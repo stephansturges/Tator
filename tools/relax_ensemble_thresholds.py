@@ -91,7 +91,7 @@ def _compute_global_metrics(
     default_threshold: float,
 ) -> dict:
     preds = np.zeros_like(probs, dtype=np.int64)
-    for idx, (prob, label) in enumerate(zip(probs, labels)):
+    for idx, (prob, label) in enumerate(zip(probs, labels, strict=False)):
         thr = thresholds.get(label, default_threshold)
         preds[idx] = 1 if prob >= thr else 0
     tp = int(((y_true == 1) & (preds == 1)).sum())

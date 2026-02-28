@@ -166,6 +166,44 @@ def _policy_value_by_class(policy_map: Any, *, label: str, default: float) -> fl
     return float(default)
 
 
+def _policy_optional_value_by_class(policy_map: Any, *, label: str) -> Optional[float]:
+    if not isinstance(policy_map, dict):
+        return None
+    key = str(label or "").strip().lower()
+    if key in policy_map:
+        return _safe_float(policy_map.get(key), 0.0)
+    if "__default__" in policy_map:
+        return _safe_float(policy_map.get("__default__"), 0.0)
+    if "*" in policy_map:
+        return _safe_float(policy_map.get("*"), 0.0)
+    return None
+
+
+def _resolve_consensus_iou(
+    *,
+    label: str,
+    primary_source: str,
+    consensus_default: float,
+    consensus_by_class: Any,
+    consensus_by_source_class: Any,
+) -> float:
+    source_key = str(primary_source or "").strip().lower()
+    if isinstance(consensus_by_source_class, dict):
+        source_map = consensus_by_source_class.get(source_key)
+        source_val = _policy_optional_value_by_class(source_map, label=label)
+        if source_val is not None:
+            return max(0.0, min(1.0, float(source_val)))
+        fallback_map = consensus_by_source_class.get("__default__")
+        fallback_val = _policy_optional_value_by_class(fallback_map, label=label)
+        if fallback_val is not None:
+            return max(0.0, min(1.0, float(fallback_val)))
+
+    class_val = _policy_optional_value_by_class(consensus_by_class, label=label)
+    if class_val is not None:
+        return max(0.0, min(1.0, float(class_val)))
+    return max(0.0, min(1.0, float(consensus_default)))
+
+
 def _policy_bias_by_source_label(policy: Dict[str, Any], *, source: str, label: str) -> float:
     mapping = policy.get("logit_bias_by_source_class")
     if not isinstance(mapping, dict):
@@ -291,6 +329,7 @@ def main() -> None:
     sam_floor_map = policy.get("sam_only_min_prob_by_class")
     consensus_default = _safe_float(policy.get("consensus_iou_default"), 0.0)
     consensus_map = policy.get("consensus_iou_by_class")
+    consensus_source_map = policy.get("consensus_iou_by_source_class")
     consensus_class_aware = bool(policy.get("consensus_class_aware", True))
     threshold_override_map = policy.get("threshold_by_class_override")
 
@@ -346,7 +385,13 @@ def main() -> None:
                 if sam_floor > 0.0 and prob_adj < sam_floor:
                     blocked_reason = "sam_only_floor"
             if blocked_reason is None and is_sam_only:
-                consensus_iou = _policy_value_by_class(consensus_map, label=label, default=consensus_default)
+                consensus_iou = _resolve_consensus_iou(
+                    label=label,
+                    primary_source=primary_source,
+                    consensus_default=consensus_default,
+                    consensus_by_class=consensus_map,
+                    consensus_by_source_class=consensus_source_map,
+                )
                 if consensus_iou > 0.0 and isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
                     if not _has_detector_consensus(
                         detector_support,

@@ -342,7 +342,7 @@ def _print_matrix(matrix: Sequence[Sequence[int]], labels: Sequence[str]) -> Non
     return
     header = "\t".join(["true\\pred"] + [str(lbl) for lbl in labels])
     print(header)
-    for label, row in zip(labels, matrix):
+    for label, row in zip(labels, matrix, strict=False):
         cells = "\t".join(str(int(v)) for v in row)
         print(f"{label}\t{cells}")
 

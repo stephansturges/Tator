@@ -170,8 +170,10 @@ def _agent_exemplars_for_window(
         if xyxy is None:
             continue
         x1, y1, x2, y2 = xyxy
-        cx = (x1 + x2) / 2.0
-        cy = (y1 + y2) / 2.0
-        if wx1 <= cx <= wx2 and wy1 <= cy <= wy2:
+        ix1 = max(float(wx1), float(x1))
+        iy1 = max(float(wy1), float(y1))
+        ix2 = min(float(wx2), float(x2))
+        iy2 = min(float(wy2), float(y2))
+        if ix2 > ix1 and iy2 > iy1:
             filtered.append(det)
     return filtered

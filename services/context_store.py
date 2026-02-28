@@ -7,7 +7,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
-from starlette.status import HTTP_404_NOT_FOUND, HTTP_422_UNPROCESSABLE_ENTITY
+from starlette.status import HTTP_404_NOT_FOUND, HTTP_422_UNPROCESSABLE_CONTENT
 
 
 def _context_store(
@@ -59,7 +59,7 @@ def _context_chunk(
     total = len(chunks)
     idx = int(chunk_index)
     if idx < 0 or idx >= total:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_ENTITY, detail="context_chunk_index_invalid")
+        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="context_chunk_index_invalid")
     return {
         "context_handle": handle,
         "chunk_index": idx,

@@ -1624,7 +1624,9 @@ def _agent_tool_run_detector_impl(
                     slice_size, overlap, merge_iou_val, crop_img.width, crop_img.height, warnings
                 )
                 slices, starts = slice_image_fn(crop_img, slice_size, overlap)
-                for tile, start in zip(slices, starts):
+                # Keep SAHI resilient: if slicer metadata is short, process available pairs
+                # and fall back to full-frame inference when no merged detections remain.
+                for tile, start in zip(slices, starts, strict=False):
                     tile_offset_x = float(start[0]) + offset_x
                     tile_offset_y = float(start[1]) + offset_y
                     with yolo_lock:
@@ -1729,7 +1731,9 @@ def _agent_tool_run_detector_impl(
                     slice_size, overlap, merge_iou_val, crop_img.width, crop_img.height, warnings
                 )
                 slices, starts = slice_image_fn(crop_img, slice_size, overlap)
-                for tile, start in zip(slices, starts):
+                # Keep SAHI resilient: if slicer metadata is short, process available pairs
+                # and fall back to full-frame inference when no merged detections remain.
+                for tile, start in zip(slices, starts, strict=False):
                     tile_offset_x = float(start[0]) + offset_x
                     tile_offset_y = float(start[1]) + offset_y
                     try:

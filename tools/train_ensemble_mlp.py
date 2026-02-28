@@ -31,7 +31,7 @@ def _split_by_image(meta_rows: List[Dict[str, str]], seed: int, val_ratio: float
     val_target = max(1, int(len(images) * val_ratio))
     val_images: set = set()
 
-    for label, img_list in sorted(label_images.items(), key=lambda item: len(item[1])):
+    for _label, img_list in sorted(label_images.items(), key=lambda item: len(item[1])):
         if not img_list:
             continue
         desired = max(1, int(len(img_list) * val_ratio))
@@ -136,7 +136,7 @@ def _compute_class_weights(
         return np.ones_like(y, dtype=np.float32)
     pos_counts: Dict[str, int] = {}
     neg_counts: Dict[str, int] = {}
-    for label, target in zip(labels, y):
+    for label, target in zip(labels, y, strict=False):
         if target >= pos_threshold:
             pos_counts[label] = pos_counts.get(label, 0) + 1
         else:
@@ -150,7 +150,7 @@ def _compute_class_weights(
     global_pos_weight = total_neg / max(total_pos, 1.0)
 
     weights = np.ones_like(y, dtype=np.float32)
-    for idx, (label, target) in enumerate(zip(labels, y)):
+    for idx, (label, target) in enumerate(zip(labels, y, strict=False)):
         if mode == "global":
             weights[idx] = float(global_pos_weight) if target > 0 else 1.0
             continue

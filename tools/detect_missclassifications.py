@@ -460,7 +460,7 @@ class MismatchDialog(QDialog):
 
         img_bgr, scale= limit_image_size(img_bgr)
 
-        for i, bb in self.all_bboxes_info.items():
+        for _bbox_id, bb in self.all_bboxes_info.items():
             x1= int(bb["x_min"])
             y1= int(bb["y_min"])
             x2= x1+ int(bb["w_px"])
@@ -736,7 +736,7 @@ def main():
 
         # Step 1 => compute predicted labels for each bbox
         pred_map= {}
-        for i,(cid,x_c,y_c,w_n,h_n) in enumerate(yolo_records):
+        for i,(_cid,x_c,y_c,w_n,h_n) in enumerate(yolo_records):
             x_min= (x_c-0.5*w_n)* w_img
             y_min= (y_c-0.5*h_n)* h_img
             x_max= x_min+ w_n*w_img
@@ -794,7 +794,7 @@ def main():
 
         image_state= {"image_auto_threshold": args.clip_auto}
 
-        for (idx,cid, p_label, conf, final_lbl) in final_preds:
+        for (idx,_cid, p_label, conf, final_lbl) in final_preds:
             sig=None
             if idx< len(yolo_records) and yolo_records[idx] is not None:
                 (cc,xx,yy,ww,hh)= yolo_records[idx]

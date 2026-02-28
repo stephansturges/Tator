@@ -630,7 +630,7 @@ def _agent_run_deep_prepass_part_a_impl(
         mask_thr = getattr(payload, "sam3_mask_threshold", None)
         if mask_thr is None and active_sam3_mask_thr is not None:
             mask_thr = active_sam3_mask_thr
-        windowed = getattr(payload, "sam3_text_window_extension", True) is not False
+        windowed = bool(getattr(payload, "sam3_text_window_extension", False))
         windows: List[Dict[str, Any]] = []
         if windowed:
             windows = sam3_text_windows_fn(
@@ -1444,21 +1444,16 @@ def _agent_select_similarity_exemplars(
 
     def _select_diverse(
         label: str,
-        eligible: List[Dict[str, Any]],
+        candidates: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        if not eligible:
+        if not candidates:
             return []
         base_seed = seed if seed is not None else 0
         seed_input = f"{base_seed}:{label}:diverse".encode("utf-8", errors="ignore")
         label_seed = int(hashlib.sha1(seed_input).hexdigest(), 16) % (2**32)
-        target_from_fraction = int(math.ceil(len(eligible) * diverse_fraction))
-        target_count = max(diverse_min, target_from_fraction)
-        target_count = min(target_count, diverse_max, len(eligible))
-        if target_count < 1:
-            return []
 
         entries: List[Dict[str, Any]] = []
-        for det in eligible:
+        for det in candidates:
             entries.append(
                 {
                     "det": det,
@@ -1469,10 +1464,52 @@ def _agent_select_similarity_exemplars(
                     "stable_key": _det_stable_key(det),
                 }
             )
-        entries.sort(key=lambda entry: (-entry["score"], entry["tie_break"], entry["stable_key"]))
-        max_score = max((entry["score"] for entry in entries), default=0.0)
-        if max_score <= 0:
-            max_score = 1.0
+
+        def _rank_confidence(indices: List[int]) -> Dict[int, float]:
+            if not indices:
+                return {}
+            ordered = sorted(
+                indices,
+                key=lambda idx: (
+                    -float(entries[idx]["score"]),
+                    float(entries[idx]["tie_break"]),
+                    str(entries[idx].get("stable_key") or ""),
+                ),
+            )
+            total = len(ordered)
+            conf: Dict[int, float] = {}
+            shrink = float(total) / float(total + 4)
+            for rank, idx in enumerate(ordered):
+                if total <= 1:
+                    base = 1.0
+                else:
+                    base = 1.0 - (float(rank) / float(total - 1))
+                conf[idx] = float(shrink * base + (1.0 - shrink) * 0.5)
+            return conf
+
+        global_conf = _rank_confidence(list(range(len(entries))))
+        source_to_indices: Dict[str, List[int]] = {}
+        for idx, entry in enumerate(entries):
+            source = str(entry.get("source") or "unknown")
+            source_to_indices.setdefault(source, []).append(idx)
+        source_conf: Dict[int, float] = {}
+        for indices in source_to_indices.values():
+            source_conf.update(_rank_confidence(indices))
+        for idx, entry in enumerate(entries):
+            quality = 0.6 * float(global_conf.get(idx, 0.5)) + 0.4 * float(source_conf.get(idx, 0.5))
+            entry["rank_quality"] = max(0.0, min(1.0, quality))
+
+        eligible_indices = [
+            idx for idx, entry in enumerate(entries) if float(entry.get("rank_quality") or 0.0) >= min_score
+        ]
+        if not eligible_indices:
+            eligible_indices = list(range(len(entries)))
+        target_from_fraction = int(math.ceil(len(eligible_indices) * diverse_fraction))
+        target_count = max(diverse_min, target_from_fraction)
+        target_count = min(target_count, diverse_max, len(eligible_indices))
+        if target_count < 1:
+            return []
+
         centers = [entry["center"] for entry in entries if entry.get("center") is not None]
         if centers:
             xs = [float(pt[0]) for pt in centers]
@@ -1489,7 +1526,7 @@ def _agent_select_similarity_exemplars(
         selected_centers: List[Tuple[float, float]] = []
 
         def _candidate_value(entry: Dict[str, Any], *, quota_phase: bool) -> float:
-            score_norm = max(0.0, min(1.0, float(entry["score"]) / max_score))
+            rank_quality = float(entry.get("rank_quality") or 0.0)
             center = entry.get("center")
             if not selected_centers:
                 diversity = 1.0
@@ -1504,11 +1541,9 @@ def _agent_select_similarity_exemplars(
             source = str(entry.get("source") or "unknown")
             source_count = int(selected_source_counts.get(source, 0))
             source_bonus = 0.0
-            if source_count == 0:
-                source_bonus += 0.15
             if quota_phase and diverse_source_quota > 0 and source_count < diverse_source_quota:
                 source_bonus += 0.20
-            return 0.65 * score_norm + 0.35 * diversity + source_bonus
+            return 0.7 * rank_quality + 0.3 * diversity + source_bonus
 
         def _pick_best(candidate_indices: List[int], *, quota_phase: bool) -> Optional[int]:
             best_idx: Optional[int] = None
@@ -1535,11 +1570,6 @@ def _agent_select_similarity_exemplars(
                     best_stable_key = stable_key
             return best_idx
 
-        source_to_indices: Dict[str, List[int]] = {}
-        for idx, entry in enumerate(entries):
-            source = str(entry.get("source") or "unknown")
-            source_to_indices.setdefault(source, []).append(idx)
-
         if diverse_source_quota > 0 and source_to_indices:
             source_order = sorted(
                 source_to_indices.keys(),
@@ -1556,7 +1586,10 @@ def _agent_select_similarity_exemplars(
                 for source in source_order:
                     if int(selected_source_counts.get(source, 0)) >= diverse_source_quota:
                         continue
-                    pick_idx = _pick_best(source_to_indices.get(source, []), quota_phase=True)
+                    source_candidates = [
+                        idx for idx in source_to_indices.get(source, []) if idx in eligible_indices
+                    ]
+                    pick_idx = _pick_best(source_candidates, quota_phase=True)
                     if pick_idx is None:
                         continue
                     selected_indices.append(pick_idx)
@@ -1571,7 +1604,7 @@ def _agent_select_similarity_exemplars(
                 if not progressed:
                     break
 
-        all_indices = list(range(len(entries)))
+        all_indices = list(eligible_indices)
         while len(selected_indices) < target_count:
             pick_idx = _pick_best(all_indices, quota_phase=False)
             if pick_idx is None:
@@ -1596,21 +1629,24 @@ def _agent_select_similarity_exemplars(
     selections: Dict[str, List[Dict[str, Any]]] = {}
     for label, dets in by_label.items():
         dets_sorted = sorted(dets, key=_det_score, reverse=True)
-        high = [d for d in dets_sorted if _det_score(d) >= min_score]
         chosen: List[Dict[str, Any]] = []
-        if high:
+        if dets_sorted:
             if strategy_norm == "diverse":
-                chosen.extend(_select_diverse(label, high))
-            elif strategy_norm == "random" and len(high) > max_count:
-                base_seed = seed if seed is not None else 0
-                seed_input = f"{base_seed}:{label}".encode("utf-8", errors="ignore")
-                label_seed = int(hashlib.sha1(seed_input).hexdigest(), 16) % (2**32)
-                rng = random.Random(label_seed)
-                candidates = list(high)
-                rng.shuffle(candidates)
-                chosen.extend(candidates[:max_count])
+                chosen.extend(_select_diverse(label, dets_sorted))
             else:
-                chosen.extend(high[:max_count])
+                high = [d for d in dets_sorted if _det_score(d) >= min_score]
+                if not high:
+                    continue
+                if strategy_norm == "random" and len(high) > max_count:
+                    base_seed = seed if seed is not None else 0
+                    seed_input = f"{base_seed}:{label}".encode("utf-8", errors="ignore")
+                    label_seed = int(hashlib.sha1(seed_input).hexdigest(), 16) % (2**32)
+                    rng = random.Random(label_seed)
+                    candidates = list(high)
+                    rng.shuffle(candidates)
+                    chosen.extend(candidates[:max_count])
+                else:
+                    chosen.extend(high[:max_count])
         if chosen:
             selections[label] = chosen
             if trace_readable:

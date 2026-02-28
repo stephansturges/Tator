@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import inspect
 import logging
+import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -179,6 +180,8 @@ def _seed_all(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _filter_kwargs_for(cls, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -204,8 +207,6 @@ def _select_eval_strategy_key(cls) -> Optional[str]:
     if "eval_strategy" in params:
         return "eval_strategy"
     return None
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 def _resolve_image_path(dataset_root: Path, split: str, image_rel: str) -> Optional[Path]:

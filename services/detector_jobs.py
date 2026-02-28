@@ -8,7 +8,7 @@ import ctypes
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 
 def _json_sanitize(value: Any) -> Any:
@@ -277,8 +277,3 @@ def _yolo_head_graft_force_stop_impl(job) -> bool:
         return True
     except Exception:
         return False
-    if audit_fn is not None and error is not None:
-        try:
-            audit_fn(job, f"error:{error}", level="error", event="error")
-        except Exception:
-            pass

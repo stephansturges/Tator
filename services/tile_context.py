@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from services.prepass_grid import _agent_grid_cell_for_window_bbox
 

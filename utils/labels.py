@@ -69,7 +69,7 @@ def _labelmaps_match(expected: Sequence[str], actual: Sequence[str]) -> bool:
     act_norm = _normalize_labelmap_entries(actual)
     if len(exp_norm) != len(act_norm):
         return False
-    for exp, act in zip(exp_norm, act_norm):
+    for exp, act in zip(exp_norm, act_norm, strict=True):
         if exp != act:
             return False
     return True

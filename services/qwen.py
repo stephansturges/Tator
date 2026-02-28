@@ -448,7 +448,7 @@ def _caption_is_degenerate_impl(caption: str) -> bool:
             return True
     if len(words) > 40:
         tokens = [w.lower() for w in words]
-        bigrams = list(zip(tokens, tokens[1:]))
+        bigrams = list(zip(tokens, tokens[1:], strict=False))
         if bigrams:
             unique_ratio = len(set(bigrams)) / len(bigrams)
             if unique_ratio < 0.55:
@@ -559,7 +559,7 @@ def _run_qwen_caption_merge(
     if not draft_caption or not windowed_captions:
         return draft_caption
     window_lines = ["Window observations (do NOT invent objects):"]
-    for x0, y0, size, caption in windowed_captions:
+    for _x0, _y0, _size, caption in windowed_captions:
         if caption:
             window_lines.append(f"- {caption}")
     if len(window_lines) == 1:

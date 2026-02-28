@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import copy
 from dataclasses import dataclass, field
 import json
 import multiprocessing
@@ -21,6 +22,77 @@ import torch
 from PIL import Image
 
 DEFAULT_EMBED_PROJ_DIM = 1024
+
+DEFAULT_ENSEMBLE_POLICY_NONWINDOW: Dict[str, Any] = {
+    "logit_bias_by_source_class": {
+        "sam3_text": {
+            "__default__": -0.8,
+            "bike": -1.0,
+            "boat": -0.6,
+            "building": -1.2,
+            "container": -1.2,
+            "digger": -1.2,
+            "light_vehicle": -0.6,
+            "person": -1.2,
+            "utility_pole": -1.2,
+        },
+        "sam3_similarity": {
+            "__default__": -0.4,
+            "bike": -0.8,
+            "building": -0.8,
+            "bus": -0.8,
+            "container": -0.2,
+            "utility_pole": -0.2,
+        },
+    },
+    "sam_only_min_prob_default": 0.0,
+    "consensus_iou_default": 0.0,
+    "consensus_iou_by_class": {
+        "building": 0.7,
+        "container": 0.7,
+        "person": 0.7,
+    },
+    "consensus_class_aware": True,
+}
+
+DEFAULT_ENSEMBLE_POLICY_WINDOW: Dict[str, Any] = {
+    "logit_bias_by_source_class": {
+        "sam3_text": {
+            "__default__": -0.8,
+            "bike": -0.6,
+            "building": -1.2,
+            "bus": -1.2,
+            "container": -1.2,
+            "gastank": -1.2,
+            "person": -1.2,
+            "solarpanels": -1.2,
+            "utility_pole": -1.2,
+        },
+        "sam3_similarity": {
+            "__default__": -0.4,
+            "bike": -0.6,
+            "boat": -0.2,
+            "building": -0.8,
+            "container": -0.8,
+            "gastank": -0.8,
+            "light_vehicle": -0.8,
+            "person": -0.2,
+            "utility_pole": -0.2,
+        },
+    },
+    "sam_only_min_prob_default": 0.0,
+    "consensus_iou_default": 0.0,
+    "consensus_iou_by_class": {
+        "boat": 0.7,
+        "building": 0.7,
+        "gastank": 0.7,
+        "person": 0.7,
+        "solarpanels": 0.7,
+        "truck": 0.7,
+        "utility_pole": 0.7,
+    },
+    "consensus_class_aware": True,
+}
 
 
 def _serialize_calibration_job(job: Any) -> Dict[str, Any]:
@@ -205,7 +277,7 @@ def _normalize_window_mode(value: Any) -> str:
 
 
 def _canonical_sam3_text_window_settings(payload: Any) -> Dict[str, Any]:
-    enabled = getattr(payload, "sam3_text_window_extension", None) is not False
+    enabled = bool(getattr(payload, "sam3_text_window_extension", False))
     if not enabled:
         return {"enabled": False, "mode": None, "size": None, "overlap": None}
     mode = _normalize_window_mode(getattr(payload, "sam3_text_window_mode", None))
@@ -266,6 +338,59 @@ def _canonical_sahi_settings(payload: Any) -> Dict[str, float | int]:
     if overlap <= 0.0 or overlap >= 1.0:
         overlap = 0.2
     return {"size": size, "overlap": overlap}
+
+
+def _resolve_default_ensemble_policy_json(
+    payload: Any,
+    *,
+    sam3_text_window_cfg: Dict[str, Any],
+    similarity_window_cfg: Dict[str, Any],
+) -> Optional[str]:
+    override = str(getattr(payload, "ensemble_policy_json", "") or "").strip()
+    if override:
+        return override
+    if getattr(payload, "apply_default_ensemble_policy", True) is False:
+        return None
+    use_window_policy = bool(sam3_text_window_cfg.get("enabled")) or bool(
+        similarity_window_cfg.get("enabled")
+    )
+    policy = copy.deepcopy(
+        DEFAULT_ENSEMBLE_POLICY_WINDOW if use_window_policy else DEFAULT_ENSEMBLE_POLICY_NONWINDOW
+    )
+    return json.dumps(policy, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+
+
+def _prepass_hash_config_legacy_compatible(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize hash inputs so default/no-op knobs don't churn cache keys.
+
+    This preserves compatibility with older cache keys where certain knobs were not
+    serialized when they had default/no-effect values.
+    """
+    out = dict(config)
+
+    strategy = _normalize_similarity_strategy(out.get("similarity_exemplar_strategy"))
+    if strategy != "diverse":
+        out.pop("similarity_exemplar_fraction", None)
+        out.pop("similarity_exemplar_min", None)
+        out.pop("similarity_exemplar_max", None)
+        out.pop("similarity_exemplar_source_quota", None)
+    if strategy == "top" and out.get("similarity_exemplar_seed") is None:
+        # Legacy top strategy persisted seed=0; keep compatibility for cache reuse.
+        out["similarity_exemplar_seed"] = 0
+
+    if not bool(out.get("cross_class_dedupe_enabled", False)):
+        out.pop("cross_class_dedupe_enabled", None)
+        out.pop("cross_class_dedupe_iou", None)
+
+    fusion_mode = str(out.get("fusion_mode") or "").strip().lower()
+    if fusion_mode in {"", "primary"}:
+        out.pop("fusion_mode", None)
+
+    # Legacy non-windowed payloads kept "grid" mode even when extension was off.
+    if out.get("sam3_text_window_extension") is False and out.get("sam3_text_window_mode") is None:
+        out["sam3_text_window_mode"] = "grid"
+
+    return out
 
 
 def _start_calibration_job(
@@ -399,6 +524,11 @@ def _run_calibration_job(
         cross_class_cfg = _canonical_cross_class_dedupe_settings(payload)
         sam3_text_window_cfg = _canonical_sam3_text_window_settings(payload)
         similarity_window_cfg = _canonical_similarity_window_settings(payload)
+        default_ensemble_policy_json = _resolve_default_ensemble_policy_json(
+            payload,
+            sam3_text_window_cfg=sam3_text_window_cfg,
+            similarity_window_cfg=similarity_window_cfg,
+        )
         sahi_cfg = _canonical_sahi_settings(payload)
         prepass_sam3_text_thr = _float_with_default(payload.prepass_sam3_text_thr, 0.2)
         prepass_similarity_score = _float_with_default(payload.prepass_similarity_score, 0.3)
@@ -528,13 +658,14 @@ def _run_calibration_job(
             "yolo_fingerprint": yolo_fingerprint,
             "rfdetr_fingerprint": rfdetr_fingerprint,
         }
+        prepass_config_for_hash = _prepass_hash_config_legacy_compatible(prepass_config)
         prepass_config_key = hash_payload_fn(
             {
                 "dataset_id": payload.dataset_id,
                 "labelmap_hash": labelmap_hash,
                 "glossary_hash": glossary_hash,
                 "glossary_text": prepass_glossary_text,
-                "prepass": prepass_config,
+                "prepass": prepass_config_for_hash,
             }
         )
         prepass_key = hash_payload_fn(
@@ -704,40 +835,93 @@ def _run_calibration_job(
                         break
                 for proc in workers:
                     proc.join(timeout=5)
+                stuck_workers = [proc for proc in workers if proc.is_alive()]
+                if stuck_workers:
+                    for proc in stuck_workers:
+                        try:
+                            proc.terminate()
+                        except Exception:
+                            pass
+                    raise RuntimeError(
+                        "deep_prepass_worker_hung:"
+                        + ",".join(str(proc.pid or "?") for proc in stuck_workers)
+                    )
                 if mp_cancel.is_set():
                     for proc in workers:
                         if proc.is_alive():
                             proc.terminate()
                     raise RuntimeError("cancelled")
+                failed_workers = [
+                    proc for proc in workers if proc.exitcode not in (0, None)
+                ]
+                if failed_workers:
+                    raise RuntimeError(
+                        "deep_prepass_worker_exit:"
+                        + ",".join(
+                            f"{proc.pid or '?'}:{proc.exitcode}"
+                            for proc in failed_workers
+                        )
+                    )
             else:
+                dataset_root = resolve_dataset_fn(payload.dataset_id)
                 for image_name in remaining:
                     if job.cancel_event.is_set():
                         raise RuntimeError("cancelled")
                     img_path = None
-                    dataset_root = resolve_dataset_fn(payload.dataset_id)
                     for split in ("val", "train"):
                         candidate = dataset_root / split / image_name
                         if candidate.exists():
                             img_path = candidate
                             break
                     if img_path is None:
+                        record = {
+                            "image": image_name,
+                            "dataset_id": payload.dataset_id,
+                            "detections": [],
+                            "warnings": ["deep_prepass_image_missing"],
+                        }
+                        _write_cached_record(image_name, record)
+                        cached_records[image_name] = record
+                        processed += 1
+                        progress = processed / total if total else 1.0
+                        update_fn(job, processed=processed, progress=progress)
                         continue
-                    with Image.open(img_path) as img:
-                        pil_img = img.convert("RGB")
-                    image_token = cache_image_fn(pil_img, prepass_payload.sam_variant)
-                    result = run_prepass_fn(
-                        prepass_payload,
-                        pil_img=pil_img,
-                        image_token=image_token,
-                        labelmap=labelmap,
-                        glossary=glossary,
-                        trace_writer=None,
-                        trace_full_writer=None,
-                        trace_readable=None,
-                    )
-                    detections = list(result.get("detections") or [])
-                    warnings = list(result.get("warnings") or [])
-                    provenance = result.get("provenance")
+                    try:
+                        with Image.open(img_path) as img:
+                            pil_img = img.convert("RGB")
+                    except Exception as exc:
+                        record = {
+                            "image": image_name,
+                            "dataset_id": payload.dataset_id,
+                            "detections": [],
+                            "warnings": [f"deep_prepass_image_open_failed:{exc}"],
+                        }
+                        _write_cached_record(image_name, record)
+                        cached_records[image_name] = record
+                        processed += 1
+                        progress = processed / total if total else 1.0
+                        update_fn(job, processed=processed, progress=progress)
+                        continue
+                    try:
+                        image_token = cache_image_fn(pil_img, prepass_payload.sam_variant)
+                        result = run_prepass_fn(
+                            prepass_payload,
+                            pil_img=pil_img,
+                            image_token=image_token,
+                            labelmap=labelmap,
+                            glossary=glossary,
+                            trace_writer=None,
+                            trace_full_writer=None,
+                            trace_readable=None,
+                        )
+                        detections = list(result.get("detections") or [])
+                        warnings = list(result.get("warnings") or [])
+                        provenance = result.get("provenance")
+                    except Exception as exc:
+                        # Keep prepass resilient per image (matching multi-worker behavior).
+                        detections = []
+                        warnings = [f"deep_prepass_worker_failed:{exc}"]
+                        provenance = None
                     record = {
                         "image": image_name,
                         "dataset_id": payload.dataset_id,
@@ -808,11 +992,79 @@ def _run_calibration_job(
         meta_path = Path(str(model_prefix) + ".meta.json")
         eval_path = output_dir / (f"{model_prefix.name}.eval.json")
 
-        def _run_step(phase: str, message: str, args: List[str]) -> None:
-            update_fn(job, phase=phase, message=message)
+        def _terminate_process(proc: subprocess.Popen[Any]) -> None:
+            if proc.poll() is not None:
+                return
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+
+        def _run_subprocess_cancellable(
+            args: List[str],
+            *,
+            capture_output: bool = False,
+            text: bool = False,
+        ) -> subprocess.CompletedProcess[Any]:
             if job.cancel_event.is_set():
                 raise RuntimeError("cancelled")
-            subprocess.run(args, check=True)
+            popen_kwargs: Dict[str, Any] = {}
+            if capture_output:
+                popen_kwargs.update(
+                    {
+                        "stdout": subprocess.PIPE,
+                        "stderr": subprocess.PIPE,
+                        "text": text,
+                    }
+                )
+            proc = subprocess.Popen(args, **popen_kwargs)
+            if not capture_output:
+                while True:
+                    if job.cancel_event.is_set():
+                        _terminate_process(proc)
+                        raise RuntimeError("cancelled")
+                    rc = proc.poll()
+                    if rc is not None:
+                        if rc != 0:
+                            raise subprocess.CalledProcessError(rc, args)
+                        return subprocess.CompletedProcess(args=args, returncode=rc)
+                    time.sleep(0.25)
+            stdout: Any = None
+            stderr: Any = None
+            while True:
+                if job.cancel_event.is_set():
+                    _terminate_process(proc)
+                    raise RuntimeError("cancelled")
+                try:
+                    stdout, stderr = proc.communicate(timeout=0.25)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            if proc.returncode:
+                raise subprocess.CalledProcessError(
+                    proc.returncode,
+                    args,
+                    output=stdout,
+                    stderr=stderr,
+                )
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=int(proc.returncode or 0),
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        def _run_step(phase: str, message: str, args: List[str]) -> None:
+            update_fn(job, phase=phase, message=message)
+            _run_subprocess_cancellable(args)
 
         classifier_id = classifier_id_resolved
         features_key = hash_payload_fn(
@@ -990,6 +1242,11 @@ def _run_calibration_job(
                     "--train-sam3-text-quality",
                     "--sam3-text-quality-alpha",
                     str(sam3_text_quality_alpha),
+                ]
+            if default_ensemble_policy_json:
+                train_cmd += [
+                    "--policy-json",
+                    default_ensemble_policy_json,
                 ]
             if payload.xgb_max_depth is not None:
                 train_cmd += ["--max-depth", str(int(payload.xgb_max_depth))]
@@ -1179,7 +1436,7 @@ def _run_calibration_job(
         ]
         if calibration_model == "xgb":
             eval_cmd += ["--prepass-jsonl", str(prepass_path)]
-        eval_run = subprocess.run(eval_cmd, check=True, capture_output=True, text=True)
+        eval_run = _run_subprocess_cancellable(eval_cmd, capture_output=True, text=True)
         eval_text = eval_run.stdout.strip()
         if eval_text:
             eval_path.write_text(eval_text)

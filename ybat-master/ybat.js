@@ -6,9 +6,6 @@
     // -----------------------------------------
     let pendingApiBboxes = {};
 
-    const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"]);
-    const LABEL_EXTENSIONS = new Set(["txt"]);
-    let directoryFallbackWarned = false;
 
     function generateUUID() {
         // Modern browsers: use crypto.randomUUID().
@@ -205,6 +202,8 @@
     let detectorBatchRunButton = null;
     let detectorBatchStopButton = null;
     let detectorBatchAllButton = null;
+    let detectorRunInFlight = false;
+    let detectorPanelInitialized = false;
     let detectorBatchActive = false;
     let detectorBatchCancel = false;
     let samModeCheckbox = null;
@@ -256,7 +255,6 @@
 
     let imagesSelectButton = null;
     let classesSelectButton = null;
-    let bboxesSelectButton = null;
     let bboxesFolderSelectButton = null;
 
     let samStatusEl = null;
@@ -268,6 +266,18 @@
     let imageListSelectionLock = 0;
     let imageLoadInProgress = false;
     let imageLoadPromise = null;
+    let imageCropInProgress = false;
+    let imageSelectionRequestToken = 0;
+    // Guards against duplicate input/crop handlers if init is triggered more than once.
+    let imageLoadListenerBound = false;
+    let imageSelectListenerBound = false;
+    let classLoadListenerBound = false;
+    let classSelectListenerBound = false;
+    let bboxLoadListenersBound = false;
+    let bboxSaveListenerBound = false;
+    let keyboardListenersBound = false;
+    let imageSearchListenerBound = false;
+    let imageCropListenerBound = false;
     const tweakPreserveSet = new Set();
     let magicTweakRunning = false;
 
@@ -318,16 +328,25 @@
     }
 
     async function fetchDetectorDefault() {
+        const requestId = detectorState.defaultFetchRequestId + 1;
+        detectorState.defaultFetchRequestId = requestId;
         try {
             const resp = await fetch(`${API_ROOT}/detectors/default`);
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
+            // Ignore stale default-mode responses from older fetches.
+            if (requestId !== detectorState.defaultFetchRequestId) {
+                return detectorState.mode;
+            }
             const mode = String(data?.mode || "").toLowerCase();
             if (mode === "yolo" || mode === "rfdetr") {
                 detectorState.mode = mode;
             }
             return detectorState.mode;
         } catch (err) {
+            if (requestId !== detectorState.defaultFetchRequestId) {
+                return detectorState.mode;
+            }
             console.warn("Detector default fetch failed", err);
             return detectorState.mode;
         }
@@ -348,14 +367,23 @@
     }
 
     async function refreshDetectorStatus() {
+        const requestId = detectorState.statusRefreshRequestId + 1;
+        detectorState.statusRefreshRequestId = requestId;
         try {
             const [yoloResp, rfdetrResp] = await Promise.all([
                 fetch(`${API_ROOT}/yolo/active`),
                 fetch(`${API_ROOT}/rfdetr/active`),
             ]);
+            // Ignore stale refreshes when a newer detector-status request exists.
+            if (requestId !== detectorState.statusRefreshRequestId) {
+                return;
+            }
             detectorState.yoloActive = yoloResp.ok ? await yoloResp.json() : null;
             detectorState.rfdetrActive = rfdetrResp.ok ? await rfdetrResp.json() : null;
         } catch (err) {
+            if (requestId !== detectorState.statusRefreshRequestId) {
+                return;
+            }
             console.warn("Detector status fetch failed", err);
             detectorState.yoloActive = null;
             detectorState.rfdetrActive = null;
@@ -372,6 +400,8 @@
     }
 
     async function maybeAutoSelectDetectorRun() {
+        const requestId = detectorState.autoSelectRequestId + 1;
+        detectorState.autoSelectRequestId = requestId;
         const mode = detectorState.mode;
         const active = mode === "yolo" ? detectorState.yoloActive : detectorState.rfdetrActive;
         const hasActive = active && (active.best_path || active.run_id || active.run_name);
@@ -385,7 +415,14 @@
         try {
             runs = await fetchDetectorRuns(mode);
         } catch (err) {
+            if (requestId !== detectorState.autoSelectRequestId) {
+                return;
+            }
             console.warn("Detector runs fetch failed", err);
+            return;
+        }
+        // Exit if mode changed or a newer auto-select attempt superseded this one.
+        if (requestId !== detectorState.autoSelectRequestId || detectorState.mode !== mode) {
             return;
         }
         if (!runs.length) {
@@ -398,6 +435,9 @@
         const name = candidate.run_name || candidate.run_id || "latest run";
         const ok = confirm(`${mode.toUpperCase()} default has no active run. Activate "${name}" now?`);
         if (!ok) return;
+        if (requestId !== detectorState.autoSelectRequestId || detectorState.mode !== mode) {
+            return;
+        }
         const endpoint = mode === "yolo" ? "yolo" : "rfdetr";
         try {
             const resp = await fetch(`${API_ROOT}/${endpoint}/active`, {
@@ -459,6 +499,17 @@
     }
 
     async function initDetectorPanel() {
+        if (detectorPanelInitialized) {
+            // Re-entry refresh: avoid duplicate listeners while keeping run/status data current.
+            const mode = await fetchDetectorDefault().catch(() => detectorState.mode);
+            applyDetectorDefault(mode);
+            await refreshDetectorStatus().catch((err) => console.warn("Detector status refresh failed", err));
+            await maybeAutoSelectDetectorRun().catch((err) => console.warn("Detector auto-select failed", err));
+            await loadYoloRunList(false).catch((err) => console.warn("Detector YOLO list refresh failed", err));
+            await loadRfDetrRunList(false).catch((err) => console.warn("Detector RF-DETR list refresh failed", err));
+            return;
+        }
+        detectorPanelInitialized = true;
         detectorElements.defaultSelect = document.getElementById("detectorDefaultSelect");
         detectorElements.defaultSave = document.getElementById("detectorDefaultSave");
         detectorElements.defaultRefresh = document.getElementById("detectorDefaultRefresh");
@@ -513,12 +564,14 @@
         if (detectorElements.yoloSelect) {
             detectorElements.yoloSelect.addEventListener("change", () => {
                 yoloRunState.selectedId = detectorElements.yoloSelect.value || null;
+                updateRunActionButtons("yolo");
                 updateDetectorRunSummary("yolo").catch((err) => console.warn("Detector YOLO summary failed", err));
             });
         }
         if (detectorElements.rfdetrSelect) {
             detectorElements.rfdetrSelect.addEventListener("change", () => {
                 rfdetrRunState.selectedId = detectorElements.rfdetrSelect.value || null;
+                updateRunActionButtons("rfdetr");
                 updateDetectorRunSummary("rfdetr").catch((err) => console.warn("Detector RF-DETR summary failed", err));
             });
         }
@@ -578,6 +631,11 @@
 
     async function refreshAgentCacheSize() {
         if (!agentElements.cacheSize) return;
+        if (agentState.cacheRefreshInFlight) {
+            agentState.cacheRefreshNeedsRefresh = true;
+            return;
+        }
+        agentState.cacheRefreshInFlight = true;
         try {
             const resp = await fetch(`${API_ROOT}/agent_mining/cache_size`);
             if (!resp.ok) throw new Error(await resp.text());
@@ -587,21 +645,46 @@
         } catch (err) {
             console.warn("Cache size check failed", err);
             agentElements.cacheSize.textContent = "Cache: n/a";
+        } finally {
+            agentState.cacheRefreshInFlight = false;
+            if (agentState.cacheRefreshNeedsRefresh) {
+                agentState.cacheRefreshNeedsRefresh = false;
+                refreshAgentCacheSize().catch((error) => {
+                    console.warn("Queued cache size refresh failed", error);
+                });
+            }
         }
     }
 
     async function purgeAgentCache() {
+        if (agentCachePurgeInProgress) {
+            return;
+        }
         if (!confirm("Purge agent mining detection cache? This frees disk space but will rerun detections next time.")) return;
+        agentCachePurgeInProgress = true;
+        const purgeBtn = agentElements.purgeCacheBtn;
+        const restoreDisabled = purgeBtn ? purgeBtn.disabled : null;
+        if (purgeBtn) {
+            // Lock purge button during in-flight request to prevent duplicate purge calls.
+            purgeBtn.disabled = true;
+        }
         try {
             const resp = await fetch(`${API_ROOT}/agent_mining/cache/purge`, { method: "POST" });
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
             const freedMb = ((Number(data?.deleted_bytes) || 0) / (1024 * 1024)).toFixed(1);
             setAgentStatus(`Cache purged (${freedMb} MB freed).`, "success");
-            refreshAgentCacheSize();
+            refreshAgentCacheSize().catch((error) => {
+                console.warn("Agent cache-size refresh failed after purge", error);
+            });
         } catch (err) {
             console.error("Agent cache purge failed", err);
             setAgentStatus(`Cache purge failed: ${err.message || err}`, "error");
+        } finally {
+            agentCachePurgeInProgress = false;
+            if (purgeBtn) {
+                purgeBtn.disabled = !!restoreDisabled;
+            }
         }
     }
 
@@ -620,17 +703,34 @@
     }
 
     async function purgeQwenSplitCache() {
+        if (qwenCachePurgeInProgress) {
+            return;
+        }
         if (!confirm("Purge cached train/val splits for Qwen training?")) return;
+        qwenCachePurgeInProgress = true;
+        const purgeBtn = qwenTrainElements.cachePurge;
+        const restoreDisabled = purgeBtn ? purgeBtn.disabled : null;
+        if (purgeBtn) {
+            // Lock purge button during in-flight request to prevent duplicate purge calls.
+            purgeBtn.disabled = true;
+        }
         try {
             const resp = await fetch(`${API_ROOT}/qwen/train/cache/purge`, { method: "POST" });
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
             const freedMb = formatBytesLabel(Number(data?.deleted_bytes) || 0);
-            setQwenStatus(`Split cache purged (${freedMb}).`, "success");
-            refreshQwenSplitCache();
+            setQwenTrainMessage(`Split cache purged (${freedMb}).`, "success");
+            refreshQwenSplitCache().catch((error) => {
+                console.warn("Qwen split-cache refresh failed after purge", error);
+            });
         } catch (err) {
             console.error("Qwen cache purge failed", err);
-            setQwenStatus(`Split cache purge failed: ${err.message || err}`, "error");
+            setQwenTrainMessage(`Split cache purge failed: ${err.message || err}`, "error");
+        } finally {
+            qwenCachePurgeInProgress = false;
+            if (purgeBtn) {
+                purgeBtn.disabled = !!restoreDisabled;
+            }
         }
     }
 
@@ -649,17 +749,34 @@
     }
 
     async function purgeSam3SplitCache() {
+        if (sam3CachePurgeInProgress) {
+            return;
+        }
         if (!confirm("Purge cached train/val splits for SAM3 training?")) return;
+        sam3CachePurgeInProgress = true;
+        const purgeBtn = sam3TrainElements.cachePurge;
+        const restoreDisabled = purgeBtn ? purgeBtn.disabled : null;
+        if (purgeBtn) {
+            // Lock purge button during in-flight request to prevent duplicate purge calls.
+            purgeBtn.disabled = true;
+        }
         try {
             const resp = await fetch(`${API_ROOT}/sam3/train/cache/purge`, { method: "POST" });
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
             const freed = formatBytesLabel(Number(data?.deleted_bytes) || 0);
-            setSam3Status(`Split cache purged (${freed}).`, "success");
-            refreshSam3SplitCache();
+            setSam3Message(`Split cache purged (${freed}).`, "success");
+            refreshSam3SplitCache().catch((error) => {
+                console.warn("SAM3 split-cache refresh failed after purge", error);
+            });
         } catch (err) {
             console.error("SAM3 cache purge failed", err);
-            setSam3Status(`Split cache purge failed: ${err.message || err}`, "error");
+            setSam3Message(`Split cache purge failed: ${err.message || err}`, "error");
+        } finally {
+            sam3CachePurgeInProgress = false;
+            if (purgeBtn) {
+                purgeBtn.disabled = !!restoreDisabled;
+            }
         }
     }
 
@@ -814,134 +931,6 @@
         backgroundLoadModal.element.setAttribute("aria-hidden", "true");
     }
 
-    function ensureTrainingPackagingElements() {
-        if (trainingPackagingModal.element) {
-            return;
-        }
-        trainingPackagingModal.element = document.getElementById("trainingPackagingModal");
-        trainingPackagingModal.summaryEl = document.getElementById("trainingPackagingStats");
-        trainingPackagingModal.etaEl = document.getElementById("trainingPackagingEta");
-        trainingPackagingModal.elapsedEl = document.getElementById("trainingPackagingElapsed");
-        trainingPackagingModal.hintEl = document.getElementById("trainingPackagingHint");
-        trainingPackagingModal.progressLabel = document.getElementById("trainingPackagingProgressText");
-        trainingPackagingModal.progressFill = document.getElementById("trainingPackagingProgressFill");
-        trainingPackagingModal.dismissBtn = document.getElementById("trainingPackagingDismiss");
-        if (trainingPackagingModal.dismissBtn) {
-            trainingPackagingModal.dismissBtn.addEventListener("click", () => hideTrainingPackagingModal());
-        }
-        const backdrop = trainingPackagingModal.element?.querySelector(".modal__backdrop");
-        if (backdrop) {
-            backdrop.addEventListener("click", () => hideTrainingPackagingModal());
-        }
-    }
-
-    function showTrainingPackagingModal(stats, options = {}) {
-        ensureTrainingPackagingElements();
-        if (!trainingPackagingModal.element) {
-            return;
-        }
-        if (trainingPackagingModal.timerId) {
-            clearInterval(trainingPackagingModal.timerId);
-            trainingPackagingModal.timerId = null;
-        }
-        const {
-            hintText = null,
-            progressText = "Preparing files…",
-            indeterminate = true,
-        summaryText = null,
-        } = options;
-        const imageSummary = stats
-            ? `${stats.imageCount} image${stats.imageCount === 1 ? "" : "s"} (${formatBytes(stats.imageBytes)})`
-            : "";
-        const labelSummary = stats
-            ? `${stats.labelCount} label file${stats.labelCount === 1 ? "" : "s"} (${formatBytes(stats.labelBytes)})`
-            : "";
-        const totalSummary = stats ? `${stats.totalFiles} files ≈ ${formatBytes(stats.totalBytes)}` : null;
-        if (trainingPackagingModal.summaryEl) {
-            if (summaryText) {
-                trainingPackagingModal.summaryEl.textContent = summaryText;
-            } else if (stats) {
-                trainingPackagingModal.summaryEl.textContent = `${imageSummary} + ${labelSummary} (${totalSummary})`;
-            } else {
-                trainingPackagingModal.summaryEl.textContent = "Packaging dataset…";
-            }
-        }
-        if (trainingPackagingModal.etaEl) {
-            if (stats && Number.isFinite(stats.estimatedSeconds) && stats.estimatedSeconds > 0) {
-                trainingPackagingModal.etaEl.textContent = `Estimated upload: ${formatDurationPrecise(stats.estimatedSeconds)} (${describeDurationRange(stats.estimatedSeconds)})`;
-            } else {
-                trainingPackagingModal.etaEl.textContent = "Estimating upload time…";
-            }
-        }
-        if (trainingPackagingModal.progressLabel) {
-            trainingPackagingModal.progressLabel.textContent = progressText;
-        }
-        if (trainingPackagingModal.progressFill) {
-            trainingPackagingModal.progressFill.style.width = indeterminate ? "200%" : "0%";
-            trainingPackagingModal.progressFill.classList.toggle("is-indeterminate", indeterminate);
-        }
-        trainingPackagingModal.indeterminate = indeterminate;
-        if (trainingPackagingModal.elapsedEl) {
-            trainingPackagingModal.elapsedEl.textContent = "Elapsed: 0s";
-        }
-        if (trainingPackagingModal.hintEl && hintText) {
-            trainingPackagingModal.hintEl.textContent = hintText;
-        } else if (trainingPackagingModal.hintEl && !hintText) {
-            trainingPackagingModal.hintEl.textContent = "Keep this tab open while we stage files and upload them to the server. Larger datasets can take a few minutes.";
-        }
-        trainingPackagingModal.startedAt = performance.now();
-        trainingPackagingModal.visible = true;
-        trainingPackagingModal.element.classList.add("visible");
-        trainingPackagingModal.element.setAttribute("aria-hidden", "false");
-        trainingPackagingModal.timerId = window.setInterval(() => {
-            updateTrainingPackagingElapsed();
-        }, 500);
-    }
-
-    function updateTrainingPackagingElapsed() {
-        if (!trainingPackagingModal.visible || !trainingPackagingModal.elapsedEl) {
-            return;
-        }
-        const elapsedSeconds = Math.max(0, (performance.now() - trainingPackagingModal.startedAt) / 1000);
-        trainingPackagingModal.elapsedEl.textContent = `Elapsed: ${formatDurationPrecise(elapsedSeconds)}`;
-    }
-
-    function updateTrainingPackagingProgress(percent, text) {
-        ensureTrainingPackagingElements();
-        if (!trainingPackagingModal.visible) {
-            return;
-        }
-        if (typeof percent === "number" && trainingPackagingModal.progressFill) {
-            const clamped = Math.max(0, Math.min(100, percent));
-            trainingPackagingModal.progressFill.classList.remove("is-indeterminate");
-            trainingPackagingModal.progressFill.style.width = `${clamped}%`;
-            trainingPackagingModal.indeterminate = false;
-        }
-        if (text && trainingPackagingModal.progressLabel) {
-            trainingPackagingModal.progressLabel.textContent = text;
-        }
-    }
-
-    function hideTrainingPackagingModal() {
-        if (!trainingPackagingModal.element) {
-            return;
-        }
-        trainingPackagingModal.visible = false;
-        trainingPackagingModal.element.classList.remove("visible");
-        trainingPackagingModal.element.setAttribute("aria-hidden", "true");
-        if (trainingPackagingModal.timerId) {
-            clearInterval(trainingPackagingModal.timerId);
-            trainingPackagingModal.timerId = null;
-        }
-        if (trainingPackagingModal.progressFill) {
-            trainingPackagingModal.progressFill.classList.add("is-indeterminate");
-            trainingPackagingModal.progressFill.style.width = "200%";
-        }
-        if (trainingPackagingModal.progressLabel) {
-            trainingPackagingModal.progressLabel.textContent = "Preparing…";
-        }
-    }
-
     function ensureTaskQueueElement() {
         if (!taskQueueState.element) {
             taskQueueState.element = document.getElementById("taskQueue");
@@ -1005,7 +994,7 @@
         if (!option) {
             return null;
         }
-        return option.text || option.textContent || option.innerHTML || null;
+        return option.text || option.textContent || null;
     }
 
     function showClassScrollIndicatorForList(classListEl, currentIndex) {
@@ -1083,21 +1072,6 @@
         }
     }
 
-    function clearTaskQueue(predicate, { statusMessage = null } = {}) {
-        if (!taskQueueState.items.length) {
-            return;
-        }
-        if (typeof predicate !== "function") {
-            taskQueueState.items = [];
-        } else {
-            taskQueueState.items = taskQueueState.items.filter((item) => !predicate(item));
-        }
-        if (statusMessage) {
-            setSamStatus(statusMessage, { variant: "warn", duration: 4000 });
-        }
-        renderTaskQueue();
-    }
-
 	    function renderTaskQueue() {
 	        const container = ensureTaskQueueElement();
 	        if (!container) {
@@ -1145,25 +1119,18 @@
 	            }
 	            summary.set(group, meta);
 	        });
-	        const taskFragments = Array.from(summary.entries()).map(([group, meta]) => {
-	            const label = (TASK_GROUP_LABELS[group] || group).toLowerCase();
-	            const noun = meta.count === 1 ? "task" : "tasks";
-	            const extra =
-	                group === "recipe-cascade" && meta.recipeSteps
-	                    ? ` • ${meta.recipeSteps} recipe step${meta.recipeSteps === 1 ? "" : "s"}`
-	                    : "";
-	            return `<div class="task-queue__entry"><span class="task-queue__label">${meta.count} ${label} ${noun} pending${extra}</span></div>`;
-	        });
+        const taskFragments = Array.from(summary.entries()).map(([group, meta]) => {
+            const label = (TASK_GROUP_LABELS[group] || group).toLowerCase();
+            const noun = meta.count === 1 ? "task" : "tasks";
+            const extra =
+                group === "recipe-cascade" && meta.recipeSteps
+                    ? ` • ${meta.recipeSteps} recipe step${meta.recipeSteps === 1 ? "" : "s"}`
+                    : "";
+            return `<div class="task-queue__entry"><span class="task-queue__label">${escapeHtml(meta.count)} ${escapeHtml(label)} ${escapeHtml(noun)} pending${escapeHtml(extra)}</span></div>`;
+        });
 	        container.innerHTML = fragments.concat(taskFragments).join("");
 	        container.classList.add("visible");
 	    }
-
-    function shortenName(name) {
-        if (!name) {
-            return "—";
-        }
-        return name.length > 10 ? `${name.slice(0, 10)}…` : name;
-    }
 
     function ensureBatchTweakElements() {
         if (!batchTweakElements.modal) {
@@ -1273,6 +1240,11 @@
         visible: false,
     };
     let bboxImportCounterActive = false;
+    let bboxImportInProgress = false;
+    let bboxExportInProgress = false;
+    let agentCachePurgeInProgress = false;
+    let qwenCachePurgeInProgress = false;
+    let sam3CachePurgeInProgress = false;
     const DOUBLE_TAP_WINDOW_MS = 260;
     let xHotkeyTimeoutId = null;
     let batchTweakRunning = false;
@@ -1289,20 +1261,6 @@
         visible: false,
         decimalsTotal: 0,
         decimalsDone: 0,
-    };
-    const trainingPackagingModal = {
-        element: null,
-        summaryEl: null,
-        etaEl: null,
-        elapsedEl: null,
-        hintEl: null,
-        progressLabel: null,
-        progressFill: null,
-        dismissBtn: null,
-        visible: false,
-        startedAt: 0,
-        timerId: null,
-        indeterminate: true,
     };
     const taskQueueState = {
         element: null,
@@ -1412,6 +1370,9 @@ const automationLockState = {
     jobs: [],
     calibrationActive: false,
     prepassEncodingActive: false,
+    refreshRequestId: 0,
+    refreshInFlight: false,
+    refreshNeedsRefresh: false,
 };
 
 let automationLockPollHandle = null;
@@ -1429,6 +1390,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         mode: "rfdetr",
         yoloActive: null,
         rfdetrActive: null,
+        defaultFetchRequestId: 0,
+        statusRefreshRequestId: 0,
+        autoSelectRequestId: 0,
         prompted: {
             yolo: false,
             rfdetr: false,
@@ -1437,6 +1401,11 @@ const AUTOMATION_LOCKED_TABS = new Set([
     const detectorRunSummaryCache = {
         yolo: new Map(),
         rfdetr: new Map(),
+    };
+    // Request tokens per detector summary pane to ignore late async responses.
+    const detectorRunSummaryRequestId = {
+        yolo: 0,
+        rfdetr: 0,
     };
 
 
@@ -1483,9 +1452,13 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionStyleList: null,
         captionStyleInspiration: null,
         captionVaryOpening: null,
+        captionOpeningList: null,
         captionDatasetSelect: null,
         captionDatasetRefresh: null,
         captionDatasetSummary: null,
+        captionMode: null,
+        captionWindowSize: null,
+        captionWindowOverlap: null,
         captionModel: null,
         captionVariant: null,
         captionMaxTokens: null,
@@ -1532,7 +1505,6 @@ const AUTOMATION_LOCKED_TABS = new Set([
         agentGlossaryRefresh: null,
         agentGlossaryLibraryRow: null,
         agentGlossary: null,
-        agentGlossaryHint: null,
         agentModel: null,
         agentVariant: null,
         agentEnableYolo: null,
@@ -1565,12 +1537,6 @@ const AUTOMATION_LOCKED_TABS = new Set([
         agentGridCols: null,
         agentGridRows: null,
         agentGridOverlap: null,
-        agentReviewEnabled: null,
-        agentReviewModel: null,
-        agentReviewVariant: null,
-        agentReviewMaxTokens: null,
-        agentReviewClasses: null,
-        agentReviewPasses: null,
         calibrationStatus: null,
         calibrationProgressWrap: null,
         calibrationProgressFill: null,
@@ -1595,6 +1561,10 @@ const AUTOMATION_LOCKED_TABS = new Set([
         calibrationCancel: null,
         agentEnsembleJob: null,
         agentEnsembleRefresh: null,
+        agentDetectorRefresh: null,
+        agentClassifierId: null,
+        agentClassifierRefresh: null,
+        agentSamVariant: null,
         agentFusionMode: null,
         agentIou: null,
         agentCrossClassDedupeEnabled: null,
@@ -1612,12 +1582,6 @@ const AUTOMATION_LOCKED_TABS = new Set([
         agentClassifierMargin: null,
         agentClassifierBgMargin: null,
         agentScorelessIou: null,
-        agentRunButton: null,
-        agentStopButton: null,
-        agentTraceList: null,
-        agentBatchCount: null,
-        agentBatchIncludeCurrent: null,
-        agentBatchRun: null,
         prepassStatus: null,
         prepassRecipeSelect: null,
         prepassRecipeRefresh: null,
@@ -1629,7 +1593,6 @@ const AUTOMATION_LOCKED_TABS = new Set([
         prepassTraceList: null,
     };
     const sam3TextElements = {
-        panel: null,
         promptInput: null,
         thresholdInput: null,
         maskThresholdInput: null,
@@ -1685,6 +1648,18 @@ const AUTOMATION_LOCKED_TABS = new Set([
         recipePresets: [],
         cascadePresets: [],
         clipClassifiers: [],
+        recipePresetRefreshRequestId: 0,
+        clipClassifierRefreshRequestId: 0,
+        cascadePresetListRequestId: 0,
+        recipePresetRefreshInFlight: false,
+        clipClassifierRefreshInFlight: false,
+        cascadePresetListInFlight: false,
+        cascadePresetListNeedsRefresh: false,
+        cascadePresetSaveInFlight: false,
+        cascadePresetLoadInFlight: false,
+        cascadePresetDeleteInFlight: false,
+        cascadePresetExportInFlight: false,
+        cascadePresetImportInFlight: false,
     };
     const DEFAULT_QWEN_METADATA = {
         id: "default",
@@ -1704,39 +1679,91 @@ const AUTOMATION_LOCKED_TABS = new Set([
     let qwenRequestActive = false;
     let qwenCaptionActive = false;
     let qwenAgentActive = false;
-    let qwenAgentJobId = null;
-    let qwenAgentPollTimer = null;
+    let qwenAgentAbortController = null;
+    let qwenAgentRunToken = 0;
     let qwenAgentBatchActive = false;
     let qwenAgentBatchCancel = false;
     let qwenAgentTraceSeen = 0;
     let qwenAgentWindowOverlays = [];
     let qwenAgentRecipeLabelmap = null;
+    let qwenAgentRecipeLabelmapRecipeId = "";
+    let prepassRecipeLoadRequestId = 0;
+    // Guards async recipe-list refreshes from stale responses.
+    let prepassRecipeRefreshRequestId = 0;
+    // Guards manual "Load recipe" requests in the editor pane.
+    let prepassRecipeEditorLoadRequestId = 0;
+    let prepassRecipeRefreshInFlight = false;
+    let prepassRecipeRefreshNeedsRefresh = false;
+    let prepassRecipeSaveInFlight = false;
+    let prepassRecipeEditorLoadInFlight = false;
+    let prepassRecipeDeleteInFlight = false;
+    let prepassRecipeImportInFlight = false;
+    let prepassRecipeExportInFlight = false;
+    let qwenCaptionDatasetRefreshInFlight = false;
+    let qwenCaptionDatasetRefreshNeedsRefresh = false;
+    let qwenAgentDatasetRefreshInFlight = false;
+    let qwenAgentDatasetRefreshNeedsRefresh = false;
+    let qwenAgentClassifierRefreshInFlight = false;
+    let qwenAgentClassifierRefreshNeedsRefresh = false;
+    let qwenAgentClassifierRefreshPendingPath = "";
+    let qwenAgentEnsembleRefreshInFlight = false;
+    let qwenAgentEnsembleRefreshNeedsRefresh = false;
+    let qwenAgentEnsembleRefreshPendingId = "";
+    let qwenAgentDetectorRefreshInFlight = false;
+    let qwenAgentDetectorRefreshNeedsRefresh = false;
+    let qwenAgentDetectorRefreshPendingSelected = null;
+    let qwenSettingsRefreshInFlight = false;
+    let qwenSettingsApplyInFlight = false;
+    let installCheckInFlight = false;
+    let backendFuzzerInFlight = false;
+    let agentRecipeDownloadInFlight = false;
+    let agentRecipeDeleteInFlight = false;
+    let agentRecipeImportInFlight = false;
     let sam3TextRequestActive = false;
     let sam3SimilarityRequestActive = false;
     let sam3TextBatchActive = false;
     let sam3TextBatchCancel = false;
     let sam3TextCascadeActive = false;
     let sam3TextCascadeCancel = false;
+    let sam3AgentApplyActive = false;
     let sam3TextCascadeEnabled = false;
     let qwenClassOverride = false;
     let qwenAdvancedVisible = false;
+    let qwenStatusRefreshRequestId = 0;
+    let qwenStatusRefreshInFlight = false;
+    let qwenStatusRefreshNeedsRefresh = false;
+    let qwenStatusRefreshNeedsVisible = false;
+    let qwenAgentGlossaryLoadRequestId = 0;
+    let qwenAgentClassifierRefreshRequestId = 0;
+    let qwenAgentEnsembleRefreshRequestId = 0;
+    const qwenAgentDetectorRunRefreshRequestId = { yolo: 0, rfdetr: 0 };
     const qwenModelState = {
         models: [],
         activeId: "default",
         activeMetadata: DEFAULT_QWEN_METADATA,
+        refreshRequestId: 0,
+        refreshInFlight: false,
+        refreshNeedsRefresh: false,
+        activateInFlight: false,
     };
     const qwenCaptionDatasetState = {
         items: [],
         selectedId: "",
+        refreshRequestId: 0,
     };
     const qwenAgentDatasetState = {
         items: [],
         selectedId: "",
+        refreshRequestId: 0,
     };
     const qwenCalibrationState = {
         jobId: null,
         overlay: null,
         timerId: null,
+        pollInFlight: false,
+        pollRequestId: 0,
+        startInFlight: false,
+        cancelInFlight: false,
     };
     const calibrationProgressCallbacks = new Set();
     const CAPTION_PRESETS = [
@@ -1766,10 +1793,15 @@ const AUTOMATION_LOCKED_TABS = new Set([
     const DEFAULT_CAPTION_WINDOW_SIZE = 672;
     const DEFAULT_CAPTION_WINDOW_OVERLAP = 0.1;
     let sam3TextUiInitialized = false;
+    let sam3PromptUiInitialized = false;
     let textLabels = {};
+    let textLabelsDatasetId = "";
     let textLabelRecords = [];
     let qwenCaptionBatchActive = false;
     let qwenCaptionBatchCancel = false;
+    let qwenCaptionBatchAbortController = null;
+    let qwenCaptionBatchRunToken = 0;
+    let qwenPanelInitialized = false;
     const captionAutoSaveState = {
         timerId: null,
         pendingImage: null,
@@ -1825,6 +1857,11 @@ const AUTOMATION_LOCKED_TABS = new Set([
         mlpPatienceInput: null,
         mlpLayerNormCheckbox: null,
         mlpHardMiningEpochsInput: null,
+        hardMisWeightInput: null,
+        hardLowConfWeightInput: null,
+        hardLowConfThresholdInput: null,
+        hardMarginThresholdInput: null,
+        convergenceTolInput: null,
         classWeightSelect: null,
         effectiveBetaInput: null,
         logitAdjustmentToggle: null,
@@ -2010,6 +2047,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         workersInput: null,
         devicesInput: null,
         devicesHelp: null,
+        gpuInfo: null,
         seedInput: null,
         augHsvH: null,
         augHsvS: null,
@@ -2065,11 +2103,32 @@ const AUTOMATION_LOCKED_TABS = new Set([
     const activeState = {
         classifiers: [],
         labelmaps: [],
+        modelRefreshRequestId: 0,
+        classifierRefreshRequestId: 0,
+        labelmapRefreshRequestId: 0,
+        modelRefreshInFlight: false,
+        modelRefreshNeedsRefresh: false,
+        classifierRefreshInFlight: false,
+        classifierRefreshNeedsRefresh: false,
+        classifierPendingSelectedPath: "",
+        labelmapRefreshInFlight: false,
+        labelmapRefreshNeedsRefresh: false,
+        labelmapPendingSelectedPath: "",
+        applyInFlight: false,
+        activateInFlight: false,
+        classifierUploadInFlight: false,
+        labelmapUploadInFlight: false,
+        classifierRenameInFlight: false,
+        classifierDeleteInFlight: false,
+        labelmapDeleteInFlight: false,
     };
 
     const trainingState = {
         activeJobId: null,
         pollHandle: null,
+        historyRefreshRequestId: 0,
+        startInFlight: false,
+        cancelInFlight: false,
         jobs: new Map(),
         latestArtifacts: null,
         lastRefreshJobId: null,
@@ -2089,11 +2148,15 @@ const AUTOMATION_LOCKED_TABS = new Set([
 const qwenTrainState = {
     activeJobId: null,
     pollHandle: null,
+    pollRequestId: 0,
+    historyRefreshRequestId: 0,
     chartSmoothing: 15,
     lastJobSnapshot: null,
     gpuTotalMb: null,
     gpuDeviceCount: null,
     trainModeTouched: false,
+    startInFlight: false,
+    cancelInFlight: false,
 };
 
 const trainingGpuInfo = {
@@ -2106,52 +2169,78 @@ const RFDETR_TOS_STORAGE_KEY = "rfdetrTrainingTosAccepted";
     const yoloTrainState = {
         activeJobId: null,
         pollHandle: null,
+        pollRequestId: 0,
+        historyRefreshRequestId: 0,
         lastJobSnapshot: null,
         variants: [],
         lastHeadType: "standard",
         autoScratchForced: false,
+        startInFlight: false,
+        cancelInFlight: false,
     };
 
     const yoloHeadGraftState = {
         activeJobId: null,
         pollHandle: null,
+        pollInFlight: false,
+        pollRequestId: 0,
+        baseSummaryRequestId: 0,
+        historyRefreshRequestId: 0,
         lastJobSnapshot: null,
         baseRunId: null,
         datasetId: null,
+        startInFlight: false,
+        dryRunInFlight: false,
+        cancelInFlight: false,
     };
 
     const rfdetrTrainState = {
         activeJobId: null,
         pollHandle: null,
+        pollRequestId: 0,
+        historyRefreshRequestId: 0,
         lastJobSnapshot: null,
         variants: [],
+        startInFlight: false,
+        cancelInFlight: false,
     };
 
     const qwenDatasetState = {
         items: [],
         selectedId: null,
+        refreshRequestId: 0,
     };
 
     const yoloDatasetState = {
         items: [],
         selectedId: null,
+        refreshRequestId: 0,
     };
 
     const rfdetrDatasetState = {
         items: [],
         selectedId: null,
+        refreshRequestId: 0,
     };
 
     const yoloRunState = {
         items: [],
         selectedId: null,
         activeId: null,
+        refreshRequestId: 0,
+        refreshInFlight: false,
+        refreshNeedsRefresh: false,
+        actionInFlight: new Set(),
     };
 
     const rfdetrRunState = {
         items: [],
         selectedId: null,
         activeId: null,
+        refreshRequestId: 0,
+        refreshInFlight: false,
+        refreshNeedsRefresh: false,
+        actionInFlight: new Set(),
     };
 
 const sam3TrainElements = {
@@ -2201,6 +2290,16 @@ const sam3TrainElements = {
         randomSplit: null,
         valPercent: null,
         splitSeed: null,
+        capEpoch: null,
+        capVal: null,
+        valCapSize: null,
+        bboxOnly: null,
+        etaText: null,
+        trendSmooth: null,
+        trendSmoothValue: null,
+        balanceSummary: null,
+        lossCanvas: null,
+        valMetrics: null,
         cacheInfo: null,
         cachePurge: null,
     };
@@ -2208,8 +2307,15 @@ const sam3TrainElements = {
 const sam3TrainState = {
     datasets: [],
     selectedId: null,
+    datasetRefreshRequestId: 0,
+    historyRefreshRequestId: 0,
+    lastSeenJob: {},
     activeJobId: null,
+    startInFlight: false,
+    convertInFlight: false,
+    cancelInFlight: false,
     pollHandle: null,
+    pollRequestId: 0,
     lastJobSnapshot: null,
     latestCheckpoint: null,
     trendAlpha: 0.05,
@@ -2224,6 +2330,8 @@ const sam3TrainState = {
 
     const sam3StorageState = {
         items: [],
+        refreshRequestId: 0,
+        deleteInFlight: new Set(),
     };
 
     const promptHelperElements = {
@@ -2255,8 +2363,16 @@ const sam3TrainState = {
     const promptHelperState = {
         datasets: [],
         selectedId: null,
+        datasetRefreshRequestId: 0,
+        presetRefreshRequestId: 0,
+        presetLoadRequestId: 0,
+        suggestRequestId: 0,
+        startRequestId: 0,
+        startInFlight: false,
         activeJobId: null,
         pollHandle: null,
+        pollRequestId: 0,
+        pollInFlight: false,
         lastJob: null,
         suggestions: [],
         promptsByClass: {},
@@ -2282,6 +2398,10 @@ const sam3TrainState = {
     const promptSearchState = {
         activeJobId: null,
         pollHandle: null,
+        pollRequestId: 0,
+        pollInFlight: false,
+        startRequestId: 0,
+        startInFlight: false,
         lastJob: null,
     };
 
@@ -2296,6 +2416,7 @@ const sam3TrainState = {
         expandCount: null,
         expandButton: null,
         runButton: null,
+        applyButton: null,
         status: null,
         logs: null,
         results: null,
@@ -2400,20 +2521,42 @@ const sam3TrainState = {
     const promptRecipeState = {
         activeJobId: null,
         pollHandle: null,
+        pollRequestId: 0,
+        pollInFlight: false,
+        startRequestId: 0,
+        startInFlight: false,
+        expandRequestId: 0,
+        expandInFlight: false,
         lastJob: null,
     };
 			    const agentState = {
 			        lastJob: null,
 			        datasetsById: {},
 			        clipHeads: [],
+			        startInFlight: false,
+			        cancelInFlight: false,
 			        pollTimer: null,
 			        pollInFlight: false,
+			        latestRefreshNeedsRefresh: false,
+			        latestRefreshNeedsVisible: false,
+			        latestRefreshRequestId: 0,
+			        prefillRequestId: 0,
+			        datasetRefreshRequestId: 0,
+			        datasetRefreshInFlight: false,
+			        datasetRefreshNeedsRefresh: false,
+			        clipHeadRefreshRequestId: 0,
+			        recipeRefreshRequestId: 0,
+			        recipeRefreshInFlight: false,
+			        recipeRefreshNeedsRefresh: false,
+			        cacheRefreshInFlight: false,
+			        cacheRefreshNeedsRefresh: false,
 			        lastRenderedLogKey: null,
 			    };
 	
 			    let agentStepsGlobalPresetLock = false;
 
     let promptHelperInitialized = false;
+    let agentMiningUiInitialized = false;
 
     const segBuilderElements = {
         datasetSelect: null,
@@ -2431,11 +2574,19 @@ const sam3TrainState = {
     const segBuilderState = {
         datasets: [],
         selectedId: null,
+        datasetRefreshRequestId: 0,
+        datasetRefreshInFlight: false,
+        datasetRefreshNeedsRefresh: false,
         jobs: [],
+        jobsRefreshRequestId: 0,
+        jobsRefreshInFlight: false,
+        jobsRefreshNeedsRefresh: false,
         lastSeenJob: {},
         activeJobId: null,
+        startInFlight: false,
         pollTimer: null,
         pollInFlight: false,
+        pollRequestId: 0,
     };
 
     const datasetManagerElements = {
@@ -2452,6 +2603,7 @@ const sam3TrainState = {
         uploadCurrentValSeed: null,
         uploadCurrentSummary: null,
         refreshBtn: null,
+        refreshBtnTop: null,
         list: null,
         deleteButtons: new Map(),
         glossaryDatasetSelect: null,
@@ -2478,18 +2630,72 @@ const sam3TrainState = {
     const datasetManagerState = {
         datasets: [],
         uploading: false,
+        refreshRequestId: 0,
+        refreshInFlight: false,
+        refreshNeedsRefresh: false,
+        glossaryLoadRequestId: 0,
+        glossaryLibraryLoadRequestId: 0,
+        glossaryDatasetLoadInFlight: false,
+        glossaryLibraryLoadInFlight: false,
+        glossaryDatasetSaveInFlight: false,
+        glossaryDatasetSaveAsInFlight: false,
+        glossaryLibrarySaveInFlight: false,
+        glossaryLibraryDeleteInFlight: false,
+        actionInFlight: new Set(),
     };
 
     const glossaryLibraryState = {
         entries: [],
         selectedName: "",
         inFlight: false,
+        pendingRefresh: false,
     };
 
     function setDatasetUploadMessage(text, tone) {
         if (!datasetManagerElements.uploadMessage) return;
         datasetManagerElements.uploadMessage.textContent = text || "";
         datasetManagerElements.uploadMessage.className = `training-message ${tone || ""}`;
+    }
+
+    function setDatasetRefreshButtonsDisabled(disabled) {
+        const value = Boolean(disabled);
+        if (datasetManagerElements.refreshBtn) {
+            datasetManagerElements.refreshBtn.disabled = value;
+        }
+        if (datasetManagerElements.refreshBtnTop) {
+            datasetManagerElements.refreshBtnTop.disabled = value;
+        }
+        if (datasetManagerElements.glossaryDatasetRefresh) {
+            datasetManagerElements.glossaryDatasetRefresh.disabled = value;
+        }
+    }
+
+    function updateDatasetUploadButtons() {
+        const busy = !!datasetManagerState.uploading;
+        if (datasetManagerElements.uploadBtn) {
+            datasetManagerElements.uploadBtn.disabled = busy;
+        }
+        if (datasetManagerElements.uploadCurrentBtn) {
+            datasetManagerElements.uploadCurrentBtn.disabled = busy;
+        }
+    }
+
+    function parseJsonObjectSafe(rawText, fallback = {}) {
+        const text = typeof rawText === "string" ? rawText.trim() : "";
+        if (!text) {
+            return fallback;
+        }
+        try {
+            const parsed = JSON.parse(text);
+            return parsed && typeof parsed === "object" ? parsed : fallback;
+        } catch {
+            // Some endpoints return plain-text success bodies; treat those as empty metadata.
+            return fallback;
+        }
+    }
+
+    function datasetActionKey(datasetId, action) {
+        return `${datasetId || ""}::${action || ""}`;
     }
 
     function renderDatasetList(list) {
@@ -2572,11 +2778,12 @@ const sam3TrainState = {
 	                    header.appendChild(badgeWrap);
 	                    const actions = document.createElement("div");
 	                    actions.className = "training-history-actions";
-	                    const downloadBtn = document.createElement("button");
+                    const downloadBtn = document.createElement("button");
 	                    downloadBtn.type = "button";
                     downloadBtn.className = "button button-outline";
                     downloadBtn.textContent = "Download";
                     downloadBtn.title = "Download this dataset as a zip.";
+                    downloadBtn.disabled = datasetManagerState.actionInFlight.has(datasetActionKey(entry.id, "download"));
                     downloadBtn.addEventListener("click", () => handleDatasetDownload(entry));
                     actions.appendChild(downloadBtn);
                     const convertBtn = document.createElement("button");
@@ -2589,30 +2796,45 @@ const sam3TrainState = {
                     } else {
                         convertBtn.textContent = cocoReady ? "COCO ready" : "Convert to COCO";
                     }
-                    convertBtn.disabled = cocoReady;
+                    convertBtn.disabled = cocoReady || datasetManagerState.actionInFlight.has(datasetActionKey(entry.id, "convert"));
                     convertBtn.title = cocoReady
                         ? "COCO annotations are already present."
                         : "Generate COCO annotations for SAM3 training, prompt helper, and recipe mining.";
-	                    convertBtn.addEventListener("click", () => handleDatasetConvert(entry));
+	                    convertBtn.addEventListener("click", () => {
+                            handleDatasetConvert(entry).catch((error) => {
+                                console.error("Dataset convert action failed", error);
+                            });
+                        });
 	                    actions.appendChild(convertBtn);
                     const qwenBtn = document.createElement("button");
                     qwenBtn.type = "button";
                     qwenBtn.className = "button button-outline";
                     const qwenEligible = !!entry.yolo_ready;
                     qwenBtn.textContent = entry.qwen_ready ? "Qwen3 ready" : "Build Qwen3";
-                    qwenBtn.disabled = !!entry.qwen_ready || !qwenEligible;
+                    qwenBtn.disabled = !!entry.qwen_ready
+                        || !qwenEligible
+                        || datasetManagerState.actionInFlight.has(datasetActionKey(entry.id, "build_qwen"));
                     qwenBtn.title = entry.qwen_ready
                         ? "Qwen JSONL annotations are already present."
                         : !qwenEligible
                             ? "Requires a YOLO dataset (labelmap.txt + labels/)."
                             : "Generate Qwen JSONL annotations for Qwen training (uses your labelmap order + optional dataset context).";
-                    qwenBtn.addEventListener("click", () => handleDatasetBuildQwen(entry));
+                    qwenBtn.addEventListener("click", () => {
+                        handleDatasetBuildQwen(entry).catch((error) => {
+                            console.error("Dataset Qwen build action failed", error);
+                        });
+                    });
                     actions.appendChild(qwenBtn);
 	                    const delBtn = document.createElement("button");
 	                    delBtn.type = "button";
 	                    delBtn.className = "button button-outline";
 	                    delBtn.textContent = "Delete";
-                    delBtn.addEventListener("click", () => handleDatasetDelete(entry));
+                    delBtn.disabled = datasetManagerState.actionInFlight.has(datasetActionKey(entry.id, "delete"));
+                    delBtn.addEventListener("click", () => {
+                        handleDatasetDelete(entry).catch((error) => {
+                            console.error("Dataset delete action failed", error);
+                        });
+                    });
                     actions.appendChild(delBtn);
                     header.appendChild(actions);
 	                    const meta = document.createElement("div");
@@ -2688,6 +2910,7 @@ const sam3TrainState = {
             datasetManagerElements.glossaryDatasetSelect.value = list[0].id || "";
         }
         updateGlossaryDatasetSummary();
+        updateGlossaryActionButtons();
     }
 
     function updateGlossaryDatasetSummary() {
@@ -2697,11 +2920,13 @@ const sam3TrainState = {
         const datasetId = datasetManagerElements.glossaryDatasetSelect?.value || "";
         if (!datasetId) {
             datasetManagerElements.glossaryDatasetSummary.textContent = "Select a dataset to edit its canonical glossary.";
+            updateGlossaryActionButtons();
             return;
         }
         const entry = datasetManagerState.datasets.find((item) => item.id === datasetId);
         if (!entry) {
             datasetManagerElements.glossaryDatasetSummary.textContent = "";
+            updateGlossaryActionButtons();
             return;
         }
         const bits = [];
@@ -2713,6 +2938,7 @@ const sam3TrainState = {
             bits.push("Glossary: present");
         }
         datasetManagerElements.glossaryDatasetSummary.textContent = bits.length ? bits.join(" • ") : "Dataset selected.";
+        updateGlossaryActionButtons();
     }
 
     function setGlossaryMessage(target, text, tone = "info") {
@@ -2721,26 +2947,85 @@ const sam3TrainState = {
         target.className = `training-message ${tone}`;
     }
 
+    function updateGlossaryActionButtons() {
+        const datasetId = datasetManagerElements.glossaryDatasetSelect?.value || "";
+        const hasDataset = !!datasetId;
+        const hasLibrarySelection = !!(datasetManagerElements.glossaryLibrarySelect?.value || "");
+        const hasLibraryName = !!((datasetManagerElements.glossaryLibraryName?.value || "").trim());
+        const datasetBusy = datasetManagerState.glossaryDatasetLoadInFlight
+            || datasetManagerState.glossaryDatasetSaveInFlight
+            || datasetManagerState.glossaryDatasetSaveAsInFlight;
+        const libraryBusy = datasetManagerState.glossaryLibraryLoadInFlight
+            || datasetManagerState.glossaryLibrarySaveInFlight
+            || datasetManagerState.glossaryLibraryDeleteInFlight
+            || glossaryLibraryState.inFlight;
+        if (datasetManagerElements.glossaryDatasetLoad) {
+            datasetManagerElements.glossaryDatasetLoad.disabled = !hasDataset || datasetBusy;
+        }
+        if (datasetManagerElements.glossaryDatasetSave) {
+            datasetManagerElements.glossaryDatasetSave.disabled = !hasDataset || datasetBusy;
+        }
+        if (datasetManagerElements.glossaryDatasetSaveAs) {
+            datasetManagerElements.glossaryDatasetSaveAs.disabled = !hasDataset || datasetBusy;
+        }
+        if (datasetManagerElements.glossaryLibraryRefresh) {
+            datasetManagerElements.glossaryLibraryRefresh.disabled = libraryBusy;
+        }
+        if (datasetManagerElements.glossaryLibrarySave) {
+            datasetManagerElements.glossaryLibrarySave.disabled = !hasLibraryName || libraryBusy;
+        }
+        if (datasetManagerElements.glossaryLibraryDelete) {
+            datasetManagerElements.glossaryLibraryDelete.disabled = !hasLibrarySelection || libraryBusy;
+        }
+        if (datasetManagerElements.glossaryLibraryDownload) {
+            datasetManagerElements.glossaryLibraryDownload.disabled = !hasLibrarySelection || libraryBusy;
+        }
+    }
+
     async function loadDatasetGlossary() {
         if (!datasetManagerElements.glossaryDatasetSelect || !datasetManagerElements.glossaryDatasetEditor) {
             return;
         }
+        if (datasetManagerState.glossaryDatasetLoadInFlight) {
+            return;
+        }
+        const requestId = datasetManagerState.glossaryLoadRequestId + 1;
+        datasetManagerState.glossaryLoadRequestId = requestId;
         const datasetId = datasetManagerElements.glossaryDatasetSelect.value || "";
         if (!datasetId) {
             setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, "Select a dataset first.", "warn");
             return;
         }
+        datasetManagerState.glossaryDatasetLoadInFlight = true;
+        updateGlossaryActionButtons();
         try {
             const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/glossary`);
             if (!resp.ok) {
                 throw new Error(await resp.text());
             }
             const data = await resp.json();
+            if (requestId !== datasetManagerState.glossaryLoadRequestId) {
+                return;
+            }
+            if ((datasetManagerElements.glossaryDatasetSelect?.value || "") !== datasetId) {
+                return;
+            }
             datasetManagerElements.glossaryDatasetEditor.value = data?.glossary || "";
             setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, "Loaded dataset glossary.", "success");
         } catch (err) {
+            if (requestId !== datasetManagerState.glossaryLoadRequestId) {
+                return;
+            }
+            if ((datasetManagerElements.glossaryDatasetSelect?.value || "") !== datasetId) {
+                return;
+            }
             console.error("Failed to load dataset glossary", err);
             setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, err.message || "Load failed", "error");
+        } finally {
+            if (requestId === datasetManagerState.glossaryLoadRequestId) {
+                datasetManagerState.glossaryDatasetLoadInFlight = false;
+                updateGlossaryActionButtons();
+            }
         }
     }
 
@@ -2753,7 +3038,12 @@ const sam3TrainState = {
             setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, "Select a dataset first.", "warn");
             return;
         }
+        if (datasetManagerState.glossaryDatasetSaveInFlight) {
+            return;
+        }
         const glossary = datasetManagerElements.glossaryDatasetEditor.value || "";
+        datasetManagerState.glossaryDatasetSaveInFlight = true;
+        updateGlossaryActionButtons();
         try {
             const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/glossary`, {
                 method: "POST",
@@ -2767,6 +3057,9 @@ const sam3TrainState = {
         } catch (err) {
             console.error("Failed to save dataset glossary", err);
             setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, err.message || "Save failed", "error");
+        } finally {
+            datasetManagerState.glossaryDatasetSaveInFlight = false;
+            updateGlossaryActionButtons();
         }
     }
 
@@ -2779,7 +3072,12 @@ const sam3TrainState = {
             setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, "Enter a name to save in the library.", "warn");
             return;
         }
+        if (datasetManagerState.glossaryDatasetSaveAsInFlight) {
+            return;
+        }
         const glossary = datasetManagerElements.glossaryDatasetEditor.value || "";
+        datasetManagerState.glossaryDatasetSaveAsInFlight = true;
+        updateGlossaryActionButtons();
         try {
             const resp = await fetch(`${API_ROOT}/glossaries`, {
                 method: "POST",
@@ -2794,14 +3092,20 @@ const sam3TrainState = {
         } catch (err) {
             console.error("Failed to save glossary to library", err);
             setGlossaryMessage(datasetManagerElements.glossaryDatasetMessage, err.message || "Save failed", "error");
+        } finally {
+            datasetManagerState.glossaryDatasetSaveAsInFlight = false;
+            updateGlossaryActionButtons();
         }
     }
 
     async function refreshGlossaryLibrary(options = {}) {
         if (glossaryLibraryState.inFlight) {
+            // Coalesce bursts of refresh calls; run one more pass after current fetch settles.
+            glossaryLibraryState.pendingRefresh = true;
             return;
         }
         glossaryLibraryState.inFlight = true;
+        updateGlossaryActionButtons();
         try {
             const resp = await fetch(`${API_ROOT}/glossaries`);
             if (!resp.ok) {
@@ -2817,6 +3121,13 @@ const sam3TrainState = {
             }
         } finally {
             glossaryLibraryState.inFlight = false;
+            updateGlossaryActionButtons();
+            if (glossaryLibraryState.pendingRefresh) {
+                glossaryLibraryState.pendingRefresh = false;
+                refreshGlossaryLibrary({ silent: true }).catch((err) => {
+                    console.error("Failed to process queued glossary refresh", err);
+                });
+            }
         }
     }
 
@@ -2844,12 +3155,22 @@ const sam3TrainState = {
             }
         });
         updateQwenAgentGlossaryMode();
+        updateGlossaryActionButtons();
     }
 
     async function loadGlossaryLibraryEntry(name, target) {
         if (!name) {
             if (target) target.value = "";
-            return;
+            updateGlossaryActionButtons();
+            return "";
+        }
+        let requestId = null;
+        const isDatasetLibraryEditorTarget = target === datasetManagerElements.glossaryLibraryEditor;
+        if (isDatasetLibraryEditorTarget) {
+            requestId = datasetManagerState.glossaryLibraryLoadRequestId + 1;
+            datasetManagerState.glossaryLibraryLoadRequestId = requestId;
+            datasetManagerState.glossaryLibraryLoadInFlight = true;
+            updateGlossaryActionButtons();
         }
         try {
             const resp = await fetch(`${API_ROOT}/glossaries/${encodeURIComponent(name)}`);
@@ -2857,16 +3178,42 @@ const sam3TrainState = {
                 throw new Error(await resp.text());
             }
             const data = await resp.json();
+            if (
+                isDatasetLibraryEditorTarget
+                && requestId !== datasetManagerState.glossaryLibraryLoadRequestId
+            ) {
+                return "";
+            }
+            if (
+                isDatasetLibraryEditorTarget
+                && (datasetManagerElements.glossaryLibrarySelect?.value || "") !== name
+            ) {
+                return "";
+            }
             if (target) {
                 target.value = data?.glossary || "";
             }
             return data?.glossary || "";
         } catch (err) {
+            if (
+                isDatasetLibraryEditorTarget
+                && requestId !== datasetManagerState.glossaryLibraryLoadRequestId
+            ) {
+                return "";
+            }
             console.error("Failed to load glossary entry", err);
             if (target === datasetManagerElements.glossaryLibraryEditor) {
                 setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, err.message || "Load failed", "error");
             }
             return "";
+        } finally {
+            if (
+                isDatasetLibraryEditorTarget
+                && requestId === datasetManagerState.glossaryLibraryLoadRequestId
+            ) {
+                datasetManagerState.glossaryLibraryLoadInFlight = false;
+                updateGlossaryActionButtons();
+            }
         }
     }
 
@@ -2879,7 +3226,12 @@ const sam3TrainState = {
             setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, "Enter a glossary name.", "warn");
             return;
         }
+        if (datasetManagerState.glossaryLibrarySaveInFlight) {
+            return;
+        }
         const glossary = datasetManagerElements.glossaryLibraryEditor.value || "";
+        datasetManagerState.glossaryLibrarySaveInFlight = true;
+        updateGlossaryActionButtons();
         try {
             const resp = await fetch(`${API_ROOT}/glossaries`, {
                 method: "POST",
@@ -2894,6 +3246,9 @@ const sam3TrainState = {
         } catch (err) {
             console.error("Failed to save glossary entry", err);
             setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, err.message || "Save failed", "error");
+        } finally {
+            datasetManagerState.glossaryLibrarySaveInFlight = false;
+            updateGlossaryActionButtons();
         }
     }
 
@@ -2906,8 +3261,13 @@ const sam3TrainState = {
             setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, "Select a glossary to delete.", "warn");
             return;
         }
+        if (datasetManagerState.glossaryLibraryDeleteInFlight) {
+            return;
+        }
         const ok = window.confirm(`Delete glossary "${name}"?`);
         if (!ok) return;
+        datasetManagerState.glossaryLibraryDeleteInFlight = true;
+        updateGlossaryActionButtons();
         try {
             const resp = await fetch(`${API_ROOT}/glossaries/${encodeURIComponent(name)}`, { method: "DELETE" });
             if (!resp.ok) {
@@ -2921,6 +3281,9 @@ const sam3TrainState = {
         } catch (err) {
             console.error("Failed to delete glossary entry", err);
             setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, err.message || "Delete failed", "error");
+        } finally {
+            datasetManagerState.glossaryLibraryDeleteInFlight = false;
+            updateGlossaryActionButtons();
         }
     }
 
@@ -2938,14 +3301,7 @@ const sam3TrainState = {
             glossary: datasetManagerElements.glossaryLibraryEditor.value || "",
         };
         const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `${name}.json`;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(url);
+        saveBlobToDisk(blob, `${sanitizeFilename(name, "glossary")}.json`);
     }
 
     async function handleGlossaryLibraryUpload() {
@@ -2958,7 +3314,7 @@ const sam3TrainState = {
             let payload;
             try {
                 payload = JSON.parse(text);
-            } catch (err) {
+            } catch {
                 payload = null;
             }
             if (payload && typeof payload === "object") {
@@ -2981,6 +3337,7 @@ const sam3TrainState = {
             setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, err.message || "Upload failed", "error");
         } finally {
             datasetManagerElements.glossaryLibraryUpload.value = "";
+            updateGlossaryActionButtons();
         }
     }
 
@@ -2988,6 +3345,13 @@ const sam3TrainState = {
 	        if (!entry || !entry.id) return;
 	        const ok = window.confirm(`Delete dataset "${entry.label || entry.id}"? This cannot be undone.`);
 	        if (!ok) return;
+        const actionKey = datasetActionKey(entry.id, "delete");
+        if (datasetManagerState.actionInFlight.has(actionKey)) {
+            return;
+        }
+        datasetManagerState.actionInFlight.add(actionKey);
+        // Re-render to disable duplicate destructive clicks while request is active.
+        renderDatasetList(datasetManagerState.datasets);
         setDatasetUploadMessage(`Deleting ${entry.label || entry.id}…`, "info");
         try {
             const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(entry.id)}`, { method: "DELETE" });
@@ -3000,11 +3364,20 @@ const sam3TrainState = {
         } catch (err) {
             console.error("Failed to delete dataset", err);
             setDatasetUploadMessage(err.message || "Failed to delete dataset", "error");
+	        } finally {
+                datasetManagerState.actionInFlight.delete(actionKey);
+                renderDatasetList(datasetManagerState.datasets);
 	        }
 	    }
 
 		    async function handleDatasetConvert(entry) {
 		        if (!entry || !entry.id) return;
+                const actionKey = datasetActionKey(entry.id, "convert");
+                if (datasetManagerState.actionInFlight.has(actionKey)) {
+                    return;
+                }
+                datasetManagerState.actionInFlight.add(actionKey);
+                renderDatasetList(datasetManagerState.datasets);
 		        setDatasetUploadMessage(`Converting ${entry.label || entry.id} to COCO…`, "info");
 		        try {
 	            const resp = await fetch(`${API_ROOT}/sam3/datasets/${encodeURIComponent(entry.id)}/convert`, { method: "POST" });
@@ -3017,11 +3390,20 @@ const sam3TrainState = {
 	        } catch (err) {
 	            console.error("Failed to convert dataset", err);
 	            setDatasetUploadMessage(err.message || "Failed to convert dataset", "error");
+		        } finally {
+                    datasetManagerState.actionInFlight.delete(actionKey);
+                    renderDatasetList(datasetManagerState.datasets);
 		        }
 		    }
 
 		    async function handleDatasetBuildQwen(entry) {
 		        if (!entry || !entry.id) return;
+                const actionKey = datasetActionKey(entry.id, "build_qwen");
+                if (datasetManagerState.actionInFlight.has(actionKey)) {
+                    return;
+                }
+                datasetManagerState.actionInFlight.add(actionKey);
+                renderDatasetList(datasetManagerState.datasets);
 		        setDatasetUploadMessage(`Building Qwen annotations for ${entry.label || entry.id}…`, "info");
 		        try {
 		            const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(entry.id)}/build/qwen`, {
@@ -3038,35 +3420,77 @@ const sam3TrainState = {
 		        } catch (err) {
 		            console.error("Failed to build Qwen dataset", err);
 		            setDatasetUploadMessage(err.message || "Failed to build Qwen dataset", "error");
+		        } finally {
+                    datasetManagerState.actionInFlight.delete(actionKey);
+                    renderDatasetList(datasetManagerState.datasets);
 		        }
 		    }
 
 		    function handleDatasetDownload(entry) {
 		        if (!entry || !entry.id) return;
+                const actionKey = datasetActionKey(entry.id, "download");
+                if (datasetManagerState.actionInFlight.has(actionKey)) {
+                    return;
+                }
+                datasetManagerState.actionInFlight.add(actionKey);
+                renderDatasetList(datasetManagerState.datasets);
 		        const url = `${API_ROOT}/datasets/${encodeURIComponent(entry.id)}/download`;
 		        const link = document.createElement("a");
 	        link.href = url;
 	        link.rel = "noopener";
-	        document.body.appendChild(link);
+	        if (document.body) {
+	            document.body.appendChild(link);
+	        }
 	        link.click();
-	        link.remove();
+	        if (link.parentNode) {
+	            link.parentNode.removeChild(link);
+	        }
+            // Download click is fire-and-forget; release lock immediately.
+            datasetManagerState.actionInFlight.delete(actionKey);
+            renderDatasetList(datasetManagerState.datasets);
 	    }
 
 	    async function refreshDatasetList() {
+        if (datasetManagerState.refreshInFlight) {
+            datasetManagerState.refreshNeedsRefresh = true;
+            return;
+        }
+        const requestId = datasetManagerState.refreshRequestId + 1;
+        datasetManagerState.refreshRequestId = requestId;
+        datasetManagerState.refreshInFlight = true;
+        setDatasetRefreshButtonsDisabled(true);
 	        try {
 	            const resp = await fetch(`${API_ROOT}/datasets`);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
+            if (requestId !== datasetManagerState.refreshRequestId) {
+                return;
+            }
             renderDatasetList(data);
-            // Keep the segmentation builder dropdown in sync.
-            renderSegBuilderDatasets(data);
         } catch (err) {
+            if (requestId !== datasetManagerState.refreshRequestId) {
+                return;
+            }
             console.error("Failed to refresh datasets", err);
             setDatasetUploadMessage(`Failed to load datasets: ${err.message || err}`, "error");
+        } finally {
+            if (requestId === datasetManagerState.refreshRequestId) {
+                datasetManagerState.refreshInFlight = false;
+                setDatasetRefreshButtonsDisabled(false);
+                updateGlossaryActionButtons();
+                if (datasetManagerState.refreshNeedsRefresh) {
+                    datasetManagerState.refreshNeedsRefresh = false;
+                    refreshDatasetList().catch((err) => console.error("Queued dataset refresh failed", err));
+                }
+            }
         }
     }
 
     async function uploadDatasetZip() {
+        if (datasetManagerState.uploading) {
+            setDatasetUploadMessage("Dataset upload already in progress. Please wait.", "info");
+            return;
+        }
         if (!datasetManagerElements.uploadFile || !datasetManagerElements.uploadFile.files.length) {
             setDatasetUploadMessage("Choose a zip file first.", "warn");
             return;
@@ -3080,6 +3504,7 @@ const sam3TrainState = {
             formData.append("dataset_type", datasetManagerElements.uploadType.value);
         }
         datasetManagerState.uploading = true;
+        updateDatasetUploadButtons();
         setDatasetUploadMessage("Uploading dataset…", "info");
         try {
             const resp = await fetch(`${API_ROOT}/datasets/upload`, { method: "POST", body: formData });
@@ -3087,7 +3512,7 @@ const sam3TrainState = {
             if (!resp.ok) {
                 throw new Error(detail || `HTTP ${resp.status}`);
             }
-            const data = detail ? JSON.parse(detail) : {};
+            const data = parseJsonObjectSafe(detail, {});
             setDatasetUploadMessage(`Uploaded ${data.label || data.id || "dataset"}.`, "success");
             if (datasetManagerElements.uploadFile) {
                 datasetManagerElements.uploadFile.value = "";
@@ -3098,6 +3523,7 @@ const sam3TrainState = {
             setDatasetUploadMessage(err.message || "Dataset upload failed", "error");
 	        } finally {
 	            datasetManagerState.uploading = false;
+                updateDatasetUploadButtons();
 	        }
 	    }
 
@@ -3122,23 +3548,29 @@ const sam3TrainState = {
     }
 
     async function uploadCurrentDatasetToCache() {
+        if (datasetManagerState.uploading) {
+            setDatasetUploadMessage("Dataset upload already in progress. Please wait.", "info");
+            return null;
+        }
         try {
             const validation = validateGeometryForSave();
             if (!validation.ok) {
-		                setDatasetUploadMessage(validation.message || "Dataset geometry invalid.", "warn");
-		                return;
-		            }
+			            setDatasetUploadMessage(validation.message || "Dataset geometry invalid.", "warn");
+			            return null;
+			        }
             const imageKeys = Object.keys(images || {});
             if (!imageKeys.length) {
                 setDatasetUploadMessage("Load images in the labeling tab first.", "warn");
-                return;
+                return null;
             }
-		            const classNames = Object.keys(classes || {});
-		            if (!classNames.length) {
-		                setDatasetUploadMessage("Load a labelmap in the labeling tab first.", "warn");
-		                return;
-		            }
+			            const classNames = Object.keys(classes || {});
+			            if (!classNames.length) {
+			                setDatasetUploadMessage("Load a labelmap in the labeling tab first.", "warn");
+			                return null;
+			            }
             setDatasetUploadMessage("Packaging current dataset as YOLO zip…", "info");
+            datasetManagerState.uploading = true;
+            updateDatasetUploadButtons();
             const runNameRaw = datasetManagerElements.uploadCurrentName?.value?.trim() || "";
             const contextText = datasetManagerElements.uploadCurrentContext?.value?.trim() || "";
             const wantSplit = Boolean(datasetManagerElements.uploadCurrentSplit?.checked);
@@ -3146,9 +3578,11 @@ const sam3TrainState = {
             const valPercent = Number.isFinite(valPercentRaw) ? Math.max(1, Math.min(50, valPercentRaw)) : 10;
             const valSeed = parseInt(datasetManagerElements.uploadCurrentValSeed?.value || "", 10) || 42;
             const runName = runNameRaw || "labeling_session";
-            const zip = new JSZip();
+            const JSZipCtor = ensureJsZipAvailable("dataset packaging");
+            const zip = new JSZipCtor();
             const folderName = sanitizeDatasetFilename(runName) || "labeling_session";
             const root = zip.folder(folderName);
+		            let skippedInvalidClassRows = 0;
 		            const labelmapEntries = Object.keys(classes || {}).map((name) => ({
 		                name,
 		                idx: Number(classes[name]),
@@ -3174,7 +3608,6 @@ const sam3TrainState = {
                 trainKeys = shuffled.slice(valCount);
                 valSet = new Set(valKeys);
             }
-            const trainSet = new Set(trainKeys);
             for (const imageKey of imageKeys) {
                 const imageRecord = images[imageKey];
                 if (!imageRecord || !imageRecord.meta) {
@@ -3197,6 +3630,11 @@ const sam3TrainState = {
 		                for (const className of Object.keys(buckets)) {
 		                    const bucket = buckets[className] || [];
 		                    const classIdx = classes[className];
+		                    if (!Number.isFinite(classIdx)) {
+		                        // Class was removed/renamed after annotations were created.
+		                        skippedInvalidClassRows += bucket.length;
+		                        continue;
+		                    }
 		                    bucket.forEach((bbox) => {
 		                        if (!bbox) return;
 		                        if (datasetType === "seg" && Array.isArray(bbox.points) && bbox.points.length >= 3) {
@@ -3232,12 +3670,15 @@ const sam3TrainState = {
 		            if (!resp.ok) {
 		                throw new Error(detail || `HTTP ${resp.status}`);
 		            }
-		            const data = detail ? JSON.parse(detail) : {};
+		            const data = parseJsonObjectSafe(detail, {});
 		            const label = data?.label || data?.id || runName;
 		            setDatasetUploadMessage(`Uploaded ${label} from the labeling tab.`, "success");
             if (datasetManagerElements.uploadCurrentSummary) {
                 const splitNote = wantSplit && valSet ? ` (train ${trainKeys.length} / val ${valSet.size})` : "";
-                datasetManagerElements.uploadCurrentSummary.textContent = `Saved as ${label}${splitNote}`;
+                const warningNote = skippedInvalidClassRows > 0
+                    ? `, skipped ${skippedInvalidClassRows} row${skippedInvalidClassRows === 1 ? "" : "s"} with unmapped classes`
+                    : "";
+                datasetManagerElements.uploadCurrentSummary.textContent = `Saved as ${label}${splitNote}${warningNote}`;
             }
 		            await refreshDatasetList();
 		            return data;
@@ -3245,11 +3686,17 @@ const sam3TrainState = {
 	            console.error("Upload current dataset failed", err);
 	            setDatasetUploadMessage(err.message || "Failed to upload current dataset", "error");
 	            return null;
+	        } finally {
+                datasetManagerState.uploading = false;
+                updateDatasetUploadButtons();
 	        }
 	    }
 
     async function initDatasetManagerTab() {
         if (datasetManagerElements.uploadBtn) {
+            await refreshDatasetList().catch((err) => console.error("Dataset list refresh failed", err));
+            await refreshSegBuilderJobs().catch((err) => console.error("Seg builder job refresh failed", err));
+            await refreshGlossaryLibrary({ silent: true }).catch((err) => console.error("Glossary library refresh failed", err));
             return;
         }
         datasetManagerElements.uploadFile = document.getElementById("datasetUploadFile");
@@ -3287,43 +3734,72 @@ const sam3TrainState = {
         datasetManagerElements.glossaryLibraryUpload = document.getElementById("glossaryLibraryUpload");
         datasetManagerElements.glossaryLibraryMessage = document.getElementById("glossaryLibraryMessage");
         if (datasetManagerElements.uploadBtn) {
-            datasetManagerElements.uploadBtn.addEventListener("click", () => uploadDatasetZip());
+            datasetManagerElements.uploadBtn.addEventListener("click", () => {
+                uploadDatasetZip().catch((error) => {
+                    console.error("Dataset upload failed", error);
+                });
+            });
         }
         if (datasetManagerElements.uploadCurrentBtn) {
-            datasetManagerElements.uploadCurrentBtn.addEventListener("click", () => uploadCurrentDatasetToCache());
+            datasetManagerElements.uploadCurrentBtn.addEventListener("click", () => {
+                uploadCurrentDatasetToCache().catch((error) => {
+                    console.error("Current dataset upload failed", error);
+                });
+            });
         }
         if (datasetManagerElements.refreshBtn) {
-            datasetManagerElements.refreshBtn.addEventListener("click", () => refreshDatasetList());
+            datasetManagerElements.refreshBtn.addEventListener("click", () => {
+                refreshDatasetList().catch((error) => {
+                    console.error("Dataset list refresh failed", error);
+                });
+            });
         }
         if (datasetManagerElements.refreshBtnTop) {
-            datasetManagerElements.refreshBtnTop.addEventListener("click", () => refreshDatasetList());
+            datasetManagerElements.refreshBtnTop.addEventListener("click", () => {
+                refreshDatasetList().catch((error) => {
+                    console.error("Dataset list top refresh failed", error);
+                });
+            });
         }
         if (datasetManagerElements.glossaryDatasetRefresh) {
-            datasetManagerElements.glossaryDatasetRefresh.addEventListener("click", () => refreshDatasetList());
+            datasetManagerElements.glossaryDatasetRefresh.addEventListener("click", () => {
+                refreshDatasetList().catch((error) => {
+                    console.error("Glossary dataset refresh failed", error);
+                });
+            });
         }
         if (datasetManagerElements.glossaryDatasetSelect) {
             datasetManagerElements.glossaryDatasetSelect.addEventListener("change", () => {
                 updateGlossaryDatasetSummary();
+                updateGlossaryActionButtons();
             });
         }
         if (datasetManagerElements.glossaryDatasetLoad) {
             datasetManagerElements.glossaryDatasetLoad.addEventListener("click", () => {
-                loadDatasetGlossary();
+                loadDatasetGlossary().catch((error) => {
+                    console.error("Dataset glossary load failed", error);
+                });
             });
         }
         if (datasetManagerElements.glossaryDatasetSave) {
             datasetManagerElements.glossaryDatasetSave.addEventListener("click", () => {
-                saveDatasetGlossary();
+                saveDatasetGlossary().catch((error) => {
+                    console.error("Dataset glossary save failed", error);
+                });
             });
         }
         if (datasetManagerElements.glossaryDatasetSaveAs) {
             datasetManagerElements.glossaryDatasetSaveAs.addEventListener("click", () => {
-                saveDatasetGlossaryAs();
+                saveDatasetGlossaryAs().catch((error) => {
+                    console.error("Dataset glossary save-as failed", error);
+                });
             });
         }
         if (datasetManagerElements.glossaryLibraryRefresh) {
             datasetManagerElements.glossaryLibraryRefresh.addEventListener("click", () => {
-                refreshGlossaryLibrary();
+                refreshGlossaryLibrary().catch((error) => {
+                    console.error("Glossary library refresh failed", error);
+                });
             });
         }
         if (datasetManagerElements.glossaryLibrarySelect) {
@@ -3332,7 +3808,15 @@ const sam3TrainState = {
                 if (datasetManagerElements.glossaryLibraryName) {
                     datasetManagerElements.glossaryLibraryName.value = name;
                 }
-                loadGlossaryLibraryEntry(name, datasetManagerElements.glossaryLibraryEditor);
+                loadGlossaryLibraryEntry(name, datasetManagerElements.glossaryLibraryEditor).catch((error) => {
+                    console.error("Glossary library entry load failed", error);
+                });
+                updateGlossaryActionButtons();
+            });
+        }
+        if (datasetManagerElements.glossaryLibraryName) {
+            datasetManagerElements.glossaryLibraryName.addEventListener("input", () => {
+                updateGlossaryActionButtons();
             });
         }
         if (datasetManagerElements.glossaryLibraryNew) {
@@ -3347,16 +3831,21 @@ const sam3TrainState = {
                     datasetManagerElements.glossaryLibraryEditor.value = "";
                 }
                 setGlossaryMessage(datasetManagerElements.glossaryLibraryMessage, "New glossary ready. Enter a name and save.", "info");
+                updateGlossaryActionButtons();
             });
         }
         if (datasetManagerElements.glossaryLibrarySave) {
             datasetManagerElements.glossaryLibrarySave.addEventListener("click", () => {
-                saveGlossaryLibraryEntry();
+                saveGlossaryLibraryEntry().catch((error) => {
+                    console.error("Glossary library save failed", error);
+                });
             });
         }
         if (datasetManagerElements.glossaryLibraryDelete) {
             datasetManagerElements.glossaryLibraryDelete.addEventListener("click", () => {
-                deleteGlossaryLibraryEntry();
+                deleteGlossaryLibraryEntry().catch((error) => {
+                    console.error("Glossary library delete failed", error);
+                });
             });
         }
         if (datasetManagerElements.glossaryLibraryDownload) {
@@ -3366,10 +3855,18 @@ const sam3TrainState = {
         }
         if (datasetManagerElements.glossaryLibraryUpload) {
             datasetManagerElements.glossaryLibraryUpload.addEventListener("change", () => {
-                handleGlossaryLibraryUpload();
+                handleGlossaryLibraryUpload().catch((error) => {
+                    console.error("Glossary upload handling failed", error);
+                });
             });
         }
-        initSegBuilderUi();
+        updateDatasetUploadButtons();
+        updateGlossaryActionButtons();
+        // Segmentation Builder initialization is async; keep Dataset Manager usable
+        // even if seg-builder bootstrapping fails.
+        await initSegBuilderTab().catch((error) => {
+            console.error("Segmentation builder init failed", error);
+        });
         await refreshDatasetList();
         await refreshSegBuilderJobs();
         await refreshGlossaryLibrary({ silent: true });
@@ -3387,9 +3884,20 @@ const sam3TrainState = {
     const sam3PromptState = {
         models: [],
         selected: null,
+        refreshRequestId: 0,
+        refreshInFlight: false,
+        refreshNeedsRefresh: false,
+        activateInFlight: false,
     };
 
     function initSam3PromptModelsUi() {
+        if (sam3PromptUiInitialized) {
+            refreshSam3PromptModels().catch((err) => {
+                console.error("Failed to refresh SAM3 prompt models", err);
+            });
+            return;
+        }
+        sam3PromptUiInitialized = true;
         sam3PromptElements.select = document.getElementById("sam3PromptModelSelect");
         sam3PromptElements.refresh = document.getElementById("sam3PromptRefresh");
         sam3PromptElements.summary = document.getElementById("sam3PromptModelSummary");
@@ -3400,20 +3908,45 @@ const sam3TrainState = {
             sam3PromptElements.select.addEventListener("change", () => updateSam3PromptSummary());
         }
         if (sam3PromptElements.refresh) {
-            sam3PromptElements.refresh.addEventListener("click", () => refreshSam3PromptModels());
+            sam3PromptElements.refresh.addEventListener("click", () => {
+                refreshSam3PromptModels().catch((error) => {
+                    console.error("SAM3 prompt model refresh failed", error);
+                });
+            });
         }
         if (sam3PromptElements.activate) {
-            sam3PromptElements.activate.addEventListener("click", () => activateSam3PromptModel());
+            sam3PromptElements.activate.addEventListener("click", () => {
+                activateSam3PromptModel().catch((error) => {
+                    console.error("SAM3 prompt model activation failed", error);
+                });
+            });
         }
-        refreshSam3PromptModels();
+        updateSam3PromptButtons();
+        refreshSam3PromptModels().catch((error) => {
+            console.error("Failed to load SAM3 prompt models", error);
+        });
     }
 
     async function refreshSam3PromptModels() {
         if (!sam3PromptElements.select) return;
+        if (sam3PromptState.refreshInFlight) {
+            // Coalesce repeated refresh clicks while one request is active.
+            sam3PromptState.refreshNeedsRefresh = true;
+            return;
+        }
+        sam3PromptState.refreshInFlight = true;
+        // Prevent duplicate refresh/activate submissions while model list request is active.
+        updateSam3PromptButtons();
+        const requestId = sam3PromptState.refreshRequestId + 1;
+        sam3PromptState.refreshRequestId = requestId;
         try {
             const resp = await fetch(`${API_ROOT}/sam3/models/available?variant=all&promoted_only=true`);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
+            // Ignore stale responses when a newer prompt-model refresh exists.
+            if (requestId !== sam3PromptState.refreshRequestId) {
+                return;
+            }
             sam3PromptState.models = Array.isArray(data) ? data : [];
             sam3PromptState.models.sort((a, b) => {
                 const pa = a.promoted ? 0 : 1;
@@ -3441,8 +3974,22 @@ const sam3TrainState = {
                 updateSam3PromptSummary();
             }
         } catch (err) {
+            if (requestId !== sam3PromptState.refreshRequestId) {
+                return;
+            }
             console.error("Failed to load SAM3 prompt models", err);
             setSam3PromptMessage(`Load failed: ${err.message || err}`, "error");
+        } finally {
+            if (requestId === sam3PromptState.refreshRequestId) {
+                sam3PromptState.refreshInFlight = false;
+                updateSam3PromptButtons();
+                if (sam3PromptState.refreshNeedsRefresh) {
+                    sam3PromptState.refreshNeedsRefresh = false;
+                    refreshSam3PromptModels().catch((err) => {
+                        console.error("Queued SAM3 prompt model refresh failed", err);
+                    });
+                }
+            }
         }
     }
 
@@ -3458,6 +4005,7 @@ const sam3TrainState = {
         }
         if (!entry) {
             sam3PromptElements.summary.textContent = "No model selected.";
+            updateSam3PromptButtons();
             return;
         }
         const parts = [];
@@ -3466,6 +4014,7 @@ const sam3TrainState = {
         if (Number.isFinite(entry.size_bytes)) parts.push(formatBytes(entry.size_bytes));
         if (entry.run_path) parts.push(`run: ${entry.run_path}`);
         sam3PromptElements.summary.textContent = parts.length ? parts.join(" • ") : "";
+        updateSam3PromptButtons();
     }
 
     function setSam3PromptMessage(text, tone = "info") {
@@ -3474,14 +4023,33 @@ const sam3TrainState = {
         sam3PromptElements.message.className = `training-message ${tone}`;
     }
 
+    function updateSam3PromptButtons() {
+        const hasModels = Array.isArray(sam3PromptState.models) && sam3PromptState.models.length > 0;
+        const busy = sam3PromptState.refreshInFlight || sam3PromptState.activateInFlight;
+        if (sam3PromptElements.refresh) {
+            sam3PromptElements.refresh.disabled = busy;
+        }
+        if (sam3PromptElements.select) {
+            sam3PromptElements.select.disabled = busy || !hasModels;
+        }
+        if (sam3PromptElements.activate) {
+            sam3PromptElements.activate.disabled = busy || !hasModels;
+        }
+    }
+
     async function activateSam3PromptModel() {
         if (!sam3PromptElements.select) return;
+        if (sam3PromptState.activateInFlight) {
+            return;
+        }
         const path = sam3PromptElements.select.value;
         const entry = sam3PromptState.models.find((m) => (m.key || m.path || m.id) === path);
         if (!entry) {
             setSam3PromptMessage("Select a model first.", "warn");
             return;
         }
+        sam3PromptState.activateInFlight = true;
+        updateSam3PromptButtons();
         const payload = {
             checkpoint_path: entry.path || null,
             enable_segmentation: false,
@@ -3494,10 +4062,14 @@ const sam3TrainState = {
                 body: JSON.stringify(payload),
             });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            await refreshSam3PromptModels();
             setSam3PromptMessage("SAM3 prompt model activated.", "success");
         } catch (err) {
             console.error("Activate SAM3 prompt model failed", err);
             setSam3PromptMessage(`Activate failed: ${err.message || err}`, "error");
+        } finally {
+            sam3PromptState.activateInFlight = false;
+            updateSam3PromptButtons();
         }
     }
 
@@ -3508,6 +4080,49 @@ const sam3TrainState = {
             .replace(/>/g, "&gt;")
             .replace(/"/g, "&quot;")
             .replace(/'/g, "&#39;");
+    }
+
+    function sanitizeFilename(value, fallback = "download") {
+        const normalized = String(value ?? "").trim();
+        const safe = normalized
+            .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
+            .replace(/\s+/g, " ")
+            .trim();
+        return safe || fallback;
+    }
+
+    function saveBlobToDisk(blob, filename) {
+        const safeName = sanitizeFilename(filename, "download.bin");
+        if (typeof saveAs === "function") {
+            try {
+                saveAs(blob, safeName);
+                return;
+            } catch (error) {
+                // Keep a robust fallback path if FileSaver throws at runtime.
+                console.warn("saveAs failed; falling back to anchor download", error);
+            }
+        }
+        // Fallback path if FileSaver did not load; keep download actions working.
+        const objectUrl = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = objectUrl;
+        link.download = safeName;
+        if (document.body) {
+            document.body.appendChild(link);
+        }
+        link.click();
+        if (link.parentNode) {
+            link.parentNode.removeChild(link);
+        }
+        // Revoke asynchronously so slow browsers don't lose the download.
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    }
+
+    function ensureJsZipAvailable(featureLabel = "zip operation") {
+        if (typeof JSZip === "undefined") {
+            throw new Error(`JSZip is not available for ${featureLabel}. Reload the page and try again.`);
+        }
+        return JSZip;
     }
 
     function formatTimestamp(seconds) {
@@ -3570,17 +4185,6 @@ const sam3TrainState = {
         return qwenDatasetState.items.find((entry) => entry.id === id) || null;
     }
 
-    function selectQwenDatasetById(datasetId) {
-        if (!datasetId) {
-            return;
-        }
-        qwenDatasetState.selectedId = datasetId;
-        if (qwenTrainElements.datasetSelect) {
-            qwenTrainElements.datasetSelect.value = datasetId;
-        }
-        updateQwenDatasetSummary();
-    }
-
     function updateQwenDatasetSummary() {
         const summaryEl = qwenTrainElements.datasetSummary;
         if (!summaryEl) {
@@ -3602,8 +4206,10 @@ const sam3TrainState = {
     function updateQwenTrainStartAvailability() {
         const entry = getSelectedQwenDataset();
         const ready = Boolean(entry && entry.qwen_ready);
+        // Keep start locked while a training job is active or a start POST is in flight.
+        const busy = qwenTrainState.startInFlight || isBusyTrainingStatus(qwenTrainState.lastJobSnapshot?.status);
         if (qwenTrainElements.startButton) {
-            qwenTrainElements.startButton.disabled = !ready;
+            qwenTrainElements.startButton.disabled = !ready || busy;
         }
         if (qwenTrainElements.datasetWarning) {
             qwenTrainElements.datasetWarning.style.display = ready ? "none" : "block";
@@ -3657,18 +4263,27 @@ const sam3TrainState = {
             populateQwenDatasetSelect();
             return qwenDatasetState.items;
         }
+        const requestId = qwenDatasetState.refreshRequestId + 1;
+        qwenDatasetState.refreshRequestId = requestId;
 	        try {
 	            const resp = await fetch(`${API_ROOT}/datasets`);
 	            if (!resp.ok) {
 	                throw new Error(`HTTP ${resp.status}`);
 	            }
 	            const data = await resp.json();
+            // Ignore stale responses from older refresh requests.
+            if (requestId !== qwenDatasetState.refreshRequestId) {
+                return qwenDatasetState.items;
+            }
 	            qwenDatasetState.items = Array.isArray(data)
 	                ? data.filter((d) => d && (d.yolo_ready || d.qwen_ready))
 	                : [];
 	            populateQwenDatasetSelect();
 	            return qwenDatasetState.items;
 	        } catch (error) {
+            if (requestId !== qwenDatasetState.refreshRequestId) {
+                return qwenDatasetState.items;
+            }
 	            console.error("Failed to load cached Qwen datasets", error);
 	            if (qwenTrainElements.datasetSummary) {
 	                qwenTrainElements.datasetSummary.textContent = `Unable to load datasets: ${error.message || error}`;
@@ -3703,8 +4318,10 @@ const sam3TrainState = {
 
     function updateYoloTrainStartAvailability(entry) {
         const ready = Boolean(entry && entry.yolo_ready);
+        // Avoid duplicate starts while the selected training job is still active.
+        const busy = yoloTrainState.startInFlight || isBusyTrainingStatus(yoloTrainState.lastJobSnapshot?.status);
         if (yoloTrainElements.startButton) {
-            yoloTrainElements.startButton.disabled = !ready;
+            yoloTrainElements.startButton.disabled = !ready || busy;
         }
         if (yoloTrainElements.datasetWarning) {
             if (!entry) {
@@ -3754,16 +4371,25 @@ const sam3TrainState = {
             populateYoloDatasetSelect();
             return yoloDatasetState.items;
         }
+        const requestId = yoloDatasetState.refreshRequestId + 1;
+        yoloDatasetState.refreshRequestId = requestId;
         try {
             const resp = await fetch(`${API_ROOT}/datasets`);
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const data = await resp.json();
+            // Ignore stale responses from older refresh requests.
+            if (requestId !== yoloDatasetState.refreshRequestId) {
+                return yoloDatasetState.items;
+            }
             yoloDatasetState.items = Array.isArray(data) ? data : [];
             populateYoloDatasetSelect();
             return yoloDatasetState.items;
         } catch (error) {
+            if (requestId !== yoloDatasetState.refreshRequestId) {
+                return yoloDatasetState.items;
+            }
             if (yoloTrainElements.datasetSummary) {
                 yoloTrainElements.datasetSummary.textContent = `Unable to load datasets: ${error.message || error}`;
             }
@@ -3812,8 +4438,10 @@ function updateRfDetrGpuInfo() {
 
 function updateRfDetrTrainStartAvailability(entry) {
         const ready = Boolean(entry && entry.id);
+        // Avoid duplicate starts while the selected training job is still active.
+        const busy = rfdetrTrainState.startInFlight || isBusyTrainingStatus(rfdetrTrainState.lastJobSnapshot?.status);
         if (rfdetrTrainElements.startButton) {
-            rfdetrTrainElements.startButton.disabled = !ready;
+            rfdetrTrainElements.startButton.disabled = !ready || busy;
         }
         if (rfdetrTrainElements.datasetWarning) {
             rfdetrTrainElements.datasetWarning.style.display = ready ? "none" : "block";
@@ -3858,16 +4486,25 @@ function updateRfDetrTrainStartAvailability(entry) {
             populateRfDetrDatasetSelect();
             return rfdetrDatasetState.items;
         }
+        const requestId = rfdetrDatasetState.refreshRequestId + 1;
+        rfdetrDatasetState.refreshRequestId = requestId;
         try {
             const resp = await fetch(`${API_ROOT}/datasets`);
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const data = await resp.json();
+            // Ignore stale responses from older refresh requests.
+            if (requestId !== rfdetrDatasetState.refreshRequestId) {
+                return rfdetrDatasetState.items;
+            }
             rfdetrDatasetState.items = Array.isArray(data) ? data : [];
             populateRfDetrDatasetSelect();
             return rfdetrDatasetState.items;
         } catch (error) {
+            if (requestId !== rfdetrDatasetState.refreshRequestId) {
+                return rfdetrDatasetState.items;
+            }
             if (rfdetrTrainElements.datasetSummary) {
                 rfdetrTrainElements.datasetSummary.textContent = `Unable to load datasets: ${error.message || error}`;
             }
@@ -3881,6 +4518,65 @@ function updateRfDetrTrainStartAvailability(entry) {
             return null;
         }
         return yoloRunState.items.find((entry) => entry.run_id === id) || null;
+    }
+
+    function getRunStateByMode(mode) {
+        return mode === "yolo" ? yoloRunState : rfdetrRunState;
+    }
+
+    function runActionKey(action, runId) {
+        return `${action || ""}::${runId || ""}`;
+    }
+
+    function isRunActionInFlight(mode, action, runId) {
+        const state = getRunStateByMode(mode);
+        return state.actionInFlight.has(runActionKey(action, runId));
+    }
+
+    function setRunActionInFlight(mode, action, runId, inFlight) {
+        const state = getRunStateByMode(mode);
+        const key = runActionKey(action, runId);
+        if (inFlight) {
+            state.actionInFlight.add(key);
+        } else {
+            state.actionInFlight.delete(key);
+        }
+    }
+
+    function updateRunRefreshUi(mode) {
+        const isYolo = mode === "yolo";
+        const state = isYolo ? yoloRunState : rfdetrRunState;
+        const trainRefresh = isYolo ? yoloTrainElements.runRefresh : rfdetrTrainElements.runRefresh;
+        const detectorRefresh = isYolo ? detectorElements.yoloRefresh : detectorElements.rfdetrRefresh;
+        const trainSelect = isYolo ? yoloTrainElements.runSelect : rfdetrTrainElements.runSelect;
+        const detectorSelect = isYolo ? detectorElements.yoloSelect : detectorElements.rfdetrSelect;
+        const busy = !!state.refreshInFlight;
+        if (trainRefresh) trainRefresh.disabled = busy;
+        if (detectorRefresh) detectorRefresh.disabled = busy;
+        if (trainSelect) trainSelect.disabled = busy || !state.items.length;
+        if (detectorSelect) detectorSelect.disabled = busy || !state.items.length;
+    }
+
+    function updateRunActionButtons(mode) {
+        const isYolo = mode === "yolo";
+        const entry = isYolo ? getSelectedYoloRun() : getSelectedRfDetrRun();
+        const state = isYolo ? yoloRunState : rfdetrRunState;
+        const runId = entry?.run_id || null;
+        const isBusy = (action) => runId ? isRunActionInFlight(mode, action, runId) : false;
+        const refreshBusy = !!state.refreshInFlight;
+        const trainActivate = isYolo ? yoloTrainElements.runActivate : rfdetrTrainElements.runActivate;
+        const trainDownload = isYolo ? yoloTrainElements.runDownload : rfdetrTrainElements.runDownload;
+        const trainDelete = isYolo ? yoloTrainElements.runDelete : rfdetrTrainElements.runDelete;
+        const detActivate = isYolo ? detectorElements.yoloActivate : detectorElements.rfdetrActivate;
+        const detDownload = isYolo ? detectorElements.yoloDownload : detectorElements.rfdetrDownload;
+        const detDelete = isYolo ? detectorElements.yoloDelete : detectorElements.rfdetrDelete;
+        const disabled = !runId || refreshBusy;
+        if (trainActivate) trainActivate.disabled = disabled || isBusy("activate");
+        if (trainDownload) trainDownload.disabled = disabled || isBusy("download");
+        if (trainDelete) trainDelete.disabled = disabled || isBusy("delete");
+        if (detActivate) detActivate.disabled = disabled || isBusy("activate");
+        if (detDownload) detDownload.disabled = disabled || isBusy("download");
+        if (detDelete) detDelete.disabled = disabled || isBusy("delete");
     }
 
     function updateYoloRunSummary() {
@@ -3934,7 +4630,9 @@ function updateRfDetrTrainStartAvailability(entry) {
             select.disabled = false;
             select.value = yoloHeadGraftState.baseRunId;
         }
-        updateYoloHeadGraftBaseSummary();
+        updateYoloHeadGraftBaseSummary().catch((error) => {
+            console.error("Failed to refresh YOLO head-graft base summary", error);
+        });
     }
 
     async function updateYoloHeadGraftBaseSummary() {
@@ -3942,6 +4640,8 @@ function updateRfDetrTrainStartAvailability(entry) {
         if (!summaryEl) {
             return;
         }
+        const requestId = yoloHeadGraftState.baseSummaryRequestId + 1;
+        yoloHeadGraftState.baseSummaryRequestId = requestId;
         const runId = yoloHeadGraftState.baseRunId;
         if (!runId) {
             summaryEl.textContent = "Select a base run to graft onto.";
@@ -3953,10 +4653,23 @@ function updateRfDetrTrainStartAvailability(entry) {
                 throw new Error(await resp.text());
             }
             const data = await resp.json();
+            // Ignore stale responses if user switched base run while request was in flight.
+            if (requestId !== yoloHeadGraftState.baseSummaryRequestId) {
+                return;
+            }
+            if (yoloHeadGraftState.baseRunId !== runId) {
+                return;
+            }
             const labelmapCount = Array.isArray(data?.labelmap) ? data.labelmap.length : 0;
             const variant = data?.variant || "unknown";
             summaryEl.textContent = `Base run ${runId} • variant ${variant} • ${labelmapCount} classes`;
         } catch (error) {
+            if (requestId !== yoloHeadGraftState.baseSummaryRequestId) {
+                return;
+            }
+            if (yoloHeadGraftState.baseRunId !== runId) {
+                return;
+            }
             summaryEl.textContent = `Unable to load base run summary: ${error.message || error}`;
         }
     }
@@ -4037,6 +4750,8 @@ function updateRfDetrTrainStartAvailability(entry) {
             select.value = yoloRunState.selectedId;
         }
         updateYoloRunSummary();
+        updateRunActionButtons("yolo");
+        updateRunRefreshUi("yolo");
         populateYoloHeadGraftBaseSelect();
     }
 
@@ -4119,6 +4834,8 @@ function updateRfDetrTrainStartAvailability(entry) {
         if (!summaryEl || !metricsEl || !labelmapEl) {
             return;
         }
+        const requestId = (detectorRunSummaryRequestId[mode] || 0) + 1;
+        detectorRunSummaryRequestId[mode] = requestId;
         if (!entry) {
             summaryEl.textContent = "No runs available.";
             metricsEl.textContent = "";
@@ -4132,6 +4849,14 @@ function updateRfDetrTrainStartAvailability(entry) {
         metricsEl.textContent = "Metrics: loading…";
         labelmapEl.textContent = "Labelmap: loading…";
         const summary = await fetchDetectorRunSummary(mode, entry.run_id);
+        // Ignore late responses if selection changed after request started.
+        if ((detectorRunSummaryRequestId[mode] || 0) !== requestId) {
+            return;
+        }
+        const currentEntry = isYolo ? getSelectedYoloRun() : getSelectedRfDetrRun();
+        if (!currentEntry || currentEntry.run_id !== entry.run_id) {
+            return;
+        }
         if (summary && summary.metrics && typeof summary.metrics === "object") {
             const metrics = summary.metrics || {};
             const parts = [];
@@ -4182,6 +4907,8 @@ function updateRfDetrTrainStartAvailability(entry) {
             select.disabled = false;
             select.value = state.selectedId || "";
         }
+        updateRunActionButtons(mode);
+        updateRunRefreshUi(mode);
         updateDetectorRunSummary(mode).catch((err) => console.warn("Detector summary update failed", err));
     }
 
@@ -4218,6 +4945,8 @@ function updateRfDetrTrainStartAvailability(entry) {
             select.value = rfdetrRunState.selectedId;
         }
         updateRfDetrRunSummary();
+        updateRunActionButtons("rfdetr");
+        updateRunRefreshUi("rfdetr");
     }
 
     async function loadRfDetrRunList(force = false) {
@@ -4226,6 +4955,14 @@ function updateRfDetrTrainStartAvailability(entry) {
             populateDetectorRunSelect("rfdetr");
             return rfdetrRunState.items;
         }
+        if (rfdetrRunState.refreshInFlight) {
+            rfdetrRunState.refreshNeedsRefresh = true;
+            return rfdetrRunState.items;
+        }
+        const requestId = rfdetrRunState.refreshRequestId + 1;
+        rfdetrRunState.refreshRequestId = requestId;
+        rfdetrRunState.refreshInFlight = true;
+        updateRunRefreshUi("rfdetr");
         if (force) {
             detectorRunSummaryCache.rfdetr.clear();
         }
@@ -4235,15 +4972,31 @@ function updateRfDetrTrainStartAvailability(entry) {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const data = await resp.json();
+            // Drop stale responses from older refreshes.
+            if (requestId !== rfdetrRunState.refreshRequestId) {
+                return rfdetrRunState.items;
+            }
             rfdetrRunState.items = Array.isArray(data) ? data : [];
             populateRfDetrRunSelect();
             populateDetectorRunSelect("rfdetr");
             return rfdetrRunState.items;
         } catch (error) {
+            if (requestId !== rfdetrRunState.refreshRequestId) {
+                return rfdetrRunState.items;
+            }
             if (rfdetrTrainElements.runSummary) {
                 rfdetrTrainElements.runSummary.textContent = `Unable to load runs: ${error.message || error}`;
             }
             return [];
+        } finally {
+            if (requestId === rfdetrRunState.refreshRequestId) {
+                rfdetrRunState.refreshInFlight = false;
+                updateRunRefreshUi("rfdetr");
+                if (rfdetrRunState.refreshNeedsRefresh) {
+                    rfdetrRunState.refreshNeedsRefresh = false;
+                    loadRfDetrRunList(true).catch((err) => console.warn("Queued RF-DETR run refresh failed", err));
+                }
+            }
         }
     }
 
@@ -4253,6 +5006,14 @@ function updateRfDetrTrainStartAvailability(entry) {
             populateDetectorRunSelect("yolo");
             return yoloRunState.items;
         }
+        if (yoloRunState.refreshInFlight) {
+            yoloRunState.refreshNeedsRefresh = true;
+            return yoloRunState.items;
+        }
+        const requestId = yoloRunState.refreshRequestId + 1;
+        yoloRunState.refreshRequestId = requestId;
+        yoloRunState.refreshInFlight = true;
+        updateRunRefreshUi("yolo");
         if (force) {
             detectorRunSummaryCache.yolo.clear();
         }
@@ -4262,15 +5023,31 @@ function updateRfDetrTrainStartAvailability(entry) {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const data = await resp.json();
+            // Drop stale responses from older refreshes.
+            if (requestId !== yoloRunState.refreshRequestId) {
+                return yoloRunState.items;
+            }
             yoloRunState.items = Array.isArray(data) ? data : [];
             populateYoloRunSelect();
             populateDetectorRunSelect("yolo");
             return yoloRunState.items;
         } catch (error) {
+            if (requestId !== yoloRunState.refreshRequestId) {
+                return yoloRunState.items;
+            }
             if (yoloTrainElements.runSummary) {
                 yoloTrainElements.runSummary.textContent = `Unable to load runs: ${error.message || error}`;
             }
             return [];
+        } finally {
+            if (requestId === yoloRunState.refreshRequestId) {
+                yoloRunState.refreshInFlight = false;
+                updateRunRefreshUi("yolo");
+                if (yoloRunState.refreshNeedsRefresh) {
+                    yoloRunState.refreshNeedsRefresh = false;
+                    loadYoloRunList(true).catch((err) => console.warn("Queued YOLO run refresh failed", err));
+                }
+            }
         }
     }
 
@@ -4280,6 +5057,11 @@ function updateRfDetrTrainStartAvailability(entry) {
             setYoloTrainMessage("Select a run to download.", "warn");
             return;
         }
+        if (isRunActionInFlight("yolo", "download", entry.run_id)) {
+            return;
+        }
+        setRunActionInFlight("yolo", "download", entry.run_id, true);
+        updateRunActionButtons("yolo");
         try {
             const resp = await fetch(`${API_ROOT}/yolo/runs/${encodeURIComponent(entry.run_id)}/download`);
             if (!resp.ok) {
@@ -4287,17 +5069,14 @@ function updateRfDetrTrainStartAvailability(entry) {
                 throw new Error(detail || `HTTP ${resp.status}`);
             }
             const blob = await resp.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = `${entry.run_name || entry.run_id}.zip`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            const baseName = sanitizeFilename(entry.run_name || entry.run_id, "yolo_run");
+            saveBlobToDisk(blob, `${baseName}.zip`);
         } catch (error) {
             console.error("YOLO run download failed", error);
             setYoloTrainMessage(error.message || "Failed to download run", "error");
+        } finally {
+            setRunActionInFlight("yolo", "download", entry.run_id, false);
+            updateRunActionButtons("yolo");
         }
     }
 
@@ -4307,6 +5086,11 @@ function updateRfDetrTrainStartAvailability(entry) {
             setYoloTrainMessage("Select a run to activate.", "warn");
             return;
         }
+        if (isRunActionInFlight("yolo", "activate", entry.run_id)) {
+            return;
+        }
+        setRunActionInFlight("yolo", "activate", entry.run_id, true);
+        updateRunActionButtons("yolo");
         try {
             const resp = await fetch(`${API_ROOT}/yolo/active`, {
                 method: "POST",
@@ -4322,6 +5106,9 @@ function updateRfDetrTrainStartAvailability(entry) {
         } catch (error) {
             console.error("YOLO run activate failed", error);
             setYoloTrainMessage(error.message || "Failed to activate run", "error");
+        } finally {
+            setRunActionInFlight("yolo", "activate", entry.run_id, false);
+            updateRunActionButtons("yolo");
         }
     }
 
@@ -4331,9 +5118,14 @@ function updateRfDetrTrainStartAvailability(entry) {
             setYoloTrainMessage("Select a run to delete.", "warn");
             return;
         }
+        if (isRunActionInFlight("yolo", "delete", entry.run_id)) {
+            return;
+        }
         if (!window.confirm(`Delete YOLO run "${entry.run_name || entry.run_id}"? This cannot be undone.`)) {
             return;
         }
+        setRunActionInFlight("yolo", "delete", entry.run_id, true);
+        updateRunActionButtons("yolo");
         try {
             const resp = await fetch(`${API_ROOT}/yolo/runs/${encodeURIComponent(entry.run_id)}`, { method: "DELETE" });
             if (!resp.ok) {
@@ -4346,6 +5138,9 @@ function updateRfDetrTrainStartAvailability(entry) {
         } catch (error) {
             console.error("YOLO run delete failed", error);
             setYoloTrainMessage(error.message || "Failed to delete run", "error");
+        } finally {
+            setRunActionInFlight("yolo", "delete", entry.run_id, false);
+            updateRunActionButtons("yolo");
         }
     }
 
@@ -4355,6 +5150,11 @@ function updateRfDetrTrainStartAvailability(entry) {
             setRfDetrTrainMessage("Select a run to download.", "warn");
             return;
         }
+        if (isRunActionInFlight("rfdetr", "download", entry.run_id)) {
+            return;
+        }
+        setRunActionInFlight("rfdetr", "download", entry.run_id, true);
+        updateRunActionButtons("rfdetr");
         try {
             const resp = await fetch(`${API_ROOT}/rfdetr/runs/${encodeURIComponent(entry.run_id)}/download`);
             if (!resp.ok) {
@@ -4362,17 +5162,14 @@ function updateRfDetrTrainStartAvailability(entry) {
                 throw new Error(detail || `HTTP ${resp.status}`);
             }
             const blob = await resp.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = `${entry.run_name || entry.run_id}.zip`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            const baseName = sanitizeFilename(entry.run_name || entry.run_id, "rfdetr_run");
+            saveBlobToDisk(blob, `${baseName}.zip`);
         } catch (error) {
             console.error("RF-DETR run download failed", error);
             setRfDetrTrainMessage(error.message || "Failed to download run", "error");
+        } finally {
+            setRunActionInFlight("rfdetr", "download", entry.run_id, false);
+            updateRunActionButtons("rfdetr");
         }
     }
 
@@ -4382,6 +5179,11 @@ function updateRfDetrTrainStartAvailability(entry) {
             setRfDetrTrainMessage("Select a run to activate.", "warn");
             return;
         }
+        if (isRunActionInFlight("rfdetr", "activate", entry.run_id)) {
+            return;
+        }
+        setRunActionInFlight("rfdetr", "activate", entry.run_id, true);
+        updateRunActionButtons("rfdetr");
         try {
             const resp = await fetch(`${API_ROOT}/rfdetr/active`, {
                 method: "POST",
@@ -4397,6 +5199,9 @@ function updateRfDetrTrainStartAvailability(entry) {
         } catch (error) {
             console.error("RF-DETR run activate failed", error);
             setRfDetrTrainMessage(error.message || "Failed to activate run", "error");
+        } finally {
+            setRunActionInFlight("rfdetr", "activate", entry.run_id, false);
+            updateRunActionButtons("rfdetr");
         }
     }
 
@@ -4406,9 +5211,14 @@ function updateRfDetrTrainStartAvailability(entry) {
             setRfDetrTrainMessage("Select a run to delete.", "warn");
             return;
         }
+        if (isRunActionInFlight("rfdetr", "delete", entry.run_id)) {
+            return;
+        }
         if (!window.confirm(`Delete RF-DETR run "${entry.run_name || entry.run_id}"? This cannot be undone.`)) {
             return;
         }
+        setRunActionInFlight("rfdetr", "delete", entry.run_id, true);
+        updateRunActionButtons("rfdetr");
         try {
             const resp = await fetch(`${API_ROOT}/rfdetr/runs/${encodeURIComponent(entry.run_id)}`, { method: "DELETE" });
             if (!resp.ok) {
@@ -4421,6 +5231,9 @@ function updateRfDetrTrainStartAvailability(entry) {
         } catch (error) {
             console.error("RF-DETR run delete failed", error);
             setRfDetrTrainMessage(error.message || "Failed to delete run", "error");
+        } finally {
+            setRunActionInFlight("rfdetr", "delete", entry.run_id, false);
+            updateRunActionButtons("rfdetr");
         }
     }
 
@@ -4442,7 +5255,12 @@ function updateRfDetrTrainStartAvailability(entry) {
             setDetectorRunMessage(mode, "Select a run to activate.", "warn");
             return;
         }
+        if (isRunActionInFlight(mode, "activate", entry.run_id)) {
+            return;
+        }
         const endpoint = mode === "yolo" ? "yolo" : "rfdetr";
+        setRunActionInFlight(mode, "activate", entry.run_id, true);
+        updateRunActionButtons(mode);
         try {
             const resp = await fetch(`${API_ROOT}/${endpoint}/active`, {
                 method: "POST",
@@ -4459,6 +5277,9 @@ function updateRfDetrTrainStartAvailability(entry) {
         } catch (error) {
             console.error("Detector run activate failed", error);
             setDetectorRunMessage(mode, error.message || "Failed to activate run", "error");
+        } finally {
+            setRunActionInFlight(mode, "activate", entry.run_id, false);
+            updateRunActionButtons(mode);
         }
     }
 
@@ -4468,7 +5289,12 @@ function updateRfDetrTrainStartAvailability(entry) {
             setDetectorRunMessage(mode, "Select a run to download.", "warn");
             return;
         }
+        if (isRunActionInFlight(mode, "download", entry.run_id)) {
+            return;
+        }
         const endpoint = mode === "yolo" ? "yolo" : "rfdetr";
+        setRunActionInFlight(mode, "download", entry.run_id, true);
+        updateRunActionButtons(mode);
         try {
             const resp = await fetch(`${API_ROOT}/${endpoint}/runs/${encodeURIComponent(entry.run_id)}/download`);
             if (!resp.ok) {
@@ -4476,17 +5302,14 @@ function updateRfDetrTrainStartAvailability(entry) {
                 throw new Error(detail || `HTTP ${resp.status}`);
             }
             const blob = await resp.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = `${entry.run_name || entry.run_id}.zip`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            const baseName = sanitizeFilename(entry.run_name || entry.run_id, "detector_run");
+            saveBlobToDisk(blob, `${baseName}.zip`);
         } catch (error) {
             console.error("Detector run download failed", error);
             setDetectorRunMessage(mode, error.message || "Failed to download run", "error");
+        } finally {
+            setRunActionInFlight(mode, "download", entry.run_id, false);
+            updateRunActionButtons(mode);
         }
     }
 
@@ -4496,11 +5319,16 @@ function updateRfDetrTrainStartAvailability(entry) {
             setDetectorRunMessage(mode, "Select a run to delete.", "warn");
             return;
         }
+        if (isRunActionInFlight(mode, "delete", entry.run_id)) {
+            return;
+        }
         const label = entry.run_name || entry.run_id;
         if (!window.confirm(`Delete ${mode.toUpperCase()} run "${label}"? This cannot be undone.`)) {
             return;
         }
         const endpoint = mode === "yolo" ? "yolo" : "rfdetr";
+        setRunActionInFlight(mode, "delete", entry.run_id, true);
+        updateRunActionButtons(mode);
         try {
             const resp = await fetch(`${API_ROOT}/${endpoint}/runs/${encodeURIComponent(entry.run_id)}`, { method: "DELETE" });
             if (!resp.ok) {
@@ -4518,6 +5346,9 @@ function updateRfDetrTrainStartAvailability(entry) {
         } catch (error) {
             console.error("Detector run delete failed", error);
             setDetectorRunMessage(mode, error.message || "Failed to delete run", "error");
+        } finally {
+            setRunActionInFlight(mode, "delete", entry.run_id, false);
+            updateRunActionButtons(mode);
         }
     }
 
@@ -4560,6 +5391,9 @@ function updateRfDetrTrainStartAvailability(entry) {
     }
 
     async function handleStartYoloHeadGraft() {
+        if (yoloHeadGraftState.startInFlight) {
+            return;
+        }
         if (!yoloHeadGraftState.baseRunId) {
             setYoloHeadGraftMessage("Select a base run first.", "warn");
             return;
@@ -4573,6 +5407,8 @@ function updateRfDetrTrainStartAvailability(entry) {
             return;
         }
         const payload = buildYoloHeadGraftPayload();
+        yoloHeadGraftState.startInFlight = true;
+        updateYoloHeadGraftTosState();
         setYoloHeadGraftMessage("Starting head graft…", "info");
         try {
             const resp = await fetch(`${API_ROOT}/yolo/head_graft/jobs`, {
@@ -4586,14 +5422,24 @@ function updateRfDetrTrainStartAvailability(entry) {
             }
             const data = await resp.json();
             yoloHeadGraftState.activeJobId = data.job_id;
-            pollYoloHeadGraftJob(data.job_id, { force: true });
-            refreshYoloHeadGraftHistory();
+            pollYoloHeadGraftJob(data.job_id, { force: true }).catch((error) => {
+                console.error("Failed to poll YOLO head-graft job", error);
+            });
+            refreshYoloHeadGraftHistory().catch((error) => {
+                console.error("Failed to refresh YOLO head-graft history", error);
+            });
         } catch (error) {
             setYoloHeadGraftMessage(error.message || "Failed to start head graft", "error");
+        } finally {
+            yoloHeadGraftState.startInFlight = false;
+            updateYoloHeadGraftTosState();
         }
     }
 
     async function handleDryRunYoloHeadGraft() {
+        if (yoloHeadGraftState.dryRunInFlight) {
+            return;
+        }
         if (!yoloHeadGraftState.baseRunId || !yoloHeadGraftState.datasetId) {
             setYoloHeadGraftMessage("Select a base run and dataset before running a dry check.", "warn");
             return;
@@ -4606,6 +5452,8 @@ function updateRfDetrTrainStartAvailability(entry) {
             base_run_id: yoloHeadGraftState.baseRunId,
             dataset_id: yoloHeadGraftState.datasetId,
         };
+        yoloHeadGraftState.dryRunInFlight = true;
+        updateYoloHeadGraftTosState();
         setYoloHeadGraftMessage("Running head graft dry check…", "info");
         try {
             const resp = await fetch(`${API_ROOT}/yolo/head_graft/dry_run`, {
@@ -4630,6 +5478,9 @@ function updateRfDetrTrainStartAvailability(entry) {
             }
         } catch (error) {
             setYoloHeadGraftMessage(error.message || "Dry run failed", "error");
+        } finally {
+            yoloHeadGraftState.dryRunInFlight = false;
+            updateYoloHeadGraftTosState();
         }
     }
 
@@ -4637,22 +5488,43 @@ function updateRfDetrTrainStartAvailability(entry) {
         if (!jobId) {
             return;
         }
-        if (!force && yoloHeadGraftState.lastJobSnapshot?.job_id === jobId) {
+        if (yoloHeadGraftState.pollHandle) {
+            clearTimeout(yoloHeadGraftState.pollHandle);
+            yoloHeadGraftState.pollHandle = null;
+        }
+        if (yoloHeadGraftState.pollInFlight) {
+            yoloHeadGraftState.activeJobId = jobId;
+            yoloHeadGraftState.pollRequestId += 1;
+            yoloHeadGraftState.pollHandle = setTimeout(() => {
+                pollYoloHeadGraftJob(jobId, { force: true }).catch((err) => console.error("Head graft poll failed", err));
+            }, 200);
             return;
         }
+        const requestId = yoloHeadGraftState.pollRequestId + 1;
+        yoloHeadGraftState.pollRequestId = requestId;
+        yoloHeadGraftState.activeJobId = jobId;
+        yoloHeadGraftState.pollInFlight = true;
         try {
             const resp = await fetch(`${API_ROOT}/yolo/head_graft/jobs/${encodeURIComponent(jobId)}`);
             if (!resp.ok) {
                 throw new Error(await resp.text());
             }
             const data = await resp.json();
+            if (requestId !== yoloHeadGraftState.pollRequestId || yoloHeadGraftState.activeJobId !== jobId) {
+                return;
+            }
             yoloHeadGraftState.lastJobSnapshot = data;
             updateYoloHeadGraftUI(data);
             if (data.status && ["running", "queued", "cancelling"].includes(data.status)) {
                 scheduleYoloHeadGraftPoll(jobId);
             }
         } catch (error) {
+            if (requestId !== yoloHeadGraftState.pollRequestId || yoloHeadGraftState.activeJobId !== jobId) {
+                return;
+            }
             setYoloHeadGraftMessage(error.message || "Failed to load head graft status", "error");
+        } finally {
+            yoloHeadGraftState.pollInFlight = false;
         }
     }
 
@@ -4682,7 +5554,8 @@ function updateRfDetrTrainStartAvailability(entry) {
                 .join("\n");
         }
         if (yoloHeadGraftElements.cancelButton) {
-            yoloHeadGraftElements.cancelButton.disabled = !["running", "queued", "cancelling"].includes(job.status);
+            const cancellable = isCancellableTrainingStatus(job.status);
+            yoloHeadGraftElements.cancelButton.disabled = !cancellable || yoloHeadGraftState.cancelInFlight;
         }
     }
 
@@ -4690,12 +5563,18 @@ function updateRfDetrTrainStartAvailability(entry) {
         if (!yoloHeadGraftElements.history) {
             return;
         }
+        const requestId = yoloHeadGraftState.historyRefreshRequestId + 1;
+        yoloHeadGraftState.historyRefreshRequestId = requestId;
         try {
             const resp = await fetch(`${API_ROOT}/yolo/head_graft/jobs`);
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const jobs = await resp.json();
+            // Prevent stale history responses from overriding newer refreshes.
+            if (requestId !== yoloHeadGraftState.historyRefreshRequestId) {
+                return;
+            }
             yoloHeadGraftElements.history.innerHTML = "";
             if (!Array.isArray(jobs) || !jobs.length) {
                 const empty = document.createElement("div");
@@ -4736,6 +5615,9 @@ function updateRfDetrTrainStartAvailability(entry) {
                 yoloHeadGraftElements.history.appendChild(item);
             });
         } catch (error) {
+            if (requestId !== yoloHeadGraftState.historyRefreshRequestId) {
+                return;
+            }
             yoloHeadGraftElements.history.textContent = `Unable to load history: ${error.message || error}`;
         }
     }
@@ -4743,10 +5625,10 @@ function updateRfDetrTrainStartAvailability(entry) {
     function updateYoloHeadGraftTosState() {
         const accepted = Boolean(yoloTrainElements.acceptTos?.checked);
         if (yoloHeadGraftElements.startButton) {
-            yoloHeadGraftElements.startButton.disabled = !accepted;
+            yoloHeadGraftElements.startButton.disabled = !accepted || yoloHeadGraftState.startInFlight;
         }
         if (yoloHeadGraftElements.dryRunButton) {
-            yoloHeadGraftElements.dryRunButton.disabled = !accepted;
+            yoloHeadGraftElements.dryRunButton.disabled = !accepted || yoloHeadGraftState.dryRunInFlight;
         }
     }
 
@@ -4762,15 +5644,8 @@ function updateRfDetrTrainStartAvailability(entry) {
                 throw new Error(detail || `HTTP ${resp.status}`);
             }
             const blob = await resp.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            const filename = `${job?.config?.run_name || job.job_id}_head_graft_bundle.zip`;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            const filename = `${sanitizeFilename(job?.config?.run_name || job.job_id, "head_graft")}_head_graft_bundle.zip`;
+            saveBlobToDisk(blob, filename);
         } catch (error) {
             setYoloHeadGraftMessage(error.message || "Failed to download head graft bundle", "error");
         }
@@ -4888,42 +5763,65 @@ async function fetchAutomationJobs(url) {
 }
 
 async function refreshAutomationLockStatus() {
-    const [clipJobs, qwenJobs, sam3Jobs, yoloJobs, rfdetrJobs, calibrationJobs] = await Promise.all([
-        fetchAutomationJobs(`${API_ROOT}/clip/train`),
-        fetchAutomationJobs(`${API_ROOT}/qwen/train/jobs`),
-        fetchAutomationJobs(`${API_ROOT}/sam3/train/jobs`),
-        fetchAutomationJobs(`${API_ROOT}/yolo/train/jobs`),
-        fetchAutomationJobs(`${API_ROOT}/rfdetr/train/jobs`),
-        fetchAutomationJobs(`${API_ROOT}/calibration/jobs`),
-    ]);
-    const active = [];
-    let calibrationActive = false;
-    let prepassEncodingActive = false;
-    const pushActive = (jobs, label) => {
-        jobs.forEach((job) => {
-            if (isAutomationJobActive(job?.status)) {
-                if (label === "Calibration") {
-                    calibrationActive = true;
-                    const phase = String(job?.phase || "").toLowerCase();
-                    if (phase === "prepass" || phase === "select_images") {
-                        prepassEncodingActive = true;
+    if (automationLockState.refreshInFlight) {
+        // Coalesce overlapping polls; run one follow-up refresh afterward.
+        automationLockState.refreshNeedsRefresh = true;
+        return;
+    }
+    const requestId = automationLockState.refreshRequestId + 1;
+    automationLockState.refreshRequestId = requestId;
+    automationLockState.refreshInFlight = true;
+    automationLockState.refreshNeedsRefresh = false;
+    try {
+        const [clipJobs, qwenJobs, sam3Jobs, yoloJobs, rfdetrJobs, calibrationJobs] = await Promise.all([
+            fetchAutomationJobs(`${API_ROOT}/clip/train`),
+            fetchAutomationJobs(`${API_ROOT}/qwen/train/jobs`),
+            fetchAutomationJobs(`${API_ROOT}/sam3/train/jobs`),
+            fetchAutomationJobs(`${API_ROOT}/yolo/train/jobs`),
+            fetchAutomationJobs(`${API_ROOT}/rfdetr/train/jobs`),
+            fetchAutomationJobs(`${API_ROOT}/calibration/jobs`),
+        ]);
+        // Ignore stale refresh completions from an older request cycle.
+        if (requestId !== automationLockState.refreshRequestId) {
+            return;
+        }
+        const active = [];
+        let calibrationActive = false;
+        let prepassEncodingActive = false;
+        const pushActive = (jobs, label) => {
+            jobs.forEach((job) => {
+                if (isAutomationJobActive(job?.status)) {
+                    if (label === "Calibration") {
+                        calibrationActive = true;
+                        const phase = String(job?.phase || "").toLowerCase();
+                        if (phase === "prepass" || phase === "select_images") {
+                            prepassEncodingActive = true;
+                        }
                     }
+                    active.push(formatAutomationJobLabel(job, label));
                 }
-                active.push(formatAutomationJobLabel(job, label));
-            }
-        });
-    };
-    pushActive(clipJobs, "CLIP training");
-    pushActive(qwenJobs, "Qwen training");
-    pushActive(sam3Jobs, "SAM3 training");
-    pushActive(yoloJobs, "YOLO training");
-    pushActive(rfdetrJobs, "RF-DETR training");
-    pushActive(calibrationJobs, "Calibration");
-    automationLockState.active = active.length > 0;
-    automationLockState.jobs = active;
-    automationLockState.calibrationActive = calibrationActive;
-    automationLockState.prepassEncodingActive = prepassEncodingActive;
-    updateAutomationLockBanner();
+            });
+        };
+        pushActive(clipJobs, "CLIP training");
+        pushActive(qwenJobs, "Qwen training");
+        pushActive(sam3Jobs, "SAM3 training");
+        pushActive(yoloJobs, "YOLO training");
+        pushActive(rfdetrJobs, "RF-DETR training");
+        pushActive(calibrationJobs, "Calibration");
+        automationLockState.active = active.length > 0;
+        automationLockState.jobs = active;
+        automationLockState.calibrationActive = calibrationActive;
+        automationLockState.prepassEncodingActive = prepassEncodingActive;
+        updateAutomationLockBanner();
+    } finally {
+        automationLockState.refreshInFlight = false;
+        if (automationLockState.refreshNeedsRefresh) {
+            automationLockState.refreshNeedsRefresh = false;
+            refreshAutomationLockStatus().catch((error) => {
+                console.debug("Queued automation-lock refresh failed", error);
+            });
+        }
+    }
 }
 
 function updateLabelingGpuLockNotice() {
@@ -4978,9 +5876,13 @@ function startAutomationLockPolling() {
     if (automationLockPollHandle) {
         clearInterval(automationLockPollHandle);
     }
-    refreshAutomationLockStatus().catch(() => {});
+    refreshAutomationLockStatus().catch((error) => {
+        console.debug("Initial automation-lock refresh failed", error);
+    });
     automationLockPollHandle = setInterval(() => {
-        refreshAutomationLockStatus().catch(() => {});
+        refreshAutomationLockStatus().catch((error) => {
+            console.debug("Automation-lock poll tick failed", error);
+        });
     }, 3000);
 }
 
@@ -5282,32 +6184,6 @@ function ensureAutomationAvailable(actionLabel) {
         return payload;
     }
 
-    async function handleQwenDatasetDelete() {
-        const entry = getSelectedQwenDataset();
-        if (!entry) {
-            setQwenTrainMessage("Select a dataset from Dataset Manager to delete.", "warn");
-            return;
-        }
-        if (!window.confirm(`Delete dataset "${entry.label}"? This cannot be undone.`)) {
-            return;
-        }
-        try {
-            const resp = await fetch(`${API_ROOT}/qwen/datasets/${encodeURIComponent(entry.id)}`, {
-                method: "DELETE",
-            });
-            if (!resp.ok) {
-                const detail = await resp.text();
-                throw new Error(detail || `HTTP ${resp.status}`);
-            }
-            setQwenTrainMessage(`Deleted dataset "${entry.label}".`, "success");
-            qwenDatasetState.selectedId = null;
-            await loadQwenDatasetList(true);
-        } catch (error) {
-            console.error("Failed to delete Qwen dataset", error);
-            setQwenTrainMessage(error.message || "Failed to delete dataset", "error");
-        }
-    }
-
     function formatBytes(bytes, digits = 1) {
         if (!Number.isFinite(bytes) || bytes <= 0) {
             return "0 B";
@@ -5321,47 +6197,6 @@ function ensureAutomationAvailable(actionLabel) {
         }
         const precision = value >= 100 ? 0 : digits;
         return `${value.toFixed(precision)} ${units[unitIndex]}`;
-    }
-
-    function formatDurationPrecise(seconds) {
-        if (!Number.isFinite(seconds) || seconds <= 0) {
-            return "0s";
-        }
-        const totalSeconds = Math.floor(seconds);
-        const mins = Math.floor(totalSeconds / 60);
-        const hrs = Math.floor(mins / 60);
-        const secs = totalSeconds % 60;
-        const minutesPart = mins % 60;
-        const parts = [];
-        if (hrs > 0) {
-            parts.push(`${hrs}h`);
-        }
-        if (minutesPart > 0 || hrs > 0) {
-            parts.push(`${minutesPart}m`);
-        }
-        parts.push(`${secs}s`);
-        return parts.join(" ");
-    }
-
-    function describeDurationRange(seconds) {
-        if (!Number.isFinite(seconds) || seconds <= 0) {
-            return "under a minute";
-        }
-        if (seconds < 60) {
-            return "under a minute";
-        }
-        if (seconds < 180) {
-            return "a few minutes";
-        }
-        if (seconds < 3600) {
-            const mins = Math.round(seconds / 60);
-            return `${mins} minute${mins === 1 ? "" : "s"}`;
-        }
-        const hours = seconds / 3600;
-        if (hours < 10) {
-            return `${hours.toFixed(1)} hours`;
-        }
-        return `${Math.round(hours)} hours`;
     }
 
     function renderConvergenceTable(trace) {
@@ -5518,92 +6353,12 @@ function ensureAutomationAvailable(actionLabel) {
         }
     }
 
-    function getRootFolderName(fileOrPath) {
-        if (!fileOrPath) {
-            return "";
-        }
-        const rel = typeof fileOrPath === "string"
-            ? fileOrPath
-            : fileOrPath.webkitRelativePath || fileOrPath.relativePath || fileOrPath.name;
-        if (rel) {
-            const parts = rel.split(/[\\/]/).filter(Boolean);
-            if (parts.length) {
-                return parts[0];
-            }
-        }
-        return typeof fileOrPath === "string" ? fileOrPath : fileOrPath.name;
-    }
-
-    function updateFileSummary(inputEl, summaryEl, options = {}) {
-        if (!summaryEl) {
-            return;
-        }
-        const entries = Array.isArray(options.entries) ? options.entries : null;
-        const files = entries
-            ? entries.map((entry) => entry.file || entry)
-            : inputEl && inputEl.files
-                ? Array.from(inputEl.files)
-                : [];
-        if (!files.length) {
-            summaryEl.textContent = options.emptyText || "No files selected";
-            if (summaryEl.textContent) {
-                summaryEl.title = summaryEl.textContent;
-            } else {
-                summaryEl.removeAttribute("title");
-            }
-            return;
-        }
-        if (options.mode === "path") {
-            const pathText = options.path || "";
-            summaryEl.textContent = pathText || (options.emptyText || "No path selected");
-            if (summaryEl.textContent) {
-                summaryEl.title = summaryEl.textContent;
-            } else {
-                summaryEl.removeAttribute("title");
-            }
-            return;
-        }
-        if (options.mode === "folder") {
-            const allowedExts = options.allowedExts;
-            const totalCount = typeof options.totalCount === "number" && options.totalCount >= files.length
-                ? options.totalCount
-                : files.length;
-            let validCount;
-            if (entries) {
-                validCount = entries.length;
-            } else if (allowedExts) {
-                validCount = files.filter((file) => allowedExts.has((file.name.split(".").pop() || "").toLowerCase())).length;
-            } else {
-                validCount = files.length;
-            }
-            const folderName = options.folderName
-                || (entries && entries.length
-                    ? getRootFolderName(entries[0].relativePath || entries[0].file?.name)
-                    : getRootFolderName(files[0]));
-            const descriptor = validCount === totalCount
-                ? `${validCount} files`
-                : `${validCount} of ${totalCount} files`;
-            summaryEl.textContent = `${folderName} (${descriptor})`;
-            summaryEl.title = summaryEl.textContent;
-            return;
-        }
-        if (files.length === 1) {
-            summaryEl.textContent = files[0].name;
-            summaryEl.title = summaryEl.textContent;
-            return;
-        }
-        summaryEl.textContent = `${files.length} files selected`;
-        summaryEl.title = summaryEl.textContent;
-    }
-
     function stopTrainingPoll() {
         if (trainingState.pollHandle !== null) {
             clearTimeout(trainingState.pollHandle);
             trainingState.pollHandle = null;
         }
     }
-
-    const HAS_DIRECTORY_PICKER = typeof window !== "undefined" && typeof window.showDirectoryPicker === "function";
 
     function startTrainingPoll(jobId, immediate = false) {
         stopTrainingPoll();
@@ -5847,12 +6602,24 @@ function ensureAutomationAvailable(actionLabel) {
     }
 
     async function refreshActiveModelPanel() {
+        if (activeState.modelRefreshInFlight) {
+            // Coalesce bursts of refresh requests; run one more pass after current call settles.
+            activeState.modelRefreshNeedsRefresh = true;
+            return;
+        }
+        const requestId = activeState.modelRefreshRequestId + 1;
+        activeState.modelRefreshRequestId = requestId;
+        activeState.modelRefreshInFlight = true;
+        updateActiveModelActionButtons();
         try {
             const resp = await fetch(`${API_ROOT}/clip/active_model`);
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const data = await resp.json();
+            if (requestId !== activeState.modelRefreshRequestId) {
+                return;
+            }
             const encoderTypeRaw = data.encoder_type || "clip";
             const encoderType = String(encoderTypeRaw).toLowerCase().trim();
             const clipModelName = data.clip_model || "(not loaded)";
@@ -5892,18 +6659,102 @@ function ensureAutomationAvailable(actionLabel) {
                 setActiveMessage(`${encoderLabel} classifier is not ready. Load a model to enable auto-labeling.`, "error");
             }
         } catch (error) {
+            if (requestId !== activeState.modelRefreshRequestId) {
+                return;
+            }
             console.warn("Failed to refresh active model", error);
             setActiveMessage(`Unable to read active model: ${error.message || error}`, "error");
+        } finally {
+            if (requestId === activeState.modelRefreshRequestId) {
+                activeState.modelRefreshInFlight = false;
+                updateActiveModelActionButtons();
+                if (activeState.modelRefreshNeedsRefresh) {
+                    activeState.modelRefreshNeedsRefresh = false;
+                    refreshActiveModelPanel().catch((err) => {
+                        console.warn("Queued active model refresh failed", err);
+                    });
+                }
+            }
         }
     }
 
     function syncActiveApplyAvailability() {
-        if (!activeElements.applyButton || !activeElements.classifierPath) return;
+        updateActiveModelActionButtons();
+    }
+
+    function updateActiveModelActionButtons() {
+        if (!activeElements.classifierPath) {
+            return;
+        }
         const hasPath = !!(activeElements.classifierPath.value || "").trim();
-        activeElements.applyButton.disabled = !hasPath;
-        activeElements.applyButton.title = hasPath
-            ? "Apply active model configuration."
-            : "Select or upload a classifier first.";
+        const hasClassifierSelection = !!getSelectedActiveClassifier();
+        const hasLabelmapSelection = !!getSelectedActiveLabelmap();
+        const hasLatestArtifacts = !!trainingState.latestArtifacts;
+        const modelBusy = activeState.modelRefreshInFlight || activeState.applyInFlight || activeState.activateInFlight;
+        const classifierBusy = activeState.classifierRefreshInFlight
+            || activeState.classifierUploadInFlight
+            || activeState.classifierRenameInFlight
+            || activeState.classifierDeleteInFlight;
+        const labelmapBusy = activeState.labelmapRefreshInFlight
+            || activeState.labelmapUploadInFlight
+            || activeState.labelmapDeleteInFlight;
+        if (activeElements.applyButton) {
+            activeElements.applyButton.disabled = !hasPath || modelBusy;
+            activeElements.applyButton.title = hasPath
+                ? "Apply active model configuration."
+                : "Select or upload a classifier first.";
+        }
+        if (activeElements.refreshButton) {
+            activeElements.refreshButton.disabled = modelBusy;
+        }
+        if (activeElements.activateLatestButton) {
+            activeElements.activateLatestButton.disabled = modelBusy || !hasLatestArtifacts;
+        }
+        if (activeElements.classifierRefresh) {
+            activeElements.classifierRefresh.disabled = classifierBusy;
+        }
+        if (activeElements.classifierSelect) {
+            activeElements.classifierSelect.disabled = classifierBusy || modelBusy;
+        }
+        if (activeElements.classifierUse) {
+            activeElements.classifierUse.disabled = !hasClassifierSelection || modelBusy;
+        }
+        if (activeElements.classifierDownload) {
+            activeElements.classifierDownload.disabled = !hasClassifierSelection || classifierBusy;
+        }
+        if (activeElements.classifierRename) {
+            activeElements.classifierRename.disabled = !hasClassifierSelection || classifierBusy;
+        }
+        if (activeElements.classifierDelete) {
+            activeElements.classifierDelete.disabled = !hasClassifierSelection || classifierBusy;
+        }
+        if (activeElements.classifierBrowse) {
+            activeElements.classifierBrowse.disabled = classifierBusy;
+        }
+        if (activeElements.classifierUpload) {
+            activeElements.classifierUpload.disabled = classifierBusy;
+        }
+        if (activeElements.labelmapRefresh) {
+            activeElements.labelmapRefresh.disabled = labelmapBusy;
+        }
+        if (activeElements.labelmapSelect) {
+            activeElements.labelmapSelect.disabled = labelmapBusy || modelBusy;
+        }
+        if (activeElements.labelmapUse) {
+            activeElements.labelmapUse.disabled = !hasLabelmapSelection || modelBusy;
+        }
+        if (activeElements.labelmapDownload) {
+            activeElements.labelmapDownload.disabled = !hasLabelmapSelection || labelmapBusy;
+        }
+        if (activeElements.labelmapDelete) {
+            activeElements.labelmapDelete.disabled = !hasLabelmapSelection || labelmapBusy;
+        }
+        if (activeElements.labelmapBrowse) {
+            activeElements.labelmapBrowse.disabled = labelmapBusy;
+        }
+        if (activeElements.labelmapUpload) {
+            activeElements.labelmapUpload.disabled = labelmapBusy;
+        }
     }
 
     function getSelectedActiveClassifier() {
@@ -5920,7 +6771,10 @@ function ensureAutomationAvailable(actionLabel) {
 
     function applyActiveClassifierSelection() {
         const entry = getSelectedActiveClassifier();
-        if (!entry || !activeElements.classifierPath) return;
+        if (!entry || !activeElements.classifierPath) {
+            updateActiveModelActionButtons();
+            return;
+        }
         activeElements.classifierPath.value = entry.path || "";
         if (entry.labelmap_guess && activeElements.labelmapPath) {
             activeElements.labelmapPath.value = entry.labelmap_guess;
@@ -5948,16 +6802,36 @@ function ensureAutomationAvailable(actionLabel) {
 
     function applyActiveLabelmapSelection() {
         const entry = getSelectedActiveLabelmap();
-        if (!entry || !activeElements.labelmapPath) return;
+        if (!entry || !activeElements.labelmapPath) {
+            updateActiveModelActionButtons();
+            return;
+        }
         activeElements.labelmapPath.value = entry.path || "";
+        updateActiveModelActionButtons();
     }
 
     async function loadActiveClipClassifiers(selectedPath) {
         if (!activeElements.classifierSelect) return;
+        if (activeState.classifierRefreshInFlight) {
+            // Keep only one active fetch; queue a follow-up refresh with latest preferred path.
+            activeState.classifierRefreshNeedsRefresh = true;
+            if (selectedPath !== undefined && selectedPath !== null) {
+                activeState.classifierPendingSelectedPath = selectedPath || "";
+            }
+            return;
+        }
+        const requestId = activeState.classifierRefreshRequestId + 1;
+        activeState.classifierRefreshRequestId = requestId;
+        activeState.classifierRefreshInFlight = true;
+        updateActiveModelActionButtons();
+        const previousPath = activeElements.classifierPath ? activeElements.classifierPath.value : "";
         try {
             const resp = await fetch(`${API_ROOT}/clip/classifiers`);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
+            if (requestId !== activeState.classifierRefreshRequestId) {
+                return;
+            }
             const list = Array.isArray(data) ? data : [];
             activeState.classifiers = list;
             activeElements.classifierSelect.innerHTML = "";
@@ -5982,9 +6856,6 @@ function ensureAutomationAvailable(actionLabel) {
                 if (!entry.encoder_type) {
                     bits.push("legacy/no meta");
                 }
-                if (!entry.encoder_type) {
-                    bits.push("legacy/no meta");
-                }
                 opt.textContent = bits.join(" • ") || entry.rel_path || entry.path || "classifier";
                 activeElements.classifierSelect.appendChild(opt);
             });
@@ -5995,17 +6866,54 @@ function ensureAutomationAvailable(actionLabel) {
             } else if (list.length === 1 && list[0].path) {
                 activeElements.classifierSelect.value = list[0].path;
             }
+            const shouldSyncPath = (!!selectedPath && match) || !previousPath;
+            if (shouldSyncPath) {
+                applyActiveClassifierSelection();
+            }
+            updateActiveModelActionButtons();
         } catch (err) {
+            if (requestId !== activeState.classifierRefreshRequestId) {
+                return;
+            }
             console.warn("Failed to load classifiers", err);
+        } finally {
+            if (requestId === activeState.classifierRefreshRequestId) {
+                activeState.classifierRefreshInFlight = false;
+                updateActiveModelActionButtons();
+                if (activeState.classifierRefreshNeedsRefresh) {
+                    const pendingPath = activeState.classifierPendingSelectedPath || "";
+                    activeState.classifierRefreshNeedsRefresh = false;
+                    activeState.classifierPendingSelectedPath = "";
+                    loadActiveClipClassifiers(pendingPath).catch((err) => {
+                        console.warn("Queued active classifier refresh failed", err);
+                    });
+                }
+            }
         }
     }
 
     async function loadActiveLabelmaps(selectedPath) {
         if (!activeElements.labelmapSelect) return;
+        if (activeState.labelmapRefreshInFlight) {
+            // Keep only one active fetch; queue a follow-up refresh with latest preferred path.
+            activeState.labelmapRefreshNeedsRefresh = true;
+            if (selectedPath !== undefined && selectedPath !== null) {
+                activeState.labelmapPendingSelectedPath = selectedPath || "";
+            }
+            return;
+        }
+        const requestId = activeState.labelmapRefreshRequestId + 1;
+        activeState.labelmapRefreshRequestId = requestId;
+        activeState.labelmapRefreshInFlight = true;
+        updateActiveModelActionButtons();
+        const previousPath = activeElements.labelmapPath ? activeElements.labelmapPath.value : "";
         try {
             const resp = await fetch(`${API_ROOT}/clip/labelmaps`);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
+            if (requestId !== activeState.labelmapRefreshRequestId) {
+                return;
+            }
             const list = Array.isArray(data) ? data : [];
             activeState.labelmaps = list;
             activeElements.labelmapSelect.innerHTML = "";
@@ -6029,18 +6937,44 @@ function ensureAutomationAvailable(actionLabel) {
             } else if (list.length === 1 && list[0].path) {
                 activeElements.labelmapSelect.value = list[0].path;
             }
+            const shouldSyncPath = (!!selectedPath && match) || !previousPath;
+            if (shouldSyncPath) {
+                applyActiveLabelmapSelection();
+            }
+            updateActiveModelActionButtons();
         } catch (err) {
+            if (requestId !== activeState.labelmapRefreshRequestId) {
+                return;
+            }
             console.warn("Failed to load labelmaps", err);
+        } finally {
+            if (requestId === activeState.labelmapRefreshRequestId) {
+                activeState.labelmapRefreshInFlight = false;
+                updateActiveModelActionButtons();
+                if (activeState.labelmapRefreshNeedsRefresh) {
+                    const pendingPath = activeState.labelmapPendingSelectedPath || "";
+                    activeState.labelmapRefreshNeedsRefresh = false;
+                    activeState.labelmapPendingSelectedPath = "";
+                    loadActiveLabelmaps(pendingPath).catch((err) => {
+                        console.warn("Queued active labelmap refresh failed", err);
+                    });
+                }
+            }
         }
     }
 
     function downloadClipAsset(url, filenameFallback) {
         const link = document.createElement("a");
         link.href = url;
-        if (filenameFallback) link.download = filenameFallback;
-        document.body.appendChild(link);
+        link.rel = "noopener";
+        if (filenameFallback) link.download = sanitizeFilename(filenameFallback, "clip_asset.zip");
+        if (document.body) {
+            document.body.appendChild(link);
+        }
         link.click();
-        document.body.removeChild(link);
+        if (link.parentNode) {
+            link.parentNode.removeChild(link);
+        }
     }
 function renderTrainingHistoryItem(container, job) {
     const item = document.createElement("div");
@@ -6052,7 +6986,9 @@ function renderTrainingHistoryItem(container, job) {
     viewBtn.type = "button";
     viewBtn.textContent = "View";
     viewBtn.addEventListener("click", () => {
-        loadTrainingJob(job.job_id, { forcePoll: job.status === "running" || job.status === "queued" });
+        loadTrainingJob(job.job_id, { forcePoll: job.status === "running" || job.status === "queued" }).catch((error) => {
+            console.error("Failed to load training job", error);
+        });
     });
     right.appendChild(viewBtn);
     item.append(left, right);
@@ -6119,6 +7055,8 @@ function renderSam3ValMetrics() {
             : best
               ? "best AP"
               : "n/a";
+    const safeLatestLabel = escapeHtml(latestLabel);
+    const safeBestLabel = escapeHtml(bestLabel);
     const bestAp = best && Number.isFinite(best.ap) ? best.ap.toFixed(3) : "–";
     const bestAp50 = best && Number.isFinite(best.ap50) ? best.ap50.toFixed(3) : "–";
     const bestAp75 = best && Number.isFinite(best.ap75) ? best.ap75.toFixed(3) : "–";
@@ -6128,10 +7066,10 @@ function renderSam3ValMetrics() {
             AP is averaged over IoU 0.50–0.95; AP50/AP75 are stricter IoU thresholds; AR10/AR100 are recall with 10/100 detections per image.
         </div>
         <div class="training-help">
-            Latest ${latestLabel}: AP ${Number.isFinite(latest.ap) ? latest.ap.toFixed(3) : "–"} • AP50 ${
+            Latest ${safeLatestLabel}: AP ${Number.isFinite(latest.ap) ? latest.ap.toFixed(3) : "–"} • AP50 ${
         Number.isFinite(latest.ap50) ? latest.ap50.toFixed(3) : "–"
     } • AP75 ${Number.isFinite(latest.ap75) ? latest.ap75.toFixed(3) : "–"}
-            ${best ? `<br/>Best ${bestLabel}: AP ${bestAp} • AP50 ${bestAp50} • AP75 ${bestAp75}` : ""}
+            ${best ? `<br/>Best ${safeBestLabel}: AP ${bestAp} • AP50 ${bestAp50} • AP75 ${bestAp75}` : ""}
         </div>
         <table class="metrics-table">
             <thead><tr><th>Epoch</th><th>AP (0.50–0.95)</th><th>AP50</th><th>AP75</th><th>AR10</th><th>AR100</th></tr></thead>
@@ -6147,6 +7085,9 @@ const sam3EtaState = {
 function initSam3LossChart() {
     if (!sam3TrainElements.lossCanvas || sam3LossState.chart) return;
     const ctx = sam3TrainElements.lossCanvas.getContext("2d");
+    if (!ctx) {
+        return;
+    }
     sam3LossState.chart = { ctx };
 }
 
@@ -6166,18 +7107,6 @@ function resetSam3LossChart(jobId = null) {
             ctx.clearRect(0, 0, width, height);
         }
     }
-}
-
-function parseSam3LossPair(line) {
-    // Expect log lines like "Losses/train_all_loss: 9.58e+01 (1.23e+02)"
-    const match = line.match(/Losses\/train_all_loss:\s*([0-9.+-eE]+)(?:\s*\(\s*([0-9.+-eE]+)\s*\))?/);
-    if (!match) return null;
-    const inst = Number(match[1]);
-    const avg = match[2] !== undefined ? Number(match[2]) : null;
-    return {
-        instant: Number.isFinite(inst) ? inst : null,
-        average: Number.isFinite(avg) ? avg : null,
-    };
 }
 
 function formatEta(seconds) {
@@ -6243,7 +7172,6 @@ function computeMetricProgress(job) {
 }
 
 function computeMetricEta(job, progressOverride = null) {
-    const metrics = Array.isArray(job?.metrics) ? job.metrics : [];
     const created = Number.isFinite(job?.created_at) ? Number(job.created_at) : null;
     const startTs = created;
     const endTs = Date.now() / 1000;
@@ -6251,22 +7179,6 @@ function computeMetricEta(job, progressOverride = null) {
     const progress = progressOverride !== null ? progressOverride : computeMetricProgress(job);
     if (!Number.isFinite(progress) || progress <= 0) return null;
     const elapsed = endTs - startTs;
-    const remaining = elapsed * (1 - progress) / progress;
-    return remaining > 0 ? remaining : null;
-}
-
-function updateSam3Eta(progress) {
-    const now = Date.now();
-    if (!Number.isFinite(progress) || progress <= 0) {
-        sam3EtaState.startTime = sam3EtaState.startTime || now;
-        return null;
-    }
-    if (sam3EtaState.startTime === null) {
-        sam3EtaState.startTime = now;
-        return null;
-    }
-    const elapsed = (now - sam3EtaState.startTime) / 1000; // seconds
-    if (elapsed <= 0) return null;
     const remaining = elapsed * (1 - progress) / progress;
     return remaining > 0 ? remaining : null;
 }
@@ -6668,6 +7580,7 @@ async function refreshQwenGpuInfo() {
         qwenTrainState.gpuDeviceCount = count && count > 0 ? count : null;
         trainingGpuInfo.deviceCount = count && count > 0 ? count : null;
     } catch (error) {
+        console.debug("Failed to refresh Qwen GPU info", error);
         qwenTrainState.gpuTotalMb = null;
         qwenTrainState.gpuDeviceCount = null;
         trainingGpuInfo.deviceCount = null;
@@ -6905,103 +7818,6 @@ function buildQwenSampleUserPrompt(context, labels, mode, type) {
     return parts.filter(Boolean).join(" ").trim();
 }
 
-function buildQwenOutputPayload(detections, type) {
-    const items = [];
-    (detections || []).forEach((det) => {
-        if (!det || !det.label) return;
-        if (type === "bbox" && Array.isArray(det.bbox)) {
-            items.push({ label: det.label, bbox: det.bbox });
-        } else if (type === "point" && Array.isArray(det.point)) {
-            items.push({ label: det.label, point: det.point });
-        }
-    });
-    return JSON.stringify({ detections: items });
-}
-
-function buildQwenConversationRecord(imageName, promptText, outputText) {
-    return JSON.stringify({
-        image: imageName,
-        conversations: [
-            { from: "human", value: `<image>\n${promptText}` },
-            { from: "gpt", value: outputText },
-        ],
-    });
-}
-
-function pickQwenValidationSet(imageNames) {
-    const shuffled = shuffleArray(imageNames);
-    if (!shuffled.length) {
-        return new Set();
-    }
-    let valCount = Math.max(1, Math.round(shuffled.length * 0.2));
-    if (valCount >= shuffled.length && shuffled.length > 1) {
-        valCount = Math.max(1, shuffled.length - 1);
-    }
-    if (shuffled.length === 1) {
-        valCount = 1;
-    }
-    const valSet = new Set(shuffled.slice(0, valCount));
-    if (valSet.size === 0 && shuffled.length) {
-        valSet.add(shuffled[0]);
-    }
-    if (valSet.size === shuffled.length && shuffled.length > 1) {
-        valSet.delete(shuffled[shuffled.length - 1]);
-    }
-    return valSet;
-}
-
-async function initQwenDatasetUpload(runName) {
-    const formData = new FormData();
-    if (runName) {
-        formData.append("run_name", runName);
-    }
-    const resp = await fetch(`${API_ROOT}/qwen/dataset/init`, {
-        method: "POST",
-        body: formData,
-    });
-    if (!resp.ok) {
-        const detail = await resp.text();
-        throw new Error(detail || "Failed to initialize Qwen dataset upload.");
-    }
-    return resp.json();
-}
-
-async function uploadQwenDatasetChunk(jobId, split, record) {
-    const formData = new FormData();
-    formData.append("job_id", jobId);
-    formData.append("split", split);
-    formData.append("image_name", record.imageName);
-    formData.append("annotation_line", record.annotation);
-    formData.append("file", record.file, record.file?.name || record.imageName);
-    const resp = await fetch(`${API_ROOT}/qwen/dataset/chunk`, {
-        method: "POST",
-        body: formData,
-    });
-    if (!resp.ok) {
-        const detail = await resp.text();
-        throw new Error(detail || `Failed to upload ${split} chunk (${resp.status})`);
-    }
-    return resp.json();
-}
-
-async function finalizeQwenDatasetUpload(jobId, metadata, runName) {
-    const formData = new FormData();
-    formData.append("job_id", jobId);
-    formData.append("metadata", JSON.stringify(metadata || {}));
-    if (runName) {
-        formData.append("run_name", runName);
-    }
-    const resp = await fetch(`${API_ROOT}/qwen/dataset/finalize`, {
-        method: "POST",
-        body: formData,
-    });
-    if (!resp.ok) {
-        const detail = await resp.text();
-        throw new Error(detail || `Dataset finalize failed (${resp.status})`);
-    }
-    return resp.json();
-}
-
 function setSam3Message(text, tone = "info") {
     if (!sam3TrainElements.message) return;
     sam3TrainElements.message.textContent = text || "";
@@ -7029,8 +7845,10 @@ function updateSam3DatasetSummary(entry) {
 
 function updateSam3TrainStartAvailability(entry) {
     const ready = Boolean(entry && entry.id);
+    const busy = isCancellableTrainingStatus(sam3TrainState.lastJobSnapshot?.status);
     if (sam3TrainElements.startButton) {
-        sam3TrainElements.startButton.disabled = !ready;
+        // Hold start disabled while a training job is active or a start request is being submitted.
+        sam3TrainElements.startButton.disabled = !ready || busy || sam3TrainState.startInFlight;
     }
     if (sam3TrainElements.datasetWarning) {
         sam3TrainElements.datasetWarning.style.display = ready ? "none" : "block";
@@ -7038,10 +7856,16 @@ function updateSam3TrainStartAvailability(entry) {
 }
 
 async function loadSam3Datasets() {
+    const requestId = sam3TrainState.datasetRefreshRequestId + 1;
+    sam3TrainState.datasetRefreshRequestId = requestId;
     try {
         const resp = await fetch(`${API_ROOT}/sam3/datasets`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
+        // Ignore stale responses when a newer dataset refresh was requested.
+        if (requestId !== sam3TrainState.datasetRefreshRequestId) {
+            return;
+        }
         sam3TrainState.datasets = Array.isArray(data) ? data : [];
         if (!sam3TrainState.selectedId && sam3TrainState.datasets.length) {
             sam3TrainState.selectedId = sam3TrainState.datasets[0].id;
@@ -7064,16 +7888,29 @@ async function loadSam3Datasets() {
         updateSam3TrainStartAvailability(selected);
         resetSam3Eta();
     } catch (err) {
+        if (requestId !== sam3TrainState.datasetRefreshRequestId) {
+            return;
+        }
         console.error("Failed to load SAM3 datasets", err);
         setSam3Message(`Failed to load datasets: ${err.message || err}`, "error");
     }
 }
 
 async function convertSam3Dataset() {
+    if (sam3TrainState.convertInFlight) {
+        return null;
+    }
     const datasetId = sam3TrainState.selectedId;
     if (!datasetId) {
         setSam3Message("Select a dataset first.", "warn");
-        return;
+        return null;
+    }
+    sam3TrainState.convertInFlight = true;
+    const convertBtn = sam3TrainElements.datasetConvert;
+    const restoreDisabled = convertBtn ? convertBtn.disabled : null;
+    if (convertBtn) {
+        // Prevent duplicate conversion submissions while request is active.
+        convertBtn.disabled = true;
     }
     setSam3Message("Converting dataset to COCO…", "info");
     try {
@@ -7087,6 +7924,11 @@ async function convertSam3Dataset() {
         console.error("SAM3 convert failed", err);
         setSam3Message(`Convert failed: ${err.message || err}`, "error");
         throw err;
+    } finally {
+        sam3TrainState.convertInFlight = false;
+        if (convertBtn) {
+            convertBtn.disabled = !!restoreDisabled;
+        }
     }
 }
 
@@ -7161,10 +8003,16 @@ function updatePromptHelperDatasetSummary(entry) {
 }
 
 async function loadPromptHelperDatasets() {
+    const requestId = promptHelperState.datasetRefreshRequestId + 1;
+    promptHelperState.datasetRefreshRequestId = requestId;
     try {
         const resp = await fetch(`${API_ROOT}/sam3/datasets`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
+        // Ignore stale responses when a newer prompt-helper dataset refresh exists.
+        if (requestId !== promptHelperState.datasetRefreshRequestId) {
+            return;
+        }
         promptHelperState.datasets = Array.isArray(data) ? data : [];
         if (!promptHelperState.selectedId && promptHelperState.datasets.length) {
             promptHelperState.selectedId = promptHelperState.datasets[0].id;
@@ -7185,16 +8033,25 @@ async function loadPromptHelperDatasets() {
         promptHelperState.selectedId = selected ? selected.id : null;
         updatePromptHelperDatasetSummary(selected);
     } catch (err) {
+        if (requestId !== promptHelperState.datasetRefreshRequestId) {
+            return;
+        }
         console.error("Failed to load datasets for prompt helper", err);
         setPromptHelperMessage(`Failed to load datasets: ${err.message || err}`, "error");
     }
 }
 
 async function loadPromptHelperPresets() {
+    const requestId = promptHelperState.presetRefreshRequestId + 1;
+    promptHelperState.presetRefreshRequestId = requestId;
     try {
         const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/presets`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
+        // Ignore stale responses when a newer preset refresh was requested.
+        if (requestId !== promptHelperState.presetRefreshRequestId) {
+            return;
+        }
         promptHelperState.presets = Array.isArray(data) ? data : [];
         if (promptHelperElements.presetSelect) {
             promptHelperElements.presetSelect.innerHTML = "";
@@ -7211,6 +8068,9 @@ async function loadPromptHelperPresets() {
             });
         }
     } catch (err) {
+        if (requestId !== promptHelperState.presetRefreshRequestId) {
+            return;
+        }
         console.error("Failed to load prompt helper presets", err);
     }
 }
@@ -7267,10 +8127,22 @@ async function loadPromptHelperPresetIntoUi() {
         setPromptHelperMessage("Generate prompts first, then load a preset to edit/evaluate.", "warn");
         return;
     }
+    const requestId = promptHelperState.presetLoadRequestId + 1;
+    promptHelperState.presetLoadRequestId = requestId;
     try {
         const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/presets/${encodeURIComponent(presetId)}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const preset = await resp.json();
+        // Ignore stale preset loads if a newer load request superseded this one.
+        if (requestId !== promptHelperState.presetLoadRequestId) {
+            return;
+        }
+        if ((promptHelperElements.presetSelect?.value || "") !== presetId) {
+            return;
+        }
+        if ((promptHelperState.selectedId || "") !== datasetId) {
+            return;
+        }
         if (preset.dataset_id && preset.dataset_id !== datasetId) {
             setPromptHelperMessage(`Preset is for dataset ${preset.dataset_id}; switch dataset to use it.`, "warn");
             return;
@@ -7279,8 +8151,12 @@ async function loadPromptHelperPresetIntoUi() {
         const normalized = {};
         Object.entries(map).forEach(([k, v]) => {
             const vals = Array.isArray(v) ? v.map((s) => String(s).trim()).filter(Boolean) : [];
+            const classId = parseInt(k, 10);
+            if (!Number.isFinite(classId)) {
+                return;
+            }
             if (vals.length) {
-                normalized[parseInt(k, 10)] = vals;
+                normalized[classId] = vals;
             }
         });
         promptHelperState.promptsByClass = normalized;
@@ -7288,6 +8164,9 @@ async function loadPromptHelperPresetIntoUi() {
         setPromptHelperMessage(`Loaded preset ${preset.label || preset.id}.`, "success");
         if (promptHelperElements.evaluateButton) promptHelperElements.evaluateButton.disabled = false;
     } catch (err) {
+        if (requestId !== promptHelperState.presetLoadRequestId) {
+            return;
+        }
         console.error("Prompt helper preset load failed", err);
         setPromptHelperMessage(`Load failed: ${err.message || err}`, "error");
     }
@@ -7296,6 +8175,11 @@ async function loadPromptHelperPresetIntoUi() {
 function formatMetric(value, digits = 3) {
     if (value === null || value === undefined || Number.isNaN(value)) return "–";
     return Number(value).toFixed(digits);
+}
+
+function isPromptJobTerminal(status) {
+    const value = String(status || "").trim().toLowerCase();
+    return value === "completed" || value === "failed" || value === "cancelled";
 }
 
 function renderPromptHelperPrompts() {
@@ -7321,7 +8205,9 @@ function renderPromptHelperPrompts() {
         if (cls.image_count) metaBits.push(`${cls.image_count} images`);
         if (cls.gt_count) metaBits.push(`${cls.gt_count} boxes`);
         const name = cls.class_name || cls.class_id;
-        title.innerHTML = `<strong>${name}</strong>${metaBits.length ? ` <span class="training-help">(${metaBits.join(" / ")})</span>` : ""}`;
+        const safeName = escapeHtml(name);
+        const safeMeta = escapeHtml(metaBits.join(" / "));
+        title.innerHTML = `<strong>${safeName}</strong>${metaBits.length ? ` <span class="training-help">(${safeMeta})</span>` : ""}`;
         header.appendChild(title);
         card.appendChild(header);
         const body = document.createElement("div");
@@ -7348,7 +8234,8 @@ function renderPromptHelperPrompts() {
 
 function collectPromptsFromUi() {
     const map = {};
-    (promptHelperState.suggestions || []).forEach((cls) => {
+    const suggestionItems = Array.isArray(promptHelperState.suggestions) ? promptHelperState.suggestions : [];
+    suggestionItems.forEach((cls) => {
         const input = document.getElementById(`promptHelperInput-${cls.class_id}`);
         if (!input) return;
         const raw = input.value || "";
@@ -7432,19 +8319,20 @@ function renderPromptHelperResults(job) {
             `;
         table.appendChild(thead);
         const tbody = document.createElement("tbody");
-        (cls.candidates || []).forEach((cand) => {
+        const candidateItems = Array.isArray(cls.candidates) ? cls.candidates : [];
+        candidateItems.forEach((cand) => {
             const row = document.createElement("tr");
             const detsPerImg = cls.images_sampled ? (cand.matches || 0) / cls.images_sampled : 0;
             row.innerHTML = `
                     <td>${formatMetric(cand.score, 3)}</td>
-                    <td>${cand.prompt}</td>
+                    <td>${escapeHtml(cand.prompt ?? "")}</td>
                     <td>${formatMetric(detsPerImg, 2)}</td>
                     <td>${formatMetric(cand.precision, 3)}</td>
                     <td>${formatMetric(cand.recall, 3)}</td>
                     <td>${formatMetric(cand.avg_iou, 3)}</td>
                     <td>${formatMetric(cand.avg_score, 3)}</td>
-                    <td>${cand.preds ?? 0}</td>
-                    <td>${cand.gts ?? 0}</td>
+                    <td>${escapeHtml(String(cand.preds ?? 0))}</td>
+                    <td>${escapeHtml(String(cand.gts ?? 0))}</td>
                 `;
             tbody.appendChild(row);
         });
@@ -7527,21 +8415,22 @@ function renderPromptSearchResults(job) {
             `;
         table.appendChild(thead);
         const tbody = document.createElement("tbody");
-        (cls.candidates || []).forEach((cand, idx) => {
+        const candidateItems = Array.isArray(cls.candidates) ? cls.candidates : [];
+        candidateItems.forEach((cand, idx) => {
             const row = document.createElement("tr");
             if (idx === 0) row.classList.add("metric-table__highlight");
             const detRate = cand.det_rate ?? 0;
             row.innerHTML = `
                     <td>${idx === 0 ? "★" : ""}</td>
                     <td>${formatMetric(cand.search_score, 3)}</td>
-                    <td>${cand.prompt}</td>
+                    <td>${escapeHtml(cand.prompt ?? "")}</td>
                     <td>${formatMetric(cand.precision, 3)}</td>
                     <td>${formatMetric(cand.recall, 3)}</td>
                     <td>${formatMetric(detRate, 3)}</td>
                     <td>${formatMetric(cand.avg_iou, 3)}</td>
-                    <td>${cand.preds ?? 0}</td>
-                    <td>${cand.gts ?? 0}</td>
-                    <td>${cand.fps ?? 0}</td>
+                    <td>${escapeHtml(String(cand.preds ?? 0))}</td>
+                    <td>${escapeHtml(String(cand.gts ?? 0))}</td>
+                    <td>${escapeHtml(String(cand.fps ?? 0))}</td>
                 `;
             tbody.appendChild(row);
         });
@@ -7586,16 +8475,17 @@ function renderPromptSearchResults(job) {
     const summaryBody = document.createElement("div");
     summaryBody.className = "training-card__body";
     const coverageRate = Number.isFinite(summary.coverage_rate) ? (summary.coverage_rate * 100).toFixed(1) : "0";
+    const safeSeed = Number.isFinite(seedVal) ? ` (seed ${escapeHtml(seedVal)})` : "";
     summaryBody.innerHTML = `
         <div><strong>Class:</strong> ${escapeHtml(result.class_name || result.class_id)}</div>
         <div><strong>Recipe:</strong> ${stepCount} step${stepCount === 1 ? "" : "s"} (best threshold per prompt; dropped no-gain steps)</div>
         <div><strong>Simulation:</strong> Per-image early stop; negatives run every step. Precision per step uses only images still active.</div>
-        <div><strong>Sample:</strong> ${posIds.length} pos / ${negIds.length} neg${Number.isFinite(seedVal) ? ` (seed ${seedVal})` : ""}</div>
-        <div><strong>Coverage:</strong> ${summary.covered || 0}/${summary.total_gt || 0} (${coverageRate}%)
-        • FPs: ${summary.fps || 0}
-        • Duplicates: ${summary.duplicates || 0}
-        • Pos imgs: ${result.positive_images || 0}
-        • Neg imgs: ${result.negative_images || 0}</div>
+        <div><strong>Sample:</strong> ${escapeHtml(posIds.length)} pos / ${escapeHtml(negIds.length)} neg${safeSeed}</div>
+        <div><strong>Coverage:</strong> ${escapeHtml(summary.covered || 0)}/${escapeHtml(summary.total_gt || 0)} (${escapeHtml(coverageRate)}%)
+        • FPs: ${escapeHtml(summary.fps || 0)}
+        • Duplicates: ${escapeHtml(summary.duplicates || 0)}
+        • Pos imgs: ${escapeHtml(result.positive_images || 0)}
+        • Neg imgs: ${escapeHtml(result.negative_images || 0)}</div>
     `;
     if (posIds.length || negIds.length) {
         const samplePreview = document.createElement("div");
@@ -7646,12 +8536,7 @@ function renderPromptSearchResults(job) {
                 steps: steps.map((s) => ({ prompt: s.prompt, threshold: s.threshold })),
             };
             const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = `${recipeLabel}_recipe.json`;
-            a.click();
-            URL.revokeObjectURL(url);
+            saveBlobToDisk(blob, `${sanitizeFilename(`${recipeLabel}_recipe`, "recipe")}.json`);
         });
         downloadRow.appendChild(dlBtn);
         summaryBody.appendChild(downloadRow);
@@ -7720,12 +8605,12 @@ function renderPromptSearchResults(job) {
             row.innerHTML = `
                 <td>${idx + 1}</td>
                 <td>${escapeHtml(step.prompt || "")}</td>
-                <td>${step.threshold ?? "–"}</td>
-                <td>${gainText}</td>
-                <td>${cov}</td>
-                <td>${stepFps}</td>
-                <td>${totalFps}</td>
-                <td>${formatMetric(step.precision, 3)}</td>
+                <td>${escapeHtml(step.threshold ?? "–")}</td>
+                <td>${escapeHtml(gainText)}</td>
+                <td>${escapeHtml(cov)}</td>
+                <td>${escapeHtml(stepFps)}</td>
+                <td>${escapeHtml(totalFps)}</td>
+                <td>${escapeHtml(formatMetric(step.precision, 3))}</td>
             `;
             tbody.appendChild(row);
         });
@@ -7769,23 +8654,23 @@ function renderPromptSearchResults(job) {
             const row = document.createElement("tr");
             row.innerHTML = `
                 <td>${escapeHtml(cand.prompt || "")}</td>
-                <td>${cand.threshold ?? "–"}</td>
-                <td>${cand.matched_gt ?? 0}</td>
-                <td>${cand.fps ?? 0}</td>
-                <td>${formatMetric(cand.precision, 3)}</td>
-                <td>${formatMetric(cand.recall, 3)}</td>
-                <td>${formatMetric(cand.det_rate, 3)}</td>
-                <td>${formatMetric(cand.avg_iou, 3)}</td>
-                <td>${cand.preds ?? 0}</td>
-                <td>${cand.gts ?? 0}</td>
+                <td>${escapeHtml(cand.threshold ?? "–")}</td>
+                <td>${escapeHtml(cand.matched_gt ?? 0)}</td>
+                <td>${escapeHtml(cand.fps ?? 0)}</td>
+                <td>${escapeHtml(formatMetric(cand.precision, 3))}</td>
+                <td>${escapeHtml(formatMetric(cand.recall, 3))}</td>
+                <td>${escapeHtml(formatMetric(cand.det_rate, 3))}</td>
+                <td>${escapeHtml(formatMetric(cand.avg_iou, 3))}</td>
+                <td>${escapeHtml(cand.preds ?? 0)}</td>
+                <td>${escapeHtml(cand.gts ?? 0)}</td>
             `;
             tbody.appendChild(row);
         });
         table.appendChild(tbody);
         const details = document.createElement("details");
-        const summary = document.createElement("summary");
-        summary.textContent = `Show tested prompts (${candidates.length})`;
-        details.appendChild(summary);
+        const detailsSummary = document.createElement("summary");
+        detailsSummary.textContent = `Show tested prompts (${candidates.length})`;
+        details.appendChild(detailsSummary);
         details.appendChild(table);
         body.appendChild(details);
         candCard.appendChild(body);
@@ -7820,9 +8705,9 @@ function renderPromptSearchResults(job) {
             list.appendChild(more);
         }
         const details = document.createElement("details");
-        const summary = document.createElement("summary");
-        summary.textContent = `Per-image coverage (${coverage.length} images)`;
-        details.appendChild(summary);
+        const detailsSummary = document.createElement("summary");
+        detailsSummary.textContent = `Per-image coverage (${coverage.length} images)`;
+        details.appendChild(detailsSummary);
         details.appendChild(list);
         body.appendChild(details);
         covCard.appendChild(body);
@@ -7848,13 +8733,20 @@ function renderPromptSearchResults(job) {
 
 async function pollPromptSearchJob(force = false) {
     if (!promptSearchState.activeJobId) return;
-    if (promptSearchState.pollHandle && !force) {
-        // interval controls timing
+    if (promptSearchState.pollInFlight) {
+        return;
     }
+    const jobId = promptSearchState.activeJobId;
+    const requestId = promptSearchState.pollRequestId + 1;
+    promptSearchState.pollRequestId = requestId;
+    promptSearchState.pollInFlight = true;
     try {
-        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/jobs/${encodeURIComponent(promptSearchState.activeJobId)}`);
+        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/jobs/${encodeURIComponent(jobId)}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const job = await resp.json();
+        if (requestId !== promptSearchState.pollRequestId || promptSearchState.activeJobId !== jobId) {
+            return;
+        }
         promptSearchState.lastJob = job;
         if (promptSearchElements.logs && Array.isArray(job.logs)) {
             const logFrag = document.createDocumentFragment();
@@ -7873,7 +8765,7 @@ async function pollPromptSearchJob(force = false) {
             const steps = job.total_steps ? ` • ${job.completed_steps || 0}/${job.total_steps}` : "";
             promptSearchElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""} (${pct}%${steps})`;
         }
-        if (job.status === "completed" || job.status === "failed") {
+        if (isPromptJobTerminal(job.status)) {
             if (promptSearchState.pollHandle) {
                 clearInterval(promptSearchState.pollHandle);
                 promptSearchState.pollHandle = null;
@@ -7882,20 +8774,34 @@ async function pollPromptSearchJob(force = false) {
             renderPromptSearchResults(job);
         }
     } catch (err) {
+        if (requestId !== promptSearchState.pollRequestId || promptSearchState.activeJobId !== jobId) {
+            return;
+        }
         console.error("Prompt search poll failed", err);
         setPromptSearchMessage(`Poll failed: ${err.message || err}`, "error");
+    } finally {
+        if (requestId === promptSearchState.pollRequestId) {
+            promptSearchState.pollInFlight = false;
+        }
     }
 }
 
 async function pollPromptRecipeJob(force = false) {
     if (!promptRecipeState.activeJobId) return;
-    if (promptRecipeState.pollHandle && !force) {
-        // interval controls timing
+    if (promptRecipeState.pollInFlight) {
+        return;
     }
+    const jobId = promptRecipeState.activeJobId;
+    const requestId = promptRecipeState.pollRequestId + 1;
+    promptRecipeState.pollRequestId = requestId;
+    promptRecipeState.pollInFlight = true;
     try {
-        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/jobs/${encodeURIComponent(promptRecipeState.activeJobId)}`);
+        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/jobs/${encodeURIComponent(jobId)}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const job = await resp.json();
+        if (requestId !== promptRecipeState.pollRequestId || promptRecipeState.activeJobId !== jobId) {
+            return;
+        }
         promptRecipeState.lastJob = job;
         if (promptRecipeElements.logs && Array.isArray(job.logs)) {
             const logFrag = document.createDocumentFragment();
@@ -7914,7 +8820,7 @@ async function pollPromptRecipeJob(force = false) {
             const steps = job.total_steps ? ` • ${job.completed_steps || 0}/${job.total_steps}` : "";
             promptRecipeElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""} (${pct}%${steps})`;
         }
-        if (job.status === "completed" || job.status === "failed") {
+        if (isPromptJobTerminal(job.status)) {
             if (promptRecipeState.pollHandle) {
                 clearInterval(promptRecipeState.pollHandle);
                 promptRecipeState.pollHandle = null;
@@ -7923,12 +8829,22 @@ async function pollPromptRecipeJob(force = false) {
             renderPromptRecipeResults(job);
         }
     } catch (err) {
+        if (requestId !== promptRecipeState.pollRequestId || promptRecipeState.activeJobId !== jobId) {
+            return;
+        }
         console.error("Prompt recipe poll failed", err);
         setPromptRecipeMessage(`Poll failed: ${err.message || err}`, "error");
+    } finally {
+        if (requestId === promptRecipeState.pollRequestId) {
+            promptRecipeState.pollInFlight = false;
+        }
     }
 }
 
 async function startPromptRecipeJob() {
+    if (promptRecipeState.startInFlight) {
+        return;
+    }
     const datasetId = promptHelperState.selectedId;
     if (!datasetId) {
         setPromptRecipeMessage("Select a dataset first.", "warn");
@@ -7953,6 +8869,8 @@ async function startPromptRecipeJob() {
     const seed = readNumberInput(promptRecipeElements.seed, { integer: true }) ?? 42;
     const thresholds = readThresholdList(promptRecipeElements.thresholds, 0.2);
     const scoreThreshold = thresholds.length ? thresholds[0] : 0.2;
+    const requestId = promptRecipeState.startRequestId + 1;
+    promptRecipeState.startRequestId = requestId;
     const payload = {
         dataset_id: datasetId,
         class_id: classId,
@@ -7964,6 +8882,10 @@ async function startPromptRecipeJob() {
         score_threshold: scoreThreshold,
         prompts: prompts.map((p) => ({ prompt: p, thresholds })),
     };
+    promptRecipeState.startInFlight = true;
+    let jobBound = false;
+    const previousRunDisabled = promptRecipeElements.runButton ? promptRecipeElements.runButton.disabled : null;
+    const previousApplyDisabled = promptRecipeElements.applyButton ? promptRecipeElements.applyButton.disabled : null;
     try {
         setPromptRecipeMessage("Starting recipe mining…", "info");
         if (promptRecipeElements.runButton) promptRecipeElements.runButton.disabled = true;
@@ -7979,19 +8901,61 @@ async function startPromptRecipeJob() {
             throw new Error(detail || `HTTP ${resp.status}`);
         }
         const job = await resp.json();
+        // Ignore stale start responses if a newer recipe-start request exists.
+        if (requestId !== promptRecipeState.startRequestId) {
+            return;
+        }
+        if ((promptHelperState.selectedId || "") !== datasetId) {
+            // Selection moved while request was in flight; restore controls because no job is bound.
+            if (promptRecipeElements.runButton) promptRecipeElements.runButton.disabled = false;
+            if (promptRecipeElements.status) promptRecipeElements.status.textContent = "Idle";
+            return;
+        }
+        const selectedClassNow = promptRecipeElements.classSelect?.value || "";
+        if (selectedClassNow !== String(classId)) {
+            // Selection moved while request was in flight; restore controls because no job is bound.
+            if (promptRecipeElements.runButton) promptRecipeElements.runButton.disabled = false;
+            if (promptRecipeElements.status) promptRecipeElements.status.textContent = "Idle";
+            return;
+        }
         promptRecipeState.activeJobId = job.job_id;
         promptRecipeState.lastJob = job;
+        jobBound = true;
+        promptRecipeState.pollRequestId += 1;
+        promptRecipeState.pollInFlight = false;
         if (promptRecipeState.pollHandle) clearInterval(promptRecipeState.pollHandle);
-        promptRecipeState.pollHandle = setInterval(() => pollPromptRecipeJob(), 2000);
-        pollPromptRecipeJob(true);
+        promptRecipeState.pollHandle = setInterval(() => {
+            pollPromptRecipeJob().catch((error) => {
+                console.error("Prompt recipe poll tick failed", error);
+            });
+        }, 2000);
+        pollPromptRecipeJob(true).catch((error) => {
+            console.error("Initial prompt recipe poll failed", error);
+        });
     } catch (err) {
+        if (requestId !== promptRecipeState.startRequestId) {
+            return;
+        }
         console.error("Prompt recipe start failed", err);
         setPromptRecipeMessage(err.message || "Start failed", "error");
-        if (promptRecipeElements.runButton) promptRecipeElements.runButton.disabled = false;
+    } finally {
+        promptRecipeState.startInFlight = false;
+        if (!jobBound) {
+            // Restore the prior button states when no job was actually started.
+            if (promptRecipeElements.runButton && previousRunDisabled !== null) {
+                promptRecipeElements.runButton.disabled = previousRunDisabled;
+            }
+            if (promptRecipeElements.applyButton && previousApplyDisabled !== null) {
+                promptRecipeElements.applyButton.disabled = previousApplyDisabled;
+            }
+        }
     }
 }
 
 async function expandPromptRecipePrompts() {
+    if (promptRecipeState.expandInFlight) {
+        return;
+    }
     const datasetId = promptHelperState.selectedId;
     if (!datasetId) {
         setPromptRecipeMessage("Select a dataset first.", "warn");
@@ -8010,6 +8974,16 @@ async function expandPromptRecipePrompts() {
         setPromptRecipeMessage("Add at least one prompt for the class, then expand.", "warn");
         return;
     }
+    const requestId = promptRecipeState.expandRequestId + 1;
+    promptRecipeState.expandRequestId = requestId;
+    promptRecipeState.expandInFlight = true;
+    const previousExpandDisabled = promptRecipeElements.expandButton
+        ? promptRecipeElements.expandButton.disabled
+        : null;
+    if (promptRecipeElements.expandButton) {
+        // Avoid overlapping expand requests while Qwen expansion call is active.
+        promptRecipeElements.expandButton.disabled = true;
+    }
     try {
         setPromptRecipeMessage("Requesting Qwen expansions…", "info");
         const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/expand`, {
@@ -8027,6 +9001,17 @@ async function expandPromptRecipePrompts() {
             throw new Error(detail || `HTTP ${resp.status}`);
         }
         const data = await resp.json();
+        // Ignore stale expansions if a newer request superseded this one.
+        if (requestId !== promptRecipeState.expandRequestId) {
+            return;
+        }
+        if ((promptHelperState.selectedId || "") !== datasetId) {
+            return;
+        }
+        const selectedClassNow = promptRecipeElements.classSelect?.value || "";
+        if (selectedClassNow !== String(classId)) {
+            return;
+        }
         const combined = Array.isArray(data.combined) ? data.combined : prompts;
         const target = document.getElementById(`promptHelperInput-${classId}`);
         if (target) {
@@ -8035,8 +9020,16 @@ async function expandPromptRecipePrompts() {
         promptHelperState.promptsByClass[classId] = combined;
         setPromptRecipeMessage(`Added ${Math.max(0, combined.length - prompts.length)} new prompts from Qwen.`, "success");
     } catch (err) {
+        if (requestId !== promptRecipeState.expandRequestId) {
+            return;
+        }
         console.error("Prompt recipe expand failed", err);
         setPromptRecipeMessage(err.message || "Expand failed", "error");
+    } finally {
+        promptRecipeState.expandInFlight = false;
+        if (promptRecipeElements.expandButton && previousExpandDisabled !== null) {
+            promptRecipeElements.expandButton.disabled = previousExpandDisabled;
+        }
     }
 }
 
@@ -8100,6 +9093,9 @@ async function expandPromptRecipePrompts() {
 }
 
 async function startPromptSearchJob() {
+    if (promptSearchState.startInFlight) {
+        return;
+    }
     const datasetId = promptHelperState.selectedId;
     if (!datasetId) {
         setPromptSearchMessage("Select a dataset first.", "warn");
@@ -8127,6 +9123,11 @@ async function startPromptSearchJob() {
         const parsed = parseInt(targetVal, 10);
         if (!Number.isNaN(parsed)) classId = parsed;
     }
+    const requestId = promptSearchState.startRequestId + 1;
+    promptSearchState.startRequestId = requestId;
+    promptSearchState.startInFlight = true;
+    let jobBound = false;
+    const previousRunDisabled = promptSearchElements.runButton ? promptSearchElements.runButton.disabled : null;
     try {
         setPromptSearchMessage("Starting prompt search…", "info");
         if (promptSearchElements.runButton) promptSearchElements.runButton.disabled = true;
@@ -8153,27 +9154,61 @@ async function startPromptSearchJob() {
             throw new Error(detail || `HTTP ${resp.status}`);
         }
         const job = await resp.json();
+        // Ignore stale start responses if a newer search-start request exists.
+        if (requestId !== promptSearchState.startRequestId) {
+            return;
+        }
+        if ((promptHelperState.selectedId || "") !== datasetId) {
+            // Dataset changed while request was in flight; restore controls because no job is bound.
+            if (promptSearchElements.runButton) promptSearchElements.runButton.disabled = false;
+            if (promptSearchElements.status) promptSearchElements.status.textContent = "Idle";
+            return;
+        }
         promptSearchState.activeJobId = job.job_id;
         promptSearchState.lastJob = job;
+        jobBound = true;
+        promptSearchState.pollRequestId += 1;
+        promptSearchState.pollInFlight = false;
         if (promptSearchState.pollHandle) clearInterval(promptSearchState.pollHandle);
-        promptSearchState.pollHandle = setInterval(() => pollPromptSearchJob(), 2000);
-        pollPromptSearchJob(true);
+        promptSearchState.pollHandle = setInterval(() => {
+            pollPromptSearchJob().catch((error) => {
+                console.error("Prompt search poll tick failed", error);
+            });
+        }, 2000);
+        pollPromptSearchJob(true).catch((error) => {
+            console.error("Initial prompt search poll failed", error);
+        });
     } catch (err) {
+        if (requestId !== promptSearchState.startRequestId) {
+            return;
+        }
         console.error("Prompt search start failed", err);
         setPromptSearchMessage(`Start failed: ${err.message || err}`, "error");
-        if (promptSearchElements.runButton) promptSearchElements.runButton.disabled = false;
+    } finally {
+        promptSearchState.startInFlight = false;
+        if (!jobBound && promptSearchElements.runButton && previousRunDisabled !== null) {
+            // Restore previous run-button state when no search job was created.
+            promptSearchElements.runButton.disabled = previousRunDisabled;
+        }
     }
 }
 
 async function pollPromptHelperJob(force = false) {
     if (!promptHelperState.activeJobId) return;
-    if (promptHelperState.pollHandle && !force) {
-        // interval controls timing
+    if (promptHelperState.pollInFlight) {
+        return;
     }
+    const jobId = promptHelperState.activeJobId;
+    const requestId = promptHelperState.pollRequestId + 1;
+    promptHelperState.pollRequestId = requestId;
+    promptHelperState.pollInFlight = true;
     try {
-        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/jobs/${encodeURIComponent(promptHelperState.activeJobId)}`);
+        const resp = await fetch(`${API_ROOT}/sam3/prompt_helper/jobs/${encodeURIComponent(jobId)}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const job = await resp.json();
+        if (requestId !== promptHelperState.pollRequestId || promptHelperState.activeJobId !== jobId) {
+            return;
+        }
         promptHelperState.lastJob = job;
         console.info("[prompt-helper] poll", job);
         if (promptHelperElements.logs && Array.isArray(job.logs)) {
@@ -8193,7 +9228,7 @@ async function pollPromptHelperJob(force = false) {
             const steps = job.total_steps ? ` • ${job.completed_steps || 0}/${job.total_steps}` : "";
             promptHelperElements.status.textContent = `${job.status.toUpperCase()}: ${job.message || ""} (${pct}%${steps})`;
         }
-        if (job.status === "completed" || job.status === "failed") {
+        if (isPromptJobTerminal(job.status)) {
             if (promptHelperState.pollHandle) {
                 clearInterval(promptHelperState.pollHandle);
                 promptHelperState.pollHandle = null;
@@ -8204,8 +9239,15 @@ async function pollPromptHelperJob(force = false) {
             renderPromptHelperResults(job);
         }
     } catch (err) {
+        if (requestId !== promptHelperState.pollRequestId || promptHelperState.activeJobId !== jobId) {
+            return;
+        }
         console.error("Prompt helper poll failed", err);
         setPromptHelperMessage(`Poll failed: ${err.message || err}`, "error");
+    } finally {
+        if (requestId === promptHelperState.pollRequestId) {
+            promptHelperState.pollInFlight = false;
+        }
     }
 }
 
@@ -8217,6 +9259,11 @@ async function generatePromptHelperPrompts() {
     }
     const maxSynonyms = readNumberInput(promptHelperElements.maxSynonyms, { integer: true }) ?? 3;
     const useQwen = promptHelperElements.useQwen ? !!promptHelperElements.useQwen.checked : true;
+    const requestId = promptHelperState.suggestRequestId + 1;
+    promptHelperState.suggestRequestId = requestId;
+    const previousEvaluateDisabled = promptHelperElements.evaluateButton
+        ? promptHelperElements.evaluateButton.disabled
+        : null;
     try {
         setPromptHelperMessage("Generating prompt suggestions…", "info");
         if (promptHelperElements.evaluateButton) promptHelperElements.evaluateButton.disabled = true;
@@ -8235,6 +9282,17 @@ async function generatePromptHelperPrompts() {
             throw new Error(detail || `HTTP ${resp.status}`);
         }
         const data = await resp.json();
+        // Ignore stale suggestion responses if a newer suggest request exists.
+        if (requestId !== promptHelperState.suggestRequestId) {
+            return;
+        }
+        if ((promptHelperState.selectedId || "") !== datasetId) {
+            // Dataset changed while suggest request was in flight; restore previous button state.
+            if (promptHelperElements.evaluateButton && previousEvaluateDisabled !== null) {
+                promptHelperElements.evaluateButton.disabled = previousEvaluateDisabled;
+            }
+            return;
+        }
         console.info("[prompt-helper] suggestions received", data);
         promptHelperState.suggestions = Array.isArray(data.classes) ? data.classes : [];
         promptHelperState.promptsByClass = {};
@@ -8253,12 +9311,22 @@ async function generatePromptHelperPrompts() {
         setPromptHelperMessage("Suggestions ready. Review/edit, then evaluate with SAM3.", "success");
         if (promptHelperElements.evaluateButton) promptHelperElements.evaluateButton.disabled = false;
     } catch (err) {
+        if (requestId !== promptHelperState.suggestRequestId) {
+            return;
+        }
         console.error("Prompt helper suggest failed", err);
         setPromptHelperMessage(`Generation failed: ${err.message || err}`, "error");
+        if (promptHelperElements.evaluateButton && previousEvaluateDisabled !== null) {
+            // Preserve previous evaluate-button availability when suggestion generation fails.
+            promptHelperElements.evaluateButton.disabled = previousEvaluateDisabled;
+        }
     }
 }
 
 async function startPromptHelperJob() {
+    if (promptHelperState.startInFlight) {
+        return;
+    }
     const datasetId = promptHelperState.selectedId;
     if (!datasetId) {
         setPromptHelperMessage("Select a dataset first.", "warn");
@@ -8276,6 +9344,16 @@ async function startPromptHelperJob() {
         setPromptHelperMessage("Add prompts for at least one class, or generate suggestions first.", "warn");
         return;
     }
+    const requestId = promptHelperState.startRequestId + 1;
+    promptHelperState.startRequestId = requestId;
+    promptHelperState.startInFlight = true;
+    let jobBound = false;
+    const previousApplyDisabled = promptHelperElements.applyButton
+        ? promptHelperElements.applyButton.disabled
+        : null;
+    const previousEvaluateDisabled = promptHelperElements.evaluateButton
+        ? promptHelperElements.evaluateButton.disabled
+        : null;
     setPromptHelperMessage("Starting prompt helper evaluation…", "info");
     if (promptHelperElements.applyButton) {
         promptHelperElements.applyButton.disabled = true;
@@ -8309,16 +9387,53 @@ async function startPromptHelperJob() {
             throw new Error(detail || `HTTP ${resp.status}`);
         }
         const job = await resp.json();
+        // Ignore stale start responses if a newer helper-start request exists.
+        if (requestId !== promptHelperState.startRequestId) {
+            return;
+        }
+        if ((promptHelperState.selectedId || "") !== datasetId) {
+            // Dataset changed while request was in flight; restore controls because no job is bound.
+            if (promptHelperElements.evaluateButton) {
+                promptHelperElements.evaluateButton.disabled = false;
+            }
+            if (promptHelperElements.status) {
+                promptHelperElements.status.textContent = "Idle";
+            }
+            return;
+        }
         promptHelperState.activeJobId = job.job_id;
         promptHelperState.lastJob = job;
+        jobBound = true;
+        promptHelperState.pollRequestId += 1;
+        promptHelperState.pollInFlight = false;
         if (promptHelperState.pollHandle) {
             clearInterval(promptHelperState.pollHandle);
         }
-        promptHelperState.pollHandle = setInterval(() => pollPromptHelperJob(), 2000);
-        pollPromptHelperJob(true);
+        promptHelperState.pollHandle = setInterval(() => {
+            pollPromptHelperJob().catch((error) => {
+                console.error("Prompt helper poll tick failed", error);
+            });
+        }, 2000);
+        pollPromptHelperJob(true).catch((error) => {
+            console.error("Initial prompt helper poll failed", error);
+        });
     } catch (err) {
+        if (requestId !== promptHelperState.startRequestId) {
+            return;
+        }
         console.error("Prompt helper start failed", err);
         setPromptHelperMessage(`Start failed: ${err.message || err}`, "error");
+    } finally {
+        promptHelperState.startInFlight = false;
+        if (!jobBound) {
+            // Restore prior button states when evaluation job submission did not succeed.
+            if (promptHelperElements.applyButton && previousApplyDisabled !== null) {
+                promptHelperElements.applyButton.disabled = previousApplyDisabled;
+            }
+            if (promptHelperElements.evaluateButton && previousEvaluateDisabled !== null) {
+                promptHelperElements.evaluateButton.disabled = previousEvaluateDisabled;
+            }
+        }
     }
 }
 
@@ -8406,9 +9521,6 @@ async function initPromptHelperUi() {
         promptRecipeElements.applyButton.disabled = true;
     }
 
-    sam3RecipeElements.fileInput = document.getElementById("sam3RecipeFile");
-    sam3RecipeElements.applyButton = document.getElementById("sam3RecipeApplyButton");
-    sam3RecipeElements.status = document.getElementById("sam3RecipeStatus");
     if (promptHelperElements.evaluateButton) {
         promptHelperElements.evaluateButton.disabled = true;
     }
@@ -8418,24 +9530,52 @@ async function initPromptHelperUi() {
             promptHelperState.selectedId = e.target.value;
             const entry = promptHelperState.datasets.find((d) => d.id === promptHelperState.selectedId);
             updatePromptHelperDatasetSummary(entry);
+            if (promptHelperState.pollHandle) {
+                clearInterval(promptHelperState.pollHandle);
+                promptHelperState.pollHandle = null;
+            }
+            if (promptSearchState.pollHandle) {
+                clearInterval(promptSearchState.pollHandle);
+                promptSearchState.pollHandle = null;
+            }
+            if (promptRecipeState.pollHandle) {
+                clearInterval(promptRecipeState.pollHandle);
+                promptRecipeState.pollHandle = null;
+            }
             promptHelperState.suggestions = [];
             promptHelperState.promptsByClass = {};
+            promptHelperState.activeJobId = null;
+            promptHelperState.lastJob = null;
+            promptHelperState.pollRequestId += 1;
+            promptHelperState.pollInFlight = false;
+            promptSearchState.activeJobId = null;
+            promptSearchState.lastJob = null;
+            promptSearchState.pollRequestId += 1;
+            promptSearchState.pollInFlight = false;
+            promptRecipeState.activeJobId = null;
+            promptRecipeState.lastJob = null;
+            promptRecipeState.pollRequestId += 1;
+            promptRecipeState.pollInFlight = false;
             renderPromptHelperPrompts();
             if (promptHelperElements.evaluateButton) promptHelperElements.evaluateButton.disabled = true;
+            if (promptHelperElements.applyButton) promptHelperElements.applyButton.disabled = true;
             if (promptHelperElements.results) promptHelperElements.results.innerHTML = "";
             if (promptHelperElements.summary) promptHelperElements.summary.textContent = "";
+            if (promptHelperElements.logs) promptHelperElements.logs.innerHTML = "";
+            if (promptHelperElements.status) promptHelperElements.status.textContent = "Idle";
+            setPromptHelperMessage("");
             if (promptSearchElements.results) promptSearchElements.results.innerHTML = "";
             if (promptSearchElements.logs) promptSearchElements.logs.innerHTML = "";
             if (promptSearchElements.status) promptSearchElements.status.textContent = "Idle";
+            if (promptSearchElements.runButton) promptSearchElements.runButton.disabled = false;
             setPromptSearchMessage("");
             if (promptRecipeElements.results) promptRecipeElements.results.innerHTML = "";
             if (promptRecipeElements.logs) promptRecipeElements.logs.innerHTML = "";
             if (promptRecipeElements.status) promptRecipeElements.status.textContent = "Idle";
+            if (promptRecipeElements.runButton) promptRecipeElements.runButton.disabled = false;
             setPromptRecipeMessage("");
             if (promptRecipeElements.applyButton) promptRecipeElements.applyButton.disabled = true;
             sam3RecipeState.recipe = null;
-            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
-            if (sam3RecipeElements.status) sam3RecipeElements.status.textContent = "";
             if (promptRecipeState.pollHandle) {
                 clearInterval(promptRecipeState.pollHandle);
                 promptRecipeState.pollHandle = null;
@@ -8644,8 +9784,14 @@ function renderRunStorage(entries, elements) {
             btn.type = "button";
             btn.textContent = label;
             btn.className = `training-button${danger ? " training-button-danger" : ""}`;
-            btn.disabled = !!entry.active;
-            btn.addEventListener("click", () => deleteRunStorage(entry.id, scope));
+            const actionKey = `${entry.id}::${scope}`;
+            // Prevent duplicate destructive requests while an action is in flight.
+            btn.disabled = !!entry.active || sam3StorageState.deleteInFlight.has(actionKey);
+            btn.addEventListener("click", () => {
+                deleteRunStorage(entry.id, scope).catch((error) => {
+                    console.error("Run storage delete action failed", error);
+                });
+            });
             actions.appendChild(btn);
         });
         item.appendChild(main);
@@ -8656,34 +9802,33 @@ function renderRunStorage(entries, elements) {
 
 async function refreshRunStorage() {
     if (!sam3StorageElements.list) return;
+    const requestId = sam3StorageState.refreshRequestId + 1;
+    sam3StorageState.refreshRequestId = requestId;
     try {
         const resp = await fetch(`${API_ROOT}/sam3/storage/runs?variant=sam3`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
+        // Ignore stale refreshes when a newer storage request exists.
+        if (requestId !== sam3StorageState.refreshRequestId) {
+            return;
+        }
         sam3StorageState.items = Array.isArray(data) ? data : [];
         renderRunStorage(sam3StorageState.items, sam3StorageElements);
     } catch (err) {
+        if (requestId !== sam3StorageState.refreshRequestId) {
+            return;
+        }
         console.error("Failed to load run storage", err);
     }
 }
 
 async function deleteRunStorage(runId, scope) {
-    if (scope === "promote") {
-        const qs = new URLSearchParams({ variant: "sam3" });
-        try {
-            const resp = await fetch(`${API_ROOT}/sam3/storage/runs/${encodeURIComponent(runId)}/promote?${qs.toString()}`, {
-                method: "POST",
-            });
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            const data = await resp.json();
-            const msg = `Promoted ${runId}: kept ${data.kept || "checkpoint"}, freed ${formatBytes(data.freed_bytes || 0)}.`;
-            setSam3Message(msg, "success");
-        } catch (err) {
-            console.error("Promote run failed", err);
-            setSam3Message(`Promote failed: ${err.message || err}`, "error");
-        }
-    } else {
-        const label = scope === "all" ? "entire run folder" : scope;
+    const actionKey = `${runId}::${scope}`;
+    if (sam3StorageState.deleteInFlight.has(actionKey)) {
+        return;
+    }
+    const label = scope === "all" ? "entire run folder" : scope;
+    if (scope !== "promote") {
         let confirmText = `Delete ${label} for ${runId}?`;
         const entry = sam3StorageState.items.find((r) => r.id === runId) || null;
         if (entry && entry.promoted) {
@@ -8693,26 +9838,57 @@ async function deleteRunStorage(runId, scope) {
         } else if (typeof window !== "undefined" && !window.confirm(confirmText)) {
             return;
         }
-        const qs = new URLSearchParams({ variant: "sam3", scope });
-        try {
-            const resp = await fetch(`${API_ROOT}/sam3/storage/runs/${encodeURIComponent(runId)}?${qs.toString()}`, {
-                method: "DELETE",
-            });
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            setSam3Message(`Deleted ${label} for ${runId}.`, "success");
-        } catch (err) {
-            console.error("Delete run failed", err);
-            setSam3Message(`Delete failed: ${err.message || err}`, "error");
-        }
     }
-    await refreshRunStorage();
+    sam3StorageState.deleteInFlight.add(actionKey);
+    // Re-render immediately so clicked action is disabled while request runs.
+    renderRunStorage(sam3StorageState.items, sam3StorageElements);
+    try {
+        if (scope === "promote") {
+            const qs = new URLSearchParams({ variant: "sam3" });
+            try {
+                const resp = await fetch(`${API_ROOT}/sam3/storage/runs/${encodeURIComponent(runId)}/promote?${qs.toString()}`, {
+                    method: "POST",
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+                const msg = `Promoted ${runId}: kept ${data.kept || "checkpoint"}, freed ${formatBytes(data.freed_bytes || 0)}.`;
+                setSam3Message(msg, "success");
+            } catch (err) {
+                console.error("Promote run failed", err);
+                setSam3Message(`Promote failed: ${err.message || err}`, "error");
+            }
+        } else {
+            const qs = new URLSearchParams({ variant: "sam3", scope });
+            try {
+                const resp = await fetch(`${API_ROOT}/sam3/storage/runs/${encodeURIComponent(runId)}?${qs.toString()}`, {
+                    method: "DELETE",
+                });
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                setSam3Message(`Deleted ${label} for ${runId}.`, "success");
+            } catch (err) {
+                console.error("Delete run failed", err);
+                setSam3Message(`Delete failed: ${err.message || err}`, "error");
+            }
+        }
+        await refreshRunStorage();
+    } finally {
+        sam3StorageState.deleteInFlight.delete(actionKey);
+        // Ensure buttons are re-enabled even if refresh fails.
+        renderRunStorage(sam3StorageState.items, sam3StorageElements);
+    }
 }
 
 async function refreshSam3History() {
+    const requestId = sam3TrainState.historyRefreshRequestId + 1;
+    sam3TrainState.historyRefreshRequestId = requestId;
     try {
         const resp = await fetch(`${API_ROOT}/sam3/train/jobs`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
+        // Ignore stale history responses when a newer refresh exists.
+        if (requestId !== sam3TrainState.historyRefreshRequestId) {
+            return;
+        }
         renderSam3History(data);
         const latestRunning = Array.isArray(data)
             ? data.find((j) => ["running", "queued", "cancelling"].includes(j.status))
@@ -8723,6 +9899,9 @@ async function refreshSam3History() {
             );
         }
     } catch (err) {
+        if (requestId !== sam3TrainState.historyRefreshRequestId) {
+            return;
+        }
         console.error("Failed to load SAM3 training history", err);
     }
 }
@@ -8771,8 +9950,12 @@ function updateSam3Ui(job) {
         }
     }
     if (sam3TrainElements.cancelButton) {
-        sam3TrainElements.cancelButton.disabled = !job || !["queued", "running", "cancelling"].includes(job.status);
+        const cancellable = isCancellableTrainingStatus(job?.status);
+        sam3TrainElements.cancelButton.disabled = !cancellable || sam3TrainState.cancelInFlight;
     }
+    // Keep start-button state in sync with live job status transitions.
+    const selected = sam3TrainState.datasets.find((d) => d.id === sam3TrainState.selectedId) || null;
+    updateSam3TrainStartAvailability(selected);
     if (sam3TrainElements.log) {
         const logs = Array.isArray(job.logs) ? job.logs : [];
         const linesDisplay = logs.map((entry) => (entry.message ? entry.message : "")).filter(Boolean).slice(-200);
@@ -8793,8 +9976,8 @@ function updateSam3Ui(job) {
     }
     if (sam3TrainElements.summary) {
         if (job.result && job.result.checkpoint) {
-            const ckpt = escapeHtml(job.result.checkpoint);
-            sam3TrainElements.summary.innerHTML = `Checkpoint: <code>${ckpt}</code>`;
+            const safeCheckpoint = escapeHtml(job.result.checkpoint);
+            sam3TrainElements.summary.innerHTML = `Checkpoint: <code>${safeCheckpoint}</code>`;
             sam3TrainState.latestCheckpoint = job.result.checkpoint;
             sam3TrainElements.summary.style.display = "block";
         } else {
@@ -8820,15 +10003,25 @@ function updateSam3Ui(job) {
 
 async function pollSam3TrainingJob(jobId, options = {}) {
     if (!jobId) return;
+    if (sam3TrainState.pollHandle) {
+        clearTimeout(sam3TrainState.pollHandle);
+        sam3TrainState.pollHandle = null;
+    }
+    const requestId = sam3TrainState.pollRequestId + 1;
+    sam3TrainState.pollRequestId = requestId;
     sam3TrainState.activeJobId = jobId;
     sam3TrainState.lastSeenJob = sam3TrainState.lastSeenJob || {};
     try {
-        const resp = await fetch(`${API_ROOT}/sam3/train/jobs/${jobId}`);
+        const encodedJobId = encodeURIComponent(jobId);
+        const resp = await fetch(`${API_ROOT}/sam3/train/jobs/${encodedJobId}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const job = await resp.json();
+        if (requestId !== sam3TrainState.pollRequestId) {
+            return;
+        }
         updateSam3Ui(job);
         const running = ["queued", "running", "cancelling"].includes(job.status);
-        if (running || options.force) {
+        if (running) {
             if (sam3TrainState.pollHandle) {
                 clearTimeout(sam3TrainState.pollHandle);
             }
@@ -8836,11 +10029,19 @@ async function pollSam3TrainingJob(jobId, options = {}) {
                 pollSam3TrainingJob(jobId).catch((err) => console.error("SAM3 poll failed", err));
             }, 1500);
         } else {
+            if (sam3TrainState.pollHandle) {
+                clearTimeout(sam3TrainState.pollHandle);
+            }
             sam3TrainState.pollHandle = null;
-            refreshSam3History();
+            refreshSam3History().catch((error) => {
+                console.error("Failed to refresh SAM3 history after job update", error);
+            });
         }
         sam3TrainState.lastSeenJob[jobId] = job;
     } catch (err) {
+        if (requestId !== sam3TrainState.pollRequestId) {
+            return;
+        }
         console.error("SAM3 job poll failed", err);
         if (!options.silent) {
             setSam3Message(`Polling failed: ${err.message || err}`, "error");
@@ -8849,6 +10050,13 @@ async function pollSam3TrainingJob(jobId, options = {}) {
 }
 
 async function startSam3Training() {
+    if (sam3TrainState.startInFlight) {
+        return;
+    }
+    if (isCancellableTrainingStatus(sam3TrainState.lastJobSnapshot?.status)) {
+        setSam3Message("A SAM3 training job is already active.", "warn");
+        return;
+    }
     const datasetId = sam3TrainState.selectedId;
     if (!datasetId) {
         setSam3Message("Select a dataset first.", "warn");
@@ -8995,6 +10203,11 @@ async function startSam3Training() {
         setSam3Message("This dataset has no segmentation masks. Disable mask training or build a segmentation dataset first.", "warn");
         return;
     }
+    sam3TrainState.startInFlight = true;
+    if (sam3TrainElements.startButton) {
+        // Prevent duplicate start submissions while request is in flight.
+        sam3TrainElements.startButton.disabled = true;
+    }
     if (bboxOnly) {
         payload.enable_segmentation_head = false;
         payload.train_segmentation = false;
@@ -9033,7 +10246,9 @@ async function startSam3Training() {
                 resetSam3Eta();
                 pollSam3TrainingJob(retryData.job_id, { force: true }).catch((err) => console.error("SAM3 poll start failed", err));
                 setSam3Message("Job queued.", "success");
-                refreshSam3History();
+                refreshSam3History().catch((error) => {
+                    console.error("Failed to refresh SAM3 history after queueing retry job", error);
+                });
                 return;
             }
             throw new Error(text || `HTTP ${resp.status}`);
@@ -9044,10 +10259,16 @@ async function startSam3Training() {
         resetSam3Eta();
         pollSam3TrainingJob(data.job_id, { force: true }).catch((err) => console.error("SAM3 poll start failed", err));
         setSam3Message("Job queued.", "success");
-        refreshSam3History();
+        refreshSam3History().catch((error) => {
+            console.error("Failed to refresh SAM3 history after queueing job", error);
+        });
     } catch (err) {
         console.error("SAM3 training start failed", err);
         setSam3Message(err.message || "Failed to start training", "error");
+    } finally {
+        sam3TrainState.startInFlight = false;
+        const selected = sam3TrainState.datasets.find((d) => d.id === sam3TrainState.selectedId) || null;
+        updateSam3TrainStartAvailability(selected);
     }
 }
 
@@ -9056,13 +10277,35 @@ async function cancelSam3Training() {
         setSam3Message("No active job.", "warn");
         return;
     }
+    if (sam3TrainState.cancelInFlight) {
+        return;
+    }
+    sam3TrainState.cancelInFlight = true;
+    let cancelRequested = false;
+    if (sam3TrainElements.cancelButton) {
+        // Avoid duplicate cancel requests while the current cancel POST is in flight.
+        sam3TrainElements.cancelButton.disabled = true;
+    }
     try {
-        const resp = await fetch(`${API_ROOT}/sam3/train/jobs/${sam3TrainState.activeJobId}/cancel`, { method: "POST" });
+        const encodedJobId = encodeURIComponent(sam3TrainState.activeJobId);
+        const resp = await fetch(`${API_ROOT}/sam3/train/jobs/${encodedJobId}/cancel`, { method: "POST" });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        cancelRequested = true;
         setSam3Message("Cancellation requested…", "info");
     } catch (err) {
         console.error("SAM3 cancel failed", err);
         setSam3Message(`Cancel failed: ${err.message || err}`, "error");
+    } finally {
+        sam3TrainState.cancelInFlight = false;
+        if (sam3TrainElements.cancelButton) {
+            if (cancelRequested) {
+                // Keep disabled until the next status poll reflects cancelling/terminal state.
+                sam3TrainElements.cancelButton.disabled = true;
+            } else {
+                const cancellable = isCancellableTrainingStatus(sam3TrainState.lastJobSnapshot?.status);
+                sam3TrainElements.cancelButton.disabled = !cancellable;
+            }
+        }
     }
 }
 
@@ -9132,7 +10375,10 @@ function updateSegBuilderDatasetSummary(entry) {
     if (counts.length) pieces.push(counts.join(" / "));
     if (!isBbox) pieces.unshift("Requires bbox dataset");
     segBuilderElements.datasetSummary.textContent = pieces.join(" • ");
-    if (segBuilderElements.startButton) segBuilderElements.startButton.disabled = !isBbox;
+    if (segBuilderElements.startButton) {
+        // Keep start disabled while queue request is in flight.
+        segBuilderElements.startButton.disabled = !isBbox || segBuilderState.startInFlight;
+    }
 }
 
 function renderSegBuilderDatasets(list) {
@@ -9164,14 +10410,50 @@ function renderSegBuilderDatasets(list) {
 }
 
 async function refreshSegBuilderDatasets() {
+    if (segBuilderState.datasetRefreshInFlight) {
+        segBuilderState.datasetRefreshNeedsRefresh = true;
+        return;
+    }
+    const requestId = segBuilderState.datasetRefreshRequestId + 1;
+    segBuilderState.datasetRefreshRequestId = requestId;
+    segBuilderState.datasetRefreshInFlight = true;
+    if (segBuilderElements.refreshButton) {
+        segBuilderElements.refreshButton.disabled = true;
+    }
+    if (segBuilderElements.datasetSelect) {
+        segBuilderElements.datasetSelect.disabled = true;
+    }
     try {
         const resp = await fetch(`${API_ROOT}/datasets`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
+        // Ignore stale dataset refreshes when a newer request exists.
+        if (requestId !== segBuilderState.datasetRefreshRequestId) {
+            return;
+        }
         renderSegBuilderDatasets(data);
     } catch (err) {
+        if (requestId !== segBuilderState.datasetRefreshRequestId) {
+            return;
+        }
         console.error("Failed to load datasets for segmentation builder", err);
         setSegBuilderMessage(`Failed to load datasets: ${err.message || err}`, "error");
+    } finally {
+        if (requestId === segBuilderState.datasetRefreshRequestId) {
+            segBuilderState.datasetRefreshInFlight = false;
+            if (segBuilderElements.refreshButton) {
+                segBuilderElements.refreshButton.disabled = false;
+            }
+            if (segBuilderElements.datasetSelect) {
+                segBuilderElements.datasetSelect.disabled = false;
+            }
+            if (segBuilderState.datasetRefreshNeedsRefresh) {
+                segBuilderState.datasetRefreshNeedsRefresh = false;
+                refreshSegBuilderDatasets().catch((error) => {
+                    console.error("Queued segmentation-dataset refresh failed", error);
+                });
+            }
+        }
     }
 }
 
@@ -9213,11 +10495,21 @@ function renderSegBuilderJobs(list) {
 async function pollSegBuilderJob(jobId, { force = false } = {}) {
     if (!jobId) return;
     if (segBuilderState.pollInFlight && !force) return;
+    const requestId = segBuilderState.pollRequestId + 1;
+    segBuilderState.pollRequestId = requestId;
     segBuilderState.pollInFlight = true;
     try {
-        const resp = await fetch(`${API_ROOT}/segmentation/build/jobs/${jobId}`);
+        const encodedJobId = encodeURIComponent(jobId);
+        const resp = await fetch(`${API_ROOT}/segmentation/build/jobs/${encodedJobId}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
+        // Ignore stale poll responses if a newer poll superseded this one.
+        if (requestId !== segBuilderState.pollRequestId) {
+            return;
+        }
+        if (segBuilderState.activeJobId && segBuilderState.activeJobId !== jobId) {
+            return;
+        }
         segBuilderState.lastSeenJob[jobId] = data;
         const pct = Number.isFinite(data.progress) ? Math.round(data.progress * 100) : null;
         const tone = data.status === "failed" ? "error" : data.status === "completed" ? "success" : "info";
@@ -9225,42 +10517,91 @@ async function pollSegBuilderJob(jobId, { force = false } = {}) {
         setSegBuilderMessage(message, tone);
         renderSegBuilderLog(data);
         if (["completed", "failed", "cancelled"].includes(data.status)) {
-            segBuilderState.activeJobId = null;
+            if (segBuilderState.activeJobId === jobId) {
+                segBuilderState.activeJobId = null;
+            }
             if (segBuilderState.pollTimer) {
                 clearTimeout(segBuilderState.pollTimer);
                 segBuilderState.pollTimer = null;
             }
-            refreshSegBuilderJobs();
+            refreshSegBuilderJobs().catch((pollRefreshError) => {
+                console.error("Failed to refresh segmentation jobs after terminal poll", pollRefreshError);
+            });
         } else {
-            segBuilderState.pollTimer = setTimeout(() => pollSegBuilderJob(jobId), 2000);
+            segBuilderState.pollTimer = setTimeout(() => {
+                pollSegBuilderJob(jobId).catch((pollError) => {
+                    console.error("Segmentation builder poll tick failed", pollError);
+                });
+            }, 2000);
         }
     } catch (err) {
+        if (requestId !== segBuilderState.pollRequestId) {
+            return;
+        }
         console.error("Failed to poll segmentation builder job", err);
     } finally {
-        segBuilderState.pollInFlight = false;
+        if (requestId === segBuilderState.pollRequestId) {
+            segBuilderState.pollInFlight = false;
+        }
     }
 }
 
 async function refreshSegBuilderJobs() {
+    if (segBuilderState.jobsRefreshInFlight) {
+        segBuilderState.jobsRefreshNeedsRefresh = true;
+        return;
+    }
+    const requestId = segBuilderState.jobsRefreshRequestId + 1;
+    segBuilderState.jobsRefreshRequestId = requestId;
+    segBuilderState.jobsRefreshInFlight = true;
+    if (segBuilderElements.jobsRefresh) {
+        segBuilderElements.jobsRefresh.disabled = true;
+    }
     try {
         const resp = await fetch(`${API_ROOT}/segmentation/build/jobs`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
-        renderSegBuilderJobs(data);
+        // Ignore stale job-list refreshes when a newer request exists.
+        if (requestId !== segBuilderState.jobsRefreshRequestId) {
+            return;
+        }
+        const jobs = Array.isArray(data) ? data : [];
+        renderSegBuilderJobs(jobs);
         if (!segBuilderState.activeJobId) {
-            const running = data.find((job) => ["running", "queued", "blocked"].includes(job.status));
+            const running = jobs.find((job) => ["running", "queued", "blocked"].includes(job.status));
             if (running) {
                 segBuilderState.activeJobId = running.job_id;
-                pollSegBuilderJob(running.job_id, { force: true });
+                pollSegBuilderJob(running.job_id, { force: true }).catch((pollError) => {
+                    console.error("Segmentation builder initial running-job poll failed", pollError);
+                });
             }
         }
     } catch (err) {
+        if (requestId !== segBuilderState.jobsRefreshRequestId) {
+            return;
+        }
         console.error("Failed to refresh segmentation jobs", err);
         setSegBuilderMessage(`Failed to refresh jobs: ${err.message || err}`, "error");
+    } finally {
+        if (requestId === segBuilderState.jobsRefreshRequestId) {
+            segBuilderState.jobsRefreshInFlight = false;
+            if (segBuilderElements.jobsRefresh) {
+                segBuilderElements.jobsRefresh.disabled = false;
+            }
+            if (segBuilderState.jobsRefreshNeedsRefresh) {
+                segBuilderState.jobsRefreshNeedsRefresh = false;
+                refreshSegBuilderJobs().catch((error) => {
+                    console.error("Queued segmentation-job refresh failed", error);
+                });
+            }
+        }
     }
 }
 
 async function startSegmentationBuild() {
+    if (segBuilderState.startInFlight) {
+        return;
+    }
     const datasetId = segBuilderState.selectedId;
     if (!datasetId) {
         setSegBuilderMessage("Select a bbox dataset first.", "warn");
@@ -9285,6 +10626,12 @@ async function startSegmentationBuild() {
         segBuilderState.pollTimer = null;
     }
     segBuilderState.activeJobId = null;
+    segBuilderState.startInFlight = true;
+    const startButton = segBuilderElements.startButton;
+    if (startButton) {
+        // Prevent duplicate queue submissions from repeated clicks while POST is active.
+        startButton.disabled = true;
+    }
     try {
         const resp = await fetch(`${API_ROOT}/segmentation/build/jobs`, {
             method: "POST",
@@ -9298,11 +10645,17 @@ async function startSegmentationBuild() {
         const job = await resp.json();
         segBuilderState.activeJobId = job.job_id;
         setSegBuilderMessage("Job queued.", "success");
-        pollSegBuilderJob(job.job_id, { force: true });
+        pollSegBuilderJob(job.job_id, { force: true }).catch((pollError) => {
+            console.error("Segmentation builder poll start failed", pollError);
+        });
         await refreshSegBuilderJobs();
     } catch (err) {
         console.error("Segmentation build start failed", err);
         setSegBuilderMessage(err.message || "Failed to start segmentation build", "error");
+    } finally {
+        segBuilderState.startInFlight = false;
+        const selected = segBuilderState.datasets.find((d) => d.id === segBuilderState.selectedId) || null;
+        updateSegBuilderDatasetSummary(selected);
     }
 }
 
@@ -9327,13 +10680,19 @@ async function initSegBuilderTab() {
         });
     }
     if (segBuilderElements.startButton) {
-        segBuilderElements.startButton.addEventListener("click", () => startSegmentationBuild());
+        segBuilderElements.startButton.addEventListener("click", () => {
+            startSegmentationBuild().catch((err) => console.error("Segmentation build start failed", err));
+        });
     }
     if (segBuilderElements.refreshButton) {
-        segBuilderElements.refreshButton.addEventListener("click", () => refreshSegBuilderDatasets());
+        segBuilderElements.refreshButton.addEventListener("click", () => {
+            refreshSegBuilderDatasets().catch((err) => console.error("Segmentation dataset refresh failed", err));
+        });
     }
     if (segBuilderElements.jobsRefresh) {
-        segBuilderElements.jobsRefresh.addEventListener("click", () => refreshSegBuilderJobs());
+        segBuilderElements.jobsRefresh.addEventListener("click", () => {
+            refreshSegBuilderJobs().catch((err) => console.error("Segmentation job refresh failed", err));
+        });
     }
     await refreshSegBuilderDatasets();
     await refreshSegBuilderJobs();
@@ -9341,7 +10700,9 @@ async function initSegBuilderTab() {
     const running = segBuilderState.jobs.find((job) => ["running", "queued", "blocked"].includes(job.status));
     if (running) {
         segBuilderState.activeJobId = running.job_id;
-        pollSegBuilderJob(running.job_id, { force: true });
+        pollSegBuilderJob(running.job_id, { force: true }).catch((pollError) => {
+            console.error("Segmentation builder running-job poll attach failed", pollError);
+        });
     }
 }
 
@@ -9463,7 +10824,11 @@ async function initSam3TrainUi() {
         });
     }
     if (sam3TrainElements.datasetRefresh) {
-        sam3TrainElements.datasetRefresh.addEventListener("click", () => loadSam3Datasets());
+        sam3TrainElements.datasetRefresh.addEventListener("click", () => {
+            loadSam3Datasets().catch((error) => {
+                console.error("Failed to refresh SAM3 datasets", error);
+            });
+        });
     }
     if (sam3TrainElements.randomSplit && sam3TrainElements.valPercent && sam3TrainElements.splitSeed) {
         const syncSam3SplitControls = () => {
@@ -9475,9 +10840,15 @@ async function initSam3TrainUi() {
         syncSam3SplitControls();
     }
     if (sam3TrainElements.cachePurge) {
-        sam3TrainElements.cachePurge.addEventListener("click", purgeSam3SplitCache);
+        sam3TrainElements.cachePurge.addEventListener("click", () => {
+            purgeSam3SplitCache().catch((error) => {
+                console.error("Failed to purge SAM3 split cache", error);
+            });
+        });
     }
-    refreshSam3SplitCache();
+    refreshSam3SplitCache().catch((error) => {
+        console.warn("Failed to refresh SAM3 split cache", error);
+    });
     if (sam3TrainElements.capEpoch && sam3TrainElements.targetEpochSize) {
         sam3TrainElements.capEpoch.addEventListener("change", () => {
             sam3TrainElements.targetEpochSize.disabled = !sam3TrainElements.capEpoch.checked;
@@ -9500,154 +10871,43 @@ async function initSam3TrainUi() {
         }
     }
     if (sam3TrainElements.datasetConvert) {
-        sam3TrainElements.datasetConvert.addEventListener("click", () => convertSam3Dataset().catch(() => {}));
+        sam3TrainElements.datasetConvert.addEventListener("click", () => {
+            convertSam3Dataset().catch((error) => {
+                console.error("SAM3 dataset convert action failed", error);
+            });
+        });
     }
     if (sam3TrainElements.startButton) {
-        sam3TrainElements.startButton.addEventListener("click", () => startSam3Training());
+        sam3TrainElements.startButton.addEventListener("click", () => {
+            startSam3Training().catch((error) => {
+                console.error("SAM3 start action failed", error);
+            });
+        });
     }
     if (sam3TrainElements.cancelButton) {
-        sam3TrainElements.cancelButton.addEventListener("click", () => cancelSam3Training());
+        sam3TrainElements.cancelButton.addEventListener("click", () => {
+            cancelSam3Training().catch((error) => {
+                console.error("SAM3 cancel action failed", error);
+            });
+        });
     }
     if (sam3TrainElements.activateButton) {
-        sam3TrainElements.activateButton.addEventListener("click", () => activateSam3Checkpoint());
+        sam3TrainElements.activateButton.addEventListener("click", () => {
+            activateSam3Checkpoint().catch((error) => {
+                console.error("SAM3 checkpoint activation failed", error);
+            });
+        });
     }
     if (sam3StorageElements.refresh) {
-        sam3StorageElements.refresh.addEventListener("click", () => refreshRunStorage());
+        sam3StorageElements.refresh.addEventListener("click", () => {
+            refreshRunStorage().catch((error) => {
+                console.error("SAM3 storage refresh failed", error);
+            });
+        });
     }
     await loadSam3Datasets();
     await refreshSam3History();
     await refreshRunStorage();
-}
-
-async function cancelQwenDatasetUpload(jobId) {
-    if (!jobId) {
-        return;
-    }
-    try {
-        const formData = new FormData();
-        formData.append("job_id", jobId);
-        await fetch(`${API_ROOT}/qwen/dataset/cancel`, {
-            method: "POST",
-            body: formData,
-        });
-    } catch (error) {
-        console.debug("Failed to cancel Qwen dataset upload", error);
-    }
-}
-
-	async function uploadQwenDatasetStream(options = {}) {
-	    const imageNames = Object.keys(images);
-	    if (!imageNames.length) {
-	        throw new Error("Load images before starting Qwen training.");
-	    }
-	    const classNames = Object.keys(classes || {});
-	    if (!classNames.length) {
-	        throw new Error("Load a label map before starting Qwen training.");
-	    }
-	    const contextOverride = typeof options.contextText === "string" ? options.contextText.trim() : "";
-	    const contextText = contextOverride || qwenTrainElements.contextInput?.value?.trim() || "";
-	    const instruction = buildQwenInstruction(contextText, classNames);
-	    const stats = computeQwenDatasetStats(imageNames);
-    let packagingModalVisible = false;
-    let jobId = null;
-    try {
-        const summaryText = `${stats.imageCount} image${stats.imageCount === 1 ? "" : "s"} (${formatBytes(stats.imageBytes)}) + streaming annotations`;
-        showTrainingPackagingModal(stats, {
-            indeterminate: false,
-            progressText: "Preparing dataset…",
-            hintText: "Keep this tab open while we package the dataset for Qwen training.",
-            summaryText,
-        });
-        packagingModalVisible = true;
-	        const runNameOverride = typeof options.runName === "string" ? options.runName.trim() : "";
-	        const runName = runNameOverride || qwenTrainElements.runNameInput?.value?.trim() || "qwen_dataset";
-	        const initInfo = await initQwenDatasetUpload(runName);
-        jobId = initInfo?.job_id;
-        if (!jobId) {
-            throw new Error("Dataset upload job id missing in response.");
-        }
-        const usedNames = new Map();
-        const valSet = pickQwenValidationSet(imageNames);
-        let processed = 0;
-        let totalBoxes = 0;
-        let uploadedTrain = 0;
-        let uploadedVal = 0;
-        let firstTrainRecord = null;
-        let firstValRecord = null;
-        for (const imageKey of imageNames) {
-            const imageRecord = images[imageKey];
-            if (!imageRecord || !imageRecord.meta) {
-                throw new Error(`Missing original file for ${imageKey}. Re-import the images and try again.`);
-            }
-            await ensureImageDimensions(imageRecord);
-            const baseName = imageRecord.meta.name || imageKey;
-            const safeName = makeUniqueFilename(baseName, usedNames);
-            const detections = buildDetectionRecords(imageKey, imageRecord);
-            totalBoxes += detections.length;
-            const split = valSet.has(imageKey) ? "val" : "train";
-            const bboxPrompt = buildQwenSampleUserPrompt(instruction, classNames, "all", "bbox");
-            const pointPrompt = buildQwenSampleUserPrompt(instruction, classNames, "all", "point");
-            const bboxOutput = buildQwenOutputPayload(detections, "bbox");
-            const pointOutput = buildQwenOutputPayload(detections, "point");
-            const recordPayloads = [
-                {
-                    imageName: safeName,
-                    annotation: buildQwenConversationRecord(safeName, bboxPrompt, bboxOutput),
-                    file: imageRecord.meta,
-                },
-                {
-                    imageName: safeName,
-                    annotation: buildQwenConversationRecord(safeName, pointPrompt, pointOutput),
-                    file: imageRecord.meta,
-                },
-            ];
-            for (const recordPayload of recordPayloads) {
-                await uploadQwenDatasetChunk(jobId, split, recordPayload);
-                if (split === "train") {
-                    uploadedTrain += 1;
-                    if (!firstTrainRecord) {
-                        firstTrainRecord = recordPayload;
-                    }
-                } else {
-                    uploadedVal += 1;
-                    if (!firstValRecord) {
-                        firstValRecord = recordPayload;
-                    }
-                }
-            }
-            processed += 1;
-            if (stats.imageCount > 0) {
-                const percent = Math.min(95, Math.round((processed / stats.imageCount) * 90));
-                updateTrainingPackagingProgress(percent, `Uploading dataset… ${percent}%`);
-            }
-        }
-        if (uploadedTrain === 0 && firstValRecord) {
-            await uploadQwenDatasetChunk(jobId, "train", firstValRecord);
-            uploadedTrain += 1;
-        }
-        if (uploadedVal === 0 && firstTrainRecord) {
-            await uploadQwenDatasetChunk(jobId, "val", firstTrainRecord);
-            uploadedVal += 1;
-        }
-        if (totalBoxes === 0) {
-            throw new Error("No bounding boxes available. Draw bboxes before training.");
-        }
-        const datasetMeta = {
-            context: contextText,
-            classes: classNames,
-            created_at: Date.now(),
-        };
-        const finalizeInfo = await finalizeQwenDatasetUpload(jobId, datasetMeta, runName);
-        updateTrainingPackagingProgress(100, "Dataset staged");
-        return finalizeInfo;
-    } catch (error) {
-        await cancelQwenDatasetUpload(jobId);
-        throw error;
-    } finally {
-        if (packagingModalVisible) {
-            hideTrainingPackagingModal();
-        }
-    }
 }
 
     function buildQwenTrainingPayload(datasetId, datasetRunName) {
@@ -9830,7 +11090,11 @@ async function buildRandomQwenSampleData() {
         await loadImageObject(imageRecord);
     }
     const detections = buildDetectionRecords(randomKey, imageRecord);
-    const contextText = qwenTrainElements.contextInput?.value?.trim() || "";
+    // Keep sample prompts aligned with the dataset context that gets packaged for Qwen runs.
+    const contextText = (
+        datasetManagerElements.uploadCurrentContext
+        || document.getElementById("datasetUploadCurrentContext")
+    )?.value?.trim() || "";
     const datasetInstruction = buildQwenInstruction(contextText, classNames);
     const { labels, mode } = chooseQwenSampleLabelSet(detections);
     const filtered = filterDetectionsForLabels(detections, labels, mode);
@@ -9893,7 +11157,8 @@ async function renderQwenSamplePreview(sample) {
     if (sample.useBBox) {
         ctx.strokeStyle = "#10b981";
         ctx.lineWidth = Math.max(1, 2 * scale);
-        (sample.expected.detections || []).forEach((det) => {
+        const expectedDetections = Array.isArray(sample.expected.detections) ? sample.expected.detections : [];
+        expectedDetections.forEach((det) => {
             if (!det.bbox) {
                 return;
             }
@@ -9903,7 +11168,8 @@ async function renderQwenSamplePreview(sample) {
     } else {
         ctx.fillStyle = "#ef4444";
         const radius = Math.max(3, 4 * scale);
-        (sample.expected.detections || []).forEach((det) => {
+        const expectedDetections = Array.isArray(sample.expected.detections) ? sample.expected.detections : [];
+        expectedDetections.forEach((det) => {
             if (!det.point) {
                 return;
             }
@@ -9922,16 +11188,19 @@ async function renderQwenSamplePreview(sample) {
 }
 
 		async function handleStartQwenTraining() {
-		    if (qwenTrainElements.startButton) {
-		        qwenTrainElements.startButton.disabled = true;
-		    }
+        if (qwenTrainState.startInFlight) {
+            return;
+        }
+        if (isBusyTrainingStatus(qwenTrainState.lastJobSnapshot?.status)) {
+            setQwenTrainMessage("A Qwen training job is already active.", "warn");
+            return;
+        }
+        qwenTrainState.startInFlight = true;
+        updateQwenTrainStartAvailability();
 		    try {
 		        const cachedEntry = getSelectedQwenDataset();
 		        if (!cachedEntry) {
 		            setQwenTrainMessage("Select a dataset (manage them in Dataset Management first).", "error");
-		            if (qwenTrainElements.startButton) {
-		                qwenTrainElements.startButton.disabled = false;
-		            }
 		            return;
 		        }
 		        if (!cachedEntry.qwen_ready) {
@@ -9990,9 +11259,8 @@ async function renderQwenSamplePreview(sample) {
         console.error("Qwen training submit failed", error);
         setQwenTrainMessage(error.message || "Failed to start training", "error");
     } finally {
-        if (qwenTrainElements.startButton) {
-            qwenTrainElements.startButton.disabled = false;
-        }
+        qwenTrainState.startInFlight = false;
+        updateQwenTrainStartAvailability();
     }
 }
 
@@ -10000,8 +11268,17 @@ async function cancelQwenTrainingJobRequest() {
     if (!qwenTrainState.activeJobId) {
         return;
     }
+    if (qwenTrainState.cancelInFlight) {
+        return;
+    }
+    qwenTrainState.cancelInFlight = true;
+    if (qwenTrainElements.cancelButton) {
+        // Avoid duplicate cancel requests while the current cancel POST is in flight.
+        qwenTrainElements.cancelButton.disabled = true;
+    }
     try {
-        const resp = await fetch(`${API_ROOT}/qwen/train/jobs/${qwenTrainState.activeJobId}/cancel`, { method: "POST" });
+        const encodedJobId = encodeURIComponent(qwenTrainState.activeJobId);
+        const resp = await fetch(`${API_ROOT}/qwen/train/jobs/${encodedJobId}/cancel`, { method: "POST" });
         if (!resp.ok) {
             throw new Error(`HTTP ${resp.status}`);
         }
@@ -10009,6 +11286,12 @@ async function cancelQwenTrainingJobRequest() {
     } catch (error) {
         console.error("Cancel Qwen job failed", error);
         setQwenTrainMessage(error.message || "Failed to cancel job", "error");
+    } finally {
+        qwenTrainState.cancelInFlight = false;
+        if (qwenTrainElements.cancelButton) {
+            const cancellable = isCancellableTrainingStatus(qwenTrainState.lastJobSnapshot?.status);
+            qwenTrainElements.cancelButton.disabled = !cancellable;
+        }
     }
 }
 
@@ -10043,13 +11326,13 @@ function updateQwenTrainingUI(job) {
             qwenTrainElements.summary.textContent = "";
         }
     }
-    if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") {
-        if (qwenTrainElements.cancelButton) {
-            qwenTrainElements.cancelButton.disabled = true;
-        }
+    if (qwenTrainElements.cancelButton) {
+        const cancellable = isCancellableTrainingStatus(job.status);
+        qwenTrainElements.cancelButton.disabled = !cancellable || qwenTrainState.cancelInFlight;
     }
     updateQwenEpochDetail(job);
     updateQwenLossChart(job);
+    updateQwenTrainStartAvailability();
 }
 
 function findLatestMetric(metrics, predicate) {
@@ -10066,6 +11349,26 @@ function findLatestMetric(metrics, predicate) {
         }
     }
     return null;
+}
+
+function isCancellableTrainingStatus(status) {
+    const normalized = String(status || "").toLowerCase();
+    // Keep cancel-button logic consistent between live refresh and cancel-finally UI updates.
+    return normalized === "running" || normalized === "queued" || normalized === "cancelling";
+}
+
+function isBusyTrainingStatus(status) {
+    const normalized = String(status || "").toLowerCase();
+    // Treat any active/non-terminal queue state as busy to suppress duplicate starts.
+    return (
+        normalized === "queued"
+        || normalized === "running"
+        || normalized === "cancelling"
+        || normalized === "blocked"
+        || normalized === "starting"
+        || normalized === "initializing"
+        || normalized === "pending"
+    );
 }
 
 function updateQwenEpochDetail(job) {
@@ -10527,12 +11830,18 @@ async function refreshQwenTrainingHistory() {
     if (!qwenTrainElements.historyContainer) {
         return;
     }
+    const requestId = qwenTrainState.historyRefreshRequestId + 1;
+    qwenTrainState.historyRefreshRequestId = requestId;
     try {
         const resp = await fetch(`${API_ROOT}/qwen/train/jobs`);
         if (!resp.ok) {
             throw new Error(`HTTP ${resp.status}`);
         }
         const jobs = await resp.json();
+        // Ignore stale history responses when a newer refresh exists.
+        if (requestId !== qwenTrainState.historyRefreshRequestId) {
+            return;
+        }
         qwenTrainElements.historyContainer.innerHTML = "";
         if (!Array.isArray(jobs) || !jobs.length) {
             const empty = document.createElement("div");
@@ -10543,6 +11852,9 @@ async function refreshQwenTrainingHistory() {
         }
         jobs.forEach((job) => renderQwenTrainingHistoryItem(qwenTrainElements.historyContainer, job));
     } catch (error) {
+        if (requestId !== qwenTrainState.historyRefreshRequestId) {
+            return;
+        }
         console.error("Failed to load Qwen job history", error);
         qwenTrainElements.historyContainer.textContent = `Unable to load history: ${error.message || error}`;
     }
@@ -10561,12 +11873,22 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
     if (!jobId) {
         return;
     }
+    if (qwenTrainState.pollHandle) {
+        clearTimeout(qwenTrainState.pollHandle);
+        qwenTrainState.pollHandle = null;
+    }
+    const requestId = qwenTrainState.pollRequestId + 1;
+    qwenTrainState.pollRequestId = requestId;
     try {
-        const resp = await fetch(`${API_ROOT}/qwen/train/jobs/${jobId}`);
+        const encodedJobId = encodeURIComponent(jobId);
+        const resp = await fetch(`${API_ROOT}/qwen/train/jobs/${encodedJobId}`);
         if (!resp.ok) {
             throw new Error(`HTTP ${resp.status}`);
         }
         const job = await resp.json();
+        if (requestId !== qwenTrainState.pollRequestId) {
+            return;
+        }
         qwenTrainState.activeJobId = job.job_id;
         updateQwenTrainingUI(job);
         const terminalStates = new Set(["succeeded", "failed", "cancelled"]);
@@ -10577,6 +11899,9 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
             qwenTrainState.pollHandle = null;
         }
     } catch (error) {
+        if (requestId !== qwenTrainState.pollRequestId) {
+            return;
+        }
         console.error("pollQwenTrainingJob error", error);
         setQwenTrainMessage(error.message || "Unable to load job", "error");
     }
@@ -10695,9 +12020,15 @@ function initQwenTrainingTab() {
             syncSplitInputs();
         }
         if (qwenTrainElements.cachePurge) {
-            qwenTrainElements.cachePurge.addEventListener("click", purgeQwenSplitCache);
+            qwenTrainElements.cachePurge.addEventListener("click", () => {
+                purgeQwenSplitCache().catch((error) => {
+                    console.error("Failed to purge Qwen split cache", error);
+                });
+            });
         }
-        refreshQwenSplitCache();
+        refreshQwenSplitCache().catch((error) => {
+            console.error("Failed to refresh Qwen split cache", error);
+        });
 	        if (qwenTrainElements.datasetRefresh) {
 	            qwenTrainElements.datasetRefresh.addEventListener("click", () => {
 	                loadQwenDatasetList(true).catch((error) => console.error("Failed to refresh datasets", error));
@@ -10745,12 +12076,18 @@ function initQwenTrainingTab() {
         if (!yoloTrainElements.history) {
             return;
         }
+        const requestId = yoloTrainState.historyRefreshRequestId + 1;
+        yoloTrainState.historyRefreshRequestId = requestId;
         try {
             const resp = await fetch(`${API_ROOT}/yolo/train/jobs`);
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const jobs = await resp.json();
+            // Ignore stale history responses when a newer refresh exists.
+            if (requestId !== yoloTrainState.historyRefreshRequestId) {
+                return;
+            }
             yoloTrainElements.history.innerHTML = "";
             if (!Array.isArray(jobs) || !jobs.length) {
                 const empty = document.createElement("div");
@@ -10761,6 +12098,9 @@ function initQwenTrainingTab() {
             }
             jobs.forEach((job) => renderYoloTrainingHistoryItem(yoloTrainElements.history, job));
         } catch (error) {
+            if (requestId !== yoloTrainState.historyRefreshRequestId) {
+                return;
+            }
             console.error("Failed to load YOLO job history", error);
             yoloTrainElements.history.textContent = `Unable to load history: ${error.message || error}`;
         }
@@ -10779,12 +12119,22 @@ function initQwenTrainingTab() {
         if (!jobId) {
             return;
         }
+        if (yoloTrainState.pollHandle) {
+            clearTimeout(yoloTrainState.pollHandle);
+            yoloTrainState.pollHandle = null;
+        }
+        const requestId = yoloTrainState.pollRequestId + 1;
+        yoloTrainState.pollRequestId = requestId;
         try {
-            const resp = await fetch(`${API_ROOT}/yolo/train/jobs/${jobId}`);
+            const encodedJobId = encodeURIComponent(jobId);
+            const resp = await fetch(`${API_ROOT}/yolo/train/jobs/${encodedJobId}`);
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const job = await resp.json();
+            if (requestId !== yoloTrainState.pollRequestId) {
+                return;
+            }
             yoloTrainState.activeJobId = job.job_id;
             updateYoloTrainingUI(job);
             const terminalStates = new Set(["succeeded", "failed", "cancelled", "blocked"]);
@@ -10795,6 +12145,9 @@ function initQwenTrainingTab() {
                 yoloTrainState.pollHandle = null;
             }
         } catch (error) {
+            if (requestId !== yoloTrainState.pollRequestId) {
+                return;
+            }
             console.error("pollYoloTrainingJob error", error);
             setYoloTrainMessage(error.message || "Unable to load job", "error");
         }
@@ -10821,8 +12174,8 @@ function initQwenTrainingTab() {
                 .join("\n");
         }
         if (yoloTrainElements.cancelButton) {
-            const cancellable = job.status === "running" || job.status === "queued";
-            yoloTrainElements.cancelButton.disabled = !cancellable;
+            const cancellable = isCancellableTrainingStatus(job.status);
+            yoloTrainElements.cancelButton.disabled = !cancellable || yoloTrainState.cancelInFlight;
         }
         updateYoloMetricChart(job.metrics);
         if (job.status && job.status !== previousStatus) {
@@ -10831,12 +12184,19 @@ function initQwenTrainingTab() {
                 loadYoloRunList(true).catch((error) => console.error("Failed to refresh YOLO runs", error));
             }
         }
+        updateYoloTrainStartAvailability(getSelectedYoloDataset());
     }
 
     async function handleStartYoloTraining() {
-        if (yoloTrainElements.startButton) {
-            yoloTrainElements.startButton.disabled = true;
+        if (yoloTrainState.startInFlight) {
+            return;
         }
+        if (isBusyTrainingStatus(yoloTrainState.lastJobSnapshot?.status)) {
+            setYoloTrainMessage("A YOLO training job is already active.", "warn");
+            return;
+        }
+        yoloTrainState.startInFlight = true;
+        updateYoloTrainStartAvailability(getSelectedYoloDataset());
         try {
             if (!yoloTrainElements.acceptTos?.checked) {
                 setYoloTrainMessage("Please accept the Ultralytics terms to start training.", "warn");
@@ -10883,34 +12243,57 @@ function initQwenTrainingTab() {
             console.error("YOLO training submit failed", error);
             setYoloTrainMessage(error.message || "Failed to start training", "error");
         } finally {
-            if (yoloTrainElements.startButton) {
-                yoloTrainElements.startButton.disabled = false;
-            }
+            yoloTrainState.startInFlight = false;
+            updateYoloTrainStartAvailability(getSelectedYoloDataset());
         }
     }
 
-    async function cancelYoloTrainingJobRequest() {
-        if (!yoloTrainState.activeJobId) {
-            return;
+async function cancelYoloTrainingJobRequest() {
+    if (!yoloTrainState.activeJobId) {
+        return;
+    }
+    if (yoloTrainState.cancelInFlight) {
+        return;
+    }
+    yoloTrainState.cancelInFlight = true;
+    if (yoloTrainElements.cancelButton) {
+        // Avoid duplicate cancel requests while the current cancel POST is in flight.
+        yoloTrainElements.cancelButton.disabled = true;
+    }
+    try {
+        const encodedJobId = encodeURIComponent(yoloTrainState.activeJobId);
+        const resp = await fetch(`${API_ROOT}/yolo/train/jobs/${encodedJobId}/cancel`, { method: "POST" });
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
         }
-        try {
-            const resp = await fetch(`${API_ROOT}/yolo/train/jobs/${yoloTrainState.activeJobId}/cancel`, { method: "POST" });
-            if (!resp.ok) {
-                throw new Error(`HTTP ${resp.status}`);
-            }
-            setYoloTrainMessage("Cancellation requested", "warn");
-        } catch (error) {
-            console.error("Cancel YOLO job failed", error);
-            setYoloTrainMessage(error.message || "Failed to cancel job", "error");
+        setYoloTrainMessage("Cancellation requested", "warn");
+    } catch (error) {
+        console.error("Cancel YOLO job failed", error);
+        setYoloTrainMessage(error.message || "Failed to cancel job", "error");
+    } finally {
+        yoloTrainState.cancelInFlight = false;
+        if (yoloTrainElements.cancelButton) {
+            const cancellable = isCancellableTrainingStatus(yoloTrainState.lastJobSnapshot?.status);
+            yoloTrainElements.cancelButton.disabled = !cancellable;
         }
     }
+}
 
     async function cancelYoloHeadGraftJob() {
         if (!yoloHeadGraftState.activeJobId) {
             return;
         }
+        if (yoloHeadGraftState.cancelInFlight) {
+            return;
+        }
+        yoloHeadGraftState.cancelInFlight = true;
+        if (yoloHeadGraftElements.cancelButton) {
+            // Avoid duplicate cancel requests while the current cancel POST is in flight.
+            yoloHeadGraftElements.cancelButton.disabled = true;
+        }
         try {
-            const resp = await fetch(`${API_ROOT}/yolo/head_graft/jobs/${yoloHeadGraftState.activeJobId}/cancel`, { method: "POST" });
+            const encodedJobId = encodeURIComponent(yoloHeadGraftState.activeJobId);
+            const resp = await fetch(`${API_ROOT}/yolo/head_graft/jobs/${encodedJobId}/cancel`, { method: "POST" });
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
@@ -10918,6 +12301,12 @@ function initQwenTrainingTab() {
         } catch (error) {
             console.error("Cancel head graft failed", error);
             setYoloHeadGraftMessage(error.message || "Failed to cancel head graft", "error");
+        } finally {
+            yoloHeadGraftState.cancelInFlight = false;
+            if (yoloHeadGraftElements.cancelButton) {
+                const cancellable = isCancellableTrainingStatus(yoloHeadGraftState.lastJobSnapshot?.status);
+                yoloHeadGraftElements.cancelButton.disabled = !cancellable;
+            }
         }
     }
 
@@ -11010,7 +12399,7 @@ function initQwenTrainingTab() {
                 if (yoloTrainState.activeJobId) {
                     pollYoloTrainingJob(yoloTrainState.activeJobId, { force: true }).catch((error) => console.error("YOLO refresh failed", error));
                 } else {
-                    refreshYoloTrainingHistory();
+                    refreshYoloTrainingHistory().catch((error) => console.error("YOLO history refresh failed", error));
                 }
             });
         }
@@ -11018,6 +12407,7 @@ function initQwenTrainingTab() {
             yoloTrainElements.runSelect.addEventListener("change", () => {
                 yoloRunState.selectedId = yoloTrainElements.runSelect.value || null;
                 updateYoloRunSummary();
+                updateRunActionButtons("yolo");
             });
         }
         if (yoloTrainElements.devicesInput) {
@@ -11054,7 +12444,9 @@ function initQwenTrainingTab() {
         if (yoloHeadGraftElements.baseRunSelect) {
             yoloHeadGraftElements.baseRunSelect.addEventListener("change", () => {
                 yoloHeadGraftState.baseRunId = yoloHeadGraftElements.baseRunSelect.value || null;
-                updateYoloHeadGraftBaseSummary();
+                updateYoloHeadGraftBaseSummary().catch((error) => {
+                    console.error("Failed to refresh head-graft base summary", error);
+                });
             });
         }
         if (yoloHeadGraftElements.baseRunRefresh) {
@@ -11163,7 +12555,9 @@ function initQwenTrainingTab() {
                     setYoloTrainMessage,
                 );
             })
-            .catch(() => {});
+            .catch((error) => {
+                console.debug("YOLO GPU info refresh failed", error);
+            });
         loadYoloDatasetList().catch((error) => console.error("Failed to load YOLO datasets", error));
         loadYoloRunList().catch((error) => console.error("Failed to load YOLO runs", error));
         updateYoloDatasetSummary();
@@ -11201,12 +12595,18 @@ function initQwenTrainingTab() {
         if (!rfdetrTrainElements.history) {
             return;
         }
+        const requestId = rfdetrTrainState.historyRefreshRequestId + 1;
+        rfdetrTrainState.historyRefreshRequestId = requestId;
         try {
             const resp = await fetch(`${API_ROOT}/rfdetr/train/jobs`);
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const jobs = await resp.json();
+            // Ignore stale history responses when a newer refresh exists.
+            if (requestId !== rfdetrTrainState.historyRefreshRequestId) {
+                return;
+            }
             rfdetrTrainElements.history.innerHTML = "";
             if (!Array.isArray(jobs) || !jobs.length) {
                 const empty = document.createElement("div");
@@ -11217,6 +12617,9 @@ function initQwenTrainingTab() {
             }
             jobs.forEach((job) => renderRfDetrTrainingHistoryItem(rfdetrTrainElements.history, job));
         } catch (error) {
+            if (requestId !== rfdetrTrainState.historyRefreshRequestId) {
+                return;
+            }
             console.error("Failed to load RF-DETR job history", error);
             rfdetrTrainElements.history.textContent = `Unable to load history: ${error.message || error}`;
         }
@@ -11235,12 +12638,22 @@ function initQwenTrainingTab() {
         if (!jobId) {
             return;
         }
+        if (rfdetrTrainState.pollHandle) {
+            clearTimeout(rfdetrTrainState.pollHandle);
+            rfdetrTrainState.pollHandle = null;
+        }
+        const requestId = rfdetrTrainState.pollRequestId + 1;
+        rfdetrTrainState.pollRequestId = requestId;
         try {
-            const resp = await fetch(`${API_ROOT}/rfdetr/train/jobs/${jobId}`);
+            const encodedJobId = encodeURIComponent(jobId);
+            const resp = await fetch(`${API_ROOT}/rfdetr/train/jobs/${encodedJobId}`);
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const job = await resp.json();
+            if (requestId !== rfdetrTrainState.pollRequestId) {
+                return;
+            }
             rfdetrTrainState.activeJobId = job.job_id;
             updateRfDetrTrainingUI(job);
             const terminalStates = new Set(["succeeded", "failed", "cancelled"]);
@@ -11251,6 +12664,9 @@ function initQwenTrainingTab() {
                 rfdetrTrainState.pollHandle = null;
             }
         } catch (error) {
+            if (requestId !== rfdetrTrainState.pollRequestId) {
+                return;
+            }
             console.error("pollRfDetrTrainingJob error", error);
             setRfDetrTrainMessage(error.message || "Unable to load job", "error");
         }
@@ -11277,8 +12693,8 @@ function initQwenTrainingTab() {
                 .join("\n");
         }
         if (rfdetrTrainElements.cancelButton) {
-            const cancellable = job.status === "running" || job.status === "queued";
-            rfdetrTrainElements.cancelButton.disabled = !cancellable;
+            const cancellable = isCancellableTrainingStatus(job.status);
+            rfdetrTrainElements.cancelButton.disabled = !cancellable || rfdetrTrainState.cancelInFlight;
         }
         updateRfDetrMetricChart(job.metrics);
         if (job.status && job.status !== previousStatus) {
@@ -11287,12 +12703,19 @@ function initQwenTrainingTab() {
                 loadRfDetrRunList(true).catch((error) => console.error("Failed to refresh RF-DETR runs", error));
             }
         }
+        updateRfDetrTrainStartAvailability(getSelectedRfDetrDataset());
     }
 
     async function handleStartRfDetrTraining() {
-        if (rfdetrTrainElements.startButton) {
-            rfdetrTrainElements.startButton.disabled = true;
+        if (rfdetrTrainState.startInFlight) {
+            return;
         }
+        if (isBusyTrainingStatus(rfdetrTrainState.lastJobSnapshot?.status)) {
+            setRfDetrTrainMessage("An RF-DETR training job is already active.", "warn");
+            return;
+        }
+        rfdetrTrainState.startInFlight = true;
+        updateRfDetrTrainStartAvailability(getSelectedRfDetrDataset());
         try {
             if (!rfdetrTrainElements.acceptTos?.checked) {
                 setRfDetrTrainMessage("Please accept the RF-DETR terms to start training.", "warn");
@@ -11334,27 +12757,41 @@ function initQwenTrainingTab() {
             console.error("RF-DETR training submit failed", error);
             setRfDetrTrainMessage(error.message || "Failed to start training", "error");
         } finally {
-            if (rfdetrTrainElements.startButton) {
-                rfdetrTrainElements.startButton.disabled = false;
-            }
+            rfdetrTrainState.startInFlight = false;
+            updateRfDetrTrainStartAvailability(getSelectedRfDetrDataset());
         }
     }
 
-    async function cancelRfDetrTrainingJobRequest() {
-        if (!rfdetrTrainState.activeJobId) {
-            return;
+async function cancelRfDetrTrainingJobRequest() {
+    if (!rfdetrTrainState.activeJobId) {
+        return;
+    }
+    if (rfdetrTrainState.cancelInFlight) {
+        return;
+    }
+    rfdetrTrainState.cancelInFlight = true;
+    if (rfdetrTrainElements.cancelButton) {
+        // Avoid duplicate cancel requests while the current cancel POST is in flight.
+        rfdetrTrainElements.cancelButton.disabled = true;
+    }
+    try {
+        const encodedJobId = encodeURIComponent(rfdetrTrainState.activeJobId);
+        const resp = await fetch(`${API_ROOT}/rfdetr/train/jobs/${encodedJobId}/cancel`, { method: "POST" });
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
         }
-        try {
-            const resp = await fetch(`${API_ROOT}/rfdetr/train/jobs/${rfdetrTrainState.activeJobId}/cancel`, { method: "POST" });
-            if (!resp.ok) {
-                throw new Error(`HTTP ${resp.status}`);
-            }
-            setRfDetrTrainMessage("Cancellation requested", "warn");
-        } catch (error) {
-            console.error("Cancel RF-DETR job failed", error);
-            setRfDetrTrainMessage(error.message || "Failed to cancel job", "error");
+        setRfDetrTrainMessage("Cancellation requested", "warn");
+    } catch (error) {
+        console.error("Cancel RF-DETR job failed", error);
+        setRfDetrTrainMessage(error.message || "Failed to cancel job", "error");
+    } finally {
+        rfdetrTrainState.cancelInFlight = false;
+        if (rfdetrTrainElements.cancelButton) {
+            const cancellable = isCancellableTrainingStatus(rfdetrTrainState.lastJobSnapshot?.status);
+            rfdetrTrainElements.cancelButton.disabled = !cancellable;
         }
     }
+}
 
     function initRfDetrTrainingTab() {
         if (rfdetrTrainElements.datasetSelect) {
@@ -11427,7 +12864,7 @@ function initQwenTrainingTab() {
                 if (rfdetrTrainState.activeJobId) {
                     pollRfDetrTrainingJob(rfdetrTrainState.activeJobId, { force: true }).catch((error) => console.error("RF-DETR refresh failed", error));
                 } else {
-                    refreshRfDetrTrainingHistory();
+                    refreshRfDetrTrainingHistory().catch((error) => console.error("RF-DETR history refresh failed", error));
                 }
             });
         }
@@ -11435,6 +12872,7 @@ function initQwenTrainingTab() {
             rfdetrTrainElements.runSelect.addEventListener("change", () => {
                 rfdetrRunState.selectedId = rfdetrTrainElements.runSelect.value || null;
                 updateRfDetrRunSummary();
+                updateRunActionButtons("rfdetr");
             });
         }
         if (rfdetrTrainElements.runRefresh) {
@@ -11524,7 +12962,9 @@ function initQwenTrainingTab() {
                 );
                 updateRfDetrGpuInfo();
             })
-            .catch(() => {});
+            .catch((error) => {
+                console.debug("RF-DETR GPU info refresh failed", error);
+            });
         loadRfDetrVariants().catch((error) => console.error("Failed to load RF-DETR variants", error));
         loadRfDetrDatasetList().catch((error) => console.error("Failed to load RF-DETR datasets", error));
         loadRfDetrRunList().catch((error) => console.error("Failed to load RF-DETR runs", error));
@@ -11534,12 +12974,23 @@ function initQwenTrainingTab() {
 
 
     async function handleClassifierUploadChange(event) {
-        const input = event.target;
+        const input = event?.target;
+        if (!input) {
+            setActiveMessage("Classifier upload input is unavailable.", "error");
+            return;
+        }
         const file = input.files && input.files[0];
         input.value = "";
         if (!file) {
             return;
         }
+        if (activeState.classifierUploadInFlight) {
+            setActiveMessage("Classifier upload already in progress.", "info");
+            return;
+        }
+        const previousPath = activeElements.classifierPath ? activeElements.classifierPath.value : "";
+        activeState.classifierUploadInFlight = true;
+        updateActiveModelActionButtons();
         if (activeElements.classifierPath) {
             activeElements.classifierPath.value = file.name;
         }
@@ -11565,18 +13016,35 @@ function initQwenTrainingTab() {
                 setActiveMessage('Classifier staged locally; enter the server path manually.', 'warn');
             }
         } catch (error) {
+            if (activeElements.classifierPath) {
+                activeElements.classifierPath.value = previousPath;
+            }
             console.error('Classifier upload failed', error);
             setActiveMessage(error.message || String(error), 'error');
+        } finally {
+            activeState.classifierUploadInFlight = false;
+            updateActiveModelActionButtons();
         }
     }
 
     async function handleLabelmapUploadChange(event) {
-        const input = event.target;
+        const input = event?.target;
+        if (!input) {
+            setActiveMessage("Labelmap upload input is unavailable.", "error");
+            return;
+        }
         const file = input.files && input.files[0];
         input.value = "";
         if (!file) {
             return;
         }
+        if (activeState.labelmapUploadInFlight) {
+            setActiveMessage("Labelmap upload already in progress.", "info");
+            return;
+        }
+        const previousPath = activeElements.labelmapPath ? activeElements.labelmapPath.value : "";
+        activeState.labelmapUploadInFlight = true;
+        updateActiveModelActionButtons();
         if (activeElements.labelmapPath) {
             activeElements.labelmapPath.value = file.name;
         }
@@ -11601,8 +13069,14 @@ function initQwenTrainingTab() {
                 setActiveMessage('Labelmap staged locally; enter the server path manually.', 'warn');
             }
         } catch (error) {
+            if (activeElements.labelmapPath) {
+                activeElements.labelmapPath.value = previousPath;
+            }
             console.error('Labelmap upload failed', error);
             setActiveMessage(error.message || String(error), 'error');
+        } finally {
+            activeState.labelmapUploadInFlight = false;
+            updateActiveModelActionButtons();
         }
     }
 
@@ -11611,12 +13085,18 @@ function initQwenTrainingTab() {
         if (!trainingElements.historyContainer) {
             return;
         }
+        const requestId = trainingState.historyRefreshRequestId + 1;
+        trainingState.historyRefreshRequestId = requestId;
         try {
             const resp = await fetch(`${API_ROOT}/clip/train`);
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const data = await resp.json();
+            // Ignore stale history responses when a newer refresh exists.
+            if (requestId !== trainingState.historyRefreshRequestId) {
+                return;
+            }
             trainingElements.historyContainer.innerHTML = "";
             if (!Array.isArray(data) || !data.length) {
                 const empty = document.createElement("div");
@@ -11626,6 +13106,9 @@ function initQwenTrainingTab() {
             }
             data.forEach((job) => renderTrainingHistoryItem(trainingElements.historyContainer, job));
         } catch (error) {
+            if (requestId !== trainingState.historyRefreshRequestId) {
+                return;
+            }
             trainingElements.historyContainer.textContent = `Unable to load history: ${error.message || error}`;
         }
     }
@@ -11638,7 +13121,7 @@ function initQwenTrainingTab() {
         }
         if (trainingElements.cancelButton) {
             const cancellable = status.status === "running" || status.status === "queued";
-            trainingElements.cancelButton.disabled = !cancellable;
+            trainingElements.cancelButton.disabled = !cancellable || trainingState.cancelInFlight;
         }
         if (trainingElements.statusText) {
             const message = status.message ? ` — ${status.message}` : "";
@@ -11714,6 +13197,7 @@ function initQwenTrainingTab() {
                 const convergenceHtml = renderConvergenceTable(art.convergence_trace);
                 trainingElements.summary.innerHTML = summaryHtml + perClassHtml + convergenceHtml;
                 trainingState.latestArtifacts = art;
+                updateActiveModelActionButtons();
                 updateClipTrainingChart(status.metrics && status.metrics.length ? status.metrics : art);
             } else if (status.status !== "succeeded") {
                 trainingElements.summary.textContent = "";
@@ -11767,6 +13251,7 @@ function initQwenTrainingTab() {
                 });
             }, 1500);
         }
+        updateTrainingStartAvailability();
     }
 
     async function pollTrainingJob(jobId) {
@@ -11775,7 +13260,8 @@ function initQwenTrainingTab() {
         }
         trainingState.pollHandle = null;
         try {
-            const resp = await fetch(`${API_ROOT}/clip/train/${jobId}`);
+            const encodedJobId = encodeURIComponent(jobId);
+            const resp = await fetch(`${API_ROOT}/clip/train/${encodedJobId}`);
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
@@ -11791,7 +13277,8 @@ function initQwenTrainingTab() {
     async function loadTrainingJob(jobId, { forcePoll = false } = {}) {
         trainingState.activeJobId = jobId;
         try {
-            const resp = await fetch(`${API_ROOT}/clip/train/${jobId}`);
+            const encodedJobId = encodeURIComponent(jobId);
+            const resp = await fetch(`${API_ROOT}/clip/train/${encodedJobId}`);
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
@@ -11805,120 +13292,6 @@ function initQwenTrainingTab() {
         } catch (error) {
             setTrainingMessage(`Failed to load job ${jobId}: ${error.message || error}`, "error");
         }
-    }
-
-    const PACKAGING_REFERENCE_MBPS = 35;
-
-    function computeDatasetStats(imageEntries, labelEntries) {
-        const sumBytes = (entries) => entries.reduce((acc, entry) => acc + Math.max(0, entry.file?.size || 0), 0);
-        const imageBytes = sumBytes(imageEntries);
-        const labelBytes = sumBytes(labelEntries);
-        const totalBytes = imageBytes + labelBytes;
-        const totalFiles = imageEntries.length + labelEntries.length;
-        const estimatedSeconds = totalBytes > 0
-            ? totalBytes / (PACKAGING_REFERENCE_MBPS * 1024 * 1024)
-            : null;
-        return {
-            imageCount: imageEntries.length,
-            labelCount: labelEntries.length,
-            totalFiles,
-            imageBytes,
-            labelBytes,
-            totalBytes,
-            estimatedSeconds,
-        };
-    }
-
-    function replacePathLeaf(pathValue, replacement) {
-        if (!pathValue) {
-            return replacement;
-        }
-        const parts = pathValue.split(/[/\\]/);
-        parts[parts.length - 1] = replacement;
-        return parts.join("/");
-    }
-
-    function normaliseBaseName(entry) {
-        if (!entry) {
-            return null;
-        }
-        const source = entry.relativePath || entry.file?.name;
-        if (!source) {
-            return null;
-        }
-        const parts = source.split(/[/\\]/);
-        return parts[parts.length - 1] || null;
-    }
-
-    function synthesiseLabelEntriesFromBboxes(imageEntries) {
-        if (!Array.isArray(imageEntries) || !imageEntries.length) {
-            return [];
-        }
-        const synthetic = [];
-        imageEntries.forEach((entry) => {
-            const baseName = normaliseBaseName(entry);
-            if (!baseName) {
-                return;
-            }
-            const bboxByClass = bboxes[baseName];
-            const imageRecord = images[baseName];
-            if (!bboxByClass || !imageRecord || !imageRecord.width || !imageRecord.height) {
-                return;
-            }
-            const lines = [];
-            Object.keys(bboxByClass).forEach((className) => {
-                const classId = classes[className];
-                if (classId === undefined || classId === null) {
-                    return;
-                }
-                const records = bboxByClass[className] || [];
-                records.forEach((bboxRecord) => {
-                    const x = (bboxRecord.x + bboxRecord.width / 2) / imageRecord.width;
-                    const y = (bboxRecord.y + bboxRecord.height / 2) / imageRecord.height;
-                    const w = bboxRecord.width / imageRecord.width;
-                    const h = bboxRecord.height / imageRecord.height;
-                    lines.push(`${classId} ${x} ${y} ${w} ${h}`);
-                });
-            });
-            if (!lines.length) {
-                return;
-            }
-            const labelName = baseName.replace(/\.[^.]+$/, ".txt");
-            const relativePath = entry.relativePath ? replacePathLeaf(entry.relativePath, labelName) : labelName;
-            const blob = new Blob([lines.join("\n")], { type: "text/plain" });
-            let syntheticFile;
-            try {
-                syntheticFile = new File([blob], labelName, { type: "text/plain" });
-            } catch {
-                syntheticFile = blob;
-                syntheticFile.name = labelName;
-            }
-            synthetic.push({ file: syntheticFile, relativePath });
-        });
-        return synthetic;
-    }
-
-    function computeQwenDatasetStats(imageKeys) {
-        let totalBytes = 0;
-        imageKeys.forEach((key) => {
-            const record = images[key];
-            const file = record?.meta;
-            if (file && typeof file.size === "number") {
-                totalBytes += file.size;
-            }
-        });
-        const estimatedSeconds = totalBytes > 0
-            ? totalBytes / (PACKAGING_REFERENCE_MBPS * 1024 * 1024)
-            : null;
-        return {
-            imageCount: imageKeys.length,
-            labelCount: 0,
-            totalFiles: imageKeys.length,
-            imageBytes: totalBytes,
-            labelBytes: 0,
-            totalBytes,
-            estimatedSeconds,
-        };
     }
 
     function gatherTrainingFormData() {
@@ -12091,8 +13464,11 @@ function initQwenTrainingTab() {
 
     function updateTrainingStartAvailability() {
         const ready = Boolean(trainingState.nativeImagesPath && trainingState.nativeLabelsPath);
+        const active = trainingState.activeJobId ? trainingState.jobs.get(trainingState.activeJobId) : null;
+        // Prevent overlapping CLIP training submissions while the active job is not terminal.
+        const busy = trainingState.startInFlight || isBusyTrainingStatus(active?.status);
         if (trainingElements.startButton) {
-            trainingElements.startButton.disabled = !ready;
+            trainingElements.startButton.disabled = !ready || busy;
         }
         if (trainingElements.datasetWarning) {
             trainingElements.datasetWarning.style.display = ready ? "none" : "block";
@@ -12169,6 +13545,17 @@ function initQwenTrainingTab() {
         if (!trainingElements.startButton) {
             return;
         }
+        if (trainingState.startInFlight) {
+            return;
+        }
+        const active = trainingState.activeJobId ? trainingState.jobs.get(trainingState.activeJobId) : null;
+        if (isBusyTrainingStatus(active?.status)) {
+            setTrainingMessage("A CLIP training job is already active.", "warn");
+            setActiveMessage("A CLIP training job is already active.", "warn");
+            return;
+        }
+        trainingState.startInFlight = true;
+        updateTrainingStartAvailability();
         try {
             const deviceCheck = validateClipDeviceOverride({ showMessage: true });
             if (deviceCheck.error) {
@@ -12210,10 +13597,13 @@ function initQwenTrainingTab() {
                 throw new Error("Training job id missing in response.");
             }
             trainingState.latestArtifacts = null;
+            updateActiveModelActionButtons();
             setTrainingMessage(`Training job ${jobId} started.`, "success");
             setActiveMessage(`Training job ${jobId} started.`, "success");
             startTrainingPoll(jobId, true);
-            refreshTrainingHistory();
+            refreshTrainingHistory().catch((error) => {
+                console.error("Failed to refresh training history after starting job", error);
+            });
             if (trainingElements.cancelButton) {
                 trainingElements.cancelButton.disabled = false;
             }
@@ -12223,9 +13613,8 @@ function initQwenTrainingTab() {
             setTrainingMessage(msg, "error");
             setActiveMessage(msg, "error");
         } finally {
-            if (trainingElements.startButton) {
-                trainingElements.startButton.disabled = false;
-            }
+            trainingState.startInFlight = false;
+            updateTrainingStartAvailability();
         }
     }
 
@@ -12234,36 +13623,59 @@ function initQwenTrainingTab() {
             setTrainingMessage("No active training job to cancel.", "warn");
             return;
         }
+        if (trainingState.cancelInFlight) {
+            return;
+        }
+        trainingState.cancelInFlight = true;
+        let cancelRequested = false;
         if (trainingElements.cancelButton) {
+            // Avoid duplicate cancel submissions while the current request is in flight.
             trainingElements.cancelButton.disabled = true;
         }
         try {
             setTrainingMessage("Requesting cancellation…", "warn");
             setActiveMessage("Requesting cancellation…", "warn");
-            const resp = await fetch(`${API_ROOT}/clip/train/${trainingState.activeJobId}/cancel`, {
+            const encodedJobId = encodeURIComponent(trainingState.activeJobId);
+            const resp = await fetch(`${API_ROOT}/clip/train/${encodedJobId}/cancel`, {
                 method: "POST",
             });
             if (!resp.ok) {
                 const text = await resp.text();
                 throw new Error(text || `HTTP ${resp.status}`);
             }
+            cancelRequested = true;
         } catch (error) {
             console.error("Failed to cancel training", error);
             const msg = error.message || String(error);
             setTrainingMessage(msg, "error");
             setActiveMessage(msg, "error");
+        } finally {
+            trainingState.cancelInFlight = false;
             if (trainingElements.cancelButton) {
-                trainingElements.cancelButton.disabled = false;
+                if (cancelRequested) {
+                    // Keep disabled until the next poll confirms terminal/cancelling status.
+                    trainingElements.cancelButton.disabled = true;
+                } else {
+                    const latest = trainingState.activeJobId ? trainingState.jobs.get(trainingState.activeJobId) : null;
+                    const status = String(latest?.status || "").toLowerCase();
+                    const cancellable = status === "running" || status === "queued";
+                    trainingElements.cancelButton.disabled = !cancellable;
+                }
             }
         }
     }
 
     async function handleActivateLatestModel() {
+        if (activeState.activateInFlight || activeState.applyInFlight) {
+            return;
+        }
         const art = trainingState.latestArtifacts;
         if (!art) {
             setActiveMessage("No completed training artifacts available.", "error");
             return;
         }
+        activeState.activateInFlight = true;
+        updateActiveModelActionButtons();
         try {
             const encoderType = String(art.encoder_type || "clip").toLowerCase().trim();
             const payload = {
@@ -12295,11 +13707,17 @@ function initQwenTrainingTab() {
         } catch (error) {
             console.error("Failed to activate trained model", error);
             setActiveMessage(`Activation failed: ${error.message || error}`, "error");
+        } finally {
+            activeState.activateInFlight = false;
+            updateActiveModelActionButtons();
         }
     }
 
     async function handleApplyActiveModel() {
         if (!activeElements.classifierPath || !activeElements.clipSelect) {
+            return;
+        }
+        if (activeState.applyInFlight || activeState.activateInFlight) {
             return;
         }
         const selected = getSelectedActiveClassifier();
@@ -12321,6 +13739,8 @@ function initQwenTrainingTab() {
             setActiveMessage("Provide a classifier path or choose a backbone to apply.", "error");
             return;
         }
+        activeState.applyInFlight = true;
+        updateActiveModelActionButtons();
         try {
             const resp = await fetch(`${API_ROOT}/clip/active_model`, {
                 method: "POST",
@@ -12337,6 +13757,9 @@ function initQwenTrainingTab() {
         } catch (error) {
             console.error("Failed to update active model", error);
             setActiveMessage(`Failed to update active model: ${error.message || error}`, "error");
+        } finally {
+            activeState.applyInFlight = false;
+            updateActiveModelActionButtons();
         }
     }
 
@@ -12514,10 +13937,16 @@ function initQwenTrainingTab() {
         }
         if (tabName === TAB_TRAINING && previous !== TAB_TRAINING) {
             initializeTrainingUi();
-            refreshTrainingHistory();
-            populateClipBackbones();
+            refreshTrainingHistory().catch((error) => {
+                console.error("Failed to refresh training history", error);
+            });
+            populateClipBackbones().catch((error) => {
+                console.error("Failed to refresh CLIP backbone list", error);
+            });
             if (trainingState.activeJobId) {
-                loadTrainingJob(trainingState.activeJobId, { forcePoll: true });
+                loadTrainingJob(trainingState.activeJobId, { forcePoll: true }).catch((error) => {
+                    console.error("Failed to load active training job", error);
+                });
             }
         }
         if (tabName === TAB_DETECTORS && previous !== TAB_DETECTORS) {
@@ -12527,7 +13956,9 @@ function initQwenTrainingTab() {
         }
         if (tabName === TAB_QWEN_TRAIN && previous !== TAB_QWEN_TRAIN) {
             initQwenTrainingTab();
-            refreshQwenTrainingHistory();
+            refreshQwenTrainingHistory().catch((error) => {
+                console.error("Failed to refresh Qwen training history", error);
+            });
             if (qwenTrainState.activeJobId) {
                 pollQwenTrainingJob(qwenTrainState.activeJobId, { force: true }).catch((error) => console.error("Qwen job poll failed", error));
             }
@@ -12537,14 +13968,18 @@ function initQwenTrainingTab() {
         }
         if (tabName === TAB_YOLO_TRAIN && previous !== TAB_YOLO_TRAIN) {
             initYoloTrainingTab();
-            refreshYoloTrainingHistory();
+            refreshYoloTrainingHistory().catch((error) => {
+                console.error("Failed to refresh YOLO training history", error);
+            });
             if (yoloTrainState.activeJobId) {
                 pollYoloTrainingJob(yoloTrainState.activeJobId, { force: true }).catch((error) => console.error("YOLO job poll failed", error));
             }
         }
         if (tabName === TAB_RFDETR_TRAIN && previous !== TAB_RFDETR_TRAIN) {
             initRfDetrTrainingTab();
-            refreshRfDetrTrainingHistory();
+            refreshRfDetrTrainingHistory().catch((error) => {
+                console.error("Failed to refresh RF-DETR training history", error);
+            });
             if (rfdetrTrainState.activeJobId) {
                 pollRfDetrTrainingJob(rfdetrTrainState.activeJobId, { force: true }).catch((error) => console.error("RF-DETR job poll failed", error));
             }
@@ -12563,8 +13998,8 @@ function initQwenTrainingTab() {
         }
         if (tabName === TAB_ACTIVE && previous !== TAB_ACTIVE) {
             initializeActiveModelUi();
-            populateClipBackbones();
-            refreshActiveModelPanel();
+            populateClipBackbones().catch((err) => console.error("Active tab backbone refresh failed", err));
+            refreshActiveModelPanel().catch((err) => console.error("Active tab model refresh failed", err));
         }
         if (tabName === TAB_QWEN && previous !== TAB_QWEN) {
             initQwenModelTab();
@@ -12605,6 +14040,8 @@ function initQwenTrainingTab() {
         trainingElements.datasetRefresh = document.getElementById("trainDatasetRefresh");
         trainingElements.datasetSummary = document.getElementById("trainDatasetSummary");
         trainingElements.datasetWarning = document.getElementById("trainDatasetWarning");
+        trainingElements.uploadCurrentDatasetBtn = document.getElementById("trainUploadCurrentDatasetBtn");
+        trainingElements.openDatasetManagerBtn = document.getElementById("trainOpenDatasetManagerBtn");
         trainingElements.classifierManageSelect = document.getElementById("trainClassifierManageSelect");
         trainingElements.classifierManageRefresh = document.getElementById("trainClassifierManageRefresh");
         trainingElements.classifierManageDownload = document.getElementById("trainClassifierManageDownload");
@@ -12821,17 +14258,22 @@ function initQwenTrainingTab() {
         }
         if (trainingElements.datasetRefresh) {
             trainingElements.datasetRefresh.addEventListener("click", () => {
-                refreshClipDatasets(trainingElements.datasetSelect?.value || null);
+                refreshClipDatasets(trainingElements.datasetSelect?.value || null).catch((error) => {
+                    console.error("Failed to refresh training datasets", error);
+                });
             });
         }
         if (trainingElements.datasetSelect) {
             trainingElements.datasetSelect.addEventListener("change", (event) => {
-                applyDatasetSelection(event.target.value || "");
+                const selectedValue = event?.target?.value || "";
+                applyDatasetSelection(selectedValue);
             });
         }
         if (trainingElements.classifierManageRefresh) {
             trainingElements.classifierManageRefresh.addEventListener("click", () => {
-                loadTrainingClipClassifiers(trainingElements.classifierManageSelect?.value || "");
+                loadTrainingClipClassifiers(trainingElements.classifierManageSelect?.value || "").catch((error) => {
+                    console.error("Training classifier refresh failed", error);
+                });
             });
         }
         if (trainingElements.classifierManageDownload) {
@@ -12903,7 +14345,9 @@ function initQwenTrainingTab() {
             .then(() => updateTrainingDeviceHelp())
             .catch(() => updateTrainingDeviceHelp());
 
-        populateClipBackbones();
+        populateClipBackbones().catch((error) => {
+            console.warn("Failed to refresh CLIP backbones", error);
+        });
         refreshClipDatasets(null)
             .catch((err) => console.warn("Dataset list init failed", err))
             .finally(() => updateTrainingStartAvailability());
@@ -12958,15 +14402,15 @@ function initQwenTrainingTab() {
         }
         if (activeElements.refreshButton) {
             activeElements.refreshButton.addEventListener("click", () => {
-                refreshActiveModelPanel();
-                populateClipBackbones();
-                loadActiveClipClassifiers(activeElements.classifierSelect?.value || "");
-                loadActiveLabelmaps(activeElements.labelmapSelect?.value || "");
+                refreshActiveModelPanel().catch((err) => console.warn("Active model refresh failed", err));
+                populateClipBackbones().catch((err) => console.warn("Backbone refresh failed", err));
+                loadActiveClipClassifiers(activeElements.classifierSelect?.value || "").catch((err) => console.warn("Active classifier refresh failed", err));
+                loadActiveLabelmaps(activeElements.labelmapSelect?.value || "").catch((err) => console.warn("Active labelmap refresh failed", err));
             });
         }
         if (activeElements.classifierRefresh) {
             activeElements.classifierRefresh.addEventListener("click", () => {
-                loadActiveClipClassifiers(activeElements.classifierSelect?.value || "");
+                loadActiveClipClassifiers(activeElements.classifierSelect?.value || "").catch((err) => console.warn("Active classifier refresh failed", err));
             });
         }
         if (activeElements.classifierSelect) {
@@ -13004,6 +14448,11 @@ function initQwenTrainingTab() {
                     alert("New name cannot be empty.");
                     return;
                 }
+                if (activeState.classifierRenameInFlight || activeState.classifierDeleteInFlight) {
+                    return;
+                }
+                activeState.classifierRenameInFlight = true;
+                updateActiveModelActionButtons();
                 const form = new FormData();
                 form.append("rel_path", entry.rel_path);
                 form.append("new_name", trimmed);
@@ -13021,6 +14470,9 @@ function initQwenTrainingTab() {
                     setActiveMessage(`Renamed classifier to ${data?.new_name || trimmed}.`, "success");
                 } catch (err) {
                     alert(`Rename failed: ${err.message || err}`);
+                } finally {
+                    activeState.classifierRenameInFlight = false;
+                    updateActiveModelActionButtons();
                 }
             });
         }
@@ -13032,18 +14484,26 @@ function initQwenTrainingTab() {
                     return;
                 }
                 if (!confirm(`Delete classifier ${entry.filename || entry.rel_path}?`)) return;
+                if (activeState.classifierDeleteInFlight || activeState.classifierRenameInFlight) {
+                    return;
+                }
+                activeState.classifierDeleteInFlight = true;
+                updateActiveModelActionButtons();
                 try {
                     const resp = await fetch(`${API_ROOT}/clip/classifiers?rel_path=${encodeURIComponent(entry.rel_path)}`, { method: "DELETE" });
                     if (!resp.ok) throw new Error(await resp.text());
                     await loadActiveClipClassifiers("");
                 } catch (err) {
                     alert(`Delete failed: ${err.message || err}`);
+                } finally {
+                    activeState.classifierDeleteInFlight = false;
+                    updateActiveModelActionButtons();
                 }
             });
         }
         if (activeElements.labelmapRefresh) {
             activeElements.labelmapRefresh.addEventListener("click", () => {
-                loadActiveLabelmaps(activeElements.labelmapSelect?.value || "");
+                loadActiveLabelmaps(activeElements.labelmapSelect?.value || "").catch((err) => console.warn("Active labelmap refresh failed", err));
             });
         }
         if (activeElements.labelmapSelect) {
@@ -13071,6 +14531,11 @@ function initQwenTrainingTab() {
                     return;
                 }
                 if (!confirm(`Delete labelmap ${entry.filename || entry.rel_path}?`)) return;
+                if (activeState.labelmapDeleteInFlight) {
+                    return;
+                }
+                activeState.labelmapDeleteInFlight = true;
+                updateActiveModelActionButtons();
                 try {
                     const url = `${API_ROOT}/clip/labelmaps?rel_path=${encodeURIComponent(entry.rel_path)}&root=${encodeURIComponent(entry.root || "labelmaps")}`;
                     const resp = await fetch(url, { method: "DELETE" });
@@ -13078,6 +14543,9 @@ function initQwenTrainingTab() {
                     await loadActiveLabelmaps("");
                 } catch (err) {
                     alert(`Delete failed: ${err.message || err}`);
+                } finally {
+                    activeState.labelmapDeleteInFlight = false;
+                    updateActiveModelActionButtons();
                 }
             });
         }
@@ -13105,6 +14573,8 @@ function initQwenTrainingTab() {
         }
         loadActiveClipClassifiers().catch((err) => console.warn("Active classifier list load failed", err));
         loadActiveLabelmaps().catch((err) => console.warn("Active labelmap list load failed", err));
+        refreshActiveModelPanel().catch((err) => console.warn("Active model init refresh failed", err));
+        updateActiveModelActionButtons();
     }
 
 
@@ -13127,6 +14597,9 @@ function initQwenTrainingTab() {
             const classBuckets = bboxes[imageName];
             for (const className of Object.keys(classBuckets)) {
                 const bucket = classBuckets[className];
+                if (!Array.isArray(bucket)) {
+                    continue;
+                }
                 const idx = bucket.findIndex((bbox) => bbox.uuid === uuid);
                 if (idx !== -1) {
                     bucket.splice(idx, 1);
@@ -13144,11 +14617,10 @@ function initQwenTrainingTab() {
     }
 
     function cancelPendingMultiPoint({ clearMarkers = false, removePendingBbox: removePendingBboxFlag = false } = {}) {
-        multiPointPending = false;
-        multiPointPendingToken = null;
-        multiPointPendingBboxInfo = null;
-        if (removePendingBboxFlag) {
-            removePendingBbox();
+        // Capture pending placeholder info before clearing shared state.
+        const pendingInfo = multiPointPendingBboxInfo ? { ...multiPointPendingBboxInfo } : null;
+        if (removePendingBboxFlag && pendingInfo) {
+            removePendingBbox(pendingInfo);
         }
         if (multiPointQueue.length > 0 && removePendingBboxFlag) {
             while (multiPointQueue.length) {
@@ -13163,6 +14635,9 @@ function initQwenTrainingTab() {
         if (clearMarkers) {
             clearMultiPointAnnotations();
         }
+        multiPointPending = false;
+        multiPointPendingToken = null;
+        multiPointPendingBboxInfo = null;
         multiPointWaitingForPreload = false;
     }
 
@@ -13251,6 +14726,12 @@ function initQwenTrainingTab() {
             hideSamPreloadProgress();
         }
         return token;
+    }
+
+    function setGlobalCursor(cursor) {
+        if (document.body) {
+            document.body.style.cursor = cursor;
+        }
     }
 
     function showSamPreloadProgress() {
@@ -13395,10 +14876,13 @@ function initQwenTrainingTab() {
         if (typeof existing.releaseLoading === "function") {
             existing.releaseLoading();
         }
-        if (existing.imageName) {
-            slotPreloadPromises.delete(existing.imageName);
-            slotLoadingIndicators.delete(existing.imageName);
+        if (existing.preloadKey) {
+            slotPreloadPromises.delete(existing.preloadKey);
+        } else if (existing.imageName) {
+            slotPreloadPromises.delete(getSlotPreloadPromiseKey(existing.imageName, existing.variant));
         }
+        // Keep slot-loading counters balanced via releaseLoading(); do not wipe
+        // all loading slots for the image in case another slot is still active.
         slotPreloadControllers[slotName] = null;
         scheduleSamSlotStatusRefresh(true);
     }
@@ -13425,7 +14909,7 @@ function initQwenTrainingTab() {
         if (!option) {
             return null;
         }
-        return option.value || option.text || option.innerHTML || null;
+        return option.value || option.text || option.textContent || null;
     }
 
     function isSlotRoleEnabled(slotRole) {
@@ -13553,7 +15037,7 @@ function initQwenTrainingTab() {
         }
     }
 
-    async function activateImageSlot(imageName) {
+    async function activateImageSlot(imageName, variant = samVariant) {
         if (!samPreloadEnabled || !imageName) {
             return false;
         }
@@ -13568,7 +15052,8 @@ function initQwenTrainingTab() {
             const resp = await fetch(`${API_ROOT}/sam_activate_slot`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ image_name: imageName, sam_variant: samVariant }),
+                // Pin variant at request start to avoid mid-flight selector changes.
+                body: JSON.stringify({ image_name: imageName, sam_variant: variant }),
             });
             if (!resp.ok) {
                 completeTask(taskId);
@@ -13594,11 +15079,11 @@ function initQwenTrainingTab() {
         const variantSnapshot = samVariant;
         const preloadAlreadyRunning = isSamPreloadActiveFor(targetName, variantSnapshot);
         if (samSlotsEnabled || await ensureSamSlotsSupport()) {
-            let activated = await activateImageSlot(targetName);
+            let activated = await activateImageSlot(targetName, variantSnapshot);
             if (!activated && samSlotsEnabled) {
-                const waited = await waitForSlotPreload(targetName);
+                const waited = await waitForSlotPreload(targetName, variantSnapshot);
                 if (waited && currentImage && currentImage.name === targetName) {
-                    activated = await activateImageSlot(targetName);
+                    activated = await activateImageSlot(targetName, variantSnapshot);
                 }
             }
             if (activated) {
@@ -13607,7 +15092,7 @@ function initQwenTrainingTab() {
                 }
                 clearImageSlotLoading(targetName);
                 setSamStatus(`SAM ready for ${targetName}`, { variant: "success", duration: 2000 });
-                resolveSamPreloadWaiters(targetName, samVariant);
+                resolveSamPreloadWaiters(targetName, variantSnapshot);
                 hideSamPreloadProgress();
                 triggerNeighborSlotPreloads(targetName);
                 scheduleSamSlotStatusRefresh(true);
@@ -13664,6 +15149,9 @@ function initQwenTrainingTab() {
             return null;
         }
         const ctx = offCanvas.getContext("2d");
+        if (!ctx) {
+            return null;
+        }
         ctx.drawImage(imageRecord.object, 0, 0, offCanvas.width, offCanvas.height);
         const dataUrl = offCanvas.toDataURL("image/jpeg");
         imageRecord.dataUrl = dataUrl;
@@ -13674,6 +15162,8 @@ function initQwenTrainingTab() {
         if (!samPreloadEnabled || !imageName) {
             return null;
         }
+        const variantSnapshot = samVariant;
+        const preloadKey = getSlotPreloadPromiseKey(imageName, variantSnapshot);
         if (!samSlotsEnabled) {
             const supported = await ensureSamSlotsSupport();
             if (!supported) {
@@ -13684,13 +15174,17 @@ function initQwenTrainingTab() {
         if (!imageRecord) {
             return null;
         }
-        const existingPromise = slotPreloadPromises.get(imageName);
+        const existingPromise = slotPreloadPromises.get(preloadKey);
         if (existingPromise) {
             return existingPromise;
         }
         const existingTask = slotPreloadControllers[slotName];
-        if (existingTask && existingTask.imageName === imageName) {
-            const promise = slotPreloadPromises.get(imageName);
+        if (
+            existingTask
+            && existingTask.imageName === imageName
+            && existingTask.variant === variantSnapshot
+        ) {
+            const promise = slotPreloadPromises.get(preloadKey);
             if (promise) {
                 return promise;
             }
@@ -13699,11 +15193,17 @@ function initQwenTrainingTab() {
 
         const runPromise = (async () => {
             const controller = new AbortController();
-            const slotTask = { controller, releaseLoading: null, imageName };
+            const slotTask = {
+                controller,
+                releaseLoading: null,
+                imageName,
+                variant: variantSnapshot,
+                preloadKey,
+            };
             slotPreloadControllers[slotName] = slotTask;
             try {
-                const requestBody = { slot: slotName, sam_variant: samVariant, image_name: imageName };
-                const cachedToken = getSamToken(imageName, samVariant);
+                const requestBody = { slot: slotName, sam_variant: variantSnapshot, image_name: imageName };
+                const cachedToken = getSamToken(imageName, variantSnapshot);
                 if (cachedToken) {
                     requestBody.image_token = cachedToken;
                 } else {
@@ -13733,7 +15233,7 @@ function initQwenTrainingTab() {
                 }
                 const result = await resp.json();
                 if (result?.token) {
-                    rememberSamToken(imageName, samVariant, result.token);
+                    rememberSamToken(imageName, variantSnapshot, result.token);
                 }
                 return result;
             } catch (error) {
@@ -13749,12 +15249,12 @@ function initQwenTrainingTab() {
                     }
                     slotPreloadControllers[slotName] = null;
                 }
-                slotPreloadPromises.delete(imageName);
+                slotPreloadPromises.delete(preloadKey);
                 scheduleSamSlotStatusRefresh();
             }
         })();
 
-        slotPreloadPromises.set(imageName, runPromise);
+        slotPreloadPromises.set(preloadKey, runPromise);
         runPromise.catch(() => null);
         return runPromise;
     }
@@ -13775,6 +15275,7 @@ function initQwenTrainingTab() {
                 updateSlotHighlights(Array.isArray(data) ? data : []);
             }
         } catch (error) {
+            console.debug("SAM slot support check failed", error);
             samSlotsEnabled = false;
         }
         return samSlotsEnabled;
@@ -13797,7 +15298,9 @@ function initQwenTrainingTab() {
             if (samSlotStatusPending) {
                 samSlotStatusNeedsRefresh = true;
             } else {
-                refreshSamSlotStatus();
+                refreshSamSlotStatus().catch((error) => {
+                    console.debug("SAM slot status refresh failed", error);
+                });
             }
             return;
         }
@@ -13806,7 +15309,9 @@ function initQwenTrainingTab() {
             if (samSlotStatusPending) {
                 samSlotStatusNeedsRefresh = true;
             } else {
-                refreshSamSlotStatus();
+                refreshSamSlotStatus().catch((error) => {
+                    console.debug("SAM slot status refresh failed", error);
+                });
             }
         }, SAM_SLOT_STATUS_DEBOUNCE_MS);
     }
@@ -13838,7 +15343,9 @@ function initQwenTrainingTab() {
             samSlotStatusPending = false;
             if (samSlotStatusNeedsRefresh) {
                 samSlotStatusNeedsRefresh = false;
-                refreshSamSlotStatus();
+                refreshSamSlotStatus().catch((error) => {
+                    console.debug("Queued SAM slot status refresh failed", error);
+                });
             }
         }
     }
@@ -13997,7 +15504,8 @@ function initQwenTrainingTab() {
         const records = [];
         const buckets = bboxes[currentImage.name];
         Object.keys(buckets).forEach((className) => {
-            (buckets[className] || []).forEach((bboxRecord) => {
+            const classBoxes = Array.isArray(buckets[className]) ? buckets[className] : [];
+            classBoxes.forEach((bboxRecord) => {
                 if (!bboxRecord || !bboxRecord.uuid) {
                     return;
                 }
@@ -14030,7 +15538,7 @@ function initQwenTrainingTab() {
         let removed = 0;
         byClass.forEach((uuidSet, className) => {
             const bucket = bboxes[currentImage.name][className];
-            if (!bucket) {
+            if (!Array.isArray(bucket)) {
                 return;
             }
             const remaining = bucket.filter((bx) => !bx.uuid || !uuidSet.has(bx.uuid));
@@ -14048,7 +15556,7 @@ function initQwenTrainingTab() {
             (selectedBboxes.has(currentBbox.bbox.uuid) || negativeBboxes.has(currentBbox.bbox.uuid))
         ) {
             currentBbox = null;
-            document.body.style.cursor = "default";
+            setGlobalCursor("default");
         }
         clearSelectedBboxes();
         return removed;
@@ -14068,7 +15576,8 @@ function initQwenTrainingTab() {
         let selectedCount = 0;
         let firstSelected = null;
         Object.keys(currentBxs).forEach((className) => {
-            currentBxs[className].forEach((bx, i) => {
+            const classBoxes = Array.isArray(currentBxs[className]) ? currentBxs[className] : [];
+            classBoxes.forEach((bx, i) => {
                 if (!bx) return;
                 const isPoly = bx.type === "polygon" || (Array.isArray(bx.points) && bx.points.length >= 3);
                 let bxRect = null;
@@ -14186,11 +15695,11 @@ function initQwenTrainingTab() {
         return !entry;
     }
 
-    function waitForSlotPreload(imageName) {
+    function waitForSlotPreload(imageName, variant = samVariant) {
         if (!imageName) {
             return Promise.resolve(false);
         }
-        const promise = slotPreloadPromises.get(imageName);
+        const promise = slotPreloadPromises.get(getSlotPreloadPromiseKey(imageName, variant));
         if (!promise) {
             return Promise.resolve(false);
         }
@@ -14337,10 +15846,14 @@ function initQwenTrainingTab() {
             predictorRefreshTimer = null;
         }
         if (immediate) {
-            refreshPredictorMetrics({ silent: true });
+            refreshPredictorMetrics({ silent: true }).catch((error) => {
+                console.debug("Predictor metrics refresh failed", error);
+            });
         }
         predictorRefreshTimer = setInterval(() => {
-            refreshPredictorMetrics({ silent: true });
+            refreshPredictorMetrics({ silent: true }).catch((error) => {
+                console.debug("Predictor metrics refresh failed", error);
+            });
         }, PREDICTOR_REFRESH_INTERVAL_MS);
     }
 
@@ -14356,7 +15869,9 @@ function initQwenTrainingTab() {
             return;
         }
         predictorTabInitialized = true;
-        refreshPredictorMetrics({ silent: true });
+        refreshPredictorMetrics({ silent: true }).catch((error) => {
+            console.debug("Predictor metrics init refresh failed", error);
+        });
     }
 
     function initializeSettingsUi() {
@@ -14389,7 +15904,11 @@ function initQwenTrainingTab() {
             settingsElements.applyButton.addEventListener("click", () => applyApiRootValue(settingsElements.apiInput?.value || ""));
         }
         if (settingsElements.testButton) {
-            settingsElements.testButton.addEventListener("click", () => testApiRootCandidate(settingsElements.apiInput?.value || API_ROOT));
+            settingsElements.testButton.addEventListener("click", () => {
+                testApiRootCandidate(settingsElements.apiInput?.value || API_ROOT).catch((error) => {
+                    console.error("Backend connectivity test failed", error);
+                });
+            });
         }
         if (qwenSettingsElements.applyButton) {
             qwenSettingsElements.applyButton.addEventListener("click", () => {
@@ -14406,7 +15925,9 @@ function initQwenTrainingTab() {
                 runBackendFuzzer().catch((err) => console.error("Backend fuzzer failed", err));
             });
         }
-        refreshQwenSettings().catch(() => {});
+        refreshQwenSettings().catch((error) => {
+            console.debug("Failed to refresh Qwen settings", error);
+        });
     }
 
     function setSettingsStatus(message, variant = "info") {
@@ -14429,8 +15950,13 @@ function initQwenTrainingTab() {
         if (!qwenSettingsElements.trustRemoteCode || !qwenSettingsElements.applyButton) {
             return;
         }
+        if (qwenSettingsRefreshInFlight) {
+            return;
+        }
+        qwenSettingsRefreshInFlight = true;
         qwenSettingsElements.applyButton.disabled = true;
         setQwenSettingsStatus("Loading Qwen settings…", "info");
+        let available = false;
         try {
             const resp = await fetch(`${API_ROOT}/qwen/settings`);
             if (!resp.ok) {
@@ -14438,23 +15964,33 @@ function initQwenTrainingTab() {
             }
             const payload = await resp.json();
             qwenSettingsElements.trustRemoteCode.checked = Boolean(payload?.trust_remote_code);
+            available = true;
             setQwenSettingsStatus("Qwen settings loaded.", "success");
         } catch (err) {
             console.warn("Qwen settings unavailable", err);
             qwenSettingsElements.trustRemoteCode.checked = false;
-            qwenSettingsElements.trustRemoteCode.disabled = true;
-            qwenSettingsElements.applyButton.disabled = true;
             setQwenSettingsStatus("Qwen settings not available on this backend.", "warn");
-            return;
+        } finally {
+            qwenSettingsRefreshInFlight = false;
+            qwenSettingsElements.trustRemoteCode.disabled = !available;
+            // Keep apply disabled while writes are active; otherwise follow availability.
+            if (!qwenSettingsApplyInFlight) {
+                qwenSettingsElements.applyButton.disabled = !available;
+            }
         }
-        qwenSettingsElements.trustRemoteCode.disabled = false;
-        qwenSettingsElements.applyButton.disabled = false;
     }
 
     async function applyQwenSettings() {
         if (!qwenSettingsElements.trustRemoteCode || !qwenSettingsElements.applyButton) {
             return;
         }
+        if (qwenSettingsElements.trustRemoteCode.disabled) {
+            return;
+        }
+        if (qwenSettingsApplyInFlight) {
+            return;
+        }
+        qwenSettingsApplyInFlight = true;
         qwenSettingsElements.applyButton.disabled = true;
         setQwenSettingsStatus("Applying Qwen settings…", "info");
         try {
@@ -14469,14 +16005,21 @@ function initQwenTrainingTab() {
                 const text = await resp.text();
                 throw new Error(text || `HTTP ${resp.status}`);
             }
-            const payload = await resp.json();
-            qwenSettingsElements.trustRemoteCode.checked = Boolean(payload?.trust_remote_code);
+            const raw = await resp.text();
+            const payload = parseJsonObjectSafe(raw, {});
+            if (Object.prototype.hasOwnProperty.call(payload, "trust_remote_code")) {
+                qwenSettingsElements.trustRemoteCode.checked = Boolean(payload?.trust_remote_code);
+            }
             setQwenSettingsStatus("Qwen settings updated (models unloaded).", "success");
         } catch (err) {
             console.error("Failed to update Qwen settings", err);
-            setQwenSettingsStatus("Failed to update Qwen settings.", "warn");
+            setQwenSettingsStatus(`Failed to update Qwen settings: ${err.message || err}`, "warn");
         } finally {
-            qwenSettingsElements.applyButton.disabled = false;
+            qwenSettingsApplyInFlight = false;
+            if (qwenSettingsRefreshInFlight) {
+                return;
+            }
+            qwenSettingsElements.applyButton.disabled = !!qwenSettingsElements.trustRemoteCode.disabled;
         }
     }
 
@@ -14484,6 +16027,10 @@ function initQwenTrainingTab() {
         if (!installCheckElements.runButton || !installCheckElements.status || !installCheckElements.log) {
             return;
         }
+        if (installCheckInFlight) {
+            return;
+        }
+        installCheckInFlight = true;
         installCheckElements.runButton.disabled = true;
         installCheckElements.status.textContent = "Running install check…";
         installCheckElements.log.textContent = "";
@@ -14625,26 +16172,34 @@ function initQwenTrainingTab() {
             const resp = await fetch(`${API_ROOT}/system/storage_check`);
             if (!resp.ok) throw new Error(await resp.text());
         });
-        let failures = 0;
-        for (const test of tests) {
-            addLog(`▶ ${test.name}`);
-            try {
-                await test.fn();
-                addLog(`✔ ${test.name}`);
-            } catch (err) {
-                failures += 1;
-                addLog(`✖ ${test.name}: ${err?.message || err}`);
+        try {
+            let failures = 0;
+            for (const test of tests) {
+                addLog(`▶ ${test.name}`);
+                try {
+                    await test.fn();
+                    addLog(`✔ ${test.name}`);
+                } catch (err) {
+                    failures += 1;
+                    addLog(`✖ ${test.name}: ${err?.message || err}`);
+                }
             }
+            installCheckElements.status.textContent = failures === 0 ? "Install check complete: all tests passed" : `Install check complete: ${failures} failed`;
+            installCheckElements.status.className = failures === 0 ? "settings-status success" : "settings-status warn";
+        } finally {
+            installCheckInFlight = false;
+            installCheckElements.runButton.disabled = false;
         }
-        installCheckElements.status.textContent = failures === 0 ? "Install check complete: all tests passed" : `Install check complete: ${failures} failed`;
-        installCheckElements.status.className = failures === 0 ? "settings-status success" : "settings-status warn";
-        installCheckElements.runButton.disabled = false;
     }
 
     async function runBackendFuzzer() {
         if (!backendFuzzerElements.runButton || !backendFuzzerElements.status || !backendFuzzerElements.log) {
             return;
         }
+        if (backendFuzzerInFlight) {
+            return;
+        }
+        backendFuzzerInFlight = true;
         backendFuzzerElements.runButton.disabled = true;
         backendFuzzerElements.status.textContent = "Running fuzzer…";
         backendFuzzerElements.log.textContent = "";
@@ -14661,6 +16216,10 @@ function initQwenTrainingTab() {
             canvasEl.width = 96;
             canvasEl.height = 96;
             const ctx = canvasEl.getContext("2d");
+            if (!ctx) {
+                // 1x1 PNG fallback when 2D context is unavailable.
+                return "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
+            }
             ctx.fillStyle = "#fff";
             ctx.fillRect(0, 0, 96, 96);
             for (let i = 0; i < 20; i++) {
@@ -14830,23 +16389,37 @@ function initQwenTrainingTab() {
                 });
             }
         }
-        let failures = 0;
-        for (const test of tests) {
-            addLog(`▶ ${test.name}`);
-            try {
-                await test.fn();
-                addLog(`✔ ${test.name}`);
-            } catch (err) {
-                failures += 1;
-                addLog(`✖ ${test.name}: ${err?.message || err}`);
+        try {
+            let failures = 0;
+            for (const test of tests) {
+                addLog(`▶ ${test.name}`);
+                try {
+                    await test.fn();
+                    addLog(`✔ ${test.name}`);
+                } catch (err) {
+                    failures += 1;
+                    addLog(`✖ ${test.name}: ${err?.message || err}`);
+                }
             }
+            backendFuzzerElements.status.textContent = failures === 0 ? "Fuzzer finished: all tests passed" : `Fuzzer finished: ${failures} failed`;
+            backendFuzzerElements.status.className = failures === 0 ? "settings-status success" : "settings-status warn";
+        } finally {
+            backendFuzzerInFlight = false;
+            backendFuzzerElements.runButton.disabled = false;
         }
-        backendFuzzerElements.status.textContent = failures === 0 ? "Fuzzer finished: all tests passed" : `Fuzzer finished: ${failures} failed`;
-        backendFuzzerElements.status.className = failures === 0 ? "settings-status success" : "settings-status warn";
-        backendFuzzerElements.runButton.disabled = false;
     }
 
     function initQwenPanel() {
+        if (qwenPanelInitialized) {
+            refreshQwenStatus().catch((err) => console.error("Failed to refresh Qwen status", err));
+            refreshQwenCaptionDatasets().catch((err) => console.error("Failed to refresh caption datasets", err));
+            refreshQwenAgentDatasets().catch((err) => console.error("Failed to refresh agent datasets", err));
+            refreshQwenAgentClassifiers().catch((err) => console.error("Failed to refresh agent classifiers", err));
+            refreshQwenAgentEnsembleJobs().catch((err) => console.error("Failed to refresh ensemble jobs", err));
+            refreshPrepassRecipes().catch((err) => console.error("Failed to refresh prepass recipes", err));
+            return;
+        }
+        qwenPanelInitialized = true;
         qwenElements.statusLabel = document.getElementById("qwenStatusLabel");
         qwenElements.itemsInput = document.getElementById("qwenItems");
         qwenElements.manualPrompt = document.getElementById("qwenCustomPrompt");
@@ -14917,7 +16490,6 @@ function initQwenTrainingTab() {
         qwenElements.agentGlossaryRefresh = document.getElementById("qwenAgentGlossaryRefresh");
         qwenElements.agentGlossaryLibraryRow = document.getElementById("qwenAgentGlossaryLibraryRow");
         qwenElements.agentGlossary = document.getElementById("qwenAgentGlossary");
-        qwenElements.agentGlossaryHint = document.getElementById("qwenAgentGlossaryHint");
         qwenElements.agentModel = document.getElementById("qwenAgentModel");
         qwenElements.agentVariant = document.getElementById("qwenAgentVariant");
         qwenElements.agentEnableYolo = document.getElementById("qwenAgentEnableYolo");
@@ -14950,12 +16522,6 @@ function initQwenTrainingTab() {
         qwenElements.agentGridCols = document.getElementById("qwenAgentGridCols");
         qwenElements.agentGridRows = document.getElementById("qwenAgentGridRows");
         qwenElements.agentGridOverlap = document.getElementById("qwenAgentGridOverlap");
-        qwenElements.agentReviewEnabled = null;
-        qwenElements.agentReviewModel = null;
-        qwenElements.agentReviewVariant = null;
-        qwenElements.agentReviewMaxTokens = null;
-        qwenElements.agentReviewClasses = null;
-        qwenElements.agentReviewPasses = null;
         qwenElements.calibrationStatus = document.getElementById("qwenCalibrationStatus");
         qwenElements.calibrationProgressWrap = document.getElementById("qwenCalibrationProgressWrap");
         qwenElements.calibrationProgressFill = document.getElementById("qwenCalibrationProgressFill");
@@ -15005,12 +16571,6 @@ function initQwenTrainingTab() {
         qwenElements.agentClassifierMargin = document.getElementById("qwenAgentClassifierMargin");
         qwenElements.agentClassifierBgMargin = document.getElementById("qwenAgentClassifierBgMargin");
         qwenElements.agentScorelessIou = document.getElementById("qwenAgentScorelessIou");
-        qwenElements.agentRunButton = document.getElementById("qwenAgentRun");
-        qwenElements.agentStopButton = document.getElementById("qwenAgentStop");
-        qwenElements.agentTraceList = document.getElementById("qwenAgentTraceList");
-        qwenElements.agentBatchCount = document.getElementById("qwenAgentBatchCount");
-        qwenElements.agentBatchIncludeCurrent = document.getElementById("qwenAgentBatchIncludeCurrent");
-        qwenElements.agentBatchRun = document.getElementById("qwenAgentBatchRun");
         qwenElements.prepassStatus = document.getElementById("prepassStatus");
         qwenElements.prepassRecipeSelect = document.getElementById("prepassRecipeSelect");
         qwenElements.prepassRecipeRefresh = document.getElementById("prepassRecipeRefresh");
@@ -15022,25 +16582,9 @@ function initQwenTrainingTab() {
         qwenElements.prepassTraceList = document.getElementById("prepassTraceList");
         qwenElements.unloadOthers = document.getElementById("qwenUnloadOthers");
         if (qwenElements.agentTightenFp) {
-            const updateAgentPrecisionControls = () => {
-                const enabled = !!qwenElements.agentTightenFp?.checked;
-                [
-                    qwenElements.agentDetectorConf,
-                    qwenElements.agentSam3ScoreThr,
-                    qwenElements.agentSam3MaskThr,
-                    qwenElements.agentClassifierMinProb,
-                    qwenElements.agentClassifierMargin,
-                    qwenElements.agentClassifierBgMargin,
-                    qwenElements.agentScorelessIou,
-                ].forEach((el) => {
-                    if (el) {
-                        el.disabled = !enabled;
-                    }
-                });
-            };
-            qwenElements.agentTightenFp.addEventListener("change", updateAgentPrecisionControls);
-            updateAgentPrecisionControls();
+            qwenElements.agentTightenFp.addEventListener("change", updateAgentPrecisionControlsUi);
         }
+        updateAgentPrecisionControlsUi();
         if (qwenElements.agentSam3ExpandGlossary) {
             const updateSam3GlossaryControls = () => {
                 const enabled = !!qwenElements.agentSam3ExpandGlossary?.checked;
@@ -15090,22 +16634,30 @@ function initQwenTrainingTab() {
         }
         if (qwenElements.agentRecipeSave) {
             qwenElements.agentRecipeSave.addEventListener("click", () => {
-                savePrepassRecipe();
+                savePrepassRecipe().catch((error) => {
+                    console.error("Prepass recipe save failed", error);
+                });
             });
         }
         if (qwenElements.agentRecipeLoad) {
             qwenElements.agentRecipeLoad.addEventListener("click", () => {
-                loadPrepassRecipe();
+                loadPrepassRecipe().catch((error) => {
+                    console.error("Prepass recipe load failed", error);
+                });
             });
         }
         if (qwenElements.agentRecipeDelete) {
             qwenElements.agentRecipeDelete.addEventListener("click", () => {
-                deletePrepassRecipe();
+                deletePrepassRecipe().catch((error) => {
+                    console.error("Prepass recipe delete failed", error);
+                });
             });
         }
         if (qwenElements.agentRecipeExport) {
             qwenElements.agentRecipeExport.addEventListener("click", () => {
-                exportPrepassRecipe();
+                exportPrepassRecipe().catch((error) => {
+                    console.error("Prepass recipe export failed", error);
+                });
             });
         }
         if (qwenElements.agentRecipeImport) {
@@ -15118,12 +16670,15 @@ function initQwenTrainingTab() {
         }
         if (qwenElements.agentRecipeImportFile) {
             qwenElements.agentRecipeImportFile.addEventListener("change", (event) => {
-                const file = event.target.files?.[0];
+                const file = event?.target?.files?.[0];
                 if (file) {
-                    importPrepassRecipe(file);
+                    importPrepassRecipe(file).catch((error) => {
+                        console.error("Prepass recipe import failed", error);
+                    });
                 }
             });
         }
+        updatePrepassRecipeActionButtons();
         if (qwenElements.captionModel) {
             qwenElements.captionModel.addEventListener("change", () => {
                 const selected = qwenElements.captionModel.value;
@@ -15180,6 +16735,7 @@ function initQwenTrainingTab() {
         if (qwenElements.captionDatasetSelect) {
             qwenElements.captionDatasetSelect.addEventListener("change", () => {
                 qwenCaptionDatasetState.selectedId = qwenElements.captionDatasetSelect.value || "";
+                ensureCaptionLabelStoreForDataset(qwenCaptionDatasetState.selectedId || "");
                 updateCaptionDatasetSummary();
                 updateQwenCaptionButton();
                 loadCaptionForCurrentImage().catch((error) => {
@@ -15212,6 +16768,7 @@ function initQwenTrainingTab() {
                     await navigator.clipboard.writeText(caption);
                     setSamStatus("Caption copied to clipboard.", { variant: "success", duration: 2500 });
                 } catch (error) {
+                    console.debug("Clipboard write failed", error);
                     setSamStatus("Unable to copy caption.", { variant: "warn", duration: 2500 });
                 }
             });
@@ -15238,7 +16795,9 @@ function initQwenTrainingTab() {
                 }
                 textLabels[currentImage.name] = value;
                 if (qwenElements.captionSaveText?.checked) {
-                    saveCaptionImmediate(currentImage.name, value);
+                    saveCaptionImmediate(currentImage.name, value).catch((error) => {
+                        console.warn("Caption save on blur failed", error);
+                    });
                 }
             });
         }
@@ -15249,14 +16808,17 @@ function initQwenTrainingTab() {
                     setSamStatus("Enter how many images to caption.", { variant: "warn", duration: 3000 });
                     return;
                 }
-                const imageNames = getCaptionImageList();
-                const startIndex = imageListIndex >= 0 ? imageListIndex : 0;
                 const includeCurrent = !!qwenElements.captionBatchIncludeCurrent?.checked;
-                const sliceStart = includeCurrent ? startIndex : startIndex + 1;
-                const batch = imageNames.slice(sliceStart, sliceStart + count);
+                const batch = getNextImageBatch(count, includeCurrent);
+                if (!batch.length) {
+                    setSamStatus("No images found for the selected range.", { variant: "warn", duration: 3000 });
+                    return;
+                }
                 runQwenCaptionBatch(batch, {
                     includeCurrent,
                     overwrite: !!qwenElements.captionBatchOverwrite?.checked,
+                }).catch((error) => {
+                    console.error("Caption batch run failed", error);
                 });
             });
         }
@@ -15273,12 +16835,25 @@ function initQwenTrainingTab() {
                 runQwenCaptionBatch(imageNames, {
                     includeCurrent: true,
                     overwrite: !!qwenElements.captionBatchOverwrite?.checked,
+                }).catch((error) => {
+                    console.error("Caption all-images run failed", error);
                 });
             });
         }
         if (qwenElements.captionBatchCancel) {
             qwenElements.captionBatchCancel.addEventListener("click", () => {
+                if (!qwenCaptionBatchActive) {
+                    return;
+                }
                 qwenCaptionBatchCancel = true;
+                updateQwenCaptionButton();
+                if (qwenCaptionBatchAbortController) {
+                    try {
+                        qwenCaptionBatchAbortController.abort();
+                    } catch (error) {
+                        console.warn("Failed to abort caption batch request", error);
+                    }
+                }
                 setQwenCaptionStatus("Batch cancel requested");
             });
         }
@@ -15347,81 +16922,85 @@ function initQwenTrainingTab() {
         }
         if (qwenElements.agentGlossaryRefresh) {
             qwenElements.agentGlossaryRefresh.addEventListener("click", () => {
-                refreshGlossaryLibrary();
-            });
-        }
-        if (qwenElements.agentRunButton) {
-            qwenElements.agentRunButton.addEventListener("click", () => {
-                startQwenAgentJob(currentImage?.name || "");
+                refreshGlossaryLibrary().catch((error) => {
+                    console.warn("Failed to refresh glossary library", error);
+                });
             });
         }
         if (qwenElements.prepassRecipeRefresh) {
             qwenElements.prepassRecipeRefresh.addEventListener("click", () => {
-                refreshPrepassRecipes();
+                refreshPrepassRecipes().catch((error) => {
+                    console.error("Failed to refresh prepass recipes", error);
+                });
             });
         }
         if (qwenElements.prepassRecipeSelect) {
             qwenElements.prepassRecipeSelect.addEventListener("change", () => {
-                loadPrepassRecipeForInference();
+                loadPrepassRecipeForInference({ suppressMissingWarning: true }).catch((error) => {
+                    console.error("Prepass recipe load on selection failed", error);
+                });
             });
         }
         if (qwenElements.prepassRunButton) {
             qwenElements.prepassRunButton.addEventListener("click", async () => {
-                const loaded = await loadPrepassRecipeForInference();
-                if (!loaded) {
-                    return;
+                try {
+                    const loaded = await loadPrepassRecipeForInference();
+                    if (!loaded) {
+                        return;
+                    }
+                    await startQwenAgentJob(currentImage?.name || "");
+                } catch (error) {
+                    console.error("Prepass run failed", error);
+                    setSamStatus(`Prepass run failed: ${error.message || error}`, { variant: "error", duration: 4500 });
                 }
-                startQwenAgentJob(currentImage?.name || "");
             });
         }
         if (qwenElements.prepassStopButton) {
             qwenElements.prepassStopButton.addEventListener("click", () => {
-                stopQwenAgentJob();
-            });
-        }
-        if (qwenElements.agentStopButton) {
-            qwenElements.agentStopButton.addEventListener("click", () => {
-                stopQwenAgentJob();
+                stopQwenAgentJob().catch((error) => {
+                    console.error("Failed to stop prepass", error);
+                });
             });
         }
         if (qwenElements.calibrationRun) {
             qwenElements.calibrationRun.addEventListener("click", () => {
-                startCalibrationJob();
+                startCalibrationJob().catch((error) => {
+                    console.error("Failed to start calibration", error);
+                });
             });
         }
         if (qwenElements.calibrationCancel) {
             qwenElements.calibrationCancel.addEventListener("click", () => {
-                cancelCalibrationJob();
-            });
-        }
-        if (qwenElements.agentBatchRun) {
-            qwenElements.agentBatchRun.addEventListener("click", () => {
-                const count = parseInt(qwenElements.agentBatchCount?.value || "1", 10);
-                if (Number.isNaN(count) || count <= 0) {
-                    setSamStatus("Enter a valid number of images.", { variant: "warn", duration: 3000 });
-                    return;
-                }
-                const imageNames = getCaptionImageList().slice(0, count);
-                runQwenAgentBatch(imageNames, {
-                    includeCurrent: !!qwenElements.agentBatchIncludeCurrent?.checked,
+                cancelCalibrationJob().catch((error) => {
+                    console.error("Failed to cancel calibration", error);
                 });
             });
         }
         if (qwenElements.prepassBatchRun) {
             qwenElements.prepassBatchRun.addEventListener("click", async () => {
-                const loaded = await loadPrepassRecipeForInference();
-                if (!loaded) {
-                    return;
+                try {
+                    const loaded = await loadPrepassRecipeForInference();
+                    if (!loaded) {
+                        return;
+                    }
+                    const count = parseInt(qwenElements.prepassBatchCount?.value || "1", 10);
+                    if (Number.isNaN(count) || count <= 0) {
+                        setSamStatus("Enter a valid number of images.", { variant: "warn", duration: 3000 });
+                        return;
+                    }
+                    const includeCurrent = !!qwenElements.prepassBatchIncludeCurrent?.checked;
+                    const imageNames = getNextImageBatch(count, includeCurrent);
+                    if (!imageNames.length) {
+                        setSamStatus("No images found for the selected range.", { variant: "warn", duration: 3000 });
+                        return;
+                    }
+                    await runQwenAgentBatch(imageNames, {
+                        includeCurrent,
+                    });
+                } catch (error) {
+                    console.error("Prepass batch run failed", error);
+                    setSamStatus(`Prepass batch failed: ${error.message || error}`, { variant: "error", duration: 4500 });
                 }
-                const count = parseInt(qwenElements.prepassBatchCount?.value || "1", 10);
-                if (Number.isNaN(count) || count <= 0) {
-                    setSamStatus("Enter a valid number of images.", { variant: "warn", duration: 3000 });
-                    return;
-                }
-                const imageNames = getCaptionImageList().slice(0, count);
-                runQwenAgentBatch(imageNames, {
-                    includeCurrent: !!qwenElements.prepassBatchIncludeCurrent?.checked,
-                });
             });
         }
         if (qwenElements.classSelect) {
@@ -15487,7 +17066,6 @@ function initQwenTrainingTab() {
             return;
         }
         sam3TextUiInitialized = true;
-        sam3TextElements.panel = document.getElementById("sam3TextPanel");
         sam3TextElements.promptInput = document.getElementById("sam3TextPrompt");
         sam3TextElements.thresholdInput = document.getElementById("sam3Threshold");
         sam3TextElements.maskThresholdInput = document.getElementById("sam3MaskThreshold");
@@ -15512,28 +17090,35 @@ function initQwenTrainingTab() {
         sam3TextElements.similarityRow = document.getElementById("sam3SimilarityRow");
         sam3TextElements.similarityThresholdInput = document.getElementById("sam3SimilarityThreshold");
         sam3TextElements.status = document.getElementById("sam3TextStatus");
-        sam3RecipeElements.fileInput = document.getElementById("sam3RecipeFile");
-        sam3RecipeElements.status = document.getElementById("sam3RecipeStatus");
-        sam3RecipeElements.recipeRefreshButton = document.getElementById("sam3RecipePresetRefresh");
-        sam3RecipeElements.cascadeSteps = document.getElementById("sam3CascadeSteps");
-        sam3RecipeElements.cascadeAddStepButton = document.getElementById("sam3CascadeAddStep");
-        sam3RecipeElements.perClassIouInput = document.getElementById("sam3CascadePerClassIou");
-        sam3RecipeElements.crossDedupeToggle = document.getElementById("sam3CascadeCrossDedupeToggle");
-        sam3RecipeElements.crossScopeSelect = document.getElementById("sam3CascadeCrossScope");
-        sam3RecipeElements.crossIouInput = document.getElementById("sam3CascadeCrossIou");
-        sam3RecipeElements.confidenceSelect = document.getElementById("sam3CascadeConfidence");
-        sam3RecipeElements.clipHeadSourceSelect = document.getElementById("sam3CascadeClipHeadSource");
-        sam3RecipeElements.cascadePresetSelect = document.getElementById("sam3CascadePresetSelect");
-        sam3RecipeElements.cascadePresetNameInput = document.getElementById("sam3CascadePresetName");
-        sam3RecipeElements.cascadePresetRefreshButton = document.getElementById("sam3CascadePresetRefresh");
-        sam3RecipeElements.cascadePresetSaveButton = document.getElementById("sam3CascadePresetSave");
-        sam3RecipeElements.cascadePresetLoadButton = document.getElementById("sam3CascadePresetLoad");
-        sam3RecipeElements.cascadePresetDeleteButton = document.getElementById("sam3CascadePresetDelete");
-        sam3RecipeElements.cascadePresetExportButton = document.getElementById("sam3CascadePresetExport");
-        sam3RecipeElements.cascadeFileInput = document.getElementById("sam3CascadeFile");
-        sam3RecipeElements.cascadeApplyButton = document.getElementById("sam3CascadeApplyButton");
+        // Legacy SAM3 recipe/cascade controls are not in the default HTML layout anymore.
+        // Keep optional lookups for backward compatibility with custom/older injected layouts.
+        const queryOptionalLegacy = (id) => document.querySelector(`#${id}`);
+        sam3RecipeElements.fileInput = queryOptionalLegacy("sam3RecipeFile");
+        sam3RecipeElements.status = queryOptionalLegacy("sam3RecipeStatus");
+        sam3RecipeElements.recipeRefreshButton = queryOptionalLegacy("sam3RecipePresetRefresh");
+        sam3RecipeElements.cascadeSteps = queryOptionalLegacy("sam3CascadeSteps");
+        sam3RecipeElements.cascadeAddStepButton = queryOptionalLegacy("sam3CascadeAddStep");
+        sam3RecipeElements.perClassIouInput = queryOptionalLegacy("sam3CascadePerClassIou");
+        sam3RecipeElements.crossDedupeToggle = queryOptionalLegacy("sam3CascadeCrossDedupeToggle");
+        sam3RecipeElements.crossScopeSelect = queryOptionalLegacy("sam3CascadeCrossScope");
+        sam3RecipeElements.crossIouInput = queryOptionalLegacy("sam3CascadeCrossIou");
+        sam3RecipeElements.confidenceSelect = queryOptionalLegacy("sam3CascadeConfidence");
+        sam3RecipeElements.clipHeadSourceSelect = queryOptionalLegacy("sam3CascadeClipHeadSource");
+        sam3RecipeElements.cascadePresetSelect = queryOptionalLegacy("sam3CascadePresetSelect");
+        sam3RecipeElements.cascadePresetNameInput = queryOptionalLegacy("sam3CascadePresetName");
+        sam3RecipeElements.cascadePresetRefreshButton = queryOptionalLegacy("sam3CascadePresetRefresh");
+        sam3RecipeElements.cascadePresetSaveButton = queryOptionalLegacy("sam3CascadePresetSave");
+        sam3RecipeElements.cascadePresetLoadButton = queryOptionalLegacy("sam3CascadePresetLoad");
+        sam3RecipeElements.cascadePresetDeleteButton = queryOptionalLegacy("sam3CascadePresetDelete");
+        sam3RecipeElements.cascadePresetExportButton = queryOptionalLegacy("sam3CascadePresetExport");
+        sam3RecipeElements.cascadeFileInput = queryOptionalLegacy("sam3CascadeFile");
+        sam3RecipeElements.cascadeApplyButton = queryOptionalLegacy("sam3CascadeApplyButton");
         if (sam3TextElements.runButton) {
-            sam3TextElements.runButton.addEventListener("click", () => handleSam3TextRequest());
+            sam3TextElements.runButton.addEventListener("click", () => {
+                handleSam3TextRequest().catch((error) => {
+                    console.error("SAM3 text request failed", error);
+                });
+            });
         }
         if (sam3TextElements.cascadeToggleButton) {
             sam3TextElements.cascadeToggleButton.addEventListener("click", () => toggleSam3TextCascade());
@@ -15542,7 +17127,11 @@ function initQwenTrainingTab() {
             sam3TextElements.cascadeAddButton.addEventListener("click", () => addSam3TextCascadeStep());
         }
         if (sam3TextElements.cascadeRunButton) {
-            sam3TextElements.cascadeRunButton.addEventListener("click", () => runSam3TextCascade());
+            sam3TextElements.cascadeRunButton.addEventListener("click", () => {
+                runSam3TextCascade().catch((error) => {
+                    console.error("SAM3 text cascade run failed", error);
+                });
+            });
         }
         if (sam3TextElements.cascadeStopButton) {
             sam3TextElements.cascadeStopButton.addEventListener("click", () => stopSam3TextCascade());
@@ -15551,17 +17140,29 @@ function initQwenTrainingTab() {
             sam3TextElements.cascadeClearButton.addEventListener("click", () => clearSam3TextCascade());
         }
         if (sam3TextElements.batchRunButton) {
-            sam3TextElements.batchRunButton.addEventListener("click", () => startSam3TextBatch());
+            sam3TextElements.batchRunButton.addEventListener("click", () => {
+                startSam3TextBatch().catch((error) => {
+                    console.error("SAM3 text batch start failed", error);
+                });
+            });
         }
         if (sam3TextElements.batchStopButton) {
             sam3TextElements.batchStopButton.addEventListener("click", () => stopSam3TextBatch());
         }
         if (sam3TextElements.similarityButton) {
-            sam3TextElements.similarityButton.addEventListener("click", handleSam3SimilarityPrompt);
+            sam3TextElements.similarityButton.addEventListener("click", () => {
+                handleSam3SimilarityPrompt().catch((error) => {
+                    console.error("SAM3 similarity prompt failed", error);
+                });
+            });
         }
         setSam3TextCascadeEnabled(false);
         if (sam3RecipeElements.fileInput) {
-            sam3RecipeElements.fileInput.addEventListener("change", handleSam3RecipeFile);
+            sam3RecipeElements.fileInput.addEventListener("change", () => {
+                handleSam3RecipeFile().catch((error) => {
+                    console.error("SAM3 recipe file handling failed", error);
+                });
+            });
         }
         if (sam3RecipeElements.recipeRefreshButton) {
             sam3RecipeElements.recipeRefreshButton.addEventListener("click", () => {
@@ -15579,25 +17180,49 @@ function initQwenTrainingTab() {
             });
         }
         if (sam3RecipeElements.cascadePresetSaveButton) {
-            sam3RecipeElements.cascadePresetSaveButton.addEventListener("click", saveSam3CascadePreset);
+            sam3RecipeElements.cascadePresetSaveButton.addEventListener("click", () => {
+                saveSam3CascadePreset().catch((error) => {
+                    console.error("SAM3 cascade save failed", error);
+                });
+            });
         }
         if (sam3RecipeElements.cascadePresetLoadButton) {
-            sam3RecipeElements.cascadePresetLoadButton.addEventListener("click", loadSam3CascadePreset);
+            sam3RecipeElements.cascadePresetLoadButton.addEventListener("click", () => {
+                loadSam3CascadePreset().catch((error) => {
+                    console.error("SAM3 cascade load failed", error);
+                });
+            });
         }
         if (sam3RecipeElements.cascadePresetDeleteButton) {
-            sam3RecipeElements.cascadePresetDeleteButton.addEventListener("click", deleteSam3CascadePreset);
+            sam3RecipeElements.cascadePresetDeleteButton.addEventListener("click", () => {
+                deleteSam3CascadePreset().catch((error) => {
+                    console.error("SAM3 cascade delete failed", error);
+                });
+            });
         }
         if (sam3RecipeElements.cascadePresetExportButton) {
-            sam3RecipeElements.cascadePresetExportButton.addEventListener("click", exportSam3CascadePreset);
+            sam3RecipeElements.cascadePresetExportButton.addEventListener("click", () => {
+                exportSam3CascadePreset().catch((error) => {
+                    console.error("SAM3 cascade export failed", error);
+                });
+            });
         }
         if (sam3RecipeElements.cascadePresetSelect) {
             sam3RecipeElements.cascadePresetSelect.addEventListener("change", refreshSam3CascadeControls);
         }
         if (sam3RecipeElements.cascadeFileInput) {
-            sam3RecipeElements.cascadeFileInput.addEventListener("change", handleSam3CascadeFile);
+            sam3RecipeElements.cascadeFileInput.addEventListener("change", (event) => {
+                handleSam3CascadeFile(event).catch((error) => {
+                    console.error("SAM3 cascade file handling failed", error);
+                });
+            });
         }
         if (sam3RecipeElements.cascadeApplyButton) {
-            sam3RecipeElements.cascadeApplyButton.addEventListener("click", runSam3CascadeOnImage);
+            sam3RecipeElements.cascadeApplyButton.addEventListener("click", () => {
+                runSam3CascadeOnImage().catch((error) => {
+                    console.error("SAM3 cascade apply failed", error);
+                });
+            });
         }
         for (const el of [
             sam3RecipeElements.perClassIouInput,
@@ -15618,9 +17243,18 @@ function initQwenTrainingTab() {
         }
         renderSam3CascadeSteps();
         refreshSam3CascadeControls();
-        loadSam3RecipePresets().catch((err) => console.error("Load recipes failed", err));
-        loadSam3CascadePresets().catch((err) => console.error("Load cascades failed", err));
-        loadSam3ClipClassifiers().catch((err) => console.error("Load CLIP classifiers failed", err));
+        const hasSam3RecipeUi = (
+            sam3RecipeElements.fileInput
+            || sam3RecipeElements.recipeRefreshButton
+            || sam3RecipeElements.cascadeSteps
+            || sam3RecipeElements.cascadePresetSelect
+            || sam3RecipeElements.cascadeApplyButton
+        );
+        if (hasSam3RecipeUi) {
+            loadSam3RecipePresets().catch((err) => console.error("Load recipes failed", err));
+            loadSam3CascadePresets().catch((err) => console.error("Load cascades failed", err));
+            loadSam3ClipClassifiers().catch((err) => console.error("Load CLIP classifiers failed", err));
+        }
     }
 
     function setSam3TextStatus(message, variant = "info") {
@@ -15638,79 +17272,80 @@ function initQwenTrainingTab() {
         }
     }
 
-	    function setSam3RecipeStatus(message, variant = "info") {
-	        const statusEl = sam3RecipeElements.status;
-	        if (!statusEl) return;
-	        statusEl.textContent = message || "";
-	        statusEl.classList.remove("warn", "error", "success");
-	        if (variant === "warn" || variant === "error" || variant === "success") {
-	            statusEl.classList.add(variant);
-	        }
-	    }
+    function setSam3RecipeStatus(message, variant = "info") {
+        // Fallback to the main SAM3 text status when legacy recipe status UI is absent.
+        const statusEl = sam3RecipeElements.status || sam3TextElements.status;
+        if (!statusEl) return;
+        statusEl.textContent = message || "";
+        statusEl.classList.remove("warn", "error", "success");
+        if (variant === "warn" || variant === "error" || variant === "success") {
+            statusEl.classList.add(variant);
+        }
+    }
 
-		    function createSam3CascadeStep({ recipeId = null } = {}) {
-		        return {
-		            uid: generateUUID(),
-		            enabled: true,
-		            recipe_id: recipeId || null,
-		            dedupe_group: "",
-		            participate_cross_class_dedupe: true,
-		            override_enabled: false,
-		            override_class_name: null,
-		            clip_head_min_prob_override: null,
-		            clip_head_margin_override: null,
-		            extra_clip_classifier_path: null,
-		            extra_clip_min_prob: 0.9,
-		            extra_clip_margin: 0.0,
-		        };
-		    }
+    function createSam3CascadeStep({ recipeId = null } = {}) {
+        return {
+            uid: generateUUID(),
+            enabled: true,
+            recipe_id: recipeId || null,
+            dedupe_group: "",
+            participate_cross_class_dedupe: true,
+            override_enabled: false,
+            override_class_name: null,
+            clip_head_min_prob_override: null,
+            clip_head_margin_override: null,
+            extra_clip_classifier_path: null,
+            extra_clip_min_prob: 0.9,
+            extra_clip_margin: 0.0,
+        };
+    }
 
-	    function ensureAtLeastOneCascadeStep() {
-	        if (!Array.isArray(sam3CascadeState.steps)) {
-	            sam3CascadeState.steps = [];
-	        }
-	        if (sam3CascadeState.steps.length === 0) {
-	            sam3CascadeState.steps.push(createSam3CascadeStep({}));
-	        }
-	    }
+    function ensureAtLeastOneCascadeStep() {
+        if (!Array.isArray(sam3CascadeState.steps)) {
+            sam3CascadeState.steps = [];
+        }
+        if (sam3CascadeState.steps.length === 0) {
+            sam3CascadeState.steps.push(createSam3CascadeStep({}));
+        }
+    }
 
-	    function addSam3CascadeStep({ recipeId = null } = {}) {
-	        ensureAtLeastOneCascadeStep();
-	        let chosen = recipeId;
-	        if (!chosen && Array.isArray(sam3CascadeState.recipePresets) && sam3CascadeState.recipePresets.length) {
-	            chosen = sam3CascadeState.recipePresets[0].id;
-	        }
-	        sam3CascadeState.steps.push(createSam3CascadeStep({ recipeId: chosen }));
-	        renderSam3CascadeSteps();
-	        refreshSam3CascadeControls();
-	    }
+    function addSam3CascadeStep({ recipeId = null } = {}) {
+        ensureAtLeastOneCascadeStep();
+        let chosen = recipeId;
+        if (!chosen && Array.isArray(sam3CascadeState.recipePresets) && sam3CascadeState.recipePresets.length) {
+            chosen = sam3CascadeState.recipePresets[0].id;
+        }
+        sam3CascadeState.steps.push(createSam3CascadeStep({ recipeId: chosen }));
+        renderSam3CascadeSteps();
+        refreshSam3CascadeControls();
+    }
 
-	    function removeSam3CascadeStep(uid) {
-	        if (!Array.isArray(sam3CascadeState.steps)) {
-	            return;
-	        }
-	        sam3CascadeState.steps = sam3CascadeState.steps.filter((s) => s && s.uid !== uid);
-	        ensureAtLeastOneCascadeStep();
-	        renderSam3CascadeSteps();
-	        refreshSam3CascadeControls();
-	    }
+    function removeSam3CascadeStep(uid) {
+        if (!Array.isArray(sam3CascadeState.steps)) {
+            return;
+        }
+        sam3CascadeState.steps = sam3CascadeState.steps.filter((s) => s && s.uid !== uid);
+        ensureAtLeastOneCascadeStep();
+        renderSam3CascadeSteps();
+        refreshSam3CascadeControls();
+    }
 
-	    function moveSam3CascadeStep(uid, direction) {
-	        if (!Array.isArray(sam3CascadeState.steps) || sam3CascadeState.steps.length < 2) {
-	            return;
-	        }
-	        const idx = sam3CascadeState.steps.findIndex((s) => s && s.uid === uid);
-	        if (idx < 0) return;
-	        const next = idx + direction;
-	        if (next < 0 || next >= sam3CascadeState.steps.length) return;
-	        const copy = [...sam3CascadeState.steps];
-	        const tmp = copy[idx];
-	        copy[idx] = copy[next];
-	        copy[next] = tmp;
-	        sam3CascadeState.steps = copy;
-	        renderSam3CascadeSteps();
-	        refreshSam3CascadeControls();
-	    }
+    function moveSam3CascadeStep(uid, direction) {
+        if (!Array.isArray(sam3CascadeState.steps) || sam3CascadeState.steps.length < 2) {
+            return;
+        }
+        const idx = sam3CascadeState.steps.findIndex((s) => s && s.uid === uid);
+        if (idx < 0) return;
+        const next = idx + direction;
+        if (next < 0 || next >= sam3CascadeState.steps.length) return;
+        const copy = [...sam3CascadeState.steps];
+        const tmp = copy[idx];
+        copy[idx] = copy[next];
+        copy[next] = tmp;
+        sam3CascadeState.steps = copy;
+        renderSam3CascadeSteps();
+        refreshSam3CascadeControls();
+    }
 
 	    function recipeHasClipHeadConfig(recipe) {
 	        const raw = recipe?.raw;
@@ -15773,7 +17408,8 @@ function initQwenTrainingTab() {
 	            opt.textContent = placeholder;
 	            select.appendChild(opt);
 	        }
-	        (options || []).forEach((entry) => {
+	        const selectOptions = Array.isArray(options) ? options : [];
+	        selectOptions.forEach((entry) => {
 	            const opt = document.createElement("option");
 	            opt.value = entry.value;
 	            opt.textContent = entry.label;
@@ -16166,6 +17802,15 @@ function initQwenTrainingTab() {
 	    }
 
 	    function refreshSam3CascadeControls() {
+	        const locked = isGpuHeavyLockActive();
+	        const presetBusy = (
+	            sam3CascadeState.cascadePresetListInFlight
+	            || sam3CascadeState.cascadePresetSaveInFlight
+	            || sam3CascadeState.cascadePresetLoadInFlight
+	            || sam3CascadeState.cascadePresetDeleteInFlight
+	            || sam3CascadeState.cascadePresetExportInFlight
+	            || sam3CascadeState.cascadePresetImportInFlight
+	        );
 	        const crossEnabled = Boolean(sam3RecipeElements.crossDedupeToggle?.checked);
 	        if (sam3RecipeElements.crossScopeSelect) sam3RecipeElements.crossScopeSelect.disabled = !crossEnabled;
 	        if (sam3RecipeElements.crossIouInput) sam3RecipeElements.crossIouInput.disabled = !crossEnabled;
@@ -16179,20 +17824,31 @@ function initQwenTrainingTab() {
 	        const hasAnyEnabled = enabledSteps.length > 0;
 	        const missingRecipe = enabledSteps.some((s) => !s.recipe_id);
 	        const hasRunnable = hasAnyEnabled && !missingRecipe;
+	        const applyBusy = sam3AgentApplyActive
+	            || sam3TextRequestActive
+	            || sam3SimilarityRequestActive
+	            || sam3TextBatchActive
+	            || sam3TextCascadeActive;
+	        if (sam3RecipeElements.cascadePresetSelect) {
+	            sam3RecipeElements.cascadePresetSelect.disabled = presetBusy;
+	        }
 	        if (sam3RecipeElements.cascadeApplyButton) {
-	            sam3RecipeElements.cascadeApplyButton.disabled = !hasRunnable || !currentImage;
+	            sam3RecipeElements.cascadeApplyButton.disabled = !hasRunnable || !currentImage || locked || applyBusy;
 	        }
 	        if (sam3RecipeElements.cascadePresetSaveButton) {
-	            sam3RecipeElements.cascadePresetSaveButton.disabled = !hasRunnable;
+	            sam3RecipeElements.cascadePresetSaveButton.disabled = !hasRunnable || presetBusy;
 	        }
 	        if (sam3RecipeElements.cascadePresetExportButton) {
-	            sam3RecipeElements.cascadePresetExportButton.disabled = !sam3RecipeElements.cascadePresetSelect?.value;
+	            sam3RecipeElements.cascadePresetExportButton.disabled = !sam3RecipeElements.cascadePresetSelect?.value || presetBusy;
 	        }
 	        if (sam3RecipeElements.cascadePresetLoadButton) {
-	            sam3RecipeElements.cascadePresetLoadButton.disabled = !sam3RecipeElements.cascadePresetSelect?.value;
+	            sam3RecipeElements.cascadePresetLoadButton.disabled = !sam3RecipeElements.cascadePresetSelect?.value || presetBusy;
 	        }
 	        if (sam3RecipeElements.cascadePresetDeleteButton) {
-	            sam3RecipeElements.cascadePresetDeleteButton.disabled = !sam3RecipeElements.cascadePresetSelect?.value;
+	            sam3RecipeElements.cascadePresetDeleteButton.disabled = !sam3RecipeElements.cascadePresetSelect?.value || presetBusy;
+	        }
+	        if (sam3RecipeElements.cascadeFileInput) {
+	            sam3RecipeElements.cascadeFileInput.disabled = presetBusy;
 	        }
 	    }
 
@@ -16233,11 +17889,22 @@ function initQwenTrainingTab() {
 
 	    async function loadSam3CascadePresets({ preserveSelection = true } = {}) {
 	        if (!sam3RecipeElements.cascadePresetSelect) return;
+	        if (sam3CascadeState.cascadePresetListInFlight) {
+	            sam3CascadeState.cascadePresetListNeedsRefresh = true;
+	            return;
+	        }
+	        sam3CascadeState.cascadePresetListInFlight = true;
+	        const requestId = sam3CascadeState.cascadePresetListRequestId + 1;
+	        sam3CascadeState.cascadePresetListRequestId = requestId;
+	        refreshSam3CascadeControls();
 	        try {
 	            const previous = preserveSelection ? sam3RecipeElements.cascadePresetSelect.value : "";
 	            const resp = await fetch(`${API_ROOT}/agent_mining/cascades`);
 	            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 	            const data = await resp.json();
+	            if (requestId !== sam3CascadeState.cascadePresetListRequestId) {
+	                return;
+	            }
 	            sam3CascadeState.cascadePresets = Array.isArray(data) ? data : [];
 	            const select = sam3RecipeElements.cascadePresetSelect;
 	            select.innerHTML = "";
@@ -16263,12 +17930,30 @@ function initQwenTrainingTab() {
 	            }
 	            refreshSam3CascadeControls();
 	        } catch (err) {
+	            if (requestId !== sam3CascadeState.cascadePresetListRequestId) {
+	                return;
+	            }
 	            console.error("Load cascade presets failed", err);
 	            setSam3RecipeStatus("Failed to load cascade presets.", "warn");
+	        } finally {
+	            if (requestId === sam3CascadeState.cascadePresetListRequestId) {
+	                sam3CascadeState.cascadePresetListInFlight = false;
+	            }
+	            const rerun = sam3CascadeState.cascadePresetListNeedsRefresh;
+	            sam3CascadeState.cascadePresetListNeedsRefresh = false;
+	            refreshSam3CascadeControls();
+	            if (rerun) {
+	                loadSam3CascadePresets({ preserveSelection: true }).catch((error) => {
+	                    console.warn("Queued cascade preset refresh failed", error);
+	                });
+	            }
 	        }
 	    }
 
 	    async function saveSam3CascadePreset() {
+	        if (sam3CascadeState.cascadePresetSaveInFlight) {
+	            return;
+	        }
 	        const rawLabel = sam3RecipeElements.cascadePresetNameInput?.value || "";
 	        const label = rawLabel.trim() || "recipe_cascade";
 	        const classNames = orderedClassNames();
@@ -16326,6 +18011,8 @@ function initQwenTrainingTab() {
 	            return;
 	        }
 	        const dedupe = getSam3CascadeDedupeConfig();
+	        sam3CascadeState.cascadePresetSaveInFlight = true;
+	        refreshSam3CascadeControls();
 	        try {
 	            const resp = await fetch(`${API_ROOT}/agent_mining/cascades`, {
 	                method: "POST",
@@ -16346,15 +18033,23 @@ function initQwenTrainingTab() {
 	        } catch (err) {
 	            console.error("Save cascade preset failed", err);
 	            setSam3RecipeStatus(err.message || "Save failed.", "error");
+	        } finally {
+	            sam3CascadeState.cascadePresetSaveInFlight = false;
+	            refreshSam3CascadeControls();
 	        }
 	    }
 
 	    async function loadSam3CascadePreset() {
+	        if (sam3CascadeState.cascadePresetLoadInFlight) {
+	            return;
+	        }
 	        const cascadeId = sam3RecipeElements.cascadePresetSelect?.value;
 	        if (!cascadeId) {
 	            setSam3RecipeStatus("Choose a cascade preset to load.", "warn");
 	            return;
 	        }
+	        sam3CascadeState.cascadePresetLoadInFlight = true;
+	        refreshSam3CascadeControls();
 	        try {
 	            const resp = await fetch(`${API_ROOT}/agent_mining/cascades/${encodeURIComponent(cascadeId)}`);
 	            if (!resp.ok) {
@@ -16367,10 +18062,16 @@ function initQwenTrainingTab() {
 	        } catch (err) {
 	            console.error("Load cascade preset failed", err);
 	            setSam3RecipeStatus(err.message || "Load failed.", "error");
+	        } finally {
+	            sam3CascadeState.cascadePresetLoadInFlight = false;
+	            refreshSam3CascadeControls();
 	        }
 	    }
 
 	    async function deleteSam3CascadePreset() {
+	        if (sam3CascadeState.cascadePresetDeleteInFlight) {
+	            return;
+	        }
 	        const cascadeId = sam3RecipeElements.cascadePresetSelect?.value;
 	        if (!cascadeId) {
 	            setSam3RecipeStatus("Choose a cascade preset to delete.", "warn");
@@ -16379,6 +18080,8 @@ function initQwenTrainingTab() {
 	        if (typeof window !== "undefined" && !window.confirm("Delete this cascade? This cannot be undone.")) {
 	            return;
 	        }
+	        sam3CascadeState.cascadePresetDeleteInFlight = true;
+	        refreshSam3CascadeControls();
 	        try {
 	            const resp = await fetch(`${API_ROOT}/agent_mining/cascades/${encodeURIComponent(cascadeId)}`, {
 	                method: "DELETE",
@@ -16394,35 +18097,52 @@ function initQwenTrainingTab() {
 	        } catch (err) {
 	            console.error("Delete cascade preset failed", err);
 	            setSam3RecipeStatus(err.message || "Delete failed.", "error");
+	        } finally {
+	            sam3CascadeState.cascadePresetDeleteInFlight = false;
+	            refreshSam3CascadeControls();
 	        }
 	    }
 
 	    async function exportSam3CascadePreset() {
+	        if (sam3CascadeState.cascadePresetExportInFlight) {
+	            return;
+	        }
 	        const cascadeId = sam3RecipeElements.cascadePresetSelect?.value;
 	        if (!cascadeId) {
 	            setSam3RecipeStatus("Choose a cascade preset to download.", "warn");
 	            return;
 	        }
+	        sam3CascadeState.cascadePresetExportInFlight = true;
+	        refreshSam3CascadeControls();
 	        try {
 	            const resp = await fetch(`${API_ROOT}/agent_mining/cascades/${encodeURIComponent(cascadeId)}/export`);
 	            if (!resp.ok) {
 	                const detail = await resp.text();
 	                throw new Error(detail || `HTTP ${resp.status}`);
 	            }
-	            const blob = await resp.blob();
-	            saveAs(blob, `${cascadeId}.zip`);
+		            const blob = await resp.blob();
+		            saveBlobToDisk(blob, `${sanitizeFilename(cascadeId, "cascade")}.zip`);
 	            setSam3RecipeStatus("Downloaded cascade zip.", "success");
 	        } catch (err) {
 	            console.error("Export cascade failed", err);
 	            setSam3RecipeStatus(err.message || "Download failed.", "error");
+	        } finally {
+	            sam3CascadeState.cascadePresetExportInFlight = false;
+	            refreshSam3CascadeControls();
 	        }
 	    }
 
 	    async function handleSam3CascadeFile(event) {
-	        const file = event.target?.files?.[0];
+	        if (sam3CascadeState.cascadePresetImportInFlight) {
+	            return;
+	        }
+	        const inputEl = event?.target || sam3RecipeElements.cascadeFileInput;
+	        const file = inputEl?.files?.[0];
 	        if (!file) {
 	            return;
 	        }
+	        sam3CascadeState.cascadePresetImportInFlight = true;
+	        refreshSam3CascadeControls();
 	        try {
 	            if (!file.name.toLowerCase().endsWith(".zip")) {
 	                throw new Error("zip_only");
@@ -16447,17 +18167,30 @@ function initQwenTrainingTab() {
 	            setSam3RecipeStatus(`Imported cascade ${data?.label || data?.id || ""}.`, "success");
 	        } catch (err) {
 	            console.error("Cascade import failed", err);
-	            const msg = err?.message === "zip_only" ? "Cascades must be loaded from a .zip file." : "Invalid cascade file (use zip).";
+	            const msg = err?.message === "zip_only"
+	                ? "Cascades must be loaded from a .zip file."
+	                : (err?.message || "Cascade import failed.");
 	            setSam3RecipeStatus(msg, "error");
 	        } finally {
 	            if (sam3RecipeElements.cascadeFileInput) sam3RecipeElements.cascadeFileInput.value = "";
+	            sam3CascadeState.cascadePresetImportInFlight = false;
+	            refreshSam3CascadeControls();
 	        }
 		    }
 
 		    async function runSam3CascadeOnImage() {
-		        if (sam3RecipeElements.status) {
-		            sam3RecipeElements.status.title = "";
-		        }
+	        if (sam3RecipeElements.status) {
+	            sam3RecipeElements.status.title = "";
+	        } else if (sam3TextElements.status) {
+	            sam3TextElements.status.title = "";
+	        }
+	        if (sam3AgentApplyActive || sam3TextRequestActive || sam3SimilarityRequestActive || sam3TextBatchActive || sam3TextCascadeActive) {
+	            setSam3RecipeStatus("SAM3 is busy; wait for the current job to finish.", "warn");
+	            return;
+	        }
+	        if (!ensureAutomationAvailable("SAM3 cascade")) {
+	            return;
+	        }
 		        if (!currentImage) {
 		            setSam3RecipeStatus("Open an image first.", "warn");
 		            return;
@@ -16519,6 +18252,8 @@ function initQwenTrainingTab() {
 		            imageName: currentImage.name,
 		            detail: { steps: stepsPayload.length },
 		        });
+	        sam3AgentApplyActive = true;
+	        refreshSam3CascadeControls();
 		        setSam3RecipeStatus(`Running cascade on ${currentImage.name}…`, "info");
 		        try {
 		            let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || "0.5");
@@ -16537,7 +18272,11 @@ function initQwenTrainingTab() {
 	            const imageNameForRequest = currentImage.name;
 	            const variantForRequest = "sam3";
 	            const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
-	            let imagePayload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
+	            let imagePayload = await buildSamImagePayload({
+	                variantOverride: variantForRequest,
+	                preferredToken: preloadToken,
+	                imageNameOverride: imageNameForRequest,
+	            });
 	            imagePayload.sam_variant = variantForRequest;
 	            let resp = await fetch(`${API_ROOT}/agent_mining/apply_image_chain`, {
 	                method: "POST",
@@ -16557,6 +18296,7 @@ function initQwenTrainingTab() {
 	                    forceBase64: true,
 	                    variantOverride: variantForRequest,
 	                    preferredToken: preloadToken,
+	                    imageNameOverride: imageNameForRequest,
 	                });
 	                imagePayload.sam_variant = variantForRequest;
 	                resp = await fetch(`${API_ROOT}/agent_mining/apply_image_chain`, {
@@ -16578,8 +18318,16 @@ function initQwenTrainingTab() {
 	                throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
 	            }
 	            const result = await resp.json();
-	            if (currentImage && result?.image_token) {
-	                rememberSamToken(currentImage.name, variantForRequest, result.image_token);
+	            if (imageNameForRequest && result?.image_token) {
+	                rememberSamToken(imageNameForRequest, variantForRequest, result.image_token);
+	            }
+	            // Prevent applying detections to the wrong image if the user switched views.
+	            if (!currentImage || currentImage.name !== imageNameForRequest) {
+	                setSam3RecipeStatus(
+	                    `Cascade finished for ${imageNameForRequest}, but view switched; skipped apply.`,
+	                    "warn",
+	                );
+	                return;
 		            }
 		            const detections = Array.isArray(result?.detections) ? result.detections : [];
 		            const warnList = Array.isArray(result?.warnings) ? result.warnings : [];
@@ -16604,6 +18352,8 @@ function initQwenTrainingTab() {
 		            const missingText = missingClasses.size ? ` Missing classes: ${Array.from(missingClasses).join(", ")}` : "";
 		            if (sam3RecipeElements.status) {
 		                sam3RecipeElements.status.title = warnDetails.codes.length ? warnDetails.codes.join("\n") : "";
+		            } else if (sam3TextElements.status) {
+		                sam3TextElements.status.title = warnDetails.codes.length ? warnDetails.codes.join("\n") : "";
 		            }
 		            if (added > 0) {
 		                setSam3RecipeStatus(
@@ -16617,38 +18367,11 @@ function initQwenTrainingTab() {
 		            console.error("Cascade apply failed", err);
 		            setSam3RecipeStatus(`Cascade failed: ${err.message || err}`, "error");
 		        } finally {
+	            sam3AgentApplyActive = false;
 		            completeTask(cascadeTaskId);
 		            refreshSam3CascadeControls();
 		        }
 		    }
-
-    function parseRecipeJson(text) {
-        try {
-            const data = JSON.parse(text);
-            if (!data || typeof data !== "object") throw new Error("invalid_json");
-            const steps = Array.isArray(data.steps) ? data.steps : [];
-            const cleanedSteps = steps
-                .map((s) => ({
-                    prompt: typeof s.prompt === "string" ? s.prompt.trim() : "",
-                    threshold:
-                        typeof s.threshold === "number" && s.threshold >= 0 && s.threshold <= 1
-                            ? s.threshold
-                            : null,
-                }))
-                .filter((s) => s.prompt && s.threshold !== null);
-            if (!cleanedSteps.length) throw new Error("no_steps");
-            const targetClass = (data.class_name || data.class || data.target_class || "").trim();
-            const targetId = data.class_id;
-            return {
-                label: data.label || data.id || "recipe",
-                class_name: targetClass,
-                class_id: targetId,
-                steps: cleanedSteps,
-            };
-        } catch (err) {
-            throw new Error("parse_failed");
-        }
-    }
 
     function normalizeAgentRecipePayload(data) {
         if (!data || typeof data !== "object") {
@@ -16767,134 +18490,6 @@ function initQwenTrainingTab() {
 	        }
 	    }
 
-    async function runSam3RecipeOnImage() {
-        const recipe = sam3RecipeState.recipe;
-        const hasContent =
-            recipe &&
-            ((Array.isArray(recipe.steps) && recipe.steps.length > 0) ||
-                (Array.isArray(recipe.text_prompts) && recipe.text_prompts.length > 0) ||
-                (Array.isArray(recipe.positives) && recipe.positives.length > 0));
-        if (!hasContent) {
-            setSam3RecipeStatus("Load a recipe zip first.", "warn");
-            return;
-        }
-        if (!currentImage) {
-            setSam3RecipeStatus("Open an image first.", "warn");
-            return;
-        }
-        if (sam3RecipeElements.status) {
-            sam3RecipeElements.status.title = "";
-        }
-        const classNames = orderedClassNames();
-        const overrideEnabled = Boolean(sam3RecipeElements.overrideToggle?.checked);
-        let outputClassName = null;
-        let outputClassId = null;
-        if (overrideEnabled) {
-            outputClassName = sam3RecipeElements.overrideSelect?.value || null;
-            if (!outputClassName || !classNames.includes(outputClassName)) {
-                setSam3RecipeStatus("Select an output class override before applying.", "warn");
-                return;
-            }
-            outputClassId = typeof classes[outputClassName] !== "undefined" ? classes[outputClassName] : null;
-	        } else {
-	            const target = (recipe.class_name || "").trim();
-	            if (!target) {
-	                setSam3RecipeStatus("Recipe is missing a target class; enable output class override.", "error");
-                return;
-            }
-            const lowerToName = new Map(classNames.map((n) => [n.toLowerCase(), n]));
-            const found = lowerToName.get(target.toLowerCase());
-            if (!found) {
-                setSam3RecipeStatus(`Class ${target} not in current label map. Enable output class override.`, "error");
-                return;
-            }
-	            outputClassName = found;
-	            outputClassId = typeof classes[outputClassName] !== "undefined" ? classes[outputClassName] : null;
-	        }
-	        if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
-	        const recipeTaskId = enqueueTask({ kind: "recipe-apply", imageName: currentImage.name, detail: outputClassName });
-	        setSam3RecipeStatus(`Running recipe on ${currentImage.name}…`, "info");
-	        try {
-	            let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || String(recipe.params?.mask_threshold ?? "0.5"));
-            if (Number.isNaN(maskThreshold)) {
-                maskThreshold = 0.5;
-            }
-            maskThreshold = Math.min(Math.max(maskThreshold, 0), 1);
-            const minSize = Math.max(0, getMinMaskArea());
-            const simplifyEps = Math.max(0, getSimplifyEpsilon());
-            let maxResults = parseInt(sam3TextElements.maxResultsInput?.value || String(recipe.params?.max_results ?? "100"), 10);
-            if (!Number.isFinite(maxResults) || maxResults <= 0) {
-                maxResults = 100;
-            }
-            maxResults = Math.min(Math.max(maxResults, 1), 5000);
-            const imageNameForRequest = currentImage.name;
-            const variantForRequest = "sam3";
-            const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
-            let imagePayload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
-            imagePayload.sam_variant = variantForRequest;
-            const recipePayload = recipe?.raw && typeof recipe.raw === "object" ? recipe.raw : recipe;
-            let resp = await fetch(`${API_ROOT}/agent_mining/apply_image`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    ...imagePayload,
-                    recipe: recipePayload,
-                    mask_threshold: maskThreshold,
-                    min_size: minSize,
-                    simplify_epsilon: simplifyEps,
-                    max_results: maxResults,
-                    override_class_id: overrideEnabled ? outputClassId : null,
-                    override_class_name: overrideEnabled ? outputClassName : null,
-                }),
-            });
-            if (resp.status === 428) {
-                imagePayload = await buildSamImagePayload({ forceBase64: true, variantOverride: variantForRequest, preferredToken: preloadToken });
-                imagePayload.sam_variant = variantForRequest;
-                resp = await fetch(`${API_ROOT}/agent_mining/apply_image`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        ...imagePayload,
-                        recipe: recipePayload,
-                        mask_threshold: maskThreshold,
-                        min_size: minSize,
-                        simplify_epsilon: simplifyEps,
-                        max_results: maxResults,
-                        override_class_id: overrideEnabled ? outputClassId : null,
-                        override_class_name: overrideEnabled ? outputClassName : null,
-                    }),
-                });
-            }
-            if (!resp.ok) {
-                const detail = await resp.text();
-                throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
-            }
-            const result = await resp.json();
-            if (currentImage && result?.image_token) {
-                rememberSamToken(currentImage.name, variantForRequest, result.image_token);
-            }
-            const detections = Array.isArray(result?.detections) ? result.detections : [];
-            const warnList = Array.isArray(result?.warnings) ? result.warnings : [];
-            const warnDetails = formatAgentWarningsForUi(warnList);
-            const added = applySegAwareDetections(detections, outputClassName, "Agent recipe");
-            const warnText = warnDetails.message ? ` Warnings: ${warnDetails.message}` : "";
-            if (sam3RecipeElements.status) {
-                sam3RecipeElements.status.title = warnDetails.codes.length ? warnDetails.codes.join("\n") : "";
-            }
-            if (added > 0) {
-                setSam3RecipeStatus(`Recipe applied: added ${added} ${datasetType === "seg" ? "polygons" : "boxes"} to ${outputClassName}.${warnText}`, warnList.length ? "warn" : "success");
-            } else {
-                setSam3RecipeStatus(`Recipe applied: no detections.${warnText}`, warnList.length ? "warn" : "warn");
-            }
-	        } catch (err) {
-	            console.error("Recipe apply failed", err);
-	            setSam3RecipeStatus(`Recipe failed: ${err.message || err}`, "error");
-	        } finally {
-	            completeTask(recipeTaskId);
-	            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = false;
-	        }
-	    }
-
     function refreshSam3SimilarityVisibility() {
         const row = sam3TextElements.similarityRow;
         const btn = sam3TextElements.similarityButton;
@@ -16917,7 +18512,8 @@ function initQwenTrainingTab() {
         const busy = sam3TextRequestActive
             || sam3SimilarityRequestActive
             || sam3TextBatchActive
-            || sam3TextCascadeActive;
+            || sam3TextCascadeActive
+            || sam3AgentApplyActive;
         const blocked = busy || locked;
         setButtonDisabled(sam3TextElements.runButton, blocked);
         setButtonDisabled(sam3TextElements.similarityButton, blocked);
@@ -16925,11 +18521,13 @@ function initQwenTrainingTab() {
         setButtonDisabled(sam3TextElements.cascadeAddButton, blocked);
         setButtonDisabled(sam3TextElements.cascadeRunButton, blocked);
         setButtonDisabled(sam3TextElements.cascadeClearButton, blocked);
-        setButtonDisabled(sam3TextElements.cascadeStopButton, !sam3TextCascadeActive);
+        // Disable repeated stop clicks once cancellation is already requested.
+        setButtonDisabled(sam3TextElements.cascadeStopButton, !sam3TextCascadeActive || sam3TextCascadeCancel);
         setButtonDisabled(sam3TextElements.batchRunButton, blocked);
         setButtonDisabled(sam3TextElements.batchCountInput, blocked);
         setButtonDisabled(sam3TextElements.batchIncludeCurrentToggle, blocked);
-        setButtonDisabled(sam3TextElements.batchStopButton, !sam3TextBatchActive);
+        // Disable repeated stop clicks once cancellation is already requested.
+        setButtonDisabled(sam3TextElements.batchStopButton, !sam3TextBatchActive || sam3TextBatchCancel);
         if (sam3TextElements.runButton) {
             sam3TextElements.runButton.textContent = busy ? "Running…" : (locked ? "Run SAM3 (GPU locked)" : "Run SAM3");
         }
@@ -17056,44 +18654,6 @@ function initQwenTrainingTab() {
         renderSam3CascadeSteps();
     }
 
-    function updateSam3RecipeOverrideOptions({ resetOverride = false, preserveSelection = true } = {}) {
-        if (!sam3RecipeElements.overrideSelect) {
-            return;
-        }
-        const select = sam3RecipeElements.overrideSelect;
-        const classNames = orderedClassNames();
-        const enabled = Boolean(sam3RecipeElements.overrideToggle?.checked);
-        select.innerHTML = "";
-        if (!classNames.length) {
-            const placeholder = document.createElement("option");
-            placeholder.textContent = "Load classes first";
-            placeholder.value = "";
-            select.appendChild(placeholder);
-            select.disabled = true;
-            return;
-        }
-        const previousValue = preserveSelection ? select.value : null;
-        classNames.forEach((name) => {
-            const option = document.createElement("option");
-            option.value = name;
-            option.textContent = name;
-            select.appendChild(option);
-        });
-        let targetValue = null;
-        if (preserveSelection && previousValue && classNames.includes(previousValue)) {
-            targetValue = previousValue;
-        } else if (currentClass && classNames.includes(currentClass)) {
-            targetValue = currentClass;
-        } else {
-            targetValue = classNames[0];
-        }
-        select.value = targetValue;
-        if (resetOverride && classNames.length) {
-            select.value = targetValue;
-        }
-        select.disabled = !enabled;
-    }
-
     function updateQwenRunButton() {
         if (!qwenElements.runButton) {
             return;
@@ -17117,7 +18677,8 @@ function initQwenTrainingTab() {
             qwenElements.captionBatchRunAll.disabled = locked || !qwenAvailable || busy;
         }
         if (qwenElements.captionBatchCancel) {
-            qwenElements.captionBatchCancel.disabled = !busy;
+            // Once cancellation is requested, keep cancel button disabled until the batch fully unwinds.
+            qwenElements.captionBatchCancel.disabled = !qwenCaptionBatchActive || qwenCaptionBatchCancel;
         }
     }
 
@@ -17174,7 +18735,7 @@ function initQwenTrainingTab() {
                 if (Array.isArray(parsed)) {
                     return parsed.map((item) => String(item || "").trim()).filter(Boolean);
                 }
-            } catch (error) {
+            } catch {
                 // Fall back to newline parsing.
             }
         }
@@ -17291,21 +18852,37 @@ function initQwenTrainingTab() {
         if (!qwenElements.statusLabel) {
             return;
         }
+        if (qwenStatusRefreshInFlight) {
+            qwenStatusRefreshNeedsRefresh = true;
+            if (!silent) {
+                qwenStatusRefreshNeedsVisible = true;
+            }
+            return;
+        }
+        const requestId = qwenStatusRefreshRequestId + 1;
+        qwenStatusRefreshRequestId = requestId;
+        qwenStatusRefreshInFlight = true;
         if (!silent) {
             setQwenStatusLabel("Checking…", "info");
         }
         qwenAvailable = false;
         updateQwenRunButton();
         updateQwenCaptionButton();
+        let timeout = null;
         try {
             const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 6000);
+            timeout = setTimeout(() => controller.abort(), 6000);
             const resp = await fetch(`${API_ROOT}/qwen/status`, { signal: controller.signal });
-            clearTimeout(timeout);
+            if (requestId !== qwenStatusRefreshRequestId) {
+                return;
+            }
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const data = await resp.json();
+            if (requestId !== qwenStatusRefreshRequestId) {
+                return;
+            }
             if (data.available && !data.dependency_error) {
                 qwenAvailable = true;
                 const deviceLabel = data.device ? ` (${data.device})` : "";
@@ -17320,12 +18897,32 @@ function initQwenTrainingTab() {
                 setQwenStatusLabel("Disabled", "error");
             }
         } catch (error) {
+            if (requestId !== qwenStatusRefreshRequestId) {
+                return;
+            }
+            console.debug("Qwen status refresh failed", error);
             setQwenStatusLabel("Unavailable", "error");
             qwenAvailable = false;
         } finally {
+            if (timeout !== null) {
+                clearTimeout(timeout);
+            }
+            qwenStatusRefreshInFlight = false;
+            // Keep button/status state bound to the latest refresh call only.
+            if (requestId !== qwenStatusRefreshRequestId) {
+                return;
+            }
             updateQwenRunButton();
             updateQwenCaptionButton();
             updateQwenAgentButtons();
+            if (qwenStatusRefreshNeedsRefresh) {
+                const nextSilent = !qwenStatusRefreshNeedsVisible;
+                qwenStatusRefreshNeedsRefresh = false;
+                qwenStatusRefreshNeedsVisible = false;
+                refreshQwenStatus({ silent: nextSilent }).catch((err) => {
+                    console.error("Queued Qwen status refresh failed", err);
+                });
+            }
         }
     }
 
@@ -17335,6 +18932,12 @@ function initQwenTrainingTab() {
         }
         qwenModelElements.status.textContent = message || "";
         qwenModelElements.status.className = variant ? `qwen-model-status ${variant}` : "qwen-model-status";
+    }
+
+    function updateQwenModelButtons() {
+        if (qwenModelElements.refreshButton) {
+            qwenModelElements.refreshButton.disabled = qwenModelState.refreshInFlight || qwenModelState.activateInFlight;
+        }
     }
 
     function applyActiveQwenMetadata(metadata) {
@@ -17369,15 +18972,21 @@ function initQwenTrainingTab() {
         const maxPixelsValue = Number(metadata.max_pixels);
         const minPixels = Number.isFinite(minPixelsValue) && minPixelsValue > 0 ? minPixelsValue : 12544;
         const maxPixels = Number.isFinite(maxPixelsValue) && maxPixelsValue > 0 ? maxPixelsValue : 451584;
+        const safeName = escapeHtml(metadata.label || metadata.id || "Custom Run");
+        const safeBaseModel = escapeHtml(metadata.model_id || "Qwen/Qwen3-VL-4B-Instruct");
+        const safeFamily = escapeHtml(familyLabel);
+        const safeContext = escapeHtml(context);
+        const safeClasses = escapeHtml(classes);
+        const safePrompt = escapeHtml(metadata.system_prompt || "");
         qwenModelElements.details.innerHTML = `
-            <p><strong>Name:</strong> ${metadata.label || metadata.id || "Custom Run"}</p>
-            <p><strong>Base model:</strong> ${metadata.model_id || "Qwen/Qwen3-VL-4B-Instruct"}</p>
-            <p><strong>Model family:</strong> ${familyLabel}</p>
-            <p><strong>Context hint:</strong> ${context}</p>
-            <p><strong>Classes:</strong> ${classes}</p>
+            <p><strong>Name:</strong> ${safeName}</p>
+            <p><strong>Base model:</strong> ${safeBaseModel}</p>
+            <p><strong>Model family:</strong> ${safeFamily}</p>
+            <p><strong>Context hint:</strong> ${safeContext}</p>
+            <p><strong>Classes:</strong> ${safeClasses}</p>
             <p><strong>Pixel budget:</strong> ${minPixels}–${maxPixels}</p>
             <label>System prompt</label>
-            <pre>${metadata.system_prompt || ""}</pre>
+            <pre>${safePrompt}</pre>
         `;
     }
 
@@ -17407,11 +19016,15 @@ function initQwenTrainingTab() {
                 card.classList.add("legacy");
             }
             button.textContent = entry.active ? "Active" : isLegacy ? "Legacy" : "Activate";
-            button.disabled = !!entry.active || isLegacy;
+            button.disabled = !!entry.active || isLegacy || qwenModelState.activateInFlight || qwenModelState.refreshInFlight;
             if (isLegacy) {
                 button.title = "Legacy Qwen2.5 checkpoints stay on disk but cannot be activated.";
             } else {
-                button.addEventListener("click", () => activateQwenModel(entry.id));
+                button.addEventListener("click", () => {
+                    activateQwenModel(entry.id).catch((error) => {
+                        console.error("Qwen model activation failed", error);
+                    });
+                });
             }
             card.appendChild(button);
             qwenModelElements.list.appendChild(card);
@@ -17419,10 +19032,17 @@ function initQwenTrainingTab() {
     }
 
     async function refreshQwenModels() {
-        setQwenModelStatus("Loading models…", "info");
-        if (qwenModelElements.refreshButton) {
-            qwenModelElements.refreshButton.disabled = true;
+        if (qwenModelState.refreshInFlight) {
+            // Coalesce repeated refresh clicks while one request is active.
+            qwenModelState.refreshNeedsRefresh = true;
+            return;
         }
+        const requestId = qwenModelState.refreshRequestId + 1;
+        qwenModelState.refreshRequestId = requestId;
+        qwenModelState.refreshInFlight = true;
+        renderQwenModelList();
+        updateQwenModelButtons();
+        setQwenModelStatus("Loading models…", "info");
         try {
             const resp = await fetch(`${API_ROOT}/qwen/models`);
             if (!resp.ok) {
@@ -17430,6 +19050,10 @@ function initQwenTrainingTab() {
                 throw new Error(text || `HTTP ${resp.status}`);
             }
             const data = await resp.json();
+            // Ignore late refresh responses that no longer reflect the latest UI request.
+            if (requestId !== qwenModelState.refreshRequestId) {
+                return;
+            }
             qwenModelState.models = data.models || [];
             qwenModelState.activeId = data.active || "default";
             const activeEntry = qwenModelState.models.find((entry) => entry.id === qwenModelState.activeId);
@@ -17438,16 +19062,33 @@ function initQwenTrainingTab() {
             renderQwenModelDetails(activeEntry?.metadata || null);
             setQwenModelStatus("Models loaded.", "success");
         } catch (error) {
+            if (requestId !== qwenModelState.refreshRequestId) {
+                return;
+            }
             console.error("Failed to load Qwen models", error);
             setQwenModelStatus(`Failed to load models: ${error.message || error}`, "error");
         } finally {
-            if (qwenModelElements.refreshButton) {
-                qwenModelElements.refreshButton.disabled = false;
+            if (requestId === qwenModelState.refreshRequestId) {
+                qwenModelState.refreshInFlight = false;
+                renderQwenModelList();
+                updateQwenModelButtons();
+                if (qwenModelState.refreshNeedsRefresh) {
+                    qwenModelState.refreshNeedsRefresh = false;
+                    refreshQwenModels().catch((err) => {
+                        console.error("Queued Qwen model refresh failed", err);
+                    });
+                }
             }
         }
     }
 
     async function activateQwenModel(modelId) {
+        if (qwenModelState.activateInFlight) {
+            return;
+        }
+        qwenModelState.activateInFlight = true;
+        renderQwenModelList();
+        updateQwenModelButtons();
         setQwenModelStatus("Switching models…", "info");
         try {
             const resp = await fetch(`${API_ROOT}/qwen/models/activate`, {
@@ -17464,11 +19105,18 @@ function initQwenTrainingTab() {
         } catch (error) {
             console.error("Failed to activate Qwen model", error);
             setQwenModelStatus(`Activation failed: ${error.message || error}`, "error");
+        } finally {
+            qwenModelState.activateInFlight = false;
+            renderQwenModelList();
+            updateQwenModelButtons();
         }
     }
 
     function initQwenModelTab() {
         if (qwenModelElements.status) {
+            refreshQwenModels().catch((error) => {
+                console.error("Failed to refresh Qwen models", error);
+            });
             return;
         }
         qwenModelElements.status = document.getElementById("qwenModelStatus");
@@ -17477,10 +19125,15 @@ function initQwenTrainingTab() {
         qwenModelElements.refreshButton = document.getElementById("qwenModelRefreshBtn");
         if (qwenModelElements.refreshButton) {
             qwenModelElements.refreshButton.addEventListener("click", () => {
-                refreshQwenModels();
+                refreshQwenModels().catch((error) => {
+                    console.error("Failed to refresh Qwen models", error);
+                });
             });
         }
-        refreshQwenModels();
+        updateQwenModelButtons();
+        refreshQwenModels().catch((error) => {
+            console.error("Failed to load Qwen models", error);
+        });
     }
 
     async function handleQwenRun() {
@@ -17516,6 +19169,7 @@ function initQwenTrainingTab() {
             maxResults = 8;
         }
         maxResults = Math.min(Math.max(maxResults, 1), 50);
+        const requestImageName = currentImage.name;
         qwenRequestActive = true;
         updateQwenRunButton();
         setSamStatus(`Running Qwen (${promptType === "point" ? "points" : "bbox"}) for ${targetClass}…`, { variant: "info", duration: 0 });
@@ -17523,7 +19177,11 @@ function initQwenTrainingTab() {
             if (qwenElements.unloadOthers?.checked) {
                 setSamStatus("Unloading other models before Qwen run…", { variant: "info", duration: 2000 });
                 try {
-                    await fetch(`${API_ROOT}/runtime/unload`, { method: "POST" });
+                    const unloadResp = await fetch(`${API_ROOT}/runtime/unload`, { method: "POST" });
+                    if (!unloadResp.ok) {
+                        const detail = await unloadResp.text();
+                        throw new Error(detail || `HTTP ${unloadResp.status}`);
+                    }
                 } catch (error) {
                     console.warn("Failed to unload other runtimes", error);
                 }
@@ -17546,8 +19204,16 @@ function initQwenTrainingTab() {
                 }
             }
             const result = await invokeQwenInfer(requestFields);
-            if (currentImage && result?.image_token) {
-                rememberSamToken(currentImage.name, samVariant, result.image_token);
+            if (requestImageName && result?.image_token) {
+                rememberSamToken(requestImageName, samVariant, result.image_token);
+            }
+            // Prevent cross-image writes if the user navigated during async Qwen call.
+            if (!currentImage || currentImage.name !== requestImageName) {
+                setSamStatus(
+                    `Qwen finished for ${requestImageName}, but view switched; skipped apply.`,
+                    { variant: "warn", duration: 4000 },
+                );
+                return;
             }
             const added = applyQwenBoxes(result?.boxes || [], targetClass);
             if (!added) {
@@ -17573,7 +19239,8 @@ function initQwenTrainingTab() {
         const hints = [];
         const buckets = bboxes[imageName];
         Object.keys(buckets).forEach((className) => {
-            (buckets[className] || []).forEach((bboxRecord) => {
+            const classBoxes = Array.isArray(buckets[className]) ? buckets[className] : [];
+            classBoxes.forEach((bboxRecord) => {
                 if (!bboxRecord) {
                     return;
                 }
@@ -17611,13 +19278,6 @@ function initQwenTrainingTab() {
         return hints;
     }
 
-    function collectCaptionLabelHints() {
-        if (!currentImage || !currentImage.name) {
-            return [];
-        }
-        return collectCaptionLabelHintsForImage(currentImage.name);
-    }
-
     async function invokeQwenCaption(requestFields) {
         if (!currentImage) {
             throw new Error("No active image");
@@ -17625,7 +19285,11 @@ function initQwenTrainingTab() {
         const imageNameForRequest = currentImage.name;
         const variantForRequest = samVariant;
         const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
-        let payload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
+        let payload = await buildSamImagePayload({
+            variantOverride: variantForRequest,
+            preferredToken: preloadToken,
+            imageNameOverride: imageNameForRequest,
+        });
         if (imageNameForRequest && !payload.image_name) {
             payload.image_name = imageNameForRequest;
         }
@@ -17636,7 +19300,12 @@ function initQwenTrainingTab() {
             body: JSON.stringify({ ...requestFields, ...payload }),
         });
         if (resp.status === 428) {
-            payload = await buildSamImagePayload({ forceBase64: true, variantOverride: variantForRequest, preferredToken: preloadToken });
+            payload = await buildSamImagePayload({
+                forceBase64: true,
+                variantOverride: variantForRequest,
+                preferredToken: preloadToken,
+                imageNameOverride: imageNameForRequest,
+            });
             if (imageNameForRequest && !payload.image_name) {
                 payload.image_name = imageNameForRequest;
             }
@@ -17766,6 +19435,16 @@ function initQwenTrainingTab() {
         return String(selected || "").trim();
     }
 
+    function ensureCaptionLabelStoreForDataset(datasetId) {
+        const key = String(datasetId || "").trim();
+        if (textLabelsDatasetId === key) {
+            return;
+        }
+        textLabels = {};
+        textLabelsDatasetId = key;
+        captionAutoSaveState.lastSaved.clear();
+    }
+
     function getCaptionDatasetEntry() {
         const id = getCaptionDatasetId();
         if (!id) {
@@ -17796,10 +19475,25 @@ function initQwenTrainingTab() {
         }
     }
 
+    function updateQwenCaptionDatasetRefreshButton() {
+        if (qwenElements.captionDatasetRefresh) {
+            // Keep refresh disabled while a fetch is active to prevent overlap races.
+            qwenElements.captionDatasetRefresh.disabled = qwenCaptionDatasetRefreshInFlight;
+        }
+    }
+
     async function refreshQwenCaptionDatasets(options = {}) {
         if (!qwenElements.captionDatasetSelect) {
             return;
         }
+        if (qwenCaptionDatasetRefreshInFlight) {
+            qwenCaptionDatasetRefreshNeedsRefresh = true;
+            return;
+        }
+        qwenCaptionDatasetRefreshInFlight = true;
+        updateQwenCaptionDatasetRefreshButton();
+        const requestId = qwenCaptionDatasetState.refreshRequestId + 1;
+        qwenCaptionDatasetState.refreshRequestId = requestId;
         if (!options.silent) {
             qwenElements.captionDatasetSummary.textContent = "Refreshing datasets…";
         }
@@ -17811,6 +19505,9 @@ function initQwenTrainingTab() {
                 throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
             }
             const data = await resp.json();
+            if (requestId !== qwenCaptionDatasetState.refreshRequestId) {
+                return;
+            }
             qwenCaptionDatasetState.items = Array.isArray(data) ? data : [];
             const previous = getCaptionDatasetId();
             qwenElements.captionDatasetSelect.innerHTML = "";
@@ -17834,18 +19531,32 @@ function initQwenTrainingTab() {
             } else {
                 qwenCaptionDatasetState.selectedId = "";
             }
+            ensureCaptionLabelStoreForDataset(qwenCaptionDatasetState.selectedId || "");
             updateCaptionDatasetSummary();
             updateQwenCaptionButton();
             if (!options.silent) {
                 setSamStatus("Caption datasets refreshed.", { variant: "success", duration: 2500 });
             }
         } catch (error) {
+            if (requestId !== qwenCaptionDatasetState.refreshRequestId) {
+                return;
+            }
             if (!options.silent) {
                 setSamStatus(`Failed to refresh datasets: ${error.message || error}`, { variant: "error", duration: 4000 });
             }
             console.error("Failed to refresh caption datasets", error);
         } finally {
-            qwenElements.captionDatasetSelect.disabled = false;
+            qwenCaptionDatasetRefreshInFlight = false;
+            updateQwenCaptionDatasetRefreshButton();
+            if (requestId === qwenCaptionDatasetState.refreshRequestId) {
+                qwenElements.captionDatasetSelect.disabled = false;
+                if (qwenCaptionDatasetRefreshNeedsRefresh) {
+                    qwenCaptionDatasetRefreshNeedsRefresh = false;
+                    refreshQwenCaptionDatasets({ silent: true }).catch((error) => {
+                        console.error("Queued caption dataset refresh failed", error);
+                    });
+                }
+            }
         }
     }
 
@@ -17882,10 +19593,28 @@ function initQwenTrainingTab() {
         }
     }
 
+    function updateQwenAgentDatasetRefreshButtons() {
+        const disabled = qwenAgentDatasetRefreshInFlight;
+        if (qwenElements.agentDatasetRefresh) {
+            qwenElements.agentDatasetRefresh.disabled = disabled;
+        }
+        if (qwenElements.calibrationDatasetRefresh) {
+            qwenElements.calibrationDatasetRefresh.disabled = disabled;
+        }
+    }
+
     async function refreshQwenAgentDatasets(options = {}) {
         if (!qwenElements.agentDatasetSelect) {
             return;
         }
+        if (qwenAgentDatasetRefreshInFlight) {
+            qwenAgentDatasetRefreshNeedsRefresh = true;
+            return;
+        }
+        qwenAgentDatasetRefreshInFlight = true;
+        updateQwenAgentDatasetRefreshButtons();
+        const requestId = qwenAgentDatasetState.refreshRequestId + 1;
+        qwenAgentDatasetState.refreshRequestId = requestId;
         if (!options.silent) {
             qwenElements.agentDatasetSummary.textContent = "Refreshing datasets…";
         }
@@ -17897,6 +19626,9 @@ function initQwenTrainingTab() {
                 throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
             }
             const data = await resp.json();
+            if (requestId !== qwenAgentDatasetState.refreshRequestId) {
+                return;
+            }
             qwenAgentDatasetState.items = Array.isArray(data) ? data : [];
             const previous = getQwenAgentDatasetId();
             qwenElements.agentDatasetSelect.innerHTML = "";
@@ -17939,17 +19671,32 @@ function initQwenTrainingTab() {
                 qwenAgentDatasetState.selectedId = "";
             }
             updateQwenAgentDatasetSummary();
-            await loadQwenAgentGlossary().catch(() => {});
+            await loadQwenAgentGlossary().catch((error) => {
+                console.debug("Failed to load agent glossary after dataset refresh", error);
+            });
             if (!options.silent) {
                 setSamStatus("Agent datasets refreshed.", { variant: "success", duration: 2500 });
             }
         } catch (error) {
+            if (requestId !== qwenAgentDatasetState.refreshRequestId) {
+                return;
+            }
             if (!options.silent) {
                 setSamStatus(`Failed to refresh agent datasets: ${error.message || error}`, { variant: "error", duration: 4000 });
             }
             console.error("Failed to refresh agent datasets", error);
         } finally {
-            qwenElements.agentDatasetSelect.disabled = false;
+            qwenAgentDatasetRefreshInFlight = false;
+            updateQwenAgentDatasetRefreshButtons();
+            if (requestId === qwenAgentDatasetState.refreshRequestId) {
+                qwenElements.agentDatasetSelect.disabled = false;
+                if (qwenAgentDatasetRefreshNeedsRefresh) {
+                    qwenAgentDatasetRefreshNeedsRefresh = false;
+                    refreshQwenAgentDatasets({ silent: true }).catch((error) => {
+                        console.error("Queued agent dataset refresh failed", error);
+                    });
+                }
+            }
         }
     }
 
@@ -17972,13 +19719,17 @@ function initQwenTrainingTab() {
         } else {
             qwenElements.agentGlossary.placeholder = "Paste JSON: {\"light_vehicle\": [\"car\", \"sedan\"], ... }";
         }
-        loadQwenAgentGlossary().catch(() => {});
+        loadQwenAgentGlossary().catch((error) => {
+            console.debug("Failed to load agent glossary", error);
+        });
     }
 
     async function loadQwenAgentGlossary() {
         if (!qwenElements.agentGlossarySource || !qwenElements.agentGlossary) {
             return;
         }
+        const requestId = qwenAgentGlossaryLoadRequestId + 1;
+        qwenAgentGlossaryLoadRequestId = requestId;
         const mode = qwenElements.agentGlossarySource.value || "dataset";
         if (mode === "custom") {
             return;
@@ -17986,15 +19737,37 @@ function initQwenTrainingTab() {
         if (mode === "library") {
             const name = qwenElements.agentGlossarySelect?.value || "";
             if (!name) {
-                qwenElements.agentGlossary.value = "";
+                if (
+                    requestId === qwenAgentGlossaryLoadRequestId
+                    && (qwenElements.agentGlossarySource?.value || "dataset") === "library"
+                    && !(qwenElements.agentGlossarySelect?.value || "")
+                ) {
+                    qwenElements.agentGlossary.value = "";
+                }
                 return;
             }
-            await loadGlossaryLibraryEntry(name, qwenElements.agentGlossary);
+            const glossary = await loadGlossaryLibraryEntry(name, null);
+            if (requestId !== qwenAgentGlossaryLoadRequestId) {
+                return;
+            }
+            if ((qwenElements.agentGlossarySource?.value || "dataset") !== "library") {
+                return;
+            }
+            if ((qwenElements.agentGlossarySelect?.value || "") !== name) {
+                return;
+            }
+            qwenElements.agentGlossary.value = glossary || "";
             return;
         }
         const datasetId = getQwenAgentDatasetId();
         if (!datasetId) {
-            qwenElements.agentGlossary.value = "";
+            if (
+                requestId === qwenAgentGlossaryLoadRequestId
+                && (qwenElements.agentGlossarySource?.value || "dataset") === "dataset"
+                && !getQwenAgentDatasetId()
+            ) {
+                qwenElements.agentGlossary.value = "";
+            }
             return;
         }
         const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/glossary`);
@@ -18003,6 +19776,15 @@ function initQwenTrainingTab() {
             throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
         }
         const data = await resp.json();
+        if (requestId !== qwenAgentGlossaryLoadRequestId) {
+            return;
+        }
+        if ((qwenElements.agentGlossarySource?.value || "dataset") !== "dataset") {
+            return;
+        }
+        if (getQwenAgentDatasetId() !== datasetId) {
+            return;
+        }
         qwenElements.agentGlossary.value = data?.glossary || "";
     }
 
@@ -18010,10 +19792,27 @@ function initQwenTrainingTab() {
         if (!qwenElements.agentClassifierId) {
             return;
         }
+        if (qwenAgentClassifierRefreshInFlight) {
+            qwenAgentClassifierRefreshNeedsRefresh = true;
+            if (selectedPath !== undefined && selectedPath !== null) {
+                qwenAgentClassifierRefreshPendingPath = selectedPath || "";
+            }
+            return;
+        }
+        qwenAgentClassifierRefreshInFlight = true;
+        if (qwenElements.agentClassifierRefresh) {
+            qwenElements.agentClassifierRefresh.disabled = true;
+        }
+        const requestId = qwenAgentClassifierRefreshRequestId + 1;
+        qwenAgentClassifierRefreshRequestId = requestId;
         try {
             const resp = await fetch(`${API_ROOT}/clip/classifiers`);
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
+            // Ignore stale refreshes if a newer classifier-list request exists.
+            if (requestId !== qwenAgentClassifierRefreshRequestId) {
+                return;
+            }
             const list = Array.isArray(data) ? data : [];
             qwenElements.agentClassifierId.innerHTML = "";
             const empty = document.createElement("option");
@@ -18045,7 +19844,23 @@ function initQwenTrainingTab() {
                 qwenElements.agentClassifierId.value = preferred;
             }
         } catch (error) {
+            if (requestId !== qwenAgentClassifierRefreshRequestId) {
+                return;
+            }
             console.warn("Failed to refresh agent classifiers", error);
+        } finally {
+            qwenAgentClassifierRefreshInFlight = false;
+            if (qwenElements.agentClassifierRefresh) {
+                qwenElements.agentClassifierRefresh.disabled = false;
+            }
+            if (qwenAgentClassifierRefreshNeedsRefresh) {
+                const pendingPath = qwenAgentClassifierRefreshPendingPath || "";
+                qwenAgentClassifierRefreshNeedsRefresh = false;
+                qwenAgentClassifierRefreshPendingPath = "";
+                refreshQwenAgentClassifiers(pendingPath).catch((error) => {
+                    console.error("Queued agent classifier refresh failed", error);
+                });
+            }
         }
     }
 
@@ -18053,12 +19868,29 @@ function initQwenTrainingTab() {
         if (!qwenElements.agentEnsembleJob) {
             return;
         }
+        if (qwenAgentEnsembleRefreshInFlight) {
+            qwenAgentEnsembleRefreshNeedsRefresh = true;
+            if (selectedId !== undefined && selectedId !== null) {
+                qwenAgentEnsembleRefreshPendingId = selectedId || "";
+            }
+            return;
+        }
+        qwenAgentEnsembleRefreshInFlight = true;
+        if (qwenElements.agentEnsembleRefresh) {
+            qwenElements.agentEnsembleRefresh.disabled = true;
+        }
+        const requestId = qwenAgentEnsembleRefreshRequestId + 1;
+        qwenAgentEnsembleRefreshRequestId = requestId;
         try {
             const resp = await fetch(`${API_ROOT}/calibration/jobs`);
             if (!resp.ok) {
                 throw new Error(await resp.text());
             }
             const jobs = await resp.json();
+            // Ignore stale refreshes if a newer ensemble-job request exists.
+            if (requestId !== qwenAgentEnsembleRefreshRequestId) {
+                return;
+            }
             const list = Array.isArray(jobs) ? jobs : [];
             qwenElements.agentEnsembleJob.innerHTML = "";
             const empty = document.createElement("option");
@@ -18082,7 +19914,23 @@ function initQwenTrainingTab() {
                 qwenElements.agentEnsembleJob.value = preferred;
             }
         } catch (error) {
+            if (requestId !== qwenAgentEnsembleRefreshRequestId) {
+                return;
+            }
             console.warn("Failed to refresh calibration MLP jobs", error);
+        } finally {
+            qwenAgentEnsembleRefreshInFlight = false;
+            if (qwenElements.agentEnsembleRefresh) {
+                qwenElements.agentEnsembleRefresh.disabled = false;
+            }
+            if (qwenAgentEnsembleRefreshNeedsRefresh) {
+                const pendingId = qwenAgentEnsembleRefreshPendingId || "";
+                qwenAgentEnsembleRefreshNeedsRefresh = false;
+                qwenAgentEnsembleRefreshPendingId = "";
+                refreshQwenAgentEnsembleJobs(pendingId).catch((error) => {
+                    console.error("Queued ensemble job refresh failed", error);
+                });
+            }
         }
     }
 
@@ -18090,14 +19938,24 @@ function initQwenTrainingTab() {
         if (!selectEl) {
             return;
         }
+        const modeKey = mode === "yolo" ? "yolo" : "rfdetr";
+        const requestId = (qwenAgentDetectorRunRefreshRequestId[modeKey] || 0) + 1;
+        qwenAgentDetectorRunRefreshRequestId[modeKey] = requestId;
         const active = mode === "yolo" ? detectorState.yoloActive : detectorState.rfdetrActive;
         const activeName = active?.run_name || active?.run_id;
         let runs = [];
         try {
             runs = await fetchDetectorRuns(mode);
         } catch (error) {
+            if ((qwenAgentDetectorRunRefreshRequestId[modeKey] || 0) !== requestId) {
+                return;
+            }
             console.warn(`Failed to refresh agent ${mode} detector runs`, error);
             runs = [];
+        }
+        // Ignore stale refreshes if a newer request exists for this detector mode.
+        if ((qwenAgentDetectorRunRefreshRequestId[modeKey] || 0) !== requestId) {
+            return;
         }
         selectEl.innerHTML = "";
         const empty = document.createElement("option");
@@ -18118,12 +19976,50 @@ function initQwenTrainingTab() {
     }
 
     async function refreshQwenAgentDetectorRuns(selectedId) {
-        await refreshQwenAgentDetectorRunsFor("yolo", qwenElements.agentYoloRun, selectedId?.yolo);
-        await refreshQwenAgentDetectorRunsFor("rfdetr", qwenElements.agentRfdetrRun, selectedId?.rfdetr);
+        if (qwenAgentDetectorRefreshInFlight) {
+            qwenAgentDetectorRefreshNeedsRefresh = true;
+            if (selectedId && typeof selectedId === "object") {
+                qwenAgentDetectorRefreshPendingSelected = { ...selectedId };
+            }
+            return;
+        }
+        qwenAgentDetectorRefreshInFlight = true;
+        if (qwenElements.agentDetectorRefresh) {
+            qwenElements.agentDetectorRefresh.disabled = true;
+        }
+        if (qwenElements.agentYoloRun) {
+            qwenElements.agentYoloRun.disabled = true;
+        }
+        if (qwenElements.agentRfdetrRun) {
+            qwenElements.agentRfdetrRun.disabled = true;
+        }
+        try {
+            await refreshQwenAgentDetectorRunsFor("yolo", qwenElements.agentYoloRun, selectedId?.yolo);
+            await refreshQwenAgentDetectorRunsFor("rfdetr", qwenElements.agentRfdetrRun, selectedId?.rfdetr);
+        } finally {
+            qwenAgentDetectorRefreshInFlight = false;
+            if (qwenElements.agentDetectorRefresh) {
+                qwenElements.agentDetectorRefresh.disabled = false;
+            }
+            if (qwenElements.agentYoloRun) {
+                qwenElements.agentYoloRun.disabled = false;
+            }
+            if (qwenElements.agentRfdetrRun) {
+                qwenElements.agentRfdetrRun.disabled = false;
+            }
+            if (qwenAgentDetectorRefreshNeedsRefresh) {
+                const pending = qwenAgentDetectorRefreshPendingSelected;
+                qwenAgentDetectorRefreshNeedsRefresh = false;
+                qwenAgentDetectorRefreshPendingSelected = null;
+                refreshQwenAgentDetectorRuns(pending || undefined).catch((error) => {
+                    console.error("Queued detector run refresh failed", error);
+                });
+            }
+        }
     }
 
-    async function loadCaptionForImage(imageName) {
-        const datasetId = getCaptionDatasetId();
+    async function loadCaptionForImage(imageName, datasetIdOverride = null) {
+        const datasetId = datasetIdOverride || getCaptionDatasetId();
         if (!datasetId || !imageName) {
             return null;
         }
@@ -18144,6 +20040,7 @@ function initQwenTrainingTab() {
         if (!datasetId) {
             return;
         }
+        ensureCaptionLabelStoreForDataset(datasetId);
         const imageNames = Object.keys(images || {});
         if (!imageNames.length) {
             return;
@@ -18157,7 +20054,7 @@ function initQwenTrainingTab() {
                 continue;
             }
             try {
-                const caption = await loadCaptionForImage(imageName);
+                const caption = await loadCaptionForImage(imageName, datasetId);
                 if (caption) {
                     textLabels[imageName] = caption;
                 }
@@ -18176,37 +20073,47 @@ function initQwenTrainingTab() {
         if (!qwenElements.captionOutput || !currentImage?.name) {
             return;
         }
+        const imageName = currentImage.name;
         const datasetId = getCaptionDatasetId();
+        ensureCaptionLabelStoreForDataset(datasetId || "");
         if (!datasetId) {
-            const localCaption = textLabels?.[currentImage.name] || "";
+            const localCaption = textLabels?.[imageName] || "";
             qwenElements.captionOutput.value = localCaption;
             return;
         }
         try {
-            let caption = await loadCaptionForImage(currentImage.name);
-            if (!caption && textLabels?.[currentImage.name]) {
-                caption = textLabels[currentImage.name];
+            let caption = await loadCaptionForImage(imageName, datasetId);
+            // Ignore stale caption loads when user switched image/dataset mid-request.
+            if ((currentImage?.name || "") !== imageName) {
+                return;
+            }
+            if ((getCaptionDatasetId() || "") !== datasetId) {
+                return;
+            }
+            if (!caption && textLabels?.[imageName]) {
+                caption = textLabels[imageName];
             }
             qwenElements.captionOutput.value = caption || "";
             if (caption && textLabels) {
-                textLabels[currentImage.name] = caption;
+                textLabels[imageName] = caption;
             }
-            captionAutoSaveState.lastSaved.set(currentImage.name, caption || "");
+            captionAutoSaveState.lastSaved.set(imageName, caption || "");
         } catch (error) {
             console.warn("Failed to load caption label", error);
         }
     }
 
-    async function captionExistsForImage(imageName) {
+    async function captionExistsForImage(imageName, datasetIdOverride = null) {
+        const datasetId = datasetIdOverride || getCaptionDatasetId();
+        ensureCaptionLabelStoreForDataset(datasetId || "");
         if (textLabels?.[imageName]) {
             return true;
         }
-        const datasetId = getCaptionDatasetId();
         if (!datasetId || !imageName) {
             return false;
         }
         try {
-            const caption = await loadCaptionForImage(imageName);
+            const caption = await loadCaptionForImage(imageName, datasetId);
             if (caption) {
                 textLabels[imageName] = caption;
             }
@@ -18217,8 +20124,8 @@ function initQwenTrainingTab() {
         }
     }
 
-    async function persistCaptionLabel(imageName, caption) {
-        const datasetId = getCaptionDatasetId();
+    async function persistCaptionLabel(imageName, caption, datasetIdOverride = null) {
+        const datasetId = datasetIdOverride || getCaptionDatasetId();
         if (!datasetId || !imageName) {
             return { skipped: true };
         }
@@ -18234,18 +20141,20 @@ function initQwenTrainingTab() {
         return resp.json();
     }
 
-    async function saveCaptionImmediate(imageName, caption) {
+    async function saveCaptionImmediate(imageName, caption, options = {}) {
         if (!imageName) {
             return;
         }
-        if (!getCaptionDatasetId()) {
+        const datasetId = (options.datasetId || getCaptionDatasetId() || "").trim();
+        ensureCaptionLabelStoreForDataset(datasetId);
+        if (!datasetId) {
             return;
         }
         const trimmed = String(caption || "").trim();
         try {
-            await persistCaptionLabel(imageName, trimmed);
+            await persistCaptionLabel(imageName, trimmed, datasetId);
             captionAutoSaveState.lastSaved.set(imageName, trimmed);
-            storeCaptionRecord(imageName, trimmed, null, { model: null }, `autosave_${Date.now()}`);
+            storeCaptionRecord(imageName, trimmed, null, { model: null, datasetId }, `autosave_${Date.now()}`);
             setQwenCaptionStatus("Saved");
         } catch (error) {
             setQwenCaptionStatus("Save failed");
@@ -18257,7 +20166,9 @@ function initQwenTrainingTab() {
         if (!qwenElements.captionSaveText?.checked) {
             return;
         }
-        if (!getCaptionDatasetId()) {
+        const datasetId = getCaptionDatasetId();
+        ensureCaptionLabelStoreForDataset(datasetId);
+        if (!datasetId) {
             setQwenCaptionStatus("Select dataset to save");
             return;
         }
@@ -18273,12 +20184,16 @@ function initQwenTrainingTab() {
         captionAutoSaveState.timerId = window.setTimeout(() => {
             captionAutoSaveState.timerId = null;
             captionAutoSaveState.pendingImage = null;
-            saveCaptionImmediate(imageName, trimmed);
+            saveCaptionImmediate(imageName, trimmed, { datasetId }).catch((error) => {
+                console.warn("Caption autosave flush failed", error);
+            });
         }, 800);
         setQwenCaptionStatus("Editing…");
     }
 
     function storeCaptionRecord(imageName, caption, result, meta, runId) {
+        const datasetId = String(meta?.datasetId || getCaptionDatasetId() || "").trim();
+        ensureCaptionLabelStoreForDataset(datasetId);
         if (!textLabels) {
             textLabels = {};
         }
@@ -18286,7 +20201,7 @@ function initQwenTrainingTab() {
         const record = {
             image: imageName,
             caption: String(caption || "").trim(),
-            dataset_id: getCaptionDatasetId() || null,
+            dataset_id: datasetId || null,
             model_id: meta?.model || null,
             variant: meta?.variant || null,
             caption_mode: meta?.captionMode || null,
@@ -18322,44 +20237,61 @@ function initQwenTrainingTab() {
             setSamStatus("Load an image before captioning", { variant: "warn", duration: 3000 });
             return;
         }
+        const requestImageName = currentImage.name;
+        const requestImageWidth = currentImage.width;
+        const requestImageHeight = currentImage.height;
         qwenCaptionActive = true;
         updateQwenCaptionButton();
         setQwenCaptionStatus("Running…");
         setSamStatus("Running Qwen caption…", { variant: "info", duration: 0 });
         try {
+            const captionDatasetId = getCaptionDatasetId();
+            ensureCaptionLabelStoreForDataset(captionDatasetId || "");
             if (qwenElements.unloadOthers?.checked) {
                 setSamStatus("Unloading other models before Qwen run…", { variant: "info", duration: 2000 });
                 try {
-                    await fetch(`${API_ROOT}/runtime/unload`, { method: "POST" });
+                    const unloadResp = await fetch(`${API_ROOT}/runtime/unload`, { method: "POST" });
+                    if (!unloadResp.ok) {
+                        const detail = await unloadResp.text();
+                        throw new Error(detail || `HTTP ${unloadResp.status}`);
+                    }
                 } catch (error) {
                     console.warn("Failed to unload other runtimes", error);
                 }
             }
-            const { requestFields, meta, hints } = buildQwenCaptionRequestFields(currentImage.name);
+            const { requestFields, meta, hints } = buildQwenCaptionRequestFields(requestImageName);
             const result = await invokeQwenCaption({
                 ...requestFields,
-                image_width: currentImage.width,
-                image_height: currentImage.height,
+                image_width: requestImageWidth,
+                image_height: requestImageHeight,
             });
-            if (qwenElements.captionOutput) {
+            // Keep UI bound to the currently viewed image; save labels against the requested image.
+            const stillViewingRequestedImage = !!currentImage && currentImage.name === requestImageName;
+            if (qwenElements.captionOutput && stillViewingRequestedImage) {
                 qwenElements.captionOutput.value = result?.caption || "";
             }
-            if (qwenElements.captionMeta) {
+            if (qwenElements.captionMeta && stillViewingRequestedImage) {
                 const countEntries = result?.used_counts || {};
                 const countSummary = Object.keys(countEntries).length
                     ? Object.entries(countEntries).map(([label, count]) => `${label}: ${count}`).join(" • ")
                     : "No label hints";
                 const truncBadge = result?.truncated ? " • summarized" : "";
                 const savedLabel = qwenElements.captionSaveText?.checked
-                    ? (getCaptionDatasetId() ? " • saved to dataset text labels" : " • saved to text labels")
+                    ? (captionDatasetId ? " • saved to dataset text labels" : " • saved to text labels")
                     : "";
                 qwenElements.captionMeta.textContent = `Hints: ${hints.length} • Used boxes: ${result?.used_boxes ?? 0}${truncBadge} • ${countSummary}${savedLabel}`;
             }
-            if (qwenElements.captionSaveText?.checked && currentImage?.name) {
-                storeCaptionRecord(currentImage.name, result?.caption || "", result, meta, `single_${Date.now()}`);
+            if (qwenElements.captionSaveText?.checked && requestImageName) {
+                storeCaptionRecord(
+                    requestImageName,
+                    result?.caption || "",
+                    result,
+                    { ...meta, datasetId: captionDatasetId || null },
+                    `single_${Date.now()}`,
+                );
                 try {
-                    await persistCaptionLabel(currentImage.name, result?.caption || "");
-                    captionAutoSaveState.lastSaved.set(currentImage.name, String(result?.caption || "").trim());
+                    await persistCaptionLabel(requestImageName, result?.caption || "", captionDatasetId || null);
+                    captionAutoSaveState.lastSaved.set(requestImageName, String(result?.caption || "").trim());
                 } catch (error) {
                     console.warn("Caption save failed", error);
                 }
@@ -18385,7 +20317,28 @@ function initQwenTrainingTab() {
         return Array.from(imageList.options || []).map((opt) => getOptionImageName(opt)).filter(Boolean);
     }
 
-    async function invokeQwenCaptionForImage(imageName, requestFields) {
+    function getNextImageBatch(count, includeCurrent = true) {
+        const imageList = document.getElementById("imageList");
+        if (!imageList || !imageList.options?.length) {
+            return [];
+        }
+        const safeCount = Number.isFinite(count) ? Math.max(1, Math.min(999, Number(count))) : 1;
+        const startIndex = Math.max(0, imageList.selectedIndex || 0);
+        const names = [];
+        for (let i = 0; i < safeCount; i += 1) {
+            const idx = includeCurrent ? startIndex + i : startIndex + i + 1;
+            if (idx >= imageList.options.length) {
+                break;
+            }
+            const name = getOptionImageName(imageList.options[idx]);
+            if (name) {
+                names.push(name);
+            }
+        }
+        return names;
+    }
+
+    async function invokeQwenCaptionForImage(imageName, requestFields, options = {}) {
         const imageRecord = images[imageName];
         if (!imageRecord) {
             throw new Error(`Unknown image: ${imageName}`);
@@ -18408,6 +20361,7 @@ function initQwenTrainingTab() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
+            signal: options.signal,
         });
         if (!resp.ok) {
             const detail = await resp.text();
@@ -18428,35 +20382,51 @@ function initQwenTrainingTab() {
         if (qwenCaptionBatchActive) {
             return;
         }
-        qwenCaptionBatchActive = true;
-        qwenCaptionBatchCancel = false;
-        updateQwenCaptionButton();
         const runId = `batch_${Date.now()}`;
         const overwrite = !!options.overwrite;
         const includeCurrent = options.includeCurrent !== false;
-        const total = imageNames.length;
+        const runnableImages = includeCurrent
+            ? imageNames.slice()
+            : imageNames.filter((name) => !currentImage || name !== currentImage.name);
+        if (!runnableImages.length) {
+            setQwenCaptionStatus("Idle");
+            setSamStatus("No images found for the selected batch range.", { variant: "warn", duration: 3000 });
+            return;
+        }
+        const runToken = qwenCaptionBatchRunToken + 1;
+        qwenCaptionBatchRunToken = runToken;
+        const abortController = new AbortController();
+        qwenCaptionBatchAbortController = abortController;
+        qwenCaptionBatchActive = true;
+        qwenCaptionBatchCancel = false;
+        updateQwenCaptionButton();
+        const total = runnableImages.length;
+        const captionDatasetId = getCaptionDatasetId();
+        ensureCaptionLabelStoreForDataset(captionDatasetId || "");
         setQwenCaptionStatus(`Batch running (0/${total})…`);
         setSamStatus("Running Qwen caption batch…", { variant: "info", duration: 0 });
         try {
             if (qwenElements.unloadOthers?.checked) {
                 setSamStatus("Unloading other models before Qwen batch…", { variant: "info", duration: 2000 });
                 try {
-                    await fetch(`${API_ROOT}/runtime/unload`, { method: "POST" });
+                    const unloadResp = await fetch(`${API_ROOT}/runtime/unload`, { method: "POST" });
+                    if (!unloadResp.ok) {
+                        const detail = await unloadResp.text();
+                        throw new Error(detail || `HTTP ${unloadResp.status}`);
+                    }
                 } catch (error) {
                     console.warn("Failed to unload other runtimes", error);
                 }
             }
             let processed = 0;
-            for (const imageName of imageNames) {
+            let failed = 0;
+            for (const imageName of runnableImages) {
                 if (qwenCaptionBatchCancel) {
                     setSamStatus("Caption batch cancelled.", { variant: "warn", duration: 3000 });
                     break;
                 }
-                if (!includeCurrent && currentImage?.name === imageName) {
-                    continue;
-                }
                 if (!overwrite) {
-                    const exists = await captionExistsForImage(imageName);
+                    const exists = await captionExistsForImage(imageName, captionDatasetId || null);
                     if (exists) {
                         processed += 1;
                         setQwenCaptionStatus(`Batch running (${processed}/${total})…`);
@@ -18464,27 +20434,64 @@ function initQwenTrainingTab() {
                     }
                 }
                 const { requestFields, meta } = buildQwenCaptionRequestFields(imageName);
-                const result = await invokeQwenCaptionForImage(imageName, requestFields);
-                if (qwenElements.captionSaveText?.checked) {
-                    storeCaptionRecord(imageName, result?.caption || "", result, meta, runId);
-                    try {
-                        await persistCaptionLabel(imageName, result?.caption || "");
-                        captionAutoSaveState.lastSaved.set(imageName, String(result?.caption || "").trim());
-                    } catch (error) {
-                        console.warn("Caption save failed", error);
+                try {
+                    const result = await invokeQwenCaptionForImage(imageName, requestFields, {
+                        signal: abortController.signal,
+                    });
+                    if (qwenElements.captionSaveText?.checked) {
+                        storeCaptionRecord(
+                            imageName,
+                            result?.caption || "",
+                            result,
+                            { ...meta, datasetId: captionDatasetId || null },
+                            runId,
+                        );
+                        try {
+                            await persistCaptionLabel(imageName, result?.caption || "", captionDatasetId || null);
+                            captionAutoSaveState.lastSaved.set(imageName, String(result?.caption || "").trim());
+                        } catch (error) {
+                            console.warn("Caption save failed", error);
+                        }
                     }
+                } catch (error) {
+                    if (error?.name === "AbortError") {
+                        throw error;
+                    }
+                    failed += 1;
+                    console.warn("Caption batch image failed", imageName, error);
+                    setSamStatus(
+                        `Caption batch warning: failed on ${imageName} (${error?.message || error})`,
+                        { variant: "warn", duration: 3500 },
+                    );
                 }
                 processed += 1;
                 setQwenCaptionStatus(`Batch running (${processed}/${total})…`);
             }
-            setQwenCaptionStatus("Batch complete");
-            setSamStatus("Caption batch complete.", { variant: "success", duration: 3500 });
+            if (qwenCaptionBatchCancel) {
+                setQwenCaptionStatus("Batch cancelled");
+                setSamStatus("Caption batch cancelled.", { variant: "warn", duration: 3500 });
+            } else {
+                setQwenCaptionStatus("Batch complete");
+                setSamStatus(
+                    `Caption batch complete${failed ? ` (${failed} failed)` : ""}.`,
+                    { variant: "success", duration: 3500 },
+                );
+            }
         } catch (error) {
+            if (error?.name === "AbortError" && qwenCaptionBatchCancel) {
+                setQwenCaptionStatus("Batch cancelled");
+                setSamStatus("Caption batch cancelled.", { variant: "warn", duration: 3500 });
+                return;
+            }
             const message = error?.message || error;
             setQwenCaptionStatus("Batch error");
             setSamStatus(`Caption batch error: ${message}`, { variant: "error", duration: 5000 });
             console.error("Qwen caption batch failed", error);
         } finally {
+            if (runToken === qwenCaptionBatchRunToken) {
+                qwenCaptionBatchAbortController = null;
+                qwenCaptionBatchCancel = false;
+            }
             qwenCaptionBatchActive = false;
             updateQwenCaptionButton();
         }
@@ -18556,30 +20563,27 @@ function initQwenTrainingTab() {
 
     function updateQwenAgentButtons() {
         const locked = isGpuHeavyLockActive();
-        if (qwenElements.agentRunButton) {
-            qwenElements.agentRunButton.disabled = locked || !qwenAvailable || qwenAgentActive || !currentImage;
-        }
-        if (qwenElements.agentStopButton) {
-            qwenElements.agentStopButton.disabled = !qwenAgentActive;
-        }
+        const busy = qwenAgentActive || qwenAgentBatchActive;
+        const stopRequested = qwenAgentBatchCancel;
         if (qwenElements.prepassRunButton) {
-            qwenElements.prepassRunButton.disabled = locked || !qwenAvailable || qwenAgentActive || !currentImage;
+            qwenElements.prepassRunButton.disabled = locked || !qwenAvailable || busy || !currentImage;
         }
         if (qwenElements.prepassBatchRun) {
-            qwenElements.prepassBatchRun.disabled = locked || !qwenAvailable || qwenAgentActive;
+            qwenElements.prepassBatchRun.disabled = locked || !qwenAvailable || busy;
         }
         if (qwenElements.prepassStopButton) {
-            qwenElements.prepassStopButton.disabled = !qwenAgentActive;
+            // Disable repeated stop clicks once a stop request is already latched.
+            qwenElements.prepassStopButton.disabled = !busy || stopRequested;
         }
     }
 
     function updateCalibrationButtons() {
-        const running = !!qwenCalibrationState.jobId;
+        const running = !!qwenCalibrationState.jobId || qwenCalibrationState.startInFlight;
         if (qwenElements.calibrationRun) {
             qwenElements.calibrationRun.disabled = running || !qwenAvailable || isGpuHeavyLockActive();
         }
         if (qwenElements.calibrationCancel) {
-            qwenElements.calibrationCancel.disabled = !running;
+            qwenElements.calibrationCancel.disabled = !qwenCalibrationState.jobId || qwenCalibrationState.cancelInFlight;
         }
     }
 
@@ -18599,19 +20603,6 @@ function initQwenTrainingTab() {
     function resolveCaptionModelId() {
         const pick = qwenElements.agentCaptionModel?.value || "active";
         const variant = qwenElements.agentCaptionVariant?.value || "auto";
-        if (!pick || pick === "active") {
-            return null;
-        }
-        if (["2B", "4B", "8B"].includes(pick)) {
-            const suffix = variant === "Thinking" ? "Thinking" : "Instruct";
-            return `Qwen/Qwen3-VL-${pick}-${suffix}`;
-        }
-        return pick;
-    }
-
-    function resolveReviewModelId() {
-        const pick = qwenElements.agentReviewModel?.value || "active";
-        const variant = qwenElements.agentReviewVariant?.value || "auto";
         if (!pick || pick === "active") {
             return null;
         }
@@ -18672,6 +20663,39 @@ function initQwenTrainingTab() {
         };
     }
 
+    function updateAgentPrecisionControlsUi() {
+        const enabled = !!qwenElements.agentTightenFp?.checked;
+        [
+            qwenElements.agentDetectorConf,
+            qwenElements.agentSam3ScoreThr,
+            qwenElements.agentSam3MaskThr,
+            qwenElements.agentClassifierMinProb,
+            qwenElements.agentClassifierMargin,
+            qwenElements.agentClassifierBgMargin,
+            qwenElements.agentScorelessIou,
+        ].forEach((el) => {
+            if (el) {
+                el.disabled = !enabled;
+            }
+        });
+    }
+
+    function getPrepassGlossaryConfig() {
+        const sourceRaw = String(qwenElements.agentGlossarySource?.value || "dataset")
+            .trim()
+            .toLowerCase();
+        const source = (sourceRaw === "custom" || sourceRaw === "library") ? sourceRaw : "dataset";
+        const glossaryText = source === "custom" ? (qwenElements.agentGlossary?.value || "").trim() : "";
+        const libraryName = source === "library"
+            ? ((qwenElements.agentGlossarySelect?.value || "").trim() || null)
+            : null;
+        return {
+            source,
+            glossaryText,
+            libraryName,
+        };
+    }
+
     function assertSupportedPrepassRecipeConfig(config) {
         if (!config || typeof config !== "object") {
             return;
@@ -18705,7 +20729,7 @@ function initQwenTrainingTab() {
         const sahiWindow = parseInt(qwenElements.agentSahiWindow?.value || "", 10);
         const sahiOverlap = parseFloat(qwenElements.agentSahiOverlap?.value || "");
         const enableSam3Text = !!qwenElements.agentEnableSam3Text?.checked;
-        const sam3TextWindowExtension = qwenElements.agentSam3TextWindowExtension?.checked !== false;
+        const sam3TextWindowExtension = !!qwenElements.agentSam3TextWindowExtension?.checked;
         const sam3TextWindowMode = (qwenElements.agentSam3TextWindowMode?.value || "grid").trim();
         const sam3TextWindowSize = parseInt(qwenElements.agentSam3TextWindowSize?.value || "", 10);
         const sam3TextWindowOverlap = parseFloat(qwenElements.agentSam3TextWindowOverlap?.value || "");
@@ -18738,7 +20762,7 @@ function initQwenTrainingTab() {
         const gridOverlap = parseFloat(qwenElements.agentGridOverlap?.value || "");
         const classifierId = (qwenElements.agentClassifierId?.value || "").trim() || null;
         const ensembleJobId = (qwenElements.agentEnsembleJob?.value || "").trim();
-        const samVariant = (qwenElements.agentSamVariant?.value || "").trim() || "sam3";
+        const selectedSamVariant = (qwenElements.agentSamVariant?.value || "").trim() || "sam3";
         const fusionMode = (qwenElements.agentFusionMode?.value || "primary").trim();
         const iou = parseFloat(qwenElements.agentIou?.value || "0.75");
         const crossClassDedupeEnabled = !!qwenElements.agentCrossClassDedupeEnabled?.checked;
@@ -18764,9 +20788,19 @@ function initQwenTrainingTab() {
         const glossaryText = glossarySource === "dataset" ? "" : (qwenElements.agentGlossary?.value || "");
         const expandGlossary = qwenElements.agentSam3ExpandGlossary?.checked !== false;
         const sam3SynBudgetValue = Number.isFinite(sam3SynBudget) ? sam3SynBudget : null;
+        const selectedPrepassRecipeId = (qwenElements.prepassRecipeSelect?.value || "").trim();
+        const selectedAgentRecipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
+        const labelmapRecipeMatch = !!qwenAgentRecipeLabelmapRecipeId
+            && (
+                selectedPrepassRecipeId === qwenAgentRecipeLabelmapRecipeId
+                || selectedAgentRecipeId === qwenAgentRecipeLabelmapRecipeId
+            );
+        const recipeLabelmap = labelmapRecipeMatch && Array.isArray(qwenAgentRecipeLabelmap)
+            ? qwenAgentRecipeLabelmap.slice()
+            : null;
         return {
             dataset_id: datasetId || null,
-            labelmap: Array.isArray(qwenAgentRecipeLabelmap) ? qwenAgentRecipeLabelmap : null,
+            labelmap: recipeLabelmap,
             image_base64: base64,
             model_id: resolveAgentModelId(),
             model_variant: variant,
@@ -18779,7 +20813,7 @@ function initQwenTrainingTab() {
             classifier_id: classifierId,
             ensemble_enabled: ensembleJobId ? true : false,
             ensemble_job_id: ensembleJobId || null,
-            sam_variant: samVariant,
+            sam_variant: selectedSamVariant,
             enable_sam3_text: enableSam3Text,
             sam3_text_window_extension: sam3TextWindowExtension,
             sam3_text_window_mode: sam3TextWindowMode || "grid",
@@ -18835,7 +20869,7 @@ function initQwenTrainingTab() {
         const sahiWindow = parseInt(qwenElements.agentSahiWindow?.value || "", 10);
         const sahiOverlap = parseFloat(qwenElements.agentSahiOverlap?.value || "");
         const enableSam3Text = !!qwenElements.agentEnableSam3Text?.checked;
-        const sam3TextWindowExtension = qwenElements.agentSam3TextWindowExtension?.checked !== false;
+        const sam3TextWindowExtension = !!qwenElements.agentSam3TextWindowExtension?.checked;
         const sam3TextWindowMode = (qwenElements.agentSam3TextWindowMode?.value || "grid").trim();
         const sam3TextWindowSize = parseInt(qwenElements.agentSam3TextWindowSize?.value || "", 10);
         const sam3TextWindowOverlap = parseFloat(qwenElements.agentSam3TextWindowOverlap?.value || "");
@@ -18868,7 +20902,7 @@ function initQwenTrainingTab() {
         const gridOverlap = parseFloat(qwenElements.agentGridOverlap?.value || "");
         const classifierId = (qwenElements.agentClassifierId?.value || "").trim() || null;
         const ensembleJobId = (qwenElements.agentEnsembleJob?.value || "").trim();
-        const samVariant = (qwenElements.agentSamVariant?.value || "").trim() || "sam3";
+        const selectedSamVariant = (qwenElements.agentSamVariant?.value || "").trim() || "sam3";
         const fusionMode = (qwenElements.agentFusionMode?.value || "primary").trim();
         const iou = parseFloat(qwenElements.agentIou?.value || "0.75");
         const crossClassDedupeEnabled = !!qwenElements.agentCrossClassDedupeEnabled?.checked;
@@ -18890,7 +20924,7 @@ function initQwenTrainingTab() {
         const classifierBgMargin = parseFloat(qwenElements.agentClassifierBgMargin?.value || "");
         const scorelessIou = parseFloat(qwenElements.agentScorelessIou?.value || "");
         const datasetId = getQwenAgentDatasetId();
-        const glossaryText = (qwenElements.agentGlossary?.value || "").trim();
+        const glossaryConfig = getPrepassGlossaryConfig();
         const expandGlossary = qwenElements.agentSam3ExpandGlossary?.checked !== false;
         const sam3SynBudgetValue = Number.isFinite(sam3SynBudget) ? sam3SynBudget : null;
         return {
@@ -18906,7 +20940,7 @@ function initQwenTrainingTab() {
             classifier_id: classifierId,
             ensemble_enabled: ensembleJobId ? true : false,
             ensemble_job_id: ensembleJobId || null,
-            sam_variant: samVariant,
+            sam_variant: selectedSamVariant,
             enable_sam3_text: enableSam3Text,
             sam3_text_window_extension: sam3TextWindowExtension,
             sam3_text_window_mode: sam3TextWindowMode || "grid",
@@ -18941,15 +20975,17 @@ function initQwenTrainingTab() {
             prepass_caption_variant: captionVariant || null,
             prepass_caption_model_id: resolveCaptionModelId(),
             prepass_caption_max_tokens: Number.isFinite(captionMaxTokens) ? captionMaxTokens : null,
-            labelmap_glossary: glossaryText || null,
+            labelmap_glossary: glossaryConfig.glossaryText || null,
+            prepass_glossary_source: glossaryConfig.source,
+            prepass_glossary_library: glossaryConfig.libraryName,
             tighten_fp: tightenFp,
-            detector_conf: tightenFp && Number.isFinite(detectorConf) ? detectorConf : null,
-            sam3_score_thr: tightenFp && Number.isFinite(sam3ScoreThr) ? sam3ScoreThr : null,
-            sam3_mask_threshold: tightenFp && Number.isFinite(sam3MaskThr) ? sam3MaskThr : null,
-            classifier_min_prob: tightenFp && Number.isFinite(classifierMinProb) ? classifierMinProb : null,
-            classifier_margin: tightenFp && Number.isFinite(classifierMargin) ? classifierMargin : null,
-            classifier_bg_margin: tightenFp && Number.isFinite(classifierBgMargin) ? classifierBgMargin : null,
-            scoreless_iou: tightenFp && Number.isFinite(scorelessIou) ? scorelessIou : null,
+            detector_conf: Number.isFinite(detectorConf) ? detectorConf : null,
+            sam3_score_thr: Number.isFinite(sam3ScoreThr) ? sam3ScoreThr : null,
+            sam3_mask_threshold: Number.isFinite(sam3MaskThr) ? sam3MaskThr : null,
+            classifier_min_prob: Number.isFinite(classifierMinProb) ? classifierMinProb : null,
+            classifier_margin: Number.isFinite(classifierMargin) ? classifierMargin : null,
+            classifier_bg_margin: Number.isFinite(classifierBgMargin) ? classifierBgMargin : null,
+            scoreless_iou: Number.isFinite(scorelessIou) ? scorelessIou : null,
         };
     }
 
@@ -18977,7 +21013,7 @@ function initQwenTrainingTab() {
         const sam3Score = parseFloat(qwenElements.agentSam3ScoreThr?.value || "");
         const sam3TextScore = parseFloat(qwenElements.agentSam3TextScoreThr?.value || "");
         const sam3Mask = parseFloat(qwenElements.agentSam3MaskThr?.value || "");
-        const sam3TextWindowExtension = qwenElements.agentSam3TextWindowExtension?.checked !== false;
+        const sam3TextWindowExtension = !!qwenElements.agentSam3TextWindowExtension?.checked;
         const sam3TextWindowMode = (qwenElements.agentSam3TextWindowMode?.value || "grid").trim();
         const sam3TextWindowSize = parseInt(qwenElements.agentSam3TextWindowSize?.value || "", 10);
         const sam3TextWindowOverlap = parseFloat(qwenElements.agentSam3TextWindowOverlap?.value || "");
@@ -19063,7 +21099,8 @@ function initQwenTrainingTab() {
     }
 
     async function startCalibrationJob() {
-        if (qwenCalibrationState.jobId) {
+        if (qwenCalibrationState.jobId || qwenCalibrationState.startInFlight) {
+            // Prevent duplicate calibration submissions from rapid repeated clicks.
             return;
         }
         if (isGpuHeavyLockActive()) {
@@ -19089,6 +21126,7 @@ function initQwenTrainingTab() {
             processed: 0,
             total: Number.isFinite(payload.max_images) ? payload.max_images : 0,
         });
+        qwenCalibrationState.startInFlight = true;
         updateCalibrationButtons();
         try {
             const resp = await fetch(`${API_ROOT}/calibration/jobs`, {
@@ -19102,8 +21140,12 @@ function initQwenTrainingTab() {
             }
             const job = await resp.json();
             qwenCalibrationState.jobId = job.job_id;
+            qwenCalibrationState.pollRequestId += 1;
+            qwenCalibrationState.pollInFlight = false;
             qwenCalibrationState.overlay = showProgressModal("Calibration starting…");
-            refreshAutomationLockStatus().catch(() => {});
+            refreshAutomationLockStatus().catch((error) => {
+                console.debug("Automation-lock refresh failed after calibration start", error);
+            });
             emitCalibrationProgress({
                 progress: 0,
                 phase: "queue",
@@ -19113,12 +21155,17 @@ function initQwenTrainingTab() {
             });
             setCalibrationStatus("Running");
             updateCalibrationButtons();
-            pollCalibrationJob();
+            pollCalibrationJob().catch((error) => {
+                console.error("Calibration poll start failed", error);
+            });
         } catch (error) {
             setCalibrationStatus("Error");
             emitCalibrationProgress(null);
             updateCalibrationButtons();
             setSamStatus(`Calibration error: ${error.message || error}`, { variant: "error", duration: 5000 });
+        } finally {
+            qwenCalibrationState.startInFlight = false;
+            updateCalibrationButtons();
         }
     }
 
@@ -19126,13 +21173,30 @@ function initQwenTrainingTab() {
         if (!qwenElements.agentRecipeSelect && !qwenElements.prepassRecipeSelect) {
             return;
         }
+        if (prepassRecipeRefreshInFlight) {
+            // Coalesce concurrent refresh intents into one follow-up request.
+            prepassRecipeRefreshNeedsRefresh = true;
+            return;
+        }
+        prepassRecipeRefreshInFlight = true;
+        const requestId = prepassRecipeRefreshRequestId + 1;
+        prepassRecipeRefreshRequestId = requestId;
+        const previousAgent = (qwenElements.agentRecipeSelect?.value || "").trim();
+        const previousInference = (qwenElements.prepassRecipeSelect?.value || "").trim();
+        if (qwenElements.prepassRecipeRefresh) {
+            qwenElements.prepassRecipeRefresh.disabled = true;
+        }
         try {
             const resp = await fetch(`${API_ROOT}/prepass/recipes`);
             if (!resp.ok) {
                 throw new Error(await resp.text());
             }
             const items = await resp.json();
-            const populate = (select) => {
+            // Ignore out-of-order responses when multiple refreshes race.
+            if (requestId !== prepassRecipeRefreshRequestId) {
+                return;
+            }
+            const populate = (select, previousValue) => {
                 if (!select) return;
                 select.innerHTML = "";
                 const placeholder = document.createElement("option");
@@ -19145,15 +21209,35 @@ function initQwenTrainingTab() {
                     option.textContent = item.name || item.id;
                     select.appendChild(option);
                 });
+                if (previousValue && items.some((item) => item?.id === previousValue)) {
+                    select.value = previousValue;
+                }
             };
-            populate(qwenElements.agentRecipeSelect);
-            populate(qwenElements.prepassRecipeSelect);
+            populate(qwenElements.agentRecipeSelect, previousAgent);
+            populate(qwenElements.prepassRecipeSelect, previousInference);
         } catch (error) {
+            if (requestId !== prepassRecipeRefreshRequestId) {
+                return;
+            }
             console.error("Failed to load recipes", error);
+        } finally {
+            if (
+                requestId === prepassRecipeRefreshRequestId
+                && qwenElements.prepassRecipeRefresh
+            ) {
+                qwenElements.prepassRecipeRefresh.disabled = false;
+            }
+            prepassRecipeRefreshInFlight = false;
+            if (prepassRecipeRefreshNeedsRefresh) {
+                prepassRecipeRefreshNeedsRefresh = false;
+                refreshPrepassRecipes().catch((error) => {
+                    console.error("Queued prepass recipe refresh failed", error);
+                });
+            }
         }
     }
 
-    function applyPrepassRecipeConfig(config, glossaryText) {
+    function applyPrepassRecipeConfig(config, glossaryText, options = {}) {
         if (!config) {
             return;
         }
@@ -19177,7 +21261,7 @@ function initQwenTrainingTab() {
         setValue(qwenElements.agentSahiWindow, config.sahi_window_size ?? "");
         setValue(qwenElements.agentSahiOverlap, config.sahi_overlap_ratio ?? "");
         setChecked(qwenElements.agentEnableSam3Text, config.enable_sam3_text !== false);
-        setChecked(qwenElements.agentSam3TextWindowExtension, config.sam3_text_window_extension !== false);
+        setChecked(qwenElements.agentSam3TextWindowExtension, !!config.sam3_text_window_extension);
         setValue(qwenElements.agentSam3TextWindowMode, config.sam3_text_window_mode ?? "grid");
         setValue(qwenElements.agentSam3TextWindowSize, config.sam3_text_window_size ?? "");
         setValue(qwenElements.agentSam3TextWindowOverlap, config.sam3_text_window_overlap ?? "");
@@ -19248,15 +21332,57 @@ function initQwenTrainingTab() {
         setValue(qwenElements.agentClassifierMargin, config.classifier_margin ?? "");
         setValue(qwenElements.agentClassifierBgMargin, config.classifier_bg_margin ?? "");
         setValue(qwenElements.agentScorelessIou, config.scoreless_iou ?? "");
+        updateAgentPrecisionControlsUi();
         qwenAgentRecipeLabelmap = Array.isArray(config.labelmap) ? config.labelmap.slice() : null;
-        if (qwenElements.agentGlossarySource && qwenElements.agentGlossary && glossaryText) {
-            qwenElements.agentGlossarySource.value = "custom";
-            qwenElements.agentGlossary.value = glossaryText;
-            handleGlossarySourceChange();
+        const explicitRecipeId = typeof options.recipeId === "string" ? options.recipeId.trim() : "";
+        const selectedRecipeId = explicitRecipeId
+            || (qwenElements.prepassRecipeSelect?.value || "").trim()
+            || (qwenElements.agentRecipeSelect?.value || "").trim();
+        if (Array.isArray(qwenAgentRecipeLabelmap) && selectedRecipeId) {
+            qwenAgentRecipeLabelmapRecipeId = selectedRecipeId;
+        } else if (!Array.isArray(qwenAgentRecipeLabelmap)) {
+            qwenAgentRecipeLabelmapRecipeId = "";
+        }
+        const glossarySourceRaw = String(config.prepass_glossary_source || "")
+            .trim()
+            .toLowerCase();
+        const glossarySource = (glossarySourceRaw === "custom" || glossarySourceRaw === "library" || glossarySourceRaw === "dataset")
+            ? glossarySourceRaw
+            : (glossaryText ? "custom" : "dataset");
+        if (qwenElements.agentGlossarySource) {
+            qwenElements.agentGlossarySource.value = glossarySource;
+        }
+        if (glossarySource === "library") {
+            setValue(qwenElements.agentGlossarySelect, config.prepass_glossary_library ?? "");
+        }
+        updateQwenAgentGlossaryMode();
+        if (glossarySource === "custom" && qwenElements.agentGlossary) {
+            qwenElements.agentGlossary.value = glossaryText || "";
+        }
+    }
+
+    function updatePrepassRecipeActionButtons() {
+        if (qwenElements.agentRecipeSave) {
+            qwenElements.agentRecipeSave.disabled = prepassRecipeSaveInFlight;
+        }
+        if (qwenElements.agentRecipeLoad) {
+            qwenElements.agentRecipeLoad.disabled = prepassRecipeEditorLoadInFlight;
+        }
+        if (qwenElements.agentRecipeDelete) {
+            qwenElements.agentRecipeDelete.disabled = prepassRecipeDeleteInFlight;
+        }
+        if (qwenElements.agentRecipeExport) {
+            qwenElements.agentRecipeExport.disabled = prepassRecipeExportInFlight;
+        }
+        if (qwenElements.agentRecipeImport) {
+            qwenElements.agentRecipeImport.disabled = prepassRecipeImportInFlight;
         }
     }
 
     async function savePrepassRecipe() {
+        if (prepassRecipeSaveInFlight) {
+            return;
+        }
         const name = (qwenElements.agentRecipeName?.value || "").trim();
         if (!name) {
             setSamStatus("Recipe name required.", { variant: "warn", duration: 3000 });
@@ -19264,8 +21390,11 @@ function initQwenTrainingTab() {
         }
         const description = (qwenElements.agentRecipeDescription?.value || "").trim();
         const config = buildPrepassRecipeConfig();
-        const glossary = (qwenElements.agentGlossary?.value || "").trim();
+        const glossaryCfg = getPrepassGlossaryConfig();
+        const glossary = glossaryCfg.source === "custom" ? glossaryCfg.glossaryText : null;
         const payload = { name, description, config, glossary };
+        prepassRecipeSaveInFlight = true;
+        updatePrepassRecipeActionButtons();
         try {
             const resp = await fetch(`${API_ROOT}/prepass/recipes`, {
                 method: "POST",
@@ -19279,6 +21408,9 @@ function initQwenTrainingTab() {
             setSamStatus("Recipe saved.", { variant: "info", duration: 2500 });
         } catch (error) {
             setSamStatus(`Save failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+        } finally {
+            prepassRecipeSaveInFlight = false;
+            updatePrepassRecipeActionButtons();
         }
     }
 
@@ -19291,44 +21423,94 @@ function initQwenTrainingTab() {
     }
 
     async function loadPrepassRecipe() {
+        if (prepassRecipeEditorLoadInFlight) {
+            return;
+        }
         const recipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
         if (!recipeId) {
             setSamStatus("Select a recipe to load.", { variant: "warn", duration: 2500 });
             return;
         }
+        const requestId = prepassRecipeEditorLoadRequestId + 1;
+        prepassRecipeEditorLoadRequestId = requestId;
+        prepassRecipeEditorLoadInFlight = true;
+        updatePrepassRecipeActionButtons();
         try {
             const data = await fetchPrepassRecipe(recipeId);
+            // Prevent late responses from applying a recipe the user no longer selected.
+            if (requestId !== prepassRecipeEditorLoadRequestId) {
+                return;
+            }
+            const selectedRecipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
+            if (selectedRecipeId !== recipeId) {
+                return;
+            }
             assertSupportedPrepassRecipeConfig(data.config);
             qwenElements.agentRecipeName.value = data.name || "";
             qwenElements.agentRecipeDescription.value = data.description || "";
-            applyPrepassRecipeConfig(data.config || {}, data.glossary || "");
+            if (qwenElements.prepassRecipeSelect) {
+                qwenElements.prepassRecipeSelect.value = recipeId;
+            }
+            applyPrepassRecipeConfig(data.config || {}, data.glossary || "", { recipeId });
             setSamStatus("Recipe loaded.", { variant: "info", duration: 2500 });
         } catch (error) {
+            if (requestId !== prepassRecipeEditorLoadRequestId) {
+                return;
+            }
             setSamStatus(`Load failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+        } finally {
+            if (requestId === prepassRecipeEditorLoadRequestId) {
+                prepassRecipeEditorLoadInFlight = false;
+                updatePrepassRecipeActionButtons();
+            }
         }
     }
 
-    async function loadPrepassRecipeForInference() {
+    async function loadPrepassRecipeForInference(options = {}) {
+        const suppressMissingWarning = options.suppressMissingWarning === true;
         const recipeId = (qwenElements.prepassRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select a recipe before running prepass.", { variant: "warn", duration: 2500 });
+            prepassRecipeLoadRequestId += 1;
+            qwenAgentRecipeLabelmap = null;
+            qwenAgentRecipeLabelmapRecipeId = "";
+            if (qwenElements.agentRecipeSelect) {
+                qwenElements.agentRecipeSelect.value = "";
+            }
+            if (!suppressMissingWarning) {
+                setSamStatus("Select a recipe before running prepass.", { variant: "warn", duration: 2500 });
+            }
             return null;
         }
+        const requestId = prepassRecipeLoadRequestId + 1;
+        prepassRecipeLoadRequestId = requestId;
         try {
             const data = await fetchPrepassRecipe(recipeId);
+            if (requestId !== prepassRecipeLoadRequestId) {
+                return null;
+            }
+            const selectedRecipeId = (qwenElements.prepassRecipeSelect?.value || "").trim();
+            if (selectedRecipeId !== recipeId) {
+                return null;
+            }
             assertSupportedPrepassRecipeConfig(data.config);
             if (qwenElements.agentRecipeSelect) {
                 qwenElements.agentRecipeSelect.value = recipeId;
             }
-            applyPrepassRecipeConfig(data.config || {}, data.glossary || "");
+            applyPrepassRecipeConfig(data.config || {}, data.glossary || "", { recipeId });
             return data;
         } catch (error) {
+            if (requestId !== prepassRecipeLoadRequestId) {
+                return null;
+            }
             setSamStatus(`Recipe load failed: ${error.message || error}`, { variant: "error", duration: 4000 });
             return null;
         }
     }
 
     async function deletePrepassRecipe() {
+        if (prepassRecipeDeleteInFlight) {
+            return;
+        }
         const recipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
         if (!recipeId) {
             setSamStatus("Select a recipe to delete.", { variant: "warn", duration: 2500 });
@@ -19337,6 +21519,8 @@ function initQwenTrainingTab() {
         if (!confirm("Delete this recipe? This cannot be undone.")) {
             return;
         }
+        prepassRecipeDeleteInFlight = true;
+        updatePrepassRecipeActionButtons();
         try {
             const resp = await fetch(`${API_ROOT}/prepass/recipes/${encodeURIComponent(recipeId)}`, { method: "DELETE" });
             if (!resp.ok) {
@@ -19346,21 +21530,39 @@ function initQwenTrainingTab() {
             setSamStatus("Recipe deleted.", { variant: "info", duration: 2500 });
         } catch (error) {
             setSamStatus(`Delete failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+        } finally {
+            prepassRecipeDeleteInFlight = false;
+            updatePrepassRecipeActionButtons();
         }
     }
 
     async function exportPrepassRecipe() {
+        if (prepassRecipeExportInFlight) {
+            return;
+        }
         const recipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
         if (!recipeId) {
             setSamStatus("Select a recipe to export.", { variant: "warn", duration: 2500 });
             return;
         }
-        const url = `${API_ROOT}/prepass/recipes/${encodeURIComponent(recipeId)}/export`;
-        window.open(url, "_blank");
+        prepassRecipeExportInFlight = true;
+        updatePrepassRecipeActionButtons();
+        try {
+            const url = `${API_ROOT}/prepass/recipes/${encodeURIComponent(recipeId)}/export`;
+            window.open(url, "_blank", "noopener");
+        } finally {
+            prepassRecipeExportInFlight = false;
+            updatePrepassRecipeActionButtons();
+        }
     }
 
     async function importPrepassRecipe(file) {
         if (!file) return;
+        if (prepassRecipeImportInFlight) {
+            return;
+        }
+        prepassRecipeImportInFlight = true;
+        updatePrepassRecipeActionButtons();
         try {
             const resp = await fetch(`${API_ROOT}/prepass/recipes/import-raw`, {
                 method: "POST",
@@ -19376,6 +21578,9 @@ function initQwenTrainingTab() {
             setSamStatus(notice, { variant: "info", duration: 4000 });
         } catch (error) {
             setSamStatus(`Import failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+        } finally {
+            prepassRecipeImportInFlight = false;
+            updatePrepassRecipeActionButtons();
         }
     }
 
@@ -19386,17 +21591,28 @@ function initQwenTrainingTab() {
         if (qwenCalibrationState.timerId) {
             clearInterval(qwenCalibrationState.timerId);
         }
+        qwenCalibrationState.pollInFlight = false;
         qwenCalibrationState.timerId = window.setInterval(async () => {
             if (!qwenCalibrationState.jobId) {
                 return;
             }
+            if (qwenCalibrationState.pollInFlight) {
+                return;
+            }
+            const jobId = qwenCalibrationState.jobId;
+            const requestId = qwenCalibrationState.pollRequestId + 1;
+            qwenCalibrationState.pollRequestId = requestId;
+            qwenCalibrationState.pollInFlight = true;
             try {
-                const resp = await fetch(`${API_ROOT}/calibration/jobs/${encodeURIComponent(qwenCalibrationState.jobId)}`);
+                const resp = await fetch(`${API_ROOT}/calibration/jobs/${encodeURIComponent(jobId)}`);
                 if (!resp.ok) {
                     const detail = await resp.text();
                     throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
                 }
                 const job = await resp.json();
+                if (requestId !== qwenCalibrationState.pollRequestId || qwenCalibrationState.jobId !== jobId) {
+                    return;
+                }
                 const processed = Number.isFinite(job.processed) ? job.processed : 0;
                 const total = Number.isFinite(job.total) ? job.total : 0;
                 const phase = job.phase || job.status || "running";
@@ -19417,8 +21633,11 @@ function initQwenTrainingTab() {
                         qwenCalibrationState.timerId = null;
                     }
                     qwenCalibrationState.jobId = null;
+                    qwenCalibrationState.pollRequestId += 1;
                     emitCalibrationProgress(null);
-                    refreshAutomationLockStatus().catch(() => {});
+                    refreshAutomationLockStatus().catch((error) => {
+                        console.debug("Automation-lock refresh failed after calibration terminal status", error);
+                    });
                     setCalibrationStatus(job.status === "completed" ? "Done" : job.status);
                     updateCalibrationButtons();
                     if (job.status === "completed") {
@@ -19428,6 +21647,9 @@ function initQwenTrainingTab() {
                     }
                 }
             } catch (error) {
+                if (requestId !== qwenCalibrationState.pollRequestId || qwenCalibrationState.jobId !== jobId) {
+                    return;
+                }
                 emitCalibrationProgress({
                     progress: 0,
                     phase: "error",
@@ -19438,6 +21660,8 @@ function initQwenTrainingTab() {
                 if (qwenCalibrationState.overlay) {
                     qwenCalibrationState.overlay.update(`Calibration status error: ${error.message || error}`, 0);
                 }
+            } finally {
+                qwenCalibrationState.pollInFlight = false;
             }
         }, 3000);
     }
@@ -19446,12 +21670,27 @@ function initQwenTrainingTab() {
         if (!qwenCalibrationState.jobId) {
             return;
         }
+        if (qwenCalibrationState.cancelInFlight) {
+            // Ignore extra cancel clicks while the previous cancel request is still in flight.
+            return;
+        }
+        qwenCalibrationState.cancelInFlight = true;
+        updateCalibrationButtons();
         try {
-            await fetch(`${API_ROOT}/calibration/jobs/${encodeURIComponent(qwenCalibrationState.jobId)}/cancel`, { method: "POST" });
+            const resp = await fetch(`${API_ROOT}/calibration/jobs/${encodeURIComponent(qwenCalibrationState.jobId)}/cancel`, { method: "POST" });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+            }
             setCalibrationStatus("Cancel requested");
-            refreshAutomationLockStatus().catch(() => {});
+            refreshAutomationLockStatus().catch((error) => {
+                console.debug("Automation-lock refresh failed after calibration cancel", error);
+            });
         } catch (error) {
             setSamStatus(`Cancel failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+        } finally {
+            qwenCalibrationState.cancelInFlight = false;
+            updateCalibrationButtons();
         }
     }
 
@@ -19487,7 +21726,6 @@ function initQwenTrainingTab() {
             });
             target.appendChild(frag);
         };
-        renderTo(qwenElements.agentTraceList);
         renderTo(qwenElements.prepassTraceList);
         emitQwenAgentTraceToasts(trace);
         updateQwenAgentWindows(trace);
@@ -19521,21 +21759,54 @@ function initQwenTrainingTab() {
         qwenAgentTraceSeen = trace.length;
     }
 
+    function normalizeQwenAgentWindowPx(x1Raw, y1Raw, x2Raw, y2Raw, labelRaw) {
+        if (!currentImage) {
+            return null;
+        }
+        const x1 = Number(x1Raw);
+        const y1 = Number(y1Raw);
+        const x2 = Number(x2Raw);
+        const y2 = Number(y2Raw);
+        if (![x1, y1, x2, y2].every(Number.isFinite)) {
+            return null;
+        }
+        // Trace payloads can be noisy/out-of-order; normalize once so draw paths stay simple.
+        const left = Math.max(0, Math.min(currentImage.width, Math.min(x1, x2)));
+        const right = Math.max(0, Math.min(currentImage.width, Math.max(x1, x2)));
+        const top = Math.max(0, Math.min(currentImage.height, Math.min(y1, y2)));
+        const bottom = Math.max(0, Math.min(currentImage.height, Math.max(y1, y2)));
+        if (right - left < 1 || bottom - top < 1) {
+            return null;
+        }
+        return {
+            x1: left,
+            y1: top,
+            x2: right,
+            y2: bottom,
+            label: typeof labelRaw === "string" ? labelRaw : "",
+        };
+    }
+
     function qwenAgentWindowToPx(windowEntry) {
         if (!currentImage) {
             return null;
         }
         if (Array.isArray(windowEntry?.window_xyxy_px) && windowEntry.window_xyxy_px.length >= 4) {
-            const [x1, y1, x2, y2] = windowEntry.window_xyxy_px.map((v) => parseFloat(v));
-            return { x1, y1, x2, y2, label: windowEntry.label || "" };
+            const [x1, y1, x2, y2] = windowEntry.window_xyxy_px;
+            return normalizeQwenAgentWindowPx(x1, y1, x2, y2, windowEntry.label);
         }
         if (Array.isArray(windowEntry?.window_bbox_2d) && windowEntry.window_bbox_2d.length >= 4) {
-            const [x1q, y1q, x2q, y2q] = windowEntry.window_bbox_2d.map((v) => parseFloat(v));
-            const x1 = (x1q / 1000) * currentImage.width;
-            const y1 = (y1q / 1000) * currentImage.height;
-            const x2 = (x2q / 1000) * currentImage.width;
-            const y2 = (y2q / 1000) * currentImage.height;
-            return { x1, y1, x2, y2, label: windowEntry.label || "" };
+            const [x1q, y1q, x2q, y2q] = windowEntry.window_bbox_2d.map((v) => Number(v));
+            if (![x1q, y1q, x2q, y2q].every(Number.isFinite)) {
+                return null;
+            }
+            return normalizeQwenAgentWindowPx(
+                (x1q / 1000) * currentImage.width,
+                (y1q / 1000) * currentImage.height,
+                (x2q / 1000) * currentImage.width,
+                (y2q / 1000) * currentImage.height,
+                windowEntry.label,
+            );
         }
         return null;
     }
@@ -19569,11 +21840,15 @@ function initQwenTrainingTab() {
         detections.forEach((det) => {
             const label = det?.label;
             const bbox = det?.bbox_yolo;
-            if (!label || !bbox) {
+            if (!label || !Array.isArray(bbox) || bbox.length < 4) {
+                return;
+            }
+            const normalizedBbox = bbox.slice(0, 4).map((value) => Number(value));
+            if (!normalizedBbox.every(Number.isFinite)) {
                 return;
             }
             grouped[label] = grouped[label] || [];
-            grouped[label].push({ bbox, score: det.score });
+            grouped[label].push({ bbox: normalizedBbox, score: det.score });
         });
         Object.entries(grouped).forEach(([label, entries]) => {
             applyDetectionsToClass(entries, label, "Prepass");
@@ -19583,18 +21858,25 @@ function initQwenTrainingTab() {
     async function startQwenAgentJob(imageName) {
         if (!imageName) {
             setSamStatus("Select an image before running the agent.", { variant: "warn", duration: 3000 });
-            return;
+            return false;
         }
         if (!ensureAutomationAvailable("Prepass")) {
-            return;
+            return false;
         }
         if (!qwenAvailable) {
             setSamStatus("Qwen backend is unavailable", { variant: "warn", duration: 3500 });
-            return;
+            return false;
         }
         if (qwenAgentActive) {
-            return;
+            return false;
         }
+        let completed = false;
+        const runToken = qwenAgentRunToken + 1;
+        qwenAgentRunToken = runToken;
+        // Reset any stale batch stop flag before a fresh single-image run starts.
+        qwenAgentBatchCancel = false;
+        const abortController = new AbortController();
+        qwenAgentAbortController = abortController;
         qwenAgentActive = true;
         qwenAgentTraceSeen = 0;
         qwenAgentWindowOverlays = [];
@@ -19602,39 +21884,87 @@ function initQwenTrainingTab() {
         setQwenAgentStatus("Running prepass…");
         try {
             const payload = await buildQwenAgentPayload(imageName);
+            if (runToken !== qwenAgentRunToken) {
+                return false;
+            }
             const resp = await fetch(`${API_ROOT}/qwen/prepass`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
+                signal: abortController.signal,
             });
+            if (runToken !== qwenAgentRunToken) {
+                return false;
+            }
             if (!resp.ok) {
                 const detail = await resp.text();
                 throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
             }
             const result = await resp.json();
+            if (runToken !== qwenAgentRunToken) {
+                return false;
+            }
             qwenAgentActive = false;
             updateQwenAgentButtons();
             setQwenAgentStatus("Done");
             renderQwenAgentTrace(result.trace || []);
+            // Safety guard: never write detections into a different image if the user
+            // navigated while the request was in flight.
+            if (!currentImage || currentImage.name !== imageName) {
+                setSamStatus(
+                    `Prepass finished for ${imageName}, but view switched; skipped auto-apply to avoid cross-image write.`,
+                    { variant: "warn", duration: 4500 },
+                );
+                completed = false;
+                return completed;
+            }
             applyAgentDetections(result?.detections || []);
             if (result?.detections?.length) {
                 enqueueTaskNotice(`Prepass completed: ${result.detections.length} boxes.`, { durationMs: 4500 });
             }
+            completed = true;
         } catch (error) {
+            if (runToken !== qwenAgentRunToken) {
+                return false;
+            }
             qwenAgentActive = false;
             updateQwenAgentButtons();
+            if (error?.name === "AbortError") {
+                setQwenAgentStatus("Cancelled");
+                return false;
+            }
             setQwenAgentStatus("Error");
             setSamStatus(`Prepass error: ${error.message || error}`, { variant: "error", duration: 5000 });
             console.error("Qwen prepass failed", error);
+        } finally {
+            if (runToken === qwenAgentRunToken) {
+                qwenAgentAbortController = null;
+            }
         }
+        return completed;
     }
 
     async function stopQwenAgentJob() {
+        if (qwenAgentBatchCancel) {
+            return;
+        }
+        const hadActive = qwenAgentActive || qwenAgentBatchActive;
+        qwenAgentRunToken += 1;
+        if (qwenAgentAbortController) {
+            try {
+                qwenAgentAbortController.abort();
+            } catch (error) {
+                console.warn("Failed to abort prepass request", error);
+            }
+            qwenAgentAbortController = null;
+        }
         qwenAgentActive = false;
         qwenAgentBatchCancel = true;
         updateQwenAgentButtons();
-        setQwenAgentStatus("Cancelled");
-        enqueueTaskNotice("Prepass stop requested.", { durationMs: 3500 });
+        if (hadActive) {
+            setQwenAgentStatus("Cancelled");
+            enqueueTaskNotice("Prepass stop requested.", { durationMs: 3500 });
+        }
     }
 
     async function runQwenAgentBatch(imageNames, options = {}) {
@@ -19642,41 +21972,96 @@ function initQwenTrainingTab() {
             setSamStatus("No images selected for prepass run.", { variant: "warn", duration: 3000 });
             return;
         }
+        if (!qwenAvailable) {
+            setSamStatus("Qwen backend is unavailable", { variant: "warn", duration: 3500 });
+            return;
+        }
+        if (!ensureAutomationAvailable("Prepass")) {
+            return;
+        }
         if (qwenAgentBatchActive) {
             return;
         }
         qwenAgentBatchActive = true;
         qwenAgentBatchCancel = false;
+        updateQwenAgentButtons();
         const includeCurrent = options.includeCurrent !== false;
+        const runnableImages = includeCurrent
+            ? imageNames.slice()
+            : imageNames.filter((name) => !currentImage || name !== currentImage.name);
+        if (!runnableImages.length) {
+            qwenAgentBatchActive = false;
+            setQwenAgentStatus("Idle");
+            setSamStatus("No images found for the selected batch range.", { variant: "warn", duration: 3000 });
+            updateQwenAgentButtons();
+            return;
+        }
         let processed = 0;
-        const totalImages = imageNames.length;
+        let failed = 0;
+        const totalImages = runnableImages.length;
+        const originalName = currentImage?.name || null;
         setQwenAgentStatus(`Batch running (0/${totalImages}, 0%)`);
         setSamStatus("Prepass batch running (frontend loop). Do not reload the page.", { variant: "info", duration: 5000 });
         enqueueTaskNotice("Prepass batch running (frontend loop). Do not reload the page.", { durationMs: 5000 });
         try {
-            for (const imageName of imageNames) {
+            for (const imageName of runnableImages) {
                 if (qwenAgentBatchCancel) {
                     break;
                 }
-                if (!includeCurrent && currentImage?.name === imageName) {
+                const record = images[imageName];
+                if (!record) {
+                    failed += 1;
                     continue;
                 }
-                await startQwenAgentJob(imageName);
+                await ensureImageRecordReady(record);
+                if (!currentImage || currentImage.name !== imageName) {
+                    setCurrentImage(record);
+                }
+                const ready = await waitForCurrentImageReady(imageName);
+                if (!ready) {
+                    failed += 1;
+                    continue;
+                }
+                const runCompleted = await startQwenAgentJob(imageName);
+                if (qwenAgentBatchCancel) {
+                    break;
+                }
                 // Wait for job to finish.
                 while (qwenAgentActive && !qwenAgentBatchCancel) {
                     await new Promise((resolve) => setTimeout(resolve, 500));
                 }
-                processed += 1;
-                const pct = totalImages ? Math.round((processed / totalImages) * 100) : 0;
-                setQwenAgentStatus(`Batch running (${processed}/${totalImages}, ${pct}%)`);
+                if (runCompleted) {
+                    processed += 1;
+                } else {
+                    failed += 1;
+                }
+                const handled = processed + failed;
+                const pct = totalImages ? Math.round((handled / totalImages) * 100) : 0;
+                setQwenAgentStatus(`Batch running (${handled}/${totalImages}, ${pct}%)`);
             }
-            setQwenAgentStatus("Batch complete");
-            setSamStatus("Prepass batch complete.", { variant: "success", duration: 3500 });
+            if (qwenAgentBatchCancel) {
+                setQwenAgentStatus("Batch cancelled");
+                setSamStatus("Prepass batch cancelled.", { variant: "warn", duration: 3500 });
+            } else if (failed > 0) {
+                setQwenAgentStatus("Batch complete with errors");
+                setSamStatus(
+                    `Prepass batch completed with ${failed} failed image${failed === 1 ? "" : "s"}.`,
+                    { variant: "warn", duration: 4500 },
+                );
+            } else {
+                setQwenAgentStatus("Batch complete");
+                setSamStatus("Prepass batch complete.", { variant: "success", duration: 3500 });
+            }
         } catch (error) {
             setQwenAgentStatus("Batch error");
             setSamStatus(`Prepass batch error: ${error.message || error}`, { variant: "error", duration: 5000 });
         } finally {
             qwenAgentBatchActive = false;
+            qwenAgentBatchCancel = false;
+            if (originalName && images[originalName] && (!currentImage || currentImage.name !== originalName)) {
+                setCurrentImage(images[originalName]);
+            }
+            updateQwenAgentButtons();
         }
     }
 
@@ -19687,7 +22072,7 @@ function initQwenTrainingTab() {
         }
         const lines = textLabelRecords.map((record) => JSON.stringify(record));
         const blob = new Blob([lines.join("\n")], { type: "application/jsonl" });
-        saveAs(blob, "captions.jsonl");
+        saveBlobToDisk(blob, "captions.jsonl");
     }
 
     function buildSam3TextSnapshot() {
@@ -19727,8 +22112,9 @@ function initQwenTrainingTab() {
         };
     }
 
-    async function runSam3TextPromptSnapshot(snapshot) {
+    async function runSam3TextPromptSnapshot(snapshot, { requestImageName = null } = {}) {
         const { prompt, threshold, maskThreshold, minSize, maxResults, simplifyEps, targetClass } = snapshot;
+        const targetImageName = requestImageName || currentImage?.name || null;
         if (!ensureAutomationAvailable("SAM3 text")) {
             return { added: 0, detections: 0, warnings: ["automation_locked"] };
         }
@@ -19740,8 +22126,16 @@ function initQwenTrainingTab() {
             simplify_epsilon: simplifyEps,
             max_results: maxResults,
         });
-        if (currentImage && result?.image_token) {
-            rememberSamToken(currentImage.name, samVariant, result.image_token);
+        if (targetImageName && result?.image_token) {
+            rememberSamToken(targetImageName, samVariant, result.image_token);
+        }
+        // Prevent cross-image writes when user navigates during async SAM calls.
+        if (targetImageName && (!currentImage || currentImage.name !== targetImageName)) {
+            return {
+                added: 0,
+                detections: Array.isArray(result?.detections) ? result.detections.length : 0,
+                warnings: [...(Array.isArray(result?.warnings) ? result.warnings : []), "stale_target_image"],
+            };
         }
         if (Array.isArray(result?.masks) && Array.isArray(result?.detections)) {
             result.detections.forEach((det, idx) => {
@@ -19867,7 +22261,6 @@ function initQwenTrainingTab() {
         const maxResultsInput = step.querySelector(".sam3-text-cascade__max-results");
         const minSizeInput = step.querySelector(".sam3-text-cascade__min-size");
         const epsilonInput = step.querySelector(".sam3-text-cascade__epsilon");
-        const classSelect = step.querySelector(".sam3-text-cascade__class");
         if (promptInput) promptInput.value = promptDefault;
         if (thresholdInput) thresholdInput.value = Number.isFinite(thresholdDefault) ? thresholdDefault : 0.5;
         if (maskInput) maskInput.value = Number.isFinite(maskDefault) ? maskDefault : 0.5;
@@ -19973,14 +22366,17 @@ function initQwenTrainingTab() {
         return { snapshots, skipped, total: steps.length + (includeBase ? 1 : 0) };
     }
 
-    async function runSam3TextCascadeSnapshots(snapshots, { shouldCancel = null, statusPrefix = "Cascade step" } = {}) {
+    async function runSam3TextCascadeSnapshots(
+        snapshots,
+        { shouldCancel = null, statusPrefix = "Cascade step", targetImageName = null } = {},
+    ) {
         let totalAdded = 0;
         for (let idx = 0; idx < snapshots.length; idx += 1) {
             if (typeof shouldCancel === "function" && shouldCancel()) {
                 break;
             }
             setSam3TextStatus(`${statusPrefix} ${idx + 1}/${snapshots.length}…`, "info");
-            const result = await runSam3TextPromptSnapshot(snapshots[idx]);
+            const result = await runSam3TextPromptSnapshot(snapshots[idx], { requestImageName: targetImageName });
             totalAdded += Number(result?.added || 0);
         }
         return totalAdded;
@@ -19989,6 +22385,9 @@ function initQwenTrainingTab() {
     async function runSam3TextCascade() {
         if (sam3TextCascadeActive || sam3TextBatchActive || sam3TextRequestActive || sam3SimilarityRequestActive) {
             setSam3TextStatus("SAM3 is busy; wait for the current job to finish.", "warn");
+            return;
+        }
+        if (!ensureAutomationAvailable("SAM3 cascade")) {
             return;
         }
         if (!currentImage || !currentImage.name) {
@@ -20012,6 +22411,7 @@ function initQwenTrainingTab() {
             totalAdded = await runSam3TextCascadeSnapshots(snapshots, {
                 shouldCancel: () => sam3TextCascadeCancel,
                 statusPrefix: "Cascade step",
+                targetImageName: currentImage.name,
             });
         } catch (error) {
             console.error("SAM3 cascade failed", error);
@@ -20032,7 +22432,11 @@ function initQwenTrainingTab() {
         if (!sam3TextCascadeActive) {
             return;
         }
+        if (sam3TextCascadeCancel) {
+            return;
+        }
         sam3TextCascadeCancel = true;
+        updateSam3TextButtons();
         setSam3TextStatus("Stopping cascade after current step…", "warn");
     }
 
@@ -20073,6 +22477,9 @@ function initQwenTrainingTab() {
     async function startSam3TextBatch() {
         if (sam3TextBatchActive || sam3TextRequestActive || sam3SimilarityRequestActive || sam3TextCascadeActive) {
             setSam3TextStatus("SAM3 is busy; wait for the current job to finish.", "warn");
+            return;
+        }
+        if (!ensureAutomationAvailable("SAM3 batch")) {
             return;
         }
         if (!currentImage || !currentImage.name) {
@@ -20148,10 +22555,11 @@ function initQwenTrainingTab() {
                         const added = await runSam3TextCascadeSnapshots(cascadeConfig.snapshots, {
                             shouldCancel: () => sam3TextBatchCancel,
                             statusPrefix: "Cascade step",
+                            targetImageName: name,
                         });
                         totalAdded += Number(added || 0);
                     } else {
-                        const result = await runSam3TextPromptSnapshot(baseSnapshot);
+                        const result = await runSam3TextPromptSnapshot(baseSnapshot, { requestImageName: name });
                         totalAdded += Number(result?.added || 0);
                     }
                 } catch (err) {
@@ -20178,7 +22586,11 @@ function initQwenTrainingTab() {
         if (!sam3TextBatchActive) {
             return;
         }
+        if (sam3TextBatchCancel) {
+            return;
+        }
         sam3TextBatchCancel = true;
+        updateSam3TextButtons();
         setSam3TextStatus("Stopping batch after current image…", "warn");
     }
 
@@ -20209,7 +22621,8 @@ function initQwenTrainingTab() {
         setSam3TextStatus("Running SAM3…", "info");
         setSamStatus("Running SAM3 text prompt…", { variant: "info", duration: 0 });
         try {
-            await runSam3TextPromptSnapshot(snapshot);
+            const requestImageName = currentImage.name;
+            await runSam3TextPromptSnapshot(snapshot, { requestImageName });
         } catch (error) {
             const detail = error?.message || error;
             setSam3TextStatus(`SAM3 error: ${detail}`, "error");
@@ -20232,6 +22645,9 @@ function initQwenTrainingTab() {
             setSam3TextStatus("Load an image and select a bbox to use as the exemplar.", "warn");
             return;
         }
+        const requestImageName = currentImage.name;
+        const requestImageWidth = currentImage.width;
+        const requestImageHeight = currentImage.height;
         const selectedRecords = getSelectedBboxRecords({ negative: false });
         const negativeRecords = getSelectedBboxRecords({ negative: true });
         const currentUuid = currentBbox && currentBbox.bbox ? currentBbox.bbox.uuid : null;
@@ -20311,13 +22727,13 @@ function initQwenTrainingTab() {
         if (Number.isNaN(simplifyEps) || simplifyEps < 0) simplifyEps = 1.0;
 
         function yoloBoxToPixelRect(yoloBox) {
-            if (!currentImage || !Array.isArray(yoloBox) || yoloBox.length < 4) return null;
+            if (!Array.isArray(yoloBox) || yoloBox.length < 4) return null;
             const [cx, cy, wNorm, hNorm] = yoloBox.map(Number);
-            const wPx = wNorm * currentImage.width;
-            const hPx = hNorm * currentImage.height;
+            const wPx = wNorm * requestImageWidth;
+            const hPx = hNorm * requestImageHeight;
             return {
-                x: cx * currentImage.width - wPx / 2,
-                y: cy * currentImage.height - hPx / 2,
+                x: cx * requestImageWidth - wPx / 2,
+                y: cy * requestImageHeight - hPx / 2,
                 width: wPx,
                 height: hPx,
             };
@@ -20339,10 +22755,11 @@ function initQwenTrainingTab() {
 
         function existingAnnotationRects() {
             const rects = [];
-            const currentBboxes = bboxes[currentImage.name];
+            const currentBboxes = bboxes[requestImageName];
             if (!currentBboxes) return rects;
             for (let className in currentBboxes) {
-                currentBboxes[className].forEach((bbox) => {
+                const classBoxes = Array.isArray(currentBboxes[className]) ? currentBboxes[className] : [];
+                classBoxes.forEach((bbox) => {
                     if (!bbox) return;
                     if (Array.isArray(bbox.points) && bbox.points.length >= 3) {
                         const xs = bbox.points.map((p) => p.x);
@@ -20366,7 +22783,7 @@ function initQwenTrainingTab() {
         const negCount = promptLabels.length - posCount;
         const promptCountLabel = promptLabels.length > 1 ? ` (${posCount} pos / ${negCount} neg)` : "";
         setSam3TextStatus(`Running SAM3 similarity prompt${promptCountLabel}…`, "info");
-        const similarityTaskId = enqueueTask({ kind: "sam-similarity", imageName: currentImage.name, detail: targetClass });
+        const similarityTaskId = enqueueTask({ kind: "sam-similarity", imageName: requestImageName, detail: targetClass });
         const statusToken = beginSamActionStatus(`Running SAM3 similarity prompt${promptCountLabel}…`, { variant: "info" });
         try {
             const result = await invokeSam3VisualPrompt({
@@ -20378,8 +22795,8 @@ function initQwenTrainingTab() {
                 simplify_epsilon: simplifyEps,
                 max_results: maxResults,
             });
-            if (currentImage && result?.image_token) {
-                rememberSamToken(currentImage.name, samVariant, result.image_token);
+            if (result?.image_token) {
+                rememberSamToken(requestImageName, samVariant, result.image_token);
             }
             let detections = Array.isArray(result?.detections) ? result.detections.slice() : [];
             if (detections.length) {
@@ -20420,6 +22837,14 @@ function initQwenTrainingTab() {
                     }
                     return true;
                 });
+            }
+            // Never apply similarity detections to a different image than the request target.
+            if (!currentImage || currentImage.name !== requestImageName) {
+                setSam3TextStatus(
+                    `Similarity finished for ${requestImageName}, but view switched; skipped apply to avoid cross-image write.`,
+                    "warn",
+                );
+                return;
             }
             const added = applySegAwareDetections(detections, targetClass, "SAM3 similarity");
             if (added) {
@@ -20484,7 +22909,9 @@ function initQwenTrainingTab() {
                 console.debug("SAM3 preload for similarity failed", err);
             });
         }
-        handleSam3SimilarityPrompt();
+        handleSam3SimilarityPrompt().catch((error) => {
+            console.error("SAM3 similarity prompt run failed", error);
+        });
     }
 
     async function invokeQwenInfer(requestFields) {
@@ -20494,7 +22921,11 @@ function initQwenTrainingTab() {
         const imageNameForRequest = currentImage.name;
         const variantForRequest = samVariant;
         const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
-        let payload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
+        let payload = await buildSamImagePayload({
+            variantOverride: variantForRequest,
+            preferredToken: preloadToken,
+            imageNameOverride: imageNameForRequest,
+        });
         if (imageNameForRequest && !payload.image_name) {
             payload.image_name = imageNameForRequest;
         }
@@ -20505,7 +22936,12 @@ function initQwenTrainingTab() {
             body: JSON.stringify({ ...requestFields, ...payload }),
         });
         if (resp.status === 428) {
-            payload = await buildSamImagePayload({ forceBase64: true, variantOverride: variantForRequest, preferredToken: preloadToken });
+            payload = await buildSamImagePayload({
+                forceBase64: true,
+                variantOverride: variantForRequest,
+                preferredToken: preloadToken,
+                imageNameOverride: imageNameForRequest,
+            });
             if (imageNameForRequest && !payload.image_name) {
                 payload.image_name = imageNameForRequest;
             }
@@ -20533,7 +22969,11 @@ function initQwenTrainingTab() {
         const imageNameForRequest = currentImage.name;
         const variantForRequest = "sam3";
         const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
-        let payload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
+        let payload = await buildSamImagePayload({
+            variantOverride: variantForRequest,
+            preferredToken: preloadToken,
+            imageNameOverride: imageNameForRequest,
+        });
         if (imageNameForRequest && !payload.image_name) {
             payload.image_name = imageNameForRequest;
         }
@@ -20544,7 +22984,12 @@ function initQwenTrainingTab() {
             body: JSON.stringify({ ...requestFields, ...payload }),
         });
         if (resp.status === 428) {
-            payload = await buildSamImagePayload({ forceBase64: true, variantOverride: variantForRequest, preferredToken: preloadToken });
+            payload = await buildSamImagePayload({
+                forceBase64: true,
+                variantOverride: variantForRequest,
+                preferredToken: preloadToken,
+                imageNameOverride: imageNameForRequest,
+            });
             if (imageNameForRequest && !payload.image_name) {
                 payload.image_name = imageNameForRequest;
             }
@@ -20572,7 +23017,11 @@ function initQwenTrainingTab() {
         const imageNameForRequest = currentImage.name;
         const variantForRequest = "sam3";
         const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
-        let payload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
+        let payload = await buildSamImagePayload({
+            variantOverride: variantForRequest,
+            preferredToken: preloadToken,
+            imageNameOverride: imageNameForRequest,
+        });
         if (imageNameForRequest && !payload.image_name) {
             payload.image_name = imageNameForRequest;
         }
@@ -20586,7 +23035,12 @@ function initQwenTrainingTab() {
             body: JSON.stringify({ ...requestFields, ...payload }),
         });
         if (resp.status === 428) {
-            payload = await buildSamImagePayload({ forceBase64: true, variantOverride: variantForRequest, preferredToken: preloadToken });
+            payload = await buildSamImagePayload({
+                forceBase64: true,
+                variantOverride: variantForRequest,
+                preferredToken: preloadToken,
+                imageNameOverride: imageNameForRequest,
+            });
             if (imageNameForRequest && !payload.image_name) {
                 payload.image_name = imageNameForRequest;
             }
@@ -20754,42 +23208,6 @@ function initQwenTrainingTab() {
         const parsedFallback = parseFloat(rawFallback);
         const fallbackEps = Number.isFinite(parsedFallback) && parsedFallback >= 0 ? parsedFallback : 1.0;
         return sliderEps !== null ? sliderEps : fallbackEps;
-    }
-
-    function simplifyPolygonPoints(points, { maxPoints = 400 } = {}) {
-        if (!Array.isArray(points) || points.length === 0) {
-            return [];
-        }
-        const deduped = [];
-        points.forEach((pt) => {
-            const last = deduped[deduped.length - 1];
-            if (!last || Math.abs(last.x - pt.x) > 1e-6 || Math.abs(last.y - pt.y) > 1e-6) {
-                deduped.push(pt);
-            }
-        });
-        if (deduped.length > 1) {
-            const first = deduped[0];
-            const last = deduped[deduped.length - 1];
-            if (Math.abs(first.x - last.x) < 1e-6 && Math.abs(first.y - last.y) < 1e-6) {
-                deduped.pop();
-            }
-        }
-        const reduced = [];
-        for (let i = 0; i < deduped.length; i++) {
-            const prev = deduped[(i - 1 + deduped.length) % deduped.length];
-            const curr = deduped[i];
-            const next = deduped[(i + 1) % deduped.length];
-            const cross = (curr.x - prev.x) * (next.y - curr.y) - (curr.y - prev.y) * (next.x - curr.x);
-            if (Math.abs(cross) > 1e-6) {
-                reduced.push(curr);
-            }
-        }
-        let result = reduced;
-        if (result.length > maxPoints) {
-            const step = Math.ceil(result.length / maxPoints);
-            result = result.filter((_, idx) => idx % step === 0);
-        }
-        return result;
     }
 
     function polygonArea(points) {
@@ -20993,7 +23411,6 @@ function initQwenTrainingTab() {
             const compSet = new Set(pixels.map((p) => `${p[0]},${p[1]}`));
             const edgeMap = new Map();
             for (const [px, py] of pixels) {
-                const idx = py * width + px;
                 const neighbors = [
                     [px, py - 1],
                     [px + 1, py],
@@ -21175,8 +23592,8 @@ function initQwenTrainingTab() {
         refreshQwenStatus({ silent: true }).catch((error) => {
             console.debug("Failed to refresh Qwen status", error);
         });
-        loadQwenConfig(true).catch((error) => {
-            console.debug("Failed to refresh Qwen config", error);
+        refreshQwenModels().catch((error) => {
+            console.debug("Failed to refresh Qwen models", error);
         });
     }
 
@@ -21209,7 +23626,9 @@ function initQwenTrainingTab() {
         if (!predictorElements.countInput) {
             return;
         }
-        submitPredictorSettings(predictorElements.countInput.value);
+        submitPredictorSettings(predictorElements.countInput.value).catch((error) => {
+            console.error("Failed to apply predictor settings", error);
+        });
     }
 
     function resetSamPreloadState() {
@@ -21259,6 +23678,9 @@ function initQwenTrainingTab() {
         }
         for (const className of Object.keys(classBuckets)) {
             const bucket = classBuckets[className];
+            if (!Array.isArray(bucket)) {
+                continue;
+            }
             const idx = bucket.findIndex((bbox) => bbox.uuid === uuid);
             if (idx !== -1) {
                 const bbox = bucket[idx];
@@ -21311,21 +23733,34 @@ function initQwenTrainingTab() {
         if (multiPointPending) {
             return;
         }
-        const job = multiPointQueue.shift();
+        let job = null;
+        while (multiPointQueue.length > 0) {
+            const nextJob = multiPointQueue.shift();
+            if (!nextJob) {
+                break;
+            }
+            if (
+                samPreloadCurrentImageName &&
+                nextJob.imageName &&
+                nextJob.imageName === samPreloadCurrentImageName
+            ) {
+                multiPointQueue.unshift(nextJob);
+                multiPointWaitingForPreload = true;
+                return;
+            }
+            multiPointWaitingForPreload = false;
+            if (!nextJob.imageName || !currentImage || currentImage.name !== nextJob.imageName) {
+                if (nextJob.placeholderContext) {
+                    removePendingBbox(nextJob.placeholderContext);
+                }
+                // Continue scanning the queue instead of recursive re-entry.
+                continue;
+            }
+            job = nextJob;
+            break;
+        }
         if (!job) {
             return;
-        }
-        if (samPreloadCurrentImageName && job.imageName && job.imageName === samPreloadCurrentImageName) {
-            multiPointQueue.unshift(job);
-            multiPointWaitingForPreload = true;
-            return;
-        }
-        multiPointWaitingForPreload = false;
-        if (!job.imageName || !currentImage || currentImage.name !== job.imageName) {
-            if (job.placeholderContext) {
-                removePendingBbox(job.placeholderContext);
-            }
-            return processNextMultiPointJob();
         }
         multiPointPending = true;
         multiPointPendingToken = job.requestToken;
@@ -21363,6 +23798,10 @@ function initQwenTrainingTab() {
         return `${variant || "sam1"}::${imageName || ""}`;
     }
 
+    function getSlotPreloadPromiseKey(imageName, variant) {
+        return `${variant || samVariant || "sam3"}::${imageName || ""}`;
+    }
+
     function rememberSamToken(imageName, variant, token) {
         if (!imageName || !token) {
             return;
@@ -21385,24 +23824,24 @@ function initQwenTrainingTab() {
         return entry ? entry.token : null;
     }
 
-    function getCurrentSamToken(variantOverride = null) {
-        if (!currentImage) {
+    function getAnySamTokenForImage(imageName, variantOverride = null) {
+        if (!imageName) {
             return null;
         }
         const variant = variantOverride ?? samVariant;
-        return getSamToken(currentImage.name, variant);
+        const primary = getSamToken(imageName, variant);
+        if (primary) {
+            return primary;
+        }
+        const fallbackVariant = variant === "sam3" ? "sam1" : "sam3";
+        return getSamToken(imageName, fallbackVariant);
     }
 
     function getAnySamToken() {
         if (!currentImage) {
             return null;
         }
-        const primary = getSamToken(currentImage.name, samVariant);
-        if (primary) {
-            return primary;
-        }
-        const fallbackVariant = samVariant === "sam3" ? "sam1" : "sam3";
-        return getSamToken(currentImage.name, fallbackVariant);
+        return getAnySamTokenForImage(currentImage.name, samVariant);
     }
 
     function isSamPreloadActiveFor(imageName, variant) {
@@ -21494,7 +23933,7 @@ function initQwenTrainingTab() {
         samAutoMode = samMode && autoMode;
         samPointAutoMode = pointMode && autoMode;
         samMultiPointAutoMode = multiPointMode && autoMode;
-        console.log(
+        console.debug(
             "Auto class =>",
             autoMode,
             "samAutoMode =>",
@@ -21539,7 +23978,7 @@ function initQwenTrainingTab() {
             updateMultiPointState(false);
         }
         samPointAutoMode = pointMode && autoMode;
-        console.log("Point mode =>", pointMode, "samPointAutoMode =>", samPointAutoMode);
+        console.debug("Point mode =>", pointMode, "samPointAutoMode =>", samPointAutoMode);
     }
 
     function cancelSamPreload(options = {}) {
@@ -21578,12 +24017,16 @@ function initQwenTrainingTab() {
             return;
         }
         if (currentImage && currentImage.object) {
-            ensureSamSlotsSupport().finally(() => {
-                scheduleSamPreload({ force: true, immediate: true });
-                if (samSlotsEnabled) {
-                    scheduleSamSlotStatusRefresh(true);
-                }
-            });
+            ensureSamSlotsSupport()
+                .catch((error) => {
+                    console.debug("SAM slot capability check failed", error);
+                })
+                .finally(() => {
+                    scheduleSamPreload({ force: true, immediate: true });
+                    if (samSlotsEnabled) {
+                        scheduleSamSlotStatusRefresh(true);
+                    }
+                });
         }
         syncActiveApplyAvailability();
     }
@@ -21727,6 +24170,9 @@ function initQwenTrainingTab() {
                 } else {
                     base64Img = await extractBase64ForImage(imageSnapshot);
                 }
+                if (!base64Img) {
+                    throw new Error(`Unable to encode image for SAM preload: ${imageSnapshot?.name || "image"}`);
+                }
                 if (newToken !== samPreloadToken) {
                     hideSamPreloadProgress();
                     resumeMultiPointQueueIfIdle();
@@ -21766,9 +24212,13 @@ function initQwenTrainingTab() {
                 } else {
                     base64Img = await extractBase64ForImage(imageSnapshot);
                 }
+                if (!base64Img) {
+                    throw new Error(`Unable to encode image for SAM preload fallback: ${imageSnapshot?.name || "image"}`);
+                }
                 if (newToken !== samPreloadToken) {
                     hideSamPreloadProgress();
                     resumeMultiPointQueueIfIdle();
+                    completeTask(options.taskId);
                     return;
                 }
                 const fallbackBody = {
@@ -21822,6 +24272,9 @@ function initQwenTrainingTab() {
                     scheduleSamSlotStatusRefresh(true);
                 }
                 completeTask(options.taskId);
+            } else {
+                // Task was superseded after response completed; avoid leaking queued task.
+                completeTask(options.taskId);
             }
         } catch (error) {
             if (error && error.name === "AbortError") {
@@ -21868,7 +24321,7 @@ function initQwenTrainingTab() {
             cancelPendingMultiPoint({ clearMarkers: !preservePoints, removePendingBbox: true });
         }
         samMultiPointAutoMode = multiPointMode && autoMode;
-        console.log("Multi-point mode =>", multiPointMode, "samMultiPointAutoMode =>", samMultiPointAutoMode);
+        console.debug("Multi-point mode =>", multiPointMode, "samMultiPointAutoMode =>", samMultiPointAutoMode);
     }
 
     function updateSamModeState(checked, options = {}) {
@@ -21892,7 +24345,7 @@ function initQwenTrainingTab() {
         }
         refreshPolygonDetailVisibility();
         refreshSam3SimilarityVisibility();
-        console.log("SAM mode =>", samMode, "samAutoMode =>", samAutoMode);
+        console.debug("SAM mode =>", samMode, "samAutoMode =>", samAutoMode);
     }
 
     function normalizeClassNameForMatch(name) {
@@ -21956,6 +24409,13 @@ function initQwenTrainingTab() {
 		            const modeLabel = isStepRecipeV2 ? "sam3_steps" : recipe.mode || (steps.length ? "legacy" : "sam3_greedy");
 	            const displayName = escapeHtml(cls.name || cls.id);
 	            const showIdSuffix = !!(cls.name && cls.id !== undefined && cls.id !== null && String(cls.id).length);
+	            const safeMatched = escapeHtml(String(matched));
+	            const safeTotalGt = escapeHtml(String(totalGt));
+	            const safeCovPct = escapeHtml(String(covPct));
+	            const safePrecPct = escapeHtml(String(precPct));
+	            const safeFps = escapeHtml(String(fps));
+	            const safeDuplicates = escapeHtml(String(duplicates));
+	            const safeDetPct = escapeHtml(String(detPct));
 
 	            summaryEl.innerHTML = `
 	                <div class="training-card__title">
@@ -21963,13 +24423,16 @@ function initQwenTrainingTab() {
 	                    <span class="badge" style="margin-left: 8px;">${escapeHtml(modeLabel)}</span>
 	                </div>
 	                <div class="training-help" style="font-weight: 400;">
-	                    Coverage: ${matched}/${totalGt} (${covPct}%) • Precision: ${precPct}% • FPs: ${fps} • Duplicates: ${duplicates} • Det rate: ${detPct}%
+	                    Coverage: ${safeMatched}/${safeTotalGt} (${safeCovPct}%) • Precision: ${safePrecPct}% • FPs: ${safeFps} • Duplicates: ${safeDuplicates} • Det rate: ${safeDetPct}%
 	                </div>
 	            `;
 	            card.appendChild(summaryEl);
 
-	            const evalGt = Number.isFinite(cls.eval_gt) ? cls.eval_gt : (Number.isFinite(summary.gts) ? summary.gts : 0);
-	            body.innerHTML = `<div class="training-help">GT eval: ${evalGt}</div>`;
+            const evalGt = Number.isFinite(cls.eval_gt) ? cls.eval_gt : (Number.isFinite(summary.gts) ? summary.gts : 0);
+            const gtEval = document.createElement("div");
+            gtEval.className = "training-help";
+            gtEval.textContent = `GT eval: ${evalGt}`;
+            body.appendChild(gtEval);
 
 		            const configBits = [];
             if (recipe.clip_head) {
@@ -22417,14 +24880,14 @@ function initQwenTrainingTab() {
 	                        const row = document.createElement("tr");
 	                        const p = typeof s.prompt === "string" ? s.prompt : "";
 	                        const matches = Number.isFinite(s.matches) ? s.matches : 0;
-	                        const fps = Number.isFinite(s.fps) ? s.fps : 0;
+                        const fpCount = Number.isFinite(s.fps) ? s.fps : 0;
 	                        const pPrec = Number.isFinite(s.precision) ? (Number(s.precision) * 100).toFixed(1) : "";
 	                        const thr = s.selected_seed_threshold ?? s.seed_threshold_recommended ?? s.seed_threshold_base ?? "";
 	                        row.innerHTML = `
 	                            <td>${idx + 1}</td>
 	                            <td>${escapeHtml(String(p))}</td>
 	                            <td>${escapeHtml(String(matches))}</td>
-	                            <td>${escapeHtml(String(fps))}</td>
+                            <td>${escapeHtml(String(fpCount))}</td>
 	                            <td>${escapeHtml(String(pPrec ? `${pPrec}%` : ""))}</td>
 	                            <td>${escapeHtml(String(thr))}</td>
 	                        `;
@@ -22582,20 +25045,20 @@ function initQwenTrainingTab() {
 	                            ? `Exemplar img ${step.exemplar.image_id} bbox ${Array.isArray(step.exemplar.bbox) ? step.exemplar.bbox.join(",") : ""}`
 	                            : step.prompt || "";
 	                    const row = document.createElement("tr");
-	                    if (idx === 0) row.classList.add("metric-table__highlight");
-	                    row.innerHTML = `
-	                        <td>${idx + 1}</td>
-	                        <td>${step.type || "text"}</td>
-	                        <td>${escapeHtml(label)}</td>
-	                        <td>${(step.threshold ?? "").toString()}</td>
-	                        <td>${step.gain ?? ""}</td>
-	                        <td>${covVal}</td>
-	                        <td>${step.fps ?? 0}</td>
-	                        <td>${step.cum_fps ?? step.fps ?? 0}</td>
-	                        <td>${formatMetric(step.precision, 3)}</td>
-	                    `;
-	                    tbody.appendChild(row);
-	                });
+                    if (idx === 0) row.classList.add("metric-table__highlight");
+                    row.innerHTML = `
+                        <td>${idx + 1}</td>
+                        <td>${escapeHtml(step.type || "text")}</td>
+                        <td>${escapeHtml(label)}</td>
+                        <td>${escapeHtml((step.threshold ?? "").toString())}</td>
+                        <td>${escapeHtml(step.gain ?? "")}</td>
+                        <td>${escapeHtml(covVal)}</td>
+                        <td>${escapeHtml(step.fps ?? 0)}</td>
+                        <td>${escapeHtml(step.cum_fps ?? step.fps ?? 0)}</td>
+                        <td>${escapeHtml(formatMetric(step.precision, 3))}</td>
+                    `;
+                    tbody.appendChild(row);
+                });
 	                table.appendChild(tbody);
 		                body.appendChild(table);
 		            }
@@ -22787,13 +25250,27 @@ function initQwenTrainingTab() {
 
     async function loadAgentDatasets() {
         if (!agentElements.datasetSelect || !agentElements.datasetSummary) return;
+        if (agentState.datasetRefreshInFlight) {
+            agentState.datasetRefreshNeedsRefresh = true;
+            return;
+        }
+        const requestId = agentState.datasetRefreshRequestId + 1;
+        agentState.datasetRefreshRequestId = requestId;
+        agentState.datasetRefreshInFlight = true;
         agentElements.datasetSelect.disabled = true;
+        if (agentElements.datasetRefresh) {
+            agentElements.datasetRefresh.disabled = true;
+        }
         agentElements.datasetSelect.innerHTML = "";
         agentElements.datasetSummary.textContent = "Loading datasets…";
         try {
             const resp = await fetch(`${API_ROOT}/sam3/datasets`);
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
+            // Ignore stale dataset refreshes if a newer request superseded this one.
+            if (requestId !== agentState.datasetRefreshRequestId) {
+                return;
+            }
             const list = Array.isArray(data) ? data : [];
             agentState.datasetsById = {};
             agentElements.datasetSelect.innerHTML = "";
@@ -22821,10 +25298,23 @@ function initQwenTrainingTab() {
 	                updateAgentStepsComputeEstimate();
 	            }
         } catch (err) {
+            if (requestId !== agentState.datasetRefreshRequestId) {
+                return;
+            }
             console.error("Agent datasets load failed", err);
             agentElements.datasetSummary.textContent = `Failed: ${err.message || err}`;
         } finally {
-            agentElements.datasetSelect.disabled = false;
+            if (requestId === agentState.datasetRefreshRequestId) {
+                agentState.datasetRefreshInFlight = false;
+                agentElements.datasetSelect.disabled = false;
+                if (agentElements.datasetRefresh) {
+                    agentElements.datasetRefresh.disabled = false;
+                }
+                if (agentState.datasetRefreshNeedsRefresh) {
+                    agentState.datasetRefreshNeedsRefresh = false;
+                    loadAgentDatasets().catch((err) => console.error("Queued agent dataset refresh failed", err));
+                }
+            }
         }
     }
 
@@ -23007,6 +25497,17 @@ function initQwenTrainingTab() {
         updateAgentClipHeadMeta();
     }
 
+	    function isAgentJobBusyStatus(status) {
+	        const normalized = String(status || "").toLowerCase();
+	        return normalized === "running" || normalized === "queued" || normalized === "cancelling";
+	    }
+
+	    function isAgentJobCancellableStatus(status) {
+	        const normalized = String(status || "").toLowerCase();
+	        // Once backend reports "cancelling", avoid issuing redundant cancel requests.
+	        return normalized === "running" || normalized === "queued";
+	    }
+
 	    function syncAgentRunButtonAvailability() {
 	        if (!agentElements.runButton) return;
         const hasSelectedHead = !!(agentElements.clipHeadSelect && agentElements.clipHeadSelect.value);
@@ -23014,11 +25515,11 @@ function initQwenTrainingTab() {
             agentElements.clipHeadSelect &&
             Array.from(agentElements.clipHeadSelect.options || []).some((opt) => opt && opt.value)
         );
-        const running = agentState.lastJob && agentState.lastJob.status === "running";
-        const disabled = running || !hasSelectedHead;
+        const running = isAgentJobBusyStatus(agentState.lastJob?.status);
+        const disabled = running || agentState.startInFlight || !hasSelectedHead;
         agentElements.runButton.disabled = disabled;
         if (disabled) {
-            if (running) {
+            if (running || agentState.startInFlight) {
                 agentElements.runButton.title = "A recipe mining job is already running.";
             } else if (!hasAnyHead) {
                 agentElements.runButton.title = "No pretrained heads found. Train a class predictor first, then select the head here.";
@@ -23028,6 +25529,10 @@ function initQwenTrainingTab() {
 	        } else {
 	            agentElements.runButton.title = "Run SAM3 Recipe Mining";
 	        }
+        if (agentElements.cancelButton) {
+            const cancellable = isAgentJobCancellableStatus(agentState.lastJob?.status);
+            agentElements.cancelButton.disabled = !cancellable || agentState.cancelInFlight;
+        }
 	    }
 
 	    function getAgentStepsGlobalPreset() {
@@ -23440,11 +25945,17 @@ function initQwenTrainingTab() {
 
     async function loadAgentClipClassifiers() {
         if (!agentElements.clipHeadSelect) return;
+        const requestId = agentState.clipHeadRefreshRequestId + 1;
+        agentState.clipHeadRefreshRequestId = requestId;
         try {
             const prev = agentElements.clipHeadSelect.value || "";
             const resp = await fetch(`${API_ROOT}/clip/classifiers`);
             if (!resp.ok) throw new Error(await resp.text());
             const data = await resp.json();
+            // Ignore stale classifier refreshes if a newer request superseded this one.
+            if (requestId !== agentState.clipHeadRefreshRequestId) {
+                return;
+            }
             const list = Array.isArray(data) ? data : [];
             agentState.clipHeads = list;
             agentElements.clipHeadSelect.innerHTML = "";
@@ -23480,10 +25991,15 @@ function initQwenTrainingTab() {
                 agentElements.clipHeadSelect.value = "";
             }
         } catch (err) {
+            if (requestId !== agentState.clipHeadRefreshRequestId) {
+                return;
+            }
             console.warn("Failed to load CLIP classifiers", err);
         } finally {
-            syncAgentClipHeadControls();
-            updateAgentClipHeadMeta();
+            if (requestId === agentState.clipHeadRefreshRequestId) {
+                syncAgentClipHeadControls();
+                updateAgentClipHeadMeta();
+            }
         }
     }
 
@@ -23519,7 +26035,7 @@ function initQwenTrainingTab() {
             const parsed = JSON.parse(extraRaw);
             const cleaned = normalize(parsed);
             return cleaned ? { data: cleaned, mode: "json" } : { data: null, mode: "empty" };
-        } catch (_err) {
+        } catch {
             // Lenient fallback: accept `"class": [a, b, c]` (items may be unquoted).
             const cleaned = {};
             const rx = /["']([^"']+)["']\s*:\s*\[([^\]]*)\]/g;
@@ -23850,8 +26366,17 @@ function initQwenTrainingTab() {
 	    }
 
     async function startAgentMiningJob() {
+        if (agentState.startInFlight) {
+            // Ignore duplicate clicks while the current start request is in flight.
+            return;
+        }
+        if (isAgentJobBusyStatus(agentState.lastJob?.status)) {
+            setAgentStatus("An agent mining job is already active.", "warn");
+            return;
+        }
         const payload = parseAgentPayload();
         if (!payload) return;
+        agentState.startInFlight = true;
         setAgentStatus("Starting agent mining…", "info");
         if (agentElements.runButton) agentElements.runButton.disabled = true;
         updateAgentProgress({ progress: 0 });
@@ -23872,6 +26397,7 @@ function initQwenTrainingTab() {
             console.error("Agent mining start failed", err);
             setAgentStatus(`Start failed: ${err.message || err}`, "error");
         } finally {
+            agentState.startInFlight = false;
             syncAgentRunButtonAvailability();
         }
     }
@@ -23893,22 +26419,36 @@ function initQwenTrainingTab() {
 
     async function refreshAgentLatest(options = {}) {
         const { silent = false } = options;
-        if (agentState.pollInFlight) return;
+        if (agentState.pollInFlight) {
+            agentState.latestRefreshNeedsRefresh = true;
+            if (!silent) {
+                agentState.latestRefreshNeedsVisible = true;
+            }
+            return;
+        }
+        const requestId = agentState.latestRefreshRequestId + 1;
+        agentState.latestRefreshRequestId = requestId;
         agentState.pollInFlight = true;
         if (!silent) setAgentStatus("Fetching latest result…", "info");
-        if (!silent && agentElements.refreshButton) agentElements.refreshButton.disabled = true;
+        if (agentElements.refreshButton) agentElements.refreshButton.disabled = true;
         try {
             const jobId = agentState.lastJob?.job_id;
             const url = jobId ? `${API_ROOT}/agent_mining/jobs/${jobId}` : `${API_ROOT}/agent_mining/results/latest`;
             const resp = await fetch(url);
             if (!resp.ok) throw new Error(await resp.text());
             const job = await resp.json();
+            // Ignore stale latest-job responses if a newer refresh superseded this one.
+            if (requestId !== agentState.latestRefreshRequestId) {
+                return;
+            }
             agentState.lastJob = job;
             if (!silent) setAgentStatus(`Latest job: ${job.status}`, "success");
             updateAgentProgress(job);
             renderAgentResults(job.result);
             renderAgentLogs(job);
-            refreshAgentCacheSize();
+            refreshAgentCacheSize().catch((error) => {
+                console.warn("Agent cache size refresh failed", error);
+            });
             syncAgentRunButtonAvailability();
             const keepPolling = !["completed", "failed", "cancelled"].includes(job.status || "");
             if (keepPolling) {
@@ -23917,13 +26457,26 @@ function initQwenTrainingTab() {
                 stopAgentPoll();
             }
         } catch (err) {
+            if (requestId !== agentState.latestRefreshRequestId) {
+                return;
+            }
             console.error("Agent mining latest failed", err);
             setAgentResultsMessage(`Fetch failed: ${err.message || err}`, "error");
             setAgentStatus(`Fetch failed: ${err.message || err}`, "error");
             stopAgentPoll();
         } finally {
-            agentState.pollInFlight = false;
-            if (!silent && agentElements.refreshButton) agentElements.refreshButton.disabled = false;
+            if (requestId === agentState.latestRefreshRequestId) {
+                agentState.pollInFlight = false;
+                if (agentElements.refreshButton) agentElements.refreshButton.disabled = false;
+                if (agentState.latestRefreshNeedsRefresh) {
+                    const nextSilent = !agentState.latestRefreshNeedsVisible;
+                    agentState.latestRefreshNeedsRefresh = false;
+                    agentState.latestRefreshNeedsVisible = false;
+                    refreshAgentLatest({ silent: nextSilent }).catch((err) => {
+                        console.error("Queued agent latest refresh failed", err);
+                    });
+                }
+            }
         }
     }
 
@@ -23933,30 +26486,68 @@ function initQwenTrainingTab() {
             setAgentStatus("No running job to cancel.", "warn");
             return;
         }
+        if (!isAgentJobCancellableStatus(agentState.lastJob?.status)) {
+            setAgentStatus("Job is not cancellable right now.", "warn");
+            return;
+        }
+        if (agentState.cancelInFlight) {
+            return;
+        }
+        agentState.cancelInFlight = true;
         setAgentStatus("Cancelling job…", "info");
+        if (agentElements.cancelButton) {
+            // Prevent duplicate cancel calls for the same agent mining job.
+            agentElements.cancelButton.disabled = true;
+        }
         try {
-            const resp = await fetch(`${API_ROOT}/agent_mining/jobs/${jobId}/cancel`, { method: "POST" });
+            const encodedJobId = encodeURIComponent(jobId);
+            const resp = await fetch(`${API_ROOT}/agent_mining/jobs/${encodedJobId}/cancel`, { method: "POST" });
             if (!resp.ok) throw new Error(await resp.text());
             const job = await resp.json();
             agentState.lastJob = job;
-            setAgentStatus(`Job ${jobId} cancelled`, "success");
+            const isCancelling = String(job.status || "").toLowerCase() === "cancelling";
+            setAgentStatus(
+                isCancelling ? `Cancellation requested for ${jobId}` : `Job ${jobId} cancelled`,
+                isCancelling ? "warn" : "success",
+            );
             updateAgentProgress(job);
             renderAgentLogs(job);
             syncAgentRunButtonAvailability();
-            stopAgentPoll();
+            if (isAgentJobBusyStatus(job.status)) {
+                // Some backends acknowledge cancel as "cancelling"; keep polling until terminal.
+                scheduleAgentPoll();
+            } else {
+                stopAgentPoll();
+            }
         } catch (err) {
             console.error("Agent cancel failed", err);
             setAgentStatus(`Cancel failed: ${err.message || err}`, "error");
+        } finally {
+            agentState.cancelInFlight = false;
+            syncAgentRunButtonAvailability();
         }
     }
 
 	    async function fetchAgentRecipes() {
 	        if (!agentElements.recipeSelect) return;
+	        if (agentState.recipeRefreshInFlight) {
+	            agentState.recipeRefreshNeedsRefresh = true;
+	            return;
+	        }
+	        const requestId = agentState.recipeRefreshRequestId + 1;
+	        agentState.recipeRefreshRequestId = requestId;
+	        agentState.recipeRefreshInFlight = true;
+	        updateAgentRecipeActionButtons();
+	        const previous = agentElements.recipeSelect.value || "";
 	        agentElements.recipeSelect.innerHTML = "";
 	        try {
 	            const resp = await fetch(`${API_ROOT}/agent_mining/recipes`);
 	            if (!resp.ok) throw new Error(await resp.text());
 	            const data = await resp.json();
+	            // Ignore stale recipe-list refreshes if a newer request superseded this one.
+	            if (requestId !== agentState.recipeRefreshRequestId) {
+	                return;
+	            }
 	            const list = Array.isArray(data) ? data : [];
             list.forEach((rec) => {
                 const opt = document.createElement("option");
@@ -23972,39 +26563,81 @@ function initQwenTrainingTab() {
                 opt.value = "";
                 opt.textContent = "No saved recipes";
                 agentElements.recipeSelect.appendChild(opt);
+            } else if (previous && list.some((rec) => rec.id === previous)) {
+                agentElements.recipeSelect.value = previous;
+            } else if (list[0]?.id) {
+                agentElements.recipeSelect.value = list[0].id;
             }
+            updateAgentRecipeActionButtons();
         } catch (err) {
+	            if (requestId !== agentState.recipeRefreshRequestId) {
+	                return;
+	            }
             console.error("Fetch recipes failed", err);
             setAgentStatus(`Recipe list failed: ${err.message || err}`, "error");
+	        } finally {
+	            if (requestId === agentState.recipeRefreshRequestId) {
+	                agentState.recipeRefreshInFlight = false;
+	                updateAgentRecipeActionButtons();
+	                if (agentState.recipeRefreshNeedsRefresh) {
+	                    agentState.recipeRefreshNeedsRefresh = false;
+	                    fetchAgentRecipes().catch((error) => console.error("Queued agent recipe refresh failed", error));
+	                }
+	            }
 	        }
 	    }
 
-	    async function downloadSelectedAgentRecipe() {
+	    function updateAgentRecipeActionButtons() {
+	        const refreshBusy = agentState.recipeRefreshInFlight;
+	        if (agentElements.recipeRefresh) {
+	            agentElements.recipeRefresh.disabled = refreshBusy;
+	        }
+	        if (agentElements.recipeSelect) {
+	            agentElements.recipeSelect.disabled = refreshBusy;
+	        }
+	        if (agentElements.recipeDownload) {
+	            agentElements.recipeDownload.disabled = refreshBusy || agentRecipeDownloadInFlight;
+	        }
+	        if (agentElements.recipeDelete) {
+	            agentElements.recipeDelete.disabled = refreshBusy || agentRecipeDeleteInFlight;
+	        }
+	        if (agentElements.recipeImport) {
+	            agentElements.recipeImport.disabled = refreshBusy || agentRecipeImportInFlight;
+	        }
+	    }
+
+    async function downloadSelectedAgentRecipe() {
+	        if (agentRecipeDownloadInFlight) {
+	            return;
+	        }
 	        const recipeId = agentElements.recipeSelect?.value;
 	        if (!recipeId) {
             setAgentStatus("Select a recipe to download.", "warn");
             return;
         }
+        agentRecipeDownloadInFlight = true;
+        updateAgentRecipeActionButtons();
         try {
-            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/${recipeId}/export`);
+            const encodedRecipeId = encodeURIComponent(recipeId);
+            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/${encodedRecipeId}/export`);
             if (!resp.ok) throw new Error(await resp.text());
             const blob = await resp.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = `${recipeId}.zip`;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(url);
+            const safeRecipeName = String(recipeId).replace(/[^a-zA-Z0-9._-]+/g, "_");
+            saveBlobToDisk(blob, `${safeRecipeName || "recipe"}.zip`);
             setAgentStatus("Downloaded recipe package.", "success");
         } catch (err) {
             console.error("Recipe download failed", err);
             setAgentStatus(`Download failed: ${err.message || err}`, "error");
+	        } finally {
+	            agentRecipeDownloadInFlight = false;
+	            updateAgentRecipeActionButtons();
 	        }
 	    }
 
 	    async function deleteSelectedAgentRecipe() {
+	        if (agentRecipeDeleteInFlight) {
+	            return;
+	        }
 	        const recipeId = agentElements.recipeSelect?.value;
 	        if (!recipeId) {
 	            setAgentStatus("Select a recipe to delete.", "warn");
@@ -24013,6 +26646,8 @@ function initQwenTrainingTab() {
 	        const label = agentElements.recipeSelect?.selectedOptions?.[0]?.textContent || recipeId;
 	        const ok = window.confirm(`Delete recipe "${label}"?\n\nThis removes it from the backend and cannot be undone.`);
 	        if (!ok) return;
+	        agentRecipeDeleteInFlight = true;
+	        updateAgentRecipeActionButtons();
 	        setAgentStatus("Deleting recipe…", "info");
 	        try {
 	            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/${encodeURIComponent(recipeId)}`, { method: "DELETE" });
@@ -24022,10 +26657,16 @@ function initQwenTrainingTab() {
 	        } catch (err) {
 	            console.error("Recipe delete failed", err);
 	            setAgentStatus(`Delete failed: ${err.message || err}`, "error");
+	        } finally {
+	            agentRecipeDeleteInFlight = false;
+	            updateAgentRecipeActionButtons();
 	        }
 	    }
 
 	    async function importAgentRecipe() {
+	        if (agentRecipeImportInFlight) {
+	            return;
+	        }
 	        if (!agentElements.recipeFile || !agentElements.recipeFile.files?.length) {
 	            setAgentStatus("Choose a recipe file (.zip) to import.", "warn");
 	            return;
@@ -24033,6 +26674,8 @@ function initQwenTrainingTab() {
         const file = agentElements.recipeFile.files[0];
         const formData = new FormData();
         formData.append("file", file);
+	        agentRecipeImportInFlight = true;
+	        updateAgentRecipeActionButtons();
         setAgentStatus("Importing recipe…", "info");
         try {
             const resp = await fetch(`${API_ROOT}/agent_mining/recipes/import`, {
@@ -24052,10 +26695,21 @@ function initQwenTrainingTab() {
 	            setAgentStatus(`Import failed: ${err.message || err}`, "error");
 	        } finally {
             agentElements.recipeFile.value = "";
+	            agentRecipeImportInFlight = false;
+	            updateAgentRecipeActionButtons();
 	        }
 	    }
 
 			    function initAgentMiningUi() {
+        if (agentMiningUiInitialized) {
+            // Re-entry refresh: keep tab data current without re-binding listeners.
+            loadAgentDatasets().catch((err) => console.error("Agent dataset refresh failed", err));
+            fetchAgentRecipes().catch((err) => console.error("Agent recipe refresh failed", err));
+            refreshAgentLatest().catch((err) => console.error("Agent latest refresh failed", err));
+            refreshAgentCacheSize().catch((err) => console.error("Agent cache size refresh failed", err));
+            return;
+        }
+        agentMiningUiInitialized = true;
 			        agentElements.datasetSelect = document.getElementById("agentDatasetSelect");
 		        agentElements.datasetRefresh = document.getElementById("agentDatasetRefresh");
 		        agentElements.datasetSummary = document.getElementById("agentDatasetSummary");
@@ -24232,25 +26886,25 @@ function initQwenTrainingTab() {
 	        if (agentElements.howItWorksDetails && agentElements.howItWorksDetails.tagName === "DETAILS") {
 	            const key = "tator.agentMining.howItWorksOpen";
 	            let open = null;
-	            try {
-	                const raw = window.localStorage ? window.localStorage.getItem(key) : null;
-	                if (raw === "1") open = true;
-	                if (raw === "0") open = false;
-	            } catch (_err) {
-	                open = null;
-	            }
+            try {
+                const raw = window.localStorage ? window.localStorage.getItem(key) : null;
+                if (raw === "1") open = true;
+                if (raw === "0") open = false;
+            } catch {
+                open = null;
+            }
 	            if (open === null) {
 	                open = false;
 	            }
 	            agentElements.howItWorksDetails.open = !!open;
 	            agentElements.howItWorksDetails.addEventListener("toggle", () => {
-	                try {
-	                    if (!window.localStorage) return;
-	                    window.localStorage.setItem(key, agentElements.howItWorksDetails.open ? "1" : "0");
-	                } catch (_err) {
-	                    // ignore
-	                }
-	            });
+                try {
+                    if (!window.localStorage) return;
+                    window.localStorage.setItem(key, agentElements.howItWorksDetails.open ? "1" : "0");
+                } catch {
+                    // ignore
+                }
+            });
 	        }
 		        applyAgentStepsGlobalPreset(getAgentStepsGlobalPreset());
 		        syncAgentClipHeadControls();
@@ -24265,7 +26919,9 @@ function initQwenTrainingTab() {
 	        syncSearchModeUi();
 	        stopAgentPoll();
         if (agentElements.datasetRefresh) {
-            agentElements.datasetRefresh.addEventListener("click", () => loadAgentDatasets());
+            agentElements.datasetRefresh.addEventListener("click", () => {
+                loadAgentDatasets().catch((err) => console.error("Agent dataset refresh failed", err));
+            });
         }
 		        if (agentElements.datasetSelect) {
 		            agentElements.datasetSelect.addEventListener("change", () => {
@@ -24300,6 +26956,7 @@ function initQwenTrainingTab() {
 	        if (agentElements.recipeImport && agentElements.recipeFile) {
 	            agentElements.recipeImport.addEventListener("click", () => importAgentRecipe().catch((err) => console.error("Agent recipe import failed", err)));
 	        }
+	        updateAgentRecipeActionButtons();
 	        loadAgentDatasets().catch((err) => console.error("Agent dataset load failed", err));
 	        fetchAgentRecipes().catch((err) => console.error("Agent recipe init failed", err));
 	        prefillExtraPrompts();
@@ -24310,12 +26967,21 @@ function initQwenTrainingTab() {
 	        if (!agentElements.extraPrompts) return;
 	        const datasetId = agentElements.datasetSelect?.value;
 	        if (!datasetId) return;
+	        const requestId = agentState.prefillRequestId + 1;
+	        agentState.prefillRequestId = requestId;
 	        fetch(`${API_ROOT}/sam3/datasets/${encodeURIComponent(datasetId)}/classes`)
             .then((resp) => {
                 if (!resp.ok) throw new Error("Failed to load classes");
                 return resp.json();
 	            })
 	            .then((data) => {
+	                // Ignore stale responses once dataset selection changes.
+	                if (requestId !== agentState.prefillRequestId) {
+	                    return;
+	                }
+	                if ((agentElements.datasetSelect?.value || "") !== datasetId) {
+	                    return;
+	                }
 	                const names = Array.isArray(data?.classes) ? data.classes : [];
 	                const template = {};
 	                template["__base__"] = ["object", "small object"];
@@ -24328,6 +26994,12 @@ function initQwenTrainingTab() {
 	                agentElements.extraPrompts.removeAttribute("readonly");
 	            })
 	            .catch((err) => {
+	                if (requestId !== agentState.prefillRequestId) {
+	                    return;
+	                }
+	                if ((agentElements.datasetSelect?.value || "") !== datasetId) {
+	                    return;
+	                }
 	                console.warn("Failed to prefill extra prompts", err);
 	                agentElements.extraPrompts.value = "{}";
 	            });
@@ -24365,7 +27037,6 @@ function initQwenTrainingTab() {
         automationElements.labelingGpuNotice = document.getElementById("labelingGpuLockNotice");
         imagesSelectButton = document.getElementById("imagesSelect");
         classesSelectButton = document.getElementById("classesSelect");
-        bboxesSelectButton = document.getElementById("bboxesSelect");
         bboxesFolderSelectButton = document.getElementById("bboxesSelectFolder");
         samStatusEl = document.getElementById("samStatus");
         samStatusProgressEl = document.getElementById("samStatusProgress");
@@ -24454,16 +27125,28 @@ function initQwenTrainingTab() {
             syncDetectorRunModeInputs();
         }
         if (detectorRunButton) {
-            detectorRunButton.addEventListener("click", () => handleDetectorRun());
+            detectorRunButton.addEventListener("click", () => {
+                handleDetectorRun().catch((error) => {
+                    console.error("Detector run failed", error);
+                });
+            });
         }
         if (detectorBatchRunButton) {
-            detectorBatchRunButton.addEventListener("click", () => startDetectorBatch({ all: false }));
+            detectorBatchRunButton.addEventListener("click", () => {
+                startDetectorBatch({ all: false }).catch((error) => {
+                    console.error("Detector batch run failed", error);
+                });
+            });
         }
         if (detectorBatchStopButton) {
             detectorBatchStopButton.addEventListener("click", () => stopDetectorBatch());
         }
         if (detectorBatchAllButton) {
-            detectorBatchAllButton.addEventListener("click", () => startDetectorBatch({ all: true }));
+            detectorBatchAllButton.addEventListener("click", () => {
+                startDetectorBatch({ all: true }).catch((error) => {
+                    console.error("Detector all-images batch run failed", error);
+                });
+            });
         }
         updateDetectorBatchButtons();
 
@@ -24473,7 +27156,7 @@ function initQwenTrainingTab() {
             updateSam3TextButtons();
             samVariantSelect.addEventListener("change", () => {
                 samVariant = samVariantSelect.value || "sam3";
-                console.log("SAM variant =>", samVariant);
+                console.debug("SAM variant =>", samVariant);
                 samPreloadLastKey = null;
                 if (samPreloadCurrentImageName) {
                     samPreloadCurrentVariant = samVariant;
@@ -24510,10 +27193,16 @@ function initQwenTrainingTab() {
 
     // Helper that extracts base64 from currentImage
     async function extractBase64Image() {
+        if (!currentImage || !currentImage.object) {
+            throw new Error("No active image loaded");
+        }
         const offCan = document.createElement("canvas");
         offCan.width = currentImage.width;
         offCan.height = currentImage.height;
         const ctx = offCan.getContext("2d");
+        if (!ctx) {
+            throw new Error("Unable to initialize canvas context");
+        }
         ctx.drawImage(currentImage.object, 0, 0);
         const dataUrl = offCan.toDataURL("image/jpeg");
         return dataUrl.split(",")[1];
@@ -24540,6 +27229,9 @@ function initQwenTrainingTab() {
         offCan.width = Math.round(width);
         offCan.height = Math.round(height);
         const ctx = offCan.getContext("2d");
+        if (!ctx || !currentImage || !currentImage.object) {
+            return null;
+        }
         ctx.drawImage(
             currentImage.object,
             left,
@@ -24644,7 +27336,14 @@ function initQwenTrainingTab() {
         return messages;
     };
 
-    const applyRegionDetections = (detections, labelPrefix) => {
+    const applyRegionDetections = (detections, labelPrefix, { targetImageName = null } = {}) => {
+        // Bind results to the image that triggered the request so late responses
+        // cannot be written onto whatever image the user switched to meanwhile.
+        const imageName = targetImageName || currentImage?.name || "";
+        if (!imageName) {
+            return { added: 0, droppedUnmapped: 0 };
+        }
+        const targetIsCurrentImage = !!currentImage && currentImage.name === imageName;
         let added = 0;
         const perClassCounts = {};
         let droppedUnmapped = 0;
@@ -24675,28 +27374,33 @@ function initQwenTrainingTab() {
                 uuid: generateUUID(),
             };
             stampBboxCreation(bbox);
-            if (!bboxes[currentImage.name]) {
-                bboxes[currentImage.name] = {};
+            if (!bboxes[imageName]) {
+                bboxes[imageName] = {};
             }
-            if (!bboxes[currentImage.name][className]) {
-                bboxes[currentImage.name][className] = [];
+            if (!bboxes[imageName][className]) {
+                bboxes[imageName][className] = [];
             }
-            bboxes[currentImage.name][className].push(bbox);
-            currentBbox = {
-                bbox,
-                index: bboxes[currentImage.name][className].length - 1,
-                originalX: bbox.x,
-                originalY: bbox.y,
-                originalWidth: bbox.width,
-                originalHeight: bbox.height,
-                moving: false,
-                resizing: null,
-            };
+            bboxes[imageName][className].push(bbox);
+            // Only move the current selection when we are still viewing the target image.
+            if (targetIsCurrentImage) {
+                currentBbox = {
+                    bbox,
+                    index: bboxes[imageName][className].length - 1,
+                    originalX: bbox.x,
+                    originalY: bbox.y,
+                    originalWidth: bbox.width,
+                    originalHeight: bbox.height,
+                    moving: false,
+                    resizing: null,
+                };
+            }
             added += 1;
             perClassCounts[className] = (perClassCounts[className] || 0) + 1;
         });
         if (added > 0) {
-            updateBboxAfterTransform();
+            if (targetIsCurrentImage) {
+                updateBboxAfterTransform();
+            }
             const classSummary = Object.entries(perClassCounts)
                 .sort((a, b) => b[1] - a[1])
                 .slice(0, 5)
@@ -24735,6 +27439,9 @@ function initQwenTrainingTab() {
             enqueueTaskNotice("YOLO region: draw a larger region.");
             return;
         }
+        const requestImageName = currentImage.name;
+        const requestImageWidth = currentImage.width;
+        const requestImageHeight = currentImage.height;
         const normalized = normalizeRegionBounds(region);
         if (!normalized) {
             setSamStatus("Draw a valid region to run region detect.", { variant: "warn", duration: 2500 });
@@ -24769,8 +27476,8 @@ function initQwenTrainingTab() {
                 max_det,
                 center_only: true,
                 image_is_cropped: imageIsCropped,
-                full_width: currentImage.width,
-                full_height: currentImage.height,
+                full_width: requestImageWidth,
+                full_height: requestImageHeight,
                 expected_labelmap: expectedLabelmap,
             };
             const resp = await fetch(`${API_ROOT}/yolo/predict_region`, {
@@ -24786,7 +27493,7 @@ function initQwenTrainingTab() {
             const data = await resp.json();
             const detections = Array.isArray(data?.detections) ? data.detections : [];
             const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
-            applyRegionDetections(detections, "YOLO region");
+            applyRegionDetections(detections, "YOLO region", { targetImageName: requestImageName });
             if (warnings.length) {
                 summarizeRegionWarnings(warnings, "YOLO region").forEach((message) => {
                     enqueueTaskNotice(message, { durationMs: 5000 });
@@ -24833,6 +27540,9 @@ function initQwenTrainingTab() {
             enqueueTaskNotice("RF-DETR region: draw a larger region.");
             return;
         }
+        const requestImageName = currentImage.name;
+        const requestImageWidth = currentImage.width;
+        const requestImageHeight = currentImage.height;
         const normalized = normalizeRegionBounds(region);
         if (!normalized) {
             setSamStatus("Draw a valid region to run region detect.", { variant: "warn", duration: 2500 });
@@ -24866,8 +27576,8 @@ function initQwenTrainingTab() {
                 max_det,
                 center_only: true,
                 image_is_cropped: imageIsCropped,
-                full_width: currentImage.width,
-                full_height: currentImage.height,
+                full_width: requestImageWidth,
+                full_height: requestImageHeight,
                 expected_labelmap: expectedLabelmap,
             };
             const resp = await fetch(`${API_ROOT}/rfdetr/predict_region`, {
@@ -24883,7 +27593,7 @@ function initQwenTrainingTab() {
             const data = await resp.json();
             const detections = Array.isArray(data?.detections) ? data.detections : [];
             const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
-            applyRegionDetections(detections, "RF-DETR region");
+            applyRegionDetections(detections, "RF-DETR region", { targetImageName: requestImageName });
             if (warnings.length) {
                 summarizeRegionWarnings(warnings, "RF-DETR region").forEach((message) => {
                     enqueueTaskNotice(message, { durationMs: 5000 });
@@ -24992,23 +27702,25 @@ function initQwenTrainingTab() {
 
     function updateDetectorBatchButtons() {
         const locked = isGpuHeavyLockActive();
+        const busy = detectorBatchActive || detectorRunInFlight;
         if (detectorRunButton) {
-            detectorRunButton.disabled = detectorBatchActive || locked;
+            detectorRunButton.disabled = busy || locked;
         }
         if (detectorBatchRunButton) {
-            detectorBatchRunButton.disabled = detectorBatchActive || locked;
+            detectorBatchRunButton.disabled = busy || locked;
         }
         if (detectorBatchAllButton) {
-            detectorBatchAllButton.disabled = detectorBatchActive || locked;
+            detectorBatchAllButton.disabled = busy || locked;
         }
         if (detectorBatchStopButton) {
-            detectorBatchStopButton.disabled = !detectorBatchActive;
+            // Disable repeated stop clicks once cancellation has already been requested.
+            detectorBatchStopButton.disabled = !detectorBatchActive || detectorBatchCancel;
         }
         if (detectorBatchCountInput) {
-            detectorBatchCountInput.disabled = detectorBatchActive || locked;
+            detectorBatchCountInput.disabled = busy || locked;
         }
         if (detectorBatchIncludeCurrentToggle) {
-            detectorBatchIncludeCurrentToggle.disabled = detectorBatchActive || locked;
+            detectorBatchIncludeCurrentToggle.disabled = busy || locked;
         }
     }
 
@@ -25031,12 +27743,15 @@ function initQwenTrainingTab() {
             enqueueTaskNotice("Detector: bbox mode only.");
             return { added: 0 };
         }
+        const requestImageName = currentImage.name;
+        const requestImageRecord = images[requestImageName] || currentImage;
         const mode = (modeOverride || getDetectorRunMode()).toLowerCase();
         const detectorMode = getRegionDetectorMode();
-        const cachedToken = getAnySamToken();
+        const cachedToken = getAnySamTokenForImage(requestImageName);
         let base64 = null;
         if (!cachedToken) {
-            base64 = await extractBase64Image();
+            // Pin encoding to the request image so navigation during await cannot swap payload image.
+            base64 = await getBase64ForImageRecord(requestImageRecord);
             if (!base64) {
                 setSamStatus("Unable to read image data for detector run.", { variant: "error", duration: 3500 });
                 enqueueTaskNotice("Detector: failed to read image data.");
@@ -25083,7 +27798,7 @@ function initQwenTrainingTab() {
             const data = await resp.json();
             const detections = Array.isArray(data?.detections) ? data.detections : [];
             const warnings = Array.isArray(data?.warnings) ? data.warnings : [];
-            const { added } = applyRegionDetections(detections, labelPrefix);
+            const { added } = applyRegionDetections(detections, labelPrefix, { targetImageName: requestImageName });
             if (warnings.length) {
                 summarizeRegionWarnings(warnings, labelPrefix).forEach((message) => {
                     enqueueTaskNotice(message, { durationMs: 5000 });
@@ -25122,11 +27837,26 @@ function initQwenTrainingTab() {
             setSamStatus("Detector batch running; wait for it to finish.", { variant: "warn", duration: 3000 });
             return;
         }
-        await runDetectorForCurrentImage();
+        if (detectorRunInFlight) {
+            return;
+        }
+        // Single-image detector run lock: prevents overlap from rapid repeated clicks.
+        detectorRunInFlight = true;
+        updateDetectorBatchButtons();
+        try {
+            await runDetectorForCurrentImage();
+        } finally {
+            detectorRunInFlight = false;
+            updateDetectorBatchButtons();
+        }
     }
 
     async function startDetectorBatch({ all = false } = {}) {
         if (detectorBatchActive) {
+            return;
+        }
+        if (detectorRunInFlight) {
+            setSamStatus("Detector is already running on the current image.", { variant: "warn", duration: 2500 });
             return;
         }
         if (!currentImage || !currentImage.name) {
@@ -25155,6 +27885,7 @@ function initQwenTrainingTab() {
         const originalName = currentImage.name;
         const batchTaskId = enqueueTask({ kind: "detector-batch", imageName: originalName, detail: { count: names.length } });
         let totalAdded = 0;
+        let failedImages = 0;
         try {
             for (let idx = 0; idx < names.length; idx += 1) {
                 if (detectorBatchCancel) {
@@ -25173,10 +27904,20 @@ function initQwenTrainingTab() {
                 const ready = await waitForCurrentImageReady(name);
                 if (!ready) {
                     setSamStatus(`Detector batch ${idx + 1}/${names.length}: failed to load ${name}`, { variant: "warn", duration: 3000 });
+                    failedImages += 1;
                     continue;
                 }
-                const result = await runDetectorForCurrentImage();
-                totalAdded += Number(result?.added || 0);
+                try {
+                    const result = await runDetectorForCurrentImage();
+                    totalAdded += Number(result?.added || 0);
+                } catch (error) {
+                    failedImages += 1;
+                    console.error("Detector batch image failed", name, error);
+                    setSamStatus(
+                        `Detector batch ${idx + 1}/${names.length}: failed on ${name} (${error?.message || error})`,
+                        { variant: "warn", duration: 3500 },
+                    );
+                }
             }
         } finally {
             detectorBatchActive = false;
@@ -25187,7 +27928,7 @@ function initQwenTrainingTab() {
             }
             const doneMessage = detectorBatchCancel
                 ? "Detector batch cancelled."
-                : `Detector batch complete: added ${totalAdded} box${totalAdded === 1 ? "" : "es"}.`;
+                : `Detector batch complete: added ${totalAdded} box${totalAdded === 1 ? "" : "es"}${failedImages ? ` (${failedImages} failed)` : ""}.`;
             setSamStatus(doneMessage, { variant: detectorBatchCancel ? "warn" : "success", duration: 3500 });
             enqueueTaskNotice(doneMessage, { durationMs: 5000 });
         }
@@ -25198,15 +27939,34 @@ function initQwenTrainingTab() {
             return;
         }
         detectorBatchCancel = true;
+        updateDetectorBatchButtons();
         setSamStatus("Stopping detector batch after current image…", { variant: "warn", duration: 3000 });
     }
 
-    async function buildSamImagePayload({ forceBase64 = false, variantOverride = null, preferredToken = null } = {}) {
-        const token = preferredToken ?? getCurrentSamToken(variantOverride);
+    async function buildSamImagePayload({
+        forceBase64 = false,
+        variantOverride = null,
+        preferredToken = null,
+        imageNameOverride = null,
+    } = {}) {
+        const variant = variantOverride ?? samVariant;
+        const targetImageName = imageNameOverride || (currentImage ? currentImage.name : null);
+        const token = preferredToken ?? (targetImageName ? getSamToken(targetImageName, variant) : null);
         if (token && !forceBase64) {
             return { image_token: token };
         }
-        const base64Img = await extractBase64Image();
+        let base64Img = null;
+        // When a caller pins an image name, avoid reading whatever image is currently
+        // selected in the UI if the user navigated mid-request.
+        if (targetImageName && (!currentImage || currentImage.name !== targetImageName)) {
+            const imageRecord = images[targetImageName];
+            base64Img = await getBase64ForImageRecord(imageRecord);
+        } else {
+            base64Img = await extractBase64Image();
+        }
+        if (!base64Img) {
+            throw new Error(`Failed to encode image payload${targetImageName ? `: ${targetImageName}` : ""}`);
+        }
         const payload = { image_base64: base64Img };
         if (token) {
             payload.image_token = token;
@@ -25218,7 +27978,11 @@ function initQwenTrainingTab() {
         const imageNameForRequest = currentImage ? currentImage.name : null;
         const variantForRequest = samVariant;
         const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
-        let payload = await buildSamImagePayload({ variantOverride: variantForRequest, preferredToken: preloadToken });
+        let payload = await buildSamImagePayload({
+            variantOverride: variantForRequest,
+            preferredToken: preloadToken,
+            imageNameOverride: imageNameForRequest,
+        });
         if (samSlotsEnabled && imageNameForRequest && !payload.image_name) {
             payload.image_name = imageNameForRequest;
         }
@@ -25229,7 +27993,15 @@ function initQwenTrainingTab() {
             signal,
         });
         if (resp.status === 428) {
-            payload = await buildSamImagePayload({ forceBase64: true, variantOverride: variantForRequest, preferredToken: preloadToken });
+            payload = await buildSamImagePayload({
+                forceBase64: true,
+                variantOverride: variantForRequest,
+                preferredToken: preloadToken,
+                imageNameOverride: imageNameForRequest,
+            });
+            if (samSlotsEnabled && imageNameForRequest && !payload.image_name) {
+                payload.image_name = imageNameForRequest;
+            }
             resp = await fetch(url, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -25278,6 +28050,9 @@ function initQwenTrainingTab() {
     async function samBboxPrompt(bbox) {
         const statusToken = beginSamActionStatus("Running SAM box prompt…");
         const imageName = currentImage ? currentImage.name : null;
+        const requestImageName = imageName;
+        const requestImageWidth = Number(images[requestImageName]?.width || currentImage?.width || 0);
+        const requestImageHeight = Number(images[requestImageName]?.height || currentImage?.height || 0);
         const placeholderContext = bbox ? { uuid: bbox.uuid, imageName } : null;
         const jobHandle = registerSamJob({
             type: "sam-bbox",
@@ -25305,8 +28080,8 @@ function initQwenTrainingTab() {
             if (!isSamJobActive(jobHandle)) {
                 return;
             }
-            if (result.image_token && currentImage) {
-                rememberSamToken(currentImage.name, samVariant, result.image_token);
+            if (result.image_token && requestImageName) {
+                rememberSamToken(requestImageName, samVariant, result.image_token);
             }
             const returnedUUID = result.uuid;
             const targetBbox = pendingApiBboxes[returnedUUID];
@@ -25317,15 +28092,18 @@ function initQwenTrainingTab() {
                 }
                 return;
             }
-            if (datasetType === "seg") {
-                const applied = applySamResultToSegDataset(result, targetBbox, targetBbox?.class);
+            // Prevent cross-image writes if the user navigated during async SAM call.
+            if (!currentImage || currentImage.name !== requestImageName) {
                 if (placeholderContext) {
                     removePendingBbox(placeholderContext);
                 }
-                delete pendingApiBboxes[returnedUUID];
-                if (!applied) {
-                    setSamStatus("SAM returned no mask/bbox to apply.", { variant: "warn", duration: 3000 });
+                if (returnedUUID) {
+                    delete pendingApiBboxes[returnedUUID];
                 }
+                setSamStatus(
+                    `SAM box prompt finished for ${requestImageName || "image"}, but view switched; skipped apply.`,
+                    { variant: "warn", duration: 4000 },
+                );
                 return;
             }
             if (datasetType === "seg") {
@@ -25352,16 +28130,16 @@ function initQwenTrainingTab() {
 
             if (result.bbox) {
                 const [cx, cy, ww, hh] = result.bbox;
-                const absW = ww * currentImage.width;
-                const absH = hh * currentImage.height;
-                const absX = cx * currentImage.width - absW / 2;
-                const absY = cy * currentImage.height - absH / 2;
+                const absW = ww * requestImageWidth;
+                const absH = hh * requestImageHeight;
+                const absX = cx * requestImageWidth - absW / 2;
+                const absY = cy * requestImageHeight - absH / 2;
                 targetBbox.x = absX;
                 targetBbox.y = absY;
                 targetBbox.width = absW;
                 targetBbox.height = absH;
                 updateBboxAfterTransform();
-                console.log("Updated SAM bounding box:", absX, absY, absW, absH);
+                console.debug("Updated SAM bounding box:", absX, absY, absW, absH);
             } else {
                 console.warn("No 'bbox' field returned from sam_bbox. Full response:", result);
                 if (placeholderContext) {
@@ -25385,6 +28163,9 @@ function initQwenTrainingTab() {
     async function samPointPrompt(px, py) {
         const statusToken = beginSamActionStatus("Running SAM point prompt…");
         const imageName = currentImage ? currentImage.name : null;
+        const requestImageName = imageName;
+        const requestImageWidth = Number(images[requestImageName]?.width || currentImage?.width || 0);
+        const requestImageHeight = Number(images[requestImageName]?.height || currentImage?.height || 0);
         const placeholderContext = currentBbox && currentBbox.bbox ? { uuid: currentBbox.bbox.uuid, imageName } : null;
         const jobHandle = registerSamJob({
             type: "sam-point",
@@ -25410,8 +28191,8 @@ function initQwenTrainingTab() {
             if (!isSamJobActive(jobHandle)) {
                 return;
             }
-            if (result.image_token && currentImage) {
-                rememberSamToken(currentImage.name, samVariant, result.image_token);
+            if (result.image_token && requestImageName) {
+                rememberSamToken(requestImageName, samVariant, result.image_token);
             }
             const returnedUUID = result.uuid;
             const targetBbox = pendingApiBboxes[returnedUUID];
@@ -25420,6 +28201,20 @@ function initQwenTrainingTab() {
                 if (placeholderContext) {
                     removePendingBbox(placeholderContext);
                 }
+                return;
+            }
+            // Prevent cross-image writes if the user navigated during async SAM call.
+            if (!currentImage || currentImage.name !== requestImageName) {
+                if (placeholderContext) {
+                    removePendingBbox(placeholderContext);
+                }
+                if (returnedUUID) {
+                    delete pendingApiBboxes[returnedUUID];
+                }
+                setSamStatus(
+                    `SAM point prompt finished for ${requestImageName || "image"}, but view switched; skipped apply.`,
+                    { variant: "warn", duration: 4000 },
+                );
                 return;
             }
             if (datasetType === "seg") {
@@ -25452,16 +28247,16 @@ function initQwenTrainingTab() {
                 return;
             }
             const [cx, cy, wNorm, hNorm] = result.bbox;
-            const absW = wNorm * currentImage.width;
-            const absH = hNorm * currentImage.height;
-            const absX = cx * currentImage.width - absW / 2;
-            const absY = cy * currentImage.height - absH / 2;
+            const absW = wNorm * requestImageWidth;
+            const absH = hNorm * requestImageHeight;
+            const absX = cx * requestImageWidth - absW / 2;
+            const absY = cy * requestImageHeight - absH / 2;
             targetBbox.x = absX;
             targetBbox.y = absY;
             targetBbox.width = absW;
             targetBbox.height = absH;
             updateBboxAfterTransform();
-            console.log("Updated existing bbox from point mode:", absX, absY, absW, absH);
+            console.debug("Updated existing bbox from point mode:", absX, absY, absW, absH);
             delete pendingApiBboxes[returnedUUID];
         } catch (err) {
             console.error("samPointPrompt error:", err);
@@ -25504,78 +28299,119 @@ function initQwenTrainingTab() {
     }
 
     async function autoPredictNewCrop(bbox) {
+        const requestImageName = currentImage ? currentImage.name : null;
         const progressToken = beginClipProgress();
-        const clipTaskId = enqueueTask({ kind: "clip-auto", imageName: currentImage ? currentImage.name : null, detail: bbox?.class || currentClass || null });
+        const clipTaskId = enqueueTask({ kind: "clip-auto", imageName: requestImageName, detail: bbox?.class || currentClass || null });
         try {
+            const sourceImageRecord = requestImageName ? images[requestImageName] : null;
+            const sourceImageObject = sourceImageRecord?.object
+                || ((currentImage && currentImage.name === requestImageName) ? currentImage.object : null);
+            if (!requestImageName || !sourceImageObject) {
+                setSamStatus("Auto class prediction skipped: source image is not available.", { variant: "warn", duration: 3000 });
+                removePendingBbox({
+                    uuid: bbox?.uuid || null,
+                    imageName: requestImageName,
+                });
+                return;
+            }
+            const cropWidth = Math.max(1, Math.round(Number(bbox?.width) || 0));
+            const cropHeight = Math.max(1, Math.round(Number(bbox?.height) || 0));
             const offCanvas = document.createElement("canvas");
-            offCanvas.width = bbox.width;
-            offCanvas.height = bbox.height;
+            offCanvas.width = cropWidth;
+            offCanvas.height = cropHeight;
             const ctx = offCanvas.getContext("2d");
+            if (!ctx) {
+                throw new Error("Unable to initialize crop canvas context");
+            }
             ctx.drawImage(
-                currentImage.object,
+                sourceImageObject,
                 bbox.x,
                 bbox.y,
                 bbox.width,
                 bbox.height,
                 0,
                 0,
-                bbox.width,
-                bbox.height
+                cropWidth,
+                cropHeight
             );
-        const base64String = offCanvas.toDataURL("image/jpeg");
-        const base64Data = base64String.split(",")[1];
-        const resp = await fetch(`${API_ROOT}/predict_base64`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                image_base64: base64Data,
-                uuid: bbox.uuid
-                })
+            const base64String = offCanvas.toDataURL("image/jpeg");
+            const base64Data = base64String.split(",")[1];
+            const resp = await fetch(`${API_ROOT}/predict_base64`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    image_base64: base64Data,
+                    uuid: bbox.uuid,
+                }),
             });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+            }
             const data = await resp.json();
-            console.log("autoPredictNewCrop =>", data);
+            console.debug("autoPredictNewCrop =>", data);
             if (!data.uuid) {
                 alert("Auto mode error: you probably don't have a trained .pkl file for CLIP!");
-                removeBbox(bbox);
+                removePendingBbox({
+                    uuid: bbox?.uuid || null,
+                    imageName: requestImageName,
+                });
                 return;
             }
             const predictedClass = resolveClipAutoPrediction(data);
             const returnedUUID = data.uuid;
             const targetBbox = pendingApiBboxes[returnedUUID];
             if (!targetBbox) {
-            console.warn("No pending bbox found for uuid:", returnedUUID);
-            return;
-        }
-            currentBbox = {
-                bbox: targetBbox,
-                index: -1,
-                originalX: targetBbox.x,
-                originalY: targetBbox.y,
-                originalWidth: targetBbox.width,
-                originalHeight: targetBbox.height,
-                moving: false,
-                resizing: null
-            };
+                console.warn("No pending bbox found for uuid:", returnedUUID);
+                return;
+            }
+            const targetBuckets = (requestImageName && bboxes[requestImageName]) ? bboxes[requestImageName] : null;
+            if (!targetBuckets) {
+                delete pendingApiBboxes[returnedUUID];
+                return;
+            }
+            if (currentImage && currentImage.name === requestImageName) {
+                currentBbox = {
+                    bbox: targetBbox,
+                    index: -1,
+                    originalX: targetBbox.x,
+                    originalY: targetBbox.y,
+                    originalWidth: targetBbox.width,
+                    originalHeight: targetBbox.height,
+                    moving: false,
+                    resizing: null
+                };
+            }
             const oldClass = targetBbox.class;
-            const oldArr = bboxes[currentImage.name][oldClass];
+            const oldArr = Array.isArray(targetBuckets[oldClass]) ? targetBuckets[oldClass] : [];
+            if (!Array.isArray(targetBuckets[oldClass])) {
+                targetBuckets[oldClass] = oldArr;
+            }
             const idx = oldArr.indexOf(targetBbox);
             if (idx !== -1) oldArr.splice(idx, 1);
             if (!predictedClass || typeof classes[predictedClass] === "undefined") {
                 console.warn("AutoPredict returned unknown class:", predictedClass);
-                if (!bboxes[currentImage.name][oldClass]) {
-                    bboxes[currentImage.name][oldClass] = [];
+                if (!targetBuckets[oldClass]) {
+                    targetBuckets[oldClass] = [];
                 }
                 targetBbox.class = oldClass;
-                bboxes[currentImage.name][oldClass].push(targetBbox);
+                targetBuckets[oldClass].push(targetBbox);
             } else {
-                if (!bboxes[currentImage.name][predictedClass]) {
-                    bboxes[currentImage.name][predictedClass] = [];
+                if (!targetBuckets[predictedClass]) {
+                    targetBuckets[predictedClass] = [];
                 }
                 targetBbox.class = predictedClass;
-                bboxes[currentImage.name][predictedClass].push(targetBbox);
+                targetBuckets[predictedClass].push(targetBbox);
             }
             delete pendingApiBboxes[returnedUUID];
+        } catch (error) {
+            console.error("autoPredictNewCrop error:", error);
+            setSamStatus(`Auto class prediction failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+            enqueueTaskNotice("Auto class prediction failed; kept current class.", { durationMs: 4000 });
         } finally {
+            if (bbox?.uuid) {
+                delete pendingApiBboxes[bbox.uuid];
+            }
             completeTask(clipTaskId);
             endClipProgress(progressToken);
         }
@@ -25588,6 +28424,9 @@ function initQwenTrainingTab() {
         }
         const statusToken = beginSamActionStatus("Running SAM auto box…");
         const imageName = currentImage ? currentImage.name : null;
+        const requestImageName = imageName;
+        const requestImageWidth = Number(images[requestImageName]?.width || currentImage?.width || 0);
+        const requestImageHeight = Number(images[requestImageName]?.height || currentImage?.height || 0);
         const placeholderContext = bbox ? { uuid: bbox.uuid, imageName } : null;
         const jobHandle = registerSamJob({
             type: "sam-bbox-auto",
@@ -25620,12 +28459,12 @@ function initQwenTrainingTab() {
                 throw new Error("sam_bbox_auto failed: " + resp.statusText);
             }
             const result = await resp.json();
-            console.log("sam_bbox_auto =>", result);
+            console.debug("sam_bbox_auto =>", result);
             if (!isSamJobActive(jobHandle)) {
                 return;
             }
-            if (result.image_token && currentImage) {
-                rememberSamToken(currentImage.name, samVariant, result.image_token);
+            if (result.image_token && requestImageName) {
+                rememberSamToken(requestImageName, samVariant, result.image_token);
             }
             if (!result.uuid || !result.bbox || result.bbox.length < 4) {
                 alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam_bbox_auto response.");
@@ -25643,6 +28482,20 @@ function initQwenTrainingTab() {
                 }
                 return;
             }
+            // Prevent cross-image writes if the user navigated during async SAM call.
+            if (!currentImage || currentImage.name !== requestImageName) {
+                if (placeholderContext) {
+                    removePendingBbox(placeholderContext);
+                }
+                if (returnedUUID) {
+                    delete pendingApiBboxes[returnedUUID];
+                }
+                setSamStatus(
+                    `SAM auto box finished for ${requestImageName || "image"}, but view switched; skipped apply.`,
+                    { variant: "warn", duration: 4000 },
+                );
+                return;
+            }
             currentBbox = {
                 bbox: targetBbox,
                 index: -1,
@@ -25654,12 +28507,16 @@ function initQwenTrainingTab() {
                 resizing: null
             };
         const [cx, cy, wNorm, hNorm] = result.bbox;
-        const absW = wNorm * currentImage.width;
-        const absH = hNorm * currentImage.height;
-        const absX = cx * currentImage.width - absW / 2;
-        const absY = cy * currentImage.height - absH / 2;
+        const absW = wNorm * requestImageWidth;
+        const absH = hNorm * requestImageHeight;
+        const absX = cx * requestImageWidth - absW / 2;
+        const absY = cy * requestImageHeight - absH / 2;
+        const imageBuckets = bboxes[currentImage.name] || (bboxes[currentImage.name] = {});
         const oldClass = targetBbox.class;
-        const oldArr = bboxes[currentImage.name][oldClass];
+        const oldArr = Array.isArray(imageBuckets[oldClass]) ? imageBuckets[oldClass] : [];
+        if (!Array.isArray(imageBuckets[oldClass])) {
+            imageBuckets[oldClass] = oldArr;
+        }
         const idx = oldArr.indexOf(targetBbox);
         if (idx !== -1) oldArr.splice(idx, 1);
         // If prediction present, move bbox to predicted class; else keep current class
@@ -25668,24 +28525,24 @@ function initQwenTrainingTab() {
             const newClass = resolvedPrediction;
             if (typeof classes[newClass] === "undefined") {
                 console.warn("SAM bbox auto predicted unknown class:", newClass);
-                if (!bboxes[currentImage.name][oldClass]) {
-                    bboxes[currentImage.name][oldClass] = [];
+                if (!imageBuckets[oldClass]) {
+                    imageBuckets[oldClass] = [];
                 }
                 targetBbox.class = oldClass;
-                bboxes[currentImage.name][oldClass].push(targetBbox);
+                imageBuckets[oldClass].push(targetBbox);
             } else {
-                if (!bboxes[currentImage.name][newClass]) {
-                    bboxes[currentImage.name][newClass] = [];
+                if (!imageBuckets[newClass]) {
+                    imageBuckets[newClass] = [];
                 }
                 targetBbox.class = newClass;
-                bboxes[currentImage.name][newClass].push(targetBbox);
+                imageBuckets[newClass].push(targetBbox);
             }
         } else {
             // Keep original class
-            if (!bboxes[currentImage.name][oldClass]) {
-                bboxes[currentImage.name][oldClass] = [];
+            if (!imageBuckets[oldClass]) {
+                imageBuckets[oldClass] = [];
             }
-            bboxes[currentImage.name][oldClass].push(targetBbox);
+            imageBuckets[oldClass].push(targetBbox);
         }
         targetBbox.x = absX;
         targetBbox.y = absY;
@@ -25708,6 +28565,9 @@ function initQwenTrainingTab() {
     async function samPointAutoPrompt(px, py) {
         const statusToken = beginSamActionStatus("Running SAM point+CLIP…");
         const imageName = currentImage ? currentImage.name : null;
+        const requestImageName = imageName;
+        const requestImageWidth = Number(images[requestImageName]?.width || currentImage?.width || 0);
+        const requestImageHeight = Number(images[requestImageName]?.height || currentImage?.height || 0);
         const placeholderContext = currentBbox && currentBbox.bbox ? { uuid: currentBbox.bbox.uuid, imageName } : null;
         const jobHandle = registerSamJob({
             type: "sam-point-auto",
@@ -25738,12 +28598,12 @@ function initQwenTrainingTab() {
                 throw new Error("sam_point_auto failed: " + resp.statusText);
             }
             const result = await resp.json();
-            console.log("sam_point_auto =>", result);
+            console.debug("sam_point_auto =>", result);
             if (!isSamJobActive(jobHandle)) {
                 return;
             }
-            if (result.image_token && currentImage) {
-                rememberSamToken(currentImage.name, samVariant, result.image_token);
+            if (result.image_token && requestImageName) {
+                rememberSamToken(requestImageName, samVariant, result.image_token);
             }
             if (!result.uuid || !result.bbox || result.bbox.length < 4) {
                 alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam_point_auto response.");
@@ -25761,6 +28621,20 @@ function initQwenTrainingTab() {
                 }
                 return;
             }
+            // Prevent cross-image writes if the user navigated during async SAM call.
+            if (!currentImage || currentImage.name !== requestImageName) {
+                if (placeholderContext) {
+                    removePendingBbox(placeholderContext);
+                }
+                if (returnedUUID) {
+                    delete pendingApiBboxes[returnedUUID];
+                }
+                setSamStatus(
+                    `SAM point auto finished for ${requestImageName || "image"}, but view switched; skipped apply.`,
+                    { variant: "warn", duration: 4000 },
+                );
+                return;
+            }
             currentBbox = {
                 bbox: targetBbox,
                 index: -1,
@@ -25772,12 +28646,16 @@ function initQwenTrainingTab() {
                 resizing: null
             };
         const [cx, cy, wNorm, hNorm] = result.bbox;
-        const absW = wNorm * currentImage.width;
-        const absH = hNorm * currentImage.height;
-        const absX = cx * currentImage.width - absW / 2;
-        const absY = cy * currentImage.height - absH / 2;
+        const absW = wNorm * requestImageWidth;
+        const absH = hNorm * requestImageHeight;
+        const absX = cx * requestImageWidth - absW / 2;
+        const absY = cy * requestImageHeight - absH / 2;
+        const imageBuckets = bboxes[currentImage.name] || (bboxes[currentImage.name] = {});
         const oldClass = targetBbox.class;
-        const oldArr = bboxes[currentImage.name][oldClass];
+        const oldArr = Array.isArray(imageBuckets[oldClass]) ? imageBuckets[oldClass] : [];
+        if (!Array.isArray(imageBuckets[oldClass])) {
+            imageBuckets[oldClass] = oldArr;
+        }
         const idx = oldArr.indexOf(targetBbox);
         if (idx !== -1) oldArr.splice(idx, 1);
         const resolvedPrediction = resolveClipAutoPrediction(result);
@@ -25785,23 +28663,23 @@ function initQwenTrainingTab() {
             const newClass = resolvedPrediction;
             if (typeof classes[newClass] === "undefined") {
                 console.warn("SAM point auto predicted unknown class:", newClass);
-                if (!bboxes[currentImage.name][oldClass]) {
-                    bboxes[currentImage.name][oldClass] = [];
+                if (!imageBuckets[oldClass]) {
+                    imageBuckets[oldClass] = [];
                 }
                 targetBbox.class = oldClass;
-                bboxes[currentImage.name][oldClass].push(targetBbox);
+                imageBuckets[oldClass].push(targetBbox);
             } else {
-                if (!bboxes[currentImage.name][newClass]) {
-                    bboxes[currentImage.name][newClass] = [];
+                if (!imageBuckets[newClass]) {
+                    imageBuckets[newClass] = [];
                 }
                 targetBbox.class = newClass;
-                bboxes[currentImage.name][newClass].push(targetBbox);
+                imageBuckets[newClass].push(targetBbox);
             }
         } else {
-            if (!bboxes[currentImage.name][oldClass]) {
-                bboxes[currentImage.name][oldClass] = [];
+            if (!imageBuckets[oldClass]) {
+                imageBuckets[oldClass] = [];
             }
-            bboxes[currentImage.name][oldClass].push(targetBbox);
+            imageBuckets[oldClass].push(targetBbox);
         }
         targetBbox.x = absX;
         targetBbox.y = absY;
@@ -25823,6 +28701,9 @@ function initQwenTrainingTab() {
 
     async function samPointMultiPrompt(job, jobHandle) {
         const { positivePoints, negativePoints, requestToken, placeholderContext } = job;
+        const requestImageName = placeholderContext?.imageName || (currentImage ? currentImage.name : null);
+        const requestImageWidth = Number(images[requestImageName]?.width || currentImage?.width || 0);
+        const requestImageHeight = Number(images[requestImageName]?.height || currentImage?.height || 0);
         const statusToken = beginSamActionStatus("Running SAM multi-point…");
         let success = false;
         try {
@@ -25843,14 +28724,26 @@ function initQwenTrainingTab() {
             if (requestToken && multiPointPendingToken !== requestToken) {
                 return;
             }
-            if (result.image_token && currentImage) {
-                rememberSamToken(currentImage.name, samVariant, result.image_token);
+            if (result.image_token && requestImageName) {
+                rememberSamToken(requestImageName, samVariant, result.image_token);
             }
             const returnedUUID = result.uuid;
             const targetBbox = pendingApiBboxes[returnedUUID];
             if (!targetBbox) {
                 console.warn("No pending bbox found for uuid:", returnedUUID);
                 removePendingBbox(placeholderContext);
+                return;
+            }
+            // Prevent cross-image writes if the user navigated during async SAM call.
+            if (!currentImage || currentImage.name !== requestImageName) {
+                removePendingBbox(placeholderContext);
+                if (returnedUUID) {
+                    delete pendingApiBboxes[returnedUUID];
+                }
+                setSamStatus(
+                    `SAM multi-point finished for ${requestImageName || "image"}, but view switched; skipped apply.`,
+                    { variant: "warn", duration: 4000 },
+                );
                 return;
             }
             if (datasetType === "seg") {
@@ -25880,10 +28773,10 @@ function initQwenTrainingTab() {
                 return;
             }
             const [cx, cy, wNorm, hNorm] = result.bbox;
-            const absW = wNorm * currentImage.width;
-            const absH = hNorm * currentImage.height;
-            const absX = cx * currentImage.width - absW / 2;
-            const absY = cy * currentImage.height - absH / 2;
+            const absW = wNorm * requestImageWidth;
+            const absH = hNorm * requestImageHeight;
+            const absX = cx * requestImageWidth - absW / 2;
+            const absY = cy * requestImageHeight - absH / 2;
             targetBbox.x = absX;
             targetBbox.y = absY;
             targetBbox.width = absW;
@@ -25910,6 +28803,9 @@ function initQwenTrainingTab() {
 
     async function samPointMultiAutoPrompt(job, jobHandle) {
         const { positivePoints, negativePoints, requestToken, placeholderContext } = job;
+        const requestImageName = placeholderContext?.imageName || (currentImage ? currentImage.name : null);
+        const requestImageWidth = Number(images[requestImageName]?.width || currentImage?.width || 0);
+        const requestImageHeight = Number(images[requestImageName]?.height || currentImage?.height || 0);
         const statusToken = beginSamActionStatus("Running SAM multi-point auto…");
         let success = false;
         try {
@@ -25936,15 +28832,15 @@ function initQwenTrainingTab() {
                 throw new Error("sam_point_multi_auto failed: " + resp.statusText);
             }
             const result = await resp.json();
-            console.log("sam_point_multi_auto =>", result);
+            console.debug("sam_point_multi_auto =>", result);
             if (!isSamJobActive(jobHandle)) {
                 return;
             }
             if (requestToken && multiPointPendingToken !== requestToken) {
                 return;
             }
-            if (result.image_token && currentImage) {
-                rememberSamToken(currentImage.name, samVariant, result.image_token);
+            if (result.image_token && requestImageName) {
+                rememberSamToken(requestImageName, samVariant, result.image_token);
             }
             if (!result.uuid || !result.bbox || result.bbox.length < 4) {
                 alert("Auto mode error: missing 'uuid' or invalid 'bbox' in /sam_point_multi_auto response.");
@@ -25958,6 +28854,18 @@ function initQwenTrainingTab() {
                 removePendingBbox(placeholderContext);
                 return;
             }
+            // Prevent cross-image writes if the user navigated during async SAM call.
+            if (!currentImage || currentImage.name !== requestImageName) {
+                removePendingBbox(placeholderContext);
+                if (returnedUUID) {
+                    delete pendingApiBboxes[returnedUUID];
+                }
+                setSamStatus(
+                    `SAM multi-point auto finished for ${requestImageName || "image"}, but view switched; skipped apply.`,
+                    { variant: "warn", duration: 4000 },
+                );
+                return;
+            }
             currentBbox = {
                 bbox: targetBbox,
                 index: -1,
@@ -25969,12 +28877,16 @@ function initQwenTrainingTab() {
                 resizing: null,
             };
             const [cx, cy, wNorm, hNorm] = result.bbox;
-            const absW = wNorm * currentImage.width;
-            const absH = hNorm * currentImage.height;
-            const absX = cx * currentImage.width - absW / 2;
-            const absY = cy * currentImage.height - absH / 2;
+            const absW = wNorm * requestImageWidth;
+            const absH = hNorm * requestImageHeight;
+            const absX = cx * requestImageWidth - absW / 2;
+            const absY = cy * requestImageHeight - absH / 2;
+            const imageBuckets = bboxes[currentImage.name] || (bboxes[currentImage.name] = {});
             const oldClass = targetBbox.class;
-            const oldArr = bboxes[currentImage.name][oldClass];
+            const oldArr = Array.isArray(imageBuckets[oldClass]) ? imageBuckets[oldClass] : [];
+            if (!Array.isArray(imageBuckets[oldClass])) {
+                imageBuckets[oldClass] = oldArr;
+            }
             const idx = oldArr.indexOf(targetBbox);
             if (idx !== -1) oldArr.splice(idx, 1);
             const resolvedPrediction = resolveClipAutoPrediction(result);
@@ -25982,23 +28894,23 @@ function initQwenTrainingTab() {
                 const newClass = resolvedPrediction;
                 if (typeof classes[newClass] === "undefined") {
                     console.warn("SAM multi-point auto predicted unknown class:", newClass);
-                    if (!bboxes[currentImage.name][oldClass]) {
-                        bboxes[currentImage.name][oldClass] = [];
+                    if (!imageBuckets[oldClass]) {
+                        imageBuckets[oldClass] = [];
                     }
                     targetBbox.class = oldClass;
-                    bboxes[currentImage.name][oldClass].push(targetBbox);
+                    imageBuckets[oldClass].push(targetBbox);
                 } else {
-                    if (!bboxes[currentImage.name][newClass]) {
-                        bboxes[currentImage.name][newClass] = [];
+                    if (!imageBuckets[newClass]) {
+                        imageBuckets[newClass] = [];
                     }
                     targetBbox.class = newClass;
-                    bboxes[currentImage.name][newClass].push(targetBbox);
+                    imageBuckets[newClass].push(targetBbox);
                 }
             } else {
-                if (!bboxes[currentImage.name][oldClass]) {
-                    bboxes[currentImage.name][oldClass] = [];
+                if (!imageBuckets[oldClass]) {
+                    imageBuckets[oldClass] = [];
                 }
-                bboxes[currentImage.name][oldClass].push(targetBbox);
+                imageBuckets[oldClass].push(targetBbox);
             }
             targetBbox.x = absX;
             targetBbox.y = absY;
@@ -26116,11 +29028,7 @@ function initQwenTrainingTab() {
     // Standard parameters
     const fontBaseSize = 6;
     const fontColor = "#001f3f";
-    const borderColor = "#001f3f";
-    const backgroundColor = "rgba(0, 116, 217, 0.2)";
     const markedFontColor = "#FF4136";
-    const markedBorderColor = "#FF4136";
-    const markedBackgroundColor = "rgba(255, 133, 27, 0.2)";
     const minBBoxWidth = 5;
     const minBBoxHeight = 5;
     const scrollSpeed = 1.03;
@@ -26133,6 +29041,9 @@ function initQwenTrainingTab() {
     const drawGuidelines = true;
     const fittedZoom = true;
     let canvas = null;
+    // Keep canvas/listener setup idempotent across any re-initialization path.
+    let canvasDrawListenerBound = false;
+    let canvasMouseListenersBound = false;
     let images = {};
     let classes = {};
     let bboxes = {};
@@ -26227,7 +29138,7 @@ function initQwenTrainingTab() {
             multiPointModeCheckbox.disabled = !samMode;
             if (!samMode) {
                 multiPointModeCheckbox.checked = false;
-                updateMultiPointModeState(false);
+                updateMultiPointState(false);
             }
         }
         if (polygonDrawToggle) {
@@ -26315,24 +29226,33 @@ function initQwenTrainingTab() {
         e.preventDefault();
     }, false);
 
-    document.onreadystatechange = () => {
-        if (document.readyState === "complete") {
-            listenCanvas();
-            listenCanvasMouse();
-            listenImageLoad();
-            listenImageSelect();
-            listenClassLoad();
-            listenClassSelect();
-            listenBboxLoad();
-            listenBboxSave();
-            listenKeyboard();
-            listenImageSearch();
-            listenImageCrop();
-            ensureBatchTweakElements();
-            datasetTypeBadge = document.getElementById("datasetTypeBadge");
-            setDatasetType(datasetType);
+    let labelingUiBootstrapped = false;
+    function bootstrapLabelingUiWhenReady() {
+        if (labelingUiBootstrapped || document.readyState !== "complete") {
+            return;
         }
-    };
+        labelingUiBootstrapped = true;
+        document.removeEventListener("readystatechange", bootstrapLabelingUiWhenReady);
+        setupTabNavigation();
+        listenCanvas();
+        listenCanvasMouse();
+        listenImageLoad();
+        listenImageSelect();
+        listenClassLoad();
+        listenClassSelect();
+        listenBboxLoad();
+        listenBboxSave();
+        listenKeyboard();
+        listenImageSearch();
+        listenImageCrop();
+        ensureBatchTweakElements();
+        datasetTypeBadge = document.getElementById("datasetTypeBadge");
+        setDatasetType(datasetType);
+    }
+    // Use an event listener instead of assigning document.onreadystatechange so
+    // we don't clobber other handlers and still initialize if script loads late.
+    document.addEventListener("readystatechange", bootstrapLabelingUiWhenReady);
+    bootstrapLabelingUiWhenReady();
 
     function ensureCanvasDimensions() {
         if (!canvas || !canvas.element) {
@@ -26356,6 +29276,10 @@ function initQwenTrainingTab() {
     }
 
     const listenCanvas = () => {
+        if (canvasDrawListenerBound && canvas) {
+            ensureCanvasDimensions();
+            return;
+        }
         const rightPanel = document.getElementById("right");
         const initialWidth = rightPanel ? rightPanel.clientWidth : window.innerWidth;
         const initialHeight = Math.max(1, window.innerHeight - 20);
@@ -26381,6 +29305,7 @@ function initQwenTrainingTab() {
                 fitZoom(currentImage, { preservePan: true });
             }
         });
+        canvasDrawListenerBound = true;
     };
 
     const drawImage = (context) => {
@@ -26481,7 +29406,8 @@ function initQwenTrainingTab() {
             return;
         }
         for (let className in currentBboxes) {
-            currentBboxes[className].forEach((bbox) => {
+            const classBoxes = Array.isArray(currentBboxes[className]) ? currentBboxes[className] : [];
+            classBoxes.forEach((bbox) => {
                 context.save();
                 const strokeColor = getColorFromClass(className);
                 const fillColor = withAlpha(strokeColor, 0.2);
@@ -26647,10 +29573,16 @@ function initQwenTrainingTab() {
         context.strokeStyle = "#f59e0b";
         context.fillStyle = "rgba(245, 158, 11, 0.08)";
         qwenAgentWindowOverlays.forEach((win) => {
+            if (!win || ![win.x1, win.y1, win.x2, win.y2].every(Number.isFinite)) {
+                return;
+            }
             const x = zoomX(win.x1);
             const y = zoomY(win.y1);
             const w = zoom(win.x2 - win.x1);
             const h = zoom(win.y2 - win.y1);
+            if (!(w > 0) || !(h > 0)) {
+                return;
+            }
             context.strokeRect(x, y, w, h);
             context.fillRect(x, y, w, h);
             if (win.label) {
@@ -26758,22 +29690,13 @@ function initQwenTrainingTab() {
         }
     };
 
-    const setBBoxStyles = (context, marked) => {
-        context.setLineDash([]);
-        if (marked === false) {
-            context.strokeStyle = borderColor;
-            context.fillStyle = backgroundColor;
-        } else {
-            context.strokeStyle = markedBorderColor;
-            context.fillStyle = markedBackgroundColor;
-        }
-    };
-
     const setBboxCoordinates = (x, y, width, height) => {
         const x2 = x + width;
         const y2 = y + height;
-        document.getElementById("bboxInformation").innerHTML =
-            `${width}x${height} (${x}, ${y}) (${x2}, ${y2})`;
+        const bboxInfo = document.getElementById("bboxInformation");
+        if (bboxInfo) {
+            bboxInfo.textContent = `${width}x${height} (${x}, ${y}) (${x2}, ${y2})`;
+        }
     };
 
     const setFontStyles = (context, marked) => {
@@ -26786,11 +29709,20 @@ function initQwenTrainingTab() {
     };
 
     const listenCanvasMouse = () => {
+        if (canvasMouseListenersBound || !canvas || !canvas.element) {
+            return;
+        }
+        canvasMouseListenersBound = true;
         canvas.element.addEventListener("wheel", trackWheel, { passive: false });
-        canvas.element.addEventListener("mousemove", trackPointer);
-        canvas.element.addEventListener("mousedown", trackPointer);
-        canvas.element.addEventListener("mouseup", trackPointer);
-        canvas.element.addEventListener("mouseout", trackPointer);
+        const trackPointerSafely = (event) => {
+            trackPointer(event).catch((error) => {
+                console.error("Pointer tracking failed", error);
+            });
+        };
+        canvas.element.addEventListener("mousemove", trackPointerSafely);
+        canvas.element.addEventListener("mousedown", trackPointerSafely);
+        canvas.element.addEventListener("mouseup", trackPointerSafely);
+        canvas.element.addEventListener("mouseout", trackPointerSafely);
         document.addEventListener("mouseup", () => {
             if (!mouse.yoloDragActive || !currentImage) {
                 return;
@@ -26802,7 +29734,9 @@ function initQwenTrainingTab() {
             mouse.buttonL = false;
             mouse.buttonR = false;
             mouse.yoloDragActive = false;
-            runRegionDetect({ x: left, y: top, width, height });
+            runRegionDetect({ x: left, y: top, width, height }).catch((error) => {
+                console.error("Region detect dispatch failed", error);
+            });
         });
         window.addEventListener("blur", () => {
             mouse.yoloKeyActive = false;
@@ -27290,7 +30224,8 @@ function initQwenTrainingTab() {
         let found = null;
         let smallestArea = Number.MAX_SAFE_INTEGER;
         for (let className in currentBxs) {
-            currentBxs[className].forEach((bx, i) => {
+            const classBoxes = Array.isArray(currentBxs[className]) ? currentBxs[className] : [];
+            classBoxes.forEach((bx, i) => {
                 if (!bx) return;
                 const isPoly = bx.type === "polygon" || (Array.isArray(bx.points) && bx.points.length >= 3);
                 let inside = false;
@@ -27332,7 +30267,8 @@ function initQwenTrainingTab() {
             }
             const currentBxs = bboxes[currentImage.name];
             for (let className in currentBxs) {
-                currentBxs[className].forEach((bx) => {
+                const classBoxes = Array.isArray(currentBxs[className]) ? currentBxs[className] : [];
+                classBoxes.forEach((bx) => {
                     bx.marked = false;
                 });
             }
@@ -27385,10 +30321,11 @@ function initQwenTrainingTab() {
         if (!currentImage || !currentImage.name) {
             return false;
         }
+        const requestImageName = currentImage.name;
         if (samMode && samSlotsEnabled && samPreloadEnabled) {
-            let token = getSamToken(currentImage.name, samVariant);
+            let token = getSamToken(requestImageName, samVariant);
             if (!token) {
-                const alreadyQueued = isSamPreloadActiveFor(currentImage.name, samVariant);
+                const alreadyQueued = isSamPreloadActiveFor(requestImageName, samVariant);
                 setSamStatus("Waiting for SAM to load this image…", { variant: "info", duration: 0 });
                 showSamPreloadProgress();
                 if (!alreadyQueued) {
@@ -27396,13 +30333,18 @@ function initQwenTrainingTab() {
                         console.debug("prepareSamForCurrentImage (tweak) failed", err);
                     });
                 }
-                token = await waitForSamPreloadIfActive(currentImage.name, samVariant);
+                token = await waitForSamPreloadIfActive(requestImageName, samVariant);
                 if (!token) {
                     setSamStatus("Using fresh SAM load for this image", { variant: "info", duration: 2500 });
                 } else {
-                    setSamStatus(`SAM ready for ${currentImage.name}`, { variant: "success", duration: 1200 });
+                    setSamStatus(`SAM ready for ${requestImageName}`, { variant: "success", duration: 1200 });
                 }
             }
+        }
+        // Guard against stale tweak operations if user switched images mid-run.
+        if (!currentImage || currentImage.name !== requestImageName) {
+            setSamStatus("Tweak target changed while processing; skipped stale tweak.", { variant: "warn", duration: 3000 });
+            return false;
         }
         if (!targetBbox.uuid) {
             stampBboxCreation(targetBbox);
@@ -27467,6 +30409,7 @@ function initQwenTrainingTab() {
             setSamStatus("No bboxes available for this class", { variant: "warn", duration: 3000 });
             return;
         }
+        const batchImageName = currentImage.name;
         batchTweakRunning = true;
         if (batchTweakElements.confirm) {
             batchTweakElements.confirm.disabled = true;
@@ -27475,6 +30418,11 @@ function initQwenTrainingTab() {
         let successCount = 0;
         try {
             for (const bbox of bucket) {
+                if (!currentImage || currentImage.name !== batchImageName) {
+                    // Batch is image-local; stop if user navigated to avoid stale writes.
+                    setSamStatus("Batch tweak stopped because active image changed.", { variant: "warn", duration: 3500 });
+                    break;
+                }
                 const ok = await runMagicTweakForBbox(bbox, { updateSelection: false });
                 if (ok) {
                     successCount += 1;
@@ -27572,15 +30520,16 @@ function initQwenTrainingTab() {
 
     const changeCursorByLocation = () => {
         if (!currentImage) return;
-        document.body.style.cursor = "default";
-        const currentBxs = bboxes[currentImage.name];
+        setGlobalCursor("default");
+        const currentBxs = bboxes[currentImage.name] || {};
         for (let className in currentBxs) {
-            for (let bx of currentBxs[className]) {
+            const classBoxes = Array.isArray(currentBxs[className]) ? currentBxs[className] : [];
+            for (let bx of classBoxes) {
                 const endX = bx.x + bx.width;
                 const endY = bx.y + bx.height;
                 if (mouse.realX >= (bx.x + edgeSize) && mouse.realX <= (endX - edgeSize) &&
                     mouse.realY >= (bx.y + edgeSize) && mouse.realY <= (endY - edgeSize)) {
-                    document.body.style.cursor = "pointer";
+                    setGlobalCursor("pointer");
                     break;
                 }
             }
@@ -27591,7 +30540,7 @@ function initQwenTrainingTab() {
             const bry = bx.y + bx.height;
             if (mouse.realX >= bx.x + edgeSize && mouse.realX <= brx - edgeSize &&
                 mouse.realY >= bx.y + edgeSize && mouse.realY <= bry - edgeSize) {
-                document.body.style.cursor = "move";
+                setGlobalCursor("move");
             }
         }
     };
@@ -27648,10 +30597,14 @@ function initQwenTrainingTab() {
     };
 
     const listenImageLoad = () => {
+        if (imageLoadListenerBound) {
+            return;
+        }
         const imagesInput = document.getElementById("images");
         if (!imagesInput) {
             return;
         }
+        imageLoadListenerBound = true;
         imagesInput.addEventListener("change", async (event) => {
             const imageList = document.getElementById("imageList");
             if (!imageList) {
@@ -27660,7 +30613,7 @@ function initQwenTrainingTab() {
                 return;
             }
 
-            const files = event.target.files;
+            const files = event?.target?.files;
             if (!files || files.length === 0) {
                 imagesInput.value = "";
                 return;
@@ -27675,6 +30628,9 @@ function initQwenTrainingTab() {
             imageLoadPromise = loadPromise;
             try {
                 await loadPromise;
+            } catch (error) {
+                console.error("Image load failed", error);
+                setSamStatus(`Image load failed: ${error.message || error}`, { variant: "error", duration: 5000 });
             } finally {
                 if (imageLoadPromise === loadPromise) {
                     imageLoadPromise = null;
@@ -27703,7 +30659,7 @@ function initQwenTrainingTab() {
             return extensions.indexOf(ext) !== -1;
         });
         const total = selectedFiles.length;
-        document.body.style.cursor = "wait";
+        setGlobalCursor("wait");
         const loadingLabel = `Loading ${total} image${total === 1 ? "" : "s"}… please wait`;
         setSamStatus(loadingLabel, { variant: "info", duration: 0 });
         let fileCount = 0;
@@ -27748,7 +30704,7 @@ function initQwenTrainingTab() {
                 }
             }
         } finally {
-            document.body.style.cursor = "default";
+            setGlobalCursor("default");
             if (supportedFiles.length > 0) {
                 stopIngestProgress();
                 hideBackgroundLoadModal();
@@ -27778,7 +30734,10 @@ function initQwenTrainingTab() {
     }
 
     const resetImageList = () => {
-        document.getElementById("imageList").innerHTML = "";
+        const imageList = document.getElementById("imageList");
+        if (imageList) {
+            imageList.innerHTML = "";
+        }
         images = {};
         bboxes = {};
         textLabels = {};
@@ -27804,6 +30763,9 @@ function initQwenTrainingTab() {
 
     function setCurrentImage(image) {
         if (!image) return;
+        // Monotonic token so late async image loads cannot override a newer selection.
+        const selectionToken = ++imageSelectionRequestToken;
+        const isSelectionStale = () => selectionToken !== imageSelectionRequestToken;
         const previousImageName = currentImage ? currentImage.name : null;
         const cancellation = cancelAllSamJobs({ reason: "image switch", imageName: previousImageName, announce: false });
         cancelPendingMultiPoint({ clearMarkers: true, removePendingBbox: true });
@@ -27814,7 +30776,11 @@ function initQwenTrainingTab() {
             cancelSamPreload({ preserveImages });
         }
         const hasActivePreload = pendingImageName
-            ? (slotPreloadPromises.has(pendingImageName) || isImageCurrentlyLoading(pendingImageName))
+            ? (
+                // Promise keys are variant-scoped; detect any in-flight preload for image.
+                Array.from(slotPreloadPromises.keys()).some((key) => key.endsWith(`::${pendingImageName}`))
+                || isImageCurrentlyLoading(pendingImageName)
+            )
             : false;
         if (samPreloadEnabled && pendingImageName) {
             const statusLabel = hasActivePreload ? "Continuing SAM preload" : "Preparing SAM preload";
@@ -27826,17 +30792,33 @@ function initQwenTrainingTab() {
             resetCanvasPlacement();
         }
         const messagePrefix = cancellation.message;
+        const finalizeCurrentImageSelection = () => {
+            if (!currentImage?.name) {
+                return;
+            }
+            // Keep list/caption UI synchronized with the image that actually became current.
+            syncImageSelectionToName(currentImage.name, { ensureVisible: true });
+            loadCaptionForCurrentImage().catch((error) => {
+                console.debug("Unable to load caption for current image", error);
+            });
+        };
+        const setImageInfo = (text) => {
+            const imageInformation = document.getElementById("imageInformation");
+            if (imageInformation) {
+                imageInformation.textContent = text || "";
+            }
+        };
         if (!image.object) {
             const reader = new FileReader();
-            document.body.style.cursor = "wait";
+            setGlobalCursor("wait");
             reader.onload = () => {
-                if (image._loadVersion !== loadVersion) {
+                if (isSelectionStale() || image._loadVersion !== loadVersion) {
                     return;
                 }
                 const dataUrl = typeof reader.result === "string" ? reader.result : "";
                 const imageObject = new Image();
                 imageObject.onload = () => {
-                    if (image._loadVersion !== loadVersion) {
+                    if (isSelectionStale() || image._loadVersion !== loadVersion) {
                         return;
                     }
                     image.object = imageObject;
@@ -27852,12 +30834,11 @@ function initQwenTrainingTab() {
                         height: naturalHeight,
                         dataUrl,
                     };
-                    document.body.style.cursor = "default";
+                    setGlobalCursor("default");
                     if (fittedZoom) {
                         fitZoom(currentImage);
                     }
-                    document.getElementById("imageInformation").innerHTML =
-                        `${naturalWidth}x${naturalHeight}, ${formatBytes(image.meta.size)}`;
+                    setImageInfo(`${naturalWidth}x${naturalHeight}, ${formatBytes(image.meta.size)}`);
                     if (!bboxes[currentImage.name]) {
                         bboxes[currentImage.name] = {};
                     }
@@ -27867,15 +30848,32 @@ function initQwenTrainingTab() {
                     if (typeof refreshSam3CascadeControls === "function") {
                         refreshSam3CascadeControls();
                     }
+                    finalizeCurrentImageSelection();
+                };
+                imageObject.onerror = () => {
+                    if (isSelectionStale() || image._loadVersion !== loadVersion) {
+                        return;
+                    }
+                    setGlobalCursor("default");
+                    setSamStatus(`Failed to decode image ${image.meta?.name || "(unknown)"}.`, { variant: "error", duration: 5000 });
                 };
                 imageObject.src = dataUrl;
+            };
+            reader.onerror = () => {
+                if (isSelectionStale() || image._loadVersion !== loadVersion) {
+                    return;
+                }
+                setGlobalCursor("default");
+                setSamStatus(`Failed to read image ${image.meta?.name || "(unknown)"}.`, { variant: "error", duration: 5000 });
             };
             reader.readAsDataURL(image.meta);
         }
         else {
-            if (image._loadVersion !== loadVersion) {
+            if (isSelectionStale() || image._loadVersion !== loadVersion) {
                 return;
             }
+            // Ensure cursor is restored when switching to an already-loaded image.
+            setGlobalCursor("default");
             const naturalWidth = image.width || image.object?.naturalWidth || image.object?.width || 0;
             const naturalHeight = image.height || image.object?.naturalHeight || image.object?.height || 0;
             image.width = naturalWidth;
@@ -27890,8 +30888,7 @@ function initQwenTrainingTab() {
             if (fittedZoom) {
                 fitZoom(currentImage);
             }
-            document.getElementById("imageInformation").innerHTML =
-                `${naturalWidth}x${naturalHeight}, ${formatBytes(image.meta.size)}`;
+            setImageInfo(`${naturalWidth}x${naturalHeight}, ${formatBytes(image.meta.size)}`);
             if (!bboxes[currentImage.name]) {
                 bboxes[currentImage.name] = {};
             }
@@ -27901,16 +30898,11 @@ function initQwenTrainingTab() {
             if (typeof refreshSam3CascadeControls === "function") {
                 refreshSam3CascadeControls();
             }
+            finalizeCurrentImageSelection();
         }
         if (currentBbox !== null) {
             currentBbox.bbox.marked = false;
             currentBbox = null;
-        }
-        if (currentImage?.name) {
-            syncImageSelectionToName(currentImage.name, { ensureVisible: true });
-            loadCaptionForCurrentImage().catch((error) => {
-                console.debug("Unable to load caption for current image", error);
-            });
         }
         if (!samPreloadEnabled && messagePrefix) {
             setSamStatus(messagePrefix, { variant: "warn", duration: 5000 });
@@ -27938,45 +30930,63 @@ function initQwenTrainingTab() {
     };
 
     const listenImageSelect = () => {
+        if (imageSelectListenerBound) {
+            return;
+        }
         const imageList = document.getElementById("imageList");
+        if (!imageList) {
+            return;
+        }
+        imageSelectListenerBound = true;
         imageList.addEventListener("change", () => {
             imageListIndex = imageList.selectedIndex;
+            if (imageListIndex < 0) {
+                return;
+            }
             const name = getOptionImageName(imageList.options[imageListIndex]);
             setCurrentImage(images[name]);
         });
     };
 
     const listenClassLoad = () => {
+        if (classLoadListenerBound) {
+            return;
+        }
         const classesElement = document.getElementById("classes");
         if (!classesElement) {
             return;
         }
-        const classesButton = document.getElementById("classesSelect");
+        classLoadListenerBound = true;
         classesElement.addEventListener("click", () => {
-            classesElement.value = null;
+            classesElement.value = "";
         });
         classesElement.addEventListener("change", (event) => {
-            const files = event.target.files;
-            if (files.length > 0) {
+            const files = event?.target?.files;
+            if (files && files.length > 0) {
                 resetClassList();
                 const nameParts = files[0].name.split(".");
                 if (nameParts[nameParts.length - 1] === "txt") {
                     const reader = new FileReader();
                     reader.addEventListener("load", () => {
-                        const lines = reader.result;
+                        const lines = typeof reader.result === "string" ? reader.result : "";
                         const rows = lines.split(/[\r\n]+/);
                         if (rows.length > 0) {
                             const classList = document.getElementById("classList");
+                            if (!classList) {
+                                return;
+                            }
                             loadedClassList = [];
                             for (let i = 0; i < rows.length; i++) {
                                 rows[i] = rows[i].trim();
                                 if (rows[i] !== "") {
-                                    classes[rows[i]] = i;
+                                    // Keep class ids contiguous even if the class file has blank lines.
+                                    const classIndex = loadedClassList.length;
+                                    classes[rows[i]] = classIndex;
                                     loadedClassList.push(rows[i]);
                                     const option = document.createElement("option");
-                                    option.value = i;
-                                    option.innerHTML = rows[i];
-                                    if (i === 0) {
+                                    option.value = classIndex;
+                                    option.textContent = rows[i];
+                                    if (classIndex === 0) {
                                         option.selected = true;
                                         currentClass = rows[i];
                                     }
@@ -27988,7 +30998,6 @@ function initQwenTrainingTab() {
                             updateSam3ClassOptions({ resetOverride: true });
                             if (Object.keys(images).length > 0) {
                                 setBboxImportEnabled(true);
-                                document.getElementById("restoreBboxes").disabled = false;
                             }
                         }
                     });
@@ -28000,7 +31009,10 @@ function initQwenTrainingTab() {
     };
 
     const resetClassList = () => {
-        document.getElementById("classList").innerHTML = "";
+        const classList = document.getElementById("classList");
+        if (classList) {
+            classList.innerHTML = "";
+        }
         classes = {};
         currentClass = null;
         loadedClassList = [];
@@ -28011,6 +31023,13 @@ function initQwenTrainingTab() {
 
     const setCurrentClass = () => {
         const classList = document.getElementById("classList");
+        if (!classList || classList.selectedIndex < 0 || !classList.options.length) {
+            currentClass = null;
+            clearMultiPointAnnotations();
+            syncQwenClassToCurrent();
+            updateSam3ClassOptions({ preserveSelection: true });
+            return;
+        }
         currentClass = classList.options[classList.selectedIndex].text;
         if (currentBbox !== null) {
             currentBbox.bbox.marked = false;
@@ -28022,7 +31041,14 @@ function initQwenTrainingTab() {
     };
 
     const listenClassSelect = () => {
+        if (classSelectListenerBound) {
+            return;
+        }
         const classList = document.getElementById("classList");
+        if (!classList) {
+            return;
+        }
+        classSelectListenerBound = true;
         classList.addEventListener("change", () => {
             classListIndex = classList.selectedIndex;
             setCurrentClass();
@@ -28051,15 +31077,19 @@ function initQwenTrainingTab() {
         const rawExtension = file.name.split(".").pop() || "";
         const extension = rawExtension.toLowerCase();
         if (extension === "txt" || extension === "xml" || extension === "json") {
-            const text = await readFileAsTextPromise(file);
-            storeBbox(file.name, text);
-            incrementIngestProgress();
+            try {
+                const text = await readFileAsTextPromise(file);
+                storeBbox(file.name, text);
+            } finally {
+                incrementIngestProgress();
+            }
             return;
         }
         const buffer = await readFileAsArrayBufferPromise(file);
-        const zip = await (typeof JSZip.loadAsync === "function"
-            ? JSZip.loadAsync(buffer)
-            : new JSZip().loadAsync(buffer));
+        const JSZipCtor = ensureJsZipAvailable("bbox zip import");
+        const zip = await (typeof JSZipCtor.loadAsync === "function"
+            ? JSZipCtor.loadAsync(buffer)
+            : new JSZipCtor().loadAsync(buffer));
         const entries = Object.values(zip.files || {}).filter((entry) => entry && !entry.dir);
         if (entries.length === 0) {
             incrementIngestProgress();
@@ -28068,18 +31098,38 @@ function initQwenTrainingTab() {
         if (entries.length > 1) {
             adjustIngestTotal(entries.length - 1);
         }
+        let failedEntries = 0;
         for (const entry of entries) {
-            const text = await entry.async("string");
-            storeBbox(entry.name, text);
-            incrementIngestProgress();
+            try {
+                const text = await entry.async("string");
+                storeBbox(entry.name, text);
+            } catch (error) {
+                // Keep importing remaining entries instead of failing the whole archive.
+                console.error("Failed to import bbox entry from archive", entry?.name, error);
+                failedEntries += 1;
+            } finally {
+                incrementIngestProgress();
+            }
+        }
+        if (failedEntries > 0) {
+            throw new Error(
+                `Failed to import ${failedEntries} archived bbox entr${failedEntries === 1 ? "y" : "ies"} from ${file.name}.`,
+            );
         }
     }
 
     const listenBboxLoad = () => {
+        if (bboxLoadListenersBound) {
+            return;
+        }
         const fileInput = document.getElementById("bboxes");
         const folderInput = document.getElementById("bboxesFolder");
         const fileButton = document.getElementById("bboxesSelect");
         const folderButton = document.getElementById("bboxesSelectFolder");
+        if (!fileInput && !folderInput) {
+            return;
+        }
+        bboxLoadListenersBound = true;
         registerFileLabel(fileButton, fileInput);
         registerFileLabel(folderButton, folderInput);
         setupBboxInputListeners(fileInput);
@@ -28094,32 +31144,46 @@ function initQwenTrainingTab() {
             input.value = "";
         });
         input.addEventListener("change", async (event) => {
-            if (imageLoadInProgress) {
-                setSamStatus("Still loading images — please wait before importing bboxes.", { variant: "info", duration: 3000 });
-                await waitForImageLoadCompletion();
+            if (bboxImportInProgress) {
+                // Prevent overlapping imports from file/folder inputs from clobbering state.
+                setSamStatus("BBox import already running — wait for current import to finish.", { variant: "info", duration: 3000 });
+                input.value = "";
+                return;
             }
-            const files = event.target.files;
-            if (files && files.length > 0) {
-                resetBboxes();
-                bboxImportCounterActive = true;
-                startIngestProgress({ phase: "bboxes", total: files.length, extraLabel: "UUIDs" });
-                try {
-                    const tasks = [];
-                    for (let i = 0; i < files.length; i++) {
-                        tasks.push(
-                            processBboxFile(files[i]).catch((err) => {
-                                console.error("Failed to import bbox file", files[i]?.name, err);
-                                setSamStatus(`Failed to import ${files[i]?.name}: ${err.message || err}`, { variant: "error", duration: 5000 });
-                            })
-                        );
-                    }
-                    await Promise.all(tasks);
-                } finally {
-                    bboxImportCounterActive = false;
-                    stopIngestProgress();
+            bboxImportInProgress = true;
+            try {
+                if (imageLoadInProgress) {
+                    setSamStatus("Still loading images — please wait before importing bboxes.", { variant: "info", duration: 3000 });
+                    await waitForImageLoadCompletion();
                 }
+                const files = event?.target?.files;
+                if (files && files.length > 0) {
+                    resetBboxes();
+                    bboxImportCounterActive = true;
+                    startIngestProgress({ phase: "bboxes", total: files.length, extraLabel: "UUIDs" });
+                    try {
+                        const tasks = [];
+                        for (let i = 0; i < files.length; i++) {
+                            tasks.push(
+                                processBboxFile(files[i]).catch((err) => {
+                                    console.error("Failed to import bbox file", files[i]?.name, err);
+                                    setSamStatus(`Failed to import ${files[i]?.name}: ${err.message || err}`, { variant: "error", duration: 5000 });
+                                })
+                            );
+                        }
+                        await Promise.all(tasks);
+                    } finally {
+                        bboxImportCounterActive = false;
+                        stopIngestProgress();
+                    }
+                }
+            } catch (error) {
+                console.error("BBox import failed", error);
+                setSamStatus(`BBox import failed: ${error.message || error}`, { variant: "error", duration: 5000 });
+            } finally {
+                bboxImportInProgress = false;
+                input.value = "";
             }
-            input.value = "";
         });
     }
 
@@ -28148,8 +31212,8 @@ function initQwenTrainingTab() {
                     bbox = bboxes[imageName];
                     if (extension === "txt") {
                         const rows = text.split(/[\r\n]+/);
-                        for (let i = 0; i < rows.length; i++) {
-                            const cols = rows[i].trim().split(/\s+/).filter(Boolean);
+                        for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+                            const cols = rows[rowIdx].trim().split(/\s+/).filter(Boolean);
                             if (cols.length < 5) continue;
                             const clsIdx = parseInt(cols[0], 10);
                             let className = null;
@@ -28222,28 +31286,57 @@ function initQwenTrainingTab() {
                     } else if (extension === "xml") {
                         const parser = new DOMParser();
                         const xmlDoc = parser.parseFromString(text, "text/xml");
+                        const parserErrors = xmlDoc.getElementsByTagName("parsererror");
+                        if (parserErrors && parserErrors.length > 0) {
+                            console.warn("Skipping invalid XML bbox file (parsererror).");
+                            return;
+                        }
                         const objects = xmlDoc.getElementsByTagName("object");
-                        for (let i = 0; i < objects.length; i++) {
-                            const objectName = objects[i].getElementsByTagName("name")[0].childNodes[0].nodeValue;
+                        for (let objectIdx = 0; objectIdx < objects.length; objectIdx++) {
+                            const objectNameNode = objects[objectIdx].getElementsByTagName("name")[0];
+                            const objectName = objectNameNode?.textContent ? objectNameNode.textContent.trim() : "";
+                            if (!objectName) {
+                                continue;
+                            }
                             for (let className in classes) {
                                 if (className === objectName) {
                                     if (typeof bbox[className] === "undefined") {
                                         bbox[className] = [];
                                     }
-                                    const bndBox = objects[i].getElementsByTagName("bndbox")[0];
-                                    const bndBoxX = bndBox.getElementsByTagName("xmin")[0].childNodes[0].nodeValue;
-                                    const bndBoxY = bndBox.getElementsByTagName("ymin")[0].childNodes[0].nodeValue;
-                                    const bndBoxMaxX = bndBox.getElementsByTagName("xmax")[0].childNodes[0].nodeValue;
-                                    const bndBoxMaxY = bndBox.getElementsByTagName("ymax")[0].childNodes[0].nodeValue;
+                                    const bndBox = objects[objectIdx].getElementsByTagName("bndbox")[0];
+                                    if (!bndBox) {
+                                        continue;
+                                    }
+                                    const readBndInt = (tag) => {
+                                        const node = bndBox.getElementsByTagName(tag)[0];
+                                        const raw = node?.textContent ? node.textContent.trim() : "";
+                                        const value = parseInt(raw, 10);
+                                        return Number.isFinite(value) ? value : null;
+                                    };
+                                    const bndBoxX = readBndInt("xmin");
+                                    const bndBoxY = readBndInt("ymin");
+                                    const bndBoxMaxX = readBndInt("xmax");
+                                    const bndBoxMaxY = readBndInt("ymax");
+                                    if (
+                                        bndBoxX === null
+                                        || bndBoxY === null
+                                        || bndBoxMaxX === null
+                                        || bndBoxMaxY === null
+                                    ) {
+                                        continue;
+                                    }
                                     const bboxRecord = {
                                         type: "bbox",
-                                        x: parseInt(bndBoxX),
-                                        y: parseInt(bndBoxY),
-                                        width: parseInt(bndBoxMaxX) - parseInt(bndBoxX),
-                                        height: parseInt(bndBoxMaxY) - parseInt(bndBoxY),
+                                        x: bndBoxX,
+                                        y: bndBoxY,
+                                        width: bndBoxMaxX - bndBoxX,
+                                        height: bndBoxMaxY - bndBoxY,
                                         marked: false,
                                         class: className
                                     };
+                                    if (bboxRecord.width <= 0 || bboxRecord.height <= 0) {
+                                        continue;
+                                    }
                                     stampBboxCreation(bboxRecord);
                                     bbox[className].push(bboxRecord);
                                     noteImportedBbox();
@@ -28256,48 +31349,71 @@ function initQwenTrainingTab() {
             }
         } else {
             const json = JSON.parse(text);
-            for (let i = 0; i < json.annotations.length; i++) {
+            const annotations = Array.isArray(json.annotations) ? json.annotations : [];
+            const imageEntries = Array.isArray(json.images) ? json.images : [];
+            const categoryEntries = Array.isArray(json.categories) ? json.categories : [];
+            for (let i = 0; i < annotations.length; i++) {
+                const annotation = annotations[i];
+                if (!annotation || !Array.isArray(annotation.bbox) || annotation.bbox.length < 4) {
+                    continue;
+                }
                 let imageName = null;
                 let categoryName = null;
-                for (let j = 0; j < json.images.length; j++) {
-                    if (json.annotations[i].image_id === json.images[j].id) {
-                        imageName = json.images[j].file_name;
+                let annotationBucket = null;
+                for (let j = 0; j < imageEntries.length; j++) {
+                    if (annotation.image_id === imageEntries[j].id) {
+                        imageName = imageEntries[j].file_name;
                         if (typeof images[imageName] !== "undefined") {
                             image = images[imageName];
                             if (typeof bboxes[imageName] === "undefined") {
                                 bboxes[imageName] = {};
                             }
-                            bbox = bboxes[imageName];
+                            annotationBucket = bboxes[imageName];
                             break;
                         }
                     }
                 }
-                for (let j = 0; j < json.categories.length; j++) {
-                    if (json.annotations[i].category_id === json.categories[j].id) {
-                        categoryName = json.categories[j].name;
+                for (let j = 0; j < categoryEntries.length; j++) {
+                    if (annotation.category_id === categoryEntries[j].id) {
+                        categoryName = categoryEntries[j].name;
                         break;
                     }
                 }
+                // Skip annotations that do not map to a currently loaded image.
+                if (!annotationBucket || !categoryName) {
+                    continue;
+                }
                 for (let className in classes) {
                     if (className === categoryName) {
-                        if (typeof bbox[className] === "undefined") {
-                            bbox[className] = [];
+                        if (typeof annotationBucket[className] === "undefined") {
+                            annotationBucket[className] = [];
                         }
-                        const bboxX = json.annotations[i].bbox[0];
-                        const bboxY = json.annotations[i].bbox[1];
-                        const bboxWidth = json.annotations[i].bbox[2];
-                        const bboxHeight = json.annotations[i].bbox[3];
+                        const bboxX = annotation.bbox[0];
+                        const bboxY = annotation.bbox[1];
+                        const bboxWidth = annotation.bbox[2];
+                        const bboxHeight = annotation.bbox[3];
+                        if (
+                            !Number.isFinite(Number(bboxX))
+                            || !Number.isFinite(Number(bboxY))
+                            || !Number.isFinite(Number(bboxWidth))
+                            || !Number.isFinite(Number(bboxHeight))
+                        ) {
+                            continue;
+                        }
                         const bboxRecord = {
                             type: "bbox",
-                            x: bboxX,
-                            y: bboxY,
-                            width: bboxWidth,
-                            height: bboxHeight,
+                            x: Number(bboxX),
+                            y: Number(bboxY),
+                            width: Number(bboxWidth),
+                            height: Number(bboxHeight),
                             marked: false,
                             class: className
                         };
+                        if (bboxRecord.width <= 0 || bboxRecord.height <= 0) {
+                            continue;
+                        }
                         stampBboxCreation(bboxRecord);
-                        bbox[className].push(bboxRecord);
+                        annotationBucket[className].push(bboxRecord);
                         noteImportedBbox();
                         break;
                     }
@@ -28311,7 +31427,8 @@ function initQwenTrainingTab() {
         let bboxCount = 0;
         Object.values(bboxes).forEach((classBuckets) => {
             Object.values(classBuckets || {}).forEach((items) => {
-                (items || []).forEach((ann) => {
+                const annotations = Array.isArray(items) ? items : [];
+                annotations.forEach((ann) => {
                     if (ann && ann.type === "polygon") {
                         polygonCount += 1;
                     } else {
@@ -28335,82 +31452,133 @@ function initQwenTrainingTab() {
     }
 
     const listenBboxSave = () => {
-        document.getElementById("saveBboxes").addEventListener("click", async () => {
+        if (bboxSaveListenerBound) {
+            return;
+        }
+        const saveButton = document.getElementById("saveBboxes");
+        if (!saveButton) {
+            return;
+        }
+        bboxSaveListenerBound = true;
+        saveButton.addEventListener("click", async () => {
+            if (bboxExportInProgress) {
+                setSamStatus("BBox export already running. Please wait.", { variant: "info", duration: 3000 });
+                return;
+            }
             const validation = validateGeometryForSave();
             if (!validation.ok) {
                 alert(validation.message);
                 return;
             }
-            if (getCaptionDatasetId()) {
-                try {
-                    setSamStatus("Loading captions for export…", { variant: "info", duration: 0 });
-                    await ensureCaptionsForExport();
-                } catch (error) {
-                    console.warn("Caption export preload failed", error);
-                }
-            }
-            const zip = new JSZip();
-            const textFolder = zip.folder("text_labels");
-            for (let imageName in bboxes) {
-                const image = images[imageName];
-                if (!image) continue;
-                const name = imageName.split(".");
-                name[name.length - 1] = "txt";
-                const result = [];
-                for (let className in bboxes[imageName]) {
-                    for (let i = 0; i < bboxes[imageName][className].length; i++) {
-                        const bbox = bboxes[imageName][className][i];
-                        const classIdx = classes[className];
-                        if (datasetType === "seg" && Array.isArray(bbox.points) && bbox.points.length >= 3) {
-                            const coords = bbox.points
-                                .map((pt) => {
-                                    const nx = pt.x / image.width;
-                                    const ny = pt.y / image.height;
-                                    return `${nx} ${ny}`;
-                                })
-                                .join(" ");
-                            result.push(`${classIdx} ${coords}`);
-                        } else {
-                            const x = (bbox.x + bbox.width / 2) / image.width;
-                            const y = (bbox.y + bbox.height / 2) / image.height;
-                            const w = bbox.width / image.width;
-                            const h = bbox.height / image.height;
-                            result.push(`${classIdx} ${x} ${y} ${w} ${h}`);
-                        }
+            let skippedInvalidClassCount = 0;
+            let skippedDimensionErrors = 0;
+            bboxExportInProgress = true;
+            saveButton.disabled = true;
+            try {
+                if (getCaptionDatasetId()) {
+                    try {
+                        setSamStatus("Loading captions for export…", { variant: "info", duration: 0 });
+                        await ensureCaptionsForExport();
+                    } catch (error) {
+                        console.warn("Caption export preload failed", error);
                     }
                 }
-                zip.file(name.join("."), result.join("\n"));
-                const textLabel = textLabels?.[imageName];
-                if (textFolder && textLabel) {
-                    textFolder.file(name.join("."), String(textLabel).trim());
-                }
-            }
-            if (textFolder && textLabels) {
-                Object.keys(textLabels).forEach((imageName) => {
-                    if (bboxes[imageName]) {
-                        return;
+                const JSZipCtor = ensureJsZipAvailable("bbox export");
+                const zip = new JSZipCtor();
+                const textFolder = zip.folder("text_labels");
+                for (let imageName in bboxes) {
+                    const image = images[imageName];
+                    if (!image) continue;
+                    try {
+                        // Ensure dimensions are available before normalization math.
+                        await ensureImageDimensions(image);
+                    } catch (error) {
+                        skippedDimensionErrors += 1;
+                        console.warn(`Skipping export for ${imageName}: missing dimensions`, error);
+                        continue;
                     }
                     const name = imageName.split(".");
                     name[name.length - 1] = "txt";
-                    textFolder.file(name.join("."), String(textLabels[imageName]).trim());
-                });
+                    const result = [];
+                    for (let className in bboxes[imageName]) {
+                        const classBoxes = Array.isArray(bboxes[imageName][className]) ? bboxes[imageName][className] : [];
+                        for (let i = 0; i < classBoxes.length; i++) {
+                            const bbox = classBoxes[i];
+                            const classIdx = classes[className];
+                            if (!Number.isFinite(classIdx)) {
+                                // Prevent writing malformed YOLO rows when class mapping is stale.
+                                skippedInvalidClassCount += 1;
+                                continue;
+                            }
+                            if (datasetType === "seg" && Array.isArray(bbox.points) && bbox.points.length >= 3) {
+                                const coords = bbox.points
+                                    .map((pt) => {
+                                        const nx = pt.x / image.width;
+                                        const ny = pt.y / image.height;
+                                        return `${nx} ${ny}`;
+                                    })
+                                    .join(" ");
+                                result.push(`${classIdx} ${coords}`);
+                            } else {
+                                const x = (bbox.x + bbox.width / 2) / image.width;
+                                const y = (bbox.y + bbox.height / 2) / image.height;
+                                const w = bbox.width / image.width;
+                                const h = bbox.height / image.height;
+                                result.push(`${classIdx} ${x} ${y} ${w} ${h}`);
+                            }
+                        }
+                    }
+                    zip.file(name.join("."), result.join("\n"));
+                    const textLabel = textLabels?.[imageName];
+                    if (textFolder && textLabel) {
+                        textFolder.file(name.join("."), String(textLabel).trim());
+                    }
+                }
+                if (textFolder && textLabels) {
+                    Object.keys(textLabels).forEach((imageName) => {
+                        if (bboxes[imageName]) {
+                            return;
+                        }
+                        const name = imageName.split(".");
+                        name[name.length - 1] = "txt";
+                        textFolder.file(name.join("."), String(textLabels[imageName]).trim());
+                    });
+                }
+                if (textFolder && Array.isArray(textLabelRecords) && textLabelRecords.length > 0) {
+                    const jsonl = textLabelRecords.map((record) => JSON.stringify(record)).join("\n");
+                    textFolder.file("captions.jsonl", jsonl);
+                }
+                const blob = await zip.generateAsync({ type: "blob" });
+                saveBlobToDisk(blob, "bboxes_yolo.zip");
+                if (skippedInvalidClassCount > 0 || skippedDimensionErrors > 0) {
+                    const parts = [];
+                    if (skippedInvalidClassCount > 0) {
+                        parts.push(`skipped ${skippedInvalidClassCount} bbox row${skippedInvalidClassCount === 1 ? "" : "s"} with unmapped classes`);
+                    }
+                    if (skippedDimensionErrors > 0) {
+                        parts.push(`skipped ${skippedDimensionErrors} image${skippedDimensionErrors === 1 ? "" : "s"} with unreadable dimensions`);
+                    }
+                    setSamStatus(`Export completed with warnings: ${parts.join("; ")}.`, { variant: "warn", duration: 5500 });
+                }
+            } catch (error) {
+                console.error("Failed to build bbox export archive", error);
+                setSamStatus(`Export failed: ${error.message || error}`, { variant: "error", duration: 5000 });
+            } finally {
+                bboxExportInProgress = false;
+                saveButton.disabled = false;
             }
-            if (textFolder && Array.isArray(textLabelRecords) && textLabelRecords.length > 0) {
-                const jsonl = textLabelRecords.map((record) => JSON.stringify(record)).join("\n");
-                textFolder.file("captions.jsonl", jsonl);
-            }
-            zip.generateAsync({ type: "blob" })
-                .then((blob) => {
-                    saveAs(blob, "bboxes_yolo.zip");
-                });
         });
     };
 
     const listenKeyboard = () => {
+        if (keyboardListenersBound) {
+            return;
+        }
         const imageList = document.getElementById("imageList");
         const classList = document.getElementById("classList");
         let modeSnapshot = null;
 
+        keyboardListenersBound = true;
         document.addEventListener("keydown", (event) => {
             if (activeTab !== TAB_LABELING) {
                 return;
@@ -28496,10 +31664,23 @@ function initQwenTrainingTab() {
                     }
                 }
                 if (currentBbox !== null) {
-                    bboxes[currentImage.name][currentBbox.bbox.class].splice(currentBbox.index, 1);
+                    const imageBuckets = currentImage ? bboxes[currentImage.name] : null;
+                    const className = currentBbox.bbox?.class;
+                    const bucket = imageBuckets && className ? imageBuckets[className] : null;
+                    let removed = false;
+                    // Guard against stale currentBbox pointers after imports/resets.
+                    if (Array.isArray(bucket) && currentBbox.index >= 0 && currentBbox.index < bucket.length) {
+                        const spliceResult = bucket.splice(currentBbox.index, 1);
+                        if (bucket.length === 0 && className) {
+                            delete imageBuckets[className];
+                        }
+                        removed = spliceResult.length > 0;
+                    }
                     currentBbox = null;
-                    document.body.style.cursor = "default";
-                    showShortcutToast("delete_bbox", "Deleted 1 bbox.");
+                    setGlobalCursor("default");
+                    if (removed) {
+                        showShortcutToast("delete_bbox", "Deleted 1 bbox.");
+                    }
                 }
                 event.preventDefault();
             }
@@ -28509,7 +31690,7 @@ function initQwenTrainingTab() {
                     const latest = findLatestCreatedBbox(currentImage.name);
                     if (latest) {
                         const bucket = bboxes[currentImage.name][latest.className];
-                        if (bucket) {
+                        if (Array.isArray(bucket)) {
                             const spliceResult = bucket.splice(latest.index, 1);
                             if (bucket.length === 0) {
                                 delete bboxes[currentImage.name][latest.className];
@@ -28518,7 +31699,7 @@ function initQwenTrainingTab() {
                                 removed = true;
                                 if (currentBbox && currentBbox.bbox === spliceResult[0]) {
                                     currentBbox = null;
-                                    document.body.style.cursor = "default";
+                                    setGlobalCursor("default");
                                 }
                             }
                         }
@@ -28569,7 +31750,9 @@ function initQwenTrainingTab() {
             }
             // '1' => SAM3 similarity (requires SAM3 predictor loaded for current image)
             if (!event.repeat && (key === 49 || event.key === "1") && !modeSnapshot) {
-                triggerSam3SimilarityHotkey();
+                triggerSam3SimilarityHotkey().catch((error) => {
+                    console.error("SAM3 similarity hotkey action failed", error);
+                });
                 showShortcutToast("sam3_similarity", "SAM3 similarity requested.");
                 event.preventDefault();
                 return;
@@ -28588,7 +31771,9 @@ function initQwenTrainingTab() {
             }
             // Enter => submit multi-point selection
             if (!event.repeat && key === 13 && multiPointMode && !modeSnapshot) {
-                submitMultiPointSelection();
+                submitMultiPointSelection().catch((error) => {
+                    console.error("Failed to submit multi-point selection", error);
+                });
                 showShortcutToast("multi_point_submit", "Multi-point submitted.");
                 event.preventDefault();
                 return;
@@ -28607,7 +31792,7 @@ function initQwenTrainingTab() {
                     if (imageName && images[imageName]) {
                         setCurrentImage(images[imageName]);
                     }
-                    document.body.style.cursor = "default";
+                    setGlobalCursor("default");
                 }
                 event.preventDefault();
             }
@@ -28625,7 +31810,7 @@ function initQwenTrainingTab() {
                     if (imageName && images[imageName]) {
                         setCurrentImage(images[imageName]);
                     }
-                    document.body.style.cursor = "default";
+                    setGlobalCursor("default");
                 }
                 event.preventDefault();
             }
@@ -28711,11 +31896,20 @@ function initQwenTrainingTab() {
     };
 
     const listenImageSearch = () => {
-        document.getElementById("imageSearch").addEventListener("input", (event) => {
-            const value = event.target.value;
+        if (imageSearchListenerBound) {
+            return;
+        }
+        const searchInput = document.getElementById("imageSearch");
+        const imageList = document.getElementById("imageList");
+        if (!searchInput || !imageList) {
+            return;
+        }
+        imageSearchListenerBound = true;
+        searchInput.addEventListener("input", (event) => {
+            const value = event?.target?.value || "";
             for (let imageName in images) {
                 if (imageName.indexOf(value) !== -1) {
-                    document.getElementById("imageList").selectedIndex = images[imageName].index;
+                    imageList.selectedIndex = images[imageName].index;
                     setCurrentImage(images[imageName]);
                     break;
                 }
@@ -28732,10 +31926,16 @@ function initQwenTrainingTab() {
     }
 
     async function extractBase64ForImage(imgObj) {
+        if (!imgObj || !imgObj.object || !imgObj.width || !imgObj.height) {
+            return null;
+        }
         const offCanvas = document.createElement("canvas");
         offCanvas.width = imgObj.width;
         offCanvas.height = imgObj.height;
         const ctx = offCanvas.getContext("2d");
+        if (!ctx) {
+            return null;
+        }
         ctx.drawImage(imgObj.object, 0, 0, imgObj.width, imgObj.height);
         const dataUrl = offCanvas.toDataURL("image/jpeg");
         return dataUrl.split(",")[1];
@@ -28744,10 +31944,30 @@ function initQwenTrainingTab() {
         /****************************************************
      * listenImageCrop - single-image-at-a-time approach
      ****************************************************/
-    async function listenImageCrop() {
-      setupTabNavigation();
+    function listenImageCrop() {
+      if (imageCropListenerBound) {
+        return;
+      }
       const btn = document.getElementById("cropImages");
+      if (!btn) {
+        return;
+      }
+      imageCropListenerBound = true;
       btn.addEventListener("click", async () => {
+        if (imageCropInProgress) {
+          setSamStatus("Crop job already running — wait for completion.", { variant: "info", duration: 3000 });
+          return;
+        }
+	        if (imageLoadInProgress) {
+	          setSamStatus("Still loading images — please wait before cropping.", { variant: "info", duration: 3000 });
+	          try {
+	            await waitForImageLoadCompletion();
+	          } catch (error) {
+	            console.error("Image load wait failed before crop run", error);
+	            setSamStatus("Crop job could not start because image loading failed.", { variant: "error", duration: 5000 });
+	            return;
+	          }
+	        }
         if (datasetType === "seg") {
           alert("Crop & Save is only available for bbox datasets.");
           return;
@@ -28758,8 +31978,15 @@ function initQwenTrainingTab() {
           return;
         }
 
-        const progressModal = showProgressModal("Initializing crop job...");
-        document.body.style.cursor = "wait";
+	        imageCropInProgress = true;
+	        if (btn) {
+	          // Lock button while async crop loop/job is running.
+	          btn.disabled = true;
+	        }
+	        const progressModal = showProgressModal("Initializing crop job...");
+	        if (document.body) {
+	          setGlobalCursor("wait");
+	        }
 
         try {
           // 1) Start the server-side job
@@ -28768,7 +31995,11 @@ function initQwenTrainingTab() {
             throw new Error("crop_zip_init failed: " + resp.status);
           }
           const { jobId } = await resp.json();
-          console.log("Got jobId:", jobId);
+          if (!jobId) {
+            throw new Error("crop_zip_init failed: missing job id");
+          }
+          const encodedJobId = encodeURIComponent(jobId);
+          console.debug("Got jobId:", jobId);
 
           // 2) Single-image loop
           let count = 0;
@@ -28796,7 +32027,8 @@ function initQwenTrainingTab() {
             // Flatten bounding boxes & clamp
             const allBbs = [];
             for (const className in rawBoxes) {
-              rawBoxes[className].forEach(bbox => {
+              const classBoxes = Array.isArray(rawBoxes[className]) ? rawBoxes[className] : [];
+              classBoxes.forEach(bbox => {
                 const copy = { ...bbox };
                 const valid = clampBbox(copy, imgData.width, imgData.height);
                 if (valid) {
@@ -28812,7 +32044,7 @@ function initQwenTrainingTab() {
             }
             if (!allBbs.length) {
               // no valid bounding boxes => skip
-              console.log("No valid bounding boxes for", imgName, " => skipping");
+              console.debug("No valid bounding boxes for", imgName, " => skipping");
               imgData.object = null;
               await yieldToDom(10);
               continue;
@@ -28820,6 +32052,12 @@ function initQwenTrainingTab() {
 
             // Convert to base64
             const base64Img = await extractBase64ForImage(imgData);
+            if (!base64Img) {
+              console.warn("Failed to encode image for crop upload", imgName, "=> skipping");
+              imgData.object = null;
+              await yieldToDom(10);
+              continue;
+            }
 
             // 3) Send just this one image
             // If your server wants different keys, rename them here
@@ -28833,9 +32071,9 @@ function initQwenTrainingTab() {
               ]
             };
             // Debug log
-            console.log("Sending:", JSON.stringify(body, null, 2));
+            console.debug("Sending:", JSON.stringify(body, null, 2));
 
-            resp = await fetch(`${API_ROOT}/crop_zip_chunk?jobId=${jobId}`, {
+            resp = await fetch(`${API_ROOT}/crop_zip_chunk?jobId=${encodedJobId}`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(body)
@@ -28851,19 +32089,26 @@ function initQwenTrainingTab() {
 
           // 4) Finalize
           progressModal.update("Finalizing crop_zip_finalize...");
-          resp = await fetch(`${API_ROOT}/crop_zip_finalize?jobId=${jobId}`);
+          resp = await fetch(`${API_ROOT}/crop_zip_finalize?jobId=${encodedJobId}`);
           if (!resp.ok) {
             throw new Error("crop_zip_finalize failed: " + resp.status);
           }
           const blob = await resp.blob();
-          saveAs(blob, "crops.zip");
+          saveBlobToDisk(blob, "crops.zip");
           alert("Done! crops.zip downloaded.");
         } catch (err) {
           console.error(err);
-          alert("Crop & Save failed: " + err);
-        } finally {
-          progressModal.close();
-          document.body.style.cursor = "default";
+          const detail = err?.message || err;
+          alert("Crop & Save failed: " + detail);
+	        } finally {
+	          progressModal.close();
+	          if (document.body) {
+	            setGlobalCursor("default");
+	          }
+	          imageCropInProgress = false;
+	          if (btn) {
+	            btn.disabled = false;
+          }
         }
       });
     }
@@ -28906,14 +32151,6 @@ function initQwenTrainingTab() {
             reader.onerror = reject;
             reader.readAsDataURL(imgData.meta);
         });
-    }
-
-    function chunkArray(array, size) {
-        const result = [];
-        for (let i = 0; i < array.length; i += size) {
-            result.push(array.slice(i, i + size));
-        }
-        return result;
     }
 
     // Enhanced progress modal with status text + determinate bar.
@@ -29011,10 +32248,23 @@ function initQwenTrainingTab() {
     }
 
     async function loadSam3RecipePresets() {
+        if (sam3CascadeState.recipePresetRefreshInFlight) {
+            return;
+        }
+        sam3CascadeState.recipePresetRefreshInFlight = true;
+        if (sam3RecipeElements.recipeRefreshButton) {
+            // Prevent duplicate preset refreshes while a request is active.
+            sam3RecipeElements.recipeRefreshButton.disabled = true;
+        }
+        const requestId = sam3CascadeState.recipePresetRefreshRequestId + 1;
+        sam3CascadeState.recipePresetRefreshRequestId = requestId;
         try {
             const resp = await fetch(`${API_ROOT}/agent_mining/recipes`);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
+            if (requestId !== sam3CascadeState.recipePresetRefreshRequestId) {
+                return;
+            }
             const normalized = (Array.isArray(data) ? data : [])
                 .map((entry) => normalizeAgentRecipePayload(entry))
                 .filter((entry) => entry && entry.id);
@@ -29030,162 +32280,48 @@ function initQwenTrainingTab() {
             renderSam3CascadeSteps();
             refreshSam3CascadeControls();
         } catch (err) {
+            if (requestId !== sam3CascadeState.recipePresetRefreshRequestId) {
+                return;
+            }
             console.error("Load recipe presets failed", err);
             setSam3RecipeStatus("Failed to load recipe presets.", "warn");
+        } finally {
+            if (requestId === sam3CascadeState.recipePresetRefreshRequestId) {
+                sam3CascadeState.recipePresetRefreshInFlight = false;
+                if (sam3RecipeElements.recipeRefreshButton) {
+                    sam3RecipeElements.recipeRefreshButton.disabled = false;
+                }
+            }
         }
     }
 
     async function loadSam3ClipClassifiers() {
+        if (sam3CascadeState.clipClassifierRefreshInFlight) {
+            return;
+        }
+        sam3CascadeState.clipClassifierRefreshInFlight = true;
+        const requestId = sam3CascadeState.clipClassifierRefreshRequestId + 1;
+        sam3CascadeState.clipClassifierRefreshRequestId = requestId;
         try {
             const resp = await fetch(`${API_ROOT}/clip/classifiers`);
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const data = await resp.json();
+            if (requestId !== sam3CascadeState.clipClassifierRefreshRequestId) {
+                return;
+            }
             sam3CascadeState.clipClassifiers = Array.isArray(data) ? data : [];
             renderSam3CascadeSteps();
             refreshSam3CascadeControls();
         } catch (err) {
+            if (requestId !== sam3CascadeState.clipClassifierRefreshRequestId) {
+                return;
+            }
             console.warn("Load CLIP classifiers failed", err);
             sam3CascadeState.clipClassifiers = [];
-        }
-    }
-
-    async function saveSam3RecipePreset() {
-        const recipe = sam3RecipeState.recipe;
-        const hasContent =
-            recipe &&
-            ((Array.isArray(recipe.steps) && recipe.steps.length > 0) ||
-                (Array.isArray(recipe.text_prompts) && recipe.text_prompts.length > 0) ||
-                (Array.isArray(recipe.positives) && recipe.positives.length > 0));
-        if (!hasContent) {
-            setSam3RecipeStatus("Load a recipe first, then save.", "warn");
-            return;
-        }
-        const datasetId = recipe.dataset_id;
-        if (!datasetId) {
-            setSam3RecipeStatus("This recipe is missing a dataset id, so it cannot be saved as a backend preset yet.", "warn");
-            return;
-        }
-        try {
-            const recipePayload =
-                recipe.raw && typeof recipe.raw === "object"
-                    ? recipe.raw
-                    : {
-                          params: recipe.params || {},
-                          recipe: {
-                              mode: recipe.mode || null,
-                              text_prompts: recipe.text_prompts || [],
-                              positives: recipe.positives || [],
-                              steps: recipe.steps || [],
-                              negatives: recipe.negatives || [],
-                              summary: recipe.summary,
-                          },
-                      };
-            const payload = {
-                label: sam3RecipeElements.presetNameInput?.value || recipe.label || "",
-                class_name: recipe.class_name,
-                class_id: recipe.class_id,
-                recipe: recipePayload,
-                dataset_id: datasetId,
-            };
-            const resp = await fetch(`${API_ROOT}/agent_mining/recipes`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-            });
-            if (!resp.ok) {
-                const detail = await resp.text();
-                throw new Error(detail || `HTTP ${resp.status}`);
+        } finally {
+            if (requestId === sam3CascadeState.clipClassifierRefreshRequestId) {
+                sam3CascadeState.clipClassifierRefreshInFlight = false;
             }
-            await loadSam3RecipePresets();
-            setSam3RecipeStatus("Saved recipe preset.", "success");
-        } catch (err) {
-            console.error("Save recipe preset failed", err);
-            setSam3RecipeStatus(err.message || "Save failed.", "error");
-        }
-    }
-
-    async function loadSam3RecipePreset() {
-        const presetId = sam3RecipeElements.presetSelect?.value;
-        if (!presetId) {
-            setSam3RecipeStatus("Choose a recipe preset to load.", "warn");
-            return;
-        }
-        try {
-            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/${encodeURIComponent(presetId)}`);
-            if (!resp.ok) {
-                const detail = await resp.text();
-                throw new Error(detail || `HTTP ${resp.status}`);
-            }
-            const data = await resp.json();
-            const parsed = normalizeAgentRecipePayload(data);
-            const hasContent =
-                parsed &&
-                ((Array.isArray(parsed.steps) && parsed.steps.length > 0) ||
-                    (Array.isArray(parsed.text_prompts) && parsed.text_prompts.length > 0) ||
-                    (Array.isArray(parsed.positives) && parsed.positives.length > 0));
-            if (!hasContent) {
-                throw new Error("Preset has no content.");
-            }
-            const classNames = orderedClassNames();
-            const lowerToName = new Map(classNames.map((n) => [n.toLowerCase(), n]));
-            const targetName = (parsed.class_name || "").trim();
-            if (targetName) {
-                const found = lowerToName.get(targetName.toLowerCase());
-                if (found) {
-                    parsed.class_name = found;
-                } else {
-                    setSam3RecipeStatus(
-                        `Loaded recipe ${parsed.label}. Note: class ${targetName} not in label map; use output class override to apply.`,
-                        "warn"
-                    );
-                }
-            }
-            sam3RecipeState.recipe = parsed;
-            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = false;
-            if (sam3RecipeElements.presetNameInput) sam3RecipeElements.presetNameInput.value = parsed.label || parsed.class_name;
-            if (!sam3RecipeElements.status?.textContent) {
-                const parts = [];
-                if (parsed.mode) parts.push(parsed.mode);
-                const promptCount = Array.isArray(parsed.text_prompts) ? parsed.text_prompts.length : 0;
-                const posCount = Array.isArray(parsed.positives) ? parsed.positives.length : 0;
-                const stepCount = Array.isArray(parsed.steps) ? parsed.steps.length : 0;
-                parts.push(`${promptCount} prompts`);
-                parts.push(`${posCount} crops`);
-                if (stepCount) parts.push(`${stepCount} steps`);
-                setSam3RecipeStatus(`Loaded recipe ${parsed.label} (${parts.join(", ")}).`, "success");
-            }
-        } catch (err) {
-            console.error("Load recipe preset failed", err);
-            setSam3RecipeStatus(err.message || "Load failed.", "error");
-            sam3RecipeState.recipe = null;
-            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
-        }
-    }
-
-    async function deleteSam3RecipePreset() {
-        const presetId = sam3RecipeElements.presetSelect?.value;
-        if (!presetId) {
-            setSam3RecipeStatus("Choose a recipe preset to delete.", "warn");
-            return;
-        }
-        const confirmed = window.confirm("Delete this recipe? This cannot be undone.");
-        if (!confirmed) return;
-        try {
-            const resp = await fetch(`${API_ROOT}/agent_mining/recipes/${encodeURIComponent(presetId)}`, {
-                method: "DELETE",
-            });
-            if (!resp.ok) {
-                const detail = await resp.text();
-                throw new Error(detail || `HTTP ${resp.status}`);
-            }
-            sam3RecipeState.recipe = null;
-            if (sam3RecipeElements.applyButton) sam3RecipeElements.applyButton.disabled = true;
-            if (sam3RecipeElements.presetNameInput) sam3RecipeElements.presetNameInput.value = "";
-            await loadSam3RecipePresets();
-            setSam3RecipeStatus("Deleted recipe preset.", "success");
-        } catch (err) {
-            console.error("Delete recipe preset failed", err);
-            setSam3RecipeStatus(err.message || "Delete failed.", "error");
         }
     }
 

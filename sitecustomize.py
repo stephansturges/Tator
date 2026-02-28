@@ -210,7 +210,7 @@ def _patch_logging_smoothing() -> None:
                         continue
                     preds_by_image.setdefault(img_id, []).append(p)
                 out = []
-                for img_id, plist in preds_by_image.items():
+                for _img_id, plist in preds_by_image.items():
                     plist.sort(key=lambda x: x.get("score", 0), reverse=True)
                     out.extend(plist[:MAX_DETS])
                 return out

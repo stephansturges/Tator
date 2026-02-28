@@ -41,23 +41,6 @@
             </div>
         </div>
 	    </div>
-	    <div id="trainingPackagingModal" class="modal" aria-hidden="true">
-	        <div class="modal__backdrop" data-modal-dismiss="trainingPackaging"></div>
-	        <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="trainingPackagingTitle">
-            <div class="modal__title" id="trainingPackagingTitle">Packaging dataset…</div>
-            <p class="training-packaging__stats" id="trainingPackagingStats">Estimating selection…</p>
-            <div class="training-packaging-progress">
-                <div class="training-packaging-progress__fill" id="trainingPackagingProgressFill"></div>
-            </div>
-            <p class="training-packaging__progress" id="trainingPackagingProgressText">Preparing…</p>
-            <p class="training-packaging__eta" id="trainingPackagingEta">Estimating upload time…</p>
-            <p class="training-packaging__elapsed" id="trainingPackagingElapsed">Elapsed: 0s</p>
-            <p class="training-packaging__hint" id="trainingPackagingHint">Keep this tab open while we stage files and upload them to the server. Larger datasets can take a few minutes.</p>
-            <div class="modal__actions">
-                <button type="button" class="modal__btn" id="trainingPackagingDismiss">Hide</button>
-            </div>
-	        </div>
-	    </div>
     <div id="taskQueue" class="task-queue" aria-live="polite" aria-atomic="true"></div>
     <div id="classScrollIndicator" class="class-scroll-indicator" aria-live="polite" aria-atomic="true"></div>
     <div id="automationLockBanner" class="training-help" style="display:none; margin:8px 16px 12px; padding:10px 12px; border:1px solid #f59e0b; border-radius:10px; background:#fff7ed; color:#9a3412;">
@@ -634,8 +617,8 @@
                                         <select id="qwenAgentGlossarySelect"></select>
                                     </div>
                                     <label for="qwenAgentGlossary">Glossary (preview or custom)</label>
-                                    <textarea id="qwenAgentGlossary" rows="4" placeholder="Paste JSON: {\"light_vehicle\": [\"car\", \"sedan\"], ... }"></textarea>
-                                    <div id="qwenAgentGlossaryHint" class="training-help">Dataset mode uses the dataset’s canonical glossary. Named/custom modes override the dataset glossary for this run.</div>
+                                    <textarea id="qwenAgentGlossary" rows="4" placeholder="Paste JSON: {&quot;light_vehicle&quot;: [&quot;car&quot;, &quot;sedan&quot;], ... }"></textarea>
+                                    <div class="training-help">Dataset mode uses the dataset’s canonical glossary. Named/custom modes override the dataset glossary for this run.</div>
                                     <div class="qwen-caption-grid">
                                         <div>
                                             <label for="qwenAgentModel">Qwen model</label>
@@ -799,8 +782,8 @@
                                             <input type="number" id="qwenAgentSam3TextScoreThr" min="0" max="1" step="0.05" value="0.2" />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentSam3TextWindowExtension">Windowed SAM3 text<span class="help-icon" title="Runs SAM3 text prompts on full-frame plus windowed tiles (default). Disable to run full-frame only.">?</span></label>
-                                            <input type="checkbox" id="qwenAgentSam3TextWindowExtension" checked />
+                                            <label for="qwenAgentSam3TextWindowExtension">Windowed SAM3 text<span class="help-icon" title="Runs an extra windowed SAM3 text pass in addition to full-frame inference. Disabled by default because it is slower and currently underperforms non-windowed on this dataset.">?</span></label>
+                                            <input type="checkbox" id="qwenAgentSam3TextWindowExtension" />
                                         </div>
                                         <div>
                                             <label for="qwenAgentSam3TextWindowMode">SAM3 text window mode<span class="help-icon" title="How to slice windows for the extra SAM3 text pass. Grid uses the grid columns/rows below; SAHI uses fixed-size tiles.">?</span></label>
@@ -906,9 +889,6 @@
                                             <label for="qwenAgentGridOverlap">Grid overlap</label>
                                             <input type="number" id="qwenAgentGridOverlap" min="0" max="0.5" step="0.05" value="0.2" />
                                         </div>
-                                    </div>
-                                        <label><input type="checkbox" id="qwenAgentBatchIncludeCurrent" checked /> Include current image</label>
-                                    </div>
                                     </div>
                                 </div>
                                 <div class="qwen-prepass">
@@ -1312,7 +1292,7 @@
                     </section>
                     <section class="training-status-section">
                         <h2>Training Status</h2>
-                        <div class="training-progress" id="trainingProgressBar">
+                        <div class="training-progress">
                             <div class="training-progress-fill" id="trainingProgressFill"></div>
                         </div>
                         <div class="training-status-text" id="trainingStatusText">Idle</div>
@@ -1524,7 +1504,7 @@
                     </section>
                     <section class="training-status-section">
                         <h2>Qwen Training Status</h2>
-                        <div class="training-progress" id="qwenTrainProgressBar">
+                        <div class="training-progress">
                             <div class="training-progress-fill" id="qwenTrainProgressFill"></div>
                         </div>
                         <div class="training-status-text" id="qwenTrainStatusText">Idle</div>
@@ -1651,7 +1631,7 @@
                             <div>
                                 <label for="sam3NumGpus">Num GPUs</label>
                                 <input type="number" id="sam3NumGpus" min="1" value="1" />
-                                <div class="training-help" id="sam3NumGpusHelp">Defaults to 1. Matches detected GPU count when available.</div>
+                                <div class="training-help">Defaults to 1. Matches detected GPU count when available.</div>
                             </div>
                             <div>
                                 <label for="sam3ValFreq">Val every N epochs</label>
@@ -1772,7 +1752,7 @@
                     </section>
                     <section class="training-status-section">
                         <h2>Training Status</h2>
-                        <div class="training-progress" id="sam3ProgressBar">
+                        <div class="training-progress">
                             <div class="training-progress-fill" id="sam3ProgressFill"></div>
                         </div>
                         <div class="training-status-text" id="sam3StatusText">Idle</div>
@@ -1812,7 +1792,7 @@
                         </div>
                         <div class="training-history">
                             <div class="storage-header">
-                                <h3>Run storage (logs & checkpoints)</h3>
+                                <h3>Run storage (logs &amp; checkpoints)</h3>
                                 <button type="button" class="training-button" id="sam3StorageRefresh">Refresh</button>
                             </div>
                             <div class="training-help">Lists folders under <code>uploads/sam3_runs/</code>; delete logs/dumps/checkpoints you no longer need.</div>
@@ -1969,7 +1949,7 @@
                     </section>
                     <section class="training-status-section">
                         <h2>YOLO Training Status</h2>
-                        <div class="training-progress" id="yoloTrainProgressBar">
+                        <div class="training-progress">
                             <div class="training-progress-fill" id="yoloTrainProgressFill"></div>
                         </div>
                         <div class="training-status-text" id="yoloTrainStatusText">Idle</div>
@@ -2088,7 +2068,7 @@
                             </div>
                             <div class="training-help">Dry run validates base run, dataset readiness, and labelmap overlap without training or GPU usage.</div>
                             <div class="training-message" id="yoloHeadGraftMessage" role="status"></div>
-                            <div class="training-progress" id="yoloHeadGraftProgressBar">
+                            <div class="training-progress">
                                 <div class="training-progress-fill" id="yoloHeadGraftProgressFill"></div>
                             </div>
                             <div class="training-status-text" id="yoloHeadGraftStatusText">Idle</div>
@@ -2250,7 +2230,7 @@
                     </section>
                     <section class="training-status-section">
                         <h2>RF-DETR Training Status</h2>
-                        <div class="training-progress" id="rfdetrTrainProgressBar">
+                        <div class="training-progress">
                             <div class="training-progress-fill" id="rfdetrTrainProgressFill"></div>
                         </div>
                         <div class="training-status-text" id="rfdetrTrainStatusText">Idle</div>
@@ -2896,7 +2876,7 @@
 			                                </ul>
 			                            </div>
 			                        </div>
-                        <h3>Progress & Logs</h3>
+                        <h3>Progress &amp; Logs</h3>
                         <div class="training-help">Live status and logs for the latest SAM3 Recipe Mining job.</div>
                         <div class="training-actions">
                             <button type="button" class="training-button danger" id="agentPurgeCacheBtn" title="Purge cached detections to free disk space.">Purge cache</button>
@@ -3091,7 +3071,7 @@
                         <div class="training-note">Uses prompts for the selected class (edit in the list above). Runs on positives + optional negatives; tries each threshold per prompt and proposes an ordered recipe.</div>
                     </section>
                     <section class="training-status-section">
-                        <h2>Prompts & Results</h2>
+                        <h2>Prompts &amp; Results</h2>
                         <div class="training-help" id="promptHelperStatus">Idle</div>
                         <div class="training-actions">
                             <button type="button" class="training-button" id="promptHelperApplyBtn" disabled>Apply top prompts to SAM3 training</button>
@@ -3344,7 +3324,7 @@
                                 <button type="button" class="training-button" id="detectorDefaultSave">Set default</button>
                                 <button type="button" class="training-button training-button--ghost" id="detectorDefaultRefresh">Refresh</button>
                             </div>
-                            <div class="training-help" id="detectorDefaultHelp">Controls the detector used for region, full-image, and windowed inference in the labeling page.</div>
+                            <div class="training-help">Controls the detector used for region, full-image, and windowed inference in the labeling page.</div>
                         </div>
                         <div class="training-field">
                             <label>Active detectors</label>
@@ -3401,6 +3381,7 @@
                     <section class="active-controls">
                         <h2>Switch Models</h2>
                         <div class="active-message" id="activeMessage" role="status"></div>
+                        <div class="active-help" id="activeModelInfo"></div>
                         <p class="active-help">When you activate a trained classifier, the system loads the backbone saved in its metadata. Use these controls if you need to override the paths manually.</p>
                         <div class="active-field">
                             <label for="activeClassifierSelect">Saved classifiers</label>
@@ -3598,12 +3579,5 @@
         </div>
     </div>
 
-    <script>
-        document.addEventListener("DOMContentLoaded", function() {
-          if (typeof listenImageCrop === "function") {
-            listenImageCrop();
-          }
-        });
-        </script>
 </body>
 </html>

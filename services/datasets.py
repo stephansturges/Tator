@@ -69,7 +69,9 @@ def _ensure_qwen_dataset_signature_impl(
     return metadata, signature
 
 
-def _load_registry_dataset_metadata_impl(dataset_dir: Path, *, load_json_metadata_fn, meta_name: str) -> Optional[Dict[str, Any]]:
+def _load_registry_dataset_metadata_impl(
+    dataset_dir: Path, *, load_json_metadata_fn, meta_name: str
+) -> Optional[Dict[str, Any]]:
     return load_json_metadata_fn(dataset_dir / meta_name)
 
 
@@ -119,6 +121,34 @@ def _coerce_dataset_metadata_impl(
         updated = True
     if "source" not in meta:
         meta["source"] = source
+        updated = True
+    storage_mode = (
+        str(meta.get("storage_mode") or ("linked" if meta.get("linked_root") else "managed"))
+        .strip()
+        .lower()
+    )
+    if storage_mode not in {"managed", "linked"}:
+        storage_mode = "managed"
+    if meta.get("storage_mode") != storage_mode:
+        meta["storage_mode"] = storage_mode
+        updated = True
+    if storage_mode == "managed" and meta.get("linked_root"):
+        meta["linked_root"] = None
+        updated = True
+    if "annotation_status" not in meta:
+        meta["annotation_status"] = "new"
+        updated = True
+    if "annotation_notes" not in meta:
+        meta["annotation_notes"] = ""
+        updated = True
+    if "annotation_cursor" not in meta:
+        meta["annotation_cursor"] = None
+        updated = True
+    if "annotation_progress" not in meta:
+        meta["annotation_progress"] = {}
+        updated = True
+    if "annotation_lock" not in meta:
+        meta["annotation_lock"] = {}
         updated = True
     signature = meta.get("signature")
     if not signature and compute_dir_signature_fn is not None:
@@ -277,7 +307,44 @@ def _list_all_datasets_impl(
             if not raw_meta:
                 continue
             meta = coerce_meta_fn(path, raw_meta, source)
-            sam3_meta = load_sam3_meta_fn(path) if source != "sam3" else meta
+            storage_mode = (
+                str(
+                    meta.get("storage_mode") or ("linked" if meta.get("linked_root") else "managed")
+                )
+                .strip()
+                .lower()
+            )
+            if storage_mode not in {"managed", "linked"}:
+                storage_mode = "managed"
+            linked_root_raw = (
+                str(meta.get("linked_root") or "").strip() if storage_mode == "linked" else ""
+            )
+            effective_root = path
+            linked_root: Optional[str] = None
+            linked_root_status: Optional[str] = None
+            if storage_mode == "linked":
+                if not linked_root_raw:
+                    linked_root_status = "missing"
+                else:
+                    linked_root = linked_root_raw
+                    try:
+                        candidate = Path(linked_root_raw).expanduser().resolve()
+                    except Exception:
+                        candidate = None
+                    if candidate is None:
+                        linked_root_status = "invalid"
+                    elif not candidate.exists():
+                        linked_root_status = "missing"
+                        effective_root = candidate
+                    elif not candidate.is_dir():
+                        linked_root_status = "invalid"
+                        effective_root = candidate
+                    else:
+                        linked_root_status = "ok"
+                        linked_root = str(candidate)
+                        effective_root = candidate
+
+            sam3_meta = load_sam3_meta_fn(effective_root) if source != "sam3" else meta
             coco_train = None
             coco_val = None
             coco_ready = False
@@ -285,11 +352,11 @@ def _list_all_datasets_impl(
                 coco_train = sam3_meta.get("coco_train_json")
                 coco_val = sam3_meta.get("coco_val_json")
                 coco_ready = bool(coco_train and coco_val)
-            labelmap_path = path / "labelmap.txt"
-            train_images = path / "train" / "images"
-            train_labels = path / "train" / "labels"
-            root_images = path / "images"
-            root_labels = path / "labels"
+            labelmap_path = effective_root / "labelmap.txt"
+            train_images = effective_root / "train" / "images"
+            train_labels = effective_root / "train" / "labels"
+            root_images = effective_root / "images"
+            root_labels = effective_root / "labels"
             yolo_images_dir: Optional[str] = None
             yolo_labels_dir: Optional[str] = None
             yolo_layout: Optional[str] = None
@@ -303,23 +370,23 @@ def _list_all_datasets_impl(
                     yolo_labels_dir = str(root_labels)
                     yolo_layout = "flat"
             yolo_ready = bool(labelmap_path.exists() and yolo_images_dir and yolo_labels_dir)
-            qwen_meta = load_qwen_meta_fn(path)
+            qwen_meta = load_qwen_meta_fn(effective_root)
             qwen_ready = bool(
                 qwen_meta
-                and (path / "train" / "annotations.jsonl").exists()
-                and (path / "val" / "annotations.jsonl").exists()
+                and (effective_root / "train" / "annotations.jsonl").exists()
+                and (effective_root / "val" / "annotations.jsonl").exists()
             )
-            if not yolo_ready:
+            if not yolo_ready and effective_root.exists() and effective_root.is_dir():
                 try:
-                    coco_exists = (path / "train" / "_annotations.coco.json").exists() or (
-                        path / "val" / "_annotations.coco.json"
-                    ).exists()
+                    coco_exists = (
+                        effective_root / "train" / "_annotations.coco.json"
+                    ).exists() or (effective_root / "val" / "_annotations.coco.json").exists()
                     if not coco_exists and qwen_ready:
-                        convert_qwen_dataset_to_coco_fn(path)
+                        convert_qwen_dataset_to_coco_fn(effective_root)
                         coco_exists = True
                     if coco_exists:
-                        convert_coco_dataset_to_yolo_fn(path)
-                        labelmap_path = path / "labelmap.txt"
+                        convert_coco_dataset_to_yolo_fn(effective_root)
+                        labelmap_path = effective_root / "labelmap.txt"
                         if labelmap_path.exists():
                             if train_images.exists() and train_labels.exists():
                                 yolo_images_dir = str(train_images)
@@ -329,11 +396,15 @@ def _list_all_datasets_impl(
                                 yolo_images_dir = str(root_images)
                                 yolo_labels_dir = str(root_labels)
                                 yolo_layout = "flat"
-                            yolo_ready = bool(labelmap_path.exists() and yolo_images_dir and yolo_labels_dir)
+                            yolo_ready = bool(
+                                labelmap_path.exists() and yolo_images_dir and yolo_labels_dir
+                            )
                             if yolo_ready and not meta.get("classes"):
                                 try:
                                     with labelmap_path.open("r", encoding="utf-8") as handle:
-                                        meta["classes"] = [line.strip() for line in handle if line.strip()]
+                                        meta["classes"] = [
+                                            line.strip() for line in handle if line.strip()
+                                        ]
                                 except Exception:
                                     pass
                 except Exception as exc:
@@ -357,13 +428,15 @@ def _list_all_datasets_impl(
                         labelmap = [line.strip() for line in handle if line.strip()]
                 except Exception:
                     labelmap = []
-            glossary_text = load_dataset_glossary_fn(path)
+            glossary_text = load_dataset_glossary_fn(effective_root)
+            if not glossary_text:
+                glossary_text = _normalize_labelmap_glossary(meta.get("labelmap_glossary") or "")
             glossary_preview = glossary_preview_fn(glossary_text, labelmap)
             signature = meta.get("signature") or ""
-            caption_count, caption_dir_present = count_caption_labels_fn(path)
+            caption_count, caption_dir_present = count_caption_labels_fn(effective_root)
             image_total = meta.get("image_count")
             if not image_total:
-                image_total = count_dataset_images_fn(path)
+                image_total = count_dataset_images_fn(effective_root)
             caption_percent = None
             if image_total and image_total > 0:
                 caption_percent = (caption_count / image_total) * 100.0
@@ -371,7 +444,8 @@ def _list_all_datasets_impl(
             entry = {
                 "id": meta.get("id") or path.name,
                 "label": meta.get("label") or path.name,
-                "dataset_root": str(path),
+                "dataset_root": str(effective_root),
+                "registry_root": str(path) if source == "registry" else None,
                 "created_at": meta.get("created_at") or path.stat().st_mtime,
                 "image_count": meta.get("image_count"),
                 "train_count": meta.get("train_count"),
@@ -380,6 +454,9 @@ def _list_all_datasets_impl(
                 "context": meta.get("context", "") or meta.get("dataset_context", ""),
                 "signature": signature,
                 "source": meta.get("source") or source,
+                "storage_mode": storage_mode,
+                "linked_root": linked_root,
+                "linked_root_status": linked_root_status,
                 "type": dataset_type,
                 "coco_ready": coco_ready,
                 "coco_seg_ready": bool(coco_ready and dataset_type == "seg"),
@@ -401,6 +478,11 @@ def _list_all_datasets_impl(
                 "caption_total": image_total,
                 "glossary_present": bool(str(glossary_text or "").strip()),
                 "glossary_preview": glossary_preview,
+                "annotation_status": meta.get("annotation_status") or "new",
+                "annotation_notes": str(meta.get("annotation_notes") or ""),
+                "annotation_cursor": meta.get("annotation_cursor"),
+                "annotation_progress": meta.get("annotation_progress") or {},
+                "annotation_lock": meta.get("annotation_lock") or {},
             }
             existing = seen.get(key)
             if existing is not None:
@@ -587,7 +669,9 @@ def _yolo_labels_have_polygons_impl(
     return False
 
 
-def _resolve_dataset_entry_impl(dataset_id: str, *, list_all_datasets_fn) -> Optional[Dict[str, Any]]:
+def _resolve_dataset_entry_impl(
+    dataset_id: str, *, list_all_datasets_fn
+) -> Optional[Dict[str, Any]]:
     cleaned = (dataset_id or "").strip()
     if not cleaned:
         return None
@@ -614,7 +698,10 @@ def _resolve_dataset_legacy_impl(
     if str(candidate_sam3).startswith(str(sam3_root.resolve())) and candidate_sam3.exists():
         return candidate_sam3
     candidate_registry = (registry_root / safe).resolve()
-    if str(candidate_registry).startswith(str(registry_root.resolve())) and candidate_registry.exists():
+    if (
+        str(candidate_registry).startswith(str(registry_root.resolve()))
+        and candidate_registry.exists()
+    ):
         return candidate_registry
     raise http_exception_cls(status_code=404, detail="sam3_dataset_not_found")
 
@@ -687,7 +774,11 @@ def _compute_dataset_signature_impl(
     try:
         cat_names = [str(c.get("name", f"class_{idx}")) for idx, c in enumerate(categories)]
         cat_hash = hashlib.sha256("|".join(sorted(cat_names)).encode("utf-8")).hexdigest()[:12]
-        file_names = [Path(info.get("file_name") or "").name for info in images.values() if info.get("file_name")]
+        file_names = [
+            Path(info.get("file_name") or "").name
+            for info in images.values()
+            if info.get("file_name")
+        ]
         file_hash = hashlib.sha256("|".join(sorted(file_names)).encode("utf-8")).hexdigest()[:12]
         payload = f"{dataset_id}|{len(images)}|{len(categories)}|{cat_hash}|{file_hash}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
@@ -857,7 +948,9 @@ def _convert_yolo_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
     has_val_images = val_images.exists()
     has_val_labels = val_labels.exists()
     if has_val_images != has_val_labels:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_yolo_val_split_incomplete")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="sam3_yolo_val_split_incomplete"
+        )
     if not has_val_images:
         val_images.mkdir(parents=True, exist_ok=True)
         val_labels.mkdir(parents=True, exist_ok=True)
@@ -866,7 +959,9 @@ def _convert_yolo_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
     if not labelmap:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_labelmap_missing")
     label_to_id = {label: idx + 1 for idx, label in enumerate(labelmap)}
-    categories = [{"id": cid, "name": name, "supercategory": "object"} for name, cid in label_to_id.items()]
+    categories = [
+        {"id": cid, "name": name, "supercategory": "object"} for name, cid in label_to_id.items()
+    ]
     signature = _compute_dir_signature(dataset_root)
     existing_meta = _load_sam3_dataset_metadata_impl(dataset_root)
     dataset_type = (existing_meta or {}).get("type", "bbox")
@@ -880,9 +975,15 @@ def _convert_yolo_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
     ):
         coco_train_path = Path(existing_meta["coco_train_json"])
         coco_val_path = Path(existing_meta["coco_val_json"])
-        rebuild = _coco_has_invalid_image_refs_impl(coco_train_path) or _coco_has_invalid_image_refs_impl(coco_val_path)
+        rebuild = _coco_has_invalid_image_refs_impl(
+            coco_train_path
+        ) or _coco_has_invalid_image_refs_impl(coco_val_path)
         if dataset_type == "seg":
-            rebuild = rebuild or _coco_missing_segmentation_impl(coco_train_path) or _coco_missing_segmentation_impl(coco_val_path)
+            rebuild = (
+                rebuild
+                or _coco_missing_segmentation_impl(coco_train_path)
+                or _coco_missing_segmentation_impl(coco_val_path)
+            )
         if not rebuild:
             _ensure_coco_info_fields_impl(coco_train_path, dataset_root.name, categories)
             _ensure_coco_info_fields_impl(coco_val_path, dataset_root.name, categories)
@@ -920,7 +1021,9 @@ def _convert_yolo_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
                 return None
             return (x1, y1, x2, y2)
 
-        def _bbox_xyxy_from_polygon(coords: List[float]) -> Optional[Tuple[float, float, float, float]]:
+        def _bbox_xyxy_from_polygon(
+            coords: List[float],
+        ) -> Optional[Tuple[float, float, float, float]]:
             if len(coords) < 6 or len(coords) % 2 != 0:
                 return None
             xs = coords[0::2]
@@ -935,7 +1038,9 @@ def _convert_yolo_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
                 return None
             return (min_x, min_y, max_x, max_y)
 
-        def _bbox_iou(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> float:
+        def _bbox_iou(
+            a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]
+        ) -> float:
             ax1, ay1, ax2, ay2 = a
             bx1, by1, bx2, by2 = b
             inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
@@ -963,7 +1068,9 @@ def _convert_yolo_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
             return [out]
 
         for label_file in sorted(split_labels.rglob("*.txt")):
-            image_path = _image_path_for_label_impl(split_labels, split_images, label_file, image_exts)
+            image_path = _image_path_for_label_impl(
+                split_labels, split_images, label_file, image_exts
+            )
             if image_path is None:
                 logger.warning("No matching image for label file %s", label_file)
                 continue
@@ -1023,14 +1130,22 @@ def _convert_yolo_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
                 else:
                     poly_only = raw_vals if len(raw_vals) >= 6 and len(raw_vals) % 2 == 0 else None
                     bbox_plus_poly = None
-                    if len(raw_vals) > 4 and (len(raw_vals) - 4) >= 6 and (len(raw_vals) - 4) % 2 == 0:
+                    if (
+                        len(raw_vals) > 4
+                        and (len(raw_vals) - 4) >= 6
+                        and (len(raw_vals) - 4) % 2 == 0
+                    ):
                         bbox_plus_poly = (raw_vals[:4], raw_vals[4:])
                     chosen_poly = None
                     if poly_only is not None and bbox_plus_poly is not None:
                         bbox_fields, poly_fields = bbox_plus_poly
                         bbox_from_fields = _bbox_xyxy_from_cxcywh(*bbox_fields)
                         bbox_from_poly = _bbox_xyxy_from_polygon(poly_fields)
-                        if bbox_from_fields is not None and bbox_from_poly is not None and _bbox_iou(bbox_from_fields, bbox_from_poly) >= 0.9:
+                        if (
+                            bbox_from_fields is not None
+                            and bbox_from_poly is not None
+                            and _bbox_iou(bbox_from_fields, bbox_from_poly) >= 0.9
+                        ):
                             chosen_poly = poly_fields
                             bbox_xyxy = bbox_from_poly
                         else:
@@ -1046,7 +1161,9 @@ def _convert_yolo_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
                     else:
                         bbox_xyxy = _bbox_xyxy_from_cxcywh(*raw_vals[:4])
                     if chosen_poly is not None and bbox_xyxy is not None:
-                        segmentation = _polygon_to_coco_segmentation(chosen_poly, int(width), int(height))
+                        segmentation = _polygon_to_coco_segmentation(
+                            chosen_poly, int(width), int(height)
+                        )
                         dataset_type = "seg"
 
                 if bbox_xyxy is None:
@@ -1080,7 +1197,9 @@ def _convert_yolo_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
                 annotations=annotations,
             )
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_write_failed:{exc}") from exc
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_write_failed:{exc}"
+            ) from exc
         return str(output_path)
 
     coco_train = _convert_split(train_images, train_labels, "train")
@@ -1126,7 +1245,9 @@ def _convert_qwen_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
     if not labelmap:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_labelmap_missing")
     label_to_id = {label: idx + 1 for idx, label in enumerate(labelmap)}
-    categories = [{"id": cid, "name": name, "supercategory": "object"} for name, cid in label_to_id.items()]
+    categories = [
+        {"id": cid, "name": name, "supercategory": "object"} for name, cid in label_to_id.items()
+    ]
     existing_meta = _load_sam3_dataset_metadata_impl(dataset_root)
     if (
         existing_meta
@@ -1134,7 +1255,9 @@ def _convert_qwen_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
         and existing_meta.get("coco_train_json")
         and existing_meta.get("coco_val_json")
     ):
-        _ensure_coco_info_fields_impl(Path(existing_meta["coco_train_json"]), dataset_id, categories)
+        _ensure_coco_info_fields_impl(
+            Path(existing_meta["coco_train_json"]), dataset_id, categories
+        )
         _ensure_coco_info_fields_impl(Path(existing_meta["coco_val_json"]), dataset_id, categories)
         return existing_meta
 
@@ -1146,7 +1269,9 @@ def _convert_qwen_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
         nonlocal annotation_id
         jsonl_path = dataset_root / split / "annotations.jsonl"
         if not jsonl_path.exists():
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"sam3_annotations_missing:{split}")
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail=f"sam3_annotations_missing:{split}"
+            )
         images: List[Dict[str, Any]] = []
         annotations: List[Dict[str, Any]] = []
         try:
@@ -1165,7 +1290,9 @@ def _convert_qwen_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
                     if image_rel not in images_lookup:
                         image_path = dataset_root / split / image_rel
                         if not image_path.exists():
-                            logger.warning("Missing image referenced in %s: %s", jsonl_path, image_path)
+                            logger.warning(
+                                "Missing image referenced in %s: %s", jsonl_path, image_path
+                            )
                             continue
                         try:
                             with Image.open(image_path) as im:
@@ -1252,7 +1379,9 @@ def _convert_qwen_dataset_to_coco_impl(dataset_root: Path) -> Dict[str, Any]:
                 annotations=annotations,
             )
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_write_failed:{exc}") from exc
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_write_failed:{exc}"
+            ) from exc
         return str(output_path)
 
     coco_train = _convert_split("train")
@@ -1315,7 +1444,9 @@ def _convert_coco_dataset_to_yolo_impl(
         try:
             data = json.loads(ann_path.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}") from exc
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}"
+            ) from exc
         for cat in data.get("categories", []) or []:
             try:
                 cid = int(cat.get("id"))
@@ -1353,7 +1484,9 @@ def _convert_coco_dataset_to_yolo_impl(
         try:
             data = json.loads(ann_path.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}") from exc
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}"
+            ) from exc
         images = data.get("images", []) or []
         annotations = data.get("annotations", []) or []
         ann_by_image: Dict[int, List[Dict[str, Any]]] = {}
@@ -1369,7 +1502,9 @@ def _convert_coco_dataset_to_yolo_impl(
             except Exception:
                 continue
             file_name = str(img.get("file_name") or "")
-            img_path = _resolve_coco_image_path_impl(file_name, images_dir, split_name, dataset_root)
+            img_path = _resolve_coco_image_path_impl(
+                file_name, images_dir, split_name, dataset_root
+            )
             if img_path is None:
                 logger.warning("COCO->YOLO: missing image for %s in %s", file_name, dataset_root)
                 continue
@@ -1380,7 +1515,9 @@ def _convert_coco_dataset_to_yolo_impl(
                     with Image.open(img_path) as im:
                         width, height = im.size
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("COCO->YOLO: failed to read image size for %s: %s", img_path, exc)
+                    logger.warning(
+                        "COCO->YOLO: failed to read image size for %s: %s", img_path, exc
+                    )
                     continue
             label_rel = _label_relpath_for_image_impl(file_name)
             label_path = labels_dir / label_rel
@@ -1456,12 +1593,16 @@ def _resolve_sam3_dataset_meta_impl(dataset_id: str) -> Dict[str, Any]:
     elif train_images.exists() and train_labels.exists():
         meta = _convert_yolo_dataset_to_coco_impl(dataset_root)
     else:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_dataset_type_unsupported")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="sam3_dataset_type_unsupported"
+        )
     meta["dataset_root"] = str(dataset_root)
     return meta
 
 
-def _load_coco_index_impl(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int, Dict[int, List[List[float]]]], Dict[int, Dict[str, Any]]]:
+def _load_coco_index_impl(
+    dataset_root: Path,
+) -> Tuple[Dict[str, Any], Dict[int, Dict[int, List[List[float]]]], Dict[int, Dict[str, Any]]]:
     dataset_root = dataset_root.resolve()
     coco_paths: List[Path] = []
     meta = _load_sam3_dataset_metadata_impl(dataset_root) or {}
@@ -1505,7 +1646,9 @@ def _load_coco_index_impl(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int,
         try:
             data = json.loads(coco_path.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}") from exc
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail=f"coco_load_failed:{exc}"
+            ) from exc
         categories = data.get("categories")
         if isinstance(categories, list) and categories:
             if not combined["categories"]:
@@ -1533,7 +1676,9 @@ def _load_coco_index_impl(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int,
             file_name = str(img.get("file_name") or "")
             width = img.get("width")
             height = img.get("height")
-            resolved_path = _resolve_coco_image_path_impl(file_name, images_dir, split_name, dataset_root)
+            resolved_path = _resolve_coco_image_path_impl(
+                file_name, images_dir, split_name, dataset_root
+            )
             entry = {
                 "id": new_id,
                 "file_name": file_name,
@@ -1571,7 +1716,9 @@ def _load_coco_index_impl(dataset_root: Path) -> Tuple[Dict[str, Any], Dict[int,
                 except (TypeError, ValueError):
                     x = y = w = h = None
                 if x is not None and w is not None:
-                    gt_by_image_cat.setdefault(new_img_id, {}).setdefault(cat_id, []).append([x, y, x + w, y + h])
+                    gt_by_image_cat.setdefault(new_img_id, {}).setdefault(cat_id, []).append(
+                        [x, y, x + w, y + h]
+                    )
             ann_copy = dict(ann)
             ann_copy["id"] = ann_id
             ann_copy["image_id"] = new_img_id

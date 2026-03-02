@@ -2602,6 +2602,16 @@ const sam3TrainState = {
         uploadCurrentValPercent: null,
         uploadCurrentValSeed: null,
         uploadCurrentSummary: null,
+        pathInput: null,
+        pathDatasetId: null,
+        pathLabel: null,
+        pathContext: null,
+        pathNotes: null,
+        pathOpenBtn: null,
+        pathSaveBtn: null,
+        pathRegisterBtn: null,
+        pathSummary: null,
+        pathMessage: null,
         refreshBtn: null,
         refreshBtnTop: null,
         list: null,
@@ -2641,6 +2651,10 @@ const sam3TrainState = {
         glossaryDatasetSaveAsInFlight: false,
         glossaryLibrarySaveInFlight: false,
         glossaryLibraryDeleteInFlight: false,
+        pathActionInFlight: false,
+        transientSessionId: "",
+        transientDatasetRoot: "",
+        transientExpiresAt: 0,
         actionInFlight: new Set(),
     };
 
@@ -2655,6 +2669,12 @@ const sam3TrainState = {
         if (!datasetManagerElements.uploadMessage) return;
         datasetManagerElements.uploadMessage.textContent = text || "";
         datasetManagerElements.uploadMessage.className = `training-message ${tone || ""}`;
+    }
+
+    function setDatasetPathMessage(text, tone = "info") {
+        if (!datasetManagerElements.pathMessage) return;
+        datasetManagerElements.pathMessage.textContent = text || "";
+        datasetManagerElements.pathMessage.className = `training-message ${tone || ""}`;
     }
 
     function setDatasetRefreshButtonsDisabled(disabled) {
@@ -2678,6 +2698,40 @@ const sam3TrainState = {
         if (datasetManagerElements.uploadCurrentBtn) {
             datasetManagerElements.uploadCurrentBtn.disabled = busy;
         }
+        updateDatasetPathButtons();
+    }
+
+    function renderDatasetPathSummary() {
+        if (!datasetManagerElements.pathSummary) {
+            return;
+        }
+        const sessionId = datasetManagerState.transientSessionId || "";
+        if (!sessionId) {
+            datasetManagerElements.pathSummary.textContent = "No transient server-path dataset is open. Transient sessions are temporary until saved to library.";
+            return;
+        }
+        const bits = [`Transient session: ${sessionId}`];
+        if (datasetManagerState.transientDatasetRoot) {
+            bits.push(`root: ${datasetManagerState.transientDatasetRoot}`);
+        }
+        if (Number.isFinite(datasetManagerState.transientExpiresAt) && datasetManagerState.transientExpiresAt > 0) {
+            const expiryIso = new Date(datasetManagerState.transientExpiresAt * 1000).toLocaleString();
+            bits.push(`expires: ${expiryIso}`);
+        }
+        datasetManagerElements.pathSummary.textContent = bits.join(" • ");
+    }
+
+    function updateDatasetPathButtons() {
+        const busy = !!datasetManagerState.pathActionInFlight || !!datasetManagerState.uploading;
+        if (datasetManagerElements.pathOpenBtn) {
+            datasetManagerElements.pathOpenBtn.disabled = busy;
+        }
+        if (datasetManagerElements.pathRegisterBtn) {
+            datasetManagerElements.pathRegisterBtn.disabled = busy;
+        }
+        if (datasetManagerElements.pathSaveBtn) {
+            datasetManagerElements.pathSaveBtn.disabled = busy || !datasetManagerState.transientSessionId;
+        }
     }
 
     function parseJsonObjectSafe(rawText, fallback = {}) {
@@ -2691,6 +2745,23 @@ const sam3TrainState = {
         } catch {
             // Some endpoints return plain-text success bodies; treat those as empty metadata.
             return fallback;
+        }
+    }
+
+    function parseApiError(detail, fallbackMessage) {
+        const text = typeof detail === "string" ? detail.trim() : "";
+        if (!text) {
+            return fallbackMessage;
+        }
+        try {
+            const parsed = JSON.parse(text);
+            const msg = parsed?.detail || parsed?.message || parsed?.error;
+            if (typeof msg === "string" && msg.trim()) {
+                return msg.trim();
+            }
+            return text;
+        } catch {
+            return text;
         }
     }
 
@@ -2728,6 +2799,31 @@ const sam3TrainState = {
 	                        ? "Polygon / YOLO-seg geometry"
 	                        : "Bounding box / YOLO geometry";
 	                    badgeWrap.appendChild(typeBadge);
+                    if ((entry.storage_mode || "").toLowerCase() === "linked") {
+                        const linkedBadge = document.createElement("span");
+                        linkedBadge.className = "badge";
+                        linkedBadge.textContent = "LINKED";
+                        linkedBadge.title = "Linked to server files. Delete removes only this library record + overlays; source files stay on disk.";
+                        badgeWrap.appendChild(linkedBadge);
+                        const linkedStatus = String(entry.linked_root_status || "").trim().toLowerCase();
+                        if (linkedStatus && linkedStatus !== "ok") {
+                            const linkedWarn = document.createElement("span");
+                            linkedWarn.className = "badge";
+                            linkedWarn.textContent = linkedStatus === "missing" ? "LINK MISSING" : "LINK INVALID";
+                            linkedWarn.title = "Linked root path is unavailable. Fix or re-register the dataset path.";
+                            badgeWrap.appendChild(linkedWarn);
+                        }
+                    }
+                    const annStatus = String(entry.annotation_status || "").trim().toLowerCase();
+                    if (annStatus) {
+                        const annBadge = document.createElement("span");
+                        annBadge.className = "badge";
+                        const annPctRaw = Number(entry?.annotation_progress?.percent_labeled);
+                        const annPct = Number.isFinite(annPctRaw) ? Math.round(annPctRaw) : null;
+                        annBadge.textContent = annPct !== null ? `ANN ${annStatus} ${annPct}%` : `ANN ${annStatus}`;
+                        annBadge.title = "Persistent annotation tracking state for this dataset.";
+                        badgeWrap.appendChild(annBadge);
+                    }
 	                    if (entry.yolo_ready) {
 	                        const yoloBadge = document.createElement("span");
 	                        yoloBadge.className = "badge";
@@ -2829,6 +2925,9 @@ const sam3TrainState = {
 	                    delBtn.type = "button";
 	                    delBtn.className = "button button-outline";
 	                    delBtn.textContent = "Delete";
+                    if ((entry.storage_mode || "").toLowerCase() === "linked") {
+                        delBtn.title = "Deletes only this library record and overlay metadata.";
+                    }
                     delBtn.disabled = datasetManagerState.actionInFlight.has(datasetActionKey(entry.id, "delete"));
                     delBtn.addEventListener("click", () => {
                         handleDatasetDelete(entry).catch((error) => {
@@ -2841,6 +2940,7 @@ const sam3TrainState = {
 	                    meta.className = "training-help";
 	                    const parts = [];
 	                    if (entry.source) parts.push(entry.source);
+                    if (entry.storage_mode) parts.push(entry.storage_mode);
 	                    if (entry.format) parts.push(entry.format.toUpperCase());
 	                    if (isSeg) {
 	                        parts.push(entry.coco_seg_ready ? "COCO-SEG ready" : "COCO-SEG missing");
@@ -2866,11 +2966,29 @@ const sam3TrainState = {
                     meta.textContent = parts.join(" • ") || "Dataset ready";
                     item.appendChild(header);
                     item.appendChild(meta);
+                    if (entry.linked_root) {
+                        const linkedRootLine = document.createElement("div");
+                        linkedRootLine.className = "training-help";
+                        const linkedStatus = String(entry.linked_root_status || "").trim().toLowerCase();
+                        if (linkedStatus === "ok" || !linkedStatus) {
+                            linkedRootLine.textContent = `Linked root: ${entry.linked_root}`;
+                        } else {
+                            linkedRootLine.textContent = `Linked root (${linkedStatus}): ${entry.linked_root}`;
+                            linkedRootLine.style.color = "#b45309";
+                        }
+                        item.appendChild(linkedRootLine);
+                    }
                     if (entry.context) {
                         const contextLine = document.createElement("div");
                         contextLine.className = "training-help";
                         contextLine.textContent = `Context: ${entry.context}`;
                         item.appendChild(contextLine);
+                    }
+                    if (entry.annotation_notes) {
+                        const notesLine = document.createElement("div");
+                        notesLine.className = "training-help";
+                        notesLine.textContent = `Notes: ${entry.annotation_notes}`;
+                        item.appendChild(notesLine);
                     }
                     if (entry.glossary_preview || entry.glossary_present) {
                         const glossaryLine = document.createElement("div");
@@ -3343,7 +3461,11 @@ const sam3TrainState = {
 
 	    async function handleDatasetDelete(entry) {
 	        if (!entry || !entry.id) return;
-	        const ok = window.confirm(`Delete dataset "${entry.label || entry.id}"? This cannot be undone.`);
+            const isLinked = String(entry.storage_mode || "").toLowerCase() === "linked";
+            const confirmText = isLinked
+                ? `Delete linked dataset record "${entry.label || entry.id}"? This removes library metadata/overlays only; source files stay on disk.`
+                : `Delete dataset "${entry.label || entry.id}"? This cannot be undone.`;
+	        const ok = window.confirm(confirmText);
 	        if (!ok) return;
         const actionKey = datasetActionKey(entry.id, "delete");
         if (datasetManagerState.actionInFlight.has(actionKey)) {
@@ -3450,7 +3572,7 @@ const sam3TrainState = {
             renderDatasetList(datasetManagerState.datasets);
 	    }
 
-	    async function refreshDatasetList() {
+    async function refreshDatasetList() {
         if (datasetManagerState.refreshInFlight) {
             datasetManagerState.refreshNeedsRefresh = true;
             return;
@@ -3483,6 +3605,139 @@ const sam3TrainState = {
                     refreshDatasetList().catch((err) => console.error("Queued dataset refresh failed", err));
                 }
             }
+        }
+    }
+
+    function buildDatasetPathPayload() {
+        const path = (datasetManagerElements.pathInput?.value || "").trim();
+        const datasetId = (datasetManagerElements.pathDatasetId?.value || "").trim();
+        const label = (datasetManagerElements.pathLabel?.value || "").trim();
+        const context = (datasetManagerElements.pathContext?.value || "").trim();
+        const notes = (datasetManagerElements.pathNotes?.value || "").trim();
+        return {
+            path,
+            dataset_id: datasetId || null,
+            label: label || null,
+            context: context || null,
+            notes: notes || null,
+            strict: true,
+        };
+    }
+
+    async function registerDatasetPath() {
+        if (datasetManagerState.pathActionInFlight) {
+            return;
+        }
+        const payload = buildDatasetPathPayload();
+        if (!payload.path) {
+            setDatasetPathMessage("Enter an absolute dataset path first.", "warn");
+            return;
+        }
+        datasetManagerState.pathActionInFlight = true;
+        updateDatasetPathButtons();
+        setDatasetPathMessage("Registering dataset path…", "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets/register_path`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            const data = parseJsonObjectSafe(detail, {});
+            setDatasetPathMessage(`Registered ${data.label || data.id || "dataset"} in library.`, "success");
+            await refreshDatasetList();
+        } catch (err) {
+            console.error("Dataset path register failed", err);
+            setDatasetPathMessage(err.message || "Failed to register dataset path.", "error");
+        } finally {
+            datasetManagerState.pathActionInFlight = false;
+            updateDatasetPathButtons();
+        }
+    }
+
+    async function openDatasetPathTransient() {
+        if (datasetManagerState.pathActionInFlight) {
+            return;
+        }
+        const payload = buildDatasetPathPayload();
+        if (!payload.path) {
+            setDatasetPathMessage("Enter an absolute dataset path first.", "warn");
+            return;
+        }
+        datasetManagerState.pathActionInFlight = true;
+        updateDatasetPathButtons();
+        setDatasetPathMessage("Opening transient dataset…", "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets/open_path`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path: payload.path, strict: true }),
+            });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            const data = parseJsonObjectSafe(detail, {});
+            datasetManagerState.transientSessionId = data.session_id || "";
+            datasetManagerState.transientDatasetRoot = data?.dataset?.dataset_root || payload.path;
+            datasetManagerState.transientExpiresAt = Number(data?.expires_at) || 0;
+            renderDatasetPathSummary();
+            setDatasetPathMessage(`Opened transient session ${datasetManagerState.transientSessionId || "(unknown)"}.`, "success");
+        } catch (err) {
+            console.error("Transient dataset open failed", err);
+            setDatasetPathMessage(err.message || "Failed to open transient dataset.", "error");
+        } finally {
+            datasetManagerState.pathActionInFlight = false;
+            updateDatasetPathButtons();
+        }
+    }
+
+    async function saveTransientDatasetPath() {
+        if (datasetManagerState.pathActionInFlight) {
+            return;
+        }
+        const sessionId = datasetManagerState.transientSessionId || "";
+        if (!sessionId) {
+            setDatasetPathMessage("Open a transient dataset first.", "warn");
+            return;
+        }
+        const payload = buildDatasetPathPayload();
+        datasetManagerState.pathActionInFlight = true;
+        updateDatasetPathButtons();
+        setDatasetPathMessage("Saving transient dataset to library…", "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets/transient/${encodeURIComponent(sessionId)}/save`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    dataset_id: payload.dataset_id,
+                    label: payload.label,
+                    context: payload.context,
+                    notes: payload.notes,
+                }),
+            });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            const data = parseJsonObjectSafe(detail, {});
+            setDatasetPathMessage(`Saved transient session as ${data.label || data.id || "dataset"}.`, "success");
+            await refreshDatasetList();
+        } catch (err) {
+            console.error("Transient dataset save failed", err);
+            if ((err.message || "").includes("transient_session_expired")) {
+                datasetManagerState.transientSessionId = "";
+                datasetManagerState.transientDatasetRoot = "";
+                datasetManagerState.transientExpiresAt = 0;
+                renderDatasetPathSummary();
+            }
+            setDatasetPathMessage(err.message || "Failed to save transient dataset.", "error");
+        } finally {
+            datasetManagerState.pathActionInFlight = false;
+            updateDatasetPathButtons();
         }
     }
 
@@ -3711,6 +3966,16 @@ const sam3TrainState = {
         datasetManagerElements.uploadCurrentValPercent = document.getElementById("datasetUploadCurrentValPercent");
         datasetManagerElements.uploadCurrentValSeed = document.getElementById("datasetUploadCurrentValSeed");
         datasetManagerElements.uploadCurrentSummary = document.getElementById("datasetUploadCurrentSummary");
+        datasetManagerElements.pathInput = document.getElementById("datasetPathInput");
+        datasetManagerElements.pathDatasetId = document.getElementById("datasetPathId");
+        datasetManagerElements.pathLabel = document.getElementById("datasetPathLabel");
+        datasetManagerElements.pathContext = document.getElementById("datasetPathContext");
+        datasetManagerElements.pathNotes = document.getElementById("datasetPathNotes");
+        datasetManagerElements.pathOpenBtn = document.getElementById("datasetPathOpenBtn");
+        datasetManagerElements.pathSaveBtn = document.getElementById("datasetPathSaveBtn");
+        datasetManagerElements.pathRegisterBtn = document.getElementById("datasetPathRegisterBtn");
+        datasetManagerElements.pathSummary = document.getElementById("datasetPathSummary");
+        datasetManagerElements.pathMessage = document.getElementById("datasetPathMessage");
         datasetManagerElements.refreshBtn = document.getElementById("datasetListRefresh");
         datasetManagerElements.refreshBtnTop = document.getElementById("datasetListRefreshTop");
         datasetManagerElements.list = document.getElementById("datasetList");
@@ -3744,6 +4009,27 @@ const sam3TrainState = {
             datasetManagerElements.uploadCurrentBtn.addEventListener("click", () => {
                 uploadCurrentDatasetToCache().catch((error) => {
                     console.error("Current dataset upload failed", error);
+                });
+            });
+        }
+        if (datasetManagerElements.pathOpenBtn) {
+            datasetManagerElements.pathOpenBtn.addEventListener("click", () => {
+                openDatasetPathTransient().catch((error) => {
+                    console.error("Transient dataset open failed", error);
+                });
+            });
+        }
+        if (datasetManagerElements.pathSaveBtn) {
+            datasetManagerElements.pathSaveBtn.addEventListener("click", () => {
+                saveTransientDatasetPath().catch((error) => {
+                    console.error("Transient dataset save failed", error);
+                });
+            });
+        }
+        if (datasetManagerElements.pathRegisterBtn) {
+            datasetManagerElements.pathRegisterBtn.addEventListener("click", () => {
+                registerDatasetPath().catch((error) => {
+                    console.error("Dataset path register failed", error);
                 });
             });
         }
@@ -3861,6 +4147,8 @@ const sam3TrainState = {
             });
         }
         updateDatasetUploadButtons();
+        renderDatasetPathSummary();
+        updateDatasetPathButtons();
         updateGlossaryActionButtons();
         // Segmentation Builder initialization is async; keep Dataset Manager usable
         // even if seg-builder bootstrapping fails.

@@ -7,11 +7,24 @@ from contextvars import ContextVar
 from pathlib import Path
 import numpy as np
 import yaml
-from typing import Optional, List, Dict, Tuple, Any, Literal, Sequence, Mapping, Callable, Set, Iterator
+from typing import (
+    Optional,
+    List,
+    Dict,
+    Tuple,
+    Any,
+    Literal,
+    Sequence,
+    Mapping,
+    Callable,
+    Set,
+    Iterator,
+)
 from collections import deque
 import torch, clip, joblib
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException, Request
+
 logger = logging.getLogger("localinferenceapi")
 from api.detectors_default import build_detectors_default_router
 from api.datasets import build_datasets_router
@@ -131,6 +144,7 @@ from models.schemas import (
 )
 from omegaconf import OmegaConf
 import psutil
+
 try:
     from packaging import version as packaging_version
 except Exception:  # noqa: BLE001
@@ -156,6 +170,7 @@ from utils.io import (
     _dir_size_bytes as _dir_size_bytes_impl,
     _path_is_within_root_impl as _path_is_within_root_impl,
 )
+
 _sanitize_rfdetr_run_id_impl = _sanitize_yolo_run_id_impl
 from utils.network import _find_free_port_impl as _find_free_port_impl
 from utils.coco import (
@@ -247,7 +262,9 @@ from services.prompt_helper_presets import (
     _load_prompt_helper_preset_impl as _load_prompt_helper_preset_impl,
     _save_prompt_helper_preset_impl as _save_prompt_helper_preset_impl,
 )
-from services.prompt_helper import _serialize_prompt_helper_job_impl as _serialize_prompt_helper_job_impl
+from services.prompt_helper import (
+    _serialize_prompt_helper_job_impl as _serialize_prompt_helper_job_impl,
+)
 from services.classifier_jobs import (
     _clip_job_append_metric_impl as _clip_job_append_metric_impl,
     _clip_job_log_impl as _clip_job_log_impl,
@@ -646,6 +663,7 @@ from tools.clip_training import (
     TrainingArtifacts,
     _load_dinov3 as _clip_training_load_dinov3,
 )
+
 try:
     from tools.qwen_training import (
         QwenTrainingConfig,
@@ -687,23 +705,45 @@ except Exception as exc:  # noqa: BLE001
 else:
     QWEN_IMPORT_ERROR = None
 
-def _try_import_qwen_agent() -> Tuple[Optional[Any], Optional[Any], Optional[Any], Optional[Any], Optional[Exception]]:
+
+def _try_import_qwen_agent() -> (
+    Tuple[Optional[Any], Optional[Any], Optional[Any], Optional[Any], Optional[Exception]]
+):
     try:
         from qwen_agent.agents import FnCallAgent as _QwenFnCallAgent  # type: ignore
         from qwen_agent.llm.schema import Message as QwenAgentMessage, ContentItem as QwenAgentContentItem  # type: ignore
         from qwen_agent_llm import LocalQwenVLChatModel  # type: ignore
         from qwen_agent_tools import build_local_agent_tools  # type: ignore
-        return _QwenFnCallAgent, QwenAgentMessage, QwenAgentContentItem, (LocalQwenVLChatModel, build_local_agent_tools), None
+
+        return (
+            _QwenFnCallAgent,
+            QwenAgentMessage,
+            QwenAgentContentItem,
+            (LocalQwenVLChatModel, build_local_agent_tools),
+            None,
+        )
     except Exception as exc:  # noqa: BLE001
         return None, None, None, None, exc
 
 
-QwenAgentAssistant, QwenAgentMessage, QwenAgentContentItem, _agent_payload, QWEN_AGENT_IMPORT_ERROR = _try_import_qwen_agent()
+(
+    QwenAgentAssistant,
+    QwenAgentMessage,
+    QwenAgentContentItem,
+    _agent_payload,
+    QWEN_AGENT_IMPORT_ERROR,
+) = _try_import_qwen_agent()
 if QWEN_AGENT_IMPORT_ERROR is not None:
     local_repo = (Path(__file__).resolve().parent / "Qwen-Agent").resolve()
     if local_repo.exists():
         sys.path.insert(0, str(local_repo))
-        QwenAgentAssistant, QwenAgentMessage, QwenAgentContentItem, _agent_payload, QWEN_AGENT_IMPORT_ERROR = _try_import_qwen_agent()
+        (
+            QwenAgentAssistant,
+            QwenAgentMessage,
+            QwenAgentContentItem,
+            _agent_payload,
+            QWEN_AGENT_IMPORT_ERROR,
+        ) = _try_import_qwen_agent()
 if _agent_payload is not None:
     LocalQwenVLChatModel, build_local_agent_tools = _agent_payload
 else:
@@ -768,9 +808,13 @@ MAX_PREDICTOR_SLOTS = 3
 DATASET_ZIP_MAX_BYTES = _env_int("DATASET_ZIP_MAX_BYTES", 100 * 1024 * 1024 * 1024)
 DATASET_ZIP_ENTRY_MAX_BYTES = _env_int("DATASET_ZIP_ENTRY_MAX_BYTES", 50 * 1024 * 1024 * 1024)
 CLIP_DATASET_CHUNK_MAX_BYTES = _env_int("CLIP_DATASET_CHUNK_MAX_BYTES", 10 * 1024 * 1024 * 1024)
-CLIP_DATASET_UPLOAD_QUOTA_BYTES = _env_int("CLIP_DATASET_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
+CLIP_DATASET_UPLOAD_QUOTA_BYTES = _env_int(
+    "CLIP_DATASET_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024
+)
 QWEN_DATASET_CHUNK_MAX_BYTES = _env_int("QWEN_DATASET_CHUNK_MAX_BYTES", 10 * 1024 * 1024 * 1024)
-QWEN_DATASET_UPLOAD_QUOTA_BYTES = _env_int("QWEN_DATASET_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
+QWEN_DATASET_UPLOAD_QUOTA_BYTES = _env_int(
+    "QWEN_DATASET_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024
+)
 ASSET_MAX_BYTES = _env_int("ASSET_MAX_BYTES", 10 * 1024 * 1024 * 1024)
 ASSET_UPLOAD_QUOTA_BYTES = _env_int("ASSET_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
 CLASSIFIER_ALLOWED_EXTS = {".pkl", ".joblib"}
@@ -781,7 +825,9 @@ MAX_RESPONSE_DETECTIONS = _env_int("MAX_RESPONSE_DETECTIONS", 5000)
 MAX_RESPONSE_MASKS = _env_int("MAX_RESPONSE_MASKS", 2000)
 MASK_ENCODE_MAX_BYTES = _env_int("MASK_ENCODE_MAX_BYTES", 64 * 1024 * 1024)
 AGENT_MINING_CACHE_MAX_BYTES = _env_int("AGENT_MINING_CACHE_MAX_BYTES", 80 * 1024 * 1024 * 1024)
-AGENT_MINING_CACHE_TTL_HOURS = _env_int("AGENT_MINING_CACHE_TTL_HOURS", 0)  # 0 = no TTL purge by default
+AGENT_MINING_CACHE_TTL_HOURS = _env_int(
+    "AGENT_MINING_CACHE_TTL_HOURS", 0
+)  # 0 = no TTL purge by default
 AGENT_RECIPE_MAX_CROPS = _env_int("AGENT_RECIPE_MAX_CROPS", 1000)
 AGENT_RECIPE_MAX_CROP_BYTES = _env_int("AGENT_RECIPE_MAX_CROP_BYTES", 512 * 1024 * 1024)
 AGENT_RECIPE_MAX_CLIP_HEAD_BYTES = _env_int("AGENT_RECIPE_MAX_CLIP_HEAD_BYTES", 256 * 1024 * 1024)
@@ -830,6 +876,7 @@ QWEN_VRAM_THINKING_SCALE = 1.08
 QWEN_VRAM_PIXEL_BASE = 451584
 QWEN_VRAM_PIXEL_SCALE_MIN = 0.6
 QWEN_VRAM_PIXEL_SCALE_MAX = 1.6
+
 
 def _is_qwen_moe_model_id(model_id: str) -> bool:
     lowered = model_id.lower()
@@ -975,7 +1022,9 @@ def _load_dinov3_backbone(
     except Exception as exc:  # noqa: BLE001
         if raise_on_error:
             raise RuntimeError(str(exc)) from exc
-        logger.warning("Failed to load DINOv3 backbone '%s' on %s: %s", model_name, target_device, exc)
+        logger.warning(
+            "Failed to load DINOv3 backbone '%s' on %s: %s", model_name, target_device, exc
+        )
         return None, None
 
 
@@ -1074,16 +1123,20 @@ def _list_qwen_model_entries() -> List[Dict[str, Any]]:
                 created_at = None
         candidates.append(
             {
-            "id": model_id,
-            "label": str(metadata.get("label") or run_dir.name),
-            "type": "finetune",
-            "metadata": metadata,
-            "path": str(latest_path),
-            "created_at": created_at,
+                "id": model_id,
+                "label": str(metadata.get("label") or run_dir.name),
+                "type": "finetune",
+                "metadata": metadata,
+                "path": str(latest_path),
+                "created_at": created_at,
             }
         )
     candidates.sort(
-        key=lambda item: float(item.get("created_at")) if isinstance(item.get("created_at"), (int, float)) else 0.0,
+        key=lambda item: (
+            float(item.get("created_at"))
+            if isinstance(item.get("created_at"), (int, float))
+            else 0.0
+        ),
         reverse=True,
     )
     entries: List[Dict[str, Any]] = []
@@ -1132,9 +1185,10 @@ def _finalize_qwen_training_environment() -> None:
 def _bytes_to_mb(value: int) -> float:
     return round(value / (1024 * 1024), 2)
 
+
 # ----------------------------------------------------------------
 # 1) Define a global error message and a global load-flag for CLIP
-ERROR_MESSAGE = 0 # messy hack, making this an int because of the way we parse it later... the message has actually just been moved to the JS and appears when bbox uuid is None
+ERROR_MESSAGE = 0  # messy hack, making this an int because of the way we parse it later... the message has actually just been moved to the JS and appears when bbox uuid is None
 clip_initialized = True
 clip_last_error: Optional[str] = None
 # ----------------------------------------------------------------
@@ -1158,7 +1212,9 @@ else:
 
 LABELMAP_DEFAULT_PATH = "./my_label_list.pkl"
 active_classifier_path: Optional[str] = MODEL_PATH if clf is not None else None
-active_labelmap_path: Optional[str] = LABELMAP_DEFAULT_PATH if os.path.exists(LABELMAP_DEFAULT_PATH) else None
+active_labelmap_path: Optional[str] = (
+    LABELMAP_DEFAULT_PATH if os.path.exists(LABELMAP_DEFAULT_PATH) else None
+)
 active_label_list: List[str] = []
 active_encoder_type: str = "clip"
 active_encoder_model: Optional[str] = None
@@ -1216,7 +1272,11 @@ try:
         if not str(src).startswith(str(_classifiers_root_early)):
             dst = _classifiers_root_early / src.name
             try:
-                if not dst.exists() or dst.stat().st_mtime < src.stat().st_mtime or dst.stat().st_size != src.stat().st_size:
+                if (
+                    not dst.exists()
+                    or dst.stat().st_mtime < src.stat().st_mtime
+                    or dst.stat().st_size != src.stat().st_size
+                ):
                     shutil.copy2(src, dst)
                 active_classifier_path = str(dst)
             except Exception:
@@ -1227,7 +1287,11 @@ try:
         if not str(src).startswith(str(_labelmaps_root_early)):
             dst = _labelmaps_root_early / src.name
             try:
-                if not dst.exists() or dst.stat().st_mtime < src.stat().st_mtime or dst.stat().st_size != src.stat().st_size:
+                if (
+                    not dst.exists()
+                    or dst.stat().st_mtime < src.stat().st_mtime
+                    or dst.stat().st_size != src.stat().st_size
+                ):
                     shutil.copy2(src, dst)
                 active_labelmap_path = str(dst)
             except Exception:
@@ -1468,7 +1532,9 @@ class _Sam3Backend:
             http_400=HTTP_400_BAD_REQUEST,
         )
         device_str = "cuda" if self.device.type == "cuda" else "cpu"
-        source = active_sam3_metadata.get("source") if isinstance(active_sam3_metadata, dict) else None
+        source = (
+            active_sam3_metadata.get("source") if isinstance(active_sam3_metadata, dict) else None
+        )
         try:
             model = build_sam3_image_model(
                 device=device_str,
@@ -1574,7 +1640,13 @@ class PredictorSlot:
         self._busy = threading.Event()
         self.image_memory_bytes: int = 0
 
-    def set_image(self, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str]) -> None:
+    def set_image(
+        self,
+        np_img: np.ndarray,
+        token: Optional[str],
+        variant: Optional[str],
+        image_name: Optional[str],
+    ) -> None:
         variant_name = (variant or "sam1").lower()
         with self.lock:
             self._busy.set()
@@ -1648,7 +1720,9 @@ class PredictorManager:
         self.image_index: Dict[Tuple[str, str], PredictorSlot] = {}
         self.queue: "queue.Queue[Tuple[str, Dict[str, Any]]]" = queue.Queue()
         self.stop_event = threading.Event()
-        self.worker = threading.Thread(target=self._worker, name="predictor-preload-worker", daemon=True)
+        self.worker = threading.Thread(
+            target=self._worker, name="predictor-preload-worker", daemon=True
+        )
         self.worker.start()
 
     def _slot_key(self, token: Optional[str], variant: Optional[str]) -> Optional[Tuple[str, str]]:
@@ -1656,7 +1730,9 @@ class PredictorManager:
             return None
         return (token, variant)
 
-    def _image_key(self, image_name: Optional[str], variant: Optional[str]) -> Optional[Tuple[str, str]]:
+    def _image_key(
+        self, image_name: Optional[str], variant: Optional[str]
+    ) -> Optional[Tuple[str, str]]:
         if not image_name or not variant:
             return None
         return (variant, image_name)
@@ -1664,7 +1740,9 @@ class PredictorManager:
     def is_slot_enabled(self, slot_name: str) -> bool:
         return slot_name in self.enabled_slots
 
-    def resolve_slot(self, slot_name: Optional[str], *, allow_disabled_fallback: bool = True) -> str:
+    def resolve_slot(
+        self, slot_name: Optional[str], *, allow_disabled_fallback: bool = True
+    ) -> str:
         """Return a normalised slot name.
 
         When ``allow_disabled_fallback`` is False we fail fast if the requested
@@ -1696,7 +1774,7 @@ class PredictorManager:
             if normalized == self.capacity:
                 return
             self.capacity = normalized
-            new_enabled = set(self.slot_order[: normalized])
+            new_enabled = set(self.slot_order[:normalized])
             disabled = self.enabled_slots - new_enabled
             self.enabled_slots = new_enabled
             for slot_name in disabled:
@@ -1709,10 +1787,16 @@ class PredictorManager:
         return len(self.enabled_slots)
 
     def loaded_slot_count(self) -> int:
-        return sum(1 for name, slot in self.slots.items() if name in self.enabled_slots and slot.token)
+        return sum(
+            1 for name, slot in self.slots.items() if name in self.enabled_slots and slot.token
+        )
 
     def total_image_memory_bytes(self) -> int:
-        return sum(slot.image_memory_bytes for name, slot in self.slots.items() if name in self.enabled_slots)
+        return sum(
+            slot.image_memory_bytes
+            for name, slot in self.slots.items()
+            if name in self.enabled_slots
+        )
 
     def _clear_slot_refs(self, slot: PredictorSlot) -> None:
         remove_keys = [key for key, value in self.token_index.items() if value is slot]
@@ -1728,7 +1812,14 @@ class PredictorManager:
                 self._clear_slot_refs(slot)
                 slot.unload()
 
-    def set_slot(self, slot_name: str, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str]) -> None:
+    def set_slot(
+        self,
+        slot_name: str,
+        np_img: np.ndarray,
+        token: Optional[str],
+        variant: Optional[str],
+        image_name: Optional[str],
+    ) -> None:
         slot_name = self.resolve_slot(slot_name, allow_disabled_fallback=False)
         slot = self.slots[slot_name]
         self._clear_slot_refs(slot)
@@ -1740,27 +1831,41 @@ class PredictorManager:
         if image_key:
             self.image_index[image_key] = slot
 
-    def ensure_current(self, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str]) -> PredictorSlot:
+    def ensure_current(
+        self,
+        np_img: np.ndarray,
+        token: Optional[str],
+        variant: Optional[str],
+        image_name: Optional[str],
+    ) -> PredictorSlot:
         slot = self.token_index.get(self._slot_key(token, variant)) if token and variant else None
         if slot and slot.name == "current":
             return slot
         self.set_slot("current", np_img, token, variant, image_name)
         return self.slots["current"]
 
-    def get_slot_for_token(self, token: Optional[str], variant: Optional[str]) -> Optional[PredictorSlot]:
+    def get_slot_for_token(
+        self, token: Optional[str], variant: Optional[str]
+    ) -> Optional[PredictorSlot]:
         key = self._slot_key(token, variant)
         if key is None:
             return None
         return self.token_index.get(key)
 
-    def get_slot_for_image(self, image_name: Optional[str], variant: Optional[str]) -> Optional[PredictorSlot]:
+    def get_slot_for_image(
+        self, image_name: Optional[str], variant: Optional[str]
+    ) -> Optional[PredictorSlot]:
         key = self._image_key(image_name, variant)
         if key is None:
             return None
         return self.image_index.get(key)
 
     def promote_slot(self, slot_name: str) -> bool:
-        if slot_name not in self.slots or slot_name == "current" or not self.is_slot_enabled(slot_name):
+        if (
+            slot_name not in self.slots
+            or slot_name == "current"
+            or not self.is_slot_enabled(slot_name)
+        ):
             return False
         if slot_name == "next":
             prev_slot = self.slots["previous"]
@@ -1783,13 +1888,27 @@ class PredictorManager:
         self.slots["next"].name = "next"
         return True
 
-    def predict(self, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str], **predict_kwargs):
+    def predict(
+        self,
+        np_img: np.ndarray,
+        token: Optional[str],
+        variant: Optional[str],
+        image_name: Optional[str],
+        **predict_kwargs,
+    ):
         slot = self.get_slot_for_token(token, variant)
         if slot is None:
             slot = self.ensure_current(np_img, token, variant, image_name)
         return slot.predict(**predict_kwargs)
 
-    def set_slot_with_wait(self, slot_name: str, np_img: np.ndarray, token: Optional[str], variant: Optional[str], image_name: Optional[str]) -> None:
+    def set_slot_with_wait(
+        self,
+        slot_name: str,
+        np_img: np.ndarray,
+        token: Optional[str],
+        variant: Optional[str],
+        image_name: Optional[str],
+    ) -> None:
         slot_name = self.resolve_slot(slot_name, allow_disabled_fallback=False)
         if slot_name != "current":
             waited = 0.0
@@ -1843,8 +1962,15 @@ class PredictorManager:
                 return cached, token, variant, image_name
         base64_data = payload.get("image_base64")
         if not base64_data:
-            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="image_payload_missing")
-        _, np_img = _decode_image_base64_impl(base64_data, max_bytes=BASE64_IMAGE_MAX_BYTES, max_dim=BASE64_IMAGE_MAX_DIM, allow_downscale=True)
+            raise HTTPException(
+                status_code=HTTP_428_PRECONDITION_REQUIRED, detail="image_payload_missing"
+            )
+        _, np_img = _decode_image_base64_impl(
+            base64_data,
+            max_bytes=BASE64_IMAGE_MAX_BYTES,
+            max_dim=BASE64_IMAGE_MAX_DIM,
+            allow_downscale=True,
+        )
         token = hashlib.md5(np_img.tobytes()).hexdigest()
         _store_preloaded_image(token, np_img, variant)
         return np_img, token, variant, image_name
@@ -1897,7 +2023,11 @@ def _store_preloaded_image(token: str, np_img: np.ndarray, variant: str) -> None
     arr = np.ascontiguousarray(np_img)
     arr_bytes = arr.nbytes
     if SAM_PRELOAD_MAX_BYTES > 0 and arr_bytes > SAM_PRELOAD_MAX_BYTES:
-        logger.warning("Skipping preload store: image too large (%d bytes > %d)", arr_bytes, SAM_PRELOAD_MAX_BYTES)
+        logger.warning(
+            "Skipping preload store: image too large (%d bytes > %d)",
+            arr_bytes,
+            SAM_PRELOAD_MAX_BYTES,
+        )
         return
     with sam_cache_lock:
         # Remove existing entry bytes
@@ -2007,7 +2137,11 @@ class SamPreloadManager:
             latest_generation = self.latest_generation.get(self._key(job))
         if latest_id is not None and job.request_id < latest_id:
             return True
-        if job.generation is not None and latest_generation is not None and job.generation < latest_generation:
+        if (
+            job.generation is not None
+            and latest_generation is not None
+            and job.generation < latest_generation
+        ):
             return True
         return False
 
@@ -2018,7 +2152,9 @@ class SamPreloadManager:
             cached = _fetch_preloaded_image(job.image_token, job.variant)
             if cached is not None:
                 height, width = cached.shape[:2]
-        return SamPreloadResponse(status="superseded", width=int(width), height=int(height), token=job.image_token or "")
+        return SamPreloadResponse(
+            status="superseded", width=int(width), height=int(height), token=job.image_token or ""
+        )
 
     def _process_job(self, job: SamPreloadJob) -> SamPreloadResponse:
         variant = job.variant
@@ -2036,14 +2172,20 @@ class SamPreloadManager:
                         height=int(height),
                         token=job.image_token,
                     )
-                predictor_manager.set_slot_with_wait(slot, cached, job.image_token, variant, image_name)
+                predictor_manager.set_slot_with_wait(
+                    slot, cached, job.image_token, variant, image_name
+                )
                 height, width = cached.shape[:2]
-                return SamPreloadResponse(status="ready", width=int(width), height=int(height), token=job.image_token)
+                return SamPreloadResponse(
+                    status="ready", width=int(width), height=int(height), token=job.image_token
+                )
             if not job.image_base64:
                 raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found")
 
         if not job.image_base64:
-            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="image_base64_required")
+            raise HTTPException(
+                status_code=HTTP_428_PRECONDITION_REQUIRED, detail="image_base64_required"
+            )
 
         np_img = self._decode_base64(job.image_base64)
         token = hashlib.md5(np_img.tobytes()).hexdigest()
@@ -2051,7 +2193,9 @@ class SamPreloadManager:
 
         if self._is_superseded(job):
             height, width = np_img.shape[:2]
-            return SamPreloadResponse(status="superseded", width=int(width), height=int(height), token=token)
+            return SamPreloadResponse(
+                status="superseded", width=int(width), height=int(height), token=token
+            )
 
         predictor_manager.set_slot_with_wait(slot, np_img, token, variant, image_name)
         height, width = np_img.shape[:2]
@@ -2059,7 +2203,12 @@ class SamPreloadManager:
 
     @staticmethod
     def _decode_base64(image_base64: str) -> np.ndarray:
-        _, np_img = _decode_image_base64_impl(image_base64, max_bytes=BASE64_IMAGE_MAX_BYTES, max_dim=BASE64_IMAGE_MAX_DIM, allow_downscale=True)
+        _, np_img = _decode_image_base64_impl(
+            image_base64,
+            max_bytes=BASE64_IMAGE_MAX_BYTES,
+            max_dim=BASE64_IMAGE_MAX_DIM,
+            allow_downscale=True,
+        )
         return np_img
 
 
@@ -2110,7 +2259,9 @@ def _predict_with_cache(
             mask[y1:y2, x1:x2] = 1
         masks = np.asarray([mask], dtype=np.uint8)
         return masks, None, None
-    return predictor_manager.predict(np_img, token, variant, image_name=image_name, **predict_kwargs)
+    return predictor_manager.predict(
+        np_img, token, variant, image_name=image_name, **predict_kwargs
+    )
 
 
 def _default_variant(value: Optional[str]) -> str:
@@ -2180,7 +2331,9 @@ class SamPreloadManager:
             job = self.queue.get()
             try:
                 if self._is_superseded(job):
-                    job.result = SamPreloadResponse(status="superseded", width=0, height=0, token=job.image_token or "")
+                    job.result = SamPreloadResponse(
+                        status="superseded", width=0, height=0, token=job.image_token or ""
+                    )
                 else:
                     job.result = self._process_job(job)
             except Exception as exc:  # noqa: BLE001 - propagate to caller
@@ -2195,7 +2348,11 @@ class SamPreloadManager:
             latest_generation = self.latest_generation.get(job.variant)
         if latest_id is not None and job.request_id < latest_id:
             return True
-        if job.generation is not None and latest_generation is not None and job.generation < latest_generation:
+        if (
+            job.generation is not None
+            and latest_generation is not None
+            and job.generation < latest_generation
+        ):
             return True
         return False
 
@@ -2204,7 +2361,9 @@ class SamPreloadManager:
         try:
             slot_name = predictor_manager.resolve_slot(job.slot, allow_disabled_fallback=False)
         except ValueError:
-            return SamPreloadResponse(status="slot_disabled", width=0, height=0, token=job.image_token or "")
+            return SamPreloadResponse(
+                status="slot_disabled", width=0, height=0, token=job.image_token or ""
+            )
         image_name = job.image_name
 
         if job.image_token:
@@ -2217,21 +2376,32 @@ class SamPreloadManager:
                         height=int(cached.shape[0]),
                         token=job.image_token,
                     )
-                predictor_manager.set_slot_with_wait(slot_name, cached, job.image_token, variant, image_name)
+                predictor_manager.set_slot_with_wait(
+                    slot_name, cached, job.image_token, variant, image_name
+                )
                 height, width = cached.shape[:2]
-                return SamPreloadResponse(status="ready", width=int(width), height=int(height), token=job.image_token)
+                return SamPreloadResponse(
+                    status="ready", width=int(width), height=int(height), token=job.image_token
+                )
             if not job.image_base64:
                 raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found")
 
         if not job.image_base64:
-            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="image_base64_required")
+            raise HTTPException(
+                status_code=HTTP_428_PRECONDITION_REQUIRED, detail="image_base64_required"
+            )
 
         np_img = self._decode_base64(job.image_base64)
         token = hashlib.md5(np_img.tobytes()).hexdigest()
         _store_preloaded_image(token, np_img, variant)
 
         if self._is_superseded(job):
-            return SamPreloadResponse(status="superseded", width=int(np_img.shape[1]), height=int(np_img.shape[0]), token=token)
+            return SamPreloadResponse(
+                status="superseded",
+                width=int(np_img.shape[1]),
+                height=int(np_img.shape[0]),
+                token=token,
+            )
 
         predictor_manager.set_slot_with_wait(slot_name, np_img, token, variant, image_name)
         height, width = np_img.shape[:2]
@@ -2239,14 +2409,22 @@ class SamPreloadManager:
 
     @staticmethod
     def _decode_base64(image_base64: str) -> np.ndarray:
-        _, np_img = _decode_image_base64_impl(image_base64, max_bytes=BASE64_IMAGE_MAX_BYTES, max_dim=BASE64_IMAGE_MAX_DIM, allow_downscale=True)
+        _, np_img = _decode_image_base64_impl(
+            image_base64,
+            max_bytes=BASE64_IMAGE_MAX_BYTES,
+            max_dim=BASE64_IMAGE_MAX_DIM,
+            allow_downscale=True,
+        )
         return np_img
 
 
 def _extract_qwen_json_block(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     snippet, detections = _extract_qwen_json_block_impl(text)
     if not detections:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="qwen_parse_error:no_json_block_found")
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="qwen_parse_error:no_json_block_found",
+        )
     return snippet, detections
 
 
@@ -2278,7 +2456,9 @@ def _qwen_bbox_results(
         left, top, right, bottom = scaled
         yolo_box = _xyxy_to_yolo_norm_list(full_w, full_h, left, top, right, bottom)
         label = item.get("label") or item.get("class") or item.get("name")
-        results.append(QwenDetection(bbox=yolo_box, qwen_label=str(label) if label else None, source="bbox"))
+        results.append(
+            QwenDetection(bbox=yolo_box, qwen_label=str(label) if label else None, source="bbox")
+        )
         if len(results) >= limit:
             break
     return results
@@ -2323,7 +2503,11 @@ def _qwen_bbox_sam_results(
             continue
         yolo_box = _xyxy_to_yolo_norm_list(pil_img.width, pil_img.height, left, top, right, bottom)
         label = item.get("label") or item.get("class") or item.get("name")
-        results.append(QwenDetection(bbox=yolo_box, qwen_label=str(label) if label else None, source="bbox_sam"))
+        results.append(
+            QwenDetection(
+                bbox=yolo_box, qwen_label=str(label) if label else None, source="bbox_sam"
+            )
+        )
         if len(results) >= limit:
             break
     return results
@@ -2366,7 +2550,9 @@ def _qwen_point_results(
             continue
         yolo_box = _xyxy_to_yolo_norm_list(pil_img.width, pil_img.height, left, top, right, bottom)
         label = item.get("label") or item.get("class") or item.get("name")
-        results.append(QwenDetection(bbox=yolo_box, qwen_label=str(label) if label else None, source="point"))
+        results.append(
+            QwenDetection(bbox=yolo_box, qwen_label=str(label) if label else None, source="point")
+        )
         if len(results) >= limit:
             break
     return results
@@ -2421,7 +2607,11 @@ def _sam3_text_detections(
     try:
         if scores_iter is not None and len(scores_iter) >= len(order):
             order.sort(
-                key=lambda i: float(scores_iter[i]) if i < len(scores_iter) and scores_iter[i] is not None else -1e9,
+                key=lambda i: (
+                    float(scores_iter[i])
+                    if i < len(scores_iter) and scores_iter[i] is not None
+                    else -1e9
+                ),
                 reverse=True,
             )
     except Exception:
@@ -2564,7 +2754,9 @@ def _run_sam3_text_inference(
                 backbone_out=img_state.get("backbone_out", {}),
                 find_input=processor.find_stage,
                 find_target=None,
-                geometric_prompt=img_state.get("geometric_prompt", processor.model._get_dummy_prompt()),
+                geometric_prompt=img_state.get(
+                    "geometric_prompt", processor.model._get_dummy_prompt()
+                ),
             )
             boxes_xyxy = raw.get("pred_boxes_xyxy")
             if boxes_xyxy is None:
@@ -2586,7 +2778,10 @@ def _run_sam3_text_inference(
             }
         except Exception as exc:  # noqa: BLE001
             logger.warning("SAM3 box-only text prompt fallback failed: %s", exc)
-            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_text_grounding_failed:{exc}") from exc
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"sam3_text_grounding_failed:{exc}",
+            ) from exc
     try:
         if output is not None and hasattr(output, "pred_masks"):
             masks = output.pred_masks
@@ -2669,7 +2864,9 @@ def _run_sam3_visual_inference(
     try:
         output = processor.add_geometric_prompt([cx, cy, w_norm, h_norm], True, state=img_state)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_visual_prompt_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_visual_prompt_failed:{exc}"
+        ) from exc
     masks_arr: Optional[np.ndarray] = None
     mask_logits = None
     if isinstance(output, Mapping):
@@ -2689,6 +2886,7 @@ def _run_sam3_visual_inference(
     threshold_val = max(0.0, min(1.0, threshold_val))
     # Normalize mask logits into a numpy array before thresholding.
     try:
+
         def _sigmoid_np(arr: np.ndarray) -> np.ndarray:
             try:
                 return 1.0 / (1.0 + np.exp(-np.clip(arr, -50, 50)))
@@ -2697,7 +2895,10 @@ def _run_sam3_visual_inference(
 
         if isinstance(mask_logits, (list, tuple)):
             if any(isinstance(m, torch.Tensor) for m in mask_logits):
-                stacked = [m.detach().cpu().numpy() if isinstance(m, torch.Tensor) else np.asarray(m) for m in mask_logits]
+                stacked = [
+                    m.detach().cpu().numpy() if isinstance(m, torch.Tensor) else np.asarray(m)
+                    for m in mask_logits
+                ]
                 mask_logits = np.stack(stacked)
             else:
                 mask_logits = np.asarray(mask_logits)
@@ -2745,6 +2946,7 @@ def _run_sam3_visual_inference(
                 masks_arr = masks_arr[..., 0]
     except Exception:
         masks_arr = None
+
     def _to_numpy_safe(val: Any) -> Optional[np.ndarray]:
         if val is None:
             return None
@@ -2782,8 +2984,16 @@ def _run_sam3_visual_inference(
         collected_masks=collected_masks,
     )
     # Drop the seed box if SAM returns it again (dedupe by IoU against the input box).
-    seed_xyxy = (bbox_xywh[0], bbox_xywh[1], bbox_xywh[0] + bbox_xywh[2], bbox_xywh[1] + bbox_xywh[3])
-    def _iou(box_a: Tuple[float, float, float, float], box_b: Tuple[float, float, float, float]) -> float:
+    seed_xyxy = (
+        bbox_xywh[0],
+        bbox_xywh[1],
+        bbox_xywh[0] + bbox_xywh[2],
+        bbox_xywh[1] + bbox_xywh[3],
+    )
+
+    def _iou(
+        box_a: Tuple[float, float, float, float], box_b: Tuple[float, float, float, float]
+    ) -> float:
         ax1, ay1, ax2, ay2 = box_a
         bx1, by1, bx2, by2 = box_b
         ix1, iy1 = max(ax1, bx1), max(ay1, by1)
@@ -2889,9 +3099,14 @@ def _run_sam3_visual_inference_multi(
         w_norm = w / img_w
         h_norm = h / img_h
         try:
-            output = processor.add_geometric_prompt([cx, cy, w_norm, h_norm], bool(label), state=img_state)
+            output = processor.add_geometric_prompt(
+                [cx, cy, w_norm, h_norm], bool(label), state=img_state
+            )
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_visual_prompt_failed:{exc}") from exc
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"sam3_visual_prompt_failed:{exc}",
+            ) from exc
     masks_arr: Optional[np.ndarray] = None
     mask_logits = None
     if isinstance(output, Mapping):
@@ -2910,6 +3125,7 @@ def _run_sam3_visual_inference_multi(
         threshold_val = 0.5
     threshold_val = max(0.0, min(1.0, threshold_val))
     try:
+
         def _sigmoid_np(arr: np.ndarray) -> np.ndarray:
             try:
                 return 1.0 / (1.0 + np.exp(-np.clip(arr, -50, 50)))
@@ -2918,7 +3134,10 @@ def _run_sam3_visual_inference_multi(
 
         if isinstance(mask_logits, (list, tuple)):
             if any(isinstance(m, torch.Tensor) for m in mask_logits):
-                stacked = [m.detach().cpu().numpy() if isinstance(m, torch.Tensor) else np.asarray(m) for m in mask_logits]
+                stacked = [
+                    m.detach().cpu().numpy() if isinstance(m, torch.Tensor) else np.asarray(m)
+                    for m in mask_logits
+                ]
                 mask_logits = np.stack(stacked)
             else:
                 mask_logits = np.asarray(mask_logits)
@@ -2959,6 +3178,7 @@ def _run_sam3_visual_inference_multi(
                 masks_arr = masks_arr[..., 0]
     except Exception:
         masks_arr = None
+
     def _to_numpy_safe(val: Any) -> Optional[np.ndarray]:
         if val is None:
             return None
@@ -2995,11 +3215,11 @@ def _run_sam3_visual_inference_multi(
         simplify_epsilon=simplify_epsilon,
         collected_masks=collected_masks,
     )
-    seed_boxes_xyxy = [
-        (bx[0], bx[1], bx[0] + bx[2], bx[1] + bx[3])
-        for bx in bboxes_xywh
-    ]
-    def _iou(box_a: Tuple[float, float, float, float], box_b: Tuple[float, float, float, float]) -> float:
+    seed_boxes_xyxy = [(bx[0], bx[1], bx[0] + bx[2], bx[1] + bx[3]) for bx in bboxes_xywh]
+
+    def _iou(
+        box_a: Tuple[float, float, float, float], box_b: Tuple[float, float, float, float]
+    ) -> float:
         ax1, ay1, ax2, ay2 = box_a
         bx1, by1, bx2, by2 = box_b
         ix1, iy1 = max(ax1, bx1), max(ay1, by1)
@@ -3039,14 +3259,21 @@ def _run_sam3_visual_inference_multi(
 
 def _ensure_qwen_ready():
     global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
-    if QWEN_IMPORT_ERROR is not None or Qwen3VLForConditionalGeneration is None or AutoProcessor is None or process_vision_info is None:
+    if (
+        QWEN_IMPORT_ERROR is not None
+        or Qwen3VLForConditionalGeneration is None
+        or AutoProcessor is None
+        or process_vision_info is None
+    ):
         detail = f"qwen_dependencies_missing:{QWEN_IMPORT_ERROR}"
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
     if packaging_version is not None:
         try:
             import transformers  # local import to avoid import-time failures
 
-            if packaging_version.parse(transformers.__version__) < packaging_version.parse(QWEN_MIN_TRANSFORMERS):
+            if packaging_version.parse(transformers.__version__) < packaging_version.parse(
+                QWEN_MIN_TRANSFORMERS
+            ):
                 raise HTTPException(
                     status_code=HTTP_503_SERVICE_UNAVAILABLE,
                     detail=f"qwen_transformers_too_old:{transformers.__version__}<{QWEN_MIN_TRANSFORMERS}",
@@ -3073,8 +3300,12 @@ def _ensure_qwen_ready():
             device = _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
         except RuntimeError as exc:  # noqa: BLE001
             qwen_last_error = str(exc)
-            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_device_unavailable:{exc}") from exc
-        use_auto_map = QWEN_DEVICE_PREF == "auto" and device.startswith("cuda") and torch.cuda.is_available()
+            raise HTTPException(
+                status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_device_unavailable:{exc}"
+            ) from exc
+        use_auto_map = (
+            QWEN_DEVICE_PREF == "auto" and device.startswith("cuda") and torch.cuda.is_available()
+        )
         load_kwargs: Dict[str, Any]
         if use_auto_map:
             load_kwargs = {
@@ -3095,9 +3326,12 @@ def _ensure_qwen_ready():
             if PEFT_IMPORT_ERROR is not None:
                 detail = f"{detail}:{PEFT_IMPORT_ERROR}"
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+
         def _load_candidate(candidate_id: str, processor_source: str) -> Tuple[Any, Any]:
             local_only = _hf_offline_enabled()
-            model_local = _load_qwen_vl_model(str(candidate_id), load_kwargs, local_files_only=local_only)
+            model_local = _load_qwen_vl_model(
+                str(candidate_id), load_kwargs, local_files_only=local_only
+            )
             if adapter_path:
                 model_local = PeftModel.from_pretrained(model_local, str(adapter_path))
             if not load_kwargs.get("device_map"):
@@ -3131,7 +3365,9 @@ def _ensure_qwen_ready():
             fallback_id = _strip_qwen_model_suffix_impl(str(base_model_id))
             if fallback_id:
                 try:
-                    logger.warning("Qwen model %s not found; falling back to %s", base_model_id, fallback_id)
+                    logger.warning(
+                        "Qwen model %s not found; falling back to %s", base_model_id, fallback_id
+                    )
                     processor_source = str(adapter_path) if adapter_path else str(fallback_id)
                     model, processor = _load_with_online_retry(str(fallback_id), processor_source)
                 except Exception as fallback_exc:  # noqa: BLE001
@@ -3144,7 +3380,9 @@ def _ensure_qwen_ready():
             else:
                 qwen_last_error = str(exc)
                 detail = _format_qwen_load_error_impl(exc, torch_module=torch)
-                raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{detail}") from exc
+                raise HTTPException(
+                    status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_load_failed:{detail}"
+                ) from exc
         qwen_model = model
         qwen_processor = processor
         qwen_device = device
@@ -3298,7 +3536,9 @@ def _group_hints_by_window(
     y_positions: Sequence[int],
     window: int,
 ) -> Dict[Tuple[int, int], List[QwenCaptionHint]]:
-    grouped: Dict[Tuple[int, int], List[QwenCaptionHint]] = {(x0, y0): [] for y0 in y_positions for x0 in x_positions}
+    grouped: Dict[Tuple[int, int], List[QwenCaptionHint]] = {
+        (x0, y0): [] for y0 in y_positions for x0 in x_positions
+    }
     for hint in label_hints:
         if not hint.bbox or len(hint.bbox) != 4:
             continue
@@ -3355,7 +3595,11 @@ def _run_qwen_inference(
     else:
         model, processor = _ensure_qwen_ready()
     messages: List[Dict[str, Any]] = []
-    sys_prompt = system_prompt_override if system_prompt_override is not None else (active_qwen_metadata or {}).get("system_prompt")
+    sys_prompt = (
+        system_prompt_override
+        if system_prompt_override is not None
+        else (active_qwen_metadata or {}).get("system_prompt")
+    )
     if sys_prompt:
         messages.append(
             {
@@ -3377,7 +3621,9 @@ def _run_qwen_inference(
         {
             "type": "llm_input",
             "source": "qwen_inference",
-            "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+            "model_id": model_id_override
+            or (active_qwen_metadata or {}).get("model_id")
+            or QWEN_MODEL_NAME,
             "messages": messages,
             "prompt_text": text,
             "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else None,
@@ -3442,7 +3688,12 @@ def _run_qwen_inference(
             model_device = next(model.parameters()).device
         except Exception:
             model_device = None
-    device = model_device or qwen_device or _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
+    device = (
+        model_device
+        or qwen_device
+        or _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
+    )
+
     def _move_nested_to_device(val: Any, target_device: Any) -> Any:
         if torch.is_tensor(val):
             return val.to(target_device)
@@ -3464,7 +3715,9 @@ def _run_qwen_inference(
     except Exception:
         inputs = inputs.to(device)
     gen_kwargs: Dict[str, Any] = {
-        "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
+        "max_new_tokens": (
+            int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS
+        ),
     }
     use_sampling = QWEN_DO_SAMPLE
     if decode_override is not None and "do_sample" in decode_override:
@@ -3519,7 +3772,8 @@ def _run_qwen_inference(
             else:
                 raise
     generated_ids_trimmed = [
-        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids, strict=False)
+        out_ids[len(in_ids) :]
+        for in_ids, out_ids in zip(inputs.input_ids, generated_ids, strict=False)
     ]
     output_text = processor.batch_decode(
         generated_ids_trimmed,
@@ -3530,7 +3784,9 @@ def _run_qwen_inference(
         {
             "type": "llm_output",
             "source": "qwen_inference",
-            "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+            "model_id": model_id_override
+            or (active_qwen_metadata or {}).get("model_id")
+            or QWEN_MODEL_NAME,
             "output_text": output_text,
         }
     )
@@ -3595,7 +3851,9 @@ def _run_qwen_chat(
     _agent_full_trace_write(
         {
             "type": "llm_input",
-            "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+            "model_id": model_id_override
+            or (active_qwen_metadata or {}).get("model_id")
+            or QWEN_MODEL_NAME,
             "messages": messages,
             "prompt_text": text,
             "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else None,
@@ -3654,7 +3912,9 @@ def _run_qwen_chat(
     device = qwen_device or _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
     inputs = inputs.to(device)
     gen_kwargs: Dict[str, Any] = {
-        "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
+        "max_new_tokens": (
+            int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS
+        ),
     }
     use_sampling = QWEN_DO_SAMPLE
     if decode_override is not None and "do_sample" in decode_override:
@@ -3682,7 +3942,9 @@ def _run_qwen_chat(
             gen_kwargs["presence_penalty"] = float(presence_penalty)
     else:
         gen_kwargs["do_sample"] = False
-    thinking_processor = _qwen_build_thinking_effort_processor(tokenizer, thinking_effort, thinking_scale_factor)
+    thinking_processor = _qwen_build_thinking_effort_processor(
+        tokenizer, thinking_effort, thinking_scale_factor
+    )
     immediate_processor = _qwen_build_immediate_action_processor(
         tokenizer,
         immediate_action_bias,
@@ -3694,7 +3956,10 @@ def _run_qwen_chat(
     _qwen_append_logits_processor(gen_kwargs, immediate_processor)
     with torch.inference_mode():
         output_ids = model.generate(**inputs, **gen_kwargs)
-    output_ids = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, output_ids, strict=False)]
+    output_ids = [
+        out_ids[len(in_ids) :]
+        for in_ids, out_ids in zip(inputs.input_ids, output_ids, strict=False)
+    ]
     output_text = processor.batch_decode(
         output_ids,
         skip_special_tokens=True,
@@ -3703,7 +3968,9 @@ def _run_qwen_chat(
     _agent_full_trace_write(
         {
             "type": "llm_output",
-            "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+            "model_id": model_id_override
+            or (active_qwen_metadata or {}).get("model_id")
+            or QWEN_MODEL_NAME,
             "output_text": output_text,
         }
     )
@@ -3748,7 +4015,9 @@ def _run_qwen_chat_stream(
     _agent_full_trace_write(
         {
             "type": "llm_input",
-            "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+            "model_id": model_id_override
+            or (active_qwen_metadata or {}).get("model_id")
+            or QWEN_MODEL_NAME,
             "messages": messages,
             "prompt_text": text,
             "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else None,
@@ -3846,7 +4115,9 @@ def _run_qwen_chat_stream(
     device = qwen_device or _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
     inputs = inputs.to(device)
     gen_kwargs: Dict[str, Any] = {
-        "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
+        "max_new_tokens": (
+            int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS
+        ),
     }
     use_sampling = QWEN_DO_SAMPLE
     if decode_override is not None and "do_sample" in decode_override:
@@ -3874,7 +4145,9 @@ def _run_qwen_chat_stream(
             gen_kwargs["presence_penalty"] = float(presence_penalty)
     else:
         gen_kwargs["do_sample"] = False
-    thinking_processor = _qwen_build_thinking_effort_processor(tokenizer, thinking_effort, thinking_scale_factor)
+    thinking_processor = _qwen_build_thinking_effort_processor(
+        tokenizer, thinking_effort, thinking_scale_factor
+    )
     immediate_processor = _qwen_build_immediate_action_processor(
         tokenizer,
         immediate_action_bias,
@@ -3908,7 +4181,9 @@ def _run_qwen_chat_stream(
         _agent_full_trace_write(
             {
                 "type": "llm_stream_timeout",
-                "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+                "model_id": model_id_override
+                or (active_qwen_metadata or {}).get("model_id")
+                or QWEN_MODEL_NAME,
                 "generated_chars": len(generated_text),
             }
         )
@@ -3916,13 +4191,17 @@ def _run_qwen_chat_stream(
     _agent_full_trace_write(
         {
             "type": "llm_output",
-            "model_id": model_id_override or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+            "model_id": model_id_override
+            or (active_qwen_metadata or {}).get("model_id")
+            or QWEN_MODEL_NAME,
             "output_text": generated_text,
         }
     )
 
 
-def _load_qwen_vl_model(model_id: str, load_kwargs: Dict[str, Any], local_files_only: bool = False) -> Any:
+def _load_qwen_vl_model(
+    model_id: str, load_kwargs: Dict[str, Any], local_files_only: bool = False
+) -> Any:
     if AutoConfig is None or AutoModelForCausalLM is None:
         return Qwen3VLForConditionalGeneration.from_pretrained(
             str(model_id), local_files_only=local_files_only, **load_kwargs
@@ -3968,7 +4247,10 @@ def _load_qwen_vl_model(model_id: str, load_kwargs: Dict[str, Any], local_files_
             )
         if model_type not in (None, "qwen3_vl", "qwen3_vl_moe"):
             return AutoModelForCausalLM.from_pretrained(
-                str(model_id), trust_remote_code=True, local_files_only=local_files_only, **load_kwargs
+                str(model_id),
+                trust_remote_code=True,
+                local_files_only=local_files_only,
+                **load_kwargs,
             )
     return Qwen3VLForConditionalGeneration.from_pretrained(
         str(model_id), local_files_only=local_files_only, **load_kwargs
@@ -3990,7 +4272,12 @@ def resolve_image_payload(
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found")
         pil_img = Image.fromarray(cached)
         return pil_img, cached, image_token
-    pil_img, np_img = _decode_image_base64_impl(image_base64, max_bytes=BASE64_IMAGE_MAX_BYTES, max_dim=BASE64_IMAGE_MAX_DIM, allow_downscale=True)
+    pil_img, np_img = _decode_image_base64_impl(
+        image_base64,
+        max_bytes=BASE64_IMAGE_MAX_BYTES,
+        max_dim=BASE64_IMAGE_MAX_DIM,
+        allow_downscale=True,
+    )
     token = hashlib.md5(np_img.tobytes()).hexdigest()
     _store_preloaded_image(token, np_img, variant)
     return pil_img, np_img, token
@@ -4056,7 +4343,9 @@ PREPASS_STRICT_SAM3_MIN_SCORE = 0.7
 PREPASS_GRID_OVERLAP_RATIO = 0.2
 PREPASS_CONTEXT_CHUNK_BYTES = 5 * 1024 * 1024
 PREPASS_MIN_ZOOM_WINDOW_PX = 200
-PREPASS_READABLE_TO_CONSOLE = str(os.environ.get("PREPASS_READABLE_TO_CONSOLE", "1")).lower() not in {"0", "false", "no"}
+PREPASS_READABLE_TO_CONSOLE = str(
+    os.environ.get("PREPASS_READABLE_TO_CONSOLE", "1")
+).lower() not in {"0", "false", "no"}
 PREPASS_CLUSTER_IOU = 0.75
 PREPASS_INSPECT_MAX_OBJECTS = 0
 
@@ -4065,6 +4354,7 @@ def _register_agent_tool(name: str):
     def _wrap(func):
         AGENT_TOOL_REGISTRY[name] = func
         return func
+
     return _wrap
 
 
@@ -4080,7 +4370,9 @@ def _agent_set_active_clusters(clusters: Optional[Sequence[Dict[str, Any]]]) -> 
     _AGENT_ACTIVE_CLUSTERS = cluster_list
     _AGENT_ACTIVE_DETECTIONS = cluster_list
     _AGENT_ACTIVE_CLUSTER_INDEX = {
-        int(item.get("cluster_id")): item for item in cluster_list if item.get("cluster_id") is not None
+        int(item.get("cluster_id")): item
+        for item in cluster_list
+        if item.get("cluster_id") is not None
     }
     _agent_refresh_handle_index()
 
@@ -4153,8 +4445,6 @@ def _agent_classifier_matches_labelmap(path: Path, labelmap: Sequence[str]) -> b
 ## NOTE: clip head loader uses *_impl directly to avoid wrapper drift.
 
 
-
-
 def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
     handler = AGENT_TOOL_REGISTRY.get(call.name)
     if handler is None:
@@ -4168,16 +4458,23 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
         )
         return AgentToolResult(
             name=call.name,
-            result=_agent_error_payload("tool_failed", "tool_not_found", "Use a supported tool name."),
+            result=_agent_error_payload(
+                "tool_failed", "tool_not_found", "Use a supported tool name."
+            ),
         )
     try:
         args = dict(call.arguments or {})
         try:
             import inspect
+
             handler_params = inspect.signature(handler).parameters
         except Exception:
             handler_params = {}
-        if ("image_token" in handler_params or "image_base64" in handler_params) and not args.get("image_token") and not args.get("image_base64"):
+        if (
+            ("image_token" in handler_params or "image_base64" in handler_params)
+            and not args.get("image_token")
+            and not args.get("image_base64")
+        ):
             if _AGENT_ACTIVE_IMAGE_TOKEN:
                 args["image_token"] = _AGENT_ACTIVE_IMAGE_TOKEN
             elif _AGENT_ACTIVE_IMAGE_BASE64:
@@ -4245,7 +4542,11 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
             if call.name in {"view_cell_raw", "view_cell_overlay"}:
                 pass
             elif call.name == "image_zoom_in_tool":
-                if not args.get("bbox_2d") and not args.get("bbox_xyxy_px") and not args.get("window_bbox_2d"):
+                if (
+                    not args.get("bbox_2d")
+                    and not args.get("bbox_xyxy_px")
+                    and not args.get("window_bbox_2d")
+                ):
                     args["bbox_2d"] = cell_bbox_2d
             else:
                 if not args.get("window_bbox_2d"):
@@ -4338,7 +4639,9 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
                         use_system_prompt=use_system_prompt,
                         system_prompt=(active_qwen_metadata or {}).get("system_prompt"),
                         ensure_qwen_ready_fn=_ensure_qwen_ready,
-                        resolve_qwen_device_fn=lambda: _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch),
+                        resolve_qwen_device_fn=lambda: _resolve_qwen_device_impl(
+                            QWEN_DEVICE_PREF, torch_module=torch
+                        ),
                     ),
                     extract_json_fn=_extract_balanced_json,
                     default_synonyms=_DEFAULT_SAM3_SYNONYMS,
@@ -4410,6 +4713,7 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
         if not args.get("dataset_id") and _AGENT_ACTIVE_DATASET_ID:
             try:
                 import inspect
+
                 sig = inspect.signature(handler)
                 if "dataset_id" in sig.parameters:
                     args["dataset_id"] = _AGENT_ACTIVE_DATASET_ID
@@ -4425,7 +4729,11 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
             }
         )
         result = handler(**args)
-        if call.name == "look_and_inspect" and inspect_window_key and _AGENT_ACTIVE_INSPECTED_WINDOWS is not None:
+        if (
+            call.name == "look_and_inspect"
+            and inspect_window_key
+            and _AGENT_ACTIVE_INSPECTED_WINDOWS is not None
+        ):
             if not (isinstance(result, dict) and result.get("error")):
                 _AGENT_ACTIVE_INSPECTED_WINDOWS.add(inspect_window_key)
         _agent_record_grid_tool_usage(call.name, args, result)
@@ -4460,7 +4768,9 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
         )
         return AgentToolResult(
             name=call.name,
-            result=_agent_error_payload("tool_failed", f"tool_failed:{exc}", "Check tool arguments and retry once."),
+            result=_agent_error_payload(
+                "tool_failed", f"tool_failed:{exc}", "Check tool arguments and retry once."
+            ),
         )
     _agent_full_trace_write(
         {
@@ -4536,8 +4846,19 @@ def _agent_tool_look_and_inspect(
         if max_items > 0:
             prompt_lines.append(f"Max objects: {max_items}.")
         messages = [
-            {"role": "system", "content": [{"type": "text", "text": "You are a vision inspector. Output JSON only."}]},
-            {"role": "user", "content": [{"type": "image", "image": crop}, {"type": "text", "text": "\n".join(prompt_lines)}]},
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "You are a vision inspector. Output JSON only."}
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": crop},
+                    {"type": "text", "text": "\n".join(prompt_lines)},
+                ],
+            },
         ]
         response = _run_qwen_chat(
             messages,
@@ -4562,7 +4883,9 @@ def _agent_tool_look_and_inspect(
                     "label": label,
                     "bbox_2d": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
                     "bbox_space": "window",
-                    "window_bbox_2d": [float(v) for v in _xyxy_to_qwen_bbox(img_w, img_h, *window_xyxy)],
+                    "window_bbox_2d": [
+                        float(v) for v in _xyxy_to_qwen_bbox(img_w, img_h, *window_xyxy)
+                    ],
                     "score": None,
                     "score_source": "qwen_inspect",
                 }
@@ -4583,8 +4906,17 @@ def _agent_tool_look_and_inspect(
                     "Mention visible objects using common terms, no coordinates."
                 )
                 caption_messages = [
-                    {"role": "system", "content": [{"type": "text", "text": "You are a visual captioner."}]},
-                    {"role": "user", "content": [{"type": "image", "image": crop}, {"type": "text", "text": caption_prompt}]},
+                    {
+                        "role": "system",
+                        "content": [{"type": "text", "text": "You are a visual captioner."}],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": crop},
+                            {"type": "text", "text": caption_prompt},
+                        ],
+                    },
                 ]
                 caption_raw = _run_qwen_chat(
                     caption_messages,
@@ -4611,15 +4943,26 @@ def _agent_tool_look_and_inspect(
                 source_override="qwen_inspect",
                 owner_cell=owner_cell,
             )
-        new_cluster_ids = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
-        updated_cluster_ids = register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+        new_cluster_ids = (
+            register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+        )
+        updated_cluster_ids = (
+            register_summary.get("updated_cluster_ids")
+            if isinstance(register_summary, dict)
+            else []
+        )
         new_summary = _agent_cluster_summaries(new_cluster_ids, include_ids=False)
         new_handles = _agent_handles_from_cluster_ids(new_cluster_ids or [])
         updated_handles = _agent_handles_from_cluster_ids(updated_cluster_ids or [])
         agent_view = {
-            "grid_cell": grid_cell or _agent_grid_cell_for_window_bbox(_AGENT_ACTIVE_GRID or {}, _xyxy_to_qwen_bbox(img_w, img_h, *window_xyxy)),
+            "grid_cell": grid_cell
+            or _agent_grid_cell_for_window_bbox(
+                _AGENT_ACTIVE_GRID or {}, _xyxy_to_qwen_bbox(img_w, img_h, *window_xyxy)
+            ),
             "caption": caption_text or None,
-            "new_clusters": register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0,
+            "new_clusters": (
+                register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0
+            ),
             "new_handles": new_handles,
             "updated_clusters": len(updated_cluster_ids or []),
             "updated_handles": updated_handles,
@@ -4866,7 +5209,9 @@ def _encode_pil_batch_for_active(images: Sequence[Image.Image]) -> Optional[np.n
         head = {
             "encoder_type": active_encoder_type or "clip",
             "normalize_embeddings": active_head_normalize_embeddings,
-            "embedding_center_values": (active_classifier_meta or {}).get("embedding_center_values"),
+            "embedding_center_values": (active_classifier_meta or {}).get(
+                "embedding_center_values"
+            ),
             "embedding_std_values": (active_classifier_meta or {}).get("embedding_std_values"),
         }
     return _encode_pil_batch_for_head(images, head=head)
@@ -4880,7 +5225,9 @@ def _clip_head_predict_proba(
 ) -> Optional[np.ndarray]:
     if feats is None:
         return None
-    feats_np = feats.detach().cpu().numpy() if isinstance(feats, torch.Tensor) else np.asarray(feats)
+    feats_np = (
+        feats.detach().cpu().numpy() if isinstance(feats, torch.Tensor) else np.asarray(feats)
+    )
     if feats_np.ndim != 2:
         return None
     classifier_type = str(head.get("classifier_type") or "").lower()
@@ -4896,7 +5243,11 @@ def _clip_head_predict_proba(
             ln_weight = layer.get("layer_norm_weight")
             if ln_weight is not None:
                 ln_weight = np.asarray(ln_weight, dtype=np.float32)
-                ln_bias = np.asarray(layer.get("layer_norm_bias"), dtype=np.float32) if layer.get("layer_norm_bias") is not None else None
+                ln_bias = (
+                    np.asarray(layer.get("layer_norm_bias"), dtype=np.float32)
+                    if layer.get("layer_norm_bias") is not None
+                    else None
+                )
                 eps = float(layer.get("layer_norm_eps") or 1e-5)
                 mean = x.mean(axis=-1, keepdims=True)
                 var = x.var(axis=-1, keepdims=True)
@@ -5181,7 +5532,9 @@ def _agent_classifier_review(
             continue
         xyxy = det.get("bbox_xyxy_px")
         if not xyxy:
-            xyxy = _resolve_agent_bbox_xyxy(det, img_w, img_h, window_bbox_2d=det.get("window_bbox_2d"))
+            xyxy = _resolve_agent_bbox_xyxy(
+                det, img_w, img_h, window_bbox_2d=det.get("window_bbox_2d")
+            )
         if not xyxy or len(xyxy) < 4:
             det["classifier_accept"] = False
             counts["classifier_rejected"] += 1
@@ -5344,7 +5697,13 @@ def _agent_register_detections(
     global _AGENT_NEXT_CANDIDATE_ID, _AGENT_NEXT_CLUSTER_ID
 
     if not detections:
-        return {"candidate_ids": [], "cluster_ids": [], "new_clusters": 0, "updated_clusters": 0, "rejected": 0}
+        return {
+            "candidate_ids": [],
+            "cluster_ids": [],
+            "new_clusters": 0,
+            "updated_clusters": 0,
+            "rejected": 0,
+        }
     labelmap = list(labelmap or _AGENT_ACTIVE_LABELMAP or [])
     cleaned, rejected = _agent_sanitize_detection_items(
         list(detections),
@@ -5495,7 +5854,8 @@ def _agent_register_detections(
     _agent_set_active_clusters(_AGENT_ACTIVE_CLUSTERS)
     return {
         "candidate_ids": candidate_ids,
-        "cluster_ids": new_cluster_ids + [cid for cid in updated_cluster_ids if cid not in new_cluster_ids],
+        "cluster_ids": new_cluster_ids
+        + [cid for cid in updated_cluster_ids if cid not in new_cluster_ids],
         "new_cluster_ids": new_cluster_ids,
         "updated_cluster_ids": updated_cluster_ids,
         "new_clusters": len(new_cluster_ids),
@@ -5561,8 +5921,6 @@ def _agent_record_grid_tool_usage(
     )
 
 
-
-
 ## NOTE: agent context helpers use *_impl directly to avoid wrapper drift.
 
 
@@ -5600,7 +5958,6 @@ def _agent_merge_detections(
         max_det=max_det,
         cross_iou=cross_iou,
     )
-
 
 
 ## NOTE: classifier batch helpers use *_impl directly to avoid wrapper drift.
@@ -5772,7 +6129,9 @@ def _agent_sanitize_detection_items(
             )
             entry["classifier_best"] = best_label
             entry["classifier_prob"] = best_prob
-            entry["classifier_accept"] = bool(keep_mask[0]) if keep_mask is not None and len(keep_mask) else False
+            entry["classifier_accept"] = (
+                bool(keep_mask[0]) if keep_mask is not None and len(keep_mask) else False
+            )
             if keep_mask is None or not bool(keep_mask[0]):
                 rejected += 1
                 continue
@@ -5786,7 +6145,9 @@ def _agent_resolve_image(
     sam_variant: Optional[str] = None,
 ) -> Tuple[Image.Image, np.ndarray, str]:
     if not image_base64 and not image_token:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="image_payload_missing")
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="image_payload_missing"
+        )
     if image_token:
         variant = _default_variant(sam_variant)
         cached = _fetch_preloaded_image(image_token, variant)
@@ -5906,7 +6267,11 @@ def _dedupe_qwen_detections_iou(
         if isinstance(det, QwenDetection):
             ann: Dict[str, Any] = {"bbox_2d": list(det.bbox)}
         else:
-            ann = det.model_dump() if hasattr(det, "model_dump") else dict(det) if isinstance(det, dict) else {}
+            ann = (
+                det.model_dump()
+                if hasattr(det, "model_dump")
+                else dict(det) if isinstance(det, dict) else {}
+            )
             if "bbox_2d" not in ann and isinstance(ann.get("bbox"), (list, tuple)):
                 ann["bbox_2d"] = list(ann.get("bbox") or [])
         xyxy = _resolve_agent_bbox_xyxy(ann, img_w, img_h)
@@ -5945,10 +6310,14 @@ def _agent_tool_zoom_and_detect(
 ) -> Dict[str, Any]:
     if window_bbox_2d is None and bbox_2d is not None:
         if bbox_space and str(bbox_space).lower() == "window":
-            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="window_bbox_required")
+            raise HTTPException(
+                status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="window_bbox_required"
+            )
         window_bbox_2d = bbox_2d
     if window_bbox_2d is None:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="window_bbox_required")
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="window_bbox_required"
+        )
     if conf is None and _AGENT_ACTIVE_DETECTOR_CONF is not None:
         conf = _AGENT_ACTIVE_DETECTOR_CONF
     mode_norm = (mode or "yolo").strip().lower()
@@ -6010,8 +6379,12 @@ def _agent_tool_zoom_and_detect(
                     "window_bbox_2d": list(_xyxy_to_qwen_bbox(img_w, img_h, *window_xyxy)),
                     "best": best,
                     "topk": classify.get("topk") if isinstance(classify, dict) else None,
-                    "background_topk": classify.get("background_topk") if isinstance(classify, dict) else None,
-                    "label_match": bool(best_label == confirm_label) if confirm_label and best_label else None,
+                    "background_topk": (
+                        classify.get("background_topk") if isinstance(classify, dict) else None
+                    ),
+                    "label_match": (
+                        bool(best_label == confirm_label) if confirm_label and best_label else None
+                    ),
                 }
             except HTTPException as exc:
                 detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
@@ -6021,12 +6394,18 @@ def _agent_tool_zoom_and_detect(
         result["window_bbox_2d"] = list(window_bbox_2d or [])
     if confirmation is not None:
         result["confirmation"] = confirmation
-    register_summary = result.get("register_summary") if isinstance(result, dict) else register_summary
-    new_cluster_ids_raw = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+    register_summary = (
+        result.get("register_summary") if isinstance(result, dict) else register_summary
+    )
+    new_cluster_ids_raw = (
+        register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+    )
     updated_cluster_ids_raw = (
         register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
     )
-    new_cluster_ids = list(new_cluster_ids_raw) if isinstance(new_cluster_ids_raw, (list, tuple, set)) else []
+    new_cluster_ids = (
+        list(new_cluster_ids_raw) if isinstance(new_cluster_ids_raw, (list, tuple, set)) else []
+    )
     updated_cluster_ids = (
         list(updated_cluster_ids_raw)
         if isinstance(updated_cluster_ids_raw, (list, tuple, set))
@@ -6039,7 +6418,9 @@ def _agent_tool_zoom_and_detect(
         "mode": mode_norm,
         "grid_cell": grid_cell,
         "intent": (intent or "").strip() or None,
-        "new_clusters": register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0,
+        "new_clusters": (
+            register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0
+        ),
         "new_handles": new_handles,
         "updated_clusters": len(updated_cluster_ids or []),
         "updated_handles": updated_handles,
@@ -6157,8 +6538,12 @@ def _agent_tool_sam3_text(
             source_override=source_override,
             owner_cell=grid_cell,
         )
-    new_cluster_ids = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
-    updated_cluster_ids = register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    new_cluster_ids = (
+        register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+    )
+    updated_cluster_ids = (
+        register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    )
     new_summary = _agent_cluster_summaries(new_cluster_ids, include_ids=False)
     new_handles = _agent_handles_from_cluster_ids(new_cluster_ids or [])
     updated_handles = _agent_handles_from_cluster_ids(updated_cluster_ids or [])
@@ -6166,7 +6551,9 @@ def _agent_tool_sam3_text(
         "label": assigned_label,
         "prompt": (prompt or "").strip() or None,
         "grid_cell": grid_cell,
-        "new_clusters": register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0,
+        "new_clusters": (
+            register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0
+        ),
         "new_handles": new_handles,
         "updated_clusters": len(updated_cluster_ids or []),
         "updated_handles": updated_handles,
@@ -6208,7 +6595,9 @@ def _agent_tool_sam3_similarity(
         pil_img, _, _ = _agent_resolve_image(image_base64, image_token, "sam3")
         img_w, img_h = pil_img.size
         if not assigned_label:
-            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="sam3_similarity_label_required")
+            raise HTTPException(
+                status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="sam3_similarity_label_required"
+            )
         window_xyxy = _normalize_window_xyxy(window, img_w, img_h)
         if window_xyxy is None and window_bbox_2d is not None:
             window_xyxy = _normalize_window_xyxy({"bbox_2d": window_bbox_2d}, img_w, img_h)
@@ -6262,7 +6651,10 @@ def _agent_tool_sam3_similarity(
                 continue
             boxes_xywh.append((x1, y1, w, h))
         if not boxes_xywh:
-            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="sam3_similarity_exemplar_required")
+            raise HTTPException(
+                status_code=HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="sam3_similarity_exemplar_required",
+            )
         threshold_val = float(score_thr) if score_thr is not None else 0.2
         mask_val = float(mask_threshold) if mask_threshold is not None else 0.2
         detections = _run_sam3_visual_inference_multi(
@@ -6327,8 +6719,12 @@ def _agent_tool_sam3_similarity(
             source_override="sam3_similarity",
             owner_cell=grid_cell,
         )
-    new_cluster_ids = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
-    updated_cluster_ids = register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    new_cluster_ids = (
+        register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+    )
+    updated_cluster_ids = (
+        register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    )
     new_summary = _agent_cluster_summaries(new_cluster_ids, include_ids=False)
     new_handles = _agent_handles_from_cluster_ids(new_cluster_ids or [])
     updated_handles = _agent_handles_from_cluster_ids(updated_cluster_ids or [])
@@ -6337,7 +6733,9 @@ def _agent_tool_sam3_similarity(
         "label": assigned_label,
         "grid_cell": grid_cell,
         "exemplar_handles": exemplar_handles_out,
-        "new_clusters": register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0,
+        "new_clusters": (
+            register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0
+        ),
         "new_handles": new_handles,
         "updated_clusters": len(updated_cluster_ids or []),
         "updated_handles": updated_handles,
@@ -6392,14 +6790,18 @@ def _agent_tool_qwen_infer(
         offset_x, offset_y = x1, y1
     prompt_type = (prompt_type or "bbox").strip().lower()
     if prompt_type not in {"bbox", "point", "bbox_sam"}:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_qwen_prompt_type_invalid")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="agent_qwen_prompt_type_invalid"
+        )
     manual_prompt = (prompt or "").strip()
     if not manual_prompt:
         if items:
             item_list = ", ".join([str(item).strip() for item in items if str(item).strip()])
         item_list = (item_list or "").strip()
         if not item_list:
-            raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="agent_qwen_items_required")
+            raise HTTPException(
+                status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="agent_qwen_items_required"
+            )
     manual_prompt = _render_qwen_prompt_impl(
         prompt_type,
         items=item_list,
@@ -6410,11 +6812,15 @@ def _agent_tool_qwen_infer(
         http_422=HTTP_422_UNPROCESSABLE_CONTENT,
     )
     try:
-        qwen_text, proc_w, proc_h = _run_qwen_inference(manual_prompt, crop_img, max_new_tokens=max_new_tokens)
+        qwen_text, proc_w, proc_h = _run_qwen_inference(
+            manual_prompt, crop_img, max_new_tokens=max_new_tokens
+        )
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_infer_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_infer_failed:{exc}"
+        ) from exc
     warnings: List[str] = []
     try:
         _, parsed_items = _extract_qwen_json_block(qwen_text)
@@ -6467,7 +6873,9 @@ def _agent_tool_qwen_infer(
     limit = int(max_results) if max_results is not None else 8
     variant = _default_variant(sam_variant)
     if prompt_type == "bbox":
-        boxes = _qwen_bbox_results(normalized_items, proc_w, proc_h, crop_img.width, crop_img.height, limit=limit)
+        boxes = _qwen_bbox_results(
+            normalized_items, proc_w, proc_h, crop_img.width, crop_img.height, limit=limit
+        )
     elif prompt_type == "bbox_sam":
         boxes = _qwen_bbox_sam_results(
             normalized_items,
@@ -6527,15 +6935,21 @@ def _agent_tool_qwen_infer(
             source_override="qwen_infer",
             owner_cell=grid_cell,
         )
-    new_cluster_ids = register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
-    updated_cluster_ids = register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    new_cluster_ids = (
+        register_summary.get("new_cluster_ids") if isinstance(register_summary, dict) else []
+    )
+    updated_cluster_ids = (
+        register_summary.get("updated_cluster_ids") if isinstance(register_summary, dict) else []
+    )
     new_summary = _agent_cluster_summaries(new_cluster_ids, include_ids=False)
     new_handles = _agent_handles_from_cluster_ids(new_cluster_ids or [])
     updated_handles = _agent_handles_from_cluster_ids(updated_cluster_ids or [])
     agent_view = {
         "grid_cell": grid_cell,
         "prompt_type": prompt_type,
-        "new_clusters": register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0,
+        "new_clusters": (
+            register_summary.get("new_clusters") if isinstance(register_summary, dict) else 0
+        ),
         "new_handles": new_handles,
         "updated_clusters": len(updated_cluster_ids or []),
         "updated_handles": updated_handles,
@@ -6632,26 +7046,32 @@ def _agent_tool_classify_crop(
             }
         )
     if not isinstance(head, dict):
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_unavailable")
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_unavailable"
+        )
     feats = _encode_pil_batch_for_head([crop], head=head)
     if feats is None or not isinstance(feats, np.ndarray) or feats.size == 0:
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_encode_failed")
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_encode_failed"
+        )
     proba_arr = _clip_head_predict_proba(feats, head)
     classes = [str(c) for c in list(head.get("classes") or [])]
-    if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] < 1 or proba_arr.shape[1] != len(classes):
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_predict_failed")
+    if (
+        proba_arr is None
+        or proba_arr.ndim != 2
+        or proba_arr.shape[0] < 1
+        or proba_arr.shape[1] != len(classes)
+    ):
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_predict_failed"
+        )
     row = proba_arr[0]
     k = max(1, min(int(topk) if topk is not None else 5, len(classes)))
     order = sorted(range(len(classes)), key=lambda idx: float(row[idx]), reverse=True)
     bg_indices = _clip_head_background_indices(classes)
-    topk_items = [
-        {"label": classes[idx], "prob": float(row[idx])}
-        for idx in order[:k]
-    ]
+    topk_items = [{"label": classes[idx], "prob": float(row[idx])} for idx in order[:k]]
     background_topk = [
-        {"label": classes[idx], "prob": float(row[idx])}
-        for idx in order
-        if idx in bg_indices
+        {"label": classes[idx], "prob": float(row[idx])} for idx in order if idx in bg_indices
     ][:k]
     best = topk_items[0] if topk_items else {"label": "unknown", "prob": None}
     accept = None
@@ -6951,9 +7371,13 @@ def _agent_tool_get_tile_context_chunk(
     chunk_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     if not context_handle:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="context_handle_required")
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="context_handle_required"
+        )
     if chunk_index is None:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="context_chunk_index_required")
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="context_chunk_index_required"
+        )
     payload = _agent_context_chunk_impl(
         context_handle,
         chunk_index=int(chunk_index),
@@ -6975,7 +7399,9 @@ def _agent_tool_get_global_context() -> Dict[str, Any]:
         if not label:
             continue
         counts[label] = counts.get(label, 0) + 1
-    usage_rows = _agent_grid_usage_rows(_AGENT_ACTIVE_GRID, _AGENT_GRID_TOOL_USAGE, _AGENT_GRID_TOOL_LAST)
+    usage_rows = _agent_grid_usage_rows(
+        _AGENT_ACTIVE_GRID, _AGENT_GRID_TOOL_USAGE, _AGENT_GRID_TOOL_LAST
+    )
     labels = _agent_overlay_labels(clusters, _AGENT_ACTIVE_LABELMAP or [])
     label_colors = _agent_current_label_colors(labels) if labels else {}
     label_prefixes = _agent_current_label_prefixes(labels) if labels else {}
@@ -7019,9 +7445,13 @@ def _agent_tool_get_global_context_chunk(
     chunk_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     if not context_handle:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="context_handle_required")
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="context_handle_required"
+        )
     if chunk_index is None:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="context_chunk_index_required")
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="context_chunk_index_required"
+        )
     payload = _agent_context_chunk_impl(
         context_handle,
         chunk_index=int(chunk_index),
@@ -7057,7 +7487,9 @@ def _agent_tool_think_missed_objects(
                 label_prefixes=label_prefixes,
             )
     labels = list(_AGENT_ACTIVE_LABELMAP or [])
-    usage_rows = _agent_grid_usage_rows(_AGENT_ACTIVE_GRID, _AGENT_GRID_TOOL_USAGE, _AGENT_GRID_TOOL_LAST)
+    usage_rows = _agent_grid_usage_rows(
+        _AGENT_ACTIVE_GRID, _AGENT_GRID_TOOL_USAGE, _AGENT_GRID_TOOL_LAST
+    )
     usage_text = _agent_grid_usage_text(usage_rows)
     prompt_lines = [
         "You are reviewing an annotated aerial image.",
@@ -7090,7 +7522,9 @@ def _agent_tool_think_missed_objects(
             system_prompt_override="Return JSON only.",
         )
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"think_missed_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"think_missed_failed:{exc}"
+        ) from exc
     json_text = _extract_balanced_json_impl(raw, "{", "}") or ""
     data: Dict[str, Any] = {}
     if json_text:
@@ -7140,7 +7574,9 @@ def _agent_tool_grid_label_counts(
         "cells": summary,
         "total_cells": len(summary),
         "__agent_view__": {
-            "label": _agent_fuzzy_align_label(label, _AGENT_ACTIVE_LABELMAP or []) if label else None,
+            "label": (
+                _agent_fuzzy_align_label(label, _AGENT_ACTIVE_LABELMAP or []) if label else None
+            ),
             "cells": agent_cells,
             "total_cells": len(summary),
         },
@@ -7253,7 +7689,9 @@ def _agent_tool_list_candidates(
             if not det_sources.intersection(source_terms):
                 continue
         entry = {
-            "cluster_id": int(det.get("cluster_id")) if det.get("cluster_id") is not None else int(idx + 1),
+            "cluster_id": (
+                int(det.get("cluster_id")) if det.get("cluster_id") is not None else int(idx + 1)
+            ),
             "handle": _agent_cluster_handle(det),
             "label": det_label,
             "class_id": det.get("class_id"),
@@ -7270,7 +7708,9 @@ def _agent_tool_list_candidates(
         filtered.append(entry)
 
     if sort_key in {"score", "score_desc", "confidence"}:
-        filtered.sort(key=lambda d: (score_value(d) if score_value(d) is not None else -1.0), reverse=True)
+        filtered.sort(
+            key=lambda d: (score_value(d) if score_value(d) is not None else -1.0), reverse=True
+        )
         sort_key = "score_desc"
     elif sort_key in {"score_asc", "confidence_asc"}:
         filtered.sort(key=lambda d: (score_value(d) if score_value(d) is not None else 1e9))
@@ -7377,7 +7817,11 @@ def _agent_tool_submit_annotations(
     cluster_id_list: List[int] = []
     label_overrides: Dict[int, str] = {}
     if include_all:
-        cluster_id_list = [int(c.get("cluster_id")) for c in (_AGENT_ACTIVE_CLUSTERS or []) if c.get("cluster_id") is not None]
+        cluster_id_list = [
+            int(c.get("cluster_id"))
+            for c in (_AGENT_ACTIVE_CLUSTERS or [])
+            if c.get("cluster_id") is not None
+        ]
     if handles:
         cluster_id_list.extend(_agent_cluster_ids_from_handles(handles))
     if cluster_ids:
@@ -7393,7 +7837,11 @@ def _agent_tool_submit_annotations(
             if override_label:
                 label_overrides[cid_val] = str(override_label)
             continue
-        if window_bbox_2d is not None and isinstance(ann, dict) and ann.get("window_bbox_2d") is None:
+        if (
+            window_bbox_2d is not None
+            and isinstance(ann, dict)
+            and ann.get("window_bbox_2d") is None
+        ):
             ann = {**ann, "window_bbox_2d": list(window_bbox_2d)}
         normalized_annotations.append(ann)
     if cluster_id_list:
@@ -7528,7 +7976,9 @@ def _agent_apply_ensemble_filter(
                     {
                         "image": image_name,
                         "detections": detections,
-                        "provenance": prepass_provenance if isinstance(prepass_provenance, dict) else None,
+                        "provenance": (
+                            prepass_provenance if isinstance(prepass_provenance, dict) else None
+                        ),
                     },
                     ensure_ascii=True,
                 )
@@ -7665,7 +8115,6 @@ def _agent_tool_specs_text(grid_enabled: bool = False) -> str:
     return json.dumps(tools, ensure_ascii=False, indent=2)
 
 
-
 def _agent_tool_specs(grid_enabled: bool = False) -> List[Dict[str, Any]]:
     """Return the tool specs as a list for Hermes-style tool templates."""
     try:
@@ -7689,7 +8138,10 @@ def _agent_tool_specs_facade(
         "description": "Handles returned by list_candidates/get_tile_context (e.g., LV12).",
         "items": {"type": "string"},
     }
-    handle = {"type": "string", "description": "Handle returned by list_candidates/get_tile_context (e.g., LV12)."}
+    handle = {
+        "type": "string",
+        "description": "Handle returned by list_candidates/get_tile_context (e.g., LV12).",
+    }
     label = {"type": "string", "description": "Canonical labelmap class."}
     prompt = {"type": "string", "description": "Single-term prompt/synonym for SAM3."}
     intent = {"type": "string", "description": "Short note on what you are searching for."}
@@ -7697,14 +8149,21 @@ def _agent_tool_specs_facade(
         "get_tile_context": {
             "name": "get_tile_context",
             "description": "Return tile context (cluster handles, counts, captions, tool usage).",
-            "parameters": {"type": "object", "properties": {"grid_cell": grid_cell}, "required": required_grid},
+            "parameters": {
+                "type": "object",
+                "properties": {"grid_cell": grid_cell},
+                "required": required_grid,
+            },
         },
         "get_tile_context_chunk": {
             "name": "get_tile_context_chunk",
             "description": "Fetch a chunk of a large tile context payload by handle + chunk_index.",
             "parameters": {
                 "type": "object",
-                "properties": {"context_handle": {"type": "string"}, "chunk_index": {"type": "number"}},
+                "properties": {
+                    "context_handle": {"type": "string"},
+                    "chunk_index": {"type": "number"},
+                },
                 "required": ["context_handle", "chunk_index"],
             },
         },
@@ -7718,19 +8177,30 @@ def _agent_tool_specs_facade(
             "description": "Fetch a chunk of a large global context payload by handle + chunk_index.",
             "parameters": {
                 "type": "object",
-                "properties": {"context_handle": {"type": "string"}, "chunk_index": {"type": "number"}},
+                "properties": {
+                    "context_handle": {"type": "string"},
+                    "chunk_index": {"type": "number"},
+                },
                 "required": ["context_handle", "chunk_index"],
             },
         },
         "view_cell_raw": {
             "name": "view_cell_raw",
             "description": "Return the raw image crop for a grid cell (no detection dots).",
-            "parameters": {"type": "object", "properties": {"grid_cell": grid_cell}, "required": required_grid},
+            "parameters": {
+                "type": "object",
+                "properties": {"grid_cell": grid_cell},
+                "required": required_grid,
+            },
         },
         "view_cell_overlay": {
             "name": "view_cell_overlay",
             "description": "Return the overlay crop for a grid cell (colored dots + handles).",
-            "parameters": {"type": "object", "properties": {"grid_cell": grid_cell}, "required": required_grid},
+            "parameters": {
+                "type": "object",
+                "properties": {"grid_cell": grid_cell},
+                "required": required_grid,
+            },
         },
         "view_full_overlay": {
             "name": "view_full_overlay",
@@ -7746,7 +8216,10 @@ def _agent_tool_specs_facade(
                     "label": {"type": "string"},
                     "min_score": {"type": "number"},
                     "include_scoreless": {"type": "boolean"},
-                    "sort_by": {"type": "string", "enum": ["score_desc", "score_asc", "label", "source", "none"]},
+                    "sort_by": {
+                        "type": "string",
+                        "enum": ["score_desc", "score_asc", "label", "source", "none"],
+                    },
                     "max_items": {"type": "number"},
                 },
                 "required": [],
@@ -7755,14 +8228,22 @@ def _agent_tool_specs_facade(
         "grid_label_counts": {
             "name": "grid_label_counts",
             "description": "Return per-grid-cell counts (no IDs).",
-            "parameters": {"type": "object", "properties": {"label": {"type": "string"}}, "required": []},
+            "parameters": {
+                "type": "object",
+                "properties": {"label": {"type": "string"}},
+                "required": [],
+            },
         },
         "look_and_inspect": {
             "name": "look_and_inspect",
             "description": "Inspect a grid cell visually and propose candidate objects.",
             "parameters": {
                 "type": "object",
-                "properties": {"grid_cell": grid_cell, "intent": intent, "max_objects": {"type": "number"}},
+                "properties": {
+                    "grid_cell": grid_cell,
+                    "intent": intent,
+                    "max_objects": {"type": "number"},
+                },
                 "required": required_grid,
             },
         },
@@ -7794,8 +8275,16 @@ def _agent_tool_specs_facade(
             "description": "Run SAM3 similarity from exemplar handles; assign canonical label.",
             "parameters": {
                 "type": "object",
-                "properties": {"grid_cell": grid_cell, "label": label, "exemplar_handles": handle_list},
-                "required": (required_grid + ["label", "exemplar_handles"]) if required_grid else ["label", "exemplar_handles"],
+                "properties": {
+                    "grid_cell": grid_cell,
+                    "label": label,
+                    "exemplar_handles": handle_list,
+                },
+                "required": (
+                    (required_grid + ["label", "exemplar_handles"])
+                    if required_grid
+                    else ["label", "exemplar_handles"]
+                ),
             },
         },
         "qwen_infer": {
@@ -7833,7 +8322,11 @@ def _agent_tool_specs_facade(
         "think_missed_objects": {
             "name": "think_missed_objects",
             "description": "Analyze overlay + captions to suggest missing labels/tiles.",
-            "parameters": {"type": "object", "properties": {"notes": {"type": "string"}}, "required": []},
+            "parameters": {
+                "type": "object",
+                "properties": {"notes": {"type": "string"}},
+                "required": [],
+            },
         },
         "submit_annotations": {
             "name": "submit_annotations",
@@ -7847,12 +8340,20 @@ def _agent_tool_specs_facade(
         "log_observation": {
             "name": "log_observation",
             "description": "Log a single-line observation about what you see (max 160 chars).",
-            "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
         },
         "log_status": {
             "name": "log_status",
             "description": "Log a short status update (max 160 chars).",
-            "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
         },
     }
     specs: List[Dict[str, Any]] = []
@@ -7895,7 +8396,9 @@ _agent_readable_write = lambda line: _agent_readable_write_impl(  # noqa: E731
         use_system_prompt=use_system_prompt,
         system_prompt=(active_qwen_metadata or {}).get("system_prompt"),
         ensure_qwen_ready_fn=_ensure_qwen_ready,
-        resolve_qwen_device_fn=lambda: _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch),
+        resolve_qwen_device_fn=lambda: _resolve_qwen_device_impl(
+            QWEN_DEVICE_PREF, torch_module=torch
+        ),
     ),
     extract_json_fn=_extract_balanced_json,
     default_synonyms=_DEFAULT_SAM3_SYNONYMS,
@@ -8022,9 +8525,17 @@ def _run_prepass_annotation_qwen(
     full_trace_path: Optional[str] = None
     readable_trace_path: Optional[str] = None
     latest_readable_path: Optional[str] = None
-    trace_file = QWEN_PREPASS_TRACE_ROOT / f"prepass_{int(time.time())}_{uuid.uuid4().hex[:8]}.jsonl"
-    full_trace_file = QWEN_PREPASS_FULL_TRACE_ROOT / f"prepass_full_{int(time.time())}_{uuid.uuid4().hex[:8]}.jsonl"
-    readable_trace_file = QWEN_PREPASS_READABLE_TRACE_ROOT / f"prepass_readable_{int(time.time())}_{uuid.uuid4().hex[:8]}.log"
+    trace_file = (
+        QWEN_PREPASS_TRACE_ROOT / f"prepass_{int(time.time())}_{uuid.uuid4().hex[:8]}.jsonl"
+    )
+    full_trace_file = (
+        QWEN_PREPASS_FULL_TRACE_ROOT
+        / f"prepass_full_{int(time.time())}_{uuid.uuid4().hex[:8]}.jsonl"
+    )
+    readable_trace_file = (
+        QWEN_PREPASS_READABLE_TRACE_ROOT
+        / f"prepass_readable_{int(time.time())}_{uuid.uuid4().hex[:8]}.log"
+    )
     try:
         trace_file.parent.mkdir(parents=True, exist_ok=True)
         trace_path = str(trace_file)
@@ -8067,6 +8578,7 @@ def _run_prepass_annotation_qwen(
                 handle.write(json.dumps(record, ensure_ascii=True) + "\n")
         except Exception:
             pass
+
     def _trace_write_full(record: Dict[str, Any]) -> None:
         if not full_trace_path and not latest_full_path:
             return
@@ -8087,6 +8599,7 @@ def _run_prepass_annotation_qwen(
                     handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
             except Exception:
                 pass
+
     def _trace_write_readable(line: str) -> None:
         if not line or (not readable_trace_path and not latest_readable_path):
             return
@@ -8106,6 +8619,7 @@ def _run_prepass_annotation_qwen(
                 pass
         if PREPASS_READABLE_TO_CONSOLE:
             logging.getLogger("prepass.readable").info(line)
+
     global _AGENT_ACTIVE_IMAGE_TOKEN, _AGENT_ACTIVE_IMAGE_BASE64, _AGENT_ACTIVE_DATASET_ID
     global _AGENT_ACTIVE_LABELMAP, _AGENT_ACTIVE_GLOSSARY, _AGENT_ACTIVE_INSPECTED_WINDOWS
     global _AGENT_ACTIVE_CLASSIFIER_ID, _AGENT_ACTIVE_TIGHTEN_FP
@@ -8116,6 +8630,7 @@ def _run_prepass_annotation_qwen(
     global _AGENT_ACTIVE_GRID_IMAGE, _AGENT_ACTIVE_OVERLAY_IMAGE
     global _AGENT_LAST_SUBMIT_DETECTIONS, _AGENT_PENDING_CLASSIFY_IDS
     global _AGENT_TRACE_FULL_WRITER, _AGENT_TRACE_READABLE_WRITER, _AGENT_PREPASS_COMPLETE
+
     def _agent_unit_float(value: Optional[float], fallback: Optional[float]) -> Optional[float]:
         if value is None:
             return fallback
@@ -8158,7 +8673,9 @@ def _run_prepass_annotation_qwen(
     _AGENT_ACTIVE_IMAGE_BASE64 = payload.image_base64
     _AGENT_ACTIVE_DATASET_ID = payload.dataset_id
     _AGENT_TRACE_FULL_WRITER = _trace_write_full if full_trace_path else None
-    _AGENT_TRACE_READABLE_WRITER = _trace_write_readable if readable_trace_path or latest_readable_path else None
+    _AGENT_TRACE_READABLE_WRITER = (
+        _trace_write_readable if readable_trace_path or latest_readable_path else None
+    )
     _AGENT_ACTIVE_TIGHTEN_FP = tighten_fp
     _AGENT_ACTIVE_DETECTOR_CONF = detector_conf
     _AGENT_ACTIVE_SAM3_SCORE_THR = sam3_score_thr
@@ -8270,7 +8787,9 @@ def _run_prepass_annotation_qwen(
         _trace_write_full({"type": "start", "payload": payload.dict()})
     except Exception:
         _trace_write_full({"type": "start", "payload": str(payload)})
-    readable_model_id = payload.model_id or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
+    readable_model_id = (
+        payload.model_id or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
+    )
     start_title = f"IMAGE START {payload.image_name or 'unknown'}"
     _trace_write_readable(_agent_readable_banner(start_title, fill="="))
     _trace_write_readable(
@@ -8388,7 +8907,9 @@ def _run_prepass_annotation_qwen(
 
     overlay_image: Optional[Image.Image] = None
     overlay_radius: Optional[int] = None
-    use_overlay = bool(payload.use_detection_overlay if payload.use_detection_overlay is not None else True)
+    use_overlay = bool(
+        payload.use_detection_overlay if payload.use_detection_overlay is not None else True
+    )
     if payload.overlay_dot_radius is not None:
         try:
             overlay_radius = max(1, int(payload.overlay_dot_radius))
@@ -8470,7 +8991,9 @@ def _run_prepass_annotation_qwen(
         if bool(payload.cross_class_dedupe_enabled):
             try:
                 cross_iou = float(
-                    payload.cross_class_dedupe_iou if payload.cross_class_dedupe_iou is not None else 0.8
+                    payload.cross_class_dedupe_iou
+                    if payload.cross_class_dedupe_iou is not None
+                    else 0.8
                 )
             except (TypeError, ValueError):
                 cross_iou = 0.8
@@ -8564,7 +9087,6 @@ class ClipTrainingJob:
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
-
 TRAINING_JOBS: Dict[str, ClipTrainingJob] = {}
 TRAINING_JOBS_LOCK = threading.Lock()
 
@@ -8614,6 +9136,8 @@ def _load_rfdetr_active():
         RFDETR_JOB_ROOT,
         save_active_fn=lambda payload: _save_rfdetr_active_impl(payload, RFDETR_ACTIVE_PATH),
     )
+
+
 RFDETR_KEEP_FILES = {
     "checkpoint_best_regular.pth",
     "checkpoint_best_ema.pth",
@@ -8681,6 +9205,8 @@ def _set_rfdetr_infer_state(
     rfdetr_infer_labelmap = state["labelmap"]
     rfdetr_infer_task = state["task"]
     rfdetr_infer_variant = state["variant"]
+
+
 YOLO_VARIANTS = [
     {"id": "yolov8n", "label": "YOLOv8 Nano", "task": "detect"},
     {"id": "yolov8s", "label": "YOLOv8 Small", "task": "detect"},
@@ -8709,7 +9235,51 @@ RFDETR_VARIANTS = [
 DATASET_REGISTRY_ROOT = Path(os.environ.get("DATASET_ROOT", "./uploads/datasets"))
 DATASET_REGISTRY_ROOT.mkdir(parents=True, exist_ok=True)
 DATASET_META_NAME = "dataset.json"
-PROMPT_HELPER_JOB_ROOT = Path(os.environ.get("SAM3_PROMPT_HELPER_ROOT", "./uploads/prompt_helper_jobs"))
+DATASET_ANNOTATION_OVERLAY_DIRNAME = ".annotation_overlay"
+DATASET_ANNOTATION_SESSION_TTL_SECONDS = max(
+    15,
+    int(os.environ.get("DATASET_ANNOTATION_SESSION_TTL_SECONDS", "90") or 90),
+)
+DATASET_TRANSIENT_SESSION_TTL_SECONDS = max(
+    60,
+    int(os.environ.get("DATASET_TRANSIENT_SESSION_TTL_SECONDS", "86400") or 86400),
+)
+DATASET_ANNOTATION_STATUSES = {"new", "in_progress", "blocked", "review", "done"}
+DATASET_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+
+
+def _parse_dataset_link_roots() -> List[Path]:
+    raw = str(os.environ.get("DATASET_LINK_ROOTS", "") or "").strip()
+    if not raw:
+        return [
+            DATASET_REGISTRY_ROOT.resolve(),
+            SAM3_DATASET_ROOT.resolve(),
+            QWEN_DATASET_ROOT.resolve(),
+        ]
+    roots: List[Path] = []
+    for token in re.split(r"[,;]", raw):
+        item = token.strip()
+        if not item:
+            continue
+        try:
+            roots.append(Path(item).expanduser().resolve())
+        except Exception:
+            continue
+    if roots:
+        return roots
+    return [
+        DATASET_REGISTRY_ROOT.resolve(),
+        SAM3_DATASET_ROOT.resolve(),
+        QWEN_DATASET_ROOT.resolve(),
+    ]
+
+
+DATASET_LINK_ROOTS = _parse_dataset_link_roots()
+DATASET_TRANSIENT_SESSIONS: Dict[str, Dict[str, Any]] = {}
+DATASET_TRANSIENT_LOCK = threading.Lock()
+PROMPT_HELPER_JOB_ROOT = Path(
+    os.environ.get("SAM3_PROMPT_HELPER_ROOT", "./uploads/prompt_helper_jobs")
+)
 PROMPT_HELPER_JOB_ROOT.mkdir(parents=True, exist_ok=True)
 SEG_BUILDER_ROOT = Path(os.environ.get("SEGMENTATION_ROOT", "./uploads/seg_runs"))
 SEG_BUILDER_ROOT.mkdir(parents=True, exist_ok=True)
@@ -8870,8 +9440,6 @@ class AgentMiningJob:
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
-
-
 QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
@@ -8931,7 +9499,9 @@ CALIBRATION_FEATURES_VERSION = 7
 CALIBRATION_ROOT.mkdir(parents=True, exist_ok=True)
 
 
-def _prune_job_registry(registry: Dict[str, Any], lock: threading.Lock, ttl_hours: Optional[int] = None) -> None:
+def _prune_job_registry(
+    registry: Dict[str, Any], lock: threading.Lock, ttl_hours: Optional[int] = None
+) -> None:
     if ttl_hours is None:
         ttl_hours = JOB_REGISTRY_TTL_HOURS
     ttl_seconds = max(0, ttl_hours) * 3600
@@ -9074,18 +9644,26 @@ _job_update = functools.partial(_clip_job_update_impl, max_logs=MAX_JOB_LOGS, lo
 
 _qwen_job_log = functools.partial(_qwen_job_log_impl, max_logs=MAX_JOB_LOGS, logger=logger)
 _qwen_job_update = functools.partial(_qwen_job_update_impl, max_logs=MAX_JOB_LOGS, logger=logger)
-_qwen_job_append_metric = functools.partial(_qwen_job_append_metric_impl, max_points=MAX_QWEN_METRIC_POINTS)
+_qwen_job_append_metric = functools.partial(
+    _qwen_job_append_metric_impl, max_points=MAX_QWEN_METRIC_POINTS
+)
 
 _sam3_job_log = functools.partial(_sam3_job_log_impl, max_logs=SAM3_MAX_LOG_LINES, logger=logger)
-_sam3_job_append_metric = functools.partial(_sam3_job_append_metric_impl, max_points=SAM3_MAX_METRIC_POINTS)
-_sam3_job_update = functools.partial(_sam3_job_update_impl, max_logs=SAM3_MAX_LOG_LINES, logger=logger)
+_sam3_job_append_metric = functools.partial(
+    _sam3_job_append_metric_impl, max_points=SAM3_MAX_METRIC_POINTS
+)
+_sam3_job_update = functools.partial(
+    _sam3_job_update_impl, max_logs=SAM3_MAX_LOG_LINES, logger=logger
+)
 
 _yolo_job_update = functools.partial(_yolo_job_update_impl)
 _yolo_job_log = functools.partial(_yolo_job_log_impl, max_logs=YOLO_MAX_LOG_LINES, logger=logger)
 _yolo_job_append_metric = functools.partial(_yolo_job_append_metric_impl, max_points=2000)
 
 _yolo_head_graft_audit = functools.partial(_yolo_head_graft_audit_impl, time_fn=time.time)
-_yolo_head_graft_job_update = functools.partial(_yolo_head_graft_job_update_impl, audit_fn=_yolo_head_graft_audit)
+_yolo_head_graft_job_update = functools.partial(
+    _yolo_head_graft_job_update_impl, audit_fn=_yolo_head_graft_audit
+)
 _yolo_head_graft_job_log = functools.partial(
     _yolo_head_graft_job_log_impl,
     max_logs=YOLO_MAX_LOG_LINES,
@@ -9186,7 +9764,9 @@ _list_all_datasets = functools.partial(
     ),
     glossary_preview_fn=_glossary_preview,
     count_caption_labels_fn=_count_caption_labels_impl,
-    count_dataset_images_fn=lambda path: _count_dataset_images_impl(path, iter_images_fn=_iter_yolo_images),
+    count_dataset_images_fn=lambda path: _count_dataset_images_impl(
+        path, iter_images_fn=_iter_yolo_images
+    ),
     logger=logger,
 )
 
@@ -9202,7 +9782,9 @@ _resolve_sam3_or_qwen_dataset = functools.partial(
     ),
 )
 
-_load_labelmap_simple = functools.partial(_load_labelmap_simple_impl, load_labelmap_file_fn=_load_labelmap_file)
+_load_labelmap_simple = functools.partial(
+    _load_labelmap_simple_impl, load_labelmap_file_fn=_load_labelmap_file
+)
 
 
 def _unique_dataset_name(base: str, *, root: Path) -> str:
@@ -9236,6 +9818,278 @@ def _normalise_relative_path(raw_path: Optional[str]) -> Path:
     return Path(*parts)
 
 
+def _annotation_normalise_split(split: Optional[str]) -> str:
+    normalized = str(split or "train").strip().lower()
+    if normalized not in {"train", "val"}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_split")
+    return normalized
+
+
+def _annotation_normalise_image_relpath(raw_path: Optional[str]) -> Path:
+    rel = _normalise_relative_path(raw_path)
+    if rel.suffix.lower() not in DATASET_IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_image_relpath")
+    return rel
+
+
+def _dataset_meta_storage_root_from_entry(entry: Dict[str, Any]) -> Path:
+    registry_root = entry.get("registry_root")
+    if registry_root:
+        return Path(str(registry_root)).resolve()
+    return Path(str(entry.get("dataset_root") or "")).resolve()
+
+
+def _dataset_overlay_root_from_entry(entry: Dict[str, Any], *, ensure: bool = False) -> Path:
+    storage_root = _dataset_meta_storage_root_from_entry(entry)
+    overlay_root = storage_root / DATASET_ANNOTATION_OVERLAY_DIRNAME
+    if ensure:
+        overlay_root.mkdir(parents=True, exist_ok=True)
+    return overlay_root
+
+
+def _dataset_meta_path_for_entry(entry: Dict[str, Any]) -> Path:
+    return _dataset_meta_storage_root_from_entry(entry) / DATASET_META_NAME
+
+
+def _dataset_effective_root_from_entry(entry: Dict[str, Any]) -> Path:
+    root = Path(str(entry.get("dataset_root") or "")).resolve()
+    if not root.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
+    return root
+
+
+def _validate_linked_dataset_path(path_str: str) -> Path:
+    raw = str(path_str or "").strip()
+    if not raw:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_path_required")
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="dataset_path_must_be_absolute"
+        )
+    resolved = candidate.resolve()
+    if not resolved.exists() or not resolved.is_dir():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_path_not_found")
+    allowed = False
+    for root in DATASET_LINK_ROOTS:
+        try:
+            resolved.relative_to(root)
+            allowed = True
+            break
+        except Exception:
+            continue
+    if not allowed:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_path_not_allowlisted")
+    return resolved
+
+
+def _dataset_labelmap_from_root(dataset_root: Path) -> List[str]:
+    classes = _discover_yolo_labelmap_impl(dataset_root, load_labelmap_file_fn=_load_labelmap_file)
+    return [str(x).strip() for x in classes if str(x).strip()]
+
+
+def _validate_linked_dataset_shape(dataset_root: Path, *, strict: bool = True) -> Dict[str, Any]:
+    layout = _detect_yolo_layout_impl(dataset_root)
+    if not strict:
+        return layout
+    labelmap_path = dataset_root / "labelmap.txt"
+    if not labelmap_path.exists():
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="dataset_shape_missing_labelmap"
+        )
+    if layout.get("yolo_layout") in {"flat", "split"} and layout.get("yolo_ready"):
+        return layout
+    has_flat_images = (dataset_root / "images").exists()
+    has_flat_labels = (dataset_root / "labels").exists()
+    has_split_images = (dataset_root / "train" / "images").exists() or (
+        dataset_root / "val" / "images"
+    ).exists()
+    has_split_labels = (dataset_root / "train" / "labels").exists() or (
+        dataset_root / "val" / "labels"
+    ).exists()
+    if not (has_flat_images or has_split_images):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_shape_missing_images")
+    if not (has_flat_labels or has_split_labels):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_shape_missing_labels")
+    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_shape_invalid_layout")
+
+
+def _annotation_source_label_path(
+    dataset_root: Path, yolo_layout: str, split: str, image_relpath: Path
+) -> Path:
+    if yolo_layout == "split":
+        return dataset_root / split / "labels" / image_relpath.with_suffix(".txt")
+    return dataset_root / "labels" / image_relpath.with_suffix(".txt")
+
+
+def _annotation_overlay_label_path(entry: Dict[str, Any], split: str, image_relpath: Path) -> Path:
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
+    return overlay_root / "labels" / split / image_relpath.with_suffix(".txt")
+
+
+def _annotation_text_relpath(image_relpath: Path) -> Path:
+    if image_relpath.suffix:
+        return image_relpath.with_suffix(".txt")
+    return image_relpath / "index.txt"
+
+
+def _annotation_legacy_text_name(image_relpath: Path) -> str:
+    return f"{image_relpath.stem}.txt"
+
+
+def _annotation_source_text_path(dataset_root: Path, image_relpath: Path) -> Path:
+    return dataset_root / "text_labels" / _annotation_text_relpath(image_relpath)
+
+
+def _annotation_source_text_path_legacy(dataset_root: Path, image_relpath: Path) -> Path:
+    return dataset_root / "text_labels" / _annotation_legacy_text_name(image_relpath)
+
+
+def _annotation_overlay_text_path(entry: Dict[str, Any], image_relpath: Path) -> Path:
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
+    return overlay_root / "text_labels" / _annotation_text_relpath(image_relpath)
+
+
+def _annotation_overlay_text_path_legacy(entry: Dict[str, Any], image_relpath: Path) -> Path:
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
+    return overlay_root / "text_labels" / _annotation_legacy_text_name(image_relpath)
+
+
+def _annotation_effective_label_lines(
+    entry: Dict[str, Any], split: str, image_relpath: Path
+) -> List[str]:
+    overlay_path = _annotation_overlay_label_path(entry, split, image_relpath)
+    if overlay_path.exists():
+        return [
+            ln.strip() for ln in overlay_path.read_text(encoding="utf-8").splitlines() if ln.strip()
+        ]
+    dataset_root = _dataset_effective_root_from_entry(entry)
+    layout = str(entry.get("yolo_layout") or "flat")
+    source_path = _annotation_source_label_path(dataset_root, layout, split, image_relpath)
+    if not source_path.exists():
+        return []
+    return [ln.strip() for ln in source_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def _annotation_effective_text_label(entry: Dict[str, Any], image_relpath: Path) -> str:
+    overlay_path = _annotation_overlay_text_path(entry, image_relpath)
+    if overlay_path.exists():
+        return overlay_path.read_text(encoding="utf-8").strip()
+    overlay_legacy = _annotation_overlay_text_path_legacy(entry, image_relpath)
+    if overlay_legacy.exists():
+        return overlay_legacy.read_text(encoding="utf-8").strip()
+    dataset_root = _dataset_effective_root_from_entry(entry)
+    source_path = _annotation_source_text_path(dataset_root, image_relpath)
+    if source_path.exists():
+        return source_path.read_text(encoding="utf-8").strip()
+    legacy_source = _annotation_source_text_path_legacy(dataset_root, image_relpath)
+    if legacy_source.exists():
+        return legacy_source.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def _annotation_source_text_value(dataset_root: Path, image_relpath: Path) -> str:
+    source_path = _annotation_source_text_path(dataset_root, image_relpath)
+    if source_path.exists():
+        return source_path.read_text(encoding="utf-8").strip()
+    legacy_source = _annotation_source_text_path_legacy(dataset_root, image_relpath)
+    if legacy_source.exists():
+        return legacy_source.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def _annotation_collect_images(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+    dataset_root = _dataset_effective_root_from_entry(entry)
+    out: List[Dict[str, Any]] = []
+    yolo_layout = str(entry.get("yolo_layout") or "flat")
+
+    def _append(split_name: str, images_dir: Path) -> None:
+        if not images_dir.exists():
+            return
+        for image_path in _iter_yolo_images(images_dir):
+            try:
+                rel = image_path.relative_to(images_dir)
+            except Exception:
+                rel = Path(image_path.name)
+            out.append(
+                {
+                    "split": split_name,
+                    "image_relpath": str(rel.as_posix()),
+                    "image_name": rel.name,
+                    "image_path": image_path,
+                }
+            )
+
+    if yolo_layout == "split":
+        _append("train", dataset_root / "train" / "images")
+        _append("val", dataset_root / "val" / "images")
+    else:
+        images_root = dataset_root / "images"
+        if not images_root.exists():
+            images_root = dataset_root
+        _append("train", images_root)
+    return out
+
+
+def _annotation_progress_from_rows(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    total = len(rows)
+    labeled = 0
+    text_labeled = 0
+    for row in rows:
+        lines = row.get("label_lines") or []
+        if isinstance(lines, list) and any(str(x).strip() for x in lines):
+            labeled += 1
+        text_label = str(row.get("text_label") or "").strip()
+        if text_label:
+            text_labeled += 1
+    pct = (100.0 * labeled / total) if total > 0 else 0.0
+    text_pct = (100.0 * text_labeled / total) if total > 0 else 0.0
+    return {
+        "images_total": total,
+        "images_with_bbox_or_seg": labeled,
+        "images_with_text_label": text_labeled,
+        "percent_labeled": pct,
+        "percent_text_labeled": text_pct,
+    }
+
+
+def _annotation_load_or_create_meta(entry: Dict[str, Any]) -> Tuple[Path, Dict[str, Any]]:
+    meta_path = _dataset_meta_path_for_entry(entry)
+    meta = _load_json_metadata(meta_path) or {}
+    if not meta.get("id"):
+        meta["id"] = entry.get("id") or meta_path.parent.name
+    if not meta.get("label"):
+        meta["label"] = entry.get("label") or meta.get("id")
+    if "annotation_status" not in meta:
+        meta["annotation_status"] = "new"
+    if "annotation_notes" not in meta:
+        meta["annotation_notes"] = ""
+    if "annotation_cursor" not in meta:
+        meta["annotation_cursor"] = None
+    if "annotation_progress" not in meta:
+        meta["annotation_progress"] = {}
+    if "annotation_lock" not in meta:
+        meta["annotation_lock"] = {}
+    return meta_path, meta
+
+
+def _annotation_persist_meta(entry: Dict[str, Any], meta: Dict[str, Any]) -> None:
+    storage_root = _dataset_meta_storage_root_from_entry(entry)
+    storage_root.mkdir(parents=True, exist_ok=True)
+    _persist_dataset_metadata_impl(storage_root, meta, meta_name=DATASET_META_NAME, logger=logger)
+
+
+def _annotation_lock_is_active(lock: Dict[str, Any]) -> bool:
+    if not isinstance(lock, dict):
+        return False
+    expires = lock.get("expires_at")
+    try:
+        expires_f = float(expires)
+    except Exception:
+        return False
+    return expires_f > time.time()
+
+
 def _link_or_copy_file(src: Path, dest: Path, *, overwrite: bool = False) -> None:
     src_resolved = src.resolve()
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -9258,6 +10112,257 @@ def _link_or_copy_file(src: Path, dest: Path, *, overwrite: bool = False) -> Non
     except Exception:
         pass
     shutil.copy2(src_resolved, dest)
+
+
+def _build_linked_dataset_metadata(
+    *,
+    dataset_id: str,
+    dataset_root: Path,
+    label: Optional[str],
+    context: Optional[str],
+    notes: Optional[str],
+) -> Dict[str, Any]:
+    layout = _detect_yolo_layout_impl(dataset_root)
+    yolo_labels_dir = layout.get("yolo_labels_dir")
+    dataset_type = "bbox"
+    if yolo_labels_dir and _yolo_labels_have_polygons_impl(Path(str(yolo_labels_dir))):
+        dataset_type = "seg"
+    train_images_dir = dataset_root / "train" / "images"
+    val_images_dir = dataset_root / "val" / "images"
+    train_count = len(_iter_yolo_images(train_images_dir)) if train_images_dir.exists() else 0
+    val_count = len(_iter_yolo_images(val_images_dir)) if val_images_dir.exists() else 0
+    image_count = train_count + val_count
+    if image_count <= 0:
+        image_count = _count_dataset_images_impl(dataset_root, iter_images_fn=_iter_yolo_images)
+    meta: Dict[str, Any] = {
+        "id": dataset_id,
+        "label": str(label or dataset_id),
+        "type": dataset_type,
+        "context": str(context or ""),
+        "created_at": time.time(),
+        "source": "registry",
+        "storage_mode": "linked",
+        "linked_root": str(dataset_root),
+        "signature": _compute_dir_signature_impl(dataset_root),
+        "classes": _dataset_labelmap_from_root(dataset_root),
+        "image_count": image_count,
+        "train_count": train_count or None,
+        "val_count": val_count or None,
+        "annotation_status": "new",
+        "annotation_notes": str(notes or ""),
+        "annotation_cursor": None,
+        "annotation_progress": {
+            "images_total": image_count,
+            "images_with_bbox_or_seg": 0,
+            "images_with_text_label": 0,
+            "percent_labeled": 0.0,
+            "percent_text_labeled": 0.0,
+        },
+        "annotation_lock": {},
+    }
+    if not meta["train_count"]:
+        meta.pop("train_count", None)
+    if not meta["val_count"]:
+        meta.pop("val_count", None)
+    return meta
+
+
+def _annotation_manifest_for_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    rows = _annotation_collect_images(entry)
+    manifest_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        split = _annotation_normalise_split(row.get("split"))
+        image_relpath = _annotation_normalise_image_relpath(row.get("image_relpath"))
+        label_lines = _annotation_effective_label_lines(entry, split, image_relpath)
+        text_label = _annotation_effective_text_label(entry, image_relpath)
+        manifest_rows.append(
+            {
+                "split": split,
+                "image_relpath": str(image_relpath.as_posix()),
+                "image_name": row.get("image_name") or image_relpath.name,
+                "label_lines": label_lines,
+                "text_label": text_label,
+            }
+        )
+    progress = _annotation_progress_from_rows(manifest_rows)
+    _meta_path, meta = _annotation_load_or_create_meta(entry)
+    persisted_progress = (
+        meta.get("annotation_progress") if isinstance(meta.get("annotation_progress"), dict) else {}
+    )
+    if persisted_progress != progress:
+        meta["annotation_progress"] = progress
+        _annotation_persist_meta(entry, meta)
+    return {
+        "dataset_id": entry.get("id"),
+        "dataset_label": entry.get("label") or entry.get("id"),
+        "dataset_root": entry.get("dataset_root"),
+        "storage_mode": entry.get("storage_mode") or "managed",
+        "linked_root": entry.get("linked_root"),
+        "labelmap": list(entry.get("classes") or []),
+        "yolo_layout": entry.get("yolo_layout") or "flat",
+        "status": meta.get("annotation_status") or "new",
+        "notes": str(meta.get("annotation_notes") or ""),
+        "cursor": meta.get("annotation_cursor"),
+        "lock": meta.get("annotation_lock") or {},
+        "progress": progress,
+        "images": manifest_rows,
+    }
+
+
+def _annotation_update_lock(
+    meta: Dict[str, Any], payload: Dict[str, Any], *, force: bool = False
+) -> Dict[str, Any]:
+    editor_name = (
+        str(payload.get("editor_name") or payload.get("holder") or "unknown").strip() or "unknown"
+    )
+    requested_session = str(payload.get("session_id") or "").strip()
+    now = time.time()
+    existing = meta.get("annotation_lock")
+    existing_lock = existing if isinstance(existing, dict) else {}
+    existing_active = _annotation_lock_is_active(existing_lock)
+    existing_holder = str(existing_lock.get("holder") or "").strip()
+    existing_session = str(existing_lock.get("session_id") or "").strip()
+    warning = None
+    if existing_active:
+        same_session = bool(requested_session and requested_session == existing_session)
+        if not same_session and existing_holder and existing_holder != editor_name and not force:
+            warning = "annotation_lock_active"
+    if warning and not force:
+        return {
+            "ok": False,
+            "warning": warning,
+            "lock": existing_lock,
+        }
+    session_id = requested_session or existing_session or uuid.uuid4().hex
+    lock = {
+        "holder": editor_name,
+        "session_id": session_id,
+        "heartbeat_at": now,
+        "expires_at": now + float(DATASET_ANNOTATION_SESSION_TTL_SECONDS),
+    }
+    meta["annotation_lock"] = lock
+    return {
+        "ok": True,
+        "warning": warning,
+        "lock": lock,
+    }
+
+
+def _annotation_release_lock(meta: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    existing = meta.get("annotation_lock")
+    existing_lock = existing if isinstance(existing, dict) else {}
+    requested_session = str(payload.get("session_id") or "").strip()
+    force = bool(payload.get("force"))
+    existing_active = _annotation_lock_is_active(existing_lock)
+    if existing_active and not force:
+        existing_session = str(existing_lock.get("session_id") or "").strip()
+        if not requested_session or requested_session != existing_session:
+            return {
+                "ok": False,
+                "warning": "annotation_lock_session_mismatch",
+                "lock": existing_lock,
+            }
+    meta["annotation_lock"] = {}
+    return {
+        "ok": True,
+        "lock": {},
+    }
+
+
+def _require_annotation_lock_owner(
+    meta: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    allow_force: bool = False,
+) -> Dict[str, Any]:
+    force = bool(payload.get("force"))
+    existing = meta.get("annotation_lock")
+    existing_lock = existing if isinstance(existing, dict) else {}
+    existing_active = _annotation_lock_is_active(existing_lock)
+    if not existing_active:
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="annotation_lock_required")
+    if allow_force and force:
+        return existing_lock
+    requested_session = str(payload.get("session_id") or "").strip()
+    if not requested_session:
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT, detail="annotation_lock_session_required"
+        )
+    existing_session = str(existing_lock.get("session_id") or "").strip()
+    if requested_session != existing_session:
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="annotation_lock_active")
+    return existing_lock
+
+
+def _annotation_overlay_key_to_split_rel(key: str) -> Tuple[str, Path]:
+    raw = str(key or "").strip()
+    if ":" not in raw:
+        raise ValueError("invalid_overlay_key")
+    split_raw, rel_raw = raw.split(":", 1)
+    split = _annotation_normalise_split(split_raw)
+    rel = _annotation_normalise_image_relpath(rel_raw)
+    return split, rel
+
+
+def _annotation_overlay_archive_entries(entry: Dict[str, Any]) -> Dict[str, Path]:
+    archive_entries: Dict[str, Path] = {}
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=False)
+    if not overlay_root.exists():
+        return archive_entries
+    layout = str(entry.get("yolo_layout") or "flat")
+    labels_root = overlay_root / "labels"
+    for split in ("train", "val"):
+        split_root = labels_root / split
+        if not split_root.exists():
+            continue
+        for path in split_root.rglob("*.txt"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(split_root)
+            target_rel = (
+                (Path(split) / "labels" / rel) if layout == "split" else (Path("labels") / rel)
+            )
+            archive_entries[target_rel.as_posix()] = path
+    text_root = overlay_root / "text_labels"
+    if text_root.exists():
+        for path in text_root.rglob("*.txt"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(text_root)
+            archive_entries[(Path("text_labels") / rel).as_posix()] = path
+    return archive_entries
+
+
+def _persist_transient_overlays_to_entry(entry: Dict[str, Any], session: Dict[str, Any]) -> None:
+    overlay_labels = (
+        session.get("overlay_labels") if isinstance(session.get("overlay_labels"), dict) else {}
+    )
+    overlay_text = (
+        session.get("overlay_text") if isinstance(session.get("overlay_text"), dict) else {}
+    )
+    if not overlay_labels and not overlay_text:
+        return
+
+    for key, label_lines_raw in overlay_labels.items():
+        try:
+            split, rel = _annotation_overlay_key_to_split_rel(str(key))
+        except Exception:
+            continue
+        lines: List[str] = []
+        if isinstance(label_lines_raw, list):
+            lines = [str(line).strip() for line in label_lines_raw if str(line).strip()]
+        label_path = _annotation_overlay_label_path(entry, split, rel)
+        label_path.parent.mkdir(parents=True, exist_ok=True)
+        label_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+    for key, text_raw in overlay_text.items():
+        try:
+            _split, rel = _annotation_overlay_key_to_split_rel(str(key))
+        except Exception:
+            continue
+        text_path = _annotation_overlay_text_path(entry, rel)
+        text_path.parent.mkdir(parents=True, exist_ok=True)
+        text_path.write_text(str(text_raw or "").strip(), encoding="utf-8")
 
 
 def _extract_zip_safely_impl(
@@ -9382,7 +10487,9 @@ def upload_dataset_zip(
             meta["val_count"] = val_count
             meta["image_count"] = train_count + val_count
         else:
-            meta["image_count"] = _count_dataset_images_impl(target_root, iter_images_fn=_iter_yolo_images)
+            meta["image_count"] = _count_dataset_images_impl(
+                target_root, iter_images_fn=_iter_yolo_images
+            )
         meta["signature"] = _compute_dir_signature_impl(target_root)
         _persist_dataset_meta(target_root, meta)
         return meta
@@ -9399,14 +10506,36 @@ def _resolve_dataset_entry(dataset_id: str) -> Dict[str, Any]:
 
 def delete_dataset_entry(dataset_id: str):
     entry = _resolve_dataset_entry(dataset_id)
-    dataset_root = Path(entry.get("dataset_root") or "").resolve()
-    if not dataset_root.exists():
+    storage_mode = str(entry.get("storage_mode") or "managed").strip().lower()
+    registry_root_raw = entry.get("registry_root")
+    registry_root = Path(str(registry_root_raw)).resolve() if registry_root_raw else None
+
+    # Linked entries should remove only the registry record + overlay metadata, never the source dataset itself.
+    if storage_mode == "linked":
+        if registry_root is None:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
+        if not _path_is_within_root_impl(registry_root, DATASET_REGISTRY_ROOT.resolve()):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
+        if registry_root.exists():
+            shutil.rmtree(registry_root, ignore_errors=True)
+        return {"status": "deleted", "id": dataset_id, "storage_mode": "linked"}
+
+    target_root = (
+        registry_root
+        if registry_root is not None
+        else Path(entry.get("dataset_root") or "").resolve()
+    )
+    if not target_root.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
-    allowed_roots = [DATASET_REGISTRY_ROOT.resolve(), SAM3_DATASET_ROOT.resolve(), QWEN_DATASET_ROOT.resolve()]
-    if not any(_path_is_within_root_impl(dataset_root, root) for root in allowed_roots):
+    allowed_roots = [
+        DATASET_REGISTRY_ROOT.resolve(),
+        SAM3_DATASET_ROOT.resolve(),
+        QWEN_DATASET_ROOT.resolve(),
+    ]
+    if not any(_path_is_within_root_impl(target_root, root) for root in allowed_roots):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
-    shutil.rmtree(dataset_root, ignore_errors=True)
-    return {"status": "deleted", "id": dataset_id}
+    shutil.rmtree(target_root, ignore_errors=True)
+    return {"status": "deleted", "id": dataset_id, "storage_mode": storage_mode or "managed"}
 
 
 def download_dataset_entry(dataset_id: str):
@@ -9414,15 +10543,25 @@ def download_dataset_entry(dataset_id: str):
     dataset_root = Path(entry.get("dataset_root") or "")
     if not dataset_root.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
+    overlay_entries = _annotation_overlay_archive_entries(entry)
     tmp_dir = Path(tempfile.mkdtemp(prefix="dataset_export_"))
     try:
         zip_path = tmp_dir / f"{dataset_id}.zip"
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            overlay_relpaths = set(overlay_entries.keys())
             for path in dataset_root.rglob("*"):
                 if not path.is_file():
                     continue
                 rel = path.relative_to(dataset_root)
+                if rel.parts and rel.parts[0] == DATASET_ANNOTATION_OVERLAY_DIRNAME:
+                    continue
+                if rel.as_posix() in overlay_relpaths:
+                    continue
                 zf.write(path, arcname=str(Path(dataset_root.name) / rel))
+            for rel_posix, overlay_path in sorted(overlay_entries.items()):
+                if not overlay_path.exists() or not overlay_path.is_file():
+                    continue
+                zf.write(overlay_path, arcname=str(Path(dataset_root.name) / Path(rel_posix)))
         return FileResponse(
             path=str(zip_path),
             media_type="application/zip",
@@ -9432,7 +10571,9 @@ def download_dataset_entry(dataset_id: str):
         )
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"dataset_export_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"dataset_export_failed:{exc}"
+        ) from exc
 
 
 def _build_qwen_context(labelmap: Sequence[str], context: str) -> str:
@@ -9443,7 +10584,9 @@ def _build_qwen_context(labelmap: Sequence[str], context: str) -> str:
     return f"Objects of interest: {items}."
 
 
-def _yolo_label_to_bbox(line: str, *, img_w: int, img_h: int) -> Optional[Tuple[int, int, int, int]]:
+def _yolo_label_to_bbox(
+    line: str, *, img_w: int, img_h: int
+) -> Optional[Tuple[int, int, int, int]]:
     parts = line.strip().split()
     if len(parts) < 5:
         return None
@@ -9475,7 +10618,11 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
     labelmap_path = Path(entry.get("yolo_labelmap_path") or dataset_root / "labelmap.txt")
     if not labelmap_path.exists():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_missing")
-    labelmap = [line.strip() for line in labelmap_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    labelmap = [
+        line.strip()
+        for line in labelmap_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     context = entry.get("context") or ""
     glossary = _load_dataset_glossary(
         dataset_root,
@@ -9580,9 +10727,13 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
     }
     if glossary:
         metadata["labelmap_glossary"] = glossary
-    (target_root / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    (target_root / "metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     dataset_meta = {"context": context, "classes": labelmap, "created_at": int(time.time() * 1000)}
-    (target_root / "dataset_meta.json").write_text(json.dumps(dataset_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    (target_root / "dataset_meta.json").write_text(
+        json.dumps(dataset_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return metadata
 
 
@@ -9594,11 +10745,21 @@ def check_dataset(dataset_id: str):
             "labels_dir": entry.get("yolo_labels_dir"),
             "labelmap_path": entry.get("yolo_labelmap_path"),
         }
-        data = _validate_clip_dataset_impl(inputs, http_exception_cls=HTTPException, load_labelmap_simple_fn=_load_labelmap_simple)
+        data = _validate_clip_dataset_impl(
+            inputs, http_exception_cls=HTTPException, load_labelmap_simple_fn=_load_labelmap_simple
+        )
         return {"ok": True, "format": "yolo", "detail": data}
     if entry.get("qwen_ready"):
-        return {"ok": True, "format": "qwen", "detail": {"train": entry.get("train_count"), "val": entry.get("val_count")}}
-    return {"ok": False, "format": entry.get("format") or "unknown", "detail": "dataset_format_unrecognized"}
+        return {
+            "ok": True,
+            "format": "qwen",
+            "detail": {"train": entry.get("train_count"), "val": entry.get("val_count")},
+        }
+    return {
+        "ok": False,
+        "format": entry.get("format") or "unknown",
+        "detail": "dataset_format_unrecognized",
+    }
 
 
 def _load_dataset_meta_candidates(dataset_root: Path) -> List[Tuple[Path, Dict[str, Any]]]:
@@ -9615,7 +10776,8 @@ def _load_dataset_meta_candidates(dataset_root: Path) -> List[Tuple[Path, Dict[s
 
 def get_dataset_glossary(dataset_id: str):
     entry = _resolve_dataset_entry(dataset_id)
-    dataset_root = Path(entry["dataset_root"])
+    dataset_root = _dataset_effective_root_from_entry(entry)
+    storage_root = _dataset_meta_storage_root_from_entry(entry)
     glossary = _load_dataset_glossary(
         dataset_root,
         load_sam3_meta=lambda dataset_dir: _load_sam3_dataset_metadata_impl(
@@ -9631,48 +10793,602 @@ def get_dataset_glossary(dataset_id: str):
         ),
     )
     if not glossary:
-        for _path, meta in _load_dataset_meta_candidates(dataset_root):
-            raw = meta.get("labelmap_glossary")
-            if raw:
-                glossary = _normalize_labelmap_glossary(raw)
+        roots = [storage_root]
+        if storage_root != dataset_root:
+            roots.append(dataset_root)
+        for root in roots:
+            for _path, meta in _load_dataset_meta_candidates(root):
+                raw = meta.get("labelmap_glossary")
+                if raw:
+                    glossary = _normalize_labelmap_glossary(raw)
+                    break
+            if glossary:
                 break
     return {"dataset_id": dataset_id, "glossary": glossary or ""}
 
 
 def set_dataset_glossary(dataset_id: str, glossary: str):
     entry = _resolve_dataset_entry(dataset_id)
-    dataset_root = Path(entry["dataset_root"])
+    storage_root = _dataset_meta_storage_root_from_entry(entry)
     normalized = _normalize_labelmap_glossary(glossary or "")
     updated = False
-    for path, meta in _load_dataset_meta_candidates(dataset_root):
+    for path, meta in _load_dataset_meta_candidates(storage_root):
         meta["labelmap_glossary"] = normalized
         with path.open("w", encoding="utf-8") as handle:
             json.dump(meta, handle, ensure_ascii=False, indent=2)
         updated = True
     if not updated:
         meta = {"id": dataset_id, "labelmap_glossary": normalized}
-        _persist_dataset_metadata_impl(dataset_root, meta, meta_name=DATASET_META_NAME, logger=logger)
+        _persist_dataset_metadata_impl(
+            storage_root, meta, meta_name=DATASET_META_NAME, logger=logger
+        )
     return {"dataset_id": dataset_id, "glossary": normalized}
 
 
 def get_text_label(dataset_id: str, image_name: str):
     entry = _resolve_dataset_entry(dataset_id)
-    dataset_root = Path(entry["dataset_root"])
-    text_dir = dataset_root / "text_labels"
-    text_path = text_dir / f"{Path(image_name).stem}.txt"
-    if not text_path.exists():
+    image_relpath = _annotation_normalise_image_relpath(
+        image_name if "." in image_name else f"{image_name}.jpg"
+    )
+    caption = _annotation_effective_text_label(entry, image_relpath)
+    if not caption:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="caption_not_found")
-    return {"caption": text_path.read_text(encoding="utf-8").strip()}
+    return {"caption": caption}
 
 
 def set_text_label(dataset_id: str, image_name: str, caption: str):
     entry = _resolve_dataset_entry(dataset_id)
-    dataset_root = Path(entry["dataset_root"])
-    text_dir = dataset_root / "text_labels"
+    image_relpath = _annotation_normalise_image_relpath(
+        image_name if "." in image_name else f"{image_name}.jpg"
+    )
+    text_path = _annotation_overlay_text_path(entry, image_relpath)
+    text_dir = text_path.parent
     text_dir.mkdir(parents=True, exist_ok=True)
-    text_path = text_dir / f"{Path(image_name).stem}.txt"
     text_path.write_text(str(caption or "").strip(), encoding="utf-8")
     return {"status": "saved", "caption": str(caption or "").strip()}
+
+
+def register_dataset_path(
+    path: str,
+    dataset_id: Optional[str],
+    label: Optional[str],
+    context: Optional[str],
+    notes: Optional[str],
+    force_new: Optional[bool] = None,
+    strict: Optional[bool] = None,
+):
+    dataset_root = _validate_linked_dataset_path(path)
+    _validate_linked_dataset_shape(dataset_root, strict=bool(strict is None or strict))
+    source_signature = _compute_dir_signature_impl(dataset_root)
+    if not bool(force_new):
+        for candidate in _list_all_datasets():
+            if str(candidate.get("storage_mode") or "").strip().lower() != "linked":
+                continue
+            linked_root_raw = str(candidate.get("linked_root") or "").strip()
+            if linked_root_raw:
+                try:
+                    if Path(linked_root_raw).expanduser().resolve() == dataset_root:
+                        return candidate
+                except Exception:
+                    pass
+            if (
+                source_signature
+                and str(candidate.get("signature") or "").strip() == source_signature
+            ):
+                return candidate
+    base_id = _sanitize_yolo_run_id_impl(dataset_id or dataset_root.name) or "linked_dataset"
+    dataset_id_final = _unique_dataset_name(base_id, root=DATASET_REGISTRY_ROOT)
+    registry_dir = (DATASET_REGISTRY_ROOT / dataset_id_final).resolve()
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    meta = _build_linked_dataset_metadata(
+        dataset_id=dataset_id_final,
+        dataset_root=dataset_root,
+        label=label,
+        context=context,
+        notes=notes,
+    )
+    meta["signature"] = source_signature
+    _persist_dataset_metadata_impl(registry_dir, meta, meta_name=DATASET_META_NAME, logger=logger)
+    entry = _resolve_dataset_entry_impl(dataset_id_final, list_all_datasets_fn=_list_all_datasets)
+    if not entry:
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dataset_register_failed"
+        )
+    return entry
+
+
+def _purge_expired_transient_sessions(now_ts: Optional[float] = None) -> int:
+    now = float(now_ts) if now_ts is not None else time.time()
+    removed = 0
+    with DATASET_TRANSIENT_LOCK:
+        stale_ids: List[str] = []
+        for sid, session in DATASET_TRANSIENT_SESSIONS.items():
+            expires_raw = session.get("expires_at")
+            try:
+                expires_at = float(expires_raw)
+            except Exception:
+                continue
+            if expires_at <= now:
+                stale_ids.append(sid)
+        for sid in stale_ids:
+            DATASET_TRANSIENT_SESSIONS.pop(sid, None)
+            removed += 1
+    return removed
+
+
+def open_dataset_path(path: str, strict: Optional[bool] = None):
+    _purge_expired_transient_sessions()
+    dataset_root = _validate_linked_dataset_path(path)
+    layout = _validate_linked_dataset_shape(dataset_root, strict=bool(strict is None or strict))
+    session_id = uuid.uuid4().hex
+    classes = _dataset_labelmap_from_root(dataset_root)
+    label = dataset_root.name
+    now = time.time()
+    expires_at = now + float(DATASET_TRANSIENT_SESSION_TTL_SECONDS)
+    with DATASET_TRANSIENT_LOCK:
+        DATASET_TRANSIENT_SESSIONS[session_id] = {
+            "session_id": session_id,
+            "dataset_root": str(dataset_root),
+            "label": label,
+            "classes": classes,
+            "yolo_layout": layout.get("yolo_layout") or "flat",
+            "created_at": now,
+            "updated_at": now,
+            "expires_at": expires_at,
+            "annotation_status": "new",
+            "annotation_notes": "",
+            "annotation_cursor": None,
+            "annotation_progress": {},
+            "annotation_lock": {},
+            "overlay_labels": {},
+            "overlay_text": {},
+        }
+    return {
+        "session_id": session_id,
+        "expires_at": expires_at,
+        "dataset": {
+            "id": f"transient:{session_id}",
+            "label": label,
+            "dataset_root": str(dataset_root),
+            "storage_mode": "transient",
+            "classes": classes,
+            "yolo_layout": layout.get("yolo_layout") or "flat",
+        },
+    }
+
+
+def _resolve_transient_session(session_id: str) -> Dict[str, Any]:
+    sid = str(session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="transient_session_required")
+    now = time.time()
+    with DATASET_TRANSIENT_LOCK:
+        session = DATASET_TRANSIENT_SESSIONS.get(sid)
+        if not session:
+            raise HTTPException(
+                status_code=HTTP_404_NOT_FOUND, detail="transient_session_not_found"
+            )
+        expires_raw = session.get("expires_at")
+        try:
+            expires_at = float(expires_raw)
+        except Exception:
+            expires_at = now + float(DATASET_TRANSIENT_SESSION_TTL_SECONDS)
+        if expires_at <= now:
+            DATASET_TRANSIENT_SESSIONS.pop(sid, None)
+            raise HTTPException(status_code=410, detail="transient_session_expired")
+        session = dict(session)
+        session["updated_at"] = now
+        session["expires_at"] = now + float(DATASET_TRANSIENT_SESSION_TTL_SECONDS)
+        DATASET_TRANSIENT_SESSIONS[sid] = session
+    _purge_expired_transient_sessions(now_ts=now)
+    return session
+
+
+def _persist_transient_session(session_id: str, payload: Dict[str, Any]) -> None:
+    with DATASET_TRANSIENT_LOCK:
+        if session_id in DATASET_TRANSIENT_SESSIONS:
+            updated = dict(payload or {})
+            now = time.time()
+            updated["updated_at"] = now
+            updated["expires_at"] = now + float(DATASET_TRANSIENT_SESSION_TTL_SECONDS)
+            DATASET_TRANSIENT_SESSIONS[session_id] = updated
+
+
+def delete_transient_dataset(session_id: str) -> Dict[str, Any]:
+    sid = str(session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="transient_session_required")
+    with DATASET_TRANSIENT_LOCK:
+        session = DATASET_TRANSIENT_SESSIONS.get(sid)
+        if not session:
+            raise HTTPException(
+                status_code=HTTP_404_NOT_FOUND, detail="transient_session_not_found"
+            )
+        expires_raw = session.get("expires_at")
+        now = time.time()
+        try:
+            expires_at = float(expires_raw)
+        except Exception:
+            expires_at = now + float(DATASET_TRANSIENT_SESSION_TTL_SECONDS)
+        if expires_at <= now:
+            DATASET_TRANSIENT_SESSIONS.pop(sid, None)
+            raise HTTPException(status_code=410, detail="transient_session_expired")
+        DATASET_TRANSIENT_SESSIONS.pop(sid, None)
+    _purge_expired_transient_sessions()
+    return {"status": "deleted", "session_id": sid}
+
+
+def save_transient_dataset(
+    session_id: str,
+    dataset_id: Optional[str],
+    label: Optional[str],
+    context: Optional[str],
+    notes: Optional[str],
+):
+    session = _resolve_transient_session(session_id)
+    dataset_root = _validate_linked_dataset_path(str(session.get("dataset_root") or ""))
+    base_id = _sanitize_yolo_run_id_impl(dataset_id or dataset_root.name) or "linked_dataset"
+    dataset_id_final = _unique_dataset_name(base_id, root=DATASET_REGISTRY_ROOT)
+    registry_dir = (DATASET_REGISTRY_ROOT / dataset_id_final).resolve()
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    meta = _build_linked_dataset_metadata(
+        dataset_id=dataset_id_final,
+        dataset_root=dataset_root,
+        label=label or session.get("label"),
+        context=context,
+        notes=notes or session.get("annotation_notes"),
+    )
+    if isinstance(session.get("annotation_progress"), dict):
+        meta["annotation_progress"] = dict(session.get("annotation_progress") or {})
+    if session.get("annotation_cursor") is not None:
+        meta["annotation_cursor"] = session.get("annotation_cursor")
+    if session.get("annotation_status"):
+        meta["annotation_status"] = session.get("annotation_status")
+    _persist_dataset_metadata_impl(registry_dir, meta, meta_name=DATASET_META_NAME, logger=logger)
+    persisted_entry = {
+        "dataset_root": str(dataset_root),
+        "registry_root": str(registry_dir),
+        "yolo_layout": str(session.get("yolo_layout") or "flat"),
+    }
+    _persist_transient_overlays_to_entry(persisted_entry, session)
+    entry = _resolve_dataset_entry_impl(dataset_id_final, list_all_datasets_fn=_list_all_datasets)
+    if not entry:
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dataset_register_failed"
+        )
+    return entry
+
+
+def start_dataset_annotation_session(dataset_id: str, payload: Dict[str, Any]):
+    entry = _resolve_dataset_entry(dataset_id)
+    _dataset_effective_root_from_entry(entry)
+    _annotation_manifest_for_entry(entry)
+    _meta_path, meta = _annotation_load_or_create_meta(entry)
+    lock_update = _annotation_update_lock(
+        meta, payload or {}, force=bool((payload or {}).get("force"))
+    )
+    if not lock_update.get("ok"):
+        return {
+            "status": "warning",
+            "warning": lock_update.get("warning"),
+            "lock": lock_update.get("lock"),
+            "dataset_id": dataset_id,
+        }
+    _annotation_persist_meta(entry, meta)
+    return {
+        "status": "ok",
+        "dataset_id": dataset_id,
+        "lock": lock_update.get("lock"),
+    }
+
+
+def heartbeat_dataset_annotation_session(dataset_id: str, payload: Dict[str, Any]):
+    return start_dataset_annotation_session(dataset_id, payload or {})
+
+
+def stop_dataset_annotation_session(dataset_id: str, payload: Dict[str, Any]):
+    entry = _resolve_dataset_entry(dataset_id)
+    _meta_path, meta = _annotation_load_or_create_meta(entry)
+    released = _annotation_release_lock(meta, payload or {})
+    if not released.get("ok"):
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT,
+            detail=released.get("warning") or "annotation_lock_active",
+        )
+    _annotation_persist_meta(entry, meta)
+    return {"status": "ok", "dataset_id": dataset_id, "lock": {}}
+
+
+def get_dataset_annotation_manifest(dataset_id: str):
+    entry = _resolve_dataset_entry(dataset_id)
+    return _annotation_manifest_for_entry(entry)
+
+
+def _resolve_annotation_image_path(
+    dataset_root: Path, yolo_layout: str, split: str, image_relpath: Path
+) -> Path:
+    if yolo_layout == "split":
+        image_path = dataset_root / split / "images" / image_relpath
+    else:
+        image_path = dataset_root / "images" / image_relpath
+        if not image_path.exists():
+            image_path = dataset_root / image_relpath
+    if not image_path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="annotation_image_not_found")
+    return image_path
+
+
+def get_dataset_annotation_image(dataset_id: str, split: str, image_relpath: str):
+    entry = _resolve_dataset_entry(dataset_id)
+    dataset_root = _dataset_effective_root_from_entry(entry)
+    split_norm = _annotation_normalise_split(split)
+    rel = _annotation_normalise_image_relpath(image_relpath)
+    image_path = _resolve_annotation_image_path(
+        dataset_root, str(entry.get("yolo_layout") or "flat"), split_norm, rel
+    )
+    return FileResponse(str(image_path))
+
+
+def save_dataset_annotation_snapshot(dataset_id: str, payload: Dict[str, Any]):
+    entry = _resolve_dataset_entry(dataset_id)
+    _dataset_effective_root_from_entry(entry)
+    _meta_path, meta = _annotation_load_or_create_meta(entry)
+    _require_annotation_lock_owner(meta, payload or {})
+    records = payload.get("records")
+    if not isinstance(records, list):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_records_required")
+    for raw in records:
+        if not isinstance(raw, dict):
+            continue
+        split = _annotation_normalise_split(raw.get("split"))
+        rel = _annotation_normalise_image_relpath(raw.get("image_relpath") or raw.get("image_name"))
+        label_lines_raw = raw.get("label_lines")
+        label_lines: List[str] = []
+        if isinstance(label_lines_raw, list):
+            label_lines = [str(line).strip() for line in label_lines_raw if str(line).strip()]
+        label_path = _annotation_overlay_label_path(entry, split, rel)
+        label_path.parent.mkdir(parents=True, exist_ok=True)
+        label_path.write_text(
+            "\n".join(label_lines) + ("\n" if label_lines else ""), encoding="utf-8"
+        )
+        if "text_label" in raw:
+            text_value = str(raw.get("text_label") or "").strip()
+            text_path = _annotation_overlay_text_path(entry, rel)
+            text_path.parent.mkdir(parents=True, exist_ok=True)
+            text_path.write_text(text_value, encoding="utf-8")
+
+    if "status" in payload:
+        requested = str(payload.get("status") or "").strip().lower()
+        if requested:
+            if requested not in DATASET_ANNOTATION_STATUSES:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST, detail="invalid_annotation_status"
+                )
+            meta["annotation_status"] = requested
+    if "notes" in payload:
+        meta["annotation_notes"] = str(payload.get("notes") or "")
+    if "cursor" in payload:
+        meta["annotation_cursor"] = payload.get("cursor")
+    manifest = _annotation_manifest_for_entry(entry)
+    meta["annotation_progress"] = manifest.get("progress") or {}
+    _annotation_persist_meta(entry, meta)
+    return {
+        "status": "saved",
+        "dataset_id": dataset_id,
+        "progress": manifest.get("progress") or {},
+    }
+
+
+def patch_dataset_annotation_meta(dataset_id: str, payload: Dict[str, Any]):
+    entry = _resolve_dataset_entry(dataset_id)
+    _meta_path, meta = _annotation_load_or_create_meta(entry)
+    _require_annotation_lock_owner(meta, payload or {})
+    if "status" in payload:
+        status_value = str(payload.get("status") or "").strip().lower()
+        if status_value and status_value not in DATASET_ANNOTATION_STATUSES:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="invalid_annotation_status"
+            )
+        if status_value:
+            meta["annotation_status"] = status_value
+    if "notes" in payload:
+        meta["annotation_notes"] = str(payload.get("notes") or "")
+    if "cursor" in payload:
+        meta["annotation_cursor"] = payload.get("cursor")
+    _annotation_persist_meta(entry, meta)
+    return {
+        "status": "saved",
+        "dataset_id": dataset_id,
+        "annotation_status": meta.get("annotation_status") or "new",
+        "annotation_notes": str(meta.get("annotation_notes") or ""),
+        "annotation_cursor": meta.get("annotation_cursor"),
+    }
+
+
+def start_transient_annotation_session(session_id: str, payload: Dict[str, Any]):
+    session = _resolve_transient_session(session_id)
+    with DATASET_TRANSIENT_LOCK:
+        lock_update = _annotation_update_lock(
+            session, payload or {}, force=bool((payload or {}).get("force"))
+        )
+        session["updated_at"] = time.time()
+        DATASET_TRANSIENT_SESSIONS[session_id] = session
+    if not lock_update.get("ok"):
+        return {
+            "status": "warning",
+            "session_id": session_id,
+            "warning": lock_update.get("warning"),
+            "lock": lock_update.get("lock"),
+        }
+    return {"status": "ok", "session_id": session_id, "lock": lock_update.get("lock")}
+
+
+def heartbeat_transient_annotation_session(session_id: str, payload: Dict[str, Any]):
+    return start_transient_annotation_session(session_id, payload or {})
+
+
+def stop_transient_annotation_session(session_id: str, payload: Dict[str, Any]):
+    session = _resolve_transient_session(session_id)
+    with DATASET_TRANSIENT_LOCK:
+        released = _annotation_release_lock(session, payload or {})
+        if not released.get("ok"):
+            raise HTTPException(
+                status_code=HTTP_409_CONFLICT,
+                detail=released.get("warning") or "annotation_lock_active",
+            )
+        session["updated_at"] = time.time()
+        DATASET_TRANSIENT_SESSIONS[session_id] = session
+    return {"status": "ok", "session_id": session_id, "lock": {}}
+
+
+def get_transient_annotation_manifest(session_id: str):
+    session = _resolve_transient_session(session_id)
+    dataset_root = _validate_linked_dataset_path(str(session.get("dataset_root") or ""))
+    yolo_layout = str(session.get("yolo_layout") or "flat")
+    rows: List[Dict[str, Any]] = []
+    overlay_labels = (
+        session.get("overlay_labels") if isinstance(session.get("overlay_labels"), dict) else {}
+    )
+    overlay_text = (
+        session.get("overlay_text") if isinstance(session.get("overlay_text"), dict) else {}
+    )
+    base_entry = {
+        "dataset_root": str(dataset_root),
+        "yolo_layout": yolo_layout,
+        "registry_root": None,
+    }
+    for image in _annotation_collect_images(base_entry):
+        split = _annotation_normalise_split(image.get("split"))
+        rel = _annotation_normalise_image_relpath(image.get("image_relpath"))
+        key = f"{split}:{rel.as_posix()}"
+        if key in overlay_labels:
+            lines = [str(x).strip() for x in (overlay_labels.get(key) or []) if str(x).strip()]
+        else:
+            source_path = _annotation_source_label_path(dataset_root, yolo_layout, split, rel)
+            lines = (
+                [
+                    ln.strip()
+                    for ln in source_path.read_text(encoding="utf-8").splitlines()
+                    if ln.strip()
+                ]
+                if source_path.exists()
+                else []
+            )
+        if key in overlay_text:
+            text_val = str(overlay_text.get(key) or "")
+        else:
+            text_val = _annotation_source_text_value(dataset_root, rel)
+        rows.append(
+            {
+                "split": split,
+                "image_relpath": str(rel.as_posix()),
+                "image_name": rel.name,
+                "label_lines": lines,
+                "text_label": text_val,
+            }
+        )
+    progress = _annotation_progress_from_rows(rows)
+    session["annotation_progress"] = progress
+    session["updated_at"] = time.time()
+    _persist_transient_session(session_id, session)
+    return {
+        "session_id": session_id,
+        "dataset_label": session.get("label") or dataset_root.name,
+        "dataset_root": str(dataset_root),
+        "storage_mode": "transient",
+        "labelmap": list(session.get("classes") or []),
+        "yolo_layout": yolo_layout,
+        "status": session.get("annotation_status") or "new",
+        "notes": str(session.get("annotation_notes") or ""),
+        "cursor": session.get("annotation_cursor"),
+        "lock": (
+            session.get("annotation_lock")
+            if isinstance(session.get("annotation_lock"), dict)
+            else {}
+        ),
+        "progress": progress,
+        "images": rows,
+    }
+
+
+def get_transient_annotation_image(session_id: str, split: str, image_relpath: str):
+    session = _resolve_transient_session(session_id)
+    dataset_root = _validate_linked_dataset_path(str(session.get("dataset_root") or ""))
+    split_norm = _annotation_normalise_split(split)
+    rel = _annotation_normalise_image_relpath(image_relpath)
+    image_path = _resolve_annotation_image_path(
+        dataset_root, str(session.get("yolo_layout") or "flat"), split_norm, rel
+    )
+    return FileResponse(str(image_path))
+
+
+def save_transient_annotation_snapshot(session_id: str, payload: Dict[str, Any]):
+    session = _resolve_transient_session(session_id)
+    _require_annotation_lock_owner(session, payload or {})
+    records = payload.get("records")
+    if not isinstance(records, list):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_records_required")
+    overlay_labels = (
+        session.get("overlay_labels") if isinstance(session.get("overlay_labels"), dict) else {}
+    )
+    overlay_text = (
+        session.get("overlay_text") if isinstance(session.get("overlay_text"), dict) else {}
+    )
+    for raw in records:
+        if not isinstance(raw, dict):
+            continue
+        split = _annotation_normalise_split(raw.get("split"))
+        rel = _annotation_normalise_image_relpath(raw.get("image_relpath") or raw.get("image_name"))
+        key = f"{split}:{rel.as_posix()}"
+        lines_raw = raw.get("label_lines")
+        if isinstance(lines_raw, list):
+            overlay_labels[key] = [str(line).strip() for line in lines_raw if str(line).strip()]
+        if "text_label" in raw:
+            overlay_text[key] = str(raw.get("text_label") or "").strip()
+    session["overlay_labels"] = overlay_labels
+    session["overlay_text"] = overlay_text
+    if "status" in payload:
+        status_value = str(payload.get("status") or "").strip().lower()
+        if status_value:
+            if status_value not in DATASET_ANNOTATION_STATUSES:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST, detail="invalid_annotation_status"
+                )
+            session["annotation_status"] = status_value
+    if "notes" in payload:
+        session["annotation_notes"] = str(payload.get("notes") or "")
+    if "cursor" in payload:
+        session["annotation_cursor"] = payload.get("cursor")
+    session["updated_at"] = time.time()
+    _persist_transient_session(session_id, session)
+    manifest = get_transient_annotation_manifest(session_id)
+    return {"status": "saved", "session_id": session_id, "progress": manifest.get("progress") or {}}
+
+
+def patch_transient_annotation_meta(session_id: str, payload: Dict[str, Any]):
+    session = _resolve_transient_session(session_id)
+    _require_annotation_lock_owner(session, payload or {})
+    if "status" in payload:
+        status_value = str(payload.get("status") or "").strip().lower()
+        if status_value and status_value not in DATASET_ANNOTATION_STATUSES:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="invalid_annotation_status"
+            )
+        if status_value:
+            session["annotation_status"] = status_value
+    if "notes" in payload:
+        session["annotation_notes"] = str(payload.get("notes") or "")
+    if "cursor" in payload:
+        session["annotation_cursor"] = payload.get("cursor")
+    session["updated_at"] = time.time()
+    _persist_transient_session(session_id, session)
+    return {
+        "status": "saved",
+        "session_id": session_id,
+        "annotation_status": session.get("annotation_status") or "new",
+        "annotation_notes": str(session.get("annotation_notes") or ""),
+        "annotation_cursor": session.get("annotation_cursor"),
+    }
 
 
 def list_glossary_library():
@@ -9730,7 +11446,9 @@ def delete_qwen_dataset(dataset_id: str):
     if not dataset_root.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_not_found")
     if not _path_is_within_root_impl(dataset_root.resolve(), QWEN_DATASET_ROOT.resolve()):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_delete_forbidden")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_delete_forbidden"
+        )
     shutil.rmtree(dataset_root, ignore_errors=True)
     return {"status": "deleted", "id": dataset_id}
 
@@ -9747,7 +11465,9 @@ def init_qwen_dataset_upload(run_name: Optional[str]) -> Dict[str, Any]:
     return {"job_id": job_id}
 
 
-def upload_qwen_dataset_chunk(job_id: str, split: str, image_name: str, annotation_line: str, file: UploadFile):
+def upload_qwen_dataset_chunk(
+    job_id: str, split: str, image_name: str, annotation_line: str, file: UploadFile
+):
     with QWEN_DATASET_UPLOADS_LOCK:
         job = QWEN_DATASET_UPLOADS.get(job_id)
     if not job:
@@ -9757,14 +11477,18 @@ def upload_qwen_dataset_chunk(job_id: str, split: str, image_name: str, annotati
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_split_invalid")
     annotation_text = str(annotation_line or "").strip()
     if "\n" in annotation_text or "\r" in annotation_text:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
+        )
     split_root = job.root_dir / split
     split_root.mkdir(parents=True, exist_ok=True)
     raw_image_name = image_name or file.filename or f"{uuid.uuid4().hex}.jpg"
     image_name_safe = Path(raw_image_name).name or f"{uuid.uuid4().hex}.jpg"
     image_path = (split_root / image_name_safe).resolve()
     if not _path_is_within_root_impl(image_path, split_root.resolve()):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_image_path_invalid")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_image_path_invalid"
+        )
     if image_path.exists():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="qwen_dataset_image_exists")
     written = 0
@@ -9800,7 +11524,12 @@ def upload_qwen_dataset_chunk(job_id: str, split: str, image_name: str, annotati
     else:
         job.val_count += 1
     job.updated_at = time.time()
-    return {"status": "ok", "job_id": job_id, "train_count": job.train_count, "val_count": job.val_count}
+    return {
+        "status": "ok",
+        "job_id": job_id,
+        "train_count": job.train_count,
+        "val_count": job.val_count,
+    }
 
 
 def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name: Optional[str]):
@@ -9831,9 +11560,17 @@ def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name
         "signature": _compute_dir_signature_impl(target_root),
         "type": "bbox",
     }
-    (target_root / "metadata.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    dataset_meta = {"context": meta["context"], "classes": labelmap, "created_at": int(time.time() * 1000)}
-    (target_root / "dataset_meta.json").write_text(json.dumps(dataset_meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    (target_root / "metadata.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    dataset_meta = {
+        "context": meta["context"],
+        "classes": labelmap,
+        "created_at": int(time.time() * 1000),
+    }
+    (target_root / "dataset_meta.json").write_text(
+        json.dumps(dataset_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return meta
 
 
@@ -9860,7 +11597,9 @@ def _resolve_sam3_dataset_meta(dataset_id: str) -> Dict[str, Any]:
     elif train_images.exists() and train_labels.exists():
         meta = _convert_yolo_dataset_to_coco_impl(dataset_root)
     else:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_dataset_type_unsupported")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="sam3_dataset_type_unsupported"
+        )
     meta["dataset_root"] = str(dataset_root)
     return meta
 
@@ -9878,7 +11617,11 @@ def list_sam3_dataset_classes(dataset_id: str):
     dataset_root = Path(entry["dataset_root"])
     labelmap_path = dataset_root / "labelmap.txt"
     if labelmap_path.exists():
-        classes = [line.strip() for line in labelmap_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        classes = [
+            line.strip()
+            for line in labelmap_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
     return {"dataset_id": dataset_id, "classes": classes}
 
 
@@ -10018,10 +11761,13 @@ def _patch_ultralytics_for_head_grafting() -> None:
     def parse_model_patched(d, ch, verbose=True):
         import ast
         import contextlib
+
         legacy = True
         max_channels = float("inf")
         nc, act, scales = (d.get(x) for x in ("nc", "activation", "scales"))
-        depth, width, kpt_shape = (d.get(x, 1.0) for x in ("depth_multiple", "width_multiple", "kpt_shape"))
+        depth, width, kpt_shape = (
+            d.get(x, 1.0) for x in ("depth_multiple", "width_multiple", "kpt_shape")
+        )
         scale = d.get("scale")
         if scales:
             if not scale:
@@ -10035,9 +11781,12 @@ def _patch_ultralytics_for_head_grafting() -> None:
                 yolo_tasks.LOGGER.info(f"{yolo_tasks.colorstr('activation:')} {act}")
 
         if verbose:
-            yolo_tasks.LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
+            yolo_tasks.LOGGER.info(
+                f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}"
+            )
         ch = [ch]
         layers, save, c2 = [], [], ch[-1]
+
         def _opt(name: str):
             return getattr(yolo_tasks, name, None)
 
@@ -10115,9 +11864,11 @@ def _patch_ultralytics_for_head_grafting() -> None:
             m = (
                 getattr(torch.nn, m[3:])
                 if "nn." in m
-                else getattr(__import__("torchvision").ops, m[16:])
-                if "torchvision.ops." in m
-                else getattr(yolo_tasks, m)
+                else (
+                    getattr(__import__("torchvision").ops, m[16:])
+                    if "torchvision.ops." in m
+                    else getattr(yolo_tasks, m)
+                )
             )
             if m is None:
                 raise KeyError(f"module_not_found:{m_name}")
@@ -10132,7 +11883,11 @@ def _patch_ultralytics_for_head_grafting() -> None:
                     c2 = yolo_tasks.make_divisible(min(c2, max_channels) * width, 8)
                 if _opt("C2fAttn") is not None and m is _opt("C2fAttn"):
                     args[1] = yolo_tasks.make_divisible(min(args[1], max_channels // 2) * width, 8)
-                    args[2] = int(max(round(min(args[2], max_channels // 2 // 32)) * width, 1) if args[2] > 1 else args[2])
+                    args[2] = int(
+                        max(round(min(args[2], max_channels // 2 // 32)) * width, 1)
+                        if args[2] > 1
+                        else args[2]
+                    )
                 args = [c1, c2, *args[1:]]
                 if m in repeat_modules:
                     args.insert(2, n)
@@ -10167,9 +11922,22 @@ def _patch_ultralytics_for_head_grafting() -> None:
                 args.append([ch[x] for x in f])
                 seg_cls = _opt("Segment")
                 yoloe_seg_cls = _opt("YOLOESegment")
-                if (seg_cls is not None and m is seg_cls) or (yoloe_seg_cls is not None and m is yoloe_seg_cls):
+                if (seg_cls is not None and m is seg_cls) or (
+                    yoloe_seg_cls is not None and m is yoloe_seg_cls
+                ):
                     args[2] = yolo_tasks.make_divisible(min(args[2], max_channels) * width, 8)
-                detect_like = {x for x in [_opt("Detect"), _opt("YOLOEDetect"), _opt("Segment"), _opt("YOLOESegment"), _opt("Pose"), _opt("OBB")] if x is not None}
+                detect_like = {
+                    x
+                    for x in [
+                        _opt("Detect"),
+                        _opt("YOLOEDetect"),
+                        _opt("Segment"),
+                        _opt("YOLOESegment"),
+                        _opt("Pose"),
+                        _opt("OBB"),
+                    ]
+                    if x is not None
+                }
                 if m in detect_like:
                     m.legacy = legacy
             elif _opt("RTDETRDecoder") is not None and m is _opt("RTDETRDecoder"):
@@ -10222,7 +11990,9 @@ def _patch_ultralytics_for_head_grafting() -> None:
         if nc and nc != self.yaml["nc"]:
             yolo_tasks.LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc
-        self.model, self.save = yolo_tasks.parse_model(yolo_tasks.deepcopy(self.yaml), ch=ch, verbose=verbose)
+        self.model, self.save = yolo_tasks.parse_model(
+            yolo_tasks.deepcopy(self.yaml), ch=ch, verbose=verbose
+        )
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}
         self.inplace = self.yaml.get("inplace", True)
         self.end2end = getattr(self.model[-1], "end2end", False)
@@ -10239,14 +12009,21 @@ def _patch_ultralytics_for_head_grafting() -> None:
                         self.forward(x)[0]
                         if isinstance(
                             detect_layer,
-                            (yolo_tasks.Segment, yolo_tasks.YOLOESegment, yolo_tasks.Pose, yolo_tasks.OBB),
+                            (
+                                yolo_tasks.Segment,
+                                yolo_tasks.YOLOESegment,
+                                yolo_tasks.Pose,
+                                yolo_tasks.OBB,
+                            ),
                         )
                         else self.forward(x)
                     )
 
                 self.model.eval()
                 m.training = True
-                m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])
+                m.stride = torch.tensor(
+                    [s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))]
+                )
                 self.stride = m.stride
                 self.model.train()
                 m.bias_init()
@@ -10264,7 +12041,6 @@ def _patch_ultralytics_for_head_grafting() -> None:
     YOLO_HEAD_GRAFT_PATCHED = True
 
 
-
 ## NOTE: YOLO YAML/head helpers use *_impl directly to avoid wrapper drift.
 
 
@@ -10275,8 +12051,15 @@ def _ensure_yolo_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
         load_labelmap_fn=_yolo_load_labelmap_impl,
         patch_ultralytics_fn=_patch_ultralytics_for_head_grafting,
         yolo_lock=YOLO_INFER_LOCK,
-        get_state_fn=lambda: (yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task),
-        set_state_fn=lambda model, path, labelmap, task: _set_yolo_infer_state(model, path, labelmap, task),
+        get_state_fn=lambda: (
+            yolo_infer_model,
+            yolo_infer_path,
+            yolo_infer_labelmap,
+            yolo_infer_task,
+        ),
+        set_state_fn=lambda model, path, labelmap, task: _set_yolo_infer_state(
+            model, path, labelmap, task
+        ),
         import_yolo_fn=lambda: __import__("ultralytics").YOLO,  # type: ignore[attr-defined]
         http_exception_cls=HTTPException,
     )
@@ -10339,7 +12122,9 @@ def _ensure_rfdetr_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
     )
 
 
-def _ensure_yolo_inference_runtime_for_detector(detector_id: Optional[str]) -> Tuple[Any, List[str], Optional[str]]:
+def _ensure_yolo_inference_runtime_for_detector(
+    detector_id: Optional[str],
+) -> Tuple[Any, List[str], Optional[str]]:
     detector_run_id = str(detector_id or "").strip()
     if not detector_run_id:
         return _ensure_yolo_inference_runtime()
@@ -10375,7 +12160,9 @@ def _ensure_yolo_inference_runtime_for_detector(detector_id: Optional[str]) -> T
         return model, labelmap, task
 
 
-def _ensure_rfdetr_inference_runtime_for_detector(detector_id: Optional[str]) -> Tuple[Any, List[str], Optional[str]]:
+def _ensure_rfdetr_inference_runtime_for_detector(
+    detector_id: Optional[str],
+) -> Tuple[Any, List[str], Optional[str]]:
     detector_run_id = str(detector_id or "").strip()
     if not detector_run_id:
         return _ensure_rfdetr_inference_runtime()
@@ -10415,7 +12202,11 @@ def _ensure_rfdetr_inference_runtime_for_detector(detector_id: Optional[str]) ->
         if not model_cls:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_variant_unknown")
         device_str = _resolve_rfdetr_infer_device()
-        if isinstance(device_str, str) and device_str.startswith("cuda") and torch.cuda.is_available():
+        if (
+            isinstance(device_str, str)
+            and device_str.startswith("cuda")
+            and torch.cuda.is_available()
+        ):
             try:
                 torch.cuda.set_device(device_str)
             except Exception:
@@ -10487,7 +12278,9 @@ def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
     freed += max(0, before - after)
     marker = run_dir / ".promoted"
     try:
-        marker.write_text(json.dumps({"timestamp": time.time(), "keep": str(keep)}), encoding="utf-8")
+        marker.write_text(
+            json.dumps({"timestamp": time.time(), "keep": str(keep)}), encoding="utf-8"
+        )
     except Exception:
         pass
     return {
@@ -10548,10 +12341,14 @@ _delete_agent_recipe = functools.partial(
     http_exception_cls=HTTPException,
 )
 
-_list_agent_recipes = functools.partial(_list_agent_recipes_impl, recipes_root=AGENT_MINING_RECIPES_ROOT)
+_list_agent_recipes = functools.partial(
+    _list_agent_recipes_impl, recipes_root=AGENT_MINING_RECIPES_ROOT
+)
 
 
-_ensure_recipe_zip = functools.partial(_ensure_recipe_zip_impl, recipes_root=AGENT_MINING_RECIPES_ROOT)
+_ensure_recipe_zip = functools.partial(
+    _ensure_recipe_zip_impl, recipes_root=AGENT_MINING_RECIPES_ROOT
+)
 
 
 _import_agent_recipe_zip_bytes = functools.partial(
@@ -10587,7 +12384,9 @@ _persist_agent_cascade = functools.partial(
 ## NOTE: agent cascade loader uses *_impl directly to avoid wrapper drift.
 
 
-_list_agent_cascades = functools.partial(_list_agent_cascades_impl, cascades_root=AGENT_MINING_CASCADES_ROOT)
+_list_agent_cascades = functools.partial(
+    _list_agent_cascades_impl, cascades_root=AGENT_MINING_CASCADES_ROOT
+)
 
 _delete_agent_cascade = functools.partial(
     _delete_agent_cascade_impl,
@@ -10768,7 +12567,12 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
             for prompt in candidates:
                 step_label = f"{class_name}: '{prompt}'"
                 try:
-                    job.logs.append({"ts": time.time(), "msg": f"Running {step_label} on {len(sampled_images)} images"})
+                    job.logs.append(
+                        {
+                            "ts": time.time(),
+                            "msg": f"Running {step_label} on {len(sampled_images)} images",
+                        }
+                    )
                     if len(job.logs) > MAX_JOB_LOGS:
                         job.logs[:] = job.logs[-MAX_JOB_LOGS:]
                 except Exception:
@@ -10789,7 +12593,10 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
                 if job.total_steps:
                     job.progress = min(1.0, job.completed_steps / job.total_steps)
                 job.updated_at = time.time()
-            candidate_results.sort(key=lambda m: (m.get("score", 0.0), m.get("recall", 0.0), m.get("precision", 0.0)), reverse=True)
+            candidate_results.sort(
+                key=lambda m: (m.get("score", 0.0), m.get("recall", 0.0), m.get("precision", 0.0)),
+                reverse=True,
+            )
             results.append(
                 {
                     "class_id": cat_id,
@@ -10864,9 +12671,13 @@ def _run_prompt_helper_search_job(job: PromptHelperJob, payload: PromptHelperSea
         all_img_ids = list(images.keys())
         image_cache: Dict[int, Image.Image] = {}
         if target_class_id is not None:
-            categories = [c for c in categories if int(c.get("id", categories.index(c))) == target_class_id]
+            categories = [
+                c for c in categories if int(c.get("id", categories.index(c))) == target_class_id
+            ]
             if not categories:
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="search_class_not_found")
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST, detail="search_class_not_found"
+                )
 
         total_steps = 0
         for idx, cat in enumerate(categories):
@@ -10943,7 +12754,9 @@ def _run_prompt_helper_search_job(job: PromptHelperJob, payload: PromptHelperSea
                 if payload.precision_floor > 0:
                     penalty = min(1.0, metrics["precision"] / max(payload.precision_floor, 1e-6))
                 metrics["precision_penalty"] = penalty
-                metrics["search_score"] = metrics["recall"] * (0.5 + 0.5 * metrics["det_rate"]) * penalty
+                metrics["search_score"] = (
+                    metrics["recall"] * (0.5 + 0.5 * metrics["det_rate"]) * penalty
+                )
                 metrics["images_evaluated"] = len(eval_ids)
                 metrics["positive_images"] = len(pos_ids)
                 metrics["negative_images"] = len(neg_ids)
@@ -10999,7 +12812,9 @@ def _stable_sample_ids(ids: Sequence[int], cap: int, seed: int, salt: str = "") 
     return pool[: min(len(pool), cap)]
 
 
-def _sample_images_for_category(class_id: int, img_ids: Sequence[int], sample_size: int, seed: int) -> List[int]:
+def _sample_images_for_category(
+    class_id: int, img_ids: Sequence[int], sample_size: int, seed: int
+) -> List[int]:
     return _stable_sample_ids(img_ids, cap=sample_size, seed=seed, salt=f"pos:{class_id}")
 
 
@@ -11025,8 +12840,12 @@ _PROMPT_VARIANT_FALLBACKS: Dict[str, List[str]] = {
 }
 
 
-def _generate_prompt_variants_for_class(class_name: str, max_synonyms: int, use_qwen: bool) -> List[str]:
-    base = _sanitize_prompts_impl([str(class_name or "").replace("_", " ").strip()]) or [str(class_name or "").strip()]
+def _generate_prompt_variants_for_class(
+    class_name: str, max_synonyms: int, use_qwen: bool
+) -> List[str]:
+    base = _sanitize_prompts_impl([str(class_name or "").replace("_", " ").strip()]) or [
+        str(class_name or "").strip()
+    ]
     if max_synonyms <= 0:
         return base
     extras: List[str] = []
@@ -11122,7 +12941,7 @@ def _evaluate_prompt_for_class(
             preds.append((score, (float(x1), float(y1), float(x2), float(y2))))
         preds.sort(key=lambda item: item[0], reverse=True)
         if max_dets > 0:
-            preds = preds[: max_dets]
+            preds = preds[:max_dets]
         total_preds += len(preds)
         if preds:
             images_with_preds += 1
@@ -11147,7 +12966,9 @@ def _evaluate_prompt_for_class(
                     matched_this_image = True
                     total_matches += 1
                     prev = gt_best_scores.get(gt_key)
-                    gt_best_scores[gt_key] = float(score) if prev is None else max(float(prev), float(score))
+                    gt_best_scores[gt_key] = (
+                        float(score) if prev is None else max(float(prev), float(score))
+                    )
             else:
                 total_fps += 1
                 fp_scores.append(float(score))
@@ -11155,7 +12976,11 @@ def _evaluate_prompt_for_class(
             images_with_match += 1
     precision = float(total_matches / total_preds) if total_preds > 0 else 0.0
     recall = float(total_matches / total_gt) if total_gt > 0 else 0.0
-    f1 = float((2.0 * precision * recall) / (precision + recall)) if (precision + recall) > 0 else 0.0
+    f1 = (
+        float((2.0 * precision * recall) / (precision + recall))
+        if (precision + recall) > 0
+        else 0.0
+    )
     image_count = max(1, len(image_ids))
     det_rate = float(images_with_preds / image_count)
     coverage_rate = float(images_with_match / image_count)
@@ -11214,7 +13039,9 @@ def _ensure_agent_mining_sample(
     if not image_ids:
         image_ids = sorted(int(i) for i in images.keys())
     image_ids = sorted(set(image_ids))
-    sampled = _stable_sample_ids(image_ids, cap=max(1, int(sample_size)), seed=int(seed), salt=f"agent:{dataset_id}")
+    sampled = _stable_sample_ids(
+        image_ids, cap=max(1, int(sample_size)), seed=int(seed), salt=f"agent:{dataset_id}"
+    )
     result = {
         "sample_ids": sampled,
         "total_available": len(image_ids),
@@ -11276,7 +13103,9 @@ def _estimate_agent_global_optimizer_image_evals(
     return int(total), budgets, False
 
 
-def _resolve_steps_prompt_prefilter_config(payload: AgentMiningRequest, *, allow_prefilter: bool) -> Dict[str, Any]:
+def _resolve_steps_prompt_prefilter_config(
+    payload: AgentMiningRequest, *, allow_prefilter: bool
+) -> Dict[str, Any]:
     requested = bool(getattr(payload, "steps_prompt_prefilter", False))
     mode = str(getattr(payload, "steps_prompt_prefilter_mode", "balanced") or "balanced").lower()
     table = {
@@ -11296,7 +13125,9 @@ def _resolve_steps_prompt_prefilter_config(payload: AgentMiningRequest, *, allow
     }
 
 
-def _resolve_steps_prompt_bg_drop_config(payload: AgentMiningRequest, *, allow_drop: bool) -> Dict[str, Any]:
+def _resolve_steps_prompt_bg_drop_config(
+    payload: AgentMiningRequest, *, allow_drop: bool
+) -> Dict[str, Any]:
     requested = bool(getattr(payload, "steps_prompt_bg_drop", False))
     mode = str(getattr(payload, "steps_prompt_bg_drop_mode", "balanced") or "balanced").lower()
     table = {
@@ -11374,8 +13205,12 @@ def _prefilter_prompts_with_clip(
     sticky = _sanitize_prompts_impl([str(p) for p in keep_prompts if isinstance(p, str)])
     if not sanitized:
         return sticky
-    keep_target = max(len(sticky), max(1, int(round(len(sanitized) * max(0.1, min(1.0, keep_ratio))))))
-    eval_subset = _stable_sample_ids(eval_ids, cap=max(1, int(sample_size)), seed=seed, salt=f"prefilter:{cat_id}")
+    keep_target = max(
+        len(sticky), max(1, int(round(len(sanitized) * max(0.1, min(1.0, keep_ratio)))))
+    )
+    eval_subset = _stable_sample_ids(
+        eval_ids, cap=max(1, int(sample_size)), seed=seed, salt=f"prefilter:{cat_id}"
+    )
     cache: Dict[int, Image.Image] = {}
     scored: List[Tuple[float, str]] = []
     for prompt in sanitized:
@@ -11426,7 +13261,9 @@ class _Sam3GreedyEvalWorker:
         return
 
 
-def _build_sam3_greedy_eval_workers(payload: AgentMiningRequest, *, log_fn: Optional[Callable[[str], None]] = None) -> List[_Sam3GreedyEvalWorker]:
+def _build_sam3_greedy_eval_workers(
+    payload: AgentMiningRequest, *, log_fn: Optional[Callable[[str], None]] = None
+) -> List[_Sam3GreedyEvalWorker]:
     workers = max(1, int(getattr(payload, "max_workers", 1) or 1))
     result = [_Sam3GreedyEvalWorker() for _ in range(workers)]
     if callable(log_fn):
@@ -11478,7 +13315,9 @@ def _mine_seed_prompt_stats_image_first(
                 "prompt": str(prompt),
                 "seed_threshold": float(payload.seed_threshold),
                 "bg_drop": False,
-                "clip_head_used": bool(clip_head is not None and clip_head_target_index is not None),
+                "clip_head_used": bool(
+                    clip_head is not None and clip_head_target_index is not None
+                ),
                 "clip_head_bg_enabled": bool(prompt_bg_drop_cfg.get("enabled")),
                 "clip_head_bg_classes": list(clip_head_bg_indices or []),
             }
@@ -11504,11 +13343,18 @@ def _mine_seed_prompt_stats_image_first(
     return stats
 
 
-def _resolve_steps_early_stop_config(payload: AgentMiningRequest, *, target_precision: Optional[float]) -> Dict[str, Any]:
+def _resolve_steps_early_stop_config(
+    payload: AgentMiningRequest, *, target_precision: Optional[float]
+) -> Dict[str, Any]:
     requested = bool(getattr(payload, "steps_early_stop", False))
     mode = str(getattr(payload, "steps_early_stop_mode", "balanced") or "balanced").lower()
     table = {
-        "conservative": {"min_steps": 3, "window": 3, "min_increment": 0.01, "precision_margin": 0.03},
+        "conservative": {
+            "min_steps": 3,
+            "window": 3,
+            "min_increment": 0.01,
+            "precision_margin": 0.03,
+        },
         "balanced": {"min_steps": 2, "window": 2, "min_increment": 0.005, "precision_margin": 0.05},
         "aggressive": {"min_steps": 1, "window": 2, "min_increment": 0.0, "precision_margin": 0.08},
     }
@@ -11704,7 +13550,9 @@ def _apply_agent_recipe_to_image(
             if not prompt:
                 continue
             try:
-                seed_threshold = float(step.get("seed_threshold", recipe_obj.get("seed_threshold", 0.0)))
+                seed_threshold = float(
+                    step.get("seed_threshold", recipe_obj.get("seed_threshold", 0.0))
+                )
             except Exception:
                 seed_threshold = 0.0
             try:
@@ -11716,7 +13564,9 @@ def _apply_agent_recipe_to_image(
         for prompt in recipe_obj.get("text_prompts") or []:
             cleaned = str(prompt).strip()
             if cleaned:
-                prompts.append((cleaned, float(recipe_obj.get("seed_threshold", 0.0) or 0.0), int(max_results)))
+                prompts.append(
+                    (cleaned, float(recipe_obj.get("seed_threshold", 0.0) or 0.0), int(max_results))
+                )
     if not prompts:
         fallback = str(class_name or recipe_obj.get("class_name") or "").strip()
         if fallback:
@@ -11777,7 +13627,9 @@ def _suggest_prompts_for_dataset(payload: PromptHelperSuggestRequest) -> Dict[st
         except Exception:
             cat_id = idx
         class_name = str(cat.get("name", f"class_{cat_id}"))
-        prompts = _generate_prompt_variants_for_class(class_name, int(payload.max_synonyms), bool(payload.use_qwen))
+        prompts = _generate_prompt_variants_for_class(
+            class_name, int(payload.max_synonyms), bool(payload.use_qwen)
+        )
         classes.append(
             {
                 "class_id": cat_id,
@@ -11831,10 +13683,20 @@ class _Sam1SegWorker:
                 outputs[task_id] = []
                 continue
             dets: List[Dict[str, Any]] = []
-            masks_arr = np.asarray(masks) if masks is not None else np.zeros((0, pil_img.height, pil_img.width), dtype=np.uint8)
-            scores_arr = np.asarray(scores).reshape(-1) if scores is not None else np.zeros((len(masks_arr),), dtype=np.float32)
+            masks_arr = (
+                np.asarray(masks)
+                if masks is not None
+                else np.zeros((0, pil_img.height, pil_img.width), dtype=np.uint8)
+            )
+            scores_arr = (
+                np.asarray(scores).reshape(-1)
+                if scores is not None
+                else np.zeros((len(masks_arr),), dtype=np.float32)
+            )
             order = list(range(len(masks_arr)))
-            order.sort(key=lambda i: float(scores_arr[i]) if i < len(scores_arr) else 0.0, reverse=True)
+            order.sort(
+                key=lambda i: float(scores_arr[i]) if i < len(scores_arr) else 0.0, reverse=True
+            )
             for idx in order[: max(1, int(max_results))]:
                 score = float(scores_arr[idx]) if idx < len(scores_arr) else 0.0
                 if score < float(min_threshold):
@@ -11943,7 +13805,9 @@ def _persist_qwen_run_metadata(
     return metadata
 
 
-def _build_qwen_config(payload: QwenTrainRequest, job_id: str, prep_logs: Optional[List[str]] = None) -> QwenTrainingConfig:
+def _build_qwen_config(
+    payload: QwenTrainRequest, job_id: str, prep_logs: Optional[List[str]] = None
+) -> QwenTrainingConfig:
     if QwenTrainingConfig is None:
         raise HTTPException(
             status_code=HTTP_503_SERVICE_UNAVAILABLE,
@@ -11972,11 +13836,15 @@ def _build_qwen_config(payload: QwenTrainRequest, job_id: str, prep_logs: Option
         prep_logs.append(f"Dataset: {dataset_root}")
         prep_logs.append(f"Output: {result_path}")
         if bool(payload.random_split):
-            prep_logs.append("random_split requested but current trainer uses existing dataset splits")
+            prep_logs.append(
+                "random_split requested but current trainer uses existing dataset splits"
+            )
     kwargs = {
         "dataset_root": str(dataset_root),
         "result_path": str(result_path),
-        "model_id": payload.model_id or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+        "model_id": payload.model_id
+        or (active_qwen_metadata or {}).get("model_id")
+        or QWEN_MODEL_NAME,
         "training_mode": payload.training_mode or "official_lora",
         "system_prompt": payload.system_prompt or DEFAULT_SYSTEM_PROMPT,
         "run_name": run_name,
@@ -11984,22 +13852,38 @@ def _build_qwen_config(payload: QwenTrainRequest, job_id: str, prep_logs: Option
         "batch_size": int(payload.batch_size) if payload.batch_size is not None else 1,
         "max_epochs": int(payload.max_epochs) if payload.max_epochs is not None else 3,
         "lr": float(payload.lr) if payload.lr is not None else 2e-4,
-        "accumulate_grad_batches": int(payload.accumulate_grad_batches) if payload.accumulate_grad_batches is not None else 8,
+        "accumulate_grad_batches": (
+            int(payload.accumulate_grad_batches)
+            if payload.accumulate_grad_batches is not None
+            else 8
+        ),
         "warmup_steps": int(payload.warmup_steps) if payload.warmup_steps is not None else 50,
         "num_workers": int(payload.num_workers) if payload.num_workers is not None else 0,
         "lora_rank": int(payload.lora_rank) if payload.lora_rank is not None else 8,
         "lora_alpha": int(payload.lora_alpha) if payload.lora_alpha is not None else 16,
         "lora_dropout": float(payload.lora_dropout) if payload.lora_dropout is not None else 0.05,
-        "lora_target_modules": payload.lora_target_modules
-        if payload.lora_target_modules
-        else ["q_proj", "k_proj", "v_proj", "o_proj"],
+        "lora_target_modules": (
+            payload.lora_target_modules
+            if payload.lora_target_modules
+            else ["q_proj", "k_proj", "v_proj", "o_proj"]
+        ),
         "seed": int(payload.seed) if payload.seed is not None else 1337,
-        "log_every_n_steps": int(payload.log_every_n_steps) if payload.log_every_n_steps is not None else 10,
+        "log_every_n_steps": (
+            int(payload.log_every_n_steps) if payload.log_every_n_steps is not None else 10
+        ),
         "max_pixels": int(payload.max_pixels) if payload.max_pixels is not None else 28 * 28 * 576,
         "min_pixels": int(payload.min_pixels) if payload.min_pixels is not None else 28 * 28 * 16,
         "max_length": int(payload.max_length) if payload.max_length is not None else None,
-        "train_limit": int(payload.train_limit) if payload.train_limit is not None and payload.train_limit > 0 else None,
-        "val_limit": int(payload.val_limit) if payload.val_limit is not None and payload.val_limit > 0 else None,
+        "train_limit": (
+            int(payload.train_limit)
+            if payload.train_limit is not None and payload.train_limit > 0
+            else None
+        ),
+        "val_limit": (
+            int(payload.val_limit)
+            if payload.val_limit is not None and payload.val_limit > 0
+            else None
+        ),
     }
     return QwenTrainingConfig(**kwargs)
 
@@ -12215,10 +14099,8 @@ def _select_steps_from_seed_prompt_stats(
     selected: List[Dict[str, Any]] = []
     for entry in prompt_stats:
         curve = entry.get("seed_threshold_curve") or []
-        curve = list(curve)[: max_candidates_per_prompt]
-        candidates = [
-            c for c in curve if float(c.get("precision", 0.0)) >= target_precision_value
-        ]
+        curve = list(curve)[:max_candidates_per_prompt]
+        candidates = [c for c in curve if float(c.get("precision", 0.0)) >= target_precision_value]
         if candidates:
             candidates.sort(
                 key=lambda c: (
@@ -12243,9 +14125,7 @@ def _select_steps_from_seed_prompt_stats(
             best = {"threshold": entry.get("seed_threshold", 0.0)}
         threshold = float(best.get("threshold", 0.0))
         gt_scores = entry.get("gt_best_scores") or {}
-        matched_keys = {
-            key for key, score in gt_scores.items() if float(score) >= float(threshold)
-        }
+        matched_keys = {key for key, score in gt_scores.items() if float(score) >= float(threshold)}
         selected.append(
             {
                 **entry,
@@ -12298,7 +14178,11 @@ def _select_steps_from_seed_prompt_stats(
                 "reason": "not_triggered",
             }
     else:
-        info["early_stop"] = {"enabled": False, "selected_steps": len(chosen), "max_steps": int(max_steps)}
+        info["early_stop"] = {
+            "enabled": False,
+            "selected_steps": len(chosen),
+            "max_steps": int(max_steps),
+        }
     return chosen, info
 
 
@@ -12312,7 +14196,9 @@ def _generate_steps_global_mutations(
     enable_max_results: bool,
     enable_ordering: bool,
 ) -> List[Dict[str, Any]]:
-    base_steps = _normalize_steps_for_head_tuning(base_candidate.get("steps") or [], payload=payload)
+    base_steps = _normalize_steps_for_head_tuning(
+        base_candidate.get("steps") or [], payload=payload
+    )
     stats_by_prompt = {
         str(s.get("prompt") or ""): s for s in seed_stats if str(s.get("prompt") or "")
     }
@@ -12344,7 +14230,9 @@ def _generate_steps_global_mutations(
                     "max_visual_seeds": int(payload.steps_max_visual_seeds_per_step),
                     "seed_dedupe_iou": float(payload.seed_dedupe_iou),
                     "dedupe_iou": float(payload.dedupe_iou),
-                    "max_results": int(payload.max_results if enable_max_results else payload.max_results),
+                    "max_results": int(
+                        payload.max_results if enable_max_results else payload.max_results
+                    ),
                 }
             )
         if enable_ordering:
@@ -12373,7 +14261,13 @@ def _successive_halving_search(
             scored.append((score, cand, meta))
         scored.sort(key=lambda row: row[0], reverse=True)
         keep = max(1, int(len(scored) * keep_ratio))
-        history.append({"budget": budget, "candidates": [row[1] for row in scored], "scores": [row[0] for row in scored]})
+        history.append(
+            {
+                "budget": budget,
+                "candidates": [row[1] for row in scored],
+                "scores": [row[0] for row in scored],
+            }
+        )
         current = [row[1] for row in scored[:keep]]
     best = current[0] if current else None
     return best, history
@@ -12393,7 +14287,7 @@ def _run_steps_global_successive_halving_rounds(
     history: List[Dict[str, Any]] = []
     for round_idx in range(int(rounds)):
         candidates = mutate(best, round_idx) or []
-        candidates = list(candidates)[: max_trials]
+        candidates = list(candidates)[:max_trials]
         best_candidate, stage_history = _successive_halving_search(
             candidates=candidates, budgets=budgets, evaluator=evaluator, keep_ratio=keep_ratio
         )
@@ -12464,7 +14358,9 @@ def _refine_steps_prompt_subset_seed_stage(
                 if refined:
                     refined.sort(key=lambda e: len(e.get("matched_keys") or []))
                     dropped = refined.pop(0)
-                    info["history"].append({"op": "swap", "dropped": dropped.get("prompt"), "added": prompt})
+                    info["history"].append(
+                        {"op": "swap", "dropped": dropped.get("prompt"), "added": prompt}
+                    )
                 refined.append(
                     {
                         **candidate,
@@ -12502,7 +14398,9 @@ def _parse_tool_call_json(raw_text: str) -> Tuple[Optional[Dict[str, Any]], Opti
         return None, f"parse_error:{exc}"
 
 
-def _infer_clip_model_from_embedding_dim(embed_dim: int, active_name: Optional[str] = None) -> Optional[str]:
+def _infer_clip_model_from_embedding_dim(
+    embed_dim: int, active_name: Optional[str] = None
+) -> Optional[str]:
     return _infer_clip_model_from_embedding_dim_impl(
         embed_dim, active_name=active_name or clip_model_name or DEFAULT_CLIP_MODEL
     )
@@ -12530,7 +14428,9 @@ def _build_prompt_recipe(
     image_ids: List[int],
     gt_index: Dict[int, List[Tuple[str, Tuple[float, float, float, float]]]],
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    return _build_prompt_recipe_impl(candidates, all_gt_keys, per_image_gt, images, image_ids, gt_index)
+    return _build_prompt_recipe_impl(
+        candidates, all_gt_keys, per_image_gt, images, image_ids, gt_index
+    )
 
 
 def _build_qwen_caption_prompt(*args: Any, **kwargs: Any) -> Any:
@@ -12632,7 +14532,10 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
         )
         coco, gt_by_image_cat, images = _load_coco_index_impl(dataset_root)
         categories = coco.get("categories") or []
-        cat_entry = next((c for c in categories if int(c.get("id", categories.index(c))) == payload.class_id), None)
+        cat_entry = next(
+            (c for c in categories if int(c.get("id", categories.index(c))) == payload.class_id),
+            None,
+        )
         if not cat_entry:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="recipe_class_not_found")
         class_name = str(cat_entry.get("name", f"class_{payload.class_id}"))
@@ -12665,7 +14568,9 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
             payload.class_id,
             xywh_to_xyxy_fn=_xywh_to_xyxy,
         )
-        gt_index = {img_id: entries for img_id, entries in gt_index_all.items() if img_id in eval_ids}
+        gt_index = {
+            img_id: entries for img_id, entries in gt_index_all.items() if img_id in eval_ids
+        }
         per_image_gt = {img_id: per_image_gt_all.get(img_id, 0) for img_id in eval_ids}
         all_gt_keys = set()
         for entries in gt_index.values():
@@ -12760,7 +14665,11 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
             "config": payload.dict(),
             "candidates": [
                 {
-                    **{k: v for k, v in cand.items() if k not in {"matched_gt_keys", "matches_by_image"}},
+                    **{
+                        k: v
+                        for k, v in cand.items()
+                        if k not in {"matched_gt_keys", "matches_by_image"}
+                    },
                     "matched_gt": len(cand.get("matched_gt_keys") or []),
                 }
                 for cand in candidates
@@ -12837,11 +14746,15 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         )
         eval_ids = [int(i) for i in (sample.get("sample_ids") or [])]
         if not eval_ids:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_empty_sample")
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_empty_sample"
+            )
         _log(f"Prepared sample with {len(eval_ids)} images (cached={sample.get('_cached', False)})")
         sample_hash = "unknown"
         try:
-            sample_hash = hashlib.sha256(",".join(str(i) for i in eval_ids).encode("utf-8")).hexdigest()[:12]
+            sample_hash = hashlib.sha256(
+                ",".join(str(i) for i in eval_ids).encode("utf-8")
+            ).hexdigest()[:12]
         except Exception:
             sample_hash = "unknown"
         job.progress = 0.05
@@ -12869,7 +14782,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 continue
             selected_categories.append((cid, str(cat.get("name", f"class_{cid}"))))
         if not selected_categories:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_no_classes_selected")
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_no_classes_selected"
+            )
 
         _log(
             "Config: "
@@ -12893,7 +14808,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             http_exception_cls=HTTPException,
         )
         if clip_head_path is None:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required")
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required"
+            )
         clip_head = _load_clip_head_from_classifier_impl(
             clip_head_path,
             joblib_load_fn=joblib.load,
@@ -12906,7 +14823,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             logger=logger,
         )
         if not isinstance(clip_head, dict):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required")
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required"
+            )
         head_encoder_type = str(clip_head.get("encoder_type") or "clip").lower().strip()
         if not head_encoder_type:
             head_encoder_type = "clip"
@@ -12923,8 +14842,14 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         except Exception:
             head_mode_bits = ""
         clip_name = clip_head.get("clip_model") if isinstance(clip_head, dict) else None
-        clip_name_str = str(clip_name).strip() if isinstance(clip_name, str) and clip_name.strip() else "unknown"
-        classes_list = clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else []
+        clip_name_str = (
+            str(clip_name).strip()
+            if isinstance(clip_name, str) and clip_name.strip()
+            else "unknown"
+        )
+        classes_list = (
+            clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else []
+        )
         _log(
             "Pretrained CLIP head enabled: "
             f"{clip_head_path.name} "
@@ -12939,12 +14864,18 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 if len(preview_items) >= preview_limit:
                     break
             preview = ", ".join(preview_items)
-            suffix = f", … (+{len(classes_list) - preview_limit} more)" if len(classes_list) > preview_limit else ""
+            suffix = (
+                f", … (+{len(classes_list) - preview_limit} more)"
+                if len(classes_list) > preview_limit
+                else ""
+            )
             _log(f"CLIP head classes (index:name): {preview}{suffix}")
 
         sample_images = int(len(eval_ids))
         class_count = int(len(selected_categories))
-        per_image_units = int(payload.steps_max_steps_per_recipe) * (1 + int(payload.steps_max_visual_seeds_per_step))
+        per_image_units = int(payload.steps_max_steps_per_recipe) * (
+            1 + int(payload.steps_max_visual_seeds_per_step)
+        )
         speed_factor = _estimate_steps_speed_factor(payload, allow_prefilter=prefilter_allowed)
         base_units_per_class = float(sample_images * per_image_units) * float(speed_factor)
         global_enabled = bool(getattr(payload, "steps_optimize_global", False)) and bool(clip_head)
@@ -12958,10 +14889,14 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 keep_ratio=float(getattr(payload, "steps_optimize_global_keep_ratio", 0.5) or 0.5),
                 rounds=int(getattr(payload, "steps_optimize_global_rounds", 1) or 1),
                 max_trials=int(getattr(payload, "steps_optimize_global_max_trials", 1) or 1),
-                mutations_per_round=int(getattr(payload, "steps_optimize_global_mutations_per_round", 1) or 1),
+                mutations_per_round=int(
+                    getattr(payload, "steps_optimize_global_mutations_per_round", 1) or 1
+                ),
             )
             if not invalid_budgets:
-                global_units_per_class = float(global_images * per_image_units) * float(speed_factor)
+                global_units_per_class = float(global_images * per_image_units) * float(
+                    speed_factor
+                )
         total_units_per_class = float(base_units_per_class + global_units_per_class)
         total_units_all = float(total_units_per_class * class_count) if class_count > 0 else None
         compute_estimate_info = {
@@ -12974,7 +14909,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             "base_units_per_class": float(base_units_per_class),
             "global_units_per_class": float(global_units_per_class),
             "total_units_per_class": float(total_units_per_class),
-            "total_units_all_classes": float(total_units_all) if total_units_all is not None else None,
+            "total_units_all_classes": (
+                float(total_units_all) if total_units_all is not None else None
+            ),
             "global_optimizer": {
                 "enabled": bool(global_enabled),
                 "eval_caps": budgets,
@@ -12986,7 +14923,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             f"sample_images={sample_images} steps={int(payload.steps_max_steps_per_recipe)} candidates/step={int(payload.steps_max_visual_seeds_per_step)} "
             f"speed_factor={float(speed_factor):.2f} base_units/class={base_units_per_class:.0f} "
             f"global_units/class={global_units_per_class:.0f} total_units/class={total_units_per_class:.0f}"
-            + (f" total_units/all_classes={total_units_all:.0f}" if total_units_all is not None else "")
+            + (
+                f" total_units/all_classes={total_units_all:.0f}"
+                if total_units_all is not None
+                else ""
+            )
         )
 
         # Prompt mining (Qwen) per class.
@@ -13001,7 +14942,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         if base_prompts_all:
             _log(f"Base prompts (all classes): {', '.join(base_prompts_all)}")
 
-        prefilter_cfg = _resolve_steps_prompt_prefilter_config(payload, allow_prefilter=prefilter_allowed)
+        prefilter_cfg = _resolve_steps_prompt_prefilter_config(
+            payload, allow_prefilter=prefilter_allowed
+        )
         clip_model_for_prefilter: Optional[str] = None
         if isinstance(clip_head, dict):
             raw_model = clip_head.get("clip_model")
@@ -13017,14 +14960,19 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             _log(f"CLIP prompt prefilter disabled: head encoder_type={head_encoder_type}")
 
         bg_indices = _clip_head_background_indices(classes_list) if clip_head else []
-        prompt_bg_drop_cfg = _resolve_steps_prompt_bg_drop_config(payload, allow_drop=bool(bg_indices))
+        prompt_bg_drop_cfg = _resolve_steps_prompt_bg_drop_config(
+            payload, allow_drop=bool(bg_indices)
+        )
         if prompt_bg_drop_cfg.get("enabled"):
             _log(
                 "Prompt background drop enabled: "
                 f"mode={prompt_bg_drop_cfg.get('mode')} min_checked={prompt_bg_drop_cfg.get('min_checked')} "
                 f"drop_rate={float(prompt_bg_drop_cfg.get('drop_rate') or 0.0):.2f}"
             )
-        elif prompt_bg_drop_cfg.get("requested") and prompt_bg_drop_cfg.get("disabled_reason") == "no_background_classes":
+        elif (
+            prompt_bg_drop_cfg.get("requested")
+            and prompt_bg_drop_cfg.get("disabled_reason") == "no_background_classes"
+        ):
             _log("Prompt background drop disabled: no __bg_* classes in CLIP head.")
 
         prepared_prompts: Dict[int, List[str]] = {}
@@ -13034,7 +14982,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                 break
             base = []
             if payload.text_prompts_by_class and cid in payload.text_prompts_by_class:
-                base = [p for p in payload.text_prompts_by_class.get(cid) or [] if isinstance(p, str) and p.strip()]
+                base = [
+                    p
+                    for p in payload.text_prompts_by_class.get(cid) or []
+                    if isinstance(p, str) and p.strip()
+                ]
             if not base:
                 base = [name]
             user_extras: List[str] = []
@@ -13128,12 +15080,18 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             if clip_head:
                 head_target_index = _find_clip_head_target_index(classes_list, name)
                 if head_target_index is None:
-                    _log(f"CLIP head mapping: class '{name}' not found; skipping head filter for this class.")
+                    _log(
+                        f"CLIP head mapping: class '{name}' not found; skipping head filter for this class."
+                    )
                 else:
                     mapped_label = (
-                        str(classes_list[head_target_index]) if 0 <= head_target_index < len(classes_list) else "unknown"
+                        str(classes_list[head_target_index])
+                        if 0 <= head_target_index < len(classes_list)
+                        else "unknown"
                     )
-                    _log(f"CLIP head mapping: class '{name}' -> idx {head_target_index} (head='{mapped_label}')")
+                    _log(
+                        f"CLIP head mapping: class '{name}' -> idx {head_target_index} (head='{mapped_label}')"
+                    )
             class_entries.append(
                 {
                     "id": int(cid),
@@ -13185,7 +15143,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                     seed_span = class_span * 0.45
                     tune_span = class_span * 0.55
 
-                    def _mk_phase_cb(base: float, span: float, label: str, class_name: str) -> Callable[[int, int], None]:
+                    def _mk_phase_cb(
+                        base: float, span: float, label: str, class_name: str
+                    ) -> Callable[[int, int], None]:
                         def _cb(done: int, total: int) -> None:
                             if total <= 0:
                                 return
@@ -13213,11 +15173,19 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         log_every=eval_log_every,
                         log_fn=_log,
                         cancel_event=job.cancel_event,
-                        progress_callback=_mk_phase_cb(class_base, seed_span, "[steps] Candidate eval", name),
+                        progress_callback=_mk_phase_cb(
+                            class_base, seed_span, "[steps] Candidate eval", name
+                        ),
                     )
                     prompt_bg_drop_summary: Optional[Dict[str, Any]] = None
-                    if isinstance(prompt_bg_drop_cfg, dict) and (prompt_bg_drop_cfg.get("enabled") or prompt_bg_drop_cfg.get("requested")):
-                        dropped = sum(1 for s in (seed_stats or []) if isinstance(s, dict) and s.get("bg_drop"))
+                    if isinstance(prompt_bg_drop_cfg, dict) and (
+                        prompt_bg_drop_cfg.get("enabled") or prompt_bg_drop_cfg.get("requested")
+                    ):
+                        dropped = sum(
+                            1
+                            for s in (seed_stats or [])
+                            if isinstance(s, dict) and s.get("bg_drop")
+                        )
                         prompt_bg_drop_summary = {
                             "enabled": bool(prompt_bg_drop_cfg.get("enabled")),
                             "mode": str(prompt_bg_drop_cfg.get("mode") or "balanced"),
@@ -13233,7 +15201,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         if (clip_head is not None and head_target_index is not None)
                         else None
                     )
-                    early_stop_cfg = _resolve_steps_early_stop_config(eval_payload, target_precision=target_prec)
+                    early_stop_cfg = _resolve_steps_early_stop_config(
+                        eval_payload, target_precision=target_prec
+                    )
                     if early_stop_cfg.get("enabled"):
                         _log(
                             "Early-stop enabled: "
@@ -13259,10 +15229,17 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         selected, refine_info = _refine_steps_prompt_subset_seed_stage(
                             seed_stats,
                             selected,
-                            max_steps=int(getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6),
+                            max_steps=int(
+                                getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6
+                            ),
                             target_precision=target_prec,
-                            max_iters=int(getattr(eval_payload, "steps_refine_prompt_subset_max_iters", 6) or 6),
-                            top_k=int(getattr(eval_payload, "steps_refine_prompt_subset_top_k", 6) or 6),
+                            max_iters=int(
+                                getattr(eval_payload, "steps_refine_prompt_subset_max_iters", 6)
+                                or 6
+                            ),
+                            top_k=int(
+                                getattr(eval_payload, "steps_refine_prompt_subset_top_k", 6) or 6
+                            ),
                             base_seed_threshold=float(eval_payload.seed_threshold),
                             log_fn=_log,
                         )
@@ -13330,7 +15307,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                     log_fn=_log,
                                     cancel_event=job.cancel_event,
                                 )
-                        job.message = f"[steps] Tuning CLIP head for {name} ({class_idx}/{total_classes})…"
+                        job.message = (
+                            f"[steps] Tuning CLIP head for {name} ({class_idx}/{total_classes})…"
+                        )
                         job.updated_at = time.time()
                         summary = _tune_clip_head_for_selected_steps_image_first(
                             cat_id=cid,
@@ -13402,15 +15381,27 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         tuned_margin = summary.get("clip_head_margin")
                         tuned_bg_margin = summary.get("clip_head_background_margin")
                     try:
-                        final_min_prob = float(tuned_min_prob) if tuned_min_prob is not None else float(payload.clip_head_min_prob)
+                        final_min_prob = (
+                            float(tuned_min_prob)
+                            if tuned_min_prob is not None
+                            else float(payload.clip_head_min_prob)
+                        )
                     except Exception:
                         final_min_prob = float(payload.clip_head_min_prob)
                     try:
-                        final_margin = float(tuned_margin) if tuned_margin is not None else float(payload.clip_head_margin)
+                        final_margin = (
+                            float(tuned_margin)
+                            if tuned_margin is not None
+                            else float(payload.clip_head_margin)
+                        )
                     except Exception:
                         final_margin = float(payload.clip_head_margin)
                     try:
-                        final_bg_margin = float(tuned_bg_margin) if tuned_bg_margin is not None else float(payload.clip_head_background_margin)
+                        final_bg_margin = (
+                            float(tuned_bg_margin)
+                            if tuned_bg_margin is not None
+                            else float(payload.clip_head_background_margin)
+                        )
                     except Exception:
                         final_bg_margin = float(payload.clip_head_background_margin)
                     if step_list:
@@ -13420,9 +15411,14 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             if "clip_seed" not in step:
                                 step["clip_seed"] = {"min_prob": 0.0, "margin": 0.0}
                             if "clip_final" not in step:
-                                step["clip_final"] = {"min_prob": float(final_min_prob), "margin": float(final_margin)}
+                                step["clip_final"] = {
+                                    "min_prob": float(final_min_prob),
+                                    "margin": float(final_margin),
+                                }
                     tuned_expand = float(eval_payload.expand_threshold)
-                    tuned_max_seeds = int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0)
+                    tuned_max_seeds = int(
+                        getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0
+                    )
                     tuned_seed_iou = float(eval_payload.seed_dedupe_iou)
                     tuned_out_iou = float(eval_payload.dedupe_iou)
                     tuned_max_results = int(eval_payload.max_results)
@@ -13436,7 +15432,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             if step_list[0].get("max_visual_seeds") is not None:
                                 tuned_max_seeds = int(step_list[0].get("max_visual_seeds"))
                         except Exception:
-                            tuned_max_seeds = int(getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0)
+                            tuned_max_seeds = int(
+                                getattr(eval_payload, "steps_max_visual_seeds_per_step", 5) or 0
+                            )
                         try:
                             if step_list[0].get("seed_dedupe_iou") is not None:
                                 tuned_seed_iou = float(step_list[0].get("seed_dedupe_iou"))
@@ -13460,52 +15458,116 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         "sample_size": int(eval_payload.eval_image_count),
                         "sample_hash": str(sample_hash),
                         "sample_images": int(len(eval_ids)),
-                        "target_precision": float(getattr(eval_payload, "clip_head_target_precision", 0.0) or 0.0),
-                        "max_steps_per_recipe": int(getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6),
+                        "target_precision": float(
+                            getattr(eval_payload, "clip_head_target_precision", 0.0) or 0.0
+                        ),
+                        "max_steps_per_recipe": int(
+                            getattr(eval_payload, "steps_max_steps_per_recipe", 6) or 6
+                        ),
                         "seed_threshold": {
                             "base": float(eval_payload.seed_threshold),
-                            "seed_eval_threshold": float(_compute_steps_seed_eval_threshold(eval_payload)),
-                            "seed_eval_max_results": int(_compute_steps_seed_eval_max_results(eval_payload)),
+                            "seed_eval_threshold": float(
+                                _compute_steps_seed_eval_threshold(eval_payload)
+                            ),
+                            "seed_eval_max_results": int(
+                                _compute_steps_seed_eval_max_results(eval_payload)
+                            ),
                             "strategy": "curve_candidates",
                             "max_candidates_per_prompt": 6,
                         },
-                        "global_optimizer": global_info
-                        if isinstance(global_info, dict)
-                        else {
-                            "enabled": False,
-                            "requested": bool(getattr(eval_payload, "steps_optimize_global", False)),
-                            "eval_caps": list(getattr(eval_payload, "steps_optimize_global_eval_caps", []) or []),
-                            "max_trials": int(getattr(eval_payload, "steps_optimize_global_max_trials", 0) or 0),
-                            "keep_ratio": float(getattr(eval_payload, "steps_optimize_global_keep_ratio", 0.0) or 0.0),
-                            "rounds": int(getattr(eval_payload, "steps_optimize_global_rounds", 0) or 0),
-                            "mutations_per_round": int(getattr(eval_payload, "steps_optimize_global_mutations_per_round", 0) or 0),
-                            "enable_ordering": bool(getattr(eval_payload, "steps_optimize_global_enable_ordering", False)),
-                            "enable_max_results": bool(getattr(eval_payload, "steps_optimize_global_enable_max_results", False)),
-                        },
-                        "tier1": tier1_info
-                        if isinstance(tier1_info, dict)
-                        else {
-                            "enabled": False,
-                            "requested": bool(getattr(eval_payload, "steps_optimize_tier1", False)),
-                            "eval_cap": int(getattr(eval_payload, "steps_optimize_tier1_eval_cap", 0) or 0),
-                            "max_trials": int(getattr(eval_payload, "steps_optimize_tier1_max_trials", 0) or 0),
-                        },
-                        "tier2": tier2_info
-                        if isinstance(tier2_info, dict)
-                        else {
-                            "enabled": False,
-                            "requested": bool(getattr(eval_payload, "steps_optimize_tier2", False)),
-                            "eval_cap": int(getattr(eval_payload, "steps_optimize_tier2_eval_cap", 0) or 0),
-                            "max_trials": int(getattr(eval_payload, "steps_optimize_tier2_max_trials", 0) or 0),
-                        },
-                        "prompt_subset_refinement": refine_info
-                        if isinstance(refine_info, dict)
-                        else {
-                            "enabled": False,
-                            "requested": bool(getattr(eval_payload, "steps_refine_prompt_subset", False)),
-                            "max_iters": int(getattr(eval_payload, "steps_refine_prompt_subset_max_iters", 0) or 0),
-                            "top_k": int(getattr(eval_payload, "steps_refine_prompt_subset_top_k", 0) or 0),
-                        },
+                        "global_optimizer": (
+                            global_info
+                            if isinstance(global_info, dict)
+                            else {
+                                "enabled": False,
+                                "requested": bool(
+                                    getattr(eval_payload, "steps_optimize_global", False)
+                                ),
+                                "eval_caps": list(
+                                    getattr(eval_payload, "steps_optimize_global_eval_caps", [])
+                                    or []
+                                ),
+                                "max_trials": int(
+                                    getattr(eval_payload, "steps_optimize_global_max_trials", 0)
+                                    or 0
+                                ),
+                                "keep_ratio": float(
+                                    getattr(eval_payload, "steps_optimize_global_keep_ratio", 0.0)
+                                    or 0.0
+                                ),
+                                "rounds": int(
+                                    getattr(eval_payload, "steps_optimize_global_rounds", 0) or 0
+                                ),
+                                "mutations_per_round": int(
+                                    getattr(
+                                        eval_payload, "steps_optimize_global_mutations_per_round", 0
+                                    )
+                                    or 0
+                                ),
+                                "enable_ordering": bool(
+                                    getattr(
+                                        eval_payload, "steps_optimize_global_enable_ordering", False
+                                    )
+                                ),
+                                "enable_max_results": bool(
+                                    getattr(
+                                        eval_payload,
+                                        "steps_optimize_global_enable_max_results",
+                                        False,
+                                    )
+                                ),
+                            }
+                        ),
+                        "tier1": (
+                            tier1_info
+                            if isinstance(tier1_info, dict)
+                            else {
+                                "enabled": False,
+                                "requested": bool(
+                                    getattr(eval_payload, "steps_optimize_tier1", False)
+                                ),
+                                "eval_cap": int(
+                                    getattr(eval_payload, "steps_optimize_tier1_eval_cap", 0) or 0
+                                ),
+                                "max_trials": int(
+                                    getattr(eval_payload, "steps_optimize_tier1_max_trials", 0) or 0
+                                ),
+                            }
+                        ),
+                        "tier2": (
+                            tier2_info
+                            if isinstance(tier2_info, dict)
+                            else {
+                                "enabled": False,
+                                "requested": bool(
+                                    getattr(eval_payload, "steps_optimize_tier2", False)
+                                ),
+                                "eval_cap": int(
+                                    getattr(eval_payload, "steps_optimize_tier2_eval_cap", 0) or 0
+                                ),
+                                "max_trials": int(
+                                    getattr(eval_payload, "steps_optimize_tier2_max_trials", 0) or 0
+                                ),
+                            }
+                        ),
+                        "prompt_subset_refinement": (
+                            refine_info
+                            if isinstance(refine_info, dict)
+                            else {
+                                "enabled": False,
+                                "requested": bool(
+                                    getattr(eval_payload, "steps_refine_prompt_subset", False)
+                                ),
+                                "max_iters": int(
+                                    getattr(eval_payload, "steps_refine_prompt_subset_max_iters", 0)
+                                    or 0
+                                ),
+                                "top_k": int(
+                                    getattr(eval_payload, "steps_refine_prompt_subset_top_k", 0)
+                                    or 0
+                                ),
+                            }
+                        ),
                         "early_stop": {
                             **(early_stop_cfg or {}),
                             "requested": bool(getattr(eval_payload, "steps_early_stop", False)),
@@ -13540,10 +15602,17 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                             "min_size": int(eval_payload.min_size),
                             "simplify_epsilon": float(eval_payload.simplify_epsilon),
                             "max_results": int(tuned_max_results),
-                            "clip_head_background_guard": bool(getattr(eval_payload, "clip_head_background_guard", False)),
+                            "clip_head_background_guard": bool(
+                                getattr(eval_payload, "clip_head_background_guard", False)
+                            ),
                             "clip_head_background_margin": float(final_bg_margin),
-                            "clip_head_background_apply": str(getattr(eval_payload, "clip_head_background_apply", "final") or "final"),
-                            "clip_head_background_penalty": float(getattr(eval_payload, "clip_head_background_penalty", 0.0) or 0.0),
+                            "clip_head_background_apply": str(
+                                getattr(eval_payload, "clip_head_background_apply", "final")
+                                or "final"
+                            ),
+                            "clip_head_background_penalty": float(
+                                getattr(eval_payload, "clip_head_background_penalty", 0.0) or 0.0
+                            ),
                         },
                         "summary": {
                             **(summary or {}),
@@ -13556,15 +15625,27 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                                     "selected_seed_threshold": float(
                                         s.get("selected_seed_threshold")
                                         if s.get("selected_seed_threshold") is not None
-                                        else (s.get("seed_threshold_recommended") if s.get("seed_threshold_recommended") is not None else eval_payload.seed_threshold)
+                                        else (
+                                            s.get("seed_threshold_recommended")
+                                            if s.get("seed_threshold_recommended") is not None
+                                            else eval_payload.seed_threshold
+                                        )
                                     ),
-                                    "selected_seed_threshold_point": s.get("selected_seed_threshold_point"),
-                                    "seed_threshold_base": float(s.get("seed_threshold_base") or eval_payload.seed_threshold),
+                                    "selected_seed_threshold_point": s.get(
+                                        "selected_seed_threshold_point"
+                                    ),
+                                    "seed_threshold_base": float(
+                                        s.get("seed_threshold_base") or eval_payload.seed_threshold
+                                    ),
                                     "seed_threshold_recommended": float(
-                                        s.get("seed_threshold_recommended") if s.get("seed_threshold_recommended") is not None else eval_payload.seed_threshold
+                                        s.get("seed_threshold_recommended")
+                                        if s.get("seed_threshold_recommended") is not None
+                                        else eval_payload.seed_threshold
                                     ),
                                     "seed_threshold_base_point": s.get("seed_threshold_base_point"),
-                                    "seed_threshold_recommended_point": s.get("seed_threshold_recommended_point"),
+                                    "seed_threshold_recommended_point": s.get(
+                                        "seed_threshold_recommended_point"
+                                    ),
                                     "seed_threshold_curve": s.get("seed_threshold_curve") or [],
                                 }
                                 for s in selected
@@ -13608,14 +15689,30 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         "artifact": "clip_head/head.npz",
                         "clip_model": clip_head.get("clip_model"),
                         "proba_mode": clip_head.get("proba_mode"),
-                        "classes": clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else [],
-                        "min_prob": float(tuned_min_prob) if tuned_min_prob is not None else float(payload.clip_head_min_prob),
-                        "margin": float(tuned_margin) if tuned_margin is not None else float(payload.clip_head_margin),
-                        "background_margin": float(tuned_bg_margin)
-                        if tuned_bg_margin is not None
-                        else float(getattr(payload, "clip_head_background_margin", 0.0) or 0.0),
+                        "classes": (
+                            clip_head.get("classes")
+                            if isinstance(clip_head.get("classes"), list)
+                            else []
+                        ),
+                        "min_prob": (
+                            float(tuned_min_prob)
+                            if tuned_min_prob is not None
+                            else float(payload.clip_head_min_prob)
+                        ),
+                        "margin": (
+                            float(tuned_margin)
+                            if tuned_margin is not None
+                            else float(payload.clip_head_margin)
+                        ),
+                        "background_margin": (
+                            float(tuned_bg_margin)
+                            if tuned_bg_margin is not None
+                            else float(getattr(payload, "clip_head_background_margin", 0.0) or 0.0)
+                        ),
                         "auto_tuned": bool(getattr(payload, "clip_head_auto_tune", True)),
-                        "target_precision": float(getattr(payload, "clip_head_target_precision", 0.9)),
+                        "target_precision": float(
+                            getattr(payload, "clip_head_target_precision", 0.9)
+                        ),
                     }
                 except Exception:
                     pass
@@ -13642,7 +15739,9 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         }
         if compute_estimate_info and total_units_per_class:
             runtime_sec = max(0.0, float(time.time() - start_ts))
-            total_units = compute_estimate_info.get("total_units_all_classes") or compute_estimate_info.get("total_units_per_class")
+            total_units = compute_estimate_info.get(
+                "total_units_all_classes"
+            ) or compute_estimate_info.get("total_units_per_class")
             try:
                 total_units_val = float(total_units) if total_units is not None else 0.0
             except Exception:
@@ -13653,7 +15752,11 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             _log(
                 "Compute estimate calibration: "
                 f"runtime_sec={runtime_sec:.1f} units={total_units_val:.0f} "
-                + (f"sec_per_unit={sec_per_unit:.6f}" if sec_per_unit is not None else "sec_per_unit=n/a")
+                + (
+                    f"sec_per_unit={sec_per_unit:.6f}"
+                    if sec_per_unit is not None
+                    else "sec_per_unit=n/a"
+                )
             )
         if _cancelled():
             job.status = "cancelled"
@@ -13669,6 +15772,8 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         job.message = "Failed"
     finally:
         job.updated_at = time.time()
+
+
 def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
     job_id = f"ph_{uuid.uuid4().hex[:8]}"
     job = PromptHelperJob(job_id=job_id)
@@ -13688,7 +15793,9 @@ def _start_agent_mining_job(payload: AgentMiningRequest) -> AgentMiningJob:
         http_exception_cls=HTTPException,
     )
     if clip_head_path is None:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_clip_head_required"
+        )
     # Validate early so we fail fast (no background job created).
     _load_clip_head_from_classifier_impl(
         clip_head_path,
@@ -13729,7 +15836,9 @@ def _start_prompt_helper_search_job(payload: PromptHelperSearchRequest) -> Promp
     job = PromptHelperJob(job_id=job_id)
     with PROMPT_HELPER_JOBS_LOCK:
         PROMPT_HELPER_JOBS[job.job_id] = job
-    thread = threading.Thread(target=_run_prompt_helper_search_job, args=(job, payload), daemon=True)
+    thread = threading.Thread(
+        target=_run_prompt_helper_search_job, args=(job, payload), daemon=True
+    )
     thread.start()
     return job
 
@@ -13772,7 +15881,11 @@ def cancel_agent_mining_job(job_id: str):
 
 def get_latest_agent_mining_result():
     with AGENT_MINING_JOBS_LOCK:
-        jobs = [j for j in AGENT_MINING_JOBS.values() if j.status in {"running", "completed", "failed", "cancelled"}]
+        jobs = [
+            j
+            for j in AGENT_MINING_JOBS.values()
+            if j.status in {"running", "completed", "failed", "cancelled"}
+        ]
     if not jobs:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_mining_result_not_found")
     jobs.sort(key=lambda j: j.updated_at, reverse=True)
@@ -13806,7 +15919,9 @@ def agent_mining_cache_size():
 def agent_mining_cache_purge():
     cache_root = AGENT_MINING_DET_CACHE_ROOT
     if _agent_cache_running_jobs():
-        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="agent_cache_purge_blocked_active_jobs")
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT, detail="agent_cache_purge_blocked_active_jobs"
+        )
     if not cache_root.exists():
         return {"status": "ok", "deleted_bytes": 0, "deleted_files": 0}
     deleted = 0
@@ -13855,7 +15970,9 @@ def agent_mining_apply_image(payload: AgentApplyImageRequest):
         try:
             pil_img.save(img_path, format="PNG")
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_apply_image_encode_failed:{exc}") from exc
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail=f"agent_apply_image_encode_failed:{exc}"
+            ) from exc
         dets = _apply_agent_recipe_to_image(
             payload.recipe,
             image={"path": str(img_path)},
@@ -13896,7 +16013,9 @@ def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
         try:
             pil_img.save(img_path, format="PNG")
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_apply_image_encode_failed:{exc}") from exc
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail=f"agent_apply_image_encode_failed:{exc}"
+            ) from exc
 
         all_dets: List[QwenDetection] = []
         det_meta: Dict[int, Dict[str, Any]] = {}
@@ -13975,8 +16094,13 @@ def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
                         rid = step.recipe.get("id")
                     if not rid:
                         continue
-                    candidate = (AGENT_MINING_RECIPES_ROOT / str(rid) / "clip_head" / "head.npz").resolve()
-                    if _path_is_within_root_impl(candidate, AGENT_MINING_RECIPES_ROOT.resolve()) and candidate.exists():
+                    candidate = (
+                        AGENT_MINING_RECIPES_ROOT / str(rid) / "clip_head" / "head.npz"
+                    ).resolve()
+                    if (
+                        _path_is_within_root_impl(candidate, AGENT_MINING_RECIPES_ROOT.resolve())
+                        and candidate.exists()
+                    ):
                         head_recipe_id = str(rid)
                         break
 
@@ -13993,13 +16117,17 @@ def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
                 fallback_meta: Optional[Dict[str, Any]] = None
                 if isinstance(head_recipe, dict):
                     recipe_block = head_recipe.get("recipe")
-                    if isinstance(recipe_block, dict) and isinstance(recipe_block.get("clip_head"), dict):
+                    if isinstance(recipe_block, dict) and isinstance(
+                        recipe_block.get("clip_head"), dict
+                    ):
                         fallback_meta = recipe_block.get("clip_head")
                     elif isinstance(head_recipe.get("clip_head"), dict):
                         fallback_meta = head_recipe.get("clip_head")
                 recipe_root = (AGENT_MINING_RECIPES_ROOT / str(head_recipe_id)).resolve()
                 if _path_is_within_root_impl(recipe_root, AGENT_MINING_RECIPES_ROOT.resolve()):
-                    clip_head = _load_clip_head_artifacts(recipe_dir=recipe_root, fallback_meta=fallback_meta)
+                    clip_head = _load_clip_head_artifacts(
+                        recipe_dir=recipe_root, fallback_meta=fallback_meta
+                    )
 
             clip_scores = (
                 _score_detections_with_clip_head(
@@ -14037,7 +16165,9 @@ def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
         deduped: List[QwenDetection] = []
         for group in by_class.values():
             deduped.extend(
-                _dedupe_qwen_detections_iou(group, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=per_class_iou)
+                _dedupe_qwen_detections_iou(
+                    group, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=per_class_iou
+                )
             )
         final = deduped
 
@@ -14050,19 +16180,24 @@ def agent_mining_apply_image_chain(payload: AgentApplyImageChainRequest):
                 meta = det_meta.get(id(det)) or {}
                 if not meta.get("cross_class", True):
                     continue
-                group_key = "global" if scope == "global" else str(meta.get("dedupe_group") or "default")
+                group_key = (
+                    "global" if scope == "global" else str(meta.get("dedupe_group") or "default")
+                )
                 group_map.setdefault(group_key, []).append(det)
 
             kept_ids: set[int] = set()
             for group in group_map.values():
-                kept = _dedupe_qwen_detections_iou(group, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=cross_iou)
+                kept = _dedupe_qwen_detections_iou(
+                    group, img_w=pil_img.width, img_h=pil_img.height, iou_thresh=cross_iou
+                )
                 kept_ids.update(id(d) for d in kept)
 
             if group_map:
                 final = [
                     det
                     for det in final
-                    if (id(det) in kept_ids) or not (det_meta.get(id(det)) or {}).get("cross_class", True)
+                    if (id(det) in kept_ids)
+                    or not (det_meta.get(id(det)) or {}).get("cross_class", True)
                 ]
 
         if original_scores:
@@ -14099,7 +16234,10 @@ def agent_mining_export_recipe(recipe_id: str):
     )
     zip_path = _ensure_recipe_zip(recipe)
     if not zip_path.exists():
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="agent_recipe_export_failed:zip_missing")
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="agent_recipe_export_failed:zip_missing",
+        )
     return FileResponse(
         path=str(zip_path),
         media_type="application/zip",
@@ -14108,7 +16246,9 @@ def agent_mining_export_recipe(recipe_id: str):
 
 
 async def agent_mining_import_recipe(file: UploadFile = File(...)):
-    staging_dir = Path(tempfile.mkdtemp(prefix="agent_recipe_import_", dir=str(AGENT_MINING_RECIPES_ROOT)))
+    staging_dir = Path(
+        tempfile.mkdtemp(prefix="agent_recipe_import_", dir=str(AGENT_MINING_RECIPES_ROOT))
+    )
     zip_path = staging_dir / "payload.zip"
     try:
         await _write_upload_file(
@@ -14124,7 +16264,9 @@ async def agent_mining_import_recipe(file: UploadFile = File(...)):
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_recipe_import_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail=f"agent_recipe_import_failed:{exc}"
+        ) from exc
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
 
@@ -14159,7 +16301,10 @@ def agent_mining_export_cascade(cascade_id: str):
     )
     zip_path = _ensure_cascade_zip(cascade)
     if not zip_path.exists():
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="agent_cascade_export_failed:zip_missing")
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="agent_cascade_export_failed:zip_missing",
+        )
     return FileResponse(
         path=str(zip_path),
         media_type="application/zip",
@@ -14168,7 +16313,9 @@ def agent_mining_export_cascade(cascade_id: str):
 
 
 async def agent_mining_import_cascade(file: UploadFile = File(...)):
-    staging_dir = Path(tempfile.mkdtemp(prefix="agent_cascade_import_", dir=str(AGENT_MINING_CASCADES_ROOT)))
+    staging_dir = Path(
+        tempfile.mkdtemp(prefix="agent_cascade_import_", dir=str(AGENT_MINING_CASCADES_ROOT))
+    )
     zip_path = staging_dir / "payload.zip"
     try:
         await _write_upload_file(
@@ -14183,7 +16330,9 @@ async def agent_mining_import_cascade(file: UploadFile = File(...)):
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"agent_cascade_import_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail=f"agent_cascade_import_failed:{exc}"
+        ) from exc
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
 
@@ -14247,7 +16396,9 @@ def prompt_helper_expand(payload: PromptRecipeExpandRequest):
     )
     coco, _, _ = _load_coco_index_impl(dataset_root)
     categories = coco.get("categories") or []
-    cat_entry = next((c for c in categories if int(c.get("id", categories.index(c))) == payload.class_id), None)
+    cat_entry = next(
+        (c for c in categories if int(c.get("id", categories.index(c))) == payload.class_id), None
+    )
     if not cat_entry:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="recipe_class_not_found")
     class_name = str(cat_entry.get("name", f"class_{payload.class_id}"))
@@ -14289,6 +16440,7 @@ def start_prompt_helper_recipe(payload: PromptRecipeRequest):
     job = _start_prompt_recipe_job(payload)
     return _serialize_prompt_helper_job_impl(job)
 
+
 def create_prompt_helper_preset(
     dataset_id: str = Form(...),
     label: str = Form(""),
@@ -14297,7 +16449,9 @@ def create_prompt_helper_preset(
     try:
         prompts_by_class = json.loads(prompts_json)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_prompts:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail=f"invalid_prompts:{exc}"
+        ) from exc
     if not isinstance(prompts_by_class, dict):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompts_must_be_object")
     normalized: Dict[int, List[str]] = {}
@@ -14346,7 +16500,9 @@ app.include_router(
         create_job_fn=start_prompt_helper_job,
         search_fn=start_prompt_helper_search,
         recipe_fn=start_prompt_helper_recipe,
-        list_presets_fn=lambda: _list_prompt_helper_presets_impl(presets_root=PROMPT_HELPER_PRESET_ROOT),
+        list_presets_fn=lambda: _list_prompt_helper_presets_impl(
+            presets_root=PROMPT_HELPER_PRESET_ROOT
+        ),
         get_preset_fn=lambda preset_id: _load_prompt_helper_preset_impl(
             preset_id,
             presets_root=PROMPT_HELPER_PRESET_ROOT,
@@ -14470,10 +16626,14 @@ def _prepare_sam3_training_split(
         with coco_val_path.open("r", encoding="utf-8") as handle:
             coco_val = json.load(handle)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_load_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_coco_load_failed:{exc}"
+        ) from exc
     categories = coco_train.get("categories") or coco_val.get("categories") or []
     if not categories and meta.get("classes"):
-        categories = [{"id": idx + 1, "name": name} for idx, name in enumerate(meta.get("classes", []))]
+        categories = [
+            {"id": idx + 1, "name": name} for idx, name in enumerate(meta.get("classes", []))
+        ]
     if not categories:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_categories_missing")
     images: Dict[int, Dict[str, Any]] = {}
@@ -14502,7 +16662,9 @@ def _prepare_sam3_training_split(
     if val_count <= 0 and total > 1:
         val_count = 1
     if val_limit is not None and val_limit > 0:
-        val_count = min(val_limit, val_count if val_count > 0 else val_limit, total - 1 if total > 1 else total)
+        val_count = min(
+            val_limit, val_count if val_count > 0 else val_limit, total - 1 if total > 1 else total
+        )
     val_ids = image_ids[:val_count]
     train_ids = image_ids[val_count:]
     if train_limit is not None and train_limit > 0:
@@ -14601,7 +16763,9 @@ def _prepare_sam3_training_split(
     return new_meta
 
 
-def _plan_segmentation_build(request: SegmentationBuildRequest) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def _plan_segmentation_build(
+    request: SegmentationBuildRequest,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     dataset_root = _resolve_sam3_or_qwen_dataset_impl(
         request.source_dataset_id,
         list_all_datasets_fn=_list_all_datasets,
@@ -14629,16 +16793,22 @@ def _plan_segmentation_build(request: SegmentationBuildRequest) -> Tuple[Dict[st
         ),
     )
     if not source_meta:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="segmentation_source_metadata_missing")
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND, detail="segmentation_source_metadata_missing"
+        )
     dataset_type = source_meta.get("type", "bbox")
     if dataset_type != "bbox":
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="segmentation_builder_requires_bbox")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="segmentation_builder_requires_bbox"
+        )
     source_id = source_meta.get("id") or dataset_root.name
     suggested_name = f"{source_id}_seg"
     output_id = _safe_run_name(request.output_name, suggested_name)
     output_root = (SAM3_DATASET_ROOT / output_id).resolve()
     if not str(output_root).startswith(str(SAM3_DATASET_ROOT.resolve())):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="segmentation_output_path_invalid")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="segmentation_output_path_invalid"
+        )
     if output_root.exists():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="segmentation_output_exists")
 
@@ -14690,28 +16860,39 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
 
     def worker() -> None:
         try:
-            _seg_job_update(job, status="running", progress=0.02, message="Preparing segmentation build…", error=None)
+            _seg_job_update(
+                job,
+                status="running",
+                progress=0.02,
+                message="Preparing segmentation build…",
+                error=None,
+            )
             source_meta = _resolve_sam3_dataset_meta(request.source_dataset_id)
             classes = source_meta.get("classes") or []
             if not classes:
                 # Try to load from labelmap.txt directly.
                 try:
-                    labelmap_file = _resolve_sam3_or_qwen_dataset_impl(
-                        request.source_dataset_id,
-                        list_all_datasets_fn=_list_all_datasets,
-                        resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
-                            dataset_id,
-                            qwen_root=QWEN_DATASET_ROOT,
-                            sam3_root=SAM3_DATASET_ROOT,
-                            registry_root=DATASET_REGISTRY_ROOT,
-                            http_exception_cls=HTTPException,
-                        ),
-                    ) / "labelmap.txt"
+                    labelmap_file = (
+                        _resolve_sam3_or_qwen_dataset_impl(
+                            request.source_dataset_id,
+                            list_all_datasets_fn=_list_all_datasets,
+                            resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
+                                dataset_id,
+                                qwen_root=QWEN_DATASET_ROOT,
+                                sam3_root=SAM3_DATASET_ROOT,
+                                registry_root=DATASET_REGISTRY_ROOT,
+                                http_exception_cls=HTTPException,
+                            ),
+                        )
+                        / "labelmap.txt"
+                    )
                     classes = _load_labelmap_file(labelmap_file)
                 except Exception:
                     classes = []
             if not classes:
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="segmentation_builder_no_classes")
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST, detail="segmentation_builder_no_classes"
+                )
             dataset_root = Path(
                 source_meta.get("dataset_root")
                 or _resolve_sam3_or_qwen_dataset_impl(
@@ -14746,7 +16927,9 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
             splits = []
             image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
-            def _find_image_for_label(labels_dir: Path, images_dir: Path, label_file: Path) -> Optional[Tuple[Path, Path]]:
+            def _find_image_for_label(
+                labels_dir: Path, images_dir: Path, label_file: Path
+            ) -> Optional[Tuple[Path, Path]]:
                 stem = label_file.stem
                 for ext in image_exts:
                     candidate = images_dir / f"{stem}{ext}"
@@ -14812,12 +16995,19 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
                 splits.append((split, entries))
             total_images = sum(len(e) for _, e in splits)
             if total_images == 0:
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="segmentation_builder_no_images")
-            _seg_job_log(job, f"Queued {total_images} images for conversion using {request.sam_variant.upper()}")
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST, detail="segmentation_builder_no_images"
+                )
+            _seg_job_log(
+                job,
+                f"Queued {total_images} images for conversion using {request.sam_variant.upper()}",
+            )
             for split_name, entries in splits:
                 _seg_job_log(job, f"{split_name}: {len(entries)} images")
             base_devices = (
-                _resolve_sam3_mining_devices_impl(SAM3_DEVICE_PREF, torch_module=torch, logger=logger)
+                _resolve_sam3_mining_devices_impl(
+                    SAM3_DEVICE_PREF, torch_module=torch, logger=logger
+                )
                 if request.sam_variant == "sam3"
                 else _resolve_sam1_devices()
             )
@@ -14836,7 +17026,10 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
             if max_total is not None:
                 expanded_devices = expanded_devices[:max_total]
             if not expanded_devices:
-                raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="segmentation_builder_no_devices")
+                raise HTTPException(
+                    status_code=HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="segmentation_builder_no_devices",
+                )
             mining_pool = None
             sam1_workers: List[_Sam1SegWorker] = []
             try:
@@ -14846,7 +17039,9 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
                     for dev in expanded_devices:
                         sam1_workers.append(_Sam1SegWorker(dev))
             except Exception as exc:  # noqa: BLE001
-                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+                raise HTTPException(
+                    status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
+                ) from exc
             processed = 0
             simplify_eps = float(request.simplify_epsilon)
             mask_threshold = float(request.mask_threshold)
@@ -14892,17 +17087,20 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
                         if not tasks:
                             outputs = {}
                         else:
-                            outputs = worker.process_image(
-                                image_id=entry.get("image_id", 0),
-                                pil_img=pil_img,
-                                tasks=tasks,
-                                min_threshold=min_threshold,
-                                mask_threshold=mask_threshold,
-                                max_results=max_results,
-                                min_size=min_area,
-                                simplify=simplify_eps,
-                                return_masks=True,
-                            ) or {}
+                            outputs = (
+                                worker.process_image(
+                                    image_id=entry.get("image_id", 0),
+                                    pil_img=pil_img,
+                                    tasks=tasks,
+                                    min_threshold=min_threshold,
+                                    mask_threshold=mask_threshold,
+                                    max_results=max_results,
+                                    min_size=min_area,
+                                    simplify=simplify_eps,
+                                    return_masks=True,
+                                )
+                                or {}
+                            )
                             label_lines = []
                             for task in tasks:
                                 task_id = task["id"]
@@ -14918,7 +17116,11 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
                                     mask_arr = best.get("mask_array")
                                     if mask_arr is None and best.get("mask"):
                                         mask_arr = _decode_binary_mask_impl(best.get("mask"))
-                                polygon = _mask_to_polygon_impl(mask_arr, simplify_eps) if mask_arr is not None else []
+                                polygon = (
+                                    _mask_to_polygon_impl(mask_arr, simplify_eps)
+                                    if mask_arr is not None
+                                    else []
+                                )
                                 if best_score is None or best_score < min_threshold:
                                     polygon = []
                                 if len(polygon) < 3:
@@ -14932,9 +17134,17 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
                                         ]
                                     )
                                 if len(coords) >= 6:
-                                    label_lines.append(f"{class_idx} " + " ".join(f"{v:.6f}" for v in coords))
-                        dest_labels = (train_out if split == "train" else val_out) / "labels" / f"{rel_path.stem}.txt"
-                        dest_images = (train_out if split == "train" else val_out) / "images" / rel_path
+                                    label_lines.append(
+                                        f"{class_idx} " + " ".join(f"{v:.6f}" for v in coords)
+                                    )
+                        dest_labels = (
+                            (train_out if split == "train" else val_out)
+                            / "labels"
+                            / f"{rel_path.stem}.txt"
+                        )
+                        dest_images = (
+                            (train_out if split == "train" else val_out) / "images" / rel_path
+                        )
                         dest_labels.parent.mkdir(parents=True, exist_ok=True)
                         dest_images.parent.mkdir(parents=True, exist_ok=True)
                         _link_or_copy(image_path, dest_images)
@@ -14989,19 +17199,25 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
             try:
                 coco_meta = _convert_yolo_dataset_to_coco_impl(output_root)
             except Exception as exc:  # noqa: BLE001
-                _seg_job_update(job, status="failed", message="COCO conversion failed", error=str(exc))
+                _seg_job_update(
+                    job, status="failed", message="COCO conversion failed", error=str(exc)
+                )
                 return
-            result_meta = _load_sam3_dataset_metadata_impl(
-                output_root,
-                meta_name=SAM3_DATASET_META_NAME,
-                load_json_metadata_fn=_load_json_metadata,
-                persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
-                    dataset_dir_inner,
-                    metadata,
+            result_meta = (
+                _load_sam3_dataset_metadata_impl(
+                    output_root,
                     meta_name=SAM3_DATASET_META_NAME,
-                    logger=logger,
-                ),
-            ) or coco_meta or planned_meta
+                    load_json_metadata_fn=_load_json_metadata,
+                    persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
+                        dataset_dir_inner,
+                        metadata,
+                        meta_name=SAM3_DATASET_META_NAME,
+                        logger=logger,
+                    ),
+                )
+                or coco_meta
+                or planned_meta
+            )
             _seg_job_update(
                 job,
                 status="completed",
@@ -15009,7 +17225,11 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
                 message="Segmentation build complete.",
                 result={
                     "planned_metadata": planned_meta,
-                    "output_dataset_id": result_meta.get("id") if isinstance(result_meta, dict) else planned_meta.get("id"),
+                    "output_dataset_id": (
+                        result_meta.get("id")
+                        if isinstance(result_meta, dict)
+                        else planned_meta.get("id")
+                    ),
                     "output_root": str(output_root),
                     "classes": classes,
                     "train_count": len(next((e for s, e in splits if s == "train"), [])),
@@ -15061,7 +17281,11 @@ def _start_sam3_training_worker(
         # Attempt to track steps per epoch from the config if present
         steps_per_epoch = None
         try:
-            steps_per_epoch = int(cfg.scratch.target_epoch_size) if getattr(cfg.scratch, "target_epoch_size", None) else None
+            steps_per_epoch = (
+                int(cfg.scratch.target_epoch_size)
+                if getattr(cfg.scratch, "target_epoch_size", None)
+                else None
+            )
         except Exception:
             steps_per_epoch = None
         try:
@@ -15080,7 +17304,9 @@ def _start_sam3_training_worker(
                     torch_module=torch,
                 )
             )
-            _sam3_job_update(job, status="running", progress=0.05, message="Preparing SAM3 training job ...")
+            _sam3_job_update(
+                job, status="running", progress=0.05, message="Preparing SAM3 training job ..."
+            )
             config_name, config_file = _save_sam3_config(cfg, job.job_id)
             script_path = SAM3_PACKAGE_ROOT / "train" / "train.py"
             cmd = [sys.executable, str(script_path), "-c", config_name, "--use-cluster", "0"]
@@ -15136,7 +17362,9 @@ def _start_sam3_training_worker(
                     job.result["balance_info"] = cleaned
                 try:
                     match = re.search(r"Train Epoch:\s*\[(\d+)\]\[\s*(\d+)\s*/\s*(\d+)\]", cleaned)
-                    val_match = re.search(r"Val Epoch:\s*\[(\d+)\]\[\s*(\d+)\s*/\s*(\d+)\]", cleaned)
+                    val_match = re.search(
+                        r"Val Epoch:\s*\[(\d+)\]\[\s*(\d+)\s*/\s*(\d+)\]", cleaned
+                    )
                     if val_match:
                         val_epoch_idx = int(val_match.group(1))
                         val_step_idx = int(val_match.group(2))
@@ -15198,7 +17426,9 @@ def _start_sam3_training_worker(
                     if "Meters:" in cleaned and "coco_eval_bbox_AP" in cleaned:
                         try:
                             # Extract key/value pairs like '...': np.float64(0.123)
-                            pairs = re.findall(r"'([^']+)':\s*np\.float64\(([0-9.eE+-]+)\)", cleaned)
+                            pairs = re.findall(
+                                r"'([^']+)':\s*np\.float64\(([0-9.eE+-]+)\)", cleaned
+                            )
                             meter_map = {k: float(v) for k, v in pairs}
                             epoch_meta = re.search(r"'Trainer/epoch':\s*([0-9]+)", cleaned)
                             epoch_val = int(epoch_meta.group(1)) + 1 if epoch_meta else None
@@ -15251,7 +17481,13 @@ def _start_sam3_training_worker(
             log_dir = Path(cfg.paths.experiment_log_dir)
             checkpoint_dir = log_dir / "checkpoints"
             latest_ckpt = _latest_checkpoint_in_dir(checkpoint_dir)
-            seg_head = bool(getattr(cfg.scratch, "enable_segmentation_head", getattr(cfg.scratch, "enable_segmentation", True)))
+            seg_head = bool(
+                getattr(
+                    cfg.scratch,
+                    "enable_segmentation_head",
+                    getattr(cfg.scratch, "enable_segmentation", True),
+                )
+            )
             load_seg = bool(getattr(cfg.scratch, "load_segmentation", seg_head))
             result_payload = {
                 "experiment_log_dir": str(log_dir),
@@ -15261,7 +17497,13 @@ def _start_sam3_training_worker(
                 "enable_segmentation_head": seg_head,
                 "load_segmentation": load_seg,
             }
-            _sam3_job_update(job, status="succeeded", message="Training complete", progress=1.0, result=result_payload)
+            _sam3_job_update(
+                job,
+                status="succeeded",
+                message="Training complete",
+                progress=1.0,
+                result=result_payload,
+            )
         except Exception as exc:  # noqa: BLE001
             _sam3_job_update(job, status="failed", message="Training crashed", error=str(exc))
         finally:
@@ -15298,12 +17540,30 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
         dataset_info = config.get("dataset") or {}
         task = str(dataset_info.get("task") or config.get("task") or "detect").lower()
         if job.cancel_event.is_set():
-            _yolo_job_update(job, status="cancelled", message="Cancelled before start", progress=0.0)
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_job_update(
+                job, status="cancelled", message="Cancelled before start", progress=0.0
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         if not dataset_info.get("yolo_ready"):
-            _yolo_job_update(job, status="failed", message="Dataset is not YOLO-ready", error="yolo_not_ready")
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_job_update(
+                job, status="failed", message="Dataset is not YOLO-ready", error="yolo_not_ready"
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         try:
             _prepare_for_training_impl(
@@ -15323,12 +17583,23 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             )
             from ultralytics import YOLO  # type: ignore
         except Exception as exc:  # noqa: BLE001
-            _yolo_job_update(job, status="failed", message="Ultralytics not installed", error=str(exc))
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_job_update(
+                job, status="failed", message="Ultralytics not installed", error=str(exc)
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         _yolo_job_update(job, status="running", message="Starting YOLOv8 training", progress=0.0)
         _yolo_job_log(job, "Preparing dataset + data.yaml")
-        dataset_root = Path(dataset_info.get("prepared_root") or dataset_info.get("dataset_root") or "")
+        dataset_root = Path(
+            dataset_info.get("prepared_root") or dataset_info.get("dataset_root") or ""
+        )
         data_yaml = _yolo_write_data_yaml_impl(
             run_dir,
             dataset_root,
@@ -15343,8 +17614,20 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
         base_weights = config.get("base_weights")
         variant = config.get("variant") or ""
         if task == "segment" and _yolo_p2_scale_impl(variant):
-            _yolo_job_update(job, status="failed", message="P2 head is only supported for detection.", error="yolo_p2_segment")
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_job_update(
+                job,
+                status="failed",
+                message="P2 head is only supported for detection.",
+                error="yolo_p2_segment",
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         _, model_source = _yolo_resolve_model_source_impl(
             variant,
@@ -15372,10 +17655,25 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             try:
                 import ultralytics  # type: ignore
             except Exception as exc:  # noqa: BLE001
-                _yolo_job_update(job, status="failed", message="Ultralytics not installed", error=str(exc))
-                write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+                _yolo_job_update(
+                    job, status="failed", message="Ultralytics not installed", error=str(exc)
+                )
+                write_run_meta(
+                    {
+                        "job_id": job.job_id,
+                        "status": job.status,
+                        "message": job.message,
+                        "config": job.config,
+                    }
+                )
                 return
-            base_cfg = Path(ultralytics.__file__).resolve().parent / "cfg" / "models" / "v8" / "yolov8-p2.yaml"
+            base_cfg = (
+                Path(ultralytics.__file__).resolve().parent
+                / "cfg"
+                / "models"
+                / "v8"
+                / "yolov8-p2.yaml"
+            )
             cfg_payload = yaml.safe_load(base_cfg.read_text())
             cfg_payload["scale"] = p2_scale
             p2_cfg = run_dir / f"yolov8{p2_scale}-p2.yaml"
@@ -15385,7 +17683,10 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
                 train_kwargs["pretrained"] = base_weights
             else:
                 train_kwargs["pretrained"] = False
-            _yolo_job_log(job, f"P2 variant: scale={p2_scale} (config={p2_cfg.name}, pretrained={train_kwargs.get('pretrained')})")
+            _yolo_job_log(
+                job,
+                f"P2 variant: scale={p2_scale} (config={p2_cfg.name}, pretrained={train_kwargs.get('pretrained')})",
+            )
         _yolo_job_log(job, f"Model source: {model_source}")
         train_kwargs.update(_yolo_build_aug_args_impl(config.get("augmentations")))
         train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
@@ -15433,7 +17734,9 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             except Exception:
                 metrics_payload = {}
             if metrics_payload:
-                (run_dir / "metrics.json").write_text(json.dumps(metrics_payload, indent=2, sort_keys=True))
+                (run_dir / "metrics.json").write_text(
+                    json.dumps(metrics_payload, indent=2, sort_keys=True)
+                )
             _yolo_prune_run_dir_impl(
                 run_dir,
                 keep_files_default=YOLO_KEEP_FILES,
@@ -15443,10 +17746,18 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             result_payload = {
                 "run_dir": str(run_dir),
                 "best_path": str(run_dir / "best.pt") if (run_dir / "best.pt").exists() else None,
-                "metrics_path": str(run_dir / "metrics.json") if (run_dir / "metrics.json").exists() else None,
+                "metrics_path": (
+                    str(run_dir / "metrics.json") if (run_dir / "metrics.json").exists() else None
+                ),
                 "metrics_series_path": str(series_path) if series_path.exists() else None,
             }
-            _yolo_job_update(job, status="succeeded", message="Training complete", progress=1.0, result=result_payload)
+            _yolo_job_update(
+                job,
+                status="succeeded",
+                message="Training complete",
+                progress=1.0,
+                result=result_payload,
+            )
         except Exception as exc:  # noqa: BLE001
             _yolo_job_update(job, status="failed", message="Training failed", error=str(exc))
         finally:
@@ -15458,7 +17769,13 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
                 torch_module=torch,
             )
             write_run_meta(
-                {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config, "result": job.result}
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                    "result": job.result,
+                }
             )
 
     thread = threading.Thread(target=worker, name=f"yolo-train-{job.job_id}", daemon=True)
@@ -15487,12 +17804,30 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
             job.config = config
         base_run_id = str(config.get("base_run_id") or "").strip()
         if not base_run_id:
-            _yolo_head_graft_job_update(job, status="failed", message="Base YOLO run missing", error="yolo_base_missing")
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_head_graft_job_update(
+                job, status="failed", message="Base YOLO run missing", error="yolo_base_missing"
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         if job.cancel_event.is_set():
-            _yolo_head_graft_job_update(job, status="cancelled", message="Cancelled before start", progress=0.0)
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_head_graft_job_update(
+                job, status="cancelled", message="Cancelled before start", progress=0.0
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         base_run_dir = _yolo_run_dir_impl(
             base_run_id,
@@ -15503,15 +17838,36 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
         )
         base_best = base_run_dir / "best.pt"
         if not base_best.exists():
-            _yolo_head_graft_job_update(job, status="failed", message="Base run is missing best.pt", error="yolo_base_missing_best")
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_head_graft_job_update(
+                job,
+                status="failed",
+                message="Base run is missing best.pt",
+                error="yolo_base_missing_best",
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         base_meta = _yolo_load_run_meta_impl(base_run_dir, meta_name=YOLO_RUN_META_NAME)
         base_cfg = base_meta.get("config") or {}
         base_task = str(base_cfg.get("task") or "detect").lower()
         if base_task != "detect":
-            _yolo_head_graft_job_update(job, status="failed", message="Base run is not detect", error="yolo_base_not_detect")
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_head_graft_job_update(
+                job, status="failed", message="Base run is not detect", error="yolo_base_not_detect"
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         base_variant = config.get("variant") or base_cfg.get("variant")
         if not base_variant:
@@ -15521,7 +17877,14 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                 message="Base run missing variant (cannot infer architecture)",
                 error="yolo_base_variant_missing",
             )
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         base_labelmap = _yolo_load_run_labelmap_impl(
             base_run_dir,
@@ -15529,29 +17892,85 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
             yaml_load_fn=yaml.safe_load,
         )
         if not base_labelmap:
-            _yolo_head_graft_job_update(job, status="failed", message="Base labelmap missing", error="yolo_base_labelmap_missing")
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_head_graft_job_update(
+                job,
+                status="failed",
+                message="Base labelmap missing",
+                error="yolo_base_labelmap_missing",
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         try:
-            dataset_payload = YoloTrainRequest(dataset_id=config.get("dataset_id"), dataset_root=config.get("dataset_root"))
+            dataset_payload = YoloTrainRequest(
+                dataset_id=config.get("dataset_id"), dataset_root=config.get("dataset_root")
+            )
             dataset_info = _resolve_yolo_training_dataset(dataset_payload)
         except Exception as exc:  # noqa: BLE001
-            _yolo_head_graft_job_update(job, status="failed", message="Dataset not ready", error=str(exc))
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_head_graft_job_update(
+                job, status="failed", message="Dataset not ready", error=str(exc)
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         if not dataset_info.get("yolo_ready"):
-            _yolo_head_graft_job_update(job, status="failed", message="Dataset is not YOLO-ready", error="yolo_not_ready")
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_head_graft_job_update(
+                job, status="failed", message="Dataset is not YOLO-ready", error="yolo_not_ready"
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         dataset_task = str(dataset_info.get("task") or "detect").lower()
         if dataset_task != "detect":
-            _yolo_head_graft_job_update(job, status="failed", message="Head grafting only supports detect datasets", error="yolo_graft_detect_only")
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_head_graft_job_update(
+                job,
+                status="failed",
+                message="Head grafting only supports detect datasets",
+                error="yolo_graft_detect_only",
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         new_labelmap = _yolo_load_labelmap_impl(Path(dataset_info.get("yolo_labelmap_path") or ""))
         if not new_labelmap:
-            _yolo_head_graft_job_update(job, status="failed", message="New labelmap missing", error="yolo_new_labelmap_missing")
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_head_graft_job_update(
+                job,
+                status="failed",
+                message="New labelmap missing",
+                error="yolo_new_labelmap_missing",
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         base_norm = {_normalize_class_name_for_match(n) for n in base_labelmap if n}
         new_norm = {_normalize_class_name_for_match(n) for n in new_labelmap if n}
@@ -15563,7 +17982,14 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                 message="Base and new class lists overlap",
                 error="yolo_labelmap_overlap",
             )
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         try:
             _prepare_for_training_impl(
@@ -15585,8 +18011,17 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
             import ultralytics  # type: ignore
             from ultralytics import YOLO  # type: ignore
         except Exception as exc:  # noqa: BLE001
-            _yolo_head_graft_job_update(job, status="failed", message="Ultralytics not installed", error=str(exc))
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_head_graft_job_update(
+                job, status="failed", message="Ultralytics not installed", error=str(exc)
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
         version = getattr(ultralytics, "__version__", "")
         if version and not version.startswith("8."):
@@ -15596,16 +18031,29 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                 message=f"Ultralytics {version} unsupported for head grafting",
                 error="yolo_graft_ultralytics_version",
             )
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             return
-        _yolo_head_graft_job_update(job, status="running", message="Preparing head graft", progress=0.0)
+        _yolo_head_graft_job_update(
+            job, status="running", message="Preparing head graft", progress=0.0
+        )
         _yolo_head_graft_job_log(job, f"Base run: {base_run_id}")
         _yolo_head_graft_job_log(job, f"Variant: {base_variant}")
         _yolo_head_graft_audit(
             job,
             "head_graft_start",
             event="start",
-            extra={"base_run_id": base_run_id, "variant": base_variant, "dataset_id": config.get("dataset_id")},
+            extra={
+                "base_run_id": base_run_id,
+                "variant": base_variant,
+                "dataset_id": config.get("dataset_id"),
+            },
         )
         data_yaml = _yolo_write_data_yaml_impl(
             run_dir,
@@ -15677,7 +18125,9 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
             def _cancel_guard(trainer):
                 if job.cancel_event.is_set():
                     trainer.stop = True
-                    _yolo_head_graft_job_log(job, "Cancellation requested; stopping after current step")
+                    _yolo_head_graft_job_log(
+                        job, "Cancellation requested; stopping after current step"
+                    )
 
             model.add_callback("on_train_epoch_start", _freeze_bn)
             model.add_callback("on_pretrain_routine_start", _freeze_bn)
@@ -15691,16 +18141,37 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
             if not new_best.exists():
                 raise RuntimeError("new_head_best_missing")
             if job.cancel_event.is_set():
-                _yolo_head_graft_job_update(job, status="cancelled", message="Head training cancelled", progress=job.progress)
-                write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+                _yolo_head_graft_job_update(
+                    job,
+                    status="cancelled",
+                    message="Head training cancelled",
+                    progress=job.progress,
+                )
+                write_run_meta(
+                    {
+                        "job_id": job.job_id,
+                        "status": job.status,
+                        "message": job.message,
+                        "config": job.config,
+                    }
+                )
                 _finalize_training_environment_impl(
                     resume_classifier_fn=_resume_classifier_backbone,
                     torch_module=torch,
                 )
                 return
         except Exception as exc:  # noqa: BLE001
-            _yolo_head_graft_job_update(job, status="failed", message="Head training failed", error=str(exc))
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_head_graft_job_update(
+                job, status="failed", message="Head training failed", error=str(exc)
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
             _finalize_training_environment_impl(
                 resume_classifier_fn=_resume_classifier_backbone,
                 torch_module=torch,
@@ -15758,11 +18229,17 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                                 if cls is None:
                                     continue
                                 try:
-                                    max_cls = int(cls.max().item()) if hasattr(cls, "max") else int(max(cls))
+                                    max_cls = (
+                                        int(cls.max().item())
+                                        if hasattr(cls, "max")
+                                        else int(max(cls))
+                                    )
                                 except Exception:
                                     max_cls = None
                                 if max_cls is not None and max_cls >= len(merged_labelmap):
-                                    sanity_errors.append(f"class_index_out_of_range:{image_path.name}:{max_cls}")
+                                    sanity_errors.append(
+                                        f"class_index_out_of_range:{image_path.name}:{max_cls}"
+                                    )
                     else:
                         sanity_errors.append("sanity_images_missing")
                 else:
@@ -15770,7 +18247,13 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
             except Exception as exc:  # noqa: BLE001
                 sanity_errors.append(f"sanity_check_failed:{exc}")
             if sanity_errors:
-                _yolo_head_graft_audit(job, "sanity_check_failed", event="sanity", level="warn", extra={"errors": sanity_errors})
+                _yolo_head_graft_audit(
+                    job,
+                    "sanity_check_failed",
+                    event="sanity",
+                    level="warn",
+                    extra={"errors": sanity_errors},
+                )
             else:
                 _yolo_head_graft_audit(job, "sanity_check_ok", event="sanity")
             export_path = None
@@ -15799,7 +18282,13 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                 dir_size_fn=_dir_size_bytes,
                 meta_name=YOLO_RUN_META_NAME,
             )
-            _yolo_head_graft_job_update(job, status="succeeded", message="Head graft complete", progress=1.0, result=result_payload)
+            _yolo_head_graft_job_update(
+                job,
+                status="succeeded",
+                message="Head graft complete",
+                progress=1.0,
+                result=result_payload,
+            )
             write_run_meta(
                 {
                     "job_id": job.job_id,
@@ -15815,10 +18304,21 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                     },
                 }
             )
-            _yolo_head_graft_audit(job, "head_graft_complete", event="complete", extra={"result": result_payload})
+            _yolo_head_graft_audit(
+                job, "head_graft_complete", event="complete", extra={"result": result_payload}
+            )
         except Exception as exc:  # noqa: BLE001
-            _yolo_head_graft_job_update(job, status="failed", message="Head merge failed", error=str(exc))
-            write_run_meta({"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config})
+            _yolo_head_graft_job_update(
+                job, status="failed", message="Head merge failed", error=str(exc)
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
         finally:
             _finalize_training_environment_impl(
                 resume_classifier_fn=_resume_classifier_backbone,
@@ -15841,10 +18341,17 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
         config = dict(job.config or {})
         dataset_info = config.get("dataset") or {}
         if job.cancel_event.is_set():
-            _rfdetr_job_update(job, status="cancelled", message="Cancelled before start", progress=0.0)
+            _rfdetr_job_update(
+                job, status="cancelled", message="Cancelled before start", progress=0.0
+            )
             _rfdetr_write_run_meta_impl(
                 run_dir,
-                {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config},
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                },
                 meta_name=RFDETR_RUN_META_NAME,
                 time_fn=time.time,
             )
@@ -15874,10 +18381,17 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 RFDETRSegPreview,
             )
         except Exception as exc:  # noqa: BLE001
-            _rfdetr_job_update(job, status="failed", message="RF-DETR not installed", error=str(exc))
+            _rfdetr_job_update(
+                job, status="failed", message="RF-DETR not installed", error=str(exc)
+            )
             _rfdetr_write_run_meta_impl(
                 run_dir,
-                {"job_id": job.job_id, "status": job.status, "message": job.message, "config": job.config},
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                },
                 meta_name=RFDETR_RUN_META_NAME,
                 time_fn=time.time,
             )
@@ -15929,7 +18443,12 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 model_kwargs["pretrain_weights"] = config.get("pretrain_weights")
             if task == "segment":
                 model_kwargs["segmentation_head"] = True
-            _rfdetr_job_update(job, status="running", message=f"Starting RF-DETR training ({variant_label})", progress=0.0)
+            _rfdetr_job_update(
+                job,
+                status="running",
+                message=f"Starting RF-DETR training ({variant_label})",
+                progress=0.0,
+            )
             _rfdetr_job_log(job, "Preparing dataset + COCO annotations")
             prepared_root = _rfdetr_prepare_dataset_impl(
                 dataset_root,
@@ -15959,7 +18478,9 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
             multi_scale = config.get("multi_scale")
             if multi_scale is not None:
                 train_kwargs["multi_scale"] = bool(multi_scale)
-                train_kwargs["expanded_scales"] = bool(config.get("expanded_scales")) if multi_scale else False
+                train_kwargs["expanded_scales"] = (
+                    bool(config.get("expanded_scales")) if multi_scale else False
+                )
             if task == "segment":
                 train_kwargs["segmentation_head"] = True
             train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
@@ -15982,7 +18503,9 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
             if use_distributed:
                 dist_url = f"tcp://127.0.0.1:{_find_free_port_impl()}"
                 world_size = len(device_ids)
-                _rfdetr_job_log(job, f"Multi-GPU enabled: devices={cuda_visible} world_size={world_size}")
+                _rfdetr_job_log(
+                    job, f"Multi-GPU enabled: devices={cuda_visible} world_size={world_size}"
+                )
                 _rfdetr_job_log(job, f"Training started (epochs={total_epochs})")
                 monitor_stop = threading.Event()
                 monitor_thread = threading.Thread(
@@ -16001,10 +18524,18 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 prev_skip_clip = os.environ.get("TATOR_SKIP_CLIP_LOAD")
                 os.environ["TATOR_SKIP_CLIP_LOAD"] = "1"
                 import torch.multiprocessing as mp
+
                 try:
                     mp.spawn(
                         _rfdetr_ddp_worker,
-                        args=(world_size, variant_id, model_kwargs, train_kwargs, aug_policy, dist_url),
+                        args=(
+                            world_size,
+                            variant_id,
+                            model_kwargs,
+                            train_kwargs,
+                            aug_policy,
+                            dist_url,
+                        ),
                         nprocs=world_size,
                         join=True,
                     )
@@ -16028,7 +18559,9 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                         try:
                             epoch_idx = int(epoch)
                             progress = max(0.0, min(0.99, epoch_idx / total_epochs))
-                            _rfdetr_job_update(job, progress=progress, message=f"Epoch {epoch_idx}/{total_epochs}")
+                            _rfdetr_job_update(
+                                job, progress=progress, message=f"Epoch {epoch_idx}/{total_epochs}"
+                            )
                         except Exception:
                             pass
                     if job.cancel_event.is_set():
@@ -16044,9 +18577,13 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 finally:
                     _rfdetr_restore_augmentations_impl(restore)
             if job.cancel_event.is_set():
-                _rfdetr_job_update(job, status="cancelled", message="Training cancelled", progress=job.progress)
+                _rfdetr_job_update(
+                    job, status="cancelled", message="Training cancelled", progress=job.progress
+                )
             else:
-                _rfdetr_job_update(job, status="succeeded", message="Training complete", progress=1.0)
+                _rfdetr_job_update(
+                    job, status="succeeded", message="Training complete", progress=1.0
+                )
             metrics_series = job.metrics or []
             if not metrics_series:
                 metrics_series = _rfdetr_parse_log_series_impl(run_dir / "log.txt")
@@ -16054,7 +18591,9 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                     job.metrics = metrics_series
             if metrics_series:
                 try:
-                    (run_dir / "metrics_series.json").write_text(json.dumps(metrics_series, indent=2, sort_keys=True))
+                    (run_dir / "metrics_series.json").write_text(
+                        json.dumps(metrics_series, indent=2, sort_keys=True)
+                    )
                 except Exception:
                     pass
             best_path = _rfdetr_best_checkpoint_impl(run_dir)
@@ -16075,8 +18614,14 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 "run_dir": str(run_dir),
                 "best_path": best_path,
                 "optimized_path": str(optimized_path) if optimized_path else None,
-                "results_path": str(run_dir / "results.json") if (run_dir / "results.json").exists() else None,
-                "metrics_series_path": str(run_dir / "metrics_series.json") if (run_dir / "metrics_series.json").exists() else None,
+                "results_path": (
+                    str(run_dir / "results.json") if (run_dir / "results.json").exists() else None
+                ),
+                "metrics_series_path": (
+                    str(run_dir / "metrics_series.json")
+                    if (run_dir / "metrics_series.json").exists()
+                    else None
+                ),
                 "log_path": str(run_dir / "log.txt") if (run_dir / "log.txt").exists() else None,
             }
             _rfdetr_prune_run_dir_impl(
@@ -16242,14 +18787,18 @@ async def _write_upload_file(
                     dest.unlink()
                 except Exception:
                     pass
-                raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="upload_too_large")
+                raise HTTPException(
+                    status_code=HTTP_413_CONTENT_TOO_LARGE, detail="upload_too_large"
+                )
             if quota_root and quota_limit and existing + written > quota_limit:
                 handle.close()
                 try:
                     dest.unlink()
                 except Exception:
                     pass
-                raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="upload_quota_exceeded")
+                raise HTTPException(
+                    status_code=HTTP_413_CONTENT_TOO_LARGE, detail="upload_quota_exceeded"
+                )
             handle.write(chunk)
     await upload.close()
 
@@ -16326,14 +18875,18 @@ def _active_encoder_ready() -> bool:
     if clf is None:
         return False
     if str(active_encoder_type or "").strip().lower() == "dinov3":
-        return bool(dinov3_initialized and dinov3_model is not None and dinov3_processor is not None)
+        return bool(
+            dinov3_initialized and dinov3_model is not None and dinov3_processor is not None
+        )
     return bool(clip_initialized and clip_model is not None and clip_preprocess is not None)
 
 
 def predict_base64(payload: Base64Payload):
     # If CLIP/logreg not loaded, return error message in "prediction"
     if not _active_encoder_ready():
-        return PredictResponse(prediction=str(ERROR_MESSAGE), uuid=None, error="clip_unavailable") # messy ... returning the error message int as str. Crap logic needs cleanup
+        return PredictResponse(
+            prediction=str(ERROR_MESSAGE), uuid=None, error="clip_unavailable"
+        )  # messy ... returning the error message int as str. Crap logic needs cleanup
 
     pil_img, _np_img, _token = _resolve_detector_image_impl(
         payload.image_base64,
@@ -16486,7 +19039,9 @@ def rename_clip_classifier(
         target_name = f"{target_name}{current_suffix}"
     target_suffix = Path(target_name).suffix.lower()
     if target_suffix not in CLASSIFIER_ALLOWED_EXTS:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_extension_not_allowed")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="classifier_extension_not_allowed"
+        )
 
     classifiers_root = (UPLOAD_ROOT / "classifiers").resolve()
     parent = classifier_path.parent.resolve()
@@ -16497,7 +19052,10 @@ def rename_clip_classifier(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_path_invalid")
 
     if target_path == classifier_path:
-        return {"status": "unchanged", "rel_path": str(classifier_path.relative_to(classifiers_root))}
+        return {
+            "status": "unchanged",
+            "rel_path": str(classifier_path.relative_to(classifiers_root)),
+        }
 
     if target_path.exists():
         stem = target_path.stem
@@ -16532,7 +19090,10 @@ def rename_clip_classifier(
 
     try:
         global active_classifier_path
-        if active_classifier_path and Path(active_classifier_path).resolve() == classifier_path.resolve():
+        if (
+            active_classifier_path
+            and Path(active_classifier_path).resolve() == classifier_path.resolve()
+        ):
             active_classifier_path = str(target_path)
     except Exception:
         pass
@@ -16657,34 +19218,78 @@ def _validate_job_exists(job_id: str) -> ClipTrainingJob:
         return job
 
 
-def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir: str, labelmap_path: Optional[str],
-                           clip_name: str, encoder_type: str, encoder_model: Optional[str],
-                           output_dir: str, labelmap_dir: str, model_filename: str, labelmap_filename: str,
-                           test_size: float, random_seed: int, batch_size: int, max_iter: int,
-                           min_per_class: int, class_weight: str, effective_beta: float, C: float, device_override: Optional[str],
-                           solver: str, classifier_type: str, mlp_hidden_sizes: str, mlp_dropout: float,
-                           mlp_epochs: int, mlp_lr: float, mlp_weight_decay: float, mlp_label_smoothing: float,
-                           mlp_loss_type: str, mlp_focal_gamma: float, mlp_focal_alpha: Optional[float],
-                           mlp_sampler: str, mlp_mixup_alpha: float, mlp_normalize_embeddings: bool,
-                           mlp_patience: int, mlp_activation: str, mlp_layer_norm: bool, mlp_hard_mining_epochs: int,
-                           logit_adjustment_mode: str, logit_adjustment_inference: Optional[bool],
-                           arcface_enabled: bool, arcface_margin: float, arcface_scale: float,
-                           supcon_weight: float, supcon_temperature: float, supcon_projection_dim: int, supcon_projection_hidden: int,
-                           embedding_center: bool, embedding_standardize: bool,
-                           calibration_mode: str, calibration_max_iters: int, calibration_min_temp: float, calibration_max_temp: float,
-                           reuse_embeddings: bool, hard_example_mining: bool,
-                           hard_mining_misclassified_weight: float,
-                           hard_mining_low_conf_weight: float,
-                           hard_mining_low_conf_threshold: float,
-                           hard_mining_margin_threshold: float,
-                           convergence_tol: float,
-                           bg_class_count: int,
-                           cancel_event: threading.Event) -> None:
+def _start_training_worker(
+    job: ClipTrainingJob,
+    *,
+    images_dir: str,
+    labels_dir: str,
+    labelmap_path: Optional[str],
+    clip_name: str,
+    encoder_type: str,
+    encoder_model: Optional[str],
+    output_dir: str,
+    labelmap_dir: str,
+    model_filename: str,
+    labelmap_filename: str,
+    test_size: float,
+    random_seed: int,
+    batch_size: int,
+    max_iter: int,
+    min_per_class: int,
+    class_weight: str,
+    effective_beta: float,
+    C: float,
+    device_override: Optional[str],
+    solver: str,
+    classifier_type: str,
+    mlp_hidden_sizes: str,
+    mlp_dropout: float,
+    mlp_epochs: int,
+    mlp_lr: float,
+    mlp_weight_decay: float,
+    mlp_label_smoothing: float,
+    mlp_loss_type: str,
+    mlp_focal_gamma: float,
+    mlp_focal_alpha: Optional[float],
+    mlp_sampler: str,
+    mlp_mixup_alpha: float,
+    mlp_normalize_embeddings: bool,
+    mlp_patience: int,
+    mlp_activation: str,
+    mlp_layer_norm: bool,
+    mlp_hard_mining_epochs: int,
+    logit_adjustment_mode: str,
+    logit_adjustment_inference: Optional[bool],
+    arcface_enabled: bool,
+    arcface_margin: float,
+    arcface_scale: float,
+    supcon_weight: float,
+    supcon_temperature: float,
+    supcon_projection_dim: int,
+    supcon_projection_hidden: int,
+    embedding_center: bool,
+    embedding_standardize: bool,
+    calibration_mode: str,
+    calibration_max_iters: int,
+    calibration_min_temp: float,
+    calibration_max_temp: float,
+    reuse_embeddings: bool,
+    hard_example_mining: bool,
+    hard_mining_misclassified_weight: float,
+    hard_mining_low_conf_weight: float,
+    hard_mining_low_conf_threshold: float,
+    hard_mining_margin_threshold: float,
+    convergence_tol: float,
+    bg_class_count: int,
+    cancel_event: threading.Event,
+) -> None:
 
     def progress_cb(value: float, message: str) -> None:
         with TRAINING_JOBS_LOCK:
             if cancel_event.is_set() and job.status not in {"cancelled", "failed"}:
-                _job_update(job, status="cancelling", message="Cancellation requested ...", progress=value)
+                _job_update(
+                    job, status="cancelling", message="Cancellation requested ...", progress=value
+                )
                 return
             _job_update(job, status="running", progress=value, message=message)
 
@@ -16713,9 +19318,16 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
             )
             with TRAINING_JOBS_LOCK:
                 if cancel_event.is_set():
-                    _job_update(job, status="cancelled", progress=job.progress, message="Training cancelled before start.")
+                    _job_update(
+                        job,
+                        status="cancelled",
+                        progress=job.progress,
+                        message="Training cancelled before start.",
+                    )
                     return
-                _job_update(job, status="running", progress=0.01, message="Preparing training job ...")
+                _job_update(
+                    job, status="running", progress=0.01, message="Preparing training job ..."
+                )
             artifacts = train_clip_from_yolo(
                 images_path=images_dir,
                 labels_path=labels_dir,
@@ -16782,7 +19394,13 @@ def _start_training_worker(job: ClipTrainingJob, *, images_dir: str, labels_dir:
             artifacts = _publish_clip_training_artifacts(artifacts)
             payload = _artifacts_to_payload(artifacts)
             with TRAINING_JOBS_LOCK:
-                _job_update(job, status="succeeded", progress=1.0, message="Training completed.", artifacts=payload)
+                _job_update(
+                    job,
+                    status="succeeded",
+                    progress=1.0,
+                    message="Training completed.",
+                    artifacts=payload,
+                )
         except TrainingError as exc:
             with TRAINING_JOBS_LOCK:
                 if str(exc) == "cancelled":
@@ -16876,7 +19494,9 @@ async def start_clip_training(
 
     encoder_type_norm = (encoder_type or "clip").strip().lower()
     if encoder_type_norm not in {"clip", "dinov3"}:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="clip_encoder_type_unsupported")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="clip_encoder_type_unsupported"
+        )
     encoder_model_name = (encoder_model or "").strip()
     if encoder_type_norm == "clip":
         if encoder_model_name:
@@ -16900,7 +19520,10 @@ async def start_clip_training(
     if use_native_paths and (images or labels):
         logger.info("Ignoring uploaded files; using native dataset paths provided.")
     if reuse_embeddings_flag and not use_native_paths:
-        logger.info("Embedding cache reuse requested but dataset is staged upload; disabling reuse for job %s", images_path_native or "<staged>")
+        logger.info(
+            "Embedding cache reuse requested but dataset is staged upload; disabling reuse for job %s",
+            images_path_native or "<staged>",
+        )
         reuse_embeddings_flag = False
 
     if not use_native_paths:
@@ -16985,7 +19608,13 @@ async def start_clip_training(
     )
     if staged_temp_dir:
         temp_root = os.path.abspath(staged_temp_dir)
-    job = ClipTrainingJob(job_id=job_id, temp_dir=temp_root, images_dir=images_dir, labels_dir=labels_dir, labelmap_path=labelmap_path)
+    job = ClipTrainingJob(
+        job_id=job_id,
+        temp_dir=temp_root,
+        images_dir=images_dir,
+        labels_dir=labels_dir,
+        labelmap_path=labelmap_path,
+    )
     job_message = "Job queued (native paths)" if use_native_paths else "Job queued (upload staging)"
     test_size_f = _coerce_float(test_size, 0.2, minimum=0.0, maximum=0.9)
     random_seed_i = _coerce_int(random_seed, 42)
@@ -17040,11 +19669,15 @@ async def start_clip_training(
         calibration_mode_norm = "none"
     calibration_max_iters_i = _coerce_int(calibration_max_iters, 50, minimum=1)
     calibration_min_temp_f = _coerce_float(calibration_min_temp, 0.5, minimum=0.01)
-    calibration_max_temp_f = _coerce_float(calibration_max_temp, 5.0, minimum=calibration_min_temp_f)
-    device_override_clean = (device_override or None)
+    calibration_max_temp_f = _coerce_float(
+        calibration_max_temp, 5.0, minimum=calibration_min_temp_f
+    )
+    device_override_clean = device_override or None
     hard_mis_weight_f = _coerce_float(hard_mis_weight, 3.0, minimum=1.0)
     hard_low_conf_weight_f = _coerce_float(hard_low_conf_weight, 2.0, minimum=1.0)
-    hard_low_conf_threshold_f = _coerce_float(hard_low_conf_threshold, 0.65, minimum=0.0, maximum=0.9999)
+    hard_low_conf_threshold_f = _coerce_float(
+        hard_low_conf_threshold, 0.65, minimum=0.0, maximum=0.9999
+    )
     hard_margin_threshold_f = _coerce_float(hard_margin_threshold, 0.15, minimum=0.0)
     convergence_tol_f = _coerce_float(convergence_tol, 1e-4, minimum=1e-8)
     bg_class_count_i = _coerce_int(bg_class_count, 2, minimum=1)
@@ -17155,7 +19788,9 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
             if isinstance(progress_val, (int, float)):
                 progress = max(0.0, min(float(progress_val), 0.999))
             message = _summarize_qwen_metric_impl(payload)
-            _qwen_job_update(job, status="running", message=message, progress=progress, log_message=False)
+            _qwen_job_update(
+                job, status="running", message=message, progress=progress, log_message=False
+            )
 
     def cancel_cb() -> bool:
         return job.cancel_event.is_set()
@@ -17167,8 +19802,12 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
                 if job.cancel_event.is_set():
                     _qwen_job_update(job, status="cancelled", message="Cancelled before start.")
                     return
-                _qwen_job_update(job, status="running", progress=0.01, message="Preparing Qwen training job ...")
-            result = train_qwen_model(config, progress_cb=progress_cb, cancel_cb=cancel_cb, metrics_cb=metrics_cb)
+                _qwen_job_update(
+                    job, status="running", progress=0.01, message="Preparing Qwen training job ..."
+                )
+            result = train_qwen_model(
+                config, progress_cb=progress_cb, cancel_cb=cancel_cb, metrics_cb=metrics_cb
+            )
             run_metadata = _persist_qwen_run_metadata(result_path, config, result)
             payload = {
                 "checkpoints": result.checkpoints,
@@ -17177,7 +19816,13 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
                 "metadata": run_metadata,
             }
             with QWEN_TRAINING_JOBS_LOCK:
-                _qwen_job_update(job, status="succeeded", progress=1.0, message="Training complete", result=payload)
+                _qwen_job_update(
+                    job,
+                    status="succeeded",
+                    progress=1.0,
+                    message="Training complete",
+                    result=payload,
+                )
         except QwenTrainingError as exc:
             with QWEN_TRAINING_JOBS_LOCK:
                 status = "cancelled" if job.cancel_event.is_set() else "failed"
@@ -17192,12 +19837,14 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
     thread.start()
 
 
-
 def list_training_jobs():
     _prune_job_registry(TRAINING_JOBS, TRAINING_JOBS_LOCK)
     with TRAINING_JOBS_LOCK:
         jobs = sorted(TRAINING_JOBS.values(), key=lambda job: job.created_at, reverse=True)
-        return [{"job_id": job.job_id, "status": job.status, "created_at": job.created_at} for job in jobs]
+        return [
+            {"job_id": job.job_id, "status": job.status, "created_at": job.created_at}
+            for job in jobs
+        ]
 
 
 def get_training_job(job_id: str):
@@ -17210,7 +19857,9 @@ def cancel_training_job(job_id: str):
     next_status = job.status
     with TRAINING_JOBS_LOCK:
         if job.status in {"succeeded", "failed", "cancelled"}:
-            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+            raise HTTPException(
+                status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable"
+            )
         if job.cancel_event.is_set():
             return {"status": job.status}
         job.cancel_event.set()
@@ -17239,8 +19888,14 @@ def _build_sam3_config(
     val_percent = payload.val_percent if payload.val_percent is not None else 0.3
     split_seed = int(payload.split_seed) if payload.split_seed is not None else 42
     random_split = payload.random_split if payload.random_split is not None else True
-    train_limit = int(payload.train_limit) if payload.train_limit is not None and payload.train_limit > 0 else None
-    val_limit = int(payload.val_limit) if payload.val_limit is not None and payload.val_limit > 0 else None
+    train_limit = (
+        int(payload.train_limit)
+        if payload.train_limit is not None and payload.train_limit > 0
+        else None
+    )
+    val_limit = (
+        int(payload.val_limit) if payload.val_limit is not None and payload.val_limit > 0 else None
+    )
     meta = _prepare_sam3_training_split(
         dataset_root,
         meta,
@@ -17264,22 +19919,44 @@ def _build_sam3_config(
     cfg.paths.val_img_folder = str(val_ann.parent)
     cfg.paths.val_ann_file = str(val_ann)
     run_name = _safe_run_name(payload.run_name, f"sam3_run_{job_id}")
-    exp_dir = Path(payload.experiment_log_dir) if payload.experiment_log_dir else (SAM3_JOB_ROOT / run_name)
+    exp_dir = (
+        Path(payload.experiment_log_dir)
+        if payload.experiment_log_dir
+        else (SAM3_JOB_ROOT / run_name)
+    )
     if exp_dir.exists():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="run_name_exists")
     cfg.paths.experiment_log_dir = str(exp_dir.resolve())
     cfg.paths.bpe_path = str(SAM3_BPE_PATH)
     cfg.launcher.experiment_log_dir = cfg.paths.experiment_log_dir
     cfg.launcher.gpus_per_node = max(1, int(payload.num_gpus or cfg.launcher.gpus_per_node or 1))
-    cfg.trainer.max_epochs = int(payload.max_epochs) if payload.max_epochs is not None else cfg.trainer.max_epochs
-    cfg.trainer.val_epoch_freq = int(payload.val_epoch_freq) if payload.val_epoch_freq is not None else cfg.trainer.val_epoch_freq
-    cfg.scratch.target_epoch_size = int(payload.target_epoch_size) if payload.target_epoch_size is not None else cfg.scratch.target_epoch_size
+    cfg.trainer.max_epochs = (
+        int(payload.max_epochs) if payload.max_epochs is not None else cfg.trainer.max_epochs
+    )
+    cfg.trainer.val_epoch_freq = (
+        int(payload.val_epoch_freq)
+        if payload.val_epoch_freq is not None
+        else cfg.trainer.val_epoch_freq
+    )
+    cfg.scratch.target_epoch_size = (
+        int(payload.target_epoch_size)
+        if payload.target_epoch_size is not None
+        else cfg.scratch.target_epoch_size
+    )
     dataset_type = meta.get("type", "bbox")
     seg_head_requested = payload.enable_segmentation_head
     train_seg_requested = payload.train_segmentation
     default_seg = dataset_type == "seg"
-    enable_seg_head = bool(seg_head_requested) if seg_head_requested is not None else (bool(cfg.scratch.enable_segmentation_head) or default_seg)
-    train_segmentation = bool(train_seg_requested) if train_seg_requested is not None else (bool(cfg.scratch.load_segmentation) or default_seg)
+    enable_seg_head = (
+        bool(seg_head_requested)
+        if seg_head_requested is not None
+        else (bool(cfg.scratch.enable_segmentation_head) or default_seg)
+    )
+    train_segmentation = (
+        bool(train_seg_requested)
+        if train_seg_requested is not None
+        else (bool(cfg.scratch.load_segmentation) or default_seg)
+    )
     cfg.scratch.enable_segmentation_head = enable_seg_head or train_segmentation
     cfg.scratch.load_segmentation = train_segmentation
     # Keep legacy flag aligned with head presence so downstream activation sees the capability.
@@ -17320,7 +19997,11 @@ def _build_sam3_config(
     elif payload.target_epoch_size is not None:
         try:
             batches = max(1, int(payload.target_epoch_size))
-            batch_size = int(payload.train_batch_size) if payload.train_batch_size is not None else int(cfg.scratch.train_batch_size)
+            batch_size = (
+                int(payload.train_batch_size)
+                if payload.train_batch_size is not None
+                else int(cfg.scratch.train_batch_size)
+            )
             cfg.dataset.num_images = max(1, batches * batch_size)
         except Exception:
             pass
@@ -17328,7 +20009,11 @@ def _build_sam3_config(
         try:
             val_limit = max(1, int(payload.val_limit))
             cfg.dataset.val_num_images = val_limit
-            if hasattr(cfg, "trainer") and hasattr(cfg.trainer, "data") and hasattr(cfg.trainer.data, "val"):
+            if (
+                hasattr(cfg, "trainer")
+                and hasattr(cfg.trainer, "data")
+                and hasattr(cfg.trainer.data, "val")
+            ):
                 if hasattr(cfg.trainer.data.val, "dataset"):
                     cfg.trainer.data.val.dataset.limit_ids = val_limit
         except Exception:
@@ -17368,8 +20053,12 @@ def _build_sam3_config(
     cfg.trainer.checkpoint.save_dir = f"{cfg.launcher.experiment_log_dir}/checkpoints"
     if "meters" in cfg.trainer and "val" in cfg.trainer.meters:
         try:
-            cfg.trainer.meters.val.roboflow100.detection.dump_dir = f"{cfg.launcher.experiment_log_dir}/dumps/local"
-            cfg.trainer.meters.val.roboflow100.detection.pred_file_evaluators[0].gt_path = cfg.paths.val_ann_file
+            cfg.trainer.meters.val.roboflow100.detection.dump_dir = (
+                f"{cfg.launcher.experiment_log_dir}/dumps/local"
+            )
+            cfg.trainer.meters.val.roboflow100.detection.pred_file_evaluators[0].gt_path = (
+                cfg.paths.val_ann_file
+            )
             # Apply val tuning
             if payload.val_max_dets is not None:
                 cfg.trainer.meters.val.roboflow100.detection.maxdets = int(payload.val_max_dets)
@@ -17380,6 +20069,7 @@ def _build_sam3_config(
     prompt_map: Dict[int, List[str]] = {}
     classes = meta.get("classes") or []
     if classes and user_prompts:
+
         def _normalise_variants(raw: Any) -> List[str]:
             if raw is None:
                 return []
@@ -17404,7 +20094,9 @@ def _build_sam3_config(
                 prompt_map[cat_id] = variants
 
     if prompt_map:
-        prompt_randomize = bool(payload.prompt_randomize) if payload.prompt_randomize is not None else True
+        prompt_randomize = (
+            bool(payload.prompt_randomize) if payload.prompt_randomize is not None else True
+        )
         # Train loader
         try:
             train_loader_cfg = cfg.trainer.data.train.dataset.get("coco_json_loader")  # type: ignore[index]
@@ -17485,7 +20177,9 @@ def cancel_sam3_training_job(job_id: str):
     job = _get_sam3_job(job_id)
     with SAM3_TRAINING_JOBS_LOCK:
         if job.status in {"succeeded", "failed", "cancelled"}:
-            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+            raise HTTPException(
+                status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable"
+            )
         if job.cancel_event.is_set():
             return {"status": job.status}
         job.cancel_event.set()
@@ -17535,7 +20229,11 @@ def create_yolo_training_job(payload: YoloTrainRequest):
         http_exception_cls=HTTPException,
     )
     dataset_info = _resolve_yolo_training_dataset(payload)
-    if payload.task == "segment" and dataset_info.get("yolo_ready") and not dataset_info.get("yolo_seg_ready"):
+    if (
+        payload.task == "segment"
+        and dataset_info.get("yolo_ready")
+        and not dataset_info.get("yolo_seg_ready")
+    ):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_seg_requires_polygons")
     config = payload.dict(exclude_none=True)
     config["paths"] = {"run_dir": str(run_dir)}
@@ -17581,7 +20279,9 @@ def cancel_yolo_training_job(job_id: str):
     job = _get_yolo_job(job_id)
     with YOLO_TRAINING_JOBS_LOCK:
         if job.status in {"succeeded", "failed", "cancelled"}:
-            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+            raise HTTPException(
+                status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable"
+            )
         if job.cancel_event.is_set():
             return {"status": job.status}
         job.cancel_event.set()
@@ -17669,7 +20369,9 @@ def yolo_head_graft_dry_run(payload: YoloHeadGraftDryRunRequest):
         yolo_load_labelmap_fn=_yolo_load_labelmap_impl,
         yaml_load_fn=yaml.safe_load,
     )
-    dataset_payload = YoloTrainRequest(dataset_id=payload.dataset_id, dataset_root=payload.dataset_root)
+    dataset_payload = YoloTrainRequest(
+        dataset_id=payload.dataset_id, dataset_root=payload.dataset_root
+    )
     dataset_info = _resolve_yolo_training_dataset(dataset_payload)
     if not dataset_info.get("yolo_ready"):
         return {
@@ -17684,7 +20386,13 @@ def yolo_head_graft_dry_run(payload: YoloHeadGraftDryRunRequest):
     base_norm = {_normalize_class_name_for_match(n) for n in base_labelmap if n}
     new_norm = {_normalize_class_name_for_match(n) for n in new_labelmap if n}
     overlap = sorted(base_norm.intersection(new_norm))
-    ok = base_task == "detect" and dataset_task == "detect" and not overlap and bool(base_labelmap) and bool(new_labelmap)
+    ok = (
+        base_task == "detect"
+        and dataset_task == "detect"
+        and not overlap
+        and bool(base_labelmap)
+        and bool(new_labelmap)
+    )
     return {
         "ok": ok,
         "base_run_id": base_run_id,
@@ -17721,14 +20429,20 @@ def cancel_yolo_head_graft_job(job_id: str):
         if not job:
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="job_not_found")
         if job.status in {"succeeded", "failed", "cancelled"}:
-            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+            raise HTTPException(
+                status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable"
+            )
         if job.cancel_event.is_set():
             return {"status": job.status}
         job.cancel_event.set()
         stopped = False
         if job.status in {"running", "queued"}:
             stopped = _yolo_head_graft_force_stop_impl(job)
-        next_status = "cancelled" if stopped else (job.status if job.status not in {"running", "queued"} else "cancelling")
+        next_status = (
+            "cancelled"
+            if stopped
+            else (job.status if job.status not in {"running", "queued"} else "cancelling")
+        )
         _yolo_head_graft_job_update(job, status=next_status, message="Cancellation requested ...")
         _yolo_head_graft_audit(job, "cancel_requested", event="cancel", extra={"forced": stopped})
     return {"status": job.status}
@@ -17806,7 +20520,9 @@ def cancel_rfdetr_training_job(job_id: str):
     job = _get_rfdetr_job(job_id)
     with RFDETR_TRAINING_JOBS_LOCK:
         if job.status in {"succeeded", "failed", "cancelled"}:
-            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+            raise HTTPException(
+                status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable"
+            )
         if job.cancel_event.is_set():
             return {"status": job.status}
         job.cancel_event.set()
@@ -17873,7 +20589,9 @@ def set_rfdetr_active(payload: RfDetrActiveRequest):
         "run_id": payload.run_id,
         "run_name": config.get("run_name") or dataset.get("label") or payload.run_id,
         "best_path": best_path,
-        "labelmap_path": str(run_dir / "labelmap.txt") if (run_dir / "labelmap.txt").exists() else None,
+        "labelmap_path": (
+            str(run_dir / "labelmap.txt") if (run_dir / "labelmap.txt").exists() else None
+        ),
         "task": config.get("task") or dataset.get("task"),
         "variant": config.get("variant"),
     }
@@ -17974,6 +20692,7 @@ def rfdetr_run_summary(run_id: str):
         "metrics": metrics,
     }
 
+
 def delete_rfdetr_run(run_id: str):
     run_dir = _rfdetr_run_dir_impl(
         run_id,
@@ -18018,7 +20737,9 @@ def set_yolo_active(payload: YoloActiveRequest):
         "run_id": payload.run_id,
         "run_name": config.get("run_name") or dataset.get("label") or payload.run_id,
         "best_path": str(best_path),
-        "labelmap_path": str(run_dir / "labelmap.txt") if (run_dir / "labelmap.txt").exists() else None,
+        "labelmap_path": (
+            str(run_dir / "labelmap.txt") if (run_dir / "labelmap.txt").exists() else None
+        ),
         "task": config.get("task"),
         "variant": config.get("variant"),
     }
@@ -18033,7 +20754,9 @@ def yolo_predict_region(payload: YoloRegionRequest):
     if not task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_task_unknown")
     if "segment" in task_name:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_region_detect_requires_bbox")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="yolo_region_detect_requires_bbox"
+        )
     pil_img, _np_img, _token = _resolve_detector_image_impl(
         payload.image_base64,
         payload.image_token,
@@ -18128,7 +20851,9 @@ def rfdetr_predict_region(payload: RfDetrRegionRequest):
     if not task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_task_unknown")
     if "segment" in task_name:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_region_detect_requires_bbox")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_region_detect_requires_bbox"
+        )
     pil_img, _np_img, _token = _resolve_detector_image_impl(
         payload.image_base64,
         payload.image_token,
@@ -18182,7 +20907,9 @@ def rfdetr_predict_region(payload: RfDetrRegionRequest):
         with RFDETR_INFER_LOCK:
             results = model.predict(crop, threshold=conf)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}"
+        ) from exc
     if results is not None:
         xyxy = getattr(results, "xyxy", None)
         scores = getattr(results, "confidence", None)
@@ -18221,7 +20948,9 @@ def rfdetr_predict_region(payload: RfDetrRegionRequest):
                 )
             if raw_entries:
                 if any(score is not None for score, _ in raw_entries):
-                    raw_entries.sort(key=lambda item: item[0] if item[0] is not None else -1.0, reverse=True)
+                    raw_entries.sort(
+                        key=lambda item: item[0] if item[0] is not None else -1.0, reverse=True
+                    )
                 detections = [entry for _, entry in raw_entries[:max_det]]
             if labelmap_shifted:
                 warnings.append("labelmap_shifted")
@@ -18238,7 +20967,9 @@ def yolo_predict_full(payload: YoloFullRequest):
     if not task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_task_unknown")
     if "segment" in task_name:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_full_detect_requires_bbox")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="yolo_full_detect_requires_bbox"
+        )
     pil_img, _np_img, _token = _resolve_detector_image_impl(
         payload.image_base64,
         payload.image_token,
@@ -18254,10 +20985,15 @@ def yolo_predict_full(payload: YoloFullRequest):
     )
     img_w, img_h = pil_img.size
     warnings: List[str] = []
-    conf = _clamp_conf_value_impl(float(payload.conf) if payload.conf is not None else 0.25, warnings)
+    conf = _clamp_conf_value_impl(
+        float(payload.conf) if payload.conf is not None else 0.25, warnings
+    )
     iou = _clamp_iou_value_impl(float(payload.iou) if payload.iou is not None else 0.45, warnings)
-    max_det = _clamp_max_det_value_impl(int(payload.max_det) if payload.max_det is not None else 300, warnings)
+    max_det = _clamp_max_det_value_impl(
+        int(payload.max_det) if payload.max_det is not None else 300, warnings
+    )
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
+
     def _predict_with_fallback(device: Optional[str] = None):
         kwargs = {"conf": conf, "iou": iou, "max_det": max_det, "verbose": False}
         if device is not None:
@@ -18290,7 +21026,9 @@ def yolo_predict_full(payload: YoloFullRequest):
                     results = _predict_with_fallback(device="cpu")
                 warnings.append("yolo_cuda_fallback_cpu")
             except Exception:
-                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="yolo_cuda_error") from exc
+                raise HTTPException(
+                    status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="yolo_cuda_error"
+                ) from exc
         else:
             raise
     raw = _yolo_extract_detections(results, labelmap, 0.0, 0.0, img_w, img_h)
@@ -18304,7 +21042,9 @@ def yolo_predict_windowed(payload: YoloWindowedRequest):
     if not task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_task_unknown")
     if "segment" in task_name:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_windowed_detect_requires_bbox")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="yolo_windowed_detect_requires_bbox"
+        )
     pil_img, _np_img, _token = _resolve_detector_image_impl(
         payload.image_base64,
         payload.image_token,
@@ -18320,13 +21060,19 @@ def yolo_predict_windowed(payload: YoloWindowedRequest):
     )
     img_w, img_h = pil_img.size
     warnings: List[str] = []
-    conf = _clamp_conf_value_impl(float(payload.conf) if payload.conf is not None else 0.25, warnings)
+    conf = _clamp_conf_value_impl(
+        float(payload.conf) if payload.conf is not None else 0.25, warnings
+    )
     iou = _clamp_iou_value_impl(float(payload.iou) if payload.iou is not None else 0.45, warnings)
-    max_det = _clamp_max_det_value_impl(int(payload.max_det) if payload.max_det is not None else 300, warnings)
+    max_det = _clamp_max_det_value_impl(
+        int(payload.max_det) if payload.max_det is not None else 300, warnings
+    )
     slice_size = int(payload.slice_size) if payload.slice_size is not None else 640
     overlap = float(payload.overlap) if payload.overlap is not None else 0.2
     merge_iou = float(payload.merge_iou) if payload.merge_iou is not None else 0.5
-    slice_size, overlap, merge_iou = _clamp_slice_params_impl(slice_size, overlap, merge_iou, img_w, img_h, warnings)
+    slice_size, overlap, merge_iou = _clamp_slice_params_impl(
+        slice_size, overlap, merge_iou, img_w, img_h, warnings
+    )
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
     slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
     raw_detections: List[Dict[str, Any]] = []
@@ -18365,10 +21111,14 @@ def yolo_predict_windowed(payload: YoloWindowedRequest):
                     results = _predict_with_fallback(crop)
                     warnings.append("yolo_cuda_fallback_cpu")
                 except Exception:
-                    raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="yolo_cuda_error") from exc
+                    raise HTTPException(
+                        status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="yolo_cuda_error"
+                    ) from exc
             else:
                 raise
-        raw_detections.extend(_yolo_extract_detections(results, labelmap, offset_x, offset_y, img_w, img_h))
+        raw_detections.extend(
+            _yolo_extract_detections(results, labelmap, offset_x, offset_y, img_w, img_h)
+        )
     merged = _merge_detections_nms(raw_detections, merge_iou, max_det)
     detections = [YoloRegionDetection(**item) for item in merged]
     return YoloRegionResponse(detections=detections, labelmap=labelmap, warnings=warnings or None)
@@ -18380,7 +21130,9 @@ def rfdetr_predict_full(payload: RfDetrFullRequest):
     if not task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_task_unknown")
     if "segment" in task_name:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_full_detect_requires_bbox")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_full_detect_requires_bbox"
+        )
     pil_img, _np_img, _token = _resolve_detector_image_impl(
         payload.image_base64,
         payload.image_token,
@@ -18396,14 +21148,20 @@ def rfdetr_predict_full(payload: RfDetrFullRequest):
     )
     img_w, img_h = pil_img.size
     warnings: List[str] = []
-    conf = _clamp_conf_value_impl(float(payload.conf) if payload.conf is not None else 0.25, warnings)
-    max_det = _clamp_max_det_value_impl(int(payload.max_det) if payload.max_det is not None else 300, warnings)
+    conf = _clamp_conf_value_impl(
+        float(payload.conf) if payload.conf is not None else 0.25, warnings
+    )
+    max_det = _clamp_max_det_value_impl(
+        int(payload.max_det) if payload.max_det is not None else 300, warnings
+    )
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
     try:
         with RFDETR_INFER_LOCK:
             results = model.predict(pil_img, threshold=conf)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}"
+        ) from exc
     raw, labelmap_shifted = _rfdetr_extract_detections(results, labelmap, 0.0, 0.0, img_w, img_h)
     raw.sort(key=lambda det: float(det.get("score") or 0.0), reverse=True)
     detections = [RfDetrRegionDetection(**item) for item in raw[:max_det]]
@@ -18418,7 +21176,9 @@ def rfdetr_predict_windowed(payload: RfDetrWindowedRequest):
     if not task_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_task_unknown")
     if "segment" in task_name:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_windowed_detect_requires_bbox")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_windowed_detect_requires_bbox"
+        )
     pil_img, _np_img, _token = _resolve_detector_image_impl(
         payload.image_base64,
         payload.image_token,
@@ -18434,12 +21194,18 @@ def rfdetr_predict_windowed(payload: RfDetrWindowedRequest):
     )
     img_w, img_h = pil_img.size
     warnings: List[str] = []
-    conf = _clamp_conf_value_impl(float(payload.conf) if payload.conf is not None else 0.25, warnings)
-    max_det = _clamp_max_det_value_impl(int(payload.max_det) if payload.max_det is not None else 300, warnings)
+    conf = _clamp_conf_value_impl(
+        float(payload.conf) if payload.conf is not None else 0.25, warnings
+    )
+    max_det = _clamp_max_det_value_impl(
+        int(payload.max_det) if payload.max_det is not None else 300, warnings
+    )
     slice_size = int(payload.slice_size) if payload.slice_size is not None else 640
     overlap = float(payload.overlap) if payload.overlap is not None else 0.2
     merge_iou = float(payload.merge_iou) if payload.merge_iou is not None else 0.5
-    slice_size, overlap, merge_iou = _clamp_slice_params_impl(slice_size, overlap, merge_iou, img_w, img_h, warnings)
+    slice_size, overlap, merge_iou = _clamp_slice_params_impl(
+        slice_size, overlap, merge_iou, img_w, img_h, warnings
+    )
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
     slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
     raw_detections: List[Dict[str, Any]] = []
@@ -18451,8 +21217,12 @@ def rfdetr_predict_windowed(payload: RfDetrWindowedRequest):
             with RFDETR_INFER_LOCK:
                 results = model.predict(crop, threshold=conf)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}") from exc
-        extracted, shifted = _rfdetr_extract_detections(results, labelmap, offset_x, offset_y, img_w, img_h)
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"rfdetr_predict_failed:{exc}"
+            ) from exc
+        extracted, shifted = _rfdetr_extract_detections(
+            results, labelmap, offset_x, offset_y, img_w, img_h
+        )
         labelmap_shifted = labelmap_shifted or shifted
         raw_detections.extend(extracted)
     merged = _merge_detections_nms(raw_detections, merge_iou, max_det)
@@ -18468,7 +21238,9 @@ app.include_router(
         list_runs_fn=lambda: _list_rfdetr_runs_impl(
             job_root=RFDETR_JOB_ROOT,
             active_payload=_load_rfdetr_active(),
-            load_meta_fn=lambda run_dir: _rfdetr_load_run_meta_impl(run_dir, meta_name=RFDETR_RUN_META_NAME),
+            load_meta_fn=lambda run_dir: _rfdetr_load_run_meta_impl(
+                run_dir, meta_name=RFDETR_RUN_META_NAME
+            ),
             collect_artifacts_fn=lambda run_dir: _collect_rfdetr_artifacts_impl(
                 run_dir,
                 meta_name=RFDETR_RUN_META_NAME,
@@ -18573,7 +21345,9 @@ app.include_router(
             job_root=YOLO_JOB_ROOT,
             dataset_cache_root=YOLO_DATASET_CACHE_ROOT,
             active_payload=_load_yolo_active_impl(YOLO_ACTIVE_PATH),
-            load_meta_fn=lambda run_dir: _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME),
+            load_meta_fn=lambda run_dir: _yolo_load_run_meta_impl(
+                run_dir, meta_name=YOLO_RUN_META_NAME
+            ),
             collect_artifacts_fn=lambda run_dir: _collect_yolo_artifacts_impl(
                 run_dir,
                 meta_name=YOLO_RUN_META_NAME,
@@ -18673,7 +21447,9 @@ def list_sam3_available_models(
     if active_sam3_checkpoint and active_sam3_checkpoint != env_base_path:
         models.append(
             {
-                "id": active_sam3_metadata.get("label") or active_sam3_metadata.get("id") or "active",
+                "id": active_sam3_metadata.get("label")
+                or active_sam3_metadata.get("id")
+                or "active",
                 "key": f"active:{active_sam3_checkpoint}",
                 "path": active_sam3_checkpoint,
                 "size_bytes": None,
@@ -18714,6 +21490,7 @@ def list_sam3_available_models(
         )
     return models
 
+
 def activate_sam3_model(payload: Sam3ModelActivateRequest):
     global active_sam3_checkpoint, active_sam3_model_id, active_sam3_metadata, active_sam3_enable_segmentation
     checkpoint_path = payload.checkpoint_path
@@ -18730,7 +21507,9 @@ def activate_sam3_model(payload: Sam3ModelActivateRequest):
         enable_seg = bool(payload.enable_segmentation)
     active_sam3_checkpoint = checkpoint_path
     active_sam3_enable_segmentation = enable_seg
-    active_sam3_model_id = payload.label or (resolved_path.stem if resolved_path else "facebook/sam3")
+    active_sam3_model_id = payload.label or (
+        resolved_path.stem if resolved_path else "facebook/sam3"
+    )
     active_sam3_metadata = {
         "id": active_sam3_model_id,
         "label": payload.label or active_sam3_model_id,
@@ -18816,7 +21595,9 @@ def cancel_qwen_training_job(job_id: str):
     job = _get_qwen_job(job_id)
     with QWEN_TRAINING_JOBS_LOCK:
         if job.status in {"succeeded", "failed", "cancelled"}:
-            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+            raise HTTPException(
+                status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable"
+            )
         if job.cancel_event.is_set():
             return {"status": job.status}
         job.cancel_event.set()
@@ -18869,7 +21650,9 @@ def activate_qwen_model(payload: QwenModelActivateRequest):
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_model_not_found")
         latest = entry.get("path")
         if not latest or not Path(latest).exists():
-            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_model_missing_checkpoint")
+            raise HTTPException(
+                status_code=HTTP_404_NOT_FOUND, detail="qwen_model_missing_checkpoint"
+            )
         _set_active_qwen_model_custom(model_id, Path(latest), entry.get("metadata") or {})
     return {
         "active": active_qwen_model_id,
@@ -18923,13 +21706,17 @@ def set_active_model(payload: ActiveModelRequest):
     allowed_root = (UPLOAD_ROOT / "classifiers").resolve()
     if not str(Path(classifier_path_abs).resolve()).startswith(str(allowed_root)):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_path_not_allowed")
-    _validate_upload_extension(classifier_path_abs, CLASSIFIER_ALLOWED_EXTS, "classifier_extension_not_allowed")
+    _validate_upload_extension(
+        classifier_path_abs, CLASSIFIER_ALLOWED_EXTS, "classifier_extension_not_allowed"
+    )
 
     try:
         new_clf = joblib.load(classifier_path_abs)
     except Exception as exc:  # noqa: BLE001
         clip_last_error = str(exc)
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"classifier_load_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail=f"classifier_load_failed:{exc}"
+        ) from exc
 
     meta_clip_model = None
     meta_encoder_type = "clip"
@@ -18952,7 +21739,9 @@ def set_active_model(payload: ActiveModelRequest):
             meta_encoder_model = None
             meta_found = False
     encoder_type_norm = str(meta_encoder_type or "clip").strip().lower()
-    encoder_model_norm = str(meta_encoder_model or "").strip() or (str(meta_clip_model).strip() if meta_clip_model else "")
+    encoder_model_norm = str(meta_encoder_model or "").strip() or (
+        str(meta_clip_model).strip() if meta_clip_model else ""
+    )
 
     embed_dim = None
     try:
@@ -18977,7 +21766,10 @@ def set_active_model(payload: ActiveModelRequest):
     encoder_model_for_active = None
 
     if not meta_found:
-        if isinstance(new_clf, dict) and str(new_clf.get("classifier_type") or new_clf.get("head_type") or "") == "mlp":
+        if (
+            isinstance(new_clf, dict)
+            and str(new_clf.get("classifier_type") or new_clf.get("head_type") or "") == "mlp"
+        ):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_meta_required")
         if embed_dim is not None and int(embed_dim) not in {512, 768}:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_meta_required")
@@ -18985,8 +21777,15 @@ def set_active_model(payload: ActiveModelRequest):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_meta_required")
 
     if encoder_type_norm == "clip":
-        clip_name = requested_clip_model or str(meta_clip_model or "").strip() or clip_model_name or DEFAULT_CLIP_MODEL
-        inferred = _infer_clip_model_from_embedding_dim_impl(embed_dim, active_name=clip_model_name or DEFAULT_CLIP_MODEL)
+        clip_name = (
+            requested_clip_model
+            or str(meta_clip_model or "").strip()
+            or clip_model_name
+            or DEFAULT_CLIP_MODEL
+        )
+        inferred = _infer_clip_model_from_embedding_dim_impl(
+            embed_dim, active_name=clip_model_name or DEFAULT_CLIP_MODEL
+        )
         if inferred and inferred != clip_name and not requested_clip_model:
             clip_name = inferred
         if clip_name not in SUPPORTED_CLIP_MODELS:
@@ -18996,7 +21795,9 @@ def set_active_model(payload: ActiveModelRequest):
             try:
                 new_clip_model, new_preprocess = clip.load(clip_name, device=device)
             except Exception as exc:  # noqa: BLE001
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"clip_load_failed:{exc}") from exc
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST, detail=f"clip_load_failed:{exc}"
+                ) from exc
         else:
             new_clip_model = clip_model
             new_preprocess = clip_preprocess
@@ -19007,7 +21808,9 @@ def set_active_model(payload: ActiveModelRequest):
                 try:
                     new_clip_model, new_preprocess = clip.load(inferred, device=device)
                 except Exception as exc:  # noqa: BLE001
-                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"clip_load_failed:{exc}") from exc
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST, detail=f"clip_load_failed:{exc}"
+                    ) from exc
                 clip_name = inferred
                 clip_dim = getattr(getattr(new_clip_model, "visual", None), "output_dim", None)
                 logger.warning(
@@ -19016,7 +21819,10 @@ def set_active_model(payload: ActiveModelRequest):
                     inferred,
                 )
         if embed_dim is not None and clip_dim is not None and embed_dim != clip_dim:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dimension_mismatch:{embed_dim}!={clip_dim}")
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"dimension_mismatch:{embed_dim}!={clip_dim}",
+            )
         encoder_model_for_active = clip_name
     elif encoder_type_norm == "dinov3":
         if not encoder_model_norm:
@@ -19029,7 +21835,9 @@ def set_active_model(payload: ActiveModelRequest):
                 raise_on_error=True,
             )
         except RuntimeError as exc:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dinov3_load_failed:{exc}") from exc
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail=f"dinov3_load_failed:{exc}"
+            ) from exc
         dino_dim = None
         try:
             cfg = getattr(new_dinov3_model, "config", None)
@@ -19037,10 +21845,15 @@ def set_active_model(payload: ActiveModelRequest):
         except Exception:
             dino_dim = None
         if embed_dim is not None and dino_dim is not None and int(embed_dim) != int(dino_dim):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"dimension_mismatch:{embed_dim}!={dino_dim}")
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"dimension_mismatch:{embed_dim}!={dino_dim}",
+            )
         encoder_model_for_active = encoder_model_norm
     else:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="clip_encoder_type_unsupported")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="clip_encoder_type_unsupported"
+        )
 
     labelmap_path_abs = None
     labelmap_entries: List[str] = []
@@ -19050,9 +21863,16 @@ def set_active_model(payload: ActiveModelRequest):
             (UPLOAD_ROOT / "labelmaps").resolve(),
             (UPLOAD_ROOT / "classifiers").resolve(),
         ]
-        if not any(str(Path(labelmap_path_abs).resolve()).startswith(str(root)) for root in allowed_label_roots):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_not_allowed")
-        _validate_upload_extension(labelmap_path_abs, LABELMAP_ALLOWED_EXTS, "labelmap_extension_not_allowed")
+        if not any(
+            str(Path(labelmap_path_abs).resolve()).startswith(str(root))
+            for root in allowed_label_roots
+        ):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_not_allowed"
+            )
+        _validate_upload_extension(
+            labelmap_path_abs, LABELMAP_ALLOWED_EXTS, "labelmap_extension_not_allowed"
+        )
         labelmap_entries = _load_labelmap_file(labelmap_path_abs, strict=True)
     elif not labelmap_provided and active_labelmap_path:
         labelmap_path_abs = active_labelmap_path
@@ -19065,13 +21885,17 @@ def set_active_model(payload: ActiveModelRequest):
     clf_classes = len(classes_list) if classes_list else None
     if clf_classes is not None:
         if not labelmap_entries:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_required_for_classifier")
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="labelmap_required_for_classifier"
+            )
         bg_indices = _clip_head_background_indices(classes_list)
         non_bg_classes = [c for idx, c in enumerate(classes_list) if idx not in bg_indices]
         label_norm = {_normalize_class_name_for_match(n) for n in labelmap_entries if n}
         clf_norm = {_normalize_class_name_for_match(n) for n in non_bg_classes if n}
         if label_norm != clf_norm:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_classifier_class_mismatch")
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="labelmap_classifier_class_mismatch"
+            )
 
     with clip_lock:
         clf = new_clf
@@ -19108,8 +21932,12 @@ def set_active_model(payload: ActiveModelRequest):
             )
         except Exception:
             active_classifier_head = None
-        if payload.logit_adjustment_inference is not None and isinstance(active_classifier_head, dict):
-            active_classifier_head["logit_adjustment_inference"] = bool(payload.logit_adjustment_inference)
+        if payload.logit_adjustment_inference is not None and isinstance(
+            active_classifier_head, dict
+        ):
+            active_classifier_head["logit_adjustment_inference"] = bool(
+                payload.logit_adjustment_inference
+            )
         clip_last_error = None
     if encoder_type_norm == "dinov3":
         with dinov3_lock:
@@ -19137,6 +21965,7 @@ app.include_router(
 # ---------------------------------------------------------------------------
 # SAM preload endpoint
 # ---------------------------------------------------------------------------
+
 
 def sam_preload(payload: SamPreloadRequest):
     variant = _default_variant(payload.sam_variant)
@@ -19495,7 +22324,9 @@ def qwen_infer(payload: QwenInferenceRequest):
             items=item_list,
             image_type=(payload.image_type or "").strip() or None,
             extra_context=(payload.extra_context or "").strip() or None,
-            get_config_fn=lambda: _get_qwen_prompt_config_impl(qwen_prompt_config, qwen_config_lock),
+            get_config_fn=lambda: _get_qwen_prompt_config_impl(
+                qwen_prompt_config, qwen_config_lock
+            ),
             http_exception_cls=HTTPException,
             http_422=HTTP_422_UNPROCESSABLE_CONTENT,
         )
@@ -19504,7 +22335,9 @@ def qwen_infer(payload: QwenInferenceRequest):
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_inference_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_inference_failed:{exc}"
+        ) from exc
     print("[Qwen prompt]", final_prompt)
     print("[Qwen raw output]", qwen_text)
     warnings: List[str] = []
@@ -19538,7 +22371,9 @@ def qwen_infer(payload: QwenInferenceRequest):
     limit = payload.max_results or 8
     image_name = getattr(payload, "image_name", None)
     if prompt_type == "bbox":
-        boxes = _qwen_bbox_results(normalized_items, proc_w, proc_h, pil_img.width, pil_img.height, limit=limit)
+        boxes = _qwen_bbox_results(
+            normalized_items, proc_w, proc_h, pil_img.width, pil_img.height, limit=limit
+        )
     elif prompt_type == "bbox_sam":
         boxes = _qwen_bbox_sam_results(
             normalized_items,
@@ -19646,8 +22481,12 @@ def qwen_caption(payload: QwenCaptionRequest):
         image_width = payload.image_width or pil_img.width
         image_height = payload.image_height or pil_img.height
         caption_mode = payload.caption_mode or "full"
-        restrict_to_labels = payload.restrict_to_labels if payload.restrict_to_labels is not None else True
-        caption_all_windows = True if caption_mode == "windowed" else bool(payload.caption_all_windows)
+        restrict_to_labels = (
+            payload.restrict_to_labels if payload.restrict_to_labels is not None else True
+        )
+        caption_all_windows = (
+            True if caption_mode == "windowed" else bool(payload.caption_all_windows)
+        )
         detailed_mode = caption_mode == "windowed"
         glossary_map = _caption_glossary_map_impl(
             payload.labelmap_glossary,
@@ -19719,9 +22558,16 @@ def qwen_caption(payload: QwenCaptionRequest):
         if final_only:
             system_prompt = f"{system_prompt} Return only the final caption. Do not include reasoning or preamble."
         if final_only and is_thinking and not two_stage:
-            system_prompt = f"{system_prompt} Respond with exactly <final>...</final> and nothing else."
+            system_prompt = (
+                f"{system_prompt} Respond with exactly <final>...</final> and nothing else."
+            )
         use_caption_cache = True
-        if active_qwen_model_path and not model_id_override and desired_model_id == base_model_id and variant == "auto":
+        if (
+            active_qwen_model_path
+            and not model_id_override
+            and desired_model_id == base_model_id
+            and variant == "auto"
+        ):
             use_caption_cache = False
 
         def _caption_cleanup(
@@ -19790,7 +22636,9 @@ def qwen_caption(payload: QwenCaptionRequest):
         refine_count = 0
         merge_count = 0
         if caption_mode == "windowed":
-            overlap = _resolve_qwen_window_overlap_impl(payload.window_overlap, default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP)
+            overlap = _resolve_qwen_window_overlap_impl(
+                payload.window_overlap, default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP
+            )
             window_size = _resolve_qwen_window_size_impl(
                 None,
                 image_width,
@@ -19800,9 +22648,15 @@ def qwen_caption(payload: QwenCaptionRequest):
                 default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP,
             )
             force_two = True
-            x_positions = _window_positions_impl(image_width, window_size, overlap, force_two=force_two)
-            y_positions = _window_positions_impl(image_height, window_size, overlap, force_two=force_two)
-            grouped_hints = _group_hints_by_window(label_hints, x_positions, y_positions, window_size)
+            x_positions = _window_positions_impl(
+                image_width, window_size, overlap, force_two=force_two
+            )
+            y_positions = _window_positions_impl(
+                image_height, window_size, overlap, force_two=force_two
+            )
+            grouped_hints = _group_hints_by_window(
+                label_hints, x_positions, y_positions, window_size
+            )
             window_model_id = desired_model_id
             window_base_model_id = window_model_id
             window_is_thinking = "Thinking" in window_model_id
@@ -19817,7 +22671,10 @@ def qwen_caption(payload: QwenCaptionRequest):
                         [hint.label for hint in window_hints if hint.label],
                     )
                     window_allowed_prompt = (
-                        [_caption_preferred_label_impl(label, window_glossary_map) for label in window_allowed]
+                        [
+                            _caption_preferred_label_impl(label, window_glossary_map)
+                            for label in window_allowed
+                        ]
                         if window_allowed
                         else []
                     )
@@ -19863,8 +22720,12 @@ def qwen_caption(payload: QwenCaptionRequest):
                     )
                     window_caption, _ = _extract_caption_from_text_impl(qwen_text, marker=None)
                     window_caption = _sanitize_qwen_caption_impl(window_caption)
-                    if window_is_thinking and _thinking_caption_needs_cleanup_impl(window_caption, qwen_text):
-                        cleanup_model = _resolve_qwen_variant_model_id_impl(window_base_model_id, "Instruct")
+                    if window_is_thinking and _thinking_caption_needs_cleanup_impl(
+                        window_caption, qwen_text
+                    ):
+                        cleanup_model = _resolve_qwen_variant_model_id_impl(
+                            window_base_model_id, "Instruct"
+                        )
                         window_caption = _caption_cleanup(
                             window_caption,
                             window_img,
@@ -19873,13 +22734,19 @@ def qwen_caption(payload: QwenCaptionRequest):
                             use_caption_cache,
                             model_id_override=cleanup_model,
                             runtime_override=get_runtime(cleanup_model),
-                            allowed_labels=window_allowed_prompt if restrict_to_labels and window_allowed_prompt else None,
+                            allowed_labels=(
+                                window_allowed_prompt
+                                if restrict_to_labels and window_allowed_prompt
+                                else None
+                            ),
                             strict=True,
                             minimal_edit=True,
                         )
                         cleanup_count += 1
                     if _caption_is_degenerate_impl(window_caption):
-                        cleanup_model = _resolve_qwen_variant_model_id_impl(window_base_model_id, "Instruct")
+                        cleanup_model = _resolve_qwen_variant_model_id_impl(
+                            window_base_model_id, "Instruct"
+                        )
                         window_caption = _caption_cleanup(
                             window_caption,
                             window_img,
@@ -19888,13 +22755,21 @@ def qwen_caption(payload: QwenCaptionRequest):
                             use_caption_cache,
                             model_id_override=cleanup_model,
                             runtime_override=get_runtime(cleanup_model),
-                            allowed_labels=window_allowed_prompt if restrict_to_labels and window_allowed_prompt else None,
+                            allowed_labels=(
+                                window_allowed_prompt
+                                if restrict_to_labels and window_allowed_prompt
+                                else None
+                            ),
                             strict=True,
                             minimal_edit=True,
                         )
                         cleanup_count += 1
-                    if _caption_needs_completion_impl(window_caption) or _caption_has_meta_impl(window_caption):
-                        cleanup_model = _resolve_qwen_variant_model_id_impl(window_base_model_id, "Instruct")
+                    if _caption_needs_completion_impl(window_caption) or _caption_has_meta_impl(
+                        window_caption
+                    ):
+                        cleanup_model = _resolve_qwen_variant_model_id_impl(
+                            window_base_model_id, "Instruct"
+                        )
                         window_caption = _caption_cleanup(
                             window_caption,
                             window_img,
@@ -19903,7 +22778,11 @@ def qwen_caption(payload: QwenCaptionRequest):
                             use_caption_cache,
                             model_id_override=cleanup_model,
                             runtime_override=get_runtime(cleanup_model),
-                            allowed_labels=window_allowed_prompt if restrict_to_labels and window_allowed_prompt else None,
+                            allowed_labels=(
+                                window_allowed_prompt
+                                if restrict_to_labels and window_allowed_prompt
+                                else None
+                            ),
                             strict=True,
                             minimal_edit=True,
                         )
@@ -19916,7 +22795,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                         glossary_map=window_glossary_map,
                     )
                     if needs_refine:
-                        refine_model = _resolve_qwen_variant_model_id_impl(window_base_model_id, "Instruct")
+                        refine_model = _resolve_qwen_variant_model_id_impl(
+                            window_base_model_id, "Instruct"
+                        )
                         allowed_note = ""
                         if restrict_to_labels and window_allowed_prompt:
                             allowed_note = (
@@ -19924,13 +22805,17 @@ def qwen_caption(payload: QwenCaptionRequest):
                                 "Do not introduce any other entity types."
                             )
                         elif not restrict_to_labels:
-                            allowed_note = "You may mention additional visible objects beyond the hints."
+                            allowed_note = (
+                                "You may mention additional visible objects beyond the hints."
+                            )
                         missing_note = (
                             f"Ensure the caption mentions: {', '.join(missing)}."
                             if missing
                             else "Ensure all labeled classes in this window are mentioned."
                         )
-                        refine_prompt = f"{window_prompt}\nDraft caption: {window_caption}\n{missing_note}"
+                        refine_prompt = (
+                            f"{window_prompt}\nDraft caption: {window_caption}\n{missing_note}"
+                        )
                         if allowed_note:
                             refine_prompt = f"{refine_prompt}\n{allowed_note}"
                         refine_prompt = (
@@ -19938,9 +22823,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             "Edit the draft with minimal changes. Do not introduce new objects or actions. "
                             "Return only a concise, complete caption (1-3 sentences) with no coordinates."
                         )
-                        refine_system = (
-                            "You are a concise captioning assistant. Return only the final caption in English."
-                        )
+                        refine_system = "You are a concise captioning assistant. Return only the final caption in English."
                         refine_text, _, _ = _run_qwen_inference(
                             refine_prompt,
                             window_img,
@@ -19949,19 +22832,31 @@ def qwen_caption(payload: QwenCaptionRequest):
                             runtime_override=get_runtime(refine_model),
                             decode_override=deterministic_decode,
                         )
-                        window_caption, _ = _extract_caption_from_text_impl(refine_text, marker=None)
+                        window_caption, _ = _extract_caption_from_text_impl(
+                            refine_text, marker=None
+                        )
                         window_caption = _sanitize_qwen_caption_impl(window_caption)
                         refine_count += 1
                     if window_caption:
                         windowed_captions.append((x0, y0, window_size, window_caption))
                         _emit_caption_window(x0, y0, window_size, window_caption)
             if windowed_captions:
-                window_lines = ["Close-up observations from subregions (use these to enrich the final caption):"]
+                window_lines = [
+                    "Close-up observations from subregions (use these to enrich the final caption):"
+                ]
                 for x0, y0, size, caption in windowed_captions:
                     x_center = x0 + size / 2.0
                     y_center = y0 + size / 2.0
-                    horiz = "left" if x_center < image_width / 3.0 else "right" if x_center > image_width * 2 / 3.0 else "center"
-                    vert = "top" if y_center < image_height / 3.0 else "bottom" if y_center > image_height * 2 / 3.0 else "middle"
+                    horiz = (
+                        "left"
+                        if x_center < image_width / 3.0
+                        else "right" if x_center > image_width * 2 / 3.0 else "center"
+                    )
+                    vert = (
+                        "top"
+                        if y_center < image_height / 3.0
+                        else "bottom" if y_center > image_height * 2 / 3.0 else "middle"
+                    )
                     region = f"{vert}-{horiz}"
                     window_lines.append(
                         f"- {region} ([{x0},{y0},{x0 + size},{y0 + size}]): {caption}"
@@ -20009,9 +22904,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             draft_caption = _sanitize_qwen_caption_impl(draft_caption)
             allowed_note = ""
             if restrict_to_labels and allowed_labels_prompt:
-                allowed_note = (
-                    f"Allowed classes: {', '.join(allowed_labels_prompt)}. Do not introduce any other entity types."
-                )
+                allowed_note = f"Allowed classes: {', '.join(allowed_labels_prompt)}. Do not introduce any other entity types."
             elif not restrict_to_labels:
                 allowed_note = "You may mention additional visible objects beyond the hints."
             refine_prompt = f"{prompt_text}\nDraft caption: {draft_caption}"
@@ -20051,7 +22944,9 @@ def qwen_caption(payload: QwenCaptionRequest):
             if final_only or is_thinking:
                 caption_text = _sanitize_qwen_caption_impl(caption_text)
             if is_thinking and _thinking_caption_needs_cleanup_impl(caption_text, qwen_text):
-                cleanup_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+                cleanup_model = _resolve_qwen_variant_model_id_impl(
+                    caption_base_model_id, "Instruct"
+                )
                 caption_text = _caption_cleanup(
                     caption_text,
                     pil_img,
@@ -20060,7 +22955,11 @@ def qwen_caption(payload: QwenCaptionRequest):
                     use_caption_cache,
                     model_id_override=cleanup_model,
                     runtime_override=get_runtime(cleanup_model),
-                    allowed_labels=allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None,
+                    allowed_labels=(
+                        allowed_labels_prompt
+                        if restrict_to_labels and allowed_labels_prompt
+                        else None
+                    ),
                     strict=True,
                     minimal_edit=True,
                 )
@@ -20089,7 +22988,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                 use_caption_cache,
                 model_id_override=cleanup_model,
                 runtime_override=get_runtime(cleanup_model),
-                allowed_labels=allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None,
+                allowed_labels=(
+                    allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None
+                ),
                 strict=True,
                 minimal_edit=True,
             )
@@ -20104,12 +23005,18 @@ def qwen_caption(payload: QwenCaptionRequest):
                 use_caption_cache,
                 model_id_override=cleanup_model,
                 runtime_override=get_runtime(cleanup_model),
-                allowed_labels=allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None,
+                allowed_labels=(
+                    allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None
+                ),
                 strict=True,
                 minimal_edit=True,
             )
             cleanup_count += 1
-        if caption_mode == "windowed" and "4B" in desired_model_id and _caption_needs_short_form_impl(caption_text):
+        if (
+            caption_mode == "windowed"
+            and "4B" in desired_model_id
+            and _caption_needs_short_form_impl(caption_text)
+        ):
             cleanup_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
             caption_text = _caption_cleanup(
                 caption_text,
@@ -20119,7 +23026,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                 use_caption_cache,
                 model_id_override=cleanup_model,
                 runtime_override=get_runtime(cleanup_model),
-                allowed_labels=allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None,
+                allowed_labels=(
+                    allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None
+                ),
                 strict=True,
                 minimal_edit=True,
             )
@@ -20135,9 +23044,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             refine_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
             allowed_note = ""
             if restrict_to_labels and allowed_labels_prompt:
-                allowed_note = (
-                    f"Allowed classes: {', '.join(allowed_labels_prompt)}. Do not introduce any other entity types."
-                )
+                allowed_note = f"Allowed classes: {', '.join(allowed_labels_prompt)}. Do not introduce any other entity types."
             elif not restrict_to_labels:
                 allowed_note = "You may mention additional visible objects beyond the hints."
             missing_note = (
@@ -20153,7 +23060,9 @@ def qwen_caption(payload: QwenCaptionRequest):
                 "Edit the draft with minimal changes. Do not introduce new objects or actions. "
                 "Return only the final caption with no coordinates."
             )
-            refine_system = "You are a captioning assistant. Return only the final caption in English."
+            refine_system = (
+                "You are a captioning assistant. Return only the final caption in English."
+            )
             refine_text, _, _ = _run_qwen_inference(
                 refine_prompt,
                 pil_img,
@@ -20219,7 +23128,9 @@ def qwen_caption(payload: QwenCaptionRequest):
             _unload_qwen_runtime()
             active_runtime = None
             active_model_id = None
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_caption_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_caption_failed:{exc}"
+        ) from exc
     if force_unload:
         request_model_cache.clear()
         _unload_qwen_runtime()
@@ -20252,7 +23163,9 @@ def qwen_prepass(payload: QwenPrepassRequest):
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_prepass_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_prepass_failed:{exc}"
+        ) from exc
 
 
 app.include_router(
@@ -20391,10 +23304,14 @@ def export_prepass_recipe(recipe_id: str):
 
 def _validate_prepass_recipe_manifest(manifest: Dict[str, Any], extract_dir: Path) -> None:
     if not isinstance(manifest, dict):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_invalid"
+        )
     schema = manifest.get("schema_version")
     if schema != PREPASS_RECIPE_SCHEMA_VERSION:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_schema_mismatch")
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_schema_mismatch"
+        )
     assets = manifest.get("assets")
     if not assets:
         return
@@ -20410,9 +23327,13 @@ def _validate_prepass_recipe_manifest(manifest: Dict[str, Any], extract_dir: Pat
             continue
         target = (extract_dir / rel).resolve()
         if not str(target).startswith(str(extract_dir.resolve())):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_path")
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_path"
+            )
         if not target.exists():
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_missing")
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_missing"
+            )
 
 
 def _unique_prepass_recipe_name(name: str) -> tuple[str, Optional[str]]:
@@ -20488,7 +23409,9 @@ def import_prepass_recipe(file: UploadFile = File(...)):  # noqa: B008
 
 async def import_prepass_recipe_raw(request: Request):
     if "application/zip" not in (request.headers.get("content-type") or ""):
-        raise HTTPException(status_code=HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="prepass_recipe_invalid_media")
+        raise HTTPException(
+            status_code=HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="prepass_recipe_invalid_media"
+        )
     temp_dir = Path(tempfile.mkdtemp(prefix="prepass_recipe_import_raw_"))
     try:
         zip_path = temp_dir / "upload.zip"
@@ -20536,6 +23459,24 @@ app.include_router(
         set_glossary_fn=set_dataset_glossary,
         get_text_label_fn=get_text_label,
         set_text_label_fn=set_text_label,
+        register_path_fn=register_dataset_path,
+        open_path_fn=open_dataset_path,
+        save_transient_fn=save_transient_dataset,
+        delete_transient_fn=delete_transient_dataset,
+        annotation_session_start_fn=start_dataset_annotation_session,
+        annotation_session_heartbeat_fn=heartbeat_dataset_annotation_session,
+        annotation_session_stop_fn=stop_dataset_annotation_session,
+        annotation_manifest_fn=get_dataset_annotation_manifest,
+        annotation_image_fn=get_dataset_annotation_image,
+        annotation_snapshot_fn=save_dataset_annotation_snapshot,
+        annotation_meta_patch_fn=patch_dataset_annotation_meta,
+        transient_annotation_manifest_fn=get_transient_annotation_manifest,
+        transient_annotation_image_fn=get_transient_annotation_image,
+        transient_annotation_snapshot_fn=save_transient_annotation_snapshot,
+        transient_annotation_meta_patch_fn=patch_transient_annotation_meta,
+        transient_annotation_session_start_fn=start_transient_annotation_session,
+        transient_annotation_session_heartbeat_fn=heartbeat_transient_annotation_session,
+        transient_annotation_session_stop_fn=stop_transient_annotation_session,
     )
 )
 
@@ -20572,7 +23513,9 @@ def sam3_text_prompt(payload: Sam3TextPrompt):
     variant = _default_variant(payload.sam_variant or "sam3")
     if variant != "sam3":
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_text_requires_sam3")
-    pil_img, np_img, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
+    pil_img, np_img, token = resolve_image_payload(
+        payload.image_base64, payload.image_token, variant
+    )
     effective_limit = payload.max_results
     detections, masks_arr = _run_sam3_text_inference(
         pil_img,
@@ -20592,9 +23535,16 @@ def sam3_text_prompt(payload: Sam3TextPrompt):
         encoded_masks = []
         for idx, det in enumerate(detections):
             payload = det.mask if isinstance(det, QwenDetection) else None
-            if payload is None and masks_arr is not None and idx < len(masks_arr) and masks_arr[idx] is not None:
+            if (
+                payload is None
+                and masks_arr is not None
+                and idx < len(masks_arr)
+                and masks_arr[idx] is not None
+            ):
                 try:
-                    payload = _encode_binary_mask_impl(masks_arr[idx], max_bytes=MASK_ENCODE_MAX_BYTES)
+                    payload = _encode_binary_mask_impl(
+                        masks_arr[idx], max_bytes=MASK_ENCODE_MAX_BYTES
+                    )
                 except Exception:
                     payload = None
             encoded_masks.append(payload)
@@ -20618,7 +23568,9 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
             warnings=["clip_unavailable"],
             image_token=None,
         )
-    pil_img, np_img, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
+    pil_img, np_img, token = resolve_image_payload(
+        payload.image_base64, payload.image_token, variant
+    )
     effective_limit = payload.max_results
     detections, masks_arr = _run_sam3_text_inference(
         pil_img,
@@ -20644,7 +23596,9 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
             try:
                 x_min, y_min, x_max, y_max = _mask_to_bounding_box(mask)
             except Exception:
-                x_min, y_min, x_max, y_max = _yolo_to_xyxy_int(det.bbox, pil_img.width, pil_img.height)
+                x_min, y_min, x_max, y_max = _yolo_to_xyxy_int(
+                    det.bbox, pil_img.width, pil_img.height
+                )
         else:
             x_min, y_min, x_max, y_max = _yolo_to_xyxy_int(det.bbox, pil_img.width, pil_img.height)
         li = max(0, int(x_min))
@@ -20709,7 +23663,9 @@ def sam3_visual_prompt(payload: Sam3VisualPrompt):
     variant = _default_variant(payload.sam_variant or "sam3")
     if variant != "sam3":
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_visual_requires_sam3")
-    pil_img, np_img, token = resolve_image_payload(payload.image_base64, payload.image_token, variant)
+    pil_img, np_img, token = resolve_image_payload(
+        payload.image_base64, payload.image_token, variant
+    )
     effective_limit = payload.max_results
     try:
         if payload.bboxes:
@@ -20743,7 +23699,9 @@ def sam3_visual_prompt(payload: Sam3VisualPrompt):
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_visual_failed:{exc}") from exc
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"sam3_visual_failed:{exc}"
+        ) from exc
     warnings: List[str] = []
     if not detections:
         warnings.append("no_results")
@@ -20752,9 +23710,16 @@ def sam3_visual_prompt(payload: Sam3VisualPrompt):
         encoded_masks = []
         for idx, det in enumerate(detections):
             payload_mask = det.mask if isinstance(det, QwenDetection) else None
-            if payload_mask is None and masks_arr is not None and idx < len(masks_arr) and masks_arr[idx] is not None:
+            if (
+                payload_mask is None
+                and masks_arr is not None
+                and idx < len(masks_arr)
+                and masks_arr[idx] is not None
+            ):
                 try:
-                    payload_mask = _encode_binary_mask_impl(masks_arr[idx], max_bytes=MASK_ENCODE_MAX_BYTES)
+                    payload_mask = _encode_binary_mask_impl(
+                        masks_arr[idx], max_bytes=MASK_ENCODE_MAX_BYTES
+                    )
                 except Exception:
                     payload_mask = None
             encoded_masks.append(payload_mask)
@@ -20854,7 +23819,13 @@ def sam_bbox_auto(prompt: BboxPrompt):
     final_pil = Image.fromarray(subarr)
     feats_np = _encode_pil_batch_for_active([final_pil])
     if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
-        return SamPointAutoResponse(prediction="unknown", bbox=yolo_box, uuid=prompt.uuid, error="clip_unavailable", image_token=token)
+        return SamPointAutoResponse(
+            prediction="unknown",
+            bbox=yolo_box,
+            uuid=prompt.uuid,
+            error="clip_unavailable",
+            image_token=token,
+        )
     details = _clip_auto_predict_details(feats_np)
     return SamPointAutoResponse(
         prediction=str(details.get("label") or "unknown"),
@@ -20944,7 +23915,9 @@ def sam_point_multi(prompt: MultiPointPrompt):
     positive = prompt.positive_points or []
     negative = prompt.negative_points or []
     if len(positive) == 0:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="positive_points_required")
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="positive_points_required"
+        )
 
     pil_img, np_img, token = resolve_image_payload(
         prompt.image_base64,
@@ -20985,7 +23958,9 @@ def sam_point_multi_auto(prompt: MultiPointPrompt):
     positive = prompt.positive_points or []
     negative = prompt.negative_points or []
     if len(positive) == 0:
-        raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="positive_points_required")
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="positive_points_required"
+        )
 
     pil_img, np_img, token = resolve_image_payload(
         prompt.image_base64,
@@ -21014,12 +23989,24 @@ def sam_point_multi_auto(prompt: MultiPointPrompt):
     ri = min(pil_img.width, int(right))
     bi = min(pil_img.height, int(bottom))
     if ri <= li or bi <= ti:
-        return SamPointAutoResponse(prediction="unknown", bbox=yolo_box, uuid=prompt.uuid, error="empty_mask", image_token=token)
+        return SamPointAutoResponse(
+            prediction="unknown",
+            bbox=yolo_box,
+            uuid=prompt.uuid,
+            error="empty_mask",
+            image_token=token,
+        )
     subarr = np_img[ti:bi, li:ri, :]
     final_pil = Image.fromarray(subarr)
     feats_np = _encode_pil_batch_for_active([final_pil])
     if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
-        return SamPointAutoResponse(prediction="unknown", bbox=yolo_box, uuid=prompt.uuid, error="clip_unavailable", image_token=token)
+        return SamPointAutoResponse(
+            prediction="unknown",
+            bbox=yolo_box,
+            uuid=prompt.uuid,
+            error="clip_unavailable",
+            image_token=token,
+        )
     details = _clip_auto_predict_details(feats_np)
     return SamPointAutoResponse(
         prediction=str(details.get("label") or "unknown"),
@@ -21048,11 +24035,7 @@ def sam_bbox(prompt: BboxPrompt):
     right = min(full_w, left + prompt.bbox_width)
     bottom = min(full_h, top + prompt.bbox_height)
     if right <= left or bottom <= top:
-        return YoloBboxOutput(
-            class_id="0",
-            bbox=[0, 0, 0, 0],
-            uuid=prompt.uuid
-        )
+        return YoloBboxOutput(class_id="0", bbox=[0, 0, 0, 0], uuid=prompt.uuid)
     sub_box = np.array([left, top, right, bottom], dtype=np.float32)
     variant = _default_variant(getattr(prompt, "sam_variant", None))
     masks, _, _ = _predict_with_cache(
@@ -21113,10 +24096,12 @@ app.include_router(
     )
 )
 
+
 def crop_zip_init():
     jobId = str(uuid.uuid4())
     job_store[jobId] = []
     return {"jobId": jobId}
+
 
 def crop_zip_chunk(request: CropZipRequest, jobId: str = Query(...)):
     if jobId not in job_store:
@@ -21144,7 +24129,7 @@ def crop_zip_finalize(jobId: str):
             return StreamingResponse(
                 empty_buffer,
                 media_type="application/x-zip-compressed",
-                headers={"Content-Disposition": "attachment; filename=crops.zip"}
+                headers={"Content-Disposition": "attachment; filename=crops.zip"},
             )
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -21155,7 +24140,9 @@ def crop_zip_finalize(jobId: str):
                     max_dim=BASE64_IMAGE_MAX_DIM,
                     allow_downscale=True,
                 )
-                stem = _safe_crop_zip_component(Path(cropImage.originalName or "").stem, f"image_{img_index}")
+                stem = _safe_crop_zip_component(
+                    Path(cropImage.originalName or "").stem, f"image_{img_index}"
+                )
                 for bindex, bbox in enumerate(cropImage.bboxes):
                     left = bbox.x
                     top = bbox.y
@@ -21178,7 +24165,7 @@ def crop_zip_finalize(jobId: str):
         return StreamingResponse(
             zip_buffer,
             media_type="application/x-zip-compressed",
-            headers={"Content-Disposition": "attachment; filename=crops.zip"}
+            headers={"Content-Disposition": "attachment; filename=crops.zip"},
         )
     finally:
         job_store.pop(jobId, None)

@@ -518,6 +518,13 @@ def main() -> None:
     parser.add_argument("--dataset", required=True, help="Dataset id.")
     parser.add_argument("--optimize", default="f1", choices=["f1", "recall", "tp"], help="Objective metric.")
     parser.add_argument("--target-fp-ratio", type=float, default=0.2, help="Max FP/TP ratio target.")
+    # Backward-compatibility no-op: some orchestration scripts still pass this flag.
+    parser.add_argument(
+        "--relax-fp-ratio",
+        type=float,
+        default=None,
+        help="Deprecated compatibility flag; ignored by this tuner.",
+    )
     parser.add_argument(
         "--target-fp-ratio-by-label-json",
         default=None,

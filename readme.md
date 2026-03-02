@@ -171,6 +171,19 @@ Takeaway:
 - The current best overall calibrator remains single-stage XGB with the full 1024-d embedding block.
 - Windowed SAM3 candidate expansion is still not translating into better post-XGB F1 under current feature/policy settings.
 
+### Calibration automation helpers (current toolchain)
+- `tools/build_feature_lanes_from_prepass.py`
+  - Builds fixed-split calibration lanes from cached prepass artifacts.
+  - Reuses precomputed labeled features when available to avoid redundant relabeling.
+- `tools/run_final_calibration_sweep.py`
+  - Runs coarse/refine/stack sweeps across lanes/views/seeds under a consistent evaluation policy.
+- `tools/report_final_calibration_decision.py`
+  - Produces a markdown decision report from ranked sweep JSON outputs.
+- `tools/augment_features_with_image_context.py`
+  - Injects or refreshes full-image embedding blocks into existing feature matrices for ablation work.
+- `tools/tune_ensemble_thresholds_xgb.py`
+  - Accepts deprecated `--relax-fp-ratio` as a compatibility no-op for older orchestration scripts.
+
 ---
 
 ### 2000 vs 4000 extension snapshot
@@ -271,9 +284,28 @@ Tator integrates several upstream tools. You are responsible for reviewing and c
 ## Dataset management & glossaries
 - Upload datasets in **Datasets** tab (YOLO preferred). COCO is auto‑converted to YOLO to preserve label order.
 - Uploading the current labeling session can optionally create a **train/val split** (seeded shuffle).
+- Server-path dataset workflows are explicitly split:
+  - **Open transient**: temporary backend session for immediate work (expires automatically and is lost on backend restart unless saved).
+  - **Save transient to library**: persists metadata + annotation overlays while keeping source files at the original path.
+  - **Register path in library**: creates a persistent linked dataset record without copying source images.
+- Linked datasets now expose a health status (`linked_root_status`: `ok`, `missing`, `invalid`) so moved/broken paths are visible in the UI.
+- Linked dataset delete is safe: delete removes the library record + overlays only; source files are never removed.
 - Each dataset has a **canonical glossary** for SAM3 text prompts.
 - A **glossary library** (named glossaries) is available for reuse across datasets.
 - Optional **dataset context** is stored with the dataset and used in Qwen captioning/term expansion prompts.
+
+### Dataset and annotation API semantics
+- `POST /datasets/register_path`
+  - Supports strict dataset-shape validation.
+  - Deduplicates by linked root/signature unless `force_new=true`.
+- `POST /datasets/open_path`
+  - Opens a transient session and refreshes TTL on use.
+- `DELETE /datasets/transient/{session_id}`
+  - Explicitly destroys transient sessions.
+- Annotation write safety:
+  - Snapshot/meta write endpoints require an active matching annotation lock session.
+  - Sessionless/wrong-session unlock or write attempts fail with `409` (no silent unlock/write).
+  - Annotation manifest responses do not expose internal server metadata paths.
 
 ---
 

@@ -3179,6 +3179,42 @@
                                     </div>
                                     <div id="datasetUploadMessage" class="training-message"></div>
                                 </div>
+                                <div class="training-subsection">
+                                    <div class="training-subsection__title">Open dataset from server path</div>
+                                    <div class="training-help">Use this when a dataset already exists on the server.</div>
+                                    <div class="training-help">Open transient: temporary backend session (lost on backend restart).</div>
+                                    <div class="training-help">Save transient to library: persists metadata + overlay labels/text only (does not copy source images).</div>
+                                    <div class="training-help">Register path in library: creates a persistent linked record only.</div>
+                                    <div class="training-grid">
+                                        <div>
+                                            <label for="datasetPathInput">Absolute path</label>
+                                            <input type="text" id="datasetPathInput" placeholder="/abs/path/to/dataset" />
+                                        </div>
+                                        <div>
+                                            <label for="datasetPathId">Library dataset id (optional)</label>
+                                            <input type="text" id="datasetPathId" placeholder="Defaults to folder name" />
+                                        </div>
+                                    </div>
+                                    <div class="training-grid">
+                                        <div>
+                                            <label for="datasetPathLabel">Display label (optional)</label>
+                                            <input type="text" id="datasetPathLabel" placeholder="Human-friendly name" />
+                                        </div>
+                                        <div>
+                                            <label for="datasetPathContext">Context (optional)</label>
+                                            <input type="text" id="datasetPathContext" placeholder="Optional prompt context" />
+                                        </div>
+                                    </div>
+                                    <label for="datasetPathNotes">Notes (optional)</label>
+                                    <textarea id="datasetPathNotes" rows="3" placeholder="Annotation progress notes or handoff details"></textarea>
+                                    <div class="training-actions">
+                                        <button type="button" id="datasetPathOpenBtn" class="training-button secondary">Open transient</button>
+                                        <button type="button" id="datasetPathSaveBtn" class="training-button secondary">Save transient to library</button>
+                                        <button type="button" id="datasetPathRegisterBtn" class="training-button">Register path in library</button>
+                                    </div>
+                                    <div id="datasetPathSummary" class="training-help"></div>
+                                    <div id="datasetPathMessage" class="training-message"></div>
+                                </div>
                             </div>
                         </div>
                         <div class="training-card">

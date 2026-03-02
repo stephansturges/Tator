@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import time
-import ctypes
 import json
 import math
 from pathlib import Path
@@ -262,18 +261,3 @@ def _yolo_head_graft_audit_impl(
     except Exception:
         return
 
-
-def _yolo_head_graft_force_stop_impl(job) -> bool:
-    ident = job.thread_ident
-    if not ident:
-        return False
-    try:
-        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(ident), ctypes.py_object(SystemExit))
-        if res == 0:
-            return False
-        if res > 1:
-            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(ident), None)
-            return False
-        return True
-    except Exception:
-        return False

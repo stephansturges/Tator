@@ -47,6 +47,7 @@ def _ensure_yolo_inference_runtime_impl(
     load_active_fn: Callable[[], Dict[str, Any]],
     load_labelmap_fn: Callable[[Any], List[str]],
     patch_ultralytics_fn: Callable[[], None],
+    should_patch_ultralytics_fn: Optional[Callable[[Dict[str, Any]], bool]] = None,
     yolo_lock: Any,
     get_state_fn: Callable[[], Tuple[Any, Optional[str], List[str], Optional[str]]],
     set_state_fn: Callable[[Any, Optional[str], List[str], Optional[str]], None],
@@ -80,7 +81,14 @@ def _ensure_yolo_inference_runtime_impl(
             YOLO = import_yolo_fn()
         except Exception as exc:  # noqa: BLE001
             raise http_exception_cls(status_code=503, detail=f"yolo_unavailable:{exc}") from exc
-        patch_ultralytics_fn()
+        should_patch = True
+        if should_patch_ultralytics_fn is not None:
+            try:
+                should_patch = bool(should_patch_ultralytics_fn(active))
+            except Exception:
+                should_patch = False
+        if should_patch:
+            patch_ultralytics_fn()
         model = YOLO(best_path)
         labelmap = load_labelmap_fn(labelmap_path) if labelmap_path else []
         resolved_task = task or getattr(model, "task", None)

@@ -43,4 +43,9 @@ pretty = true
 [tool.pytest.ini_options]
 markers = [
   "ui: browser end-to-end smoke tests (requires RUN_UI_E2E=1 and Playwright)",
+  "ui_smoke: fast UI smoke scenarios for PR validation",
+  "ui_full: broader UI flow matrix for nightly/full runs",
+  "ui_usability_smoke: fast usability/legibility UI checks for PR validation",
+  "ui_usability_full: broader usability/legibility UI checks for nightly/full runs",
+  "ui_gpu_lifecycle: UI checks that validate heavy-job lifecycle semantics",
 ]

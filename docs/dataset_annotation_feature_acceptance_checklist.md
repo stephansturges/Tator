@@ -3,7 +3,7 @@
 Use this checklist after deploying frontend changes that enable loading server datasets directly into the annotation tab.
 
 ## Automated Playwright Coverage
-`tests/ui/test_dataset_annotation_flow_playwright.py` now covers the critical dataset-annotation UX path end-to-end:
+`tests/ui/e2e/test_dataset_annotation_flows.py` now covers the critical dataset-annotation UX path end-to-end:
 - Dataset Manager default messaging/disabled-state clarity checks.
 - Transient open -> annotation workspace load.
 - Register path workflow + linked dataset card open-in-annotation flow.
@@ -19,12 +19,16 @@ UI_PAGE_URL=http://127.0.0.1:8001/ybat.html \
 UI_DATASET_PATH=/abs/path/to/yolo_dataset \
 UI_API_ROOT=http://127.0.0.1:8000 \
 UI_HEALTH_URL=http://127.0.0.1:8000/system/health_summary \
-pytest -q tests/ui/test_dataset_annotation_flow_playwright.py -m ui
+pytest -q tests/ui/e2e/test_dataset_annotation_flows.py -m ui_smoke
 ```
 
 Notes:
 - Backend (`uvicorn`) and static UI host must both be running before this command.
 - By default these tests are skipped unless `RUN_UI_E2E=1` and required env vars are set.
+- Full matrix run: `pytest -q tests/ui/e2e -m \"ui_full\"`
+- PR smoke (functional + usability): `pytest -q tests/ui/e2e -m \"ui_smoke or ui_usability_smoke\"`
+- Nightly full (functional + usability): `pytest -q tests/ui/e2e -m \"ui_full or ui_usability_full\"`
+- Control claim validation: `python tools/check_playwright_control_coverage.py`
 
 ## Preconditions
 - Backend is running and reachable.

@@ -1,0 +1,557 @@
+{
+  "version": 2,
+  "controls": [
+    {
+      "id": "tabLabelingButton",
+      "tab": "labeling",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabPrepassBuilderButton",
+      "tab": "prepass-builder",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabTrainingButton",
+      "tab": "training",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabQwenTrainButton",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabSam3TrainButton",
+      "tab": "sam3-train",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabYoloTrainButton",
+      "tab": "yolo-train",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabRfDetrTrainButton",
+      "tab": "rfdetr-train",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabAgentMiningButton",
+      "tab": "agent-mining",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabPromptHelperButton",
+      "tab": "prompt-helper",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabDatasetsButton",
+      "tab": "datasets",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER",
+        "DATASET_DEFAULTS_CLEAR",
+        "DATASET_REGISTER_LINKED_OPEN",
+        "DATASET_READONLY_TAKEOVER"
+      ]
+    },
+    {
+      "id": "tabSam3PromptModelsButton",
+      "tab": "sam3-prompt-models",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabDetectorsButton",
+      "tab": "detectors",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabActiveButton",
+      "tab": "active",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabQwenButton",
+      "tab": "qwen",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabPredictorsButton",
+      "tab": "predictors",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "tabSettingsButton",
+      "tab": "settings",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "imageList",
+      "tab": "labeling",
+      "claimed_by": [
+        "DATASET_TRANSIENT_OPEN_ANNOTATION",
+        "DATASET_CLOSE_BLOCKED_SAVE_FAILURE"
+      ]
+    },
+    {
+      "id": "images",
+      "tab": "labeling",
+      "claimed_by": [
+        "DATASET_TRANSIENT_OPEN_ANNOTATION"
+      ]
+    },
+    {
+      "id": "annotationSourceMode",
+      "tab": "labeling",
+      "claimed_by": [
+        "DATASET_TRANSIENT_OPEN_ANNOTATION",
+        "DATASET_REGISTER_LINKED_OPEN",
+        "DATASET_STALE_MANIFEST_NO_RESURRECT"
+      ]
+    },
+    {
+      "id": "annotationSourceSummary",
+      "tab": "labeling",
+      "claimed_by": [
+        "DATASET_DEFAULTS_CLEAR",
+        "DATASET_CLOSE_BLOCKED_SAVE_FAILURE",
+        "UX_CRITICAL_TEXT_CONTRAST"
+      ]
+    },
+    {
+      "id": "annotationSourceLock",
+      "tab": "labeling",
+      "claimed_by": [
+        "DATASET_READONLY_TAKEOVER"
+      ]
+    },
+    {
+      "id": "annotationTakeoverBtn",
+      "tab": "labeling",
+      "claimed_by": [
+        "DATASET_READONLY_TAKEOVER"
+      ]
+    },
+    {
+      "id": "annotationSaveNowBtn",
+      "tab": "labeling",
+      "claimed_by": [
+        "DATASET_CLOSE_BLOCKED_SAVE_FAILURE"
+      ]
+    },
+    {
+      "id": "annotationReloadBtn",
+      "tab": "labeling",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "annotationCloseBtn",
+      "tab": "labeling",
+      "claimed_by": [
+        "DATASET_STALE_MANIFEST_NO_RESURRECT",
+        "DATASET_CLOSE_BLOCKED_SAVE_FAILURE"
+      ]
+    },
+    {
+      "id": "qwenCaptionOutput",
+      "tab": "labeling",
+      "claimed_by": [
+        "DATASET_READONLY_TAKEOVER",
+        "DATASET_CLOSE_BLOCKED_SAVE_FAILURE"
+      ]
+    },
+    {
+      "id": "datasetPathInput",
+      "tab": "datasets",
+      "claimed_by": [
+        "DATASET_TRANSIENT_OPEN_ANNOTATION",
+        "DATASET_REGISTER_LINKED_OPEN"
+      ]
+    },
+    {
+      "id": "datasetPathId",
+      "tab": "datasets",
+      "claimed_by": [
+        "DATASET_REGISTER_LINKED_OPEN"
+      ]
+    },
+    {
+      "id": "datasetPathLabel",
+      "tab": "datasets",
+      "claimed_by": [
+        "DATASET_REGISTER_LINKED_OPEN"
+      ]
+    },
+    {
+      "id": "datasetPathOpenBtn",
+      "tab": "datasets",
+      "claimed_by": [
+        "DATASET_TRANSIENT_OPEN_ANNOTATION",
+        "DATASET_READONLY_TAKEOVER",
+        "DATASET_STALE_MANIFEST_NO_RESURRECT"
+      ]
+    },
+    {
+      "id": "datasetPathSaveBtn",
+      "tab": "datasets",
+      "claimed_by": [
+        "DATASET_DEFAULTS_CLEAR"
+      ]
+    },
+    {
+      "id": "datasetPathRegisterBtn",
+      "tab": "datasets",
+      "claimed_by": [
+        "DATASET_REGISTER_LINKED_OPEN"
+      ]
+    },
+    {
+      "id": "datasetPathAnnotateBtn",
+      "tab": "datasets",
+      "claimed_by": [
+        "DATASET_TRANSIENT_OPEN_ANNOTATION",
+        "DATASET_READONLY_TAKEOVER",
+        "DATASET_STALE_MANIFEST_NO_RESURRECT"
+      ]
+    },
+    {
+      "id": "datasetPathSummary",
+      "tab": "datasets",
+      "claimed_by": [
+        "DATASET_DEFAULTS_CLEAR",
+        "DATASET_TRANSIENT_OPEN_ANNOTATION"
+      ]
+    },
+    {
+      "id": "datasetPathMessage",
+      "tab": "datasets",
+      "claimed_by": [
+        "DATASET_REGISTER_LINKED_OPEN"
+      ]
+    },
+    {
+      "id": "datasetListRefreshTop",
+      "tab": "datasets",
+      "claimed_by": [
+        "DATASET_REGISTER_LINKED_OPEN"
+      ]
+    },
+    {
+      "id": "datasetList",
+      "tab": "datasets",
+      "claimed_by": [
+        "DATASET_REGISTER_LINKED_OPEN"
+      ]
+    },
+    {
+      "id": "qwenAgentRecipeSave",
+      "tab": "prepass-builder",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "startTrainingBtn",
+      "tab": "training",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "qwenTrainStartBtn",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "sam3StartBtn",
+      "tab": "sam3-train",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "yoloTrainStartBtn",
+      "tab": "yolo-train",
+      "claimed_by": [
+        "GPU_YOLO_LIFECYCLE_UI_CONTRACT",
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "rfdetrTrainStartBtn",
+      "tab": "rfdetr-train",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "agentRunBtn",
+      "tab": "agent-mining",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "promptHelperGenerateBtn",
+      "tab": "prompt-helper",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "sam3PromptRefresh",
+      "tab": "sam3-prompt-models",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "detectorDefaultSave",
+      "tab": "detectors",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "activeClassifierUse",
+      "tab": "active",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "qwenSettingsApply",
+      "tab": "qwen",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "predictorApply",
+      "tab": "predictors",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "settingsApply",
+      "tab": "settings",
+      "claimed_by": [
+        "NAV_ALL_TABS_RENDER"
+      ]
+    },
+    {
+      "id": "yoloAcceptTos",
+      "tab": "yolo-train",
+      "claimed_by": [
+        "GPU_YOLO_LIFECYCLE_UI_CONTRACT"
+      ]
+    },
+    {
+      "id": "yoloDatasetRefresh",
+      "tab": "yolo-train",
+      "claimed_by": [
+        "GPU_YOLO_LIFECYCLE_UI_CONTRACT"
+      ]
+    },
+    {
+      "id": "yoloDatasetSelect",
+      "tab": "yolo-train",
+      "claimed_by": [
+        "GPU_YOLO_LIFECYCLE_UI_CONTRACT"
+      ]
+    },
+    {
+      "id": "yoloTrainCancelBtn",
+      "tab": "yolo-train",
+      "claimed_by": [
+        "GPU_YOLO_LIFECYCLE_UI_CONTRACT"
+      ]
+    },
+    {
+      "id": "yoloTrainRefreshBtn",
+      "tab": "yolo-train",
+      "claimed_by": [
+        "GPU_YOLO_LIFECYCLE_UI_CONTRACT"
+      ]
+    },
+    {
+      "id": "yoloTrainStatusText",
+      "tab": "yolo-train",
+      "claimed_by": [
+        "GPU_YOLO_LIFECYCLE_UI_CONTRACT"
+      ]
+    },
+    {
+      "id": "qwenAgentIou",
+      "tab": "prepass-builder",
+      "claimed_by": [
+        "UX_TOOLTIP_READABILITY_PREPASS"
+      ]
+    },
+    {
+      "id": "backgroundLoadModal",
+      "tab": "labeling",
+      "claimed_by": [
+        "UX_MODAL_BACKGROUND_LOAD_READABLE"
+      ]
+    },
+    {
+      "id": "backgroundLoadTitle",
+      "tab": "labeling",
+      "claimed_by": [
+        "UX_MODAL_BACKGROUND_LOAD_READABLE"
+      ]
+    },
+    {
+      "id": "backgroundLoadMessage",
+      "tab": "labeling",
+      "claimed_by": [
+        "UX_MODAL_BACKGROUND_LOAD_READABLE"
+      ]
+    },
+    {
+      "id": "backgroundLoadDismiss",
+      "tab": "labeling",
+      "claimed_by": [
+        "UX_MODAL_BACKGROUND_LOAD_READABLE"
+      ]
+    },
+    {
+      "id": "batchTweakModal",
+      "tab": "labeling",
+      "claimed_by": [
+        "UX_MODAL_BATCH_TWEAK_READABLE"
+      ]
+    },
+    {
+      "id": "batchTweakTitle",
+      "tab": "labeling",
+      "claimed_by": [
+        "UX_MODAL_BATCH_TWEAK_READABLE"
+      ]
+    },
+    {
+      "id": "batchTweakMessage",
+      "tab": "labeling",
+      "claimed_by": [
+        "UX_MODAL_BATCH_TWEAK_READABLE"
+      ]
+    },
+    {
+      "id": "batchTweakConfirm",
+      "tab": "labeling",
+      "claimed_by": [
+        "UX_MODAL_BATCH_TWEAK_READABLE"
+      ]
+    },
+    {
+      "id": "batchTweakCancel",
+      "tab": "labeling",
+      "claimed_by": [
+        "UX_MODAL_BATCH_TWEAK_READABLE"
+      ]
+    },
+    {
+      "id": "detectorRunButton",
+      "tab": "labeling",
+      "claimed_by": [
+        "UX_STATUS_NOTICE_LEGIBILITY"
+      ]
+    },
+    {
+      "id": "samStatus",
+      "tab": "labeling",
+      "claimed_by": [
+        "UX_STATUS_NOTICE_LEGIBILITY"
+      ]
+    },
+    {
+      "id": "taskQueue",
+      "tab": "labeling",
+      "claimed_by": [
+        "UX_STATUS_NOTICE_LEGIBILITY"
+      ]
+    },
+    {
+      "id": "automationLockBanner",
+      "tab": "labeling",
+      "claimed_by": [
+        "UX_CRITICAL_TEXT_CONTRAST"
+      ]
+    }
+  ],
+  "usability_surfaces": [
+    {
+      "surface_id": "backgroundLoadModal",
+      "type": "modal",
+      "claimed_by": [
+        "UX_MODAL_BACKGROUND_LOAD_READABLE"
+      ]
+    },
+    {
+      "surface_id": "batchTweakModal",
+      "type": "modal",
+      "claimed_by": [
+        "UX_MODAL_BATCH_TWEAK_READABLE"
+      ]
+    },
+    {
+      "surface_id": "taskQueue",
+      "type": "toast",
+      "claimed_by": [
+        "UX_STATUS_NOTICE_LEGIBILITY"
+      ]
+    },
+    {
+      "surface_id": "automationLockBanner",
+      "type": "banner",
+      "claimed_by": [
+        "UX_CRITICAL_TEXT_CONTRAST"
+      ]
+    },
+    {
+      "surface_id": "tabPrepassBuilder",
+      "type": "panel",
+      "claimed_by": [
+        "UX_TAB_PANELS_NO_OVERFLOW",
+        "UX_TOOLTIP_READABILITY_PREPASS"
+      ]
+    }
+  ]
+}

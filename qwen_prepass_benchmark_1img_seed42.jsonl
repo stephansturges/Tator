@@ -1,0 +1,1 @@
+{"ts": 1770130777.7758749, "image": "41fa2e5c-72c9-443a-a3d0-27e3b9cc70ff.png", "model_id": "Qwen/Qwen3-VL-4B-Thinking", "variant": "Thinking", "payload_bytes": 2603806, "status": 503, "error": "{\"detail\":\"qwen_prepass_failed:_discover_yolo_labelmap_impl() missing 1 required keyword-only argument: 'load_labelmap_file_fn'\"}"}

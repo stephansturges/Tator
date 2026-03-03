@@ -39,3 +39,8 @@ check_untyped_defs = false
 no_strict_optional = true
 follow_imports = "skip"
 pretty = true
+
+[tool.pytest.ini_options]
+markers = [
+  "ui: browser end-to-end smoke tests (requires RUN_UI_E2E=1 and Playwright)",
+]

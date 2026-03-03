@@ -1,0 +1,92 @@
+{
+  "generated_at_utc": "2026-03-02T16:16:35Z",
+  "scope": "YOLO head-graft deep review",
+  "issues": [
+    {
+      "id": "YHG-001",
+      "severity": "high",
+      "title": "Unsafe forced cancellation via async thread exception injection",
+      "status": "resolved",
+      "evidence": [
+        "services/detector_jobs.py:266",
+        "localinferenceapi.py:20440",
+        "localinferenceapi.py:17786"
+      ],
+      "risk": "Can interrupt arbitrary frames, skip cleanup/finalization, and leave inconsistent artifacts/runtime state.",
+      "recommended_fix": "Remove force-stop path and rely on cooperative cancellation with a top-level worker try/finally cleanup guard.",
+      "resolved_at_utc": "2026-03-02T16:16:35Z",
+      "resolution_note": "fixed in codebase update on 2026-03-02"
+    },
+    {
+      "id": "YHG-002",
+      "severity": "medium",
+      "title": "Dry-run does not fully mirror start preconditions",
+      "status": "resolved",
+      "evidence": [
+        "localinferenceapi.py:20389",
+        "localinferenceapi.py:17839",
+        "localinferenceapi.py:17872"
+      ],
+      "risk": "Dry-run may report OK while start fails on missing base checkpoint or variant metadata.",
+      "recommended_fix": "Add the missing preflight checks to dry-run and return explicit failure codes/details.",
+      "resolved_at_utc": "2026-03-02T16:16:35Z",
+      "resolution_note": "fixed in codebase update on 2026-03-02"
+    },
+    {
+      "id": "YHG-003",
+      "severity": "medium",
+      "title": "Experimental Ultralytics patch is process-global and reused by normal YOLO inference",
+      "status": "resolved",
+      "evidence": [
+        "localinferenceapi.py:11733",
+        "localinferenceapi.py:12038",
+        "services/detectors.py:83",
+        "localinferenceapi.py:12047"
+      ],
+      "risk": "Patch side-effects can impact non-head-graft inference/training paths.",
+      "recommended_fix": "Isolate patch activation to head-graft contexts or gate with explicit runtime compatibility mode.",
+      "resolved_at_utc": "2026-03-02T16:16:35Z",
+      "resolution_note": "fixed in codebase update on 2026-03-02"
+    },
+    {
+      "id": "YHG-004",
+      "severity": "medium",
+      "title": "Bundle endpoint may silently return incomplete package",
+      "status": "resolved",
+      "evidence": [
+        "localinferenceapi.py:21310",
+        "localinferenceapi.py:21313"
+      ],
+      "risk": "Users may receive incomplete bundle with no precondition error.",
+      "recommended_fix": "Fail with precondition error when required artifacts are missing and include missing list.",
+      "resolved_at_utc": "2026-03-02T16:16:35Z",
+      "resolution_note": "fixed in codebase update on 2026-03-02"
+    },
+    {
+      "id": "YHG-005",
+      "severity": "low",
+      "title": "Head-graft UI payload parsing drops explicit zero values",
+      "status": "resolved",
+      "evidence": [
+        "ybat-master/ybat.js:5670"
+      ],
+      "risk": "Explicit 0 values are coerced to null and replaced by backend defaults.",
+      "recommended_fix": "Use finite-number parsing helper instead of truthy-coalescing for numeric fields.",
+      "resolved_at_utc": "2026-03-02T16:16:35Z",
+      "resolution_note": "fixed in codebase update on 2026-03-02"
+    },
+    {
+      "id": "YHG-006",
+      "severity": "low",
+      "title": "No dedicated automated tests for head-graft path",
+      "status": "resolved",
+      "evidence": [
+        "tests/ (no head_graft-specific coverage found)"
+      ],
+      "risk": "Regression probability remains elevated for patch-heavy flow.",
+      "recommended_fix": "Add non-GPU tests for dry-run parity, YAML generation, cancellation semantics, and bundle integrity.",
+      "resolved_at_utc": "2026-03-02T16:16:35Z",
+      "resolution_note": "fixed in codebase update on 2026-03-02"
+    }
+  ]
+}

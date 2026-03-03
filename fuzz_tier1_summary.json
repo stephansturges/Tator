@@ -1,0 +1,244 @@
+{
+  "skip_gpu": false,
+  "steps": [
+    {
+      "name": "prepass_base",
+      "result": {
+        "detections": [
+          {
+            "bbox_xyxy_px": [
+              68.26551818847656,
+              68.58133697509766,
+              122.70370483398438,
+              122.40019989013672
+            ],
+            "bbox_xywh_px": [
+              68.26551818847656,
+              68.58133697509766,
+              54.43818664550781,
+              53.81886291503906
+            ],
+            "bbox_2d": [
+              533.3243608474731,
+              535.7916951179504,
+              958.6226940155029,
+              956.2515616416931
+            ],
+            "bbox_yolo": [
+              0.745973527431488,
+              0.7460216283798218,
+              0.4252983331680298,
+              0.4204598665237427
+            ],
+            "label": "building",
+            "class_id": 2,
+            "score": 0.8299192786216736,
+            "score_source": "rfdetr",
+            "sam3_prompt_term": null,
+            "sam3_prompt_label": null,
+            "sam3_prompt_source": null,
+            "source": "rfdetr",
+            "source_list": [
+              "rfdetr",
+              "yolo"
+            ]
+          },
+          {
+            "bbox_xyxy_px": [
+              8.981292724609375,
+              9.474632263183594,
+              52.17721176147461,
+              51.4831657409668
+            ],
+            "bbox_xywh_px": [
+              8.981292724609375,
+              9.474632263183594,
+              43.195919036865234,
+              42.0085334777832
+            ],
+            "bbox_2d": [
+              70.16634941101074,
+              74.02056455612183,
+              407.6344668865204,
+              402.2122323513031
+            ],
+            "bbox_yolo": [
+              0.23890040814876556,
+              0.23811639845371246,
+              0.33746811747550964,
+              0.3281916677951813
+            ],
+            "label": "building",
+            "class_id": 2,
+            "score": 0.742997407913208,
+            "score_source": "yolo",
+            "sam3_prompt_term": null,
+            "sam3_prompt_label": null,
+            "sam3_prompt_source": null,
+            "source": "yolo",
+            "source_list": [
+              "yolo"
+            ]
+          }
+        ],
+        "trace": [
+          {
+            "step_id": 1,
+            "phase": "merge",
+            "tool_name": null,
+            "summary": "deep_prepass_complete",
+            "counts": {
+              "detections": 2
+            },
+            "windows": null,
+            "timestamp": 1770142309.4140394,
+            "tool_input": null,
+            "tool_output": null,
+            "model_output": null
+          }
+        ],
+        "warnings": null,
+        "caption": null,
+        "trace_path": "uploads/qwen_prepass_traces/prepass_1770142287_59f65af6.jsonl",
+        "trace_full_path": "uploads/qwen_prepass_traces_full/prepass_full_1770142287_0a90acb5.jsonl"
+      }
+    },
+    {
+      "name": "prepass_windowed",
+      "result": {
+        "detections": [
+          {
+            "bbox_xyxy_px": [
+              68.26551818847656,
+              68.58133697509766,
+              122.70370483398438,
+              122.40019989013672
+            ],
+            "bbox_xywh_px": [
+              68.26551818847656,
+              68.58133697509766,
+              54.43818664550781,
+              53.81886291503906
+            ],
+            "bbox_2d": [
+              533.3243608474731,
+              535.7916951179504,
+              958.6226940155029,
+              956.2515616416931
+            ],
+            "bbox_yolo": [
+              0.745973527431488,
+              0.7460216283798218,
+              0.4252983331680298,
+              0.4204598665237427
+            ],
+            "label": "building",
+            "class_id": 2,
+            "score": 0.8299192786216736,
+            "score_source": "rfdetr",
+            "sam3_prompt_term": null,
+            "sam3_prompt_label": null,
+            "sam3_prompt_source": null,
+            "source": "rfdetr",
+            "source_list": [
+              "rfdetr",
+              "yolo"
+            ]
+          },
+          {
+            "bbox_xyxy_px": [
+              8.981292724609375,
+              9.474632263183594,
+              52.17721176147461,
+              51.4831657409668
+            ],
+            "bbox_xywh_px": [
+              8.981292724609375,
+              9.474632263183594,
+              43.195919036865234,
+              42.0085334777832
+            ],
+            "bbox_2d": [
+              70.16634941101074,
+              74.02056455612183,
+              407.6344668865204,
+              402.2122323513031
+            ],
+            "bbox_yolo": [
+              0.23890040814876556,
+              0.23811639845371246,
+              0.33746811747550964,
+              0.3281916677951813
+            ],
+            "label": "building",
+            "class_id": 2,
+            "score": 0.742997407913208,
+            "score_source": "yolo",
+            "sam3_prompt_term": null,
+            "sam3_prompt_label": null,
+            "sam3_prompt_source": null,
+            "source": "yolo",
+            "source_list": [
+              "yolo"
+            ]
+          }
+        ],
+        "trace": [
+          {
+            "step_id": 1,
+            "phase": "merge",
+            "tool_name": null,
+            "summary": "deep_prepass_complete",
+            "counts": {
+              "detections": 2
+            },
+            "windows": null,
+            "timestamp": 1770142313.3036106,
+            "tool_input": null,
+            "tool_output": null,
+            "model_output": null
+          }
+        ],
+        "warnings": null,
+        "caption": null,
+        "trace_path": "uploads/qwen_prepass_traces/prepass_1770142309_5800ce13.jsonl",
+        "trace_full_path": "uploads/qwen_prepass_traces_full/prepass_full_1770142309_54292b62.jsonl"
+      }
+    },
+    {
+      "name": "caption_full",
+      "result": {
+        "caption": "The image displays two distinct, solid-colored squares set against a completely black background. The upper square is a vibrant red, positioned in the top-left quadrant of the frame, while the lower square is a deep, saturated blue, occupying the bottom-right area. The two shapes are non-overlapping and are separated by a significant amount of empty black space, creating a stark contrast between their colors and the void surrounding them. Neither square appears to be moving or interacting with any other object; they remain static and isolated within the composition. The arrangement is symmetrical in a diagonal sense, with the red square diagonally above and to the left of the blue square, giving the image a balanced yet minimalist aesthetic. There is no indication of motion, context, or environmental elements beyond the two colored shapes and the dark backdrop.",
+        "used_counts": {},
+        "used_boxes": 0,
+        "truncated": false
+      }
+    },
+    {
+      "name": "caption_windowed",
+      "result": {
+        "caption": "Two colored squares, one red and one blue, are positioned against a black background with the red square above and to the left of the blue square.",
+        "used_counts": {},
+        "used_boxes": 0,
+        "truncated": false
+      }
+    },
+    {
+      "name": "calibration",
+      "result": {
+        "job_id": "cal_ed9ce345",
+        "status": "queued",
+        "message": "Queued",
+        "phase": "queued",
+        "progress": 0.0,
+        "processed": 0,
+        "total": 0,
+        "created_at": 1770142340.6250956,
+        "updated_at": 1770142340.6250958,
+        "request": {},
+        "result": null,
+        "error": null
+      }
+    }
+  ]
+}

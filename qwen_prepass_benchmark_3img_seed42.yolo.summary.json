@@ -1,0 +1,28 @@
+{
+  "count": 3,
+  "seed": 42,
+  "iou": 0.5,
+  "label_source": "coco",
+  "yolo_root": "",
+  "tp": 38,
+  "fp": 12,
+  "fn": 25,
+  "by_class": {
+    "0": {
+      "tp": 12,
+      "fp": 1,
+      "fn": 13
+    },
+    "2": {
+      "tp": 26,
+      "fp": 11,
+      "fn": 8
+    },
+    "3": {
+      "tp": 0,
+      "fp": 0,
+      "fn": 4
+    }
+  },
+  "output": "qwen_prepass_benchmark_3img_seed42.yolo.summary.json"
+}

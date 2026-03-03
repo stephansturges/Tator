@@ -1,0 +1,25 @@
+{
+  "count": 1,
+  "seed": 321,
+  "model_id": "Qwen/Qwen3-VL-4B-Thinking",
+  "variant": "Thinking",
+  "iou": 0.5,
+  "label_source": "yolo",
+  "yolo_root": "",
+  "selection_filter": {
+    "min_items": 0,
+    "min_classes": 0
+  },
+  "use_detection_overlay": null,
+  "tp": 0,
+  "fp": 0,
+  "fn": 0,
+  "by_class": {},
+  "output": "qwen_prepass_benchmark_1img_seed321.jsonl",
+  "yolo_baseline": {
+    "tp": 0,
+    "fp": 0,
+    "fn": 1,
+    "summary_path": "qwen_prepass_benchmark_1img_seed321.yolo.summary.json"
+  }
+}

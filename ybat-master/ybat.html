@@ -81,6 +81,17 @@
                             <select name="imageList" id="imageList" size="10" multiple></select>
                             <div id="imageInformation"></div>
                             <div id="datasetTypeBadge" class="training-help"></div>
+                            <div id="annotationSourcePanel" class="training-help" style="margin:8px 0 10px; border-left:3px solid #475569; padding-left:10px;">
+                                <div><strong>Annotation source:</strong> <span id="annotationSourceMode">local files</span></div>
+                                <div id="annotationSourceSummary">Load images + classes from local files, or open a dataset from Dataset Manager.</div>
+                                <div id="annotationSourceLock" style="margin-top:4px;"></div>
+                                <div class="training-actions" style="margin-top:6px;">
+                                    <button type="button" id="annotationTakeoverBtn" class="training-button secondary" disabled>Take over lock</button>
+                                    <button type="button" id="annotationSaveNowBtn" class="training-button secondary" disabled>Save now</button>
+                                    <button type="button" id="annotationReloadBtn" class="training-button secondary" disabled>Reload</button>
+                                    <button type="button" id="annotationCloseBtn" class="training-button secondary" disabled>Close dataset</button>
+                                </div>
+                            </div>
                             <div id="labelingGpuLockNotice" class="automation-lock-panel" style="display:none; margin:8px 0 10px;">
                                 GPU-heavy labeling actions are locked while prepass encoding/calibration or training is running.
                             </div>
@@ -3211,6 +3222,7 @@
                                         <button type="button" id="datasetPathOpenBtn" class="training-button secondary">Open transient</button>
                                         <button type="button" id="datasetPathSaveBtn" class="training-button secondary">Save transient to library</button>
                                         <button type="button" id="datasetPathRegisterBtn" class="training-button">Register path in library</button>
+                                        <button type="button" id="datasetPathAnnotateBtn" class="training-button secondary">Open in annotation</button>
                                     </div>
                                     <div id="datasetPathSummary" class="training-help"></div>
                                     <div id="datasetPathMessage" class="training-message"></div>

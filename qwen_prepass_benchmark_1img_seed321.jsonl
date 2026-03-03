@@ -1,0 +1,2 @@
+{"ts": 1770155225.4249005, "image": "e6f5915d-705f-4db2-997f-0ffd6a09b5aa.jpg", "model_id": "Qwen/Qwen3-VL-4B-Thinking", "variant": "Thinking", "payload_bytes": 313648, "status": 503, "error": "{\"detail\":\"qwen_prepass_failed:name 'active_clip_model_name' is not defined\"}"}
+{"ts": 1770155240.8469782, "image": "e6f5915d-705f-4db2-997f-0ffd6a09b5aa.jpg", "model_id": "Qwen/Qwen3-VL-4B-Thinking", "variant": "Thinking", "payload_bytes": 313626, "status": 503, "error": "{\"detail\":\"qwen_prepass_failed:name 'active_clip_model_name' is not defined\"}"}

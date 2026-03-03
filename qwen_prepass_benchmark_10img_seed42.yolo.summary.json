@@ -1,0 +1,38 @@
+{
+  "count": 10,
+  "seed": 42,
+  "iou": 0.5,
+  "label_source": "coco",
+  "yolo_root": "",
+  "tp": 94,
+  "fp": 34,
+  "fn": 63,
+  "by_class": {
+    "0": {
+      "tp": 14,
+      "fp": 1,
+      "fn": 14
+    },
+    "2": {
+      "tp": 27,
+      "fp": 12,
+      "fn": 10
+    },
+    "3": {
+      "tp": 1,
+      "fp": 3,
+      "fn": 8
+    },
+    "1": {
+      "tp": 48,
+      "fp": 18,
+      "fn": 31
+    },
+    "4": {
+      "tp": 4,
+      "fp": 0,
+      "fn": 0
+    }
+  },
+  "output": "qwen_prepass_benchmark_10img_seed42.yolo.summary.json"
+}

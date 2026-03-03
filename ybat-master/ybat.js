@@ -256,6 +256,13 @@
     let imagesSelectButton = null;
     let classesSelectButton = null;
     let bboxesFolderSelectButton = null;
+    let annotationSourceModeEl = null;
+    let annotationSourceSummaryEl = null;
+    let annotationSourceLockEl = null;
+    let annotationTakeoverButton = null;
+    let annotationSaveNowButton = null;
+    let annotationReloadButton = null;
+    let annotationCloseButton = null;
 
     let samStatusEl = null;
     let samStatusTimer = null;
@@ -2610,6 +2617,7 @@ const sam3TrainState = {
         pathOpenBtn: null,
         pathSaveBtn: null,
         pathRegisterBtn: null,
+        pathAnnotateBtn: null,
         pathSummary: null,
         pathMessage: null,
         refreshBtn: null,
@@ -2654,8 +2662,35 @@ const sam3TrainState = {
         pathActionInFlight: false,
         transientSessionId: "",
         transientDatasetRoot: "",
+        transientOpenPath: "",
         transientExpiresAt: 0,
         actionInFlight: new Set(),
+    };
+
+    const ANNOTATION_AUTOSAVE_INTERVAL_MS = 1500;
+    const ANNOTATION_HEARTBEAT_INTERVAL_MS = 10000;
+    const ANNOTATION_EDITOR_NAME = "webui";
+
+    const annotationSourceState = {
+        mode: "none", // "none" | "linked" | "transient"
+        datasetId: "",
+        sessionId: "",
+        transientOpenPath: "",
+        datasetLabel: "",
+        lockSessionId: "",
+        lock: {},
+        readOnly: false,
+        manifest: null,
+        imageRowsByKey: new Map(),
+        rawLabelLinesByKey: new Map(),
+        hydratedKeys: new Set(),
+        savedSnapshotByKey: new Map(),
+        dirtyRecordsByKey: new Map(),
+        autosaveTimer: null,
+        heartbeatTimer: null,
+        saveInFlight: false,
+        loadToken: 0,
+        statusMessage: "",
     };
 
     const glossaryLibraryState = {
@@ -2732,6 +2767,970 @@ const sam3TrainState = {
         if (datasetManagerElements.pathSaveBtn) {
             datasetManagerElements.pathSaveBtn.disabled = busy || !datasetManagerState.transientSessionId;
         }
+        if (datasetManagerElements.pathAnnotateBtn) {
+            datasetManagerElements.pathAnnotateBtn.disabled =
+                busy || !datasetManagerState.transientSessionId;
+        }
+    }
+
+    function isAnnotationDatasetModeActive() {
+        return annotationSourceState.mode === "linked" || annotationSourceState.mode === "transient";
+    }
+
+    function isAnnotationReadOnly() {
+        return isAnnotationDatasetModeActive() && !!annotationSourceState.readOnly;
+    }
+
+    function annotationSourceLabel() {
+        if (annotationSourceState.mode === "linked") {
+            return "linked dataset";
+        }
+        if (annotationSourceState.mode === "transient") {
+            return "transient dataset";
+        }
+        return "local files";
+    }
+
+    function annotationProgressLabel() {
+        const progress = annotationSourceState.manifest?.progress || {};
+        const total = Number(progress.images_total) || 0;
+        const labeled = Number(progress.images_with_bbox_or_seg) || 0;
+        const pct = Number(progress.percent_labeled);
+        if (total <= 0) {
+            return "";
+        }
+        if (Number.isFinite(pct)) {
+            return `${labeled}/${total} (${Math.round(pct)}%)`;
+        }
+        return `${labeled}/${total}`;
+    }
+
+    function updateAnnotationSourceUi() {
+        if (annotationSourceModeEl) {
+            annotationSourceModeEl.textContent = annotationSourceLabel();
+        }
+        if (annotationSourceSummaryEl) {
+            if (!isAnnotationDatasetModeActive()) {
+                annotationSourceSummaryEl.textContent =
+                    "Load images + classes from local files, or open a dataset from Dataset Manager.";
+            } else {
+                const progress = annotationProgressLabel();
+                const bits = [
+                    annotationSourceState.datasetLabel || "(unnamed dataset)",
+                    annotationSourceState.mode === "transient" ? `session ${annotationSourceState.sessionId}` : annotationSourceState.datasetId,
+                ];
+                if (progress) {
+                    bits.push(`progress ${progress}`);
+                }
+                if (annotationSourceState.statusMessage) {
+                    bits.push(annotationSourceState.statusMessage);
+                }
+                annotationSourceSummaryEl.textContent = bits.filter(Boolean).join(" • ");
+            }
+        }
+        if (annotationSourceLockEl) {
+            if (!isAnnotationDatasetModeActive()) {
+                annotationSourceLockEl.textContent = "";
+            } else if (isAnnotationReadOnly()) {
+                const holder = String(annotationSourceState.lock?.holder || "another editor");
+                annotationSourceLockEl.textContent = `Read-only: lock held by ${holder}.`;
+            } else {
+                const holder = String(annotationSourceState.lock?.holder || "you");
+                annotationSourceLockEl.textContent = `Writable: lock held by ${holder}.`;
+            }
+        }
+        if (annotationTakeoverButton) {
+            annotationTakeoverButton.disabled = !isAnnotationDatasetModeActive() || !isAnnotationReadOnly();
+        }
+        if (annotationSaveNowButton) {
+            annotationSaveNowButton.disabled =
+                !isAnnotationDatasetModeActive() || isAnnotationReadOnly() || annotationSourceState.saveInFlight;
+        }
+        if (annotationReloadButton) {
+            annotationReloadButton.disabled = !isAnnotationDatasetModeActive() || annotationSourceState.saveInFlight;
+        }
+        if (annotationCloseButton) {
+            annotationCloseButton.disabled = !isAnnotationDatasetModeActive() || annotationSourceState.saveInFlight;
+        }
+    }
+
+    function syncLabelingSourceControls() {
+        const datasetMode = isAnnotationDatasetModeActive();
+        const readOnly = isAnnotationReadOnly();
+        const imagesInput = document.getElementById("images");
+        const classesInput = document.getElementById("classes");
+        if (imagesInput) {
+            imagesInput.disabled = datasetMode;
+        }
+        if (classesInput) {
+            classesInput.disabled = datasetMode;
+        }
+        setButtonDisabled(imagesSelectButton, datasetMode);
+        setButtonDisabled(classesSelectButton, datasetMode);
+        const canImport =
+            !datasetMode && Object.keys(images).length > 0 && Object.keys(classes).length > 0;
+        setBboxImportEnabled(canImport);
+        if (qwenElements.captionOutput) {
+            // In annotation read-only mode, block direct text edits to avoid local drift vs locked source.
+            qwenElements.captionOutput.disabled = datasetMode && readOnly;
+        }
+        updateAnnotationSourceUi();
+    }
+
+    function annotationImageKey(split, imageRelpath) {
+        return `${String(split || "train")}/${String(imageRelpath || "").replace(/^\/+/, "")}`;
+    }
+
+    function annotationRowKey(row) {
+        return annotationImageKey(row?.split, row?.image_relpath);
+    }
+
+    function getAnnotationBasePath() {
+        if (annotationSourceState.mode === "linked" && annotationSourceState.datasetId) {
+            return `${API_ROOT}/datasets/${encodeURIComponent(annotationSourceState.datasetId)}/annotation`;
+        }
+        if (annotationSourceState.mode === "transient" && annotationSourceState.sessionId) {
+            return `${API_ROOT}/datasets/transient/${encodeURIComponent(annotationSourceState.sessionId)}/annotation`;
+        }
+        return null;
+    }
+
+    function annotationImageUrlForRecord(imageRecord) {
+        const base = getAnnotationBasePath();
+        if (!base || !imageRecord) {
+            return null;
+        }
+        const split = encodeURIComponent(String(imageRecord.annotationSplit || "train"));
+        const rel = encodeURIComponent(String(imageRecord.annotationRelpath || ""));
+        return `${base}/image?split=${split}&image_relpath=${rel}`;
+    }
+
+    function annotationSessionPayload(extra = {}) {
+        if (!annotationSourceState.lockSessionId) {
+            annotationSourceState.lockSessionId = generateUUID();
+        }
+        return {
+            editor_name: ANNOTATION_EDITOR_NAME,
+            session_id: annotationSourceState.lockSessionId,
+            ...extra,
+        };
+    }
+
+    function stopAnnotationTimers() {
+        if (annotationSourceState.autosaveTimer) {
+            clearInterval(annotationSourceState.autosaveTimer);
+            annotationSourceState.autosaveTimer = null;
+        }
+        if (annotationSourceState.heartbeatTimer) {
+            clearInterval(annotationSourceState.heartbeatTimer);
+            annotationSourceState.heartbeatTimer = null;
+        }
+    }
+
+    function resetAnnotationSourceState() {
+        stopAnnotationTimers();
+        // Invalidate any in-flight async open/reload work so stale responses cannot repopulate UI state.
+        annotationSourceState.loadToken += 1;
+        annotationSourceState.mode = "none";
+        annotationSourceState.datasetId = "";
+        annotationSourceState.sessionId = "";
+        annotationSourceState.transientOpenPath = "";
+        annotationSourceState.datasetLabel = "";
+        annotationSourceState.lockSessionId = "";
+        annotationSourceState.lock = {};
+        annotationSourceState.readOnly = false;
+        annotationSourceState.manifest = null;
+        annotationSourceState.imageRowsByKey = new Map();
+        annotationSourceState.rawLabelLinesByKey = new Map();
+        annotationSourceState.hydratedKeys = new Set();
+        annotationSourceState.savedSnapshotByKey = new Map();
+        annotationSourceState.dirtyRecordsByKey = new Map();
+        annotationSourceState.saveInFlight = false;
+        annotationSourceState.statusMessage = "";
+        updateAnnotationSourceUi();
+        syncLabelingSourceControls();
+    }
+
+    function isDatasetBackedImageRecord(imageRecord) {
+        return !!imageRecord && imageRecord.sourceType === "dataset";
+    }
+
+    function detectSegDatasetFromManifestRows(rows) {
+        for (const row of Array.isArray(rows) ? rows : []) {
+            const lines = Array.isArray(row?.label_lines) ? row.label_lines : [];
+            for (const line of lines) {
+                const cols = String(line || "").trim().split(/\s+/).filter(Boolean);
+                if (cols.length >= 7) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    function populateClassesFromLabelmap(labelmap) {
+        resetClassList();
+        const classList = document.getElementById("classList");
+        if (!classList) {
+            return;
+        }
+        loadedClassList = [];
+        const values = Array.isArray(labelmap) ? labelmap : [];
+        for (let idx = 0; idx < values.length; idx++) {
+            const className = String(values[idx] || "").trim();
+            if (!className) {
+                continue;
+            }
+            classes[className] = loadedClassList.length;
+            loadedClassList.push(className);
+            const option = document.createElement("option");
+            option.value = String(loadedClassList.length - 1);
+            option.textContent = className;
+            if (loadedClassList.length === 1) {
+                option.selected = true;
+                currentClass = className;
+            }
+            classList.appendChild(option);
+        }
+        if (classList.options.length > 0) {
+            classList.selectedIndex = 0;
+        }
+        classListIndex = classList.selectedIndex >= 0 ? classList.selectedIndex : 0;
+        setCurrentClass();
+        updateQwenClassOptions({ resetOverride: true });
+        updateSam3ClassOptions({ resetOverride: true });
+    }
+
+    function chooseInitialAnnotationImageKey(manifestRows, cursor) {
+        const rows = Array.isArray(manifestRows) ? manifestRows : [];
+        const keySet = new Set(rows.map((row) => annotationRowKey(row)));
+        const cursorKey =
+            cursor && cursor.image_relpath
+                ? annotationImageKey(cursor.split || "train", cursor.image_relpath)
+                : "";
+        if (cursorKey && keySet.has(cursorKey)) {
+            return cursorKey;
+        }
+        const firstUnlabeled = rows.find((row) => {
+            const lines = Array.isArray(row?.label_lines) ? row.label_lines : [];
+            return !lines.some((line) => String(line || "").trim());
+        });
+        if (firstUnlabeled) {
+            return annotationRowKey(firstUnlabeled);
+        }
+        if (rows.length) {
+            return annotationRowKey(rows[0]);
+        }
+        return "";
+    }
+
+    function normalizeYoloNumber(value) {
+        if (!Number.isFinite(value)) {
+            return "0";
+        }
+        const clamped = Math.max(0, Math.min(1, value));
+        return clamped.toFixed(6).replace(/\.?0+$/, "") || "0";
+    }
+
+    function serializeDatasetBboxesForImage(imageKey) {
+        const image = images[imageKey];
+        if (!image || !Number.isFinite(image.width) || !Number.isFinite(image.height) || image.width <= 0 || image.height <= 0) {
+            return [];
+        }
+        const rows = [];
+        const classBuckets = bboxes[imageKey] || {};
+        for (const className of Object.keys(classBuckets)) {
+            const classIdx = classes[className];
+            if (!Number.isFinite(classIdx)) {
+                continue;
+            }
+            const list = Array.isArray(classBuckets[className]) ? classBuckets[className] : [];
+            for (const bbox of list) {
+                if (bbox && Array.isArray(bbox.points) && bbox.points.length >= 3) {
+                    const coords = [];
+                    bbox.points.forEach((pt) => {
+                        const nx = normalizeYoloNumber(Number(pt?.x) / image.width);
+                        const ny = normalizeYoloNumber(Number(pt?.y) / image.height);
+                        coords.push(nx, ny);
+                    });
+                    if (coords.length >= 6) {
+                        rows.push(`${classIdx} ${coords.join(" ")}`);
+                    }
+                    continue;
+                }
+                const x = Number(bbox?.x);
+                const y = Number(bbox?.y);
+                const w = Number(bbox?.width);
+                const h = Number(bbox?.height);
+                if (!(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(w) && Number.isFinite(h))) {
+                    continue;
+                }
+                if (w <= 0 || h <= 0) {
+                    continue;
+                }
+                const cx = normalizeYoloNumber((x + (w / 2)) / image.width);
+                const cy = normalizeYoloNumber((y + (h / 2)) / image.height);
+                const wn = normalizeYoloNumber(w / image.width);
+                const hn = normalizeYoloNumber(h / image.height);
+                rows.push(`${classIdx} ${cx} ${cy} ${wn} ${hn}`);
+            }
+        }
+        return rows;
+    }
+
+    function buildAnnotationRecord(imageKey) {
+        const row = annotationSourceState.imageRowsByKey.get(imageKey);
+        if (!row) {
+            return null;
+        }
+        return {
+            split: row.split,
+            image_relpath: row.image_relpath,
+            label_lines: serializeDatasetBboxesForImage(imageKey),
+            text_label: String(textLabels[imageKey] || ""),
+        };
+    }
+
+    function serializeAnnotationRecord(record) {
+        if (!record) {
+            return "";
+        }
+        return JSON.stringify({
+            label_lines: Array.isArray(record.label_lines) ? record.label_lines : [],
+            text_label: String(record.text_label || ""),
+        });
+    }
+
+    function captureCurrentAnnotationDirtyState() {
+        if (!isAnnotationDatasetModeActive() || !currentImage || !isDatasetBackedImageRecord(currentImage)) {
+            return;
+        }
+        const key = currentImage.name;
+        if (!annotationSourceState.hydratedKeys.has(key)) {
+            return;
+        }
+        const record = buildAnnotationRecord(key);
+        if (!record) {
+            return;
+        }
+        const serialized = serializeAnnotationRecord(record);
+        const saved = annotationSourceState.savedSnapshotByKey.get(key);
+        if (saved === undefined) {
+            annotationSourceState.savedSnapshotByKey.set(key, serialized);
+            return;
+        }
+        if (serialized !== saved) {
+            annotationSourceState.dirtyRecordsByKey.set(key, record);
+        }
+    }
+
+    async function handleAnnotationTransientExpiry() {
+        annotationSourceState.readOnly = true;
+        annotationSourceState.statusMessage = "Transient session expired.";
+        syncLabelingSourceControls();
+        stopAnnotationTimers();
+        const reopenPath = String(annotationSourceState.transientOpenPath || "").trim();
+        if (!reopenPath) {
+            setSamStatus("Transient session expired. Reopen from Dataset Manager.", {
+                variant: "warn",
+                duration: 5000,
+            });
+            return;
+        }
+        const shouldReopen = window.confirm(
+            "Transient session expired. Reopen it now and retry pending saves?"
+        );
+        if (!shouldReopen) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets/open_path`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path: reopenPath, strict: true }),
+            });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            const data = parseJsonObjectSafe(detail, {});
+            const newSessionId = String(data.session_id || "").trim();
+            if (!newSessionId) {
+                throw new Error("Failed to reopen transient dataset.");
+            }
+            datasetManagerState.transientSessionId = newSessionId;
+            datasetManagerState.transientDatasetRoot =
+                data?.dataset?.dataset_root || reopenPath;
+            datasetManagerState.transientOpenPath = reopenPath;
+            datasetManagerState.transientExpiresAt = Number(data?.expires_at) || 0;
+            renderDatasetPathSummary();
+            annotationSourceState.sessionId = newSessionId;
+            annotationSourceState.transientOpenPath = reopenPath;
+            annotationSourceState.datasetLabel =
+                String(data?.dataset?.label || "").trim()
+                || annotationSourceState.datasetLabel
+                || datasetManagerState.transientDatasetRoot
+                || "transient dataset";
+            annotationSourceState.lockSessionId = generateUUID();
+            annotationSourceState.readOnly = false;
+            annotationSourceState.statusMessage = "";
+            await startAnnotationSession({ force: false });
+            startAnnotationTimers();
+            await flushAnnotationSnapshot({ manual: false });
+            syncLabelingSourceControls();
+            setSamStatus("Transient session reopened.", { variant: "success", duration: 3000 });
+        } catch (error) {
+            console.error("Failed to reopen transient session", error);
+            setSamStatus(
+                `Transient reopen failed: ${error.message || error}`,
+                { variant: "error", duration: 5000 }
+            );
+        }
+    }
+
+    async function flushAnnotationSnapshot({ manual = false } = {}) {
+        if (!isAnnotationDatasetModeActive() || isAnnotationReadOnly()) {
+            return false;
+        }
+        captureCurrentAnnotationDirtyState();
+        if (!annotationSourceState.dirtyRecordsByKey.size || annotationSourceState.saveInFlight) {
+            return false;
+        }
+        const base = getAnnotationBasePath();
+        if (!base) {
+            return false;
+        }
+        const records = Array.from(annotationSourceState.dirtyRecordsByKey.values());
+        const cursor =
+            currentImage && isDatasetBackedImageRecord(currentImage)
+                ? {
+                    split: currentImage.annotationSplit || "train",
+                    image_relpath: currentImage.annotationRelpath || currentImage.name,
+                }
+                : null;
+        annotationSourceState.saveInFlight = true;
+        updateAnnotationSourceUi();
+        try {
+            const resp = await fetch(`${base}/snapshot`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    session_id: annotationSourceState.lockSessionId,
+                    records,
+                    cursor,
+                }),
+            });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                if (resp.status === 410 && annotationSourceState.mode === "transient") {
+                    await handleAnnotationTransientExpiry();
+                    return false;
+                }
+                if (resp.status === 409) {
+                    annotationSourceState.readOnly = true;
+                    annotationSourceState.statusMessage = "Lost lock; switched to read-only.";
+                    stopAnnotationTimers();
+                    syncLabelingSourceControls();
+                }
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            const payload = parseJsonObjectSafe(detail, {});
+            records.forEach((record) => {
+                const key = annotationImageKey(record.split, record.image_relpath);
+                annotationSourceState.savedSnapshotByKey.set(key, serializeAnnotationRecord(record));
+                annotationSourceState.dirtyRecordsByKey.delete(key);
+                const row = annotationSourceState.imageRowsByKey.get(key);
+                if (row) {
+                    row.label_lines = Array.isArray(record.label_lines) ? [...record.label_lines] : [];
+                    row.text_label = String(record.text_label || "");
+                    annotationSourceState.imageRowsByKey.set(key, row);
+                }
+            });
+            if (payload && typeof payload === "object" && payload.progress && annotationSourceState.manifest) {
+                annotationSourceState.manifest.progress = payload.progress;
+            }
+            if (manual) {
+                setSamStatus("Annotation snapshot saved.", { variant: "success", duration: 2500 });
+            }
+            return true;
+        } catch (error) {
+            console.error("Failed to save annotation snapshot", error);
+            if (manual) {
+                setSamStatus(`Save failed: ${error.message || error}`, {
+                    variant: "error",
+                    duration: 5000,
+                });
+            }
+            return false;
+        } finally {
+            annotationSourceState.saveInFlight = false;
+            updateAnnotationSourceUi();
+        }
+    }
+
+    async function annotationHeartbeatTick() {
+        if (!isAnnotationDatasetModeActive() || isAnnotationReadOnly()) {
+            return;
+        }
+        const base = getAnnotationBasePath();
+        if (!base) {
+            return;
+        }
+        const resp = await fetch(`${base}/session/heartbeat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(annotationSessionPayload()),
+        });
+        const detail = await resp.text();
+        if (!resp.ok) {
+            if (resp.status === 410 && annotationSourceState.mode === "transient") {
+                await handleAnnotationTransientExpiry();
+                return;
+            }
+            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+        }
+        const payload = parseJsonObjectSafe(detail, {});
+        if (String(payload.status || "").toLowerCase() === "warning") {
+            annotationSourceState.readOnly = true;
+            annotationSourceState.lock = payload.lock || annotationSourceState.lock || {};
+            annotationSourceState.statusMessage = "Lock moved to another editor.";
+            stopAnnotationTimers();
+            syncLabelingSourceControls();
+        } else {
+            annotationSourceState.lock = payload.lock || annotationSourceState.lock || {};
+            annotationSourceState.statusMessage = "";
+            syncLabelingSourceControls();
+        }
+    }
+
+    function startAnnotationTimers() {
+        stopAnnotationTimers();
+        if (!isAnnotationDatasetModeActive() || isAnnotationReadOnly()) {
+            return;
+        }
+        annotationSourceState.autosaveTimer = setInterval(() => {
+            flushAnnotationSnapshot({ manual: false }).catch((error) => {
+                console.error("Annotation autosave tick failed", error);
+            });
+        }, ANNOTATION_AUTOSAVE_INTERVAL_MS);
+        annotationSourceState.heartbeatTimer = setInterval(() => {
+            annotationHeartbeatTick().catch((error) => {
+                console.error("Annotation heartbeat failed", error);
+            });
+        }, ANNOTATION_HEARTBEAT_INTERVAL_MS);
+    }
+
+    function hydrateDatasetBboxesForImage(imageRecord) {
+        if (!isDatasetBackedImageRecord(imageRecord)) {
+            return;
+        }
+        const imageKey = imageRecord.name;
+        if (annotationSourceState.hydratedKeys.has(imageKey)) {
+            return;
+        }
+        const imageWidth = Number(imageRecord.width);
+        const imageHeight = Number(imageRecord.height);
+        if (!(Number.isFinite(imageWidth) && Number.isFinite(imageHeight) && imageWidth > 0 && imageHeight > 0)) {
+            return;
+        }
+        const labelLines = annotationSourceState.rawLabelLinesByKey.get(imageKey) || [];
+        const imageBuckets = {};
+        for (const rawLine of labelLines) {
+            const cols = String(rawLine || "").trim().split(/\s+/).filter(Boolean);
+            if (cols.length < 5) {
+                continue;
+            }
+            const classIdx = parseInt(cols[0], 10);
+            if (!Number.isFinite(classIdx)) {
+                continue;
+            }
+            const className =
+                (Array.isArray(loadedClassList) && loadedClassList[classIdx])
+                || getClassNameById(classIdx);
+            if (!className) {
+                continue;
+            }
+            if (!imageBuckets[className]) {
+                imageBuckets[className] = [];
+            }
+            if (cols.length >= 7) {
+                const points = [];
+                for (let i = 1; i + 1 < cols.length; i += 2) {
+                    const nx = parseFloat(cols[i]);
+                    const ny = parseFloat(cols[i + 1]);
+                    if (!(Number.isFinite(nx) && Number.isFinite(ny))) {
+                        continue;
+                    }
+                    points.push({
+                        x: Math.max(0, Math.min(imageWidth, nx * imageWidth)),
+                        y: Math.max(0, Math.min(imageHeight, ny * imageHeight)),
+                    });
+                }
+                if (points.length >= 3) {
+                    const xs = points.map((pt) => pt.x);
+                    const ys = points.map((pt) => pt.y);
+                    const minX = Math.max(0, Math.min(...xs));
+                    const maxX = Math.min(imageWidth, Math.max(...xs));
+                    const minY = Math.max(0, Math.min(...ys));
+                    const maxY = Math.min(imageHeight, Math.max(...ys));
+                    const bboxRecord = {
+                        type: "polygon",
+                        points,
+                        x: minX,
+                        y: minY,
+                        width: Math.max(0, maxX - minX),
+                        height: Math.max(0, maxY - minY),
+                        marked: false,
+                        class: className,
+                    };
+                    stampBboxCreation(bboxRecord);
+                    imageBuckets[className].push(bboxRecord);
+                    continue;
+                }
+            }
+            const cx = parseFloat(cols[1]);
+            const cy = parseFloat(cols[2]);
+            const wNorm = parseFloat(cols[3]);
+            const hNorm = parseFloat(cols[4]);
+            if (!(Number.isFinite(cx) && Number.isFinite(cy) && Number.isFinite(wNorm) && Number.isFinite(hNorm))) {
+                continue;
+            }
+            const width = wNorm * imageWidth;
+            const height = hNorm * imageHeight;
+            const bboxRecord = {
+                type: "bbox",
+                x: (cx * imageWidth) - (width / 2),
+                y: (cy * imageHeight) - (height / 2),
+                width,
+                height,
+                marked: false,
+                class: className,
+            };
+            const valid = clampBbox(bboxRecord, imageWidth, imageHeight);
+            if (!valid) {
+                continue;
+            }
+            stampBboxCreation(bboxRecord);
+            imageBuckets[className].push(bboxRecord);
+        }
+        bboxes[imageKey] = imageBuckets;
+        annotationSourceState.hydratedKeys.add(imageKey);
+        const snapshot = serializeAnnotationRecord(buildAnnotationRecord(imageKey));
+        annotationSourceState.savedSnapshotByKey.set(imageKey, snapshot);
+    }
+
+    async function stopAnnotationSession() {
+        if (!isAnnotationDatasetModeActive() || !annotationSourceState.lockSessionId) {
+            return;
+        }
+        const base = getAnnotationBasePath();
+        if (!base) {
+            return;
+        }
+        try {
+            await fetch(`${base}/session/stop`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ session_id: annotationSourceState.lockSessionId }),
+            });
+        } catch (error) {
+            console.debug("Failed to stop annotation session cleanly", error);
+        }
+    }
+
+    async function closeAnnotationDataset({ clearCanvas = true } = {}) {
+        if (!isAnnotationDatasetModeActive()) {
+            return true;
+        }
+        // Invalidate outstanding async loads before close side effects run.
+        annotationSourceState.loadToken += 1;
+        captureCurrentAnnotationDirtyState();
+        const hadDirtyRecords = annotationSourceState.dirtyRecordsByKey.size > 0;
+        let saved = true;
+        if (hadDirtyRecords) {
+            saved = await flushAnnotationSnapshot({ manual: false });
+        }
+        const stillDirty = annotationSourceState.dirtyRecordsByKey.size > 0;
+        if ((hadDirtyRecords && !saved) || stillDirty) {
+            annotationSourceState.statusMessage = "Save failed. Close blocked to prevent data loss.";
+            updateAnnotationSourceUi();
+            setSamStatus("Save failed. Dataset remains open; please retry Save now.", {
+                variant: "error",
+                duration: 5000,
+            });
+            return false;
+        }
+        stopAnnotationTimers();
+        await stopAnnotationSession();
+        resetAnnotationSourceState();
+        if (clearCanvas) {
+            resetImageList();
+            resetClassList();
+        }
+        setSamStatus("Closed dataset annotation session.", { variant: "info", duration: 2500 });
+        return true;
+    }
+
+    async function startAnnotationSession({ force = false } = {}) {
+        const base = getAnnotationBasePath();
+        if (!base) {
+            return;
+        }
+        const resp = await fetch(`${base}/session/start`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(annotationSessionPayload({ force })),
+        });
+        const detail = await resp.text();
+        if (!resp.ok) {
+            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+        }
+        const payload = parseJsonObjectSafe(detail, {});
+        annotationSourceState.lock = payload.lock || {};
+        if (String(payload.status || "").toLowerCase() === "warning") {
+            annotationSourceState.readOnly = true;
+            annotationSourceState.statusMessage = "Opened read-only (lock held by another editor).";
+        } else {
+            annotationSourceState.readOnly = false;
+            annotationSourceState.statusMessage = "";
+        }
+        syncLabelingSourceControls();
+    }
+
+    async function forceTakeoverAnnotationLock() {
+        if (!isAnnotationDatasetModeActive()) {
+            return;
+        }
+        try {
+            await startAnnotationSession({ force: true });
+            annotationSourceState.readOnly = false;
+            annotationSourceState.statusMessage = "Lock takeover complete.";
+            startAnnotationTimers();
+            syncLabelingSourceControls();
+            setSamStatus("Annotation lock taken over.", { variant: "success", duration: 3000 });
+        } catch (error) {
+            console.error("Failed to take over annotation lock", error);
+            setSamStatus(`Takeover failed: ${error.message || error}`, {
+                variant: "error",
+                duration: 5000,
+            });
+        }
+    }
+
+    function annotationEditableGuard(actionLabel) {
+        if (!isAnnotationReadOnly()) {
+            return true;
+        }
+        const holder = String(annotationSourceState.lock?.holder || "another editor");
+        const message = `${actionLabel || "Editing"} is disabled in read-only mode (lock held by ${holder}).`;
+        setSamStatus(message, { variant: "warn", duration: 4000 });
+        return false;
+    }
+
+    async function openDatasetInAnnotationMode({
+        mode,
+        datasetId = "",
+        sessionId = "",
+        datasetLabel = "",
+        datasetTypeHint = "",
+        transientOpenPath = "",
+    }) {
+        const normalizedMode = String(mode || "").trim().toLowerCase();
+        if (normalizedMode !== "linked" && normalizedMode !== "transient") {
+            throw new Error("Unsupported annotation dataset mode.");
+        }
+        if (normalizedMode === "linked" && !String(datasetId || "").trim()) {
+            throw new Error("Dataset id is required.");
+        }
+        if (normalizedMode === "transient" && !String(sessionId || "").trim()) {
+            throw new Error("Transient session id is required.");
+        }
+
+        const closed = await closeAnnotationDataset({ clearCanvas: false });
+        if (!closed) {
+            throw new Error("Current dataset has unsaved changes. Save successfully before opening another dataset.");
+        }
+        try {
+            const loadToken = ++annotationSourceState.loadToken;
+            annotationSourceState.mode = normalizedMode;
+            annotationSourceState.datasetId = String(datasetId || "").trim();
+            annotationSourceState.sessionId = String(sessionId || "").trim();
+            annotationSourceState.transientOpenPath = String(transientOpenPath || "").trim();
+            annotationSourceState.datasetLabel = String(datasetLabel || "").trim();
+            annotationSourceState.lockSessionId = generateUUID();
+            annotationSourceState.lock = {};
+            annotationSourceState.readOnly = false;
+            annotationSourceState.manifest = null;
+            annotationSourceState.imageRowsByKey = new Map();
+            annotationSourceState.rawLabelLinesByKey = new Map();
+            annotationSourceState.hydratedKeys = new Set();
+            annotationSourceState.savedSnapshotByKey = new Map();
+            annotationSourceState.dirtyRecordsByKey = new Map();
+            annotationSourceState.statusMessage = "Loading manifest…";
+            if (annotationSourceState.mode === "transient" && annotationSourceState.transientOpenPath) {
+                datasetManagerState.transientOpenPath = annotationSourceState.transientOpenPath;
+            }
+            if (annotationSourceState.mode === "transient" && annotationSourceState.sessionId) {
+                datasetManagerState.transientSessionId = annotationSourceState.sessionId;
+            }
+            updateAnnotationSourceUi();
+            syncLabelingSourceControls();
+
+            const base = getAnnotationBasePath();
+            if (!base) {
+                throw new Error("Unable to resolve annotation API path.");
+            }
+            const manifestResp = await fetch(`${base}/manifest`);
+            const detail = await manifestResp.text();
+            if (!manifestResp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${manifestResp.status}`));
+            }
+            const manifest = parseJsonObjectSafe(detail, {});
+            if (loadToken !== annotationSourceState.loadToken) {
+                return;
+            }
+
+            // Resolve lock semantics before mutating the current workspace.
+            await startAnnotationSession({ force: false });
+            if (loadToken !== annotationSourceState.loadToken) {
+                return;
+            }
+
+            annotationSourceState.manifest = manifest;
+            annotationSourceState.datasetLabel =
+                annotationSourceState.datasetLabel
+                || String(manifest.dataset_label || "").trim()
+                || annotationSourceLabel();
+
+            const imageList = document.getElementById("imageList");
+            if (!imageList) {
+                throw new Error("Image list control is missing.");
+            }
+            resetImageList();
+            populateClassesFromLabelmap(manifest.labelmap || []);
+            const rows = Array.isArray(manifest.images) ? manifest.images : [];
+            rows.forEach((row, idx) => {
+                const key = annotationRowKey(row);
+                annotationSourceState.imageRowsByKey.set(key, {
+                    split: row.split || "train",
+                    image_relpath: row.image_relpath || row.image_name || "",
+                    image_name: row.image_name || row.image_relpath || "",
+                });
+                annotationSourceState.rawLabelLinesByKey.set(
+                    key,
+                    Array.isArray(row.label_lines)
+                        ? row.label_lines.map((line) => String(line || "").trim()).filter(Boolean)
+                        : []
+                );
+                images[key] = {
+                    meta: {
+                        name: key,
+                        size: 0,
+                    },
+                    index: idx,
+                    width: 0,
+                    height: 0,
+                    object: undefined,
+                    dataUrl: null,
+                    sourceType: "dataset",
+                    annotationSplit: row.split || "train",
+                    annotationRelpath: row.image_relpath || row.image_name || "",
+                    displayName: row.image_name || row.image_relpath || key,
+                };
+                bboxes[key] = {};
+                textLabels[key] = String(row.text_label || "");
+                const option = document.createElement("option");
+                option.value = key;
+                option.text = `${row.split || "train"}/${row.image_relpath || row.image_name || key}`;
+                if (idx === 0) {
+                    option.selected = true;
+                }
+                imageList.appendChild(option);
+            });
+
+            const segHint = String(datasetTypeHint || "").toLowerCase() === "seg";
+            const detectedSeg = detectSegDatasetFromManifestRows(rows);
+            setDatasetType(segHint || detectedSeg ? "seg" : "bbox");
+            imageListIndex = imageList.selectedIndex >= 0 ? imageList.selectedIndex : 0;
+            classListIndex = 0;
+
+            const initialKey = chooseInitialAnnotationImageKey(rows, manifest.cursor || null);
+            if (initialKey && images[initialKey]) {
+                const opts = Array.from(imageList.options || []);
+                const idx = opts.findIndex((opt) => getOptionImageName(opt) === initialKey);
+                if (idx >= 0) {
+                    imageList.selectedIndex = idx;
+                    imageListIndex = idx;
+                }
+                setCurrentImage(images[initialKey]);
+            }
+
+            if (loadToken !== annotationSourceState.loadToken) {
+                return;
+            }
+            updateAnnotationSourceUi();
+            syncLabelingSourceControls();
+            startAnnotationTimers();
+            setActiveTab(TAB_LABELING);
+            const openedReadOnly = isAnnotationReadOnly();
+            setSamStatus(
+                openedReadOnly
+                    ? `Opened ${annotationSourceState.datasetLabel} in read-only mode.`
+                    : `Opened ${annotationSourceState.datasetLabel} in annotation view.`,
+                { variant: openedReadOnly ? "warn" : "success", duration: 3200 }
+            );
+        } catch (error) {
+            // If loading fails, reset annotation linkage but preserve any existing local workspace.
+            stopAnnotationTimers();
+            resetAnnotationSourceState();
+            throw error;
+        }
+    }
+
+    async function openDatasetEntryInAnnotation(entry) {
+        const datasetId = String(entry?.id || "").trim();
+        if (!datasetId) {
+            throw new Error("Dataset id is missing.");
+        }
+        await openDatasetInAnnotationMode({
+            mode: "linked",
+            datasetId,
+            datasetLabel: String(entry?.label || entry?.id || "dataset"),
+            datasetTypeHint: String(entry?.type || ""),
+        });
+    }
+
+    async function openTransientPathInAnnotation() {
+        const sessionId = String(datasetManagerState.transientSessionId || "").trim();
+        if (!sessionId) {
+            throw new Error("Open a transient dataset first.");
+        }
+        await openDatasetInAnnotationMode({
+            mode: "transient",
+            sessionId,
+            datasetLabel:
+                String(datasetManagerState.transientDatasetRoot || "").trim() || "transient dataset",
+            transientOpenPath: String(datasetManagerState.transientOpenPath || "").trim(),
+        });
+    }
+
+    async function reloadAnnotationManifest() {
+        if (!isAnnotationDatasetModeActive()) {
+            return;
+        }
+        const mode = annotationSourceState.mode;
+        const datasetId = annotationSourceState.datasetId;
+        const sessionId = annotationSourceState.sessionId;
+        const datasetLabel = annotationSourceState.datasetLabel;
+        const transientOpenPath = annotationSourceState.transientOpenPath;
+        await openDatasetInAnnotationMode({
+            mode,
+            datasetId,
+            sessionId,
+            datasetLabel,
+            transientOpenPath,
+            datasetTypeHint: datasetType,
+        });
     }
 
     function parseJsonObjectSafe(rawText, fallback = {}) {
@@ -2874,6 +3873,21 @@ const sam3TrainState = {
 	                    header.appendChild(badgeWrap);
 	                    const actions = document.createElement("div");
 	                    actions.className = "training-history-actions";
+                    const annotateBtn = document.createElement("button");
+                    annotateBtn.type = "button";
+                    annotateBtn.className = "button button-outline";
+                    annotateBtn.textContent = "Open in annotation";
+                    annotateBtn.title = "Load this dataset directly into the Label Images tab.";
+                    annotateBtn.addEventListener("click", () => {
+                        openDatasetEntryInAnnotation(entry).catch((error) => {
+                            console.error("Dataset annotation open failed", error);
+                            setDatasetUploadMessage(
+                                `Failed to open in annotation: ${error.message || error}`,
+                                "error"
+                            );
+                        });
+                    });
+                    actions.appendChild(annotateBtn);
                     const downloadBtn = document.createElement("button");
 	                    downloadBtn.type = "button";
                     downloadBtn.className = "button button-outline";
@@ -3683,6 +4697,7 @@ const sam3TrainState = {
             const data = parseJsonObjectSafe(detail, {});
             datasetManagerState.transientSessionId = data.session_id || "";
             datasetManagerState.transientDatasetRoot = data?.dataset?.dataset_root || payload.path;
+            datasetManagerState.transientOpenPath = payload.path;
             datasetManagerState.transientExpiresAt = Number(data?.expires_at) || 0;
             renderDatasetPathSummary();
             setDatasetPathMessage(`Opened transient session ${datasetManagerState.transientSessionId || "(unknown)"}.`, "success");
@@ -3731,6 +4746,7 @@ const sam3TrainState = {
             if ((err.message || "").includes("transient_session_expired")) {
                 datasetManagerState.transientSessionId = "";
                 datasetManagerState.transientDatasetRoot = "";
+                datasetManagerState.transientOpenPath = "";
                 datasetManagerState.transientExpiresAt = 0;
                 renderDatasetPathSummary();
             }
@@ -3974,6 +4990,7 @@ const sam3TrainState = {
         datasetManagerElements.pathOpenBtn = document.getElementById("datasetPathOpenBtn");
         datasetManagerElements.pathSaveBtn = document.getElementById("datasetPathSaveBtn");
         datasetManagerElements.pathRegisterBtn = document.getElementById("datasetPathRegisterBtn");
+        datasetManagerElements.pathAnnotateBtn = document.getElementById("datasetPathAnnotateBtn");
         datasetManagerElements.pathSummary = document.getElementById("datasetPathSummary");
         datasetManagerElements.pathMessage = document.getElementById("datasetPathMessage");
         datasetManagerElements.refreshBtn = document.getElementById("datasetListRefresh");
@@ -4030,6 +5047,17 @@ const sam3TrainState = {
             datasetManagerElements.pathRegisterBtn.addEventListener("click", () => {
                 registerDatasetPath().catch((error) => {
                     console.error("Dataset path register failed", error);
+                });
+            });
+        }
+        if (datasetManagerElements.pathAnnotateBtn) {
+            datasetManagerElements.pathAnnotateBtn.addEventListener("click", () => {
+                openTransientPathInAnnotation().catch((error) => {
+                    console.error("Transient annotation open failed", error);
+                    setDatasetPathMessage(
+                        error.message || "Failed to open transient dataset in annotation view.",
+                        "error"
+                    );
                 });
             });
         }
@@ -6211,6 +7239,13 @@ function updateAutomationLockTabs() {
 }
 
 function ensureAutomationAvailable(actionLabel) {
+    if (isAnnotationReadOnly()) {
+        const holder = String(annotationSourceState.lock?.holder || "another editor");
+        const message = `${actionLabel || "Automation"} is disabled in read-only mode (lock held by ${holder}).`;
+        setSamStatus(message, { variant: "warn", duration: 4000 });
+        enqueueTaskNotice(message, { durationMs: 5000 });
+        return false;
+    }
     if (!automationLockState.active) {
         return true;
     }
@@ -17066,6 +18101,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (!currentImage?.name) {
                     return;
                 }
+                if (!annotationEditableGuard("Edit text label")) {
+                    qwenElements.captionOutput.value = textLabels[currentImage.name] || "";
+                    return;
+                }
                 const value = qwenElements.captionOutput.value || "";
                 if (!textLabels) {
                     textLabels = {};
@@ -17075,6 +18114,10 @@ async function cancelRfDetrTrainingJobRequest() {
             });
             qwenElements.captionOutput.addEventListener("blur", () => {
                 if (!currentImage?.name) {
+                    return;
+                }
+                if (!annotationEditableGuard("Edit text label")) {
+                    qwenElements.captionOutput.value = textLabels[currentImage.name] || "";
                     return;
                 }
                 const value = qwenElements.captionOutput.value || "";
@@ -20433,6 +21476,10 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!imageName) {
             return;
         }
+        if (isAnnotationReadOnly()) {
+            annotationEditableGuard("Edit text label");
+            return;
+        }
         const datasetId = (options.datasetId || getCaptionDatasetId() || "").trim();
         ensureCaptionLabelStoreForDataset(datasetId);
         if (!datasetId) {
@@ -20452,6 +21499,9 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function scheduleCaptionAutosave(imageName, caption) {
         if (!qwenElements.captionSaveText?.checked) {
+            return;
+        }
+        if (isAnnotationReadOnly()) {
             return;
         }
         const datasetId = getCaptionDatasetId();
@@ -27326,6 +28376,13 @@ async function cancelRfDetrTrainingJobRequest() {
         imagesSelectButton = document.getElementById("imagesSelect");
         classesSelectButton = document.getElementById("classesSelect");
         bboxesFolderSelectButton = document.getElementById("bboxesSelectFolder");
+        annotationSourceModeEl = document.getElementById("annotationSourceMode");
+        annotationSourceSummaryEl = document.getElementById("annotationSourceSummary");
+        annotationSourceLockEl = document.getElementById("annotationSourceLock");
+        annotationTakeoverButton = document.getElementById("annotationTakeoverBtn");
+        annotationSaveNowButton = document.getElementById("annotationSaveNowBtn");
+        annotationReloadButton = document.getElementById("annotationReloadBtn");
+        annotationCloseButton = document.getElementById("annotationCloseBtn");
         samStatusEl = document.getElementById("samStatus");
         samStatusProgressEl = document.getElementById("samStatusProgress");
         polygonDrawToggle = document.getElementById("polygonDrawToggle");
@@ -27346,7 +28403,41 @@ async function cancelRfDetrTrainingJobRequest() {
         registerFileLabel(imagesSelectButton, document.getElementById("images"));
         registerFileLabel(classesSelectButton, document.getElementById("classes"));
         registerFileLabel(bboxesFolderSelectButton, document.getElementById("bboxesFolder"));
+        if (annotationTakeoverButton) {
+            annotationTakeoverButton.addEventListener("click", () => {
+                forceTakeoverAnnotationLock().catch((error) => {
+                    console.error("Annotation lock takeover failed", error);
+                });
+            });
+        }
+        if (annotationSaveNowButton) {
+            annotationSaveNowButton.addEventListener("click", () => {
+                flushAnnotationSnapshot({ manual: true }).catch((error) => {
+                    console.error("Annotation manual save failed", error);
+                });
+            });
+        }
+        if (annotationReloadButton) {
+            annotationReloadButton.addEventListener("click", () => {
+                reloadAnnotationManifest().catch((error) => {
+                    console.error("Annotation manifest reload failed", error);
+                    setSamStatus(`Reload failed: ${error.message || error}`, {
+                        variant: "error",
+                        duration: 5000,
+                    });
+                });
+            });
+        }
+        if (annotationCloseButton) {
+            annotationCloseButton.addEventListener("click", () => {
+                closeAnnotationDataset({ clearCanvas: true }).catch((error) => {
+                    console.error("Annotation close failed", error);
+                });
+            });
+        }
         hideSamPreloadProgress();
+        updateAnnotationSourceUi();
+        syncLabelingSourceControls();
 
         if (autoModeCheckbox) {
             autoModeCheckbox.addEventListener("change", () => {
@@ -30065,6 +31156,14 @@ async function cancelRfDetrTrainingJobRequest() {
         mouse.realX = zoomXInv(mouse.x);
         mouse.realY = zoomYInv(mouse.y);
         mouse.shiftKeyActive = !!event.shiftKey;
+        if (isAnnotationReadOnly() && event.type === "mousedown" && event.which === 1) {
+            setSamStatus(
+                "Read-only mode: lock is held by another editor. Use Take over lock to edit.",
+                { variant: "warn", duration: 3200 }
+            );
+            mouse.buttonL = false;
+            return;
+        }
     
         if (event.type === "mousedown") {
             mouse.startRealX = mouse.realX;
@@ -30453,6 +31552,9 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     const storeNewBbox = (movedWidth, movedHeight) => {
+        if (!annotationEditableGuard("Create bbox")) {
+            return;
+        }
         const bbox = {
             type: "bbox",
             x: Math.min(mouse.startRealX, mouse.realX),
@@ -31013,9 +32115,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         setCurrentImage(images[firstName]);
 
-        if (Object.keys(classes).length > 0) {
-            setBboxImportEnabled(true);
-        }
+        syncLabelingSourceControls();
 
         setSamStatus(`Loaded ${fileCount} image${fileCount === 1 ? "" : "s"}.`, { variant: "success", duration: 3000 });
         imagesInput.value = "";
@@ -31047,10 +32147,12 @@ async function cancelRfDetrTrainingJobRequest() {
         setBboxImportEnabled(false);
         cancelAllSamJobs({ reason: "image reset", announce: false });
         cancelPendingMultiPoint({ clearMarkers: true, removePendingBbox: true });
+        syncLabelingSourceControls();
     };
 
     function setCurrentImage(image) {
         if (!image) return;
+        captureCurrentAnnotationDirtyState();
         // Monotonic token so late async image loads cannot override a newer selection.
         const selectionToken = ++imageSelectionRequestToken;
         const isSelectionStale = () => selectionToken !== imageSelectionRequestToken;
@@ -31096,90 +32198,37 @@ async function cancelRfDetrTrainingJobRequest() {
                 imageInformation.textContent = text || "";
             }
         };
-        if (!image.object) {
-            const reader = new FileReader();
-            setGlobalCursor("wait");
-            reader.onload = () => {
-                if (isSelectionStale() || image._loadVersion !== loadVersion) {
-                    return;
-                }
-                const dataUrl = typeof reader.result === "string" ? reader.result : "";
-                const imageObject = new Image();
-                imageObject.onload = () => {
-                    if (isSelectionStale() || image._loadVersion !== loadVersion) {
-                        return;
-                    }
-                    image.object = imageObject;
-                    image.dataUrl = dataUrl;
-                    const naturalWidth = imageObject.naturalWidth || imageObject.width || image.width || 0;
-                    const naturalHeight = imageObject.naturalHeight || imageObject.height || image.height || 0;
-                    image.width = naturalWidth;
-                    image.height = naturalHeight;
-                    currentImage = {
-                        name: image.meta.name,
-                        object: imageObject,
-                        width: naturalWidth,
-                        height: naturalHeight,
-                        dataUrl,
-                    };
-                    setGlobalCursor("default");
-                    if (fittedZoom) {
-                        fitZoom(currentImage);
-                    }
-                    setImageInfo(`${naturalWidth}x${naturalHeight}, ${formatBytes(image.meta.size)}`);
-                    if (!bboxes[currentImage.name]) {
-                        bboxes[currentImage.name] = {};
-                    }
-                    prepareSamForCurrentImage({ messagePrefix }).catch((err) => {
-                        console.debug("prepareSamForCurrentImage failed", err);
-                    });
-                    if (typeof refreshSam3CascadeControls === "function") {
-                        refreshSam3CascadeControls();
-                    }
-                    finalizeCurrentImageSelection();
-                };
-                imageObject.onerror = () => {
-                    if (isSelectionStale() || image._loadVersion !== loadVersion) {
-                        return;
-                    }
-                    setGlobalCursor("default");
-                    setSamStatus(`Failed to decode image ${image.meta?.name || "(unknown)"}.`, { variant: "error", duration: 5000 });
-                };
-                imageObject.src = dataUrl;
-            };
-            reader.onerror = () => {
-                if (isSelectionStale() || image._loadVersion !== loadVersion) {
-                    return;
-                }
-                setGlobalCursor("default");
-                setSamStatus(`Failed to read image ${image.meta?.name || "(unknown)"}.`, { variant: "error", duration: 5000 });
-            };
-            reader.readAsDataURL(image.meta);
-        }
-        else {
+        const finalizeLoadedImage = (imageObject, dataUrl = null) => {
             if (isSelectionStale() || image._loadVersion !== loadVersion) {
                 return;
             }
-            // Ensure cursor is restored when switching to an already-loaded image.
-            setGlobalCursor("default");
-            const naturalWidth = image.width || image.object?.naturalWidth || image.object?.width || 0;
-            const naturalHeight = image.height || image.object?.naturalHeight || image.object?.height || 0;
+            image.object = imageObject;
+            image.dataUrl = dataUrl || image.dataUrl || null;
+            const naturalWidth = imageObject.naturalWidth || imageObject.width || image.width || 0;
+            const naturalHeight = imageObject.naturalHeight || imageObject.height || image.height || 0;
             image.width = naturalWidth;
             image.height = naturalHeight;
             currentImage = {
-                name: image.meta.name,
-                object: image.object,
+                name: image.meta?.name || image.name,
+                object: imageObject,
                 width: naturalWidth,
                 height: naturalHeight,
                 dataUrl: image.dataUrl || null,
+                sourceType: image.sourceType || null,
+                annotationSplit: image.annotationSplit || null,
+                annotationRelpath: image.annotationRelpath || null,
             };
+            setGlobalCursor("default");
             if (fittedZoom) {
                 fitZoom(currentImage);
             }
-            setImageInfo(`${naturalWidth}x${naturalHeight}, ${formatBytes(image.meta.size)}`);
+            const byteCount = Number(image.meta?.size || 0);
+            const sizeLabel = byteCount > 0 ? formatBytes(byteCount) : "n/a";
+            setImageInfo(`${naturalWidth}x${naturalHeight}, ${sizeLabel}`);
             if (!bboxes[currentImage.name]) {
                 bboxes[currentImage.name] = {};
             }
+            hydrateDatasetBboxesForImage(currentImage);
             prepareSamForCurrentImage({ messagePrefix, immediate: true }).catch((err) => {
                 console.debug("prepareSamForCurrentImage failed", err);
             });
@@ -31187,6 +32236,104 @@ async function cancelRfDetrTrainingJobRequest() {
                 refreshSam3CascadeControls();
             }
             finalizeCurrentImageSelection();
+        };
+        if (!image.object) {
+            setGlobalCursor("wait");
+            if (isDatasetBackedImageRecord(image)) {
+                const imageUrl = annotationImageUrlForRecord(image);
+                if (!imageUrl) {
+                    setGlobalCursor("default");
+                    setSamStatus("Failed to resolve dataset image URL.", {
+                        variant: "error",
+                        duration: 5000,
+                    });
+                    return;
+                }
+                fetch(imageUrl)
+                    .then(async (resp) => {
+                        if (!resp.ok) {
+                            const detail = await resp.text();
+                            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+                        }
+                        return resp.blob();
+                    })
+                    .then((blob) => {
+                        if (isSelectionStale() || image._loadVersion !== loadVersion) {
+                            return;
+                        }
+                        image.meta = image.meta || { name: image.name, size: 0 };
+                        image.meta.size = Number(blob.size) || 0;
+                        const objectUrl = URL.createObjectURL(blob);
+                        const imageObject = new Image();
+                        imageObject.onload = () => {
+                            URL.revokeObjectURL(objectUrl);
+                            finalizeLoadedImage(imageObject, null);
+                        };
+                        imageObject.onerror = () => {
+                            URL.revokeObjectURL(objectUrl);
+                            if (isSelectionStale() || image._loadVersion !== loadVersion) {
+                                return;
+                            }
+                            setGlobalCursor("default");
+                            setSamStatus(
+                                `Failed to decode image ${image.meta?.name || "(unknown)"}.`,
+                                { variant: "error", duration: 5000 }
+                            );
+                        };
+                        imageObject.src = objectUrl;
+                    })
+                    .catch((error) => {
+                        if (isSelectionStale() || image._loadVersion !== loadVersion) {
+                            return;
+                        }
+                        setGlobalCursor("default");
+                        setSamStatus(`Failed to load dataset image: ${error.message || error}`, {
+                            variant: "error",
+                            duration: 5000,
+                        });
+                    });
+            } else {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    if (isSelectionStale() || image._loadVersion !== loadVersion) {
+                        return;
+                    }
+                    const dataUrl = typeof reader.result === "string" ? reader.result : "";
+                    const imageObject = new Image();
+                    imageObject.onload = () => {
+                        finalizeLoadedImage(imageObject, dataUrl);
+                    };
+                    imageObject.onerror = () => {
+                        if (isSelectionStale() || image._loadVersion !== loadVersion) {
+                            return;
+                        }
+                        setGlobalCursor("default");
+                        setSamStatus(
+                            `Failed to decode image ${image.meta?.name || "(unknown)"}.`,
+                            { variant: "error", duration: 5000 }
+                        );
+                    };
+                    imageObject.src = dataUrl;
+                };
+                reader.onerror = () => {
+                    if (isSelectionStale() || image._loadVersion !== loadVersion) {
+                        return;
+                    }
+                    setGlobalCursor("default");
+                    setSamStatus(`Failed to read image ${image.meta?.name || "(unknown)"}.`, {
+                        variant: "error",
+                        duration: 5000,
+                    });
+                };
+                reader.readAsDataURL(image.meta);
+            }
+        }
+        else {
+            if (isSelectionStale() || image._loadVersion !== loadVersion) {
+                return;
+            }
+            // Ensure cursor is restored when switching to an already-loaded image.
+            finalizeLoadedImage(image.object, image.dataUrl || null);
         }
         if (currentBbox !== null) {
             currentBbox.bbox.marked = false;
@@ -31284,9 +32431,7 @@ async function cancelRfDetrTrainingJobRequest() {
                             setCurrentClass();
                             updateQwenClassOptions({ resetOverride: true });
                             updateSam3ClassOptions({ resetOverride: true });
-                            if (Object.keys(images).length > 0) {
-                                setBboxImportEnabled(true);
-                            }
+                            syncLabelingSourceControls();
                         }
                     });
                     reader.readAsText(files[0]);
@@ -31307,6 +32452,7 @@ async function cancelRfDetrTrainingJobRequest() {
         clearMultiPointAnnotations();
         updateQwenClassOptions({ resetOverride: true });
         updateSam3ClassOptions({ resetOverride: true });
+        syncLabelingSourceControls();
     };
 
     const setCurrentClass = () => {
@@ -31943,6 +33089,10 @@ async function cancelRfDetrTrainingJobRequest() {
             const plainDeleteHotkey = !event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey
                 && (key === 87 || event.key === "w" || event.key === "W");
             if (key === 8 || (key === 46 && event.metaKey === true) || plainDeleteHotkey) {
+                if (!annotationEditableGuard("Delete")) {
+                    event.preventDefault();
+                    return;
+                }
                 if (selectedBboxes.size) {
                     const removed = deleteSelectedBboxes();
                     if (removed > 0) {
@@ -31973,6 +33123,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 event.preventDefault();
             }
             if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 81 || event.key === "q" || event.key === "Q")) {
+                if (!annotationEditableGuard("Delete")) {
+                    event.preventDefault();
+                    return;
+                }
                 let removed = false;
                 if (currentImage && bboxes[currentImage.name]) {
                     const latest = findLatestCreatedBbox(currentImage.name);
@@ -32421,16 +33575,62 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     /**
-     * Helper function to load an image from its File object (imgData.meta)
-     * and store the resulting <img> in imgData.object.
+     * Helper function to load an image record into imgData.object.
+     * Local files are read from File/Blob; dataset-backed records are fetched
+     * through the annotation image endpoint.
      */
     function loadImageObject(imgData) {
         return new Promise((resolve, reject) => {
+            if (!imgData) {
+                reject(new Error("Image record is missing."));
+                return;
+            }
+
+            if (isDatasetBackedImageRecord(imgData)) {
+                const imageUrl = annotationImageUrlForRecord(imgData);
+                if (!imageUrl) {
+                    reject(new Error("Dataset image URL is unavailable."));
+                    return;
+                }
+                fetch(imageUrl)
+                    .then(async (resp) => {
+                        if (!resp.ok) {
+                            const detail = await resp.text();
+                            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+                        }
+                        return resp.blob();
+                    })
+                    .then((blob) => {
+                        const objectUrl = URL.createObjectURL(blob);
+                        const im = new Image();
+                        im.onload = () => {
+                            URL.revokeObjectURL(objectUrl);
+                            imgData.object = im;
+                            imgData.meta = imgData.meta || {};
+                            imgData.meta.size = Number(blob.size) || 0;
+                            imgData.dataUrl = null;
+                            resolve();
+                        };
+                        im.onerror = (err) => {
+                            URL.revokeObjectURL(objectUrl);
+                            reject(err || new Error("Failed to decode dataset image."));
+                        };
+                        im.src = objectUrl;
+                    })
+                    .catch((error) => reject(error));
+                return;
+            }
+
+            if (!imgData.meta || !(imgData.meta instanceof Blob)) {
+                reject(new Error("Image file blob is missing."));
+                return;
+            }
             const reader = new FileReader();
             reader.onload = () => {
                 const im = new Image();
                 im.onload = () => {
                     imgData.object = im;
+                    imgData.dataUrl = typeof reader.result === "string" ? reader.result : null;
                     resolve();
                 };
                 im.onerror = reject;

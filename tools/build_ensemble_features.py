@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
 
 import localinferenceapi as api
+from tools.context_feature_variants import CANONICAL_BASE_VARIANT, compute_feature_schema_hash
 
 SOURCE_RUNS = [
     "yolo_full",
@@ -1136,6 +1137,28 @@ def main() -> None:
         image_embed_proj_dim=int(image_embed_proj_dim),
         image_embed_proj_seed=int(image_embed_proj_seed),
         embed_l2_normalize=bool(embed_l2_normalize),
+        feature_schema_hash=np.asarray(
+            compute_feature_schema_hash(
+                feature_names,
+                classifier_classes=classifier_classes,
+                labelmap=labelmap,
+                context_variant_id=CANONICAL_BASE_VARIANT,
+                variant_config={
+                    "embed_proj_dim": int(embed_proj_dim),
+                    "embed_proj_seed": int(embed_proj_seed),
+                    "image_embed_proj_dim": int(image_embed_proj_dim),
+                    "image_embed_proj_seed": int(image_embed_proj_seed),
+                    "embed_l2_normalize": bool(embed_l2_normalize),
+                    "term_hash_dim": int(term_hash_dim),
+                    "support_iou": float(args.support_iou),
+                    "context_radius": float(args.context_radius),
+                },
+            )
+        ),
+        context_variant_id=np.asarray(CANONICAL_BASE_VARIANT),
+        parent_feature_npz=np.asarray(""),
+        parent_feature_schema_hash=np.asarray(""),
+        variant_config_json=np.asarray("{}"),
     )
 
 

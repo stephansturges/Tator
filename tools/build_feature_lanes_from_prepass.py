@@ -94,7 +94,17 @@ def _subset_npz_by_images(src: Path, dst: Path, keep_images: Set[str]) -> Dict[s
 def _lane_config(prepass_key: str, image_embed_dim: int) -> str:
     if image_embed_dim <= 0:
         return f"{prepass_key}_noimg"
-    return f"{prepass_key}_imgctx{image_embed_dim}"
+    return f"{prepass_key}_imgctx{int(image_embed_dim)}"
+
+
+def _lane_suffix(image_embed_dim: int) -> str:
+    if int(image_embed_dim) <= 0:
+        return "noimg"
+    return f"imgctx{int(image_embed_dim)}"
+
+
+def _lane_id(variant: str, image_embed_dim: int) -> str:
+    return f"{str(variant).strip()}_{_lane_suffix(int(image_embed_dim))}"
 
 
 def main() -> None:
@@ -214,7 +224,7 @@ def main() -> None:
 
     for variant, cache_key in base_variants.items():
         for image_embed_dim in image_embed_dims:
-            lane_id = f"{variant}_{'imgctx1024' if image_embed_dim > 0 else 'noimg'}"
+            lane_id = _lane_id(variant, image_embed_dim)
             lane_dir = lanes_dir / lane_id
             lane_dir.mkdir(parents=True, exist_ok=True)
             features_path = lane_dir / "features.npz"

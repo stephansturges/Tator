@@ -6,6 +6,8 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 
+from tools.context_feature_variants import copy_schema_metadata
+
 
 def _load_labelmap(dataset_id: str) -> List[str]:
     path = Path(f"uploads/clip_dataset_uploads/{dataset_id}_yolo/labelmap.txt")
@@ -157,6 +159,7 @@ def main() -> None:
         sam3_term_list=np.asarray(sam3_term_list, dtype=object),
         sam3_term_hash_dim=int(sam3_term_hash_dim),
         label_iou=float(args.iou),
+        **copy_schema_metadata(data),
     )
 
 

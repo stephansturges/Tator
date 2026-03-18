@@ -2,7 +2,7 @@
 
 # 🥔 Tator — Local CLIP + SAM Annotation & Prelabeling Toolkit
 
-Tator is a single‑machine annotation stack with a browser UI and a FastAPI backend. It focuses on fast, reliable **human labeling** (CLIP + SAM assists) and a deterministic **prepass + calibration** pipeline for high‑quality prelabeling (detectors + SAM3 + XGBoost).
+Tator is a single‑machine annotation stack with a browser UI and a FastAPI backend. It focuses on fast, reliable **human labeling** (CLIP + SAM assists) and a deterministic **Ensemble Detection Recipe (EDR)** workflow for high‑quality prelabeling (prepass + calibration with detectors + SAM3 + XGBoost).
 
 We previously experimented with agentic annotation loops and removed them. Qwen is now used **only** for captioning and for optional glossary expansion used by SAM3 text prompting.
 
@@ -18,8 +18,8 @@ We previously experimented with agentic annotation loops and removed them. Qwen 
 - **Point‑to‑Box** — click once and SAM draws a tight box.
 - **Multi‑point prompts** — add positive/negative points to sculpt tricky objects.
 
-### Deterministic prelabeling (prepass + calibration)
-- **Detectors + SAM3** build a high‑recall candidate pool.
+### Deterministic prelabeling (EDR workflow)
+- **Prepass (detectors + SAM3)** builds a high‑recall candidate pool.
 - **Dedupe** (IoU merge) stabilizes candidate clusters.
 - **Calibration (XGBoost)** filters candidates to maximize F1 while enforcing a recall floor.
 - **Glossary management** (dataset glossaries + library) and optional Qwen expansion.
@@ -48,7 +48,7 @@ Tator/
 ```
 
 ### Backend module map (where core logic lives)
-- **Prepass + calibration**: `services/prepass*.py`, `services/calibration*.py`
+- **EDR workflow (prepass + calibration)**: `services/prepass*.py`, `services/calibration*.py`
 - **Detectors (YOLO / RF‑DETR)**: `services/detectors.py` + `services/detector_jobs.py`
 - **Classifier heads (CLIP/DINOv3)**: `services/classifier*.py`
 - **SAM3**: `services/sam3_*.py`
@@ -71,9 +71,16 @@ has moved into `services/` and `utils/`.
 
 ---
 
-## Prepass + calibration (current default)
+## Ensemble Detection Recipe (EDR) workflow
 
-### Prepass architecture (detectors + SAM3 + dedupe)
+An **Ensemble Detection Recipe (EDR)** is the full reusable detection workflow made of:
+
+- a **prepass**, which generates a broad candidate pool
+- a **calibration**, which scores and filters that candidate pool
+
+For the fuller operator-facing explanation, see [docs/ensemble_detection_recipe_explainer.md](docs/ensemble_detection_recipe_explainer.md).
+
+### EDR prepass architecture (detectors + SAM3 + dedupe)
 ```
 Full image
    │
@@ -100,7 +107,7 @@ Key notes:
 - **Dedupe**: run twice (after detectors + text; after similarity).
 - **Calibration**: uses `prepass_keep_all=true` (no classifier gating) so the model sees the full candidate pool.
 
-### Calibration workflow + caching
+### EDR calibration workflow + caching
 - Jobs stored under `uploads/calibration_jobs/<job_id>/`.
 - Intermediate prepass/features/labels cached under `uploads/calibration_cache/` keyed by payload hash.
 - Poll status via `GET /calibration/jobs/{job_id}`.
@@ -125,8 +132,88 @@ Notes:
   - **Diagnostics only:** `raw_detector` replay (`yolo`, `rfdetr`, `yolo_rfdetr_union`)
 - Acceptance gate: the `post_xgb.accepted_all` ensemble must beat `post_cluster.source_attributed.yolo_rfdetr_union` on the agreed target metric (typically F1, with precision/recall shown).
 
-### Apples-to-apples benchmark snapshot (2026-02-20)
-The metrics below replace earlier apples-to-oranges summaries. These runs use:
+### Current default snapshot (2026-03-16)
+The current promoted EDR is the repaired `window` lane, with strengthened source-aware hand policy and the promoted SAM3 similarity-quality head:
+
+- lane: `window`
+- scenario:
+  - `split_head=false`
+  - `sam3_text_quality=true`, `sam3_text_quality_alpha=0.8`
+  - `sam3_similarity_quality=true`, `sam3_similarity_quality_alpha=0.5`
+- policy:
+  - `sam_bias_scope=sam_only`
+  - `sam3_text` bias `-1.4`
+  - `sam3_similarity` bias `-1.2`
+  - `sam_only_min_prob_default=0.15`
+  - `consensus_iou_default=0.7`
+- learned second-stage policy: **research-only, not part of the default promotion path**
+- selection protocol:
+  - main sweep on `intersection`
+  - winner-only alpha extension
+  - `sam_only` bias-scope ablation
+  - bias-magnitude sweep
+  - full-window similarity-quality confirmation
+  - non-window fallback confirmation
+
+Final promoted full-window result:
+
+| Variant | Precision | Recall | F1 | Delta vs refined hand baseline |
+|---|---:|---:|---:|---:|
+| `refined_hand_baseline` | 0.8885 | 0.8010 | 0.8425 | +0.0000 |
+| `refined_hand + sam3_similarity_quality(a=0.5)` | 0.8910 | 0.8009 | **0.8436** | **+0.0011** |
+
+Trust-analysis result for the learned second stage:
+
+| Variant | Mean F1 | Delta vs refined hand baseline |
+|---|---:|---:|
+| `learned_selected` | 0.7057 | -0.1370 |
+| `learned_base_thresholds` | 0.7636 | -0.0791 |
+| `learned_gate_only` | 0.7701 | -0.0726 |
+| `learned_full_hand` | 0.8155 | -0.0272 |
+
+Takeaways:
+
+- the shipped default is **windowed prepass + no full-image context + refined hand-policy XGB + SAM3 similarity-quality**
+- the meaningful gains are coming from **policy/scenario choices**, not whole-image embeddings or learned second-stage replacement
+- the current learned second-stage policy is **not trusted** on the real post-dedupe detection surface and stays experimental only
+- whole-image context, candidate-embedding transforms, and anchor-similarity experiments all failed to produce a promotable gain
+
+Canonical EDR discovery now lives in:
+
+- `tools/run_canonical_prepass_discovery.py`
+
+This runner is the authoritative offline EDR promotion path. It:
+
+- reruns or reuses the sweep/ablation chain,
+- consumes the per-stage `decision_summary.json` artifacts,
+- re-discovers the promoted quality alphas and policy settings,
+- and writes the canonical windowed + non-windowed EDRs.
+
+Normal calibration jobs now run in **smart EDR mode** by default:
+
+- `recipe_mode = auto`
+- compute a strict fingerprint from the dataset, labelmap/glossary, detector/classifier context, windowing settings, and calibration feature version
+- reuse a promoted canonical EDR for that exact fingerprint if one already exists
+- otherwise run canonical discovery, promote an EDR, and then train the final calibration job with it
+
+Advanced overrides exist for:
+
+- `reuse_only`: require an existing promoted EDR
+- `force_rediscover`: rerun discovery before training
+
+The WebUI still exposes a single main calibration button. The backend decides reuse vs discovery.
+
+The discovery runner writes:
+
+- `canonical_edr.json`
+- `canonical_edr.md`
+
+Legacy compatibility aliases `canonical_prepass_recipe.json` and `canonical_prepass_recipe.md` are still emitted for older code paths.
+
+Under the chosen run root, the promoted EDR is derived from the sweep sequence rather than hand-copied defaults.
+
+### Historical apples-to-apples benchmark snapshot (2026-02-20)
+The metrics below are retained as historical context. These runs used:
 
 - fixed validation slice,
 - IoU `0.50` for evaluation,
@@ -166,10 +253,10 @@ Projection sweep note:
 - Best projected setup by mean F1 across both variants was `jl.d512` (mean F1 `0.7921`), but it did not beat the 1024-d XGB baseline overall.
 - On the windowed variant only, `pca.d512` was marginally highest (`F1=0.7855` vs `0.7852` baseline), not a meaningful gain.
 
-Takeaway:
+Historical takeaway:
 
-- The current best overall calibrator remains single-stage XGB with the full 1024-d embedding block.
-- Windowed SAM3 candidate expansion is still not translating into better post-XGB F1 under current feature/policy settings.
+- At that stage, the best calibrator was still single-stage XGB with the 1024-d embedding block.
+- That conclusion is now superseded by the 2026-03-10 promoted windowed result above.
 
 ### Calibration automation helpers (current toolchain)
 - `tools/build_feature_lanes_from_prepass.py`

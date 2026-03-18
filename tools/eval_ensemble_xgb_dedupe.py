@@ -2,12 +2,26 @@
 import argparse
 import json
 import math
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import xgboost as xgb
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
+from tools.policy_runtime import (
+    apply_hand_policy,
+    apply_selected_policy,
+    load_selected_policy,
+    predict_base_probabilities,
+    resolve_thresholds,
+    transform_base_features,
+)
 
 
 def _yolo_to_xyxy(bbox: Sequence[float], w: int, h: int) -> List[float]:
@@ -226,6 +240,95 @@ def _compute_metrics(tp: int, fp: int, fn: int) -> dict:
     return {"tp": tp, "fp": fp, "fn": fn, "precision": precision, "recall": recall, "f1": f1}
 
 
+def _init_boundary_bucket() -> Dict[str, Any]:
+    return {
+        "accepted": 0,
+        "rejected": 0,
+        "positive_rows": 0,
+        "negative_rows": 0,
+        "by_label": {},
+        "by_source": {},
+    }
+
+
+def _update_boundary_bucket(
+    bucket: Dict[str, Any],
+    *,
+    accepted: bool,
+    label: str,
+    source: str,
+    target: int,
+) -> None:
+    key = "accepted" if accepted else "rejected"
+    bucket[key] = int(bucket.get(key, 0)) + 1
+    if int(target) > 0:
+        bucket["positive_rows"] = int(bucket.get("positive_rows", 0)) + 1
+    else:
+        bucket["negative_rows"] = int(bucket.get("negative_rows", 0)) + 1
+    for group_name, group_key in (("by_label", str(label or "").strip().lower()), ("by_source", str(source or "").strip().lower() or "unknown")):
+        group = bucket[group_name]
+        slot = group.setdefault(group_key, {"accepted": 0, "rejected": 0, "positive_rows": 0, "negative_rows": 0})
+        slot[key] = int(slot.get(key, 0)) + 1
+        if int(target) > 0:
+            slot["positive_rows"] = int(slot.get("positive_rows", 0)) + 1
+        else:
+            slot["negative_rows"] = int(slot.get("negative_rows", 0)) + 1
+
+
+def _compute_calibration_diagnostics(prob_rows: Sequence[float], y_rows: Sequence[int], *, bins: int = 10) -> Dict[str, Any]:
+    probs = np.asarray(prob_rows, dtype=np.float64)
+    targets = np.asarray(y_rows, dtype=np.float64)
+    count = int(probs.shape[0])
+    positive_count = int(float(targets.sum())) if count else 0
+    if count <= 0:
+        return {
+            "candidate_count": 0,
+            "positive_count": 0,
+            "brier_sum_sq": 0.0,
+            "brier_score": 0.0,
+            "ece_10": 0.0,
+            "bins": [],
+        }
+    sq_error = np.square(probs - targets)
+    brier_sum_sq = float(sq_error.sum())
+    bin_rows: List[Dict[str, Any]] = []
+    ece = 0.0
+    for idx in range(int(bins)):
+        lower = idx / float(bins)
+        upper = (idx + 1) / float(bins)
+        if idx == bins - 1:
+            mask = (probs >= lower) & (probs <= upper)
+        else:
+            mask = (probs >= lower) & (probs < upper)
+        bin_count = int(mask.sum())
+        sum_prob = float(probs[mask].sum()) if bin_count else 0.0
+        sum_positive = float(targets[mask].sum()) if bin_count else 0.0
+        mean_prob = (sum_prob / bin_count) if bin_count else 0.0
+        positive_rate = (sum_positive / bin_count) if bin_count else 0.0
+        if bin_count:
+            ece += (abs(mean_prob - positive_rate) * bin_count) / float(count)
+        bin_rows.append(
+            {
+                "bin_index": idx,
+                "lower": lower,
+                "upper": upper,
+                "count": bin_count,
+                "sum_prob": sum_prob,
+                "sum_positive": sum_positive,
+                "mean_prob": mean_prob,
+                "positive_rate": positive_rate,
+            }
+        )
+    return {
+        "candidate_count": count,
+        "positive_count": positive_count,
+        "brier_sum_sq": brier_sum_sq,
+        "brier_score": brier_sum_sq / float(count),
+        "ece_10": float(ece),
+        "bins": bin_rows,
+    }
+
+
 def _parse_grid(raw: Optional[str], fallback: float) -> List[float]:
     if not raw:
         return [float(fallback)]
@@ -247,11 +350,12 @@ def _load_policy(path_or_json: Optional[str]) -> Dict[str, Any]:
     raw = str(path_or_json).strip()
     if not raw:
         return {}
-    path = Path(raw)
-    if path.exists():
+    if raw[:1] not in "{[":
+        path = Path(raw)
         try:
-            return json.loads(path.read_text())
-        except Exception:
+            if path.exists():
+                return json.loads(path.read_text())
+        except (Exception, OSError):
             return {}
     try:
         return json.loads(raw)
@@ -367,6 +471,20 @@ def _policy_bias_by_source_label(policy: Dict[str, Any], *, source: str, label: 
         if "*" in global_map:
             return _safe_float(global_map.get("*"), 0.0)
     return 0.0
+
+
+def _should_apply_source_bias(
+    policy: Dict[str, Any],
+    *,
+    primary_source: str,
+    has_detector_support: bool,
+) -> bool:
+    scope = str(policy.get("sam_bias_scope") or "primary_source").strip().lower()
+    if scope == "sam_only":
+        return str(primary_source or "").strip().lower() in {"sam3_text", "sam3_similarity"} and (
+            not bool(has_detector_support)
+        )
+    return True
 
 
 def _load_source_weights(raw: Optional[str], policy: Dict[str, Any]) -> Dict[str, float]:
@@ -523,6 +641,14 @@ def _is_sam3_text_only(payload: Dict[str, Any]) -> bool:
     return ("yolo" not in source_set) and ("rfdetr" not in source_set)
 
 
+def _is_sam3_similarity_only(payload: Dict[str, Any]) -> bool:
+    primary, source_list = _normalize_source_fields(payload)
+    if primary != "sam3_similarity":
+        return False
+    source_set = {str(src or "").strip().lower() for src in source_list}
+    return ("yolo" not in source_set) and ("rfdetr" not in source_set)
+
+
 def _resolve_model_path(raw_path: Optional[str], *, model_path: Path) -> Optional[Path]:
     if not raw_path:
         return None
@@ -585,6 +711,22 @@ def _predict_probabilities(
                         (1.0 - alpha) * probs[text_mask] + alpha * q_probs,
                         dtype=np.float32,
                     )
+    similarity_quality_cfg = meta.get("sam3_similarity_quality") if isinstance(meta.get("sam3_similarity_quality"), dict) else {}
+    if bool(similarity_quality_cfg.get("enabled")):
+        quality_booster = _load_optional_booster(
+            _resolve_model_path(similarity_quality_cfg.get("model_path"), model_path=model_path)
+        )
+        if quality_booster is not None:
+            alpha = _safe_float(similarity_quality_cfg.get("alpha"), 0.35)
+            alpha = max(0.0, min(1.0, alpha))
+            if alpha > 0.0:
+                sim_mask = np.asarray([_is_sam3_similarity_only(row) for row in parsed_meta], dtype=bool)
+                if sim_mask.any():
+                    q_probs = np.asarray(quality_booster.predict(xgb.DMatrix(X[sim_mask])), dtype=np.float32)
+                    probs[sim_mask] = np.asarray(
+                        (1.0 - alpha) * probs[sim_mask] + alpha * q_probs,
+                        dtype=np.float32,
+                    )
 
     return probs
 
@@ -630,6 +772,141 @@ def _evaluate_predictions(
             fn += cfn
         fp += unknown
     return _compute_metrics(tp, fp, fn)
+
+
+def _evaluate_predictions_detailed(
+    pred_by_image: Dict[str, List[Dict[str, Any]]],
+    gt_by_image: Dict[str, Dict[int, List[List[float]]]],
+    *,
+    name_to_cat: Dict[str, int],
+    labelmap: Sequence[str],
+    dedupe_iou: float,
+    eval_iou: float,
+    scoreless_iou: float,
+    fusion_mode: str = "primary",
+    source_weights: Optional[Dict[str, float]] = None,
+    apply_dedupe: bool = True,
+) -> Dict[str, Any]:
+    per_class: Dict[str, Dict[str, int]] = defaultdict(
+        lambda: {"tp": 0, "fp": 0, "fn": 0, "support_gt": 0, "support_pred": 0}
+    )
+    per_class_per_source: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(
+        lambda: {"tp": 0, "fp": 0, "accepted": 0}
+    )
+    total_tp = total_fp = total_fn = 0
+    eval_image_names = set(gt_by_image.keys()) | set(pred_by_image.keys())
+    for image in eval_image_names:
+        image_preds = list(pred_by_image.get(image, []))
+        if apply_dedupe:
+            image_preds, _ = _merge_prepass_detections(
+                image_preds,
+                iou_thr=dedupe_iou,
+                fusion_mode=fusion_mode,
+                source_weights=source_weights,
+            )
+            if scoreless_iou > 0:
+                image_preds, _ = _filter_scoreless_detections(image_preds, iou_thr=scoreless_iou)
+        gt_by_class = gt_by_image.get(image, {})
+        pred_by_class: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        unknown_preds: List[Dict[str, Any]] = []
+        for det in image_preds:
+            label = str(det.get("label") or "").strip().lower()
+            cat_id = name_to_cat.get(label)
+            if cat_id is None:
+                unknown_preds.append(det)
+                continue
+            pred_by_class[cat_id].append(det)
+        if unknown_preds:
+            unknown_bucket = per_class["__unknown__"]
+            unknown_bucket["fp"] += len(unknown_preds)
+            unknown_bucket["support_pred"] += len(unknown_preds)
+            total_fp += len(unknown_preds)
+            for det in unknown_preds:
+                source = str(det.get("score_source") or det.get("source") or "unknown").strip().lower() or "unknown"
+                src_bucket = per_class_per_source[("__unknown__", source)]
+                src_bucket["fp"] += 1
+                src_bucket["accepted"] += 1
+        class_ids = set(gt_by_class.keys()) | set(pred_by_class.keys())
+        for cat_id in class_ids:
+            label = (
+                str(labelmap[cat_id]).strip().lower()
+                if 0 <= int(cat_id) < len(labelmap)
+                else f"class_{cat_id}"
+            )
+            gt_boxes = list(gt_by_class.get(cat_id, []))
+            preds = list(pred_by_class.get(cat_id, []))
+            class_bucket = per_class[label]
+            class_bucket["support_gt"] += len(gt_boxes)
+            class_bucket["support_pred"] += len(preds)
+            matched_gt: Set[int] = set()
+            for det in preds:
+                bbox = det.get("bbox_xyxy_px")
+                if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                    class_bucket["fp"] += 1
+                    total_fp += 1
+                    source = str(det.get("score_source") or det.get("source") or "unknown").strip().lower() or "unknown"
+                    src_bucket = per_class_per_source[(label, source)]
+                    src_bucket["fp"] += 1
+                    src_bucket["accepted"] += 1
+                    continue
+                best_iou = 0.0
+                best_idx: Optional[int] = None
+                for idx, gt_box in enumerate(gt_boxes):
+                    if idx in matched_gt:
+                        continue
+                    cur_iou = _iou(bbox, gt_box)
+                    if cur_iou > best_iou:
+                        best_iou = cur_iou
+                        best_idx = idx
+                source = str(det.get("score_source") or det.get("source") or "unknown").strip().lower() or "unknown"
+                src_bucket = per_class_per_source[(label, source)]
+                src_bucket["accepted"] += 1
+                if best_idx is not None and best_iou >= eval_iou:
+                    matched_gt.add(best_idx)
+                    class_bucket["tp"] += 1
+                    src_bucket["tp"] += 1
+                    total_tp += 1
+                else:
+                    class_bucket["fp"] += 1
+                    src_bucket["fp"] += 1
+                    total_fp += 1
+            class_fn = max(0, len(gt_boxes) - len(matched_gt))
+            class_bucket["fn"] += class_fn
+            total_fn += class_fn
+    per_class_rows: List[Dict[str, Any]] = []
+    for label, row in per_class.items():
+        metrics = _compute_metrics(int(row["tp"]), int(row["fp"]), int(row["fn"]))
+        per_class_rows.append(
+            {
+                "label": label,
+                "tp": int(row["tp"]),
+                "fp": int(row["fp"]),
+                "fn": int(row["fn"]),
+                "support_gt": int(row["support_gt"]),
+                "support_pred": int(row["support_pred"]),
+                **metrics,
+            }
+        )
+    per_class_rows.sort(key=lambda item: (-int(item["fp"]), str(item["label"])))
+    per_class_source_rows: List[Dict[str, Any]] = []
+    for (label, source), row in per_class_per_source.items():
+        precision = row["tp"] / (row["tp"] + row["fp"]) if (row["tp"] + row["fp"]) else 0.0
+        per_class_source_rows.append(
+            {
+                "label": label,
+                "primary_source": source,
+                "tp": int(row["tp"]),
+                "fp": int(row["fp"]),
+                "accepted": int(row["accepted"]),
+                "precision": float(precision),
+            }
+        )
+    per_class_source_rows.sort(key=lambda item: (-int(item["fp"]), str(item["label"]), str(item["primary_source"])))
+    return {
+        **_compute_metrics(total_tp, total_fp, total_fn),
+        "per_class": per_class_rows,
+        "per_class_per_source": per_class_source_rows,
+    }
 
 
 def _filter_by_sources(
@@ -900,25 +1177,18 @@ def main() -> None:
         default=None,
         help="Optional policy JSON file/string for post-score acceptance controls.",
     )
+    parser.add_argument(
+        "--force-hand-policy",
+        action="store_true",
+        help="Ignore any selected learned policy artifact and evaluate the legacy hand-policy path.",
+    )
     parser.add_argument("--use-val-split", action="store_true", help="Evaluate only validation split.")
     parser.add_argument("--output-jsonl", default=None, help="Optional JSONL output of deduped detections.")
+    parser.add_argument("--analysis-json", default=None, help="Optional JSON output for richer post-hoc reporting analysis.")
     args = parser.parse_args()
 
     meta = json.loads(Path(args.meta).read_text())
-    thresholds_by_label = meta.get("calibrated_thresholds_objective")
-    if not isinstance(thresholds_by_label, dict):
-        thresholds_by_label = meta.get("calibrated_thresholds_relaxed_smoothed")
-    if not isinstance(thresholds_by_label, dict):
-        thresholds_by_label = (
-            meta.get("calibrated_thresholds_relaxed")
-            if isinstance(meta.get("calibrated_thresholds_relaxed"), dict)
-            else {}
-        )
-    if not isinstance(thresholds_by_label, dict):
-        thresholds_by_label = (
-            meta.get("calibrated_thresholds") if isinstance(meta.get("calibrated_thresholds"), dict) else {}
-        )
-    default_threshold = float(meta.get("calibrated_threshold") or 0.5)
+    default_threshold, thresholds_by_label = resolve_thresholds(meta)
     policy = _load_policy(args.policy_json)
     if not policy and isinstance(meta.get("ensemble_policy"), dict):
         policy = dict(meta.get("ensemble_policy"))
@@ -931,19 +1201,38 @@ def main() -> None:
 
     data = np.load(args.data, allow_pickle=True)
     X = data["X"].astype(np.float32)
+    y = np.asarray(data["y"], dtype=np.int64) if "y" in data.files else np.zeros(X.shape[0], dtype=np.int64)
     feature_names = [str(name) for name in data.get("feature_names", [])]
     parsed_meta = [json.loads(str(row)) for row in data["meta"]]
 
-    if meta.get("log1p_counts"):
-        X = _apply_log1p_counts(X, feature_names)
-    X = _standardize(X, meta.get("feature_mean"), meta.get("feature_std"))
-
-    probs = _predict_probabilities(
-        X,
-        parsed_meta=parsed_meta,
+    X_base = transform_base_features(X, feature_names, meta)
+    probs = predict_base_probabilities(
+        X_base,
+        meta_rows=parsed_meta,
         model_path=Path(args.model),
         meta=meta,
     )
+
+    selected_policy = None if args.force_hand_policy else load_selected_policy(
+        meta,
+        base_dir=Path(args.model).parent,
+        meta_dir=Path(args.meta).parent,
+    )
+    selected_policy_meta: Dict[str, Any] = {}
+    selected_policy_info: Dict[str, Any] = {}
+    if selected_policy is not None:
+        probs, selected_policy_info = apply_selected_policy(
+            X_full=X,
+            feature_names_full=feature_names,
+            meta_rows=parsed_meta,
+            base_probs=probs,
+            selected_policy=selected_policy,
+        )
+        selected_policy_meta = selected_policy.get("meta") if isinstance(selected_policy.get("meta"), dict) else {}
+        default_threshold = float(selected_policy_meta.get("calibrated_threshold") or default_threshold)
+        selected_thresholds = selected_policy_meta.get("calibrated_thresholds")
+        if isinstance(selected_thresholds, dict) and selected_thresholds:
+            thresholds_by_label = {str(k): float(v) for k, v in selected_thresholds.items()}
 
     if args.use_val_split:
         val_images = set(meta.get("split_val_images") or [])
@@ -952,11 +1241,12 @@ def main() -> None:
             mask = np.asarray(keep_mask, dtype=bool)
             if mask.any():
                 probs = probs[mask]
+                y = y[mask]
                 parsed_meta = [row for idx, row in enumerate(parsed_meta) if mask[idx]]
 
     detections_by_image: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     candidates_by_image: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    candidate_rows: List[Tuple[str, Dict[str, Any]]] = []
+    candidate_rows: List[Tuple[str, Dict[str, Any], int]] = []
     for idx, payload in enumerate(parsed_meta):
         label = str(payload.get("label") or "").strip().lower()
         image = str(payload.get("image") or "")
@@ -1001,7 +1291,7 @@ def main() -> None:
             "ensemble_prob_raw": float(probs[idx]),
         }
         candidates_by_image[image].append(candidate_det)
-        candidate_rows.append((image, candidate_det))
+        candidate_rows.append((image, candidate_det, int(y[idx]) if idx < y.shape[0] else 0))
 
     yolo_root = Path(args.yolo_root or f"uploads/clip_dataset_uploads/{args.dataset}_yolo")
     labelmap_path = yolo_root / "labelmap.txt"
@@ -1071,7 +1361,8 @@ def main() -> None:
     geom_stats = _compute_geometry_stats(gt_by_image, image_sizes, labelmap=labelmap)
 
     policy_stats: Dict[str, Any] = {
-        "enabled": bool(policy),
+        "enabled": bool(policy) or bool(selected_policy),
+        "mode": str(selected_policy.get("variant")) if selected_policy else "legacy_hand_policy",
         "total_candidates": 0,
         "accepted": 0,
         "rejected_threshold": 0,
@@ -1103,8 +1394,22 @@ def main() -> None:
     geom_penalty_hard = _safe_float(geom_cfg.get("penalty_hard"), 0.9)
     geom_penalty_by_class = geom_cfg.get("penalty_by_class") if isinstance(geom_cfg.get("penalty_by_class"), dict) else {}
     threshold_override_map = policy.get("threshold_by_class_override")
+    boundary_hits: Dict[str, Any] = {
+        "decision_rows": 0,
+        "hard_gate_rejections": {
+            "sam_only_floor": 0,
+            "consensus": 0,
+        },
+        "buckets": {
+            "within_0p01": _init_boundary_bucket(),
+            "within_0p02": _init_boundary_bucket(),
+            "within_0p05": _init_boundary_bucket(),
+        },
+    }
+    calibration_probs: List[float] = []
+    calibration_targets: List[int] = []
 
-    for image, candidate_det in candidate_rows:
+    for image, candidate_det, target in candidate_rows:
         label = str(candidate_det.get("label") or "").strip().lower()
         primary_source = str(candidate_det.get("score_source") or candidate_det.get("source") or "unknown").strip().lower()
         source_list = {
@@ -1122,69 +1427,90 @@ def main() -> None:
 
         prob_raw = _safe_float(candidate_det.get("ensemble_prob_raw"), 0.0)
         prob_adj = float(prob_raw)
-        bias = _policy_bias_by_source_label(policy, source=primary_source, label=label)
-        if abs(bias) > 1e-12:
-            prob_adj = _apply_logit_shift(prob_adj, bias)
-
-        # Geometry prior penalty (logit-domain subtraction).
-        if geom_enabled:
-            stats = geom_stats.get(label)
-            size = image_sizes.get(image)
-            bbox = candidate_det.get("bbox_xyxy_px")
-            if stats and size and isinstance(bbox, (list, tuple)) and len(bbox) >= 4 and size[0] > 0 and size[1] > 0:
-                x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
-                bw = max(0.0, x2 - x1)
-                bh = max(0.0, y2 - y1)
-                if bw > 0.0 and bh > 0.0:
-                    denom = float(size[0]) * float(size[1])
-                    area_log = math.log(max((bw * bh) / max(denom, 1.0), 1e-12))
-                    aspect_log = math.log(max(bw / bh, 1e-12))
-                    area_sigma = max(geom_min_sigma, _safe_float(stats.get("area_sigma"), geom_min_sigma))
-                    aspect_sigma = max(geom_min_sigma, _safe_float(stats.get("aspect_sigma"), geom_min_sigma))
-                    area_z = abs((area_log - _safe_float(stats.get("area_mu"), area_log)) / area_sigma)
-                    aspect_z = abs((aspect_log - _safe_float(stats.get("aspect_mu"), aspect_log)) / aspect_sigma)
-                    penalty = 0.0
-                    if area_z >= geom_area_hard or aspect_z >= geom_aspect_hard:
-                        penalty = geom_penalty_hard
-                    elif area_z >= geom_area_soft or aspect_z >= geom_aspect_soft:
-                        penalty = geom_penalty_soft
-                    class_scale = _policy_value_by_class(geom_penalty_by_class, label=label, default=1.0)
-                    penalty *= max(0.0, class_scale)
-                    if penalty > 0.0:
-                        prob_adj = _apply_logit_shift(prob_adj, -penalty)
-
-        # Threshold selection with optional per-class override.
-        thr = float(thresholds_by_label.get(label, default_threshold)) if thresholds_by_label else default_threshold
-        thr = _policy_value_by_class(threshold_override_map, label=label, default=thr)
-
-        # SAM-only soft floor.
-        if is_sam_only:
-            sam_floor = _policy_value_by_class(sam_floor_map, label=label, default=sam_floor_default)
-            if sam_floor > 0.0 and prob_adj < sam_floor:
-                policy_stats["rejected_sam_only_floor"] += 1
-                continue
-
-        # SAM-only detector consensus.
-        if is_sam_only:
-            consensus_iou = _resolve_consensus_iou(
-                label=label,
+        thr = float(thresholds_by_label.get(label, default_threshold)) if thresholds_by_label else float(default_threshold)
+        if selected_policy is None:
+            bias = 0.0
+            if _should_apply_source_bias(
+                policy,
                 primary_source=primary_source,
-                consensus_default=consensus_default,
-                consensus_by_class=consensus_map,
-                consensus_by_source_class=consensus_source_map,
-            )
-            if consensus_iou > 0.0:
-                bbox = candidate_det.get("bbox_xyxy_px") or []
-                if not _has_detector_consensus(
-                    detector_support_index,
-                    image=image,
-                    label=label,
-                    bbox=bbox,
-                    iou_thr=consensus_iou,
-                    class_aware=consensus_class_aware,
-                ):
-                    policy_stats["rejected_consensus"] += 1
+                has_detector_support=has_detector_support,
+            ):
+                bias = _policy_bias_by_source_label(policy, source=primary_source, label=label)
+            if abs(bias) > 1e-12:
+                prob_adj = _apply_logit_shift(prob_adj, bias)
+
+            if geom_enabled:
+                stats = geom_stats.get(label)
+                size = image_sizes.get(image)
+                bbox = candidate_det.get("bbox_xyxy_px")
+                if stats and size and isinstance(bbox, (list, tuple)) and len(bbox) >= 4 and size[0] > 0 and size[1] > 0:
+                    x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+                    bw = max(0.0, x2 - x1)
+                    bh = max(0.0, y2 - y1)
+                    if bw > 0.0 and bh > 0.0:
+                        denom = float(size[0]) * float(size[1])
+                        area_log = math.log(max((bw * bh) / max(denom, 1.0), 1e-12))
+                        aspect_log = math.log(max(bw / bh, 1e-12))
+                        area_sigma = max(geom_min_sigma, _safe_float(stats.get("area_sigma"), geom_min_sigma))
+                        aspect_sigma = max(geom_min_sigma, _safe_float(stats.get("aspect_sigma"), geom_min_sigma))
+                        area_z = abs((area_log - _safe_float(stats.get("area_mu"), area_log)) / area_sigma)
+                        aspect_z = abs((aspect_log - _safe_float(stats.get("aspect_mu"), aspect_log)) / aspect_sigma)
+                        penalty = 0.0
+                        if area_z >= geom_area_hard or aspect_z >= geom_aspect_hard:
+                            penalty = geom_penalty_hard
+                        elif area_z >= geom_area_soft or aspect_z >= geom_aspect_soft:
+                            penalty = geom_penalty_soft
+                        class_scale = _policy_value_by_class(geom_penalty_by_class, label=label, default=1.0)
+                        penalty *= max(0.0, class_scale)
+                        if penalty > 0.0:
+                            prob_adj = _apply_logit_shift(prob_adj, -penalty)
+
+            thr = _policy_value_by_class(threshold_override_map, label=label, default=thr)
+            if is_sam_only:
+                sam_floor = _policy_value_by_class(sam_floor_map, label=label, default=sam_floor_default)
+                if sam_floor > 0.0 and prob_adj < sam_floor:
+                    policy_stats["rejected_sam_only_floor"] += 1
+                    boundary_hits["hard_gate_rejections"]["sam_only_floor"] += 1
+                    calibration_probs.append(float(prob_adj))
+                    calibration_targets.append(int(target))
                     continue
+            if is_sam_only:
+                consensus_iou = _resolve_consensus_iou(
+                    label=label,
+                    primary_source=primary_source,
+                    consensus_default=consensus_default,
+                    consensus_by_class=consensus_map,
+                    consensus_by_source_class=consensus_source_map,
+                )
+                if consensus_iou > 0.0:
+                    bbox = candidate_det.get("bbox_xyxy_px") or []
+                    if not _has_detector_consensus(
+                        detector_support_index,
+                        image=image,
+                        label=label,
+                        bbox=bbox,
+                        iou_thr=consensus_iou,
+                        class_aware=consensus_class_aware,
+                    ):
+                        policy_stats["rejected_consensus"] += 1
+                        boundary_hits["hard_gate_rejections"]["consensus"] += 1
+                        calibration_probs.append(float(prob_adj))
+                        calibration_targets.append(int(target))
+                        continue
+        calibration_probs.append(float(prob_adj))
+        calibration_targets.append(int(target))
+        gap = abs(float(prob_adj) - float(thr))
+        boundary_hits["decision_rows"] += 1
+        if gap <= 0.05:
+            for bucket_name, bucket_thr in (("within_0p01", 0.01), ("within_0p02", 0.02), ("within_0p05", 0.05)):
+                if gap <= bucket_thr:
+                    _update_boundary_bucket(
+                        boundary_hits["buckets"][bucket_name],
+                        accepted=bool(prob_adj >= thr),
+                        label=label,
+                        source=primary_source,
+                        target=int(target),
+                    )
 
         if prob_adj < thr:
             policy_stats["rejected_threshold"] += 1
@@ -1235,6 +1561,18 @@ def main() -> None:
         detections_by_image,
         gt_by_image,
         name_to_cat=name_to_cat,
+        dedupe_iou=ref_dedupe,
+        eval_iou=ref_eval,
+        scoreless_iou=float(args.scoreless_iou),
+        fusion_mode=fusion_mode,
+        source_weights=source_weights,
+        apply_dedupe=True,
+    )
+    xgb_reference_detail = _evaluate_predictions_detailed(
+        detections_by_image,
+        gt_by_image,
+        name_to_cat=name_to_cat,
+        labelmap=labelmap,
         dedupe_iou=ref_dedupe,
         eval_iou=ref_eval,
         scoreless_iou=float(args.scoreless_iou),
@@ -1414,9 +1752,10 @@ def main() -> None:
             "accepted_source_counts_attributed": _count_by_sources(detections_by_image, attributed=True),
         },
         "policy": {
-            "config": policy,
+            "config": selected_policy_meta if selected_policy is not None else policy,
             "stats": policy_stats,
             "source_weights": source_weights,
+            "feature_schema_hash": selected_policy_info.get("feature_schema_hash") if selected_policy is not None else None,
         },
         "metric_tiers": {
             "raw_detector": raw_detector_tiers,
@@ -1458,6 +1797,34 @@ def main() -> None:
     }
     if prepass_health is not None:
         out["prepass_health"] = prepass_health
+
+    if args.analysis_json:
+        analysis_payload = {
+            "version": 1,
+            "context": {
+                "dataset": str(args.dataset),
+                "eval_iou": ref_eval,
+                "dedupe_iou": ref_dedupe,
+                "scoreless_iou": float(args.scoreless_iou),
+                "fusion_mode": fusion_mode,
+                "use_val_split": bool(args.use_val_split),
+                "policy_mode": policy_stats["mode"],
+                "selected_policy_variant": selected_policy.get("variant") if selected_policy is not None else None,
+            },
+            "overall_metrics": xgb_reference,
+            "per_class": xgb_reference_detail.get("per_class", []),
+            "per_class_per_source": xgb_reference_detail.get("per_class_per_source", []),
+            "boundary_hits": boundary_hits,
+            "calibration_diagnostics": _compute_calibration_diagnostics(calibration_probs, calibration_targets),
+            "policy": {
+                "stats": policy_stats,
+                "feature_schema_hash": selected_policy_info.get("feature_schema_hash") if selected_policy is not None else None,
+            },
+            "warnings": [],
+        }
+        analysis_path = Path(args.analysis_json)
+        analysis_path.parent.mkdir(parents=True, exist_ok=True)
+        analysis_path.write_text(json.dumps(analysis_payload, indent=2), encoding="utf-8")
 
     if args.output_jsonl:
         out_path = Path(args.output_jsonl)

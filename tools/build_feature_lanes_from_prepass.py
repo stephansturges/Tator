@@ -91,20 +91,12 @@ def _subset_npz_by_images(src: Path, dst: Path, keep_images: Set[str]) -> Dict[s
     return {"rows": int(len(keep_idx)), "src_rows": int(len(meta))}
 
 
-def _lane_config(prepass_key: str, image_embed_dim: int) -> str:
-    if image_embed_dim <= 0:
-        return f"{prepass_key}_noimg"
-    return f"{prepass_key}_imgctx{int(image_embed_dim)}"
+def _lane_config(prepass_key: str) -> str:
+    return str(prepass_key).strip()
 
 
-def _lane_suffix(image_embed_dim: int) -> str:
-    if int(image_embed_dim) <= 0:
-        return "noimg"
-    return f"imgctx{int(image_embed_dim)}"
-
-
-def _lane_id(variant: str, image_embed_dim: int) -> str:
-    return f"{str(variant).strip()}_{_lane_suffix(int(image_embed_dim))}"
+def _lane_id(variant: str) -> str:
+    return str(variant).strip()
 
 
 def main() -> None:
@@ -117,21 +109,22 @@ def main() -> None:
     parser.add_argument("--window-key", required=True)
     parser.add_argument("--classifier-id", required=True)
     parser.add_argument("--candidate-embed-dim", type=int, default=1024)
-    parser.add_argument("--image-embed-dims", default="0,1024")
+    parser.add_argument(
+        "--lane-selection",
+        default="compare_both",
+        choices=["window", "nonwindow", "compare_both"],
+        help="Restrict lane construction to the selected lane family or build both.",
+    )
     parser.add_argument("--support-iou", type=float, default=0.5)
     parser.add_argument("--context-radius", type=float, default=0.075)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--force", action="store_true", help="Rebuild existing outputs.")
     parser.add_argument("--nonwindow-prepass-jsonl", default="", help="Optional precomputed nonwindow prepass JSONL.")
     parser.add_argument("--window-prepass-jsonl", default="", help="Optional precomputed window prepass JSONL.")
-    parser.add_argument("--nonwindow-noimg-features", default="", help="Optional precomputed nonwindow noimg features npz.")
-    parser.add_argument("--nonwindow-noimg-labeled", default="", help="Optional precomputed nonwindow noimg labeled npz.")
-    parser.add_argument("--nonwindow-imgctx-features", default="", help="Optional precomputed nonwindow imgctx features npz.")
-    parser.add_argument("--nonwindow-imgctx-labeled", default="", help="Optional precomputed nonwindow imgctx labeled npz.")
-    parser.add_argument("--window-noimg-features", default="", help="Optional precomputed window noimg features npz.")
-    parser.add_argument("--window-noimg-labeled", default="", help="Optional precomputed window noimg labeled npz.")
-    parser.add_argument("--window-imgctx-features", default="", help="Optional precomputed window imgctx features npz.")
-    parser.add_argument("--window-imgctx-labeled", default="", help="Optional precomputed window imgctx labeled npz.")
+    parser.add_argument("--nonwindow-features", default="", help="Optional precomputed nonwindow features npz.")
+    parser.add_argument("--nonwindow-labeled", default="", help="Optional precomputed nonwindow labeled npz.")
+    parser.add_argument("--window-features", default="", help="Optional precomputed window features npz.")
+    parser.add_argument("--window-labeled", default="", help="Optional precomputed window labeled npz.")
     args = parser.parse_args()
 
     run_root = (REPO_ROOT / args.run_root).resolve()
@@ -142,19 +135,20 @@ def main() -> None:
     lanes_dir.mkdir(parents=True, exist_ok=True)
     views_dir.mkdir(parents=True, exist_ok=True)
 
-    image_embed_dims: List[int] = []
-    for raw in str(args.image_embed_dims).split(","):
-        token = raw.strip()
-        if not token:
-            continue
-        image_embed_dims.append(max(0, int(token)))
-    image_embed_dims = sorted(set(image_embed_dims))
-    if not image_embed_dims:
-        raise SystemExit("no image embed dims requested")
-
-    base_variants = {
+    base_variants_all = {
         "nonwindow": str(args.nonwindow_key).strip(),
         "window": str(args.window_key).strip(),
+    }
+    if args.lane_selection == "window":
+        active_variants = ["window"]
+    elif args.lane_selection == "nonwindow":
+        active_variants = ["nonwindow"]
+    else:
+        active_variants = ["nonwindow", "window"]
+    base_variants = {
+        variant: cache_key
+        for variant, cache_key in base_variants_all.items()
+        if variant in active_variants
     }
 
     prepass_jsonl_paths: Dict[str, Path] = {}
@@ -188,123 +182,111 @@ def main() -> None:
     }
 
     lane_precomputed: Dict[str, Dict[str, Optional[Path]]] = {
-        "nonwindow_noimg": {
-            "features": Path(str(args.nonwindow_noimg_features).strip()).resolve()
-            if str(args.nonwindow_noimg_features).strip()
+        "nonwindow": {
+            "features": Path(str(args.nonwindow_features).strip()).resolve()
+            if str(args.nonwindow_features).strip()
             else None,
-            "labeled": Path(str(args.nonwindow_noimg_labeled).strip()).resolve()
-            if str(args.nonwindow_noimg_labeled).strip()
-            else None,
-        },
-        "nonwindow_imgctx1024": {
-            "features": Path(str(args.nonwindow_imgctx_features).strip()).resolve()
-            if str(args.nonwindow_imgctx_features).strip()
-            else None,
-            "labeled": Path(str(args.nonwindow_imgctx_labeled).strip()).resolve()
-            if str(args.nonwindow_imgctx_labeled).strip()
+            "labeled": Path(str(args.nonwindow_labeled).strip()).resolve()
+            if str(args.nonwindow_labeled).strip()
             else None,
         },
-        "window_noimg": {
-            "features": Path(str(args.window_noimg_features).strip()).resolve()
-            if str(args.window_noimg_features).strip()
+        "window": {
+            "features": Path(str(args.window_features).strip()).resolve()
+            if str(args.window_features).strip()
             else None,
-            "labeled": Path(str(args.window_noimg_labeled).strip()).resolve()
-            if str(args.window_noimg_labeled).strip()
-            else None,
-        },
-        "window_imgctx1024": {
-            "features": Path(str(args.window_imgctx_features).strip()).resolve()
-            if str(args.window_imgctx_features).strip()
-            else None,
-            "labeled": Path(str(args.window_imgctx_labeled).strip()).resolve()
-            if str(args.window_imgctx_labeled).strip()
+            "labeled": Path(str(args.window_labeled).strip()).resolve()
+            if str(args.window_labeled).strip()
             else None,
         },
     }
 
     for variant, cache_key in base_variants.items():
-        for image_embed_dim in image_embed_dims:
-            lane_id = _lane_id(variant, image_embed_dim)
-            lane_dir = lanes_dir / lane_id
-            lane_dir.mkdir(parents=True, exist_ok=True)
-            features_path = lane_dir / "features.npz"
-            labeled_path = lane_dir / "labeled.npz"
-            precomputed = lane_precomputed.get(lane_id, {})
-            precomputed_features = precomputed.get("features")
-            precomputed_labeled = precomputed.get("labeled")
-            # Reuse labeled targets directly when the provided feature artifact already includes y.
-            if precomputed_labeled is None and precomputed_features is not None:
-                if _npz_has_label_targets(precomputed_features):
-                    precomputed_labeled = precomputed_features
-            if precomputed_features is not None:
-                _ensure_symlink_or_copy(precomputed_features, features_path, force=bool(args.force))
-            if precomputed_labeled is not None:
-                _ensure_symlink_or_copy(precomputed_labeled, labeled_path, force=bool(args.force))
-            if args.force or (not features_path.exists()):
-                _run(
-                    [
-                        sys.executable,
-                        "tools/build_ensemble_features.py",
-                        "--input",
-                        str(prepass_jsonl_paths[variant]),
-                        "--dataset",
-                        str(args.dataset),
-                        "--output",
-                        str(features_path),
-                        "--classifier-id",
-                        str(args.classifier_id),
-                        "--require-classifier",
-                        "--support-iou",
-                        str(float(args.support_iou)),
-                        "--context-radius",
-                        str(float(args.context_radius)),
-                        "--embed-proj-dim",
-                        str(int(args.candidate_embed_dim)),
-                        "--image-embed-proj-dim",
-                        str(int(image_embed_dim)),
-                        "--device",
-                        str(args.device),
-                    ]
-                )
-            if args.force or (not labeled_path.exists()):
-                _run(
-                    [
-                        sys.executable,
-                        "tools/label_candidates_iou90.py",
-                        "--input",
-                        str(features_path),
-                        "--dataset",
-                        str(args.dataset),
-                        "--output",
-                        str(labeled_path),
-                        "--iou",
-                        "0.5",
-                    ]
-                )
-            lane_manifest["lanes"][lane_id] = {
-                "variant": variant,
-                "cache_key": cache_key,
-                "image_embed_dim": int(image_embed_dim),
-                "features": str(features_path),
-                "labeled": str(labeled_path),
-                "prepass_jsonl": str(prepass_jsonl_paths[variant]),
-                "lane_config_key": _lane_config(cache_key, image_embed_dim),
-                "precomputed_features": str(precomputed_features) if precomputed_features else "",
-                "precomputed_labeled": str(precomputed_labeled) if precomputed_labeled else "",
-            }
+        lane_id = _lane_id(variant)
+        lane_dir = lanes_dir / lane_id
+        lane_dir.mkdir(parents=True, exist_ok=True)
+        features_path = lane_dir / "features.npz"
+        labeled_path = lane_dir / "labeled.npz"
+        precomputed = lane_precomputed.get(lane_id, {})
+        precomputed_features = precomputed.get("features")
+        precomputed_labeled = precomputed.get("labeled")
+        if precomputed_labeled is None and precomputed_features is not None:
+            if _npz_has_label_targets(precomputed_features):
+                precomputed_labeled = precomputed_features
+        if precomputed_features is not None:
+            _ensure_symlink_or_copy(precomputed_features, features_path, force=bool(args.force))
+        if precomputed_labeled is not None:
+            _ensure_symlink_or_copy(precomputed_labeled, labeled_path, force=bool(args.force))
+        if args.force or (not features_path.exists()):
+            _run(
+                [
+                    sys.executable,
+                    "tools/build_ensemble_features.py",
+                    "--input",
+                    str(prepass_jsonl_paths[variant]),
+                    "--dataset",
+                    str(args.dataset),
+                    "--output",
+                    str(features_path),
+                    "--classifier-id",
+                    str(args.classifier_id),
+                    "--require-classifier",
+                    "--support-iou",
+                    str(float(args.support_iou)),
+                    "--context-radius",
+                    str(float(args.context_radius)),
+                    "--embed-proj-dim",
+                    str(int(args.candidate_embed_dim)),
+                    "--image-embed-proj-dim",
+                    "0",
+                    "--device",
+                    str(args.device),
+                ]
+            )
+        if args.force or (not labeled_path.exists()):
+            _run(
+                [
+                    sys.executable,
+                    "tools/label_candidates_iou90.py",
+                    "--input",
+                    str(features_path),
+                    "--dataset",
+                    str(args.dataset),
+                    "--output",
+                    str(labeled_path),
+                    "--iou",
+                    "0.5",
+                ]
+            )
+        lane_manifest["lanes"][lane_id] = {
+            "variant": variant,
+            "cache_key": cache_key,
+            "image_embed_dim": 0,
+            "features": str(features_path),
+            "labeled": str(labeled_path),
+            "prepass_jsonl": str(prepass_jsonl_paths[variant]),
+            "lane_config_key": _lane_config(cache_key),
+            "precomputed_features": str(precomputed_features) if precomputed_features else "",
+            "precomputed_labeled": str(precomputed_labeled) if precomputed_labeled else "",
+        }
 
-    nonwindow_images = _npz_image_set(
-        Path(lane_manifest["lanes"]["nonwindow_noimg"]["labeled"])
-    )
-    window_images = _npz_image_set(Path(lane_manifest["lanes"]["window_noimg"]["labeled"]))
-    intersection = sorted(nonwindow_images & window_images)
+    lane_image_sets: Dict[str, Set[str]] = {}
+    for lane_id, lane in lane_manifest["lanes"].items():
+        lane_image_sets[lane_id] = _npz_image_set(Path(lane["labeled"]))
+    if "nonwindow" in lane_image_sets and "window" in lane_image_sets:
+        intersection = sorted(lane_image_sets["nonwindow"] & lane_image_sets["window"])
+    elif "window" in lane_image_sets:
+        intersection = sorted(lane_image_sets["window"])
+    elif "nonwindow" in lane_image_sets:
+        intersection = sorted(lane_image_sets["nonwindow"])
+    else:
+        raise SystemExit("no_lane_built")
     intersection_file = views_dir / "intersection_images.json"
     intersection_file.write_text(json.dumps(intersection, indent=2), encoding="utf-8")
 
     lane_manifest["views"] = {
         "full": {
-            "nonwindow_images": int(len(nonwindow_images)),
-            "window_images": int(len(window_images)),
+            "nonwindow_images": int(len(lane_image_sets.get("nonwindow", set()))),
+            "window_images": int(len(lane_image_sets.get("window", set()))),
         },
         "intersection": {
             "images_file": str(intersection_file),

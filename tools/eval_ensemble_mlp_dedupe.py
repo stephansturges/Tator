@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 import argparse
+from collections import defaultdict
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import torch
@@ -138,6 +139,228 @@ def _filter_scoreless_detections(
     return filtered, removed
 
 
+def _compute_metrics(tp: int, fp: int, fn: int) -> Dict[str, Any]:
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    return {"tp": tp, "fp": fp, "fn": fn, "precision": precision, "recall": recall, "f1": f1}
+
+
+def _init_boundary_bucket() -> Dict[str, Any]:
+    return {
+        "accepted": 0,
+        "rejected": 0,
+        "positive_rows": 0,
+        "negative_rows": 0,
+        "by_label": {},
+        "by_source": {},
+    }
+
+
+def _update_boundary_bucket(
+    bucket: Dict[str, Any],
+    *,
+    accepted: bool,
+    label: str,
+    source: str,
+    target: int,
+) -> None:
+    key = "accepted" if accepted else "rejected"
+    bucket[key] = int(bucket.get(key, 0)) + 1
+    if int(target) > 0:
+        bucket["positive_rows"] = int(bucket.get("positive_rows", 0)) + 1
+    else:
+        bucket["negative_rows"] = int(bucket.get("negative_rows", 0)) + 1
+    for group_name, group_key in (
+        ("by_label", str(label or "").strip().lower()),
+        ("by_source", str(source or "").strip().lower() or "unknown"),
+    ):
+        group = bucket[group_name]
+        slot = group.setdefault(group_key, {"accepted": 0, "rejected": 0, "positive_rows": 0, "negative_rows": 0})
+        slot[key] = int(slot.get(key, 0)) + 1
+        if int(target) > 0:
+            slot["positive_rows"] = int(slot.get("positive_rows", 0)) + 1
+        else:
+            slot["negative_rows"] = int(slot.get("negative_rows", 0)) + 1
+
+
+def _compute_calibration_diagnostics(prob_rows: Sequence[float], y_rows: Sequence[int], *, bins: int = 10) -> Dict[str, Any]:
+    probs = np.asarray(prob_rows, dtype=np.float64)
+    targets = np.asarray(y_rows, dtype=np.float64)
+    count = int(probs.shape[0])
+    positive_count = int(float(targets.sum())) if count else 0
+    if count <= 0:
+        return {
+            "candidate_count": 0,
+            "positive_count": 0,
+            "brier_sum_sq": 0.0,
+            "brier_score": 0.0,
+            "ece_10": 0.0,
+            "bins": [],
+        }
+    sq_error = np.square(probs - targets)
+    brier_sum_sq = float(sq_error.sum())
+    bin_rows: List[Dict[str, Any]] = []
+    ece = 0.0
+    for idx in range(int(bins)):
+        lower = idx / float(bins)
+        upper = (idx + 1) / float(bins)
+        if idx == bins - 1:
+            mask = (probs >= lower) & (probs <= upper)
+        else:
+            mask = (probs >= lower) & (probs < upper)
+        bin_count = int(mask.sum())
+        sum_prob = float(probs[mask].sum()) if bin_count else 0.0
+        sum_positive = float(targets[mask].sum()) if bin_count else 0.0
+        mean_prob = (sum_prob / bin_count) if bin_count else 0.0
+        positive_rate = (sum_positive / bin_count) if bin_count else 0.0
+        if bin_count:
+            ece += (abs(mean_prob - positive_rate) * bin_count) / float(count)
+        bin_rows.append(
+            {
+                "bin_index": idx,
+                "lower": lower,
+                "upper": upper,
+                "count": bin_count,
+                "sum_prob": sum_prob,
+                "sum_positive": sum_positive,
+                "mean_prob": mean_prob,
+                "positive_rate": positive_rate,
+            }
+        )
+    return {
+        "candidate_count": count,
+        "positive_count": positive_count,
+        "brier_sum_sq": brier_sum_sq,
+        "brier_score": brier_sum_sq / float(count),
+        "ece_10": float(ece),
+        "bins": bin_rows,
+    }
+
+
+def _evaluate_predictions_detailed(
+    pred_by_image: Dict[str, List[Dict[str, Any]]],
+    gt_by_image: Dict[str, Dict[int, List[List[float]]]],
+    *,
+    name_to_cat: Dict[str, int],
+    labelmap: Sequence[str],
+    dedupe_iou: float,
+    eval_iou: float,
+    scoreless_iou: float,
+) -> Dict[str, Any]:
+    per_class: Dict[str, Dict[str, int]] = defaultdict(
+        lambda: {"tp": 0, "fp": 0, "fn": 0, "support_gt": 0, "support_pred": 0}
+    )
+    per_class_per_source: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(
+        lambda: {"tp": 0, "fp": 0, "accepted": 0}
+    )
+    total_tp = total_fp = total_fn = 0
+    eval_image_names = set(gt_by_image.keys()) | set(pred_by_image.keys())
+    for image in eval_image_names:
+        image_preds = list(pred_by_image.get(image, []))
+        image_preds, _ = _merge_prepass_detections(image_preds, iou_thr=dedupe_iou)
+        if scoreless_iou > 0:
+            image_preds, _ = _filter_scoreless_detections(image_preds, iou_thr=scoreless_iou)
+        gt_by_class = gt_by_image.get(image, {})
+        pred_by_class: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        unknown_preds: List[Dict[str, Any]] = []
+        for det in image_preds:
+            label = str(det.get("label") or "").strip().lower()
+            cat_id = name_to_cat.get(label)
+            if cat_id is None:
+                unknown_preds.append(det)
+                continue
+            pred_by_class[cat_id].append(det)
+        if unknown_preds:
+            unknown_bucket = per_class["__unknown__"]
+            unknown_bucket["fp"] += len(unknown_preds)
+            unknown_bucket["support_pred"] += len(unknown_preds)
+            total_fp += len(unknown_preds)
+            for det in unknown_preds:
+                source = str(det.get("score_source") or det.get("source") or "unknown").strip().lower() or "unknown"
+                src_bucket = per_class_per_source[("__unknown__", source)]
+                src_bucket["fp"] += 1
+                src_bucket["accepted"] += 1
+        class_ids = set(gt_by_class.keys()) | set(pred_by_class.keys())
+        for cat_id in class_ids:
+            label = (
+                str(labelmap[cat_id]).strip().lower()
+                if 0 <= int(cat_id) < len(labelmap)
+                else f"class_{cat_id}"
+            )
+            gt_boxes = list(gt_by_class.get(cat_id, []))
+            preds = list(pred_by_class.get(cat_id, []))
+            class_bucket = per_class[label]
+            class_bucket["support_gt"] += len(gt_boxes)
+            class_bucket["support_pred"] += len(preds)
+            matched_gt: Set[int] = set()
+            for det in preds:
+                bbox = det.get("bbox_xyxy_px")
+                source = str(det.get("score_source") or det.get("source") or "unknown").strip().lower() or "unknown"
+                src_bucket = per_class_per_source[(label, source)]
+                src_bucket["accepted"] += 1
+                if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                    class_bucket["fp"] += 1
+                    src_bucket["fp"] += 1
+                    total_fp += 1
+                    continue
+                best_iou = 0.0
+                best_idx: Optional[int] = None
+                for idx, gt_box in enumerate(gt_boxes):
+                    if idx in matched_gt:
+                        continue
+                    cur_iou = _iou(bbox, gt_box)
+                    if cur_iou > best_iou:
+                        best_iou = cur_iou
+                        best_idx = idx
+                if best_idx is not None and best_iou >= eval_iou:
+                    matched_gt.add(best_idx)
+                    class_bucket["tp"] += 1
+                    src_bucket["tp"] += 1
+                    total_tp += 1
+                else:
+                    class_bucket["fp"] += 1
+                    src_bucket["fp"] += 1
+                    total_fp += 1
+            class_fn = max(0, len(gt_boxes) - len(matched_gt))
+            class_bucket["fn"] += class_fn
+            total_fn += class_fn
+    per_class_rows: List[Dict[str, Any]] = []
+    for label, row in per_class.items():
+        metrics = _compute_metrics(int(row["tp"]), int(row["fp"]), int(row["fn"]))
+        per_class_rows.append(
+            {
+                "label": label,
+                "tp": int(row["tp"]),
+                "fp": int(row["fp"]),
+                "fn": int(row["fn"]),
+                "support_gt": int(row["support_gt"]),
+                "support_pred": int(row["support_pred"]),
+                **metrics,
+            }
+        )
+    per_class_rows.sort(key=lambda item: (-int(item["fp"]), str(item["label"])))
+    per_class_source_rows: List[Dict[str, Any]] = []
+    for (label, source), row in per_class_per_source.items():
+        precision = row["tp"] / (row["tp"] + row["fp"]) if (row["tp"] + row["fp"]) else 0.0
+        per_class_source_rows.append(
+            {
+                "label": label,
+                "primary_source": source,
+                "tp": int(row["tp"]),
+                "fp": int(row["fp"]),
+                "accepted": int(row["accepted"]),
+                "precision": float(precision),
+            }
+        )
+    per_class_source_rows.sort(key=lambda item: (-int(item["fp"]), str(item["label"]), str(item["primary_source"])))
+    return {
+        **_compute_metrics(total_tp, total_fp, total_fn),
+        "per_class": per_class_rows,
+        "per_class_per_source": per_class_source_rows,
+    }
+
+
 class _MLP(torch.nn.Module):
     def __init__(self, input_dim: int, hidden: List[int], dropout: float) -> None:
         super().__init__()
@@ -227,6 +450,7 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=None, help="Override logit temperature.")
     parser.add_argument("--output-jsonl", default=None, help="Optional JSONL output of deduped detections.")
     parser.add_argument("--use-val-split", action="store_true", help="Restrict evaluation to validation split.")
+    parser.add_argument("--analysis-json", default=None, help="Optional JSON output for richer post-hoc reporting analysis.")
     args = parser.parse_args()
 
     meta = json.loads(Path(args.meta).read_text()) if Path(args.meta).exists() else {}
@@ -241,6 +465,7 @@ def main() -> None:
 
     data = np.load(args.data, allow_pickle=True)
     X = data["X"].astype(np.float32)
+    targets = data["y"].astype(np.int64) if "y" in data else np.zeros((X.shape[0],), dtype=np.int64)
     meta_rows = list(data["meta"])
     feature_names = [str(name) for name in data.get("feature_names", [])]
 
@@ -265,15 +490,39 @@ def main() -> None:
             mask = np.asarray(keep_mask, dtype=bool)
             if mask.any():
                 probs = probs[mask]
+                targets = targets[mask]
                 parsed_meta = [row for idx, row in enumerate(parsed_meta) if mask[idx]]
 
     detections_by_image: Dict[str, List[Dict[str, Any]]] = {}
+    boundary_hits: Dict[str, Any] = {
+        "decision_rows": 0,
+        "hard_gate_rejections": {},
+        "buckets": {
+            "within_0p01": _init_boundary_bucket(),
+            "within_0p02": _init_boundary_bucket(),
+            "within_0p05": _init_boundary_bucket(),
+        },
+    }
     for idx, payload in enumerate(parsed_meta):
         label = str(payload.get("label") or "").strip().lower()
         if thresholds_by_label and label in thresholds_by_label and args.threshold is None:
             thr = float(thresholds_by_label[label])
         else:
             thr = default_threshold
+        target = int(targets[idx]) if idx < len(targets) else 0
+        source = str(payload.get("score_source") or payload.get("source") or "unknown").strip().lower() or "unknown"
+        gap = abs(float(probs[idx]) - float(thr))
+        boundary_hits["decision_rows"] += 1
+        if gap <= 0.05:
+            for bucket_name, bucket_thr in (("within_0p01", 0.01), ("within_0p02", 0.02), ("within_0p05", 0.05)):
+                if gap <= bucket_thr:
+                    _update_boundary_bucket(
+                        boundary_hits["buckets"][bucket_name],
+                        accepted=bool(probs[idx] >= thr),
+                        label=label,
+                        source=source,
+                        target=target,
+                    )
         if probs[idx] < thr:
             continue
         image = str(payload.get("image") or "")
@@ -282,7 +531,14 @@ def main() -> None:
         bbox = payload.get("bbox_xyxy_px")
         if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
             continue
-        det = {"label": label, "bbox_xyxy_px": [float(v) for v in bbox[:4]], "score": float(probs[idx])}
+        det = {
+            "label": label,
+            "bbox_xyxy_px": [float(v) for v in bbox[:4]],
+            "score": float(probs[idx]),
+            "score_source": source,
+            "source": source,
+            "source_list": list(payload.get("source_list") or ([source] if source else [])),
+        }
         detections_by_image.setdefault(image, []).append(det)
 
     yolo_root = Path(args.yolo_root or f"uploads/clip_dataset_uploads/{args.dataset}_yolo")
@@ -373,6 +629,15 @@ def main() -> None:
     metrics = _eval(float(args.dedupe_iou), float(args.eval_iou))
     output = dict(metrics)
     output["calibrated_temperature"] = float(temperature)
+    detailed = _evaluate_predictions_detailed(
+        detections_by_image,
+        gt_by_image,
+        name_to_cat=name_to_cat,
+        labelmap=labelmap,
+        dedupe_iou=float(args.dedupe_iou),
+        eval_iou=float(args.eval_iou),
+        scoreless_iou=float(args.scoreless_iou),
+    )
 
     if args.output_jsonl:
         output_records: List[Dict[str, Any]] = []
@@ -417,6 +682,30 @@ def main() -> None:
                 entry["eval_iou"] = float(eval_iou)
                 sweep.append(entry)
         output["iou_sweep"] = sweep
+
+    if args.analysis_json:
+        analysis_payload = {
+            "version": 1,
+            "context": {
+                "dataset": str(args.dataset),
+                "eval_iou": float(args.eval_iou),
+                "dedupe_iou": float(args.dedupe_iou),
+                "scoreless_iou": float(args.scoreless_iou),
+                "use_val_split": bool(args.use_val_split),
+                "policy_mode": "mlp_thresholds",
+                "selected_policy_variant": None,
+            },
+            "overall_metrics": metrics,
+            "per_class": detailed.get("per_class", []),
+            "per_class_per_source": detailed.get("per_class_per_source", []),
+            "boundary_hits": boundary_hits,
+            "calibration_diagnostics": _compute_calibration_diagnostics(probs.tolist(), targets.tolist()),
+            "policy": None,
+            "warnings": [],
+        }
+        analysis_path = Path(args.analysis_json)
+        analysis_path.parent.mkdir(parents=True, exist_ok=True)
+        analysis_path.write_text(json.dumps(analysis_payload, indent=2), encoding="utf-8")
 
     print(json.dumps(output, indent=2))
 

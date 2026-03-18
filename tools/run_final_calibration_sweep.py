@@ -49,6 +49,10 @@ def _run(cmd: Sequence[str], *, capture: bool = False) -> subprocess.CompletedPr
     )
 
 
+def _final_sweep_report_analysis_glob(run_root: Path) -> str:
+    return str(Path(run_root) / "final_matrix" / "**" / "*.analysis.json")
+
+
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         out = float(value)
@@ -418,6 +422,7 @@ def _train_tune_eval(
 
     eval_id = _hash_obj(policy)
     eval_out = out_dir / f"eval_{hp_id}_{sc_id}_{eval_id}.json"
+    analysis_out = out_dir / f"eval_{hp_id}_{sc_id}_{eval_id}.analysis.json"
     if not eval_out.exists():
         policy_path = out_dir / f"policy_{eval_id}.json"
         policy_path.write_text(json.dumps(policy, indent=2), encoding="utf-8")
@@ -446,6 +451,8 @@ def _train_tune_eval(
                 "--use-val-split",
                 "--policy-json",
                 str(policy_path),
+                "--analysis-json",
+                str(analysis_out),
             ],
             capture=True,
         )
@@ -456,6 +463,7 @@ def _train_tune_eval(
         "model_json": str(model_json),
         "model_meta": str(model_meta),
         "eval_json": str(eval_out),
+        "analysis_json": str(analysis_out),
         "hp": hp,
         "scenario": scenario,
         "policy": policy,
@@ -515,7 +523,11 @@ def main() -> None:
     parser.add_argument("--seeds", default="42,1337,2025")
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--candidate-embed-dim", type=int, default=1024)
-    parser.add_argument("--image-embed-dims", default="0,1024")
+    parser.add_argument(
+        "--lane-selection",
+        default="compare_both",
+        choices=["window", "nonwindow", "compare_both"],
+    )
     parser.add_argument("--support-iou", type=float, default=0.5)
     parser.add_argument("--context-radius", type=float, default=0.075)
     parser.add_argument("--optimize", default="f1", choices=["f1", "recall", "tp"])
@@ -531,14 +543,10 @@ def main() -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--nonwindow-prepass-jsonl", default="")
     parser.add_argument("--window-prepass-jsonl", default="")
-    parser.add_argument("--nonwindow-noimg-features", default="")
-    parser.add_argument("--nonwindow-noimg-labeled", default="")
-    parser.add_argument("--nonwindow-imgctx-features", default="")
-    parser.add_argument("--nonwindow-imgctx-labeled", default="")
-    parser.add_argument("--window-noimg-features", default="")
-    parser.add_argument("--window-noimg-labeled", default="")
-    parser.add_argument("--window-imgctx-features", default="")
-    parser.add_argument("--window-imgctx-labeled", default="")
+    parser.add_argument("--nonwindow-features", default="")
+    parser.add_argument("--nonwindow-labeled", default="")
+    parser.add_argument("--window-features", default="")
+    parser.add_argument("--window-labeled", default="")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
@@ -560,8 +568,8 @@ def main() -> None:
         str(args.classifier_id),
         "--candidate-embed-dim",
         str(int(args.candidate_embed_dim)),
-        "--image-embed-dims",
-        str(args.image_embed_dims),
+        "--lane-selection",
+        str(args.lane_selection),
         "--support-iou",
         str(float(args.support_iou)),
         "--context-radius",
@@ -572,14 +580,10 @@ def main() -> None:
     passthrough = {
         "--nonwindow-prepass-jsonl": str(args.nonwindow_prepass_jsonl).strip(),
         "--window-prepass-jsonl": str(args.window_prepass_jsonl).strip(),
-        "--nonwindow-noimg-features": str(args.nonwindow_noimg_features).strip(),
-        "--nonwindow-noimg-labeled": str(args.nonwindow_noimg_labeled).strip(),
-        "--nonwindow-imgctx-features": str(args.nonwindow_imgctx_features).strip(),
-        "--nonwindow-imgctx-labeled": str(args.nonwindow_imgctx_labeled).strip(),
-        "--window-noimg-features": str(args.window_noimg_features).strip(),
-        "--window-noimg-labeled": str(args.window_noimg_labeled).strip(),
-        "--window-imgctx-features": str(args.window_imgctx_features).strip(),
-        "--window-imgctx-labeled": str(args.window_imgctx_labeled).strip(),
+        "--nonwindow-features": str(args.nonwindow_features).strip(),
+        "--nonwindow-labeled": str(args.nonwindow_labeled).strip(),
+        "--window-features": str(args.window_features).strip(),
+        "--window-labeled": str(args.window_labeled).strip(),
     }
     for flag, value in passthrough.items():
         if value:
@@ -591,6 +595,14 @@ def main() -> None:
     manifest = _load_json(run_root / "lane_manifest.json")
     lanes = manifest["lanes"]
     lane_ids = sorted(lanes.keys())
+    if args.lane_selection == "window":
+        lane_ids = [lane_id for lane_id in lane_ids if lane_id == "window"]
+    elif args.lane_selection == "nonwindow":
+        lane_ids = [lane_id for lane_id in lane_ids if lane_id == "nonwindow"]
+    else:
+        lane_ids = [lane_id for lane_id in lane_ids if lane_id in {"window", "nonwindow"}]
+    if not lane_ids:
+        raise RuntimeError(f"no_lanes_selected:{args.lane_selection}")
     seeds = _parse_seed_list(args.seeds)
 
     lane_images_full: Dict[str, List[str]] = {}
@@ -857,6 +869,20 @@ def main() -> None:
             str(ranked_json),
             "--output-md",
             str(report_md),
+        ]
+    )
+    _run(
+        [
+            sys.executable,
+            "tools/build_calibration_report_bundle.py",
+            "--ranked-json",
+            str(ranked_json),
+            "--analysis-json-glob",
+            _final_sweep_report_analysis_glob(run_root),
+            "--output-json",
+            str(run_root / "report_bundle.json"),
+            "--output-md",
+            str(run_root / "report_bundle.md"),
         ]
     )
 

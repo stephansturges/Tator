@@ -1,0 +1,136 @@
+import json
+from pathlib import Path
+
+import pytest
+
+import localinferenceapi as api
+from services.calibration import (
+    CALIBRATION_JOB_STATE_FILENAME,
+    CalibrationJob,
+)
+
+
+def test_get_calibration_report_bundle_reads_completed_job_artifact(tmp_path: Path):
+    report_root = tmp_path / "jobs"
+    report_path = report_root / "job-report" / "report_bundle.json"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"report_kind": "calibration_job", "overall_metrics": {"f1": 0.84}}
+    report_path.write_text(json.dumps(payload), encoding="utf-8")
+    job = CalibrationJob(job_id="job-report")
+    job.result = {"report_bundle_json": str(report_path)}
+    original_root = api.CALIBRATION_ROOT
+    api.CALIBRATION_ROOT = report_root
+    with api.CALIBRATION_JOBS_LOCK:
+        api.CALIBRATION_JOBS[job.job_id] = job
+    try:
+        result = api.get_calibration_report_bundle(job.job_id)
+        assert result["report_kind"] == "calibration_job"
+        assert result["overall_metrics"]["f1"] == pytest.approx(0.84)
+    finally:
+        api.CALIBRATION_ROOT = original_root
+        with api.CALIBRATION_JOBS_LOCK:
+            api.CALIBRATION_JOBS.pop(job.job_id, None)
+
+
+def test_get_calibration_report_bundle_reads_persisted_artifact_without_live_job(tmp_path: Path):
+    job_id = "cal_reportdisk"
+    job_dir = api.CALIBRATION_ROOT / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    report_path = job_dir / "report_bundle.json"
+    payload = {"report_kind": "calibration_job", "overall_metrics": {"f1": 0.91}}
+    report_path.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        result = api.get_calibration_report_bundle(job_id)
+        assert result["overall_metrics"]["f1"] == pytest.approx(0.91)
+    finally:
+        report_path.unlink(missing_ok=True)
+        job_dir.rmdir()
+
+
+def test_get_calibration_report_bundle_404_for_missing_job():
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.get_calibration_report_bundle("missing-job")
+    assert excinfo.value.status_code == 404
+
+
+def test_get_calibration_job_reads_persisted_state_without_live_job(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(api, "CALIBRATION_ROOT", tmp_path)
+    with api.CALIBRATION_JOBS_LOCK:
+        api.CALIBRATION_JOBS.clear()
+    job_dir = tmp_path / "cal_persisted"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / CALIBRATION_JOB_STATE_FILENAME).write_text(
+        json.dumps(
+            {
+                "job_id": "cal_persisted",
+                "status": "completed",
+                "message": "Done",
+                "phase": "completed",
+                "progress": 1.0,
+                "processed": 300,
+                "total": 300,
+                "step_current": 10,
+                "step_total": 10,
+                "step_label": "Completed",
+                "substep_current": 0,
+                "substep_total": 0,
+                "substep_label": "",
+                "created_at": 1.0,
+                "updated_at": 2.0,
+                "request": {"dataset_id": "demo"},
+                "result": {"report_bundle_json": None},
+                "error": None,
+                "state_schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = api.get_calibration_job("cal_persisted")
+
+    assert payload["job_id"] == "cal_persisted"
+    assert payload["status"] == "completed"
+    assert payload["step_total"] == 10
+
+
+def test_list_calibration_jobs_marks_persisted_running_jobs_interrupted(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(api, "CALIBRATION_ROOT", tmp_path)
+    with api.CALIBRATION_JOBS_LOCK:
+        api.CALIBRATION_JOBS.clear()
+    job_dir = tmp_path / "cal_interrupted"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    state_path = job_dir / CALIBRATION_JOB_STATE_FILENAME
+    state_path.write_text(
+        json.dumps(
+            {
+                "job_id": "cal_interrupted",
+                "status": "running",
+                "message": "Building features…",
+                "phase": "features",
+                "progress": 0.4,
+                "processed": 120,
+                "total": 300,
+                "step_current": 5,
+                "step_total": 10,
+                "step_label": "Build features",
+                "substep_current": 0,
+                "substep_total": 0,
+                "substep_label": "",
+                "created_at": 1.0,
+                "updated_at": 2.0,
+                "request": {"dataset_id": "demo"},
+                "result": None,
+                "error": None,
+                "state_schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = api.list_calibration_jobs()
+
+    assert payload[0]["job_id"] == "cal_interrupted"
+    assert payload[0]["status"] == "failed"
+    assert payload[0]["message"] == "Interrupted by backend restart"
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "failed"

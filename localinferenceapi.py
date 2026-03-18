@@ -535,6 +535,8 @@ from services.calibration import (
     _run_calibration_job as _run_calibration_job_impl,
     _start_calibration_job as _start_calibration_job_impl,
     _cancel_calibration_job as _cancel_calibration_job_impl,
+    _list_persisted_calibration_job_payloads as _list_persisted_calibration_job_payloads_impl,
+    _load_persisted_calibration_job_payload as _load_persisted_calibration_job_payload_impl,
 )
 from services.calibration_metrics import (
     _build_gt_index_for_class_impl as _build_gt_index_for_class_impl,
@@ -23157,6 +23159,7 @@ def start_calibration_job(payload: CalibrationRequest = Body(...)):
         jobs=CALIBRATION_JOBS,
         jobs_lock=CALIBRATION_JOBS_LOCK,
         run_job_fn=_calibration_run_job,
+        calibration_root=CALIBRATION_ROOT,
     )
     return _serialize_calibration_job_impl(job)
 
@@ -23164,28 +23167,93 @@ def start_calibration_job(payload: CalibrationRequest = Body(...)):
 def list_calibration_jobs():
     _prune_job_registry(CALIBRATION_JOBS, CALIBRATION_JOBS_LOCK)
     with CALIBRATION_JOBS_LOCK:
-        jobs = list(CALIBRATION_JOBS.values())
-    jobs.sort(key=lambda j: j.created_at, reverse=True)
-    return [_serialize_calibration_job_impl(job) for job in jobs]
+        live_jobs = {
+            job_id: _serialize_calibration_job_impl(job)
+            for job_id, job in CALIBRATION_JOBS.items()
+        }
+    jobs_by_id = {}
+    for payload in _list_persisted_calibration_job_payloads_impl(
+        CALIBRATION_ROOT,
+        mark_interrupted=False,
+    ):
+        if not isinstance(payload, dict):
+            continue
+        persisted_job_id = str(payload.get("job_id") or "").strip()
+        if not persisted_job_id:
+            continue
+        if persisted_job_id not in live_jobs and str(payload.get("status") or "") in {"queued", "running"}:
+            payload = _load_persisted_calibration_job_payload_impl(
+                CALIBRATION_ROOT,
+                persisted_job_id,
+                mark_interrupted=True,
+            ) or payload
+        jobs_by_id[persisted_job_id] = payload
+    jobs_by_id.update(live_jobs)
+    jobs = list(jobs_by_id.values())
+    jobs.sort(key=lambda j: float(j.get("created_at") or 0.0), reverse=True)
+    return jobs
 
 
 def get_calibration_job(job_id: str):
     with CALIBRATION_JOBS_LOCK:
         job = CALIBRATION_JOBS.get(job_id)
-    if not job:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
-    return _serialize_calibration_job_impl(job)
+    if job:
+        return _serialize_calibration_job_impl(job)
+    persisted = _load_persisted_calibration_job_payload_impl(
+        CALIBRATION_ROOT,
+        job_id,
+        mark_interrupted=True,
+    )
+    if persisted:
+        return persisted
+    raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
 
 
 def cancel_calibration_job(job_id: str):
-    job = _cancel_calibration_job_impl(
+    with CALIBRATION_JOBS_LOCK:
+        job = CALIBRATION_JOBS.get(job_id)
+    if job:
+        job = _cancel_calibration_job_impl(
+            job_id,
+            jobs=CALIBRATION_JOBS,
+            jobs_lock=CALIBRATION_JOBS_LOCK,
+            http_exception_cls=HTTPException,
+            time_fn=time.time,
+        )
+        return _serialize_calibration_job_impl(job)
+    persisted = _load_persisted_calibration_job_payload_impl(
+        CALIBRATION_ROOT,
         job_id,
-        jobs=CALIBRATION_JOBS,
-        jobs_lock=CALIBRATION_JOBS_LOCK,
-        http_exception_cls=HTTPException,
-        time_fn=time.time,
+        mark_interrupted=True,
     )
-    return _serialize_calibration_job_impl(job)
+    if persisted:
+        return persisted
+    raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
+
+
+def get_calibration_report_bundle(job_id: str):
+    safe_job_id = _sanitize_yolo_run_id_impl(str(job_id)) or str(job_id)
+    if safe_job_id != str(job_id):
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
+    path = (CALIBRATION_ROOT / safe_job_id / "report_bundle.json").resolve()
+    if not _path_is_within_root_impl(path, CALIBRATION_ROOT.resolve()):
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
+    if not path.exists():
+        with CALIBRATION_JOBS_LOCK:
+            job = CALIBRATION_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
+        result = job.result if isinstance(job.result, dict) else {}
+        report_path = result.get("report_bundle_json")
+        path = Path(str(report_path)).resolve() if report_path else path
+        if not _path_is_within_root_impl(path, CALIBRATION_ROOT.resolve()):
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
+    if not path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_report_bundle_not_found")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"calibration_report_bundle_unreadable:{exc}") from exc
 
 
 app.include_router(
@@ -23194,6 +23262,7 @@ app.include_router(
         list_fn=list_calibration_jobs,
         get_fn=get_calibration_job,
         cancel_fn=cancel_calibration_job,
+        report_bundle_fn=get_calibration_report_bundle,
         request_cls=CalibrationRequest,
     )
 )

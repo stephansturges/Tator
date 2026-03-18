@@ -514,6 +514,90 @@
       "claimed_by": [
         "UX_CRITICAL_TEXT_CONTRAST"
       ]
+    },
+    {
+      "id": "qwenCalibrationRecipeMode",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "CALIBRATION_SMART_RECIPE_RENDER"
+      ]
+    },
+    {
+      "id": "qwenCalibrationLaneSelection",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "CALIBRATION_SMART_RECIPE_RENDER"
+      ]
+    },
+    {
+      "id": "qwenCalibrationRecipeInfo",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "CALIBRATION_SMART_RECIPE_RENDER"
+      ]
+    },
+    {
+      "id": "qwenCalibrationReportWrap",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "CALIBRATION_REPORT_BUNDLE_RENDER"
+      ]
+    },
+    {
+      "id": "qwenCalibrationReportSummary",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "CALIBRATION_REPORT_BUNDLE_RENDER"
+      ]
+    },
+    {
+      "id": "qwenCalibrationReportStatus",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "CALIBRATION_REPORT_BUNDLE_RENDER"
+      ]
+    },
+    {
+      "id": "qwenCalibrationReportOverview",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "CALIBRATION_REPORT_BUNDLE_RENDER"
+      ]
+    },
+    {
+      "id": "qwenCalibrationReportPerClass",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "CALIBRATION_REPORT_BUNDLE_RENDER"
+      ]
+    },
+    {
+      "id": "qwenCalibrationReportPerSource",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "CALIBRATION_REPORT_BUNDLE_RENDER"
+      ]
+    },
+    {
+      "id": "qwenCalibrationReportBoundary",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "CALIBRATION_REPORT_BUNDLE_RENDER"
+      ]
+    },
+    {
+      "id": "qwenCalibrationReportUncertainty",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "CALIBRATION_REPORT_BUNDLE_RENDER"
+      ]
+    },
+    {
+      "id": "qwenCalibrationReportDiagnostics",
+      "tab": "qwen-train",
+      "claimed_by": [
+        "CALIBRATION_REPORT_BUNDLE_RENDER"
+      ]
     }
   ],
   "usability_surfaces": [

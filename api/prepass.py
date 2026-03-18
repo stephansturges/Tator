@@ -1,4 +1,4 @@
-"""APIRouter for prepass recipe endpoints."""
+"""APIRouter for EDR endpoints on the legacy /prepass/recipes paths."""
 
 
 from typing import Any, Callable, Type

@@ -195,6 +195,22 @@ def _is_sam3_text_only(row: Dict[str, Any]) -> bool:
     return ("yolo" not in sources) and ("rfdetr" not in sources)
 
 
+def _is_sam3_similarity_only(row: Dict[str, Any]) -> bool:
+    primary, sources = _normalize_source_fields(row)
+    if primary != "sam3_similarity":
+        return False
+    return ("yolo" not in sources) and ("rfdetr" not in sources)
+
+
+def _blend_probabilities(base: np.ndarray, aux: np.ndarray, alpha: float) -> np.ndarray:
+    alpha = max(0.0, min(1.0, float(alpha)))
+    if alpha <= 0.0:
+        return np.asarray(base, dtype=np.float32)
+    if alpha >= 1.0:
+        return np.asarray(aux, dtype=np.float32)
+    return np.asarray((1.0 - alpha) * base + alpha * aux, dtype=np.float32)
+
+
 def _resolve_model_path(raw_path: Optional[str], *, model_path: Path) -> Optional[Path]:
     if not raw_path:
         return None
@@ -253,10 +269,20 @@ def _predict_probabilities(
                 text_mask = np.asarray([_is_sam3_text_only(row) for row in meta_rows], dtype=bool)
                 if text_mask.any():
                     q_probs = np.asarray(quality_booster.predict(xgb.DMatrix(X[text_mask])), dtype=np.float32)
-                    probs[text_mask] = np.asarray(
-                        (1.0 - alpha) * probs[text_mask] + alpha * q_probs,
-                        dtype=np.float32,
-                    )
+                    probs[text_mask] = _blend_probabilities(probs[text_mask], q_probs, alpha)
+    similarity_quality_cfg = meta.get("sam3_similarity_quality") if isinstance(meta.get("sam3_similarity_quality"), dict) else {}
+    if bool(similarity_quality_cfg.get("enabled")):
+        quality_booster = _load_optional_booster(
+            _resolve_model_path(similarity_quality_cfg.get("model_path"), model_path=model_path)
+        )
+        if quality_booster is not None:
+            alpha = float(similarity_quality_cfg.get("alpha") or 0.35)
+            alpha = max(0.0, min(1.0, alpha))
+            if alpha > 0.0:
+                sim_mask = np.asarray([_is_sam3_similarity_only(row) for row in meta_rows], dtype=bool)
+                if sim_mask.any():
+                    q_probs = np.asarray(quality_booster.predict(xgb.DMatrix(X[sim_mask])), dtype=np.float32)
+                    probs[sim_mask] = _blend_probabilities(probs[sim_mask], q_probs, alpha)
     return probs
 
 

@@ -118,6 +118,13 @@ def _is_sam3_text_only(row: Dict[str, Any]) -> bool:
     return ("yolo" not in sources) and ("rfdetr" not in sources)
 
 
+def _is_sam3_similarity_only(row: Dict[str, Any]) -> bool:
+    primary, sources = _normalize_source_fields(row)
+    if primary != "sam3_similarity":
+        return False
+    return ("yolo" not in sources) and ("rfdetr" not in sources)
+
+
 def _blend_probabilities(base: np.ndarray, aux: np.ndarray, alpha: float) -> np.ndarray:
     alpha = float(max(0.0, min(1.0, alpha)))
     if alpha <= 0.0:
@@ -168,10 +175,14 @@ def _load_policy(path_or_json: Optional[str]) -> Dict[str, Any]:
     raw = str(path_or_json).strip()
     if not raw:
         return {}
-    maybe_path = Path(raw)
     payload = raw
-    if maybe_path.exists() and maybe_path.is_file():
-        payload = maybe_path.read_text(encoding="utf-8")
+    if raw[:1] not in "{[":
+        maybe_path = Path(raw)
+        try:
+            if maybe_path.exists() and maybe_path.is_file():
+                payload = maybe_path.read_text(encoding="utf-8")
+        except OSError:
+            payload = raw
     try:
         parsed = json.loads(payload)
     except json.JSONDecodeError as exc:
@@ -222,6 +233,17 @@ def main() -> None:
         type=float,
         default=0.35,
         help="Blend weight for SAM3-text-only quality model on primary SAM3-text candidates.",
+    )
+    parser.add_argument(
+        "--train-sam3-similarity-quality",
+        action="store_true",
+        help="Train a dedicated SAM3-similarity-only quality model and blend during threshold calibration.",
+    )
+    parser.add_argument(
+        "--sam3-similarity-quality-alpha",
+        type=float,
+        default=0.35,
+        help="Blend weight for SAM3-similarity-only quality model on primary SAM3-similarity candidates.",
     )
     parser.add_argument(
         "--policy-json",
@@ -394,6 +416,34 @@ def main() -> None:
                 "train_count": len(q_train_idx),
                 "val_count": len(q_val_idx),
             }
+    sam3_similarity_quality_meta: Dict[str, Any] = {"enabled": False}
+    if args.train_sam3_similarity_quality:
+        q_train_idx = [idx for idx in train_idx if _is_sam3_similarity_only(meta_rows[idx])]
+        q_val_idx = [idx for idx in val_idx if _is_sam3_similarity_only(meta_rows[idx])]
+        q_model = _train_head_model(
+            X=X,
+            y=y,
+            train_idx=q_train_idx,
+            val_idx=q_val_idx,
+            params={**params, "max_depth": int(min(int(args.max_depth), 4))},
+            n_estimators=int(min(int(args.n_estimators), 400)),
+            early_stopping_rounds=int(args.early_stopping_rounds),
+        )
+        if q_model is not None and q_val_idx:
+            q_path = Path(str(args.output) + ".sam3_similarity_quality.json")
+            q_model.save_model(str(q_path))
+            alpha = float(max(0.0, min(1.0, float(args.sam3_similarity_quality_alpha))))
+            local_mask = np.asarray([_is_sam3_similarity_only(meta_rows[idx]) for idx in val_idx], dtype=bool)
+            if local_mask.any():
+                q_probs = np.asarray(q_model.predict(xgb.DMatrix(X_val[local_mask])), dtype=np.float32)
+                probs_val[local_mask] = _blend_probabilities(probs_val[local_mask], q_probs, alpha)
+            sam3_similarity_quality_meta = {
+                "enabled": True,
+                "model_path": str(q_path),
+                "alpha": alpha,
+                "train_count": len(q_train_idx),
+                "val_count": len(q_val_idx),
+            }
     thresholds = np.linspace(0.0, 1.0, int(args.threshold_steps))
     best_thr = _select_threshold(
         probs_val,
@@ -469,6 +519,7 @@ def main() -> None:
         "ensemble_policy": policy,
         "split_head": split_head_meta,
         "sam3_text_quality": sam3_text_quality_meta,
+        "sam3_similarity_quality": sam3_similarity_quality_meta,
     }
     meta_path.write_text(json.dumps(meta_out, indent=2))
 

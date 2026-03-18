@@ -297,6 +297,7 @@
     const API_STORAGE_KEY = "tator.apiRoot";
     let API_ROOT = loadStoredApiRoot();
     const TAB_LABELING = "labeling";
+    const TAB_PREPASS_BUILDER = "prepass-builder";
     const TAB_TRAINING = "training";
     const TAB_QWEN_TRAIN = "qwen-train";
     const TAB_SAM3_TRAIN = "sam3-train";
@@ -1309,6 +1310,7 @@
 
     const tabElements = {
         labelingButton: null,
+        prepassBuilderButton: null,
         trainingButton: null,
         qwenTrainButton: null,
         sam3TrainButton: null,
@@ -1324,6 +1326,7 @@
         predictorsButton: null,
         settingsButton: null,
         labelingPanel: null,
+        prepassBuilderPanel: null,
         trainingPanel: null,
         qwenTrainPanel: null,
         sam3TrainPanel: null,
@@ -1551,6 +1554,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         calibrationDataset: null,
         calibrationDatasetRefresh: null,
         calibrationImageCount: null,
+        calibrationRecipeMode: null,
+        calibrationRecipeInfo: null,
         calibrationMaxTerms: null,
         calibrationBaseFp: null,
         calibrationRelaxFp: null,
@@ -1566,6 +1571,15 @@ const AUTOMATION_LOCKED_TABS = new Set([
         calibrationSupportIou: null,
         calibrationRun: null,
         calibrationCancel: null,
+        calibrationReportWrap: null,
+        calibrationReportSummary: null,
+        calibrationReportStatus: null,
+        calibrationReportOverview: null,
+        calibrationReportPerClass: null,
+        calibrationReportPerSource: null,
+        calibrationReportBoundary: null,
+        calibrationReportUncertainty: null,
+        calibrationReportDiagnostics: null,
         agentEnsembleJob: null,
         agentEnsembleRefresh: null,
         agentDetectorRefresh: null,
@@ -3764,6 +3778,56 @@ const sam3TrainState = {
         }
     }
 
+    function applyPlaywrightTestIds() {
+        // Stable selectors for browser E2E tests. Keep this list additive so legacy ids remain untouched.
+        const selectorMap = {
+            tabLabelingButton: "tab.labeling.open",
+            tabPrepassBuilderButton: "tab.prepass_builder.open",
+            tabTrainingButton: "tab.training.open",
+            tabQwenTrainButton: "tab.qwen_train.open",
+            tabSam3TrainButton: "tab.sam3_train.open",
+            tabYoloTrainButton: "tab.yolo_train.open",
+            tabRfDetrTrainButton: "tab.rfdetr_train.open",
+            tabAgentMiningButton: "tab.agent_mining.open",
+            tabPromptHelperButton: "tab.prompt_helper.open",
+            tabDatasetsButton: "tab.datasets.open",
+            tabSam3PromptModelsButton: "tab.sam3_prompt_models.open",
+            tabDetectorsButton: "tab.detectors.open",
+            tabActiveButton: "tab.active_classifier.open",
+            tabQwenButton: "tab.qwen_models.open",
+            tabPredictorsButton: "tab.sam_predictors.open",
+            tabSettingsButton: "tab.settings.open",
+            qwenAgentRecipeSave: "action.prepass.recipe_save",
+            startTrainingBtn: "action.classifier_train.start",
+            qwenTrainStartBtn: "action.qwen_train.start",
+            sam3StartBtn: "action.sam3_train.start",
+            yoloTrainStartBtn: "action.yolo_train.start",
+            rfdetrTrainStartBtn: "action.rfdetr_train.start",
+            agentRunBtn: "action.agent_mining.run",
+            promptHelperGenerateBtn: "action.prompt_helper.generate",
+            sam3PromptRefresh: "action.sam3_prompt_models.refresh",
+            detectorDefaultSave: "action.detectors.save_default",
+            activeClassifierUse: "action.active_classifier.use",
+            qwenSettingsApply: "action.qwen_models.apply_settings",
+            predictorApply: "action.predictors.apply",
+            settingsApply: "action.settings.apply",
+            yoloTrainRefreshBtn: "action.yolo_train.refresh_status",
+            yoloTrainCancelBtn: "action.yolo_train.cancel",
+            yoloTrainStatusText: "status.yolo_train.status_text",
+            yoloDatasetRefresh: "action.yolo_train.dataset_refresh",
+            yoloDatasetSelect: "input.yolo_train.dataset_select",
+            yoloAcceptTos: "input.yolo_train.accept_tos",
+            sam3CachePurge: "action.sam3_train.purge_cache",
+            qwenCachePurge: "action.qwen_train.purge_cache",
+        };
+        Object.entries(selectorMap).forEach(([id, testid]) => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.setAttribute("data-testid", testid);
+            }
+        });
+    }
+
     function datasetActionKey(datasetId, action) {
         return `${datasetId || ""}::${action || ""}`;
     }
@@ -3782,6 +3846,8 @@ const sam3TrainState = {
 	                datasetManagerState.datasets.forEach((entry) => {
 	                    const item = document.createElement("div");
 	                    item.className = "training-history-item";
+                    item.setAttribute("data-testid", "card.datasets.entry");
+                    item.setAttribute("data-dataset-id", String(entry?.id || ""));
 	                    const header = document.createElement("div");
 	                    header.className = "training-history-row";
 	                    const title = document.createElement("div");
@@ -3876,6 +3942,7 @@ const sam3TrainState = {
                     const annotateBtn = document.createElement("button");
                     annotateBtn.type = "button";
                     annotateBtn.className = "button button-outline";
+                    annotateBtn.setAttribute("data-testid", "action.datasets.card.open_annotation");
                     annotateBtn.textContent = "Open in annotation";
                     annotateBtn.title = "Load this dataset directly into the Label Images tab.";
                     annotateBtn.addEventListener("click", () => {
@@ -3891,6 +3958,7 @@ const sam3TrainState = {
                     const downloadBtn = document.createElement("button");
 	                    downloadBtn.type = "button";
                     downloadBtn.className = "button button-outline";
+                    downloadBtn.setAttribute("data-testid", "action.datasets.card.download");
                     downloadBtn.textContent = "Download";
                     downloadBtn.title = "Download this dataset as a zip.";
                     downloadBtn.disabled = datasetManagerState.actionInFlight.has(datasetActionKey(entry.id, "download"));
@@ -3899,6 +3967,7 @@ const sam3TrainState = {
                     const convertBtn = document.createElement("button");
                     convertBtn.type = "button";
                     convertBtn.className = "button button-outline";
+                    convertBtn.setAttribute("data-testid", "action.datasets.card.convert");
                     const isSeg = entry.type === "seg";
                     const cocoReady = isSeg ? !!entry.coco_seg_ready : !!entry.coco_ready;
                     if (isSeg) {
@@ -3919,6 +3988,7 @@ const sam3TrainState = {
                     const qwenBtn = document.createElement("button");
                     qwenBtn.type = "button";
                     qwenBtn.className = "button button-outline";
+                    qwenBtn.setAttribute("data-testid", "action.datasets.card.build_qwen");
                     const qwenEligible = !!entry.yolo_ready;
                     qwenBtn.textContent = entry.qwen_ready ? "Qwen3 ready" : "Build Qwen3";
                     qwenBtn.disabled = !!entry.qwen_ready
@@ -3938,6 +4008,7 @@ const sam3TrainState = {
 	                    const delBtn = document.createElement("button");
 	                    delBtn.type = "button";
 	                    delBtn.className = "button button-outline";
+                    delBtn.setAttribute("data-testid", "action.datasets.card.delete");
 	                    delBtn.textContent = "Delete";
                     if ((entry.storage_mode || "").toLowerCase() === "linked") {
                         delBtn.title = "Deletes only this library record and overlay metadata.";
@@ -15088,6 +15159,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function setupTabNavigation() {
         tabElements.labelingButton = document.getElementById("tabLabelingButton");
+        tabElements.prepassBuilderButton = document.getElementById("tabPrepassBuilderButton");
         tabElements.trainingButton = document.getElementById("tabTrainingButton");
         tabElements.qwenTrainButton = document.getElementById("tabQwenTrainButton");
         tabElements.sam3TrainButton = document.getElementById("tabSam3TrainButton");
@@ -15103,6 +15175,7 @@ async function cancelRfDetrTrainingJobRequest() {
         tabElements.predictorsButton = document.getElementById("tabPredictorsButton");
         tabElements.settingsButton = document.getElementById("tabSettingsButton");
         tabElements.labelingPanel = document.getElementById("tabLabeling");
+        tabElements.prepassBuilderPanel = document.getElementById("tabPrepassBuilder");
         tabElements.trainingPanel = document.getElementById("tabTraining");
         tabElements.qwenTrainPanel = document.getElementById("tabQwenTrain");
         tabElements.sam3TrainPanel = document.getElementById("tabSam3Train");
@@ -15119,6 +15192,9 @@ async function cancelRfDetrTrainingJobRequest() {
         tabElements.settingsPanel = document.getElementById("tabSettings");
         if (tabElements.labelingButton) {
             tabElements.labelingButton.addEventListener("click", () => setActiveTab(TAB_LABELING));
+        }
+        if (tabElements.prepassBuilderButton) {
+            tabElements.prepassBuilderButton.addEventListener("click", () => setActiveTab(TAB_PREPASS_BUILDER));
         }
         if (tabElements.trainingButton) {
             tabElements.trainingButton.addEventListener("click", () => setActiveTab(TAB_TRAINING));
@@ -15171,6 +15247,9 @@ async function cancelRfDetrTrainingJobRequest() {
         if (tabElements.labelingButton) {
             tabElements.labelingButton.classList.toggle("active", tabName === TAB_LABELING);
         }
+        if (tabElements.prepassBuilderButton) {
+            tabElements.prepassBuilderButton.classList.toggle("active", tabName === TAB_PREPASS_BUILDER);
+        }
         if (tabElements.trainingButton) {
             tabElements.trainingButton.classList.toggle("active", tabName === TAB_TRAINING);
         }
@@ -15215,6 +15294,9 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (tabElements.labelingPanel) {
             tabElements.labelingPanel.classList.toggle("active", tabName === TAB_LABELING);
+        }
+        if (tabElements.prepassBuilderPanel) {
+            tabElements.prepassBuilderPanel.classList.toggle("active", tabName === TAB_PREPASS_BUILDER);
         }
         if (tabElements.trainingPanel) {
             tabElements.trainingPanel.classList.toggle("active", tabName === TAB_TRAINING);
@@ -17739,7 +17821,7 @@ async function cancelRfDetrTrainingJobRequest() {
             refreshQwenAgentDatasets().catch((err) => console.error("Failed to refresh agent datasets", err));
             refreshQwenAgentClassifiers().catch((err) => console.error("Failed to refresh agent classifiers", err));
             refreshQwenAgentEnsembleJobs().catch((err) => console.error("Failed to refresh ensemble jobs", err));
-            refreshPrepassRecipes().catch((err) => console.error("Failed to refresh prepass recipes", err));
+            refreshPrepassRecipes().catch((err) => console.error("Failed to refresh EDRs", err));
             return;
         }
         qwenPanelInitialized = true;
@@ -17852,6 +17934,9 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.calibrationDataset = document.getElementById("qwenCalibrationDataset");
         qwenElements.calibrationDatasetRefresh = document.getElementById("qwenCalibrationDatasetRefresh");
         qwenElements.calibrationImageCount = document.getElementById("qwenCalibrationImageCount");
+        qwenElements.calibrationRecipeMode = document.getElementById("qwenCalibrationRecipeMode");
+        qwenElements.calibrationLaneSelection = document.getElementById("qwenCalibrationLaneSelection");
+        qwenElements.calibrationRecipeInfo = document.getElementById("qwenCalibrationRecipeInfo");
         qwenElements.calibrationMaxTerms = document.getElementById("qwenCalibrationMaxTerms");
         qwenElements.calibrationBaseFp = document.getElementById("qwenCalibrationBaseFp");
         qwenElements.calibrationRelaxFp = document.getElementById("qwenCalibrationRelaxFp");
@@ -17867,6 +17952,15 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.calibrationSupportIou = document.getElementById("qwenCalibrationSupportIou");
         qwenElements.calibrationRun = document.getElementById("qwenCalibrationRun");
         qwenElements.calibrationCancel = document.getElementById("qwenCalibrationCancel");
+        qwenElements.calibrationReportWrap = document.getElementById("qwenCalibrationReportWrap");
+        qwenElements.calibrationReportSummary = document.getElementById("qwenCalibrationReportSummary");
+        qwenElements.calibrationReportStatus = document.getElementById("qwenCalibrationReportStatus");
+        qwenElements.calibrationReportOverview = document.getElementById("qwenCalibrationReportOverview");
+        qwenElements.calibrationReportPerClass = document.getElementById("qwenCalibrationReportPerClass");
+        qwenElements.calibrationReportPerSource = document.getElementById("qwenCalibrationReportPerSource");
+        qwenElements.calibrationReportBoundary = document.getElementById("qwenCalibrationReportBoundary");
+        qwenElements.calibrationReportUncertainty = document.getElementById("qwenCalibrationReportUncertainty");
+        qwenElements.calibrationReportDiagnostics = document.getElementById("qwenCalibrationReportDiagnostics");
         onCalibrationProgress((job) => {
             updateCalibrationProgressUi(job);
         });
@@ -18261,7 +18355,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (qwenElements.prepassRecipeRefresh) {
             qwenElements.prepassRecipeRefresh.addEventListener("click", () => {
                 refreshPrepassRecipes().catch((error) => {
-                    console.error("Failed to refresh prepass recipes", error);
+                    console.error("Failed to refresh EDRs", error);
                 });
             });
         }
@@ -18370,7 +18464,7 @@ async function cancelRfDetrTrainingJobRequest() {
             console.debug("Unable to load agent detector runs", error);
         });
         refreshPrepassRecipes().catch((error) => {
-            console.debug("Unable to load prepass recipes", error);
+            console.debug("Unable to load EDRs", error);
         });
         initSam3TextUi();
         updateSam3TextButtons();
@@ -21852,6 +21946,13 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.calibrationStatus.textContent = message || "";
     }
 
+    function setCalibrationRecipeInfo(message) {
+        if (!qwenElements.calibrationRecipeInfo) {
+            return;
+        }
+        qwenElements.calibrationRecipeInfo.textContent = message || "";
+    }
+
     function isGpuHeavyLockActive() {
         return !!automationLockState.active;
     }
@@ -21876,6 +21977,26 @@ async function cancelRfDetrTrainingJobRequest() {
         });
     }
 
+    function formatCalibrationStepSummary(job) {
+        if (!job || typeof job !== "object") {
+            return "";
+        }
+        const stepCurrent = Number.isFinite(job.step_current) ? Math.max(0, Number(job.step_current)) : 0;
+        const stepTotal = Number.isFinite(job.step_total) ? Math.max(0, Number(job.step_total)) : 0;
+        const substepCurrent = Number.isFinite(job.substep_current) ? Math.max(0, Number(job.substep_current)) : 0;
+        const substepTotal = Number.isFinite(job.substep_total) ? Math.max(0, Number(job.substep_total)) : 0;
+        const substepLabel = String(job.substep_label || "").trim();
+        const bits = [];
+        if (stepCurrent > 0 && stepTotal > 0) {
+            bits.push(`Step ${stepCurrent}/${stepTotal}`);
+        }
+        if (substepCurrent > 0 && substepTotal > 0) {
+            const suffix = substepLabel ? ` (${substepLabel})` : "";
+            bits.push(`EDR discovery ${substepCurrent}/${substepTotal}${suffix}`);
+        }
+        return bits.join(" • ");
+    }
+
     function updateCalibrationProgressUi(job) {
         if (!qwenElements.calibrationProgressWrap || !qwenElements.calibrationProgressFill || !qwenElements.calibrationProgressText) {
             return;
@@ -21892,11 +22013,307 @@ async function cancelRfDetrTrainingJobRequest() {
         const message = String(job.message || phase);
         const processed = Number.isFinite(job.processed) ? Number(job.processed) : 0;
         const total = Number.isFinite(job.total) ? Number(job.total) : 0;
+        const stepSummary = formatCalibrationStepSummary(job);
         qwenElements.calibrationProgressWrap.hidden = false;
         qwenElements.calibrationProgressFill.style.width = `${percent}%`;
-        qwenElements.calibrationProgressText.textContent = total > 0
-            ? `${phase}: ${message} • ${percent}% (${processed}/${total})`
-            : `${phase}: ${message} • ${percent}%`;
+        const statusBits = [];
+        if (stepSummary) {
+            statusBits.push(stepSummary);
+        }
+        statusBits.push(`${phase}: ${message}`);
+        statusBits.push(total > 0 ? `${percent}% (${processed}/${total})` : `${percent}%`);
+        qwenElements.calibrationProgressText.textContent = statusBits.join(" • ");
+    }
+
+    function clearCalibrationReportUi() {
+        const targets = [
+            qwenElements.calibrationReportOverview,
+            qwenElements.calibrationReportPerClass,
+            qwenElements.calibrationReportPerSource,
+            qwenElements.calibrationReportBoundary,
+            qwenElements.calibrationReportUncertainty,
+            qwenElements.calibrationReportDiagnostics,
+        ];
+        targets.forEach((target) => {
+            if (target) {
+                target.innerHTML = "";
+            }
+        });
+    }
+
+    function setCalibrationReportStatus(message, { visible = true } = {}) {
+        if (!qwenElements.calibrationReportWrap || !qwenElements.calibrationReportStatus || !qwenElements.calibrationReportSummary) {
+            return;
+        }
+        qwenElements.calibrationReportWrap.hidden = !visible;
+        qwenElements.calibrationReportStatus.textContent = message || "";
+        if (!visible) {
+            clearCalibrationReportUi();
+            qwenElements.calibrationReportSummary.textContent = "EDR report bundle";
+        }
+    }
+
+    function createCalibrationReportSection(title) {
+        const wrap = document.createElement("div");
+        const heading = document.createElement("div");
+        heading.style.fontWeight = "600";
+        heading.style.color = "#0f172a";
+        heading.style.marginBottom = "6px";
+        heading.textContent = title;
+        wrap.appendChild(heading);
+        return wrap;
+    }
+
+    function createCalibrationReportTable(headers, rows) {
+        const table = document.createElement("table");
+        table.style.width = "100%";
+        table.style.borderCollapse = "collapse";
+        table.style.fontSize = "12px";
+        const thead = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        headers.forEach((header) => {
+            const cell = document.createElement("th");
+            cell.textContent = header;
+            cell.style.textAlign = "left";
+            cell.style.padding = "6px 8px";
+            cell.style.borderBottom = "1px solid #cbd5e1";
+            cell.style.color = "#334155";
+            headRow.appendChild(cell);
+        });
+        thead.appendChild(headRow);
+        const tbody = document.createElement("tbody");
+        rows.forEach((row) => {
+            const tr = document.createElement("tr");
+            row.forEach((value) => {
+                const cell = document.createElement("td");
+                cell.textContent = value;
+                cell.style.padding = "6px 8px";
+                cell.style.borderBottom = "1px solid #e2e8f0";
+                tr.appendChild(cell);
+            });
+            tbody.appendChild(tr);
+        });
+        table.appendChild(thead);
+        table.appendChild(tbody);
+        return table;
+    }
+
+    function formatCalibrationMetric(value, digits = 4) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+            return "0";
+        }
+        return numeric.toFixed(digits);
+    }
+
+    function renderCalibrationReportOverview(bundle) {
+        if (!qwenElements.calibrationReportOverview) {
+            return;
+        }
+        qwenElements.calibrationReportOverview.innerHTML = "";
+        const section = createCalibrationReportSection("Overview");
+        const overall = bundle?.overall_metrics || {};
+        const selection = bundle?.selection_summary || {};
+        const policy = bundle?.policy_layer || {};
+        const list = document.createElement("div");
+        list.className = "training-help";
+        const winner = selection.selected_policy_variant || selection.winner || selection.winner_lane || "n/a";
+        const bits = [
+            `Winner: ${winner}`,
+            `Precision: ${formatCalibrationMetric(overall.precision)}`,
+            `Recall: ${formatCalibrationMetric(overall.recall)}`,
+            `F1: ${formatCalibrationMetric(overall.f1)}`,
+        ];
+        if (Number.isFinite(Number(overall.coverage_preservation))) {
+            bits.push(`Coverage preservation: ${formatCalibrationMetric(overall.coverage_preservation)}`);
+        }
+        if (policy && policy.selected_variant) {
+            bits.push(`Selected policy layer: ${policy.selected_variant}`);
+        }
+        list.textContent = bits.join(" • ");
+        section.appendChild(list);
+        qwenElements.calibrationReportOverview.appendChild(section);
+    }
+
+    function renderCalibrationPerClassTable(rows) {
+        if (!qwenElements.calibrationReportPerClass) {
+            return;
+        }
+        qwenElements.calibrationReportPerClass.innerHTML = "";
+        if (!Array.isArray(rows) || !rows.length) {
+            return;
+        }
+        const section = createCalibrationReportSection("Per-class metrics");
+        section.appendChild(
+            createCalibrationReportTable(
+                ["Label", "TP", "FP", "FN", "P", "R", "F1"],
+                rows.map((row) => [
+                    String(row.label || ""),
+                    String(row.tp ?? 0),
+                    String(row.fp ?? 0),
+                    String(row.fn ?? 0),
+                    formatCalibrationMetric(row.precision),
+                    formatCalibrationMetric(row.recall),
+                    formatCalibrationMetric(row.f1),
+                ]),
+            ),
+        );
+        qwenElements.calibrationReportPerClass.appendChild(section);
+    }
+
+    function renderCalibrationPerSourceTable(rows) {
+        if (!qwenElements.calibrationReportPerSource) {
+            return;
+        }
+        qwenElements.calibrationReportPerSource.innerHTML = "";
+        if (!Array.isArray(rows) || !rows.length) {
+            return;
+        }
+        const section = createCalibrationReportSection("Per-class / source attribution");
+        section.appendChild(
+            createCalibrationReportTable(
+                ["Label", "Source", "TP", "FP", "Accepted", "Precision"],
+                rows.slice(0, 80).map((row) => [
+                    String(row.label || ""),
+                    String(row.primary_source || row.source || ""),
+                    String(row.tp ?? 0),
+                    String(row.fp ?? 0),
+                    String(row.accepted ?? 0),
+                    formatCalibrationMetric(row.precision),
+                ]),
+            ),
+        );
+        qwenElements.calibrationReportPerSource.appendChild(section);
+    }
+
+    function renderCalibrationBoundarySummary(boundary) {
+        if (!qwenElements.calibrationReportBoundary) {
+            return;
+        }
+        qwenElements.calibrationReportBoundary.innerHTML = "";
+        if (!boundary || typeof boundary !== "object") {
+            return;
+        }
+        const section = createCalibrationReportSection("Boundary-hit diagnostics");
+        const info = document.createElement("div");
+        info.className = "training-help";
+        info.textContent = `Decision rows: ${boundary.decision_rows || 0}`;
+        section.appendChild(info);
+        const buckets = boundary.buckets || {};
+        const bucketRows = Object.keys(buckets).sort().map((key) => {
+            const row = buckets[key] || {};
+            return [
+                key,
+                String(row.accepted || 0),
+                String(row.rejected || 0),
+                String(row.positive_rows || 0),
+                String(row.negative_rows || 0),
+            ];
+        });
+        if (bucketRows.length) {
+            section.appendChild(
+                createCalibrationReportTable(
+                    ["Bucket", "Accepted", "Rejected", "Positive rows", "Negative rows"],
+                    bucketRows,
+                ),
+            );
+        }
+        qwenElements.calibrationReportBoundary.appendChild(section);
+    }
+
+    function renderCalibrationSeedUncertainty(summary) {
+        if (!qwenElements.calibrationReportUncertainty) {
+            return;
+        }
+        qwenElements.calibrationReportUncertainty.innerHTML = "";
+        const metrics = summary?.metrics;
+        if (!metrics || typeof metrics !== "object") {
+            return;
+        }
+        const section = createCalibrationReportSection("Seed uncertainty");
+        section.appendChild(
+            createCalibrationReportTable(
+                ["Metric", "Mean", "Std", "Min", "Max"],
+                Object.entries(metrics).map(([name, payload]) => [
+                    name,
+                    formatCalibrationMetric(payload?.mean),
+                    formatCalibrationMetric(payload?.std),
+                    formatCalibrationMetric(payload?.min),
+                    formatCalibrationMetric(payload?.max),
+                ]),
+            ),
+        );
+        qwenElements.calibrationReportUncertainty.appendChild(section);
+    }
+
+    function renderCalibrationDiagnostics(diag) {
+        if (!qwenElements.calibrationReportDiagnostics) {
+            return;
+        }
+        qwenElements.calibrationReportDiagnostics.innerHTML = "";
+        if (!diag || typeof diag !== "object") {
+            return;
+        }
+        const section = createCalibrationReportSection("Calibration diagnostics");
+        const summary = document.createElement("div");
+        summary.className = "training-help";
+        summary.textContent = `Candidates: ${diag.candidate_count || 0} • Brier: ${formatCalibrationMetric(diag.brier_score, 6)} • ECE(10): ${formatCalibrationMetric(diag.ece_10, 6)}`;
+        section.appendChild(summary);
+        const bins = Array.isArray(diag.bins) ? diag.bins : [];
+        if (bins.length) {
+            section.appendChild(
+                createCalibrationReportTable(
+                    ["Bin", "Range", "Count", "Mean prob", "Positive rate"],
+                    bins.map((row) => [
+                        String(row.bin_index ?? ""),
+                        `${formatCalibrationMetric(row.lower, 2)}-${formatCalibrationMetric(row.upper, 2)}`,
+                        String(row.count ?? 0),
+                        formatCalibrationMetric(row.mean_prob),
+                        formatCalibrationMetric(row.positive_rate),
+                    ]),
+                ),
+            );
+        }
+        qwenElements.calibrationReportDiagnostics.appendChild(section);
+    }
+
+    function renderCalibrationReportBundle(bundle) {
+        if (!qwenElements.calibrationReportWrap || !bundle || typeof bundle !== "object") {
+            setCalibrationReportStatus("No EDR report bundle available yet.", { visible: false });
+            return;
+        }
+        const selection = bundle.selection_summary || {};
+        const overall = bundle.overall_metrics || {};
+        const winner = selection.selected_policy_variant || selection.winner || selection.winner_lane || "result";
+        qwenElements.calibrationReportWrap.hidden = false;
+        qwenElements.calibrationReportSummary.textContent = `EDR report bundle • ${winner} • F1 ${formatCalibrationMetric(overall.f1)}`;
+        qwenElements.calibrationReportStatus.textContent = "Loaded from completed EDR build.";
+        renderCalibrationReportOverview(bundle);
+        renderCalibrationPerClassTable(bundle.per_class);
+        renderCalibrationPerSourceTable(bundle.per_class_per_source);
+        renderCalibrationBoundarySummary(bundle.boundary_hits);
+        renderCalibrationSeedUncertainty(bundle.seed_uncertainty);
+        renderCalibrationDiagnostics(bundle.calibration_diagnostics);
+    }
+
+    async function fetchCalibrationReportBundle(jobId) {
+        if (!jobId) {
+            setCalibrationReportStatus("No EDR report bundle available yet.", { visible: false });
+            return;
+        }
+        setCalibrationReportStatus("Loading EDR report bundle…", { visible: true });
+        clearCalibrationReportUi();
+        try {
+            const resp = await fetch(`${API_ROOT}/calibration/jobs/${encodeURIComponent(jobId)}/artifacts/report_bundle`);
+            if (!resp.ok) {
+                throw new Error((await resp.text()) || `HTTP ${resp.status}`);
+            }
+            const bundle = await resp.json();
+            renderCalibrationReportBundle(bundle);
+        } catch (error) {
+            console.debug("EDR report bundle unavailable", error);
+            setCalibrationReportStatus("No EDR report bundle available for this build.", { visible: false });
+        }
     }
 
     function updateQwenAgentButtons() {
@@ -22333,6 +22750,8 @@ async function cancelRfDetrTrainingJobRequest() {
             throw new Error("Select a dataset for calibration.");
         }
         const imageCount = parseInt(qwenElements.calibrationImageCount?.value || "2000", 10);
+        const recipeMode = (qwenElements.calibrationRecipeMode?.value || "auto").trim().toLowerCase();
+        const laneSelection = (qwenElements.calibrationLaneSelection?.value || "window").trim().toLowerCase();
         const maxTermsRaw = (qwenElements.calibrationMaxTerms?.value || "").trim();
         const maxTerms = maxTermsRaw === "" ? NaN : parseInt(maxTermsRaw, 10);
         const baseFp = parseFloat(qwenElements.calibrationBaseFp?.value || "0.2");
@@ -22391,6 +22810,8 @@ async function cancelRfDetrTrainingJobRequest() {
         return {
             dataset_id: datasetId,
             max_images: Number.isFinite(imageCount) ? imageCount : 2000,
+            recipe_mode: recipeMode || "auto",
+            lane_selection: laneSelection || "window",
             sam3_text_synonym_budget: expandGlossary ? (Number.isFinite(maxTerms) ? maxTerms : null) : 0,
             sam3_text_window_extension: sam3TextWindowExtension,
             sam3_text_window_mode: sam3TextWindowMode || "grid",
@@ -22457,10 +22878,12 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         setCalibrationStatus("Starting…");
+        setCalibrationRecipeInfo(`EDR mode: ${String(payload.recipe_mode || "auto").replaceAll("_", " ")} • lane ${String(payload.lane_selection || "window").replaceAll("_", " ")}. Preparing EDR build…`);
+        setCalibrationReportStatus("No EDR report bundle available yet.", { visible: false });
         updateCalibrationProgressUi({
             progress: 0,
             phase: "queue",
-            message: "Submitting calibration job",
+            message: "Submitting EDR build",
             processed: 0,
             total: Number.isFinite(payload.max_images) ? payload.max_images : 0,
         });
@@ -22480,18 +22903,19 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenCalibrationState.jobId = job.job_id;
             qwenCalibrationState.pollRequestId += 1;
             qwenCalibrationState.pollInFlight = false;
-            qwenCalibrationState.overlay = showProgressModal("Calibration starting…");
+            qwenCalibrationState.overlay = showProgressModal("EDR build starting…");
             refreshAutomationLockStatus().catch((error) => {
                 console.debug("Automation-lock refresh failed after calibration start", error);
             });
             emitCalibrationProgress({
                 progress: 0,
                 phase: "queue",
-                message: "Calibration job queued",
+                message: "EDR build queued",
                 processed: 0,
                 total: Number.isFinite(payload.max_images) ? payload.max_images : 0,
             });
             setCalibrationStatus("Running");
+            setCalibrationRecipeInfo(`EDR mode: ${String(payload.recipe_mode || "auto").replaceAll("_", " ")} • lane ${String(payload.lane_selection || "window").replaceAll("_", " ")}. Build queued.`);
             updateCalibrationButtons();
             pollCalibrationJob().catch((error) => {
                 console.error("Calibration poll start failed", error);
@@ -22500,7 +22924,7 @@ async function cancelRfDetrTrainingJobRequest() {
             setCalibrationStatus("Error");
             emitCalibrationProgress(null);
             updateCalibrationButtons();
-            setSamStatus(`Calibration error: ${error.message || error}`, { variant: "error", duration: 5000 });
+            setSamStatus(`EDR build error: ${error.message || error}`, { variant: "error", duration: 5000 });
         } finally {
             qwenCalibrationState.startInFlight = false;
             updateCalibrationButtons();
@@ -22539,7 +22963,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 select.innerHTML = "";
                 const placeholder = document.createElement("option");
                 placeholder.value = "";
-                placeholder.textContent = "Select recipe";
+                placeholder.textContent = "Select EDR";
                 select.appendChild(placeholder);
                 items.forEach((item) => {
                     const option = document.createElement("option");
@@ -22557,7 +22981,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (requestId !== prepassRecipeRefreshRequestId) {
                 return;
             }
-            console.error("Failed to load recipes", error);
+            console.error("Failed to load EDRs", error);
         } finally {
             if (
                 requestId === prepassRecipeRefreshRequestId
@@ -22569,7 +22993,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (prepassRecipeRefreshNeedsRefresh) {
                 prepassRecipeRefreshNeedsRefresh = false;
                 refreshPrepassRecipes().catch((error) => {
-                    console.error("Queued prepass recipe refresh failed", error);
+                    console.error("Queued EDR refresh failed", error);
                 });
             }
         }
@@ -22723,7 +23147,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const name = (qwenElements.agentRecipeName?.value || "").trim();
         if (!name) {
-            setSamStatus("Recipe name required.", { variant: "warn", duration: 3000 });
+            setSamStatus("EDR name required.", { variant: "warn", duration: 3000 });
             return;
         }
         const description = (qwenElements.agentRecipeDescription?.value || "").trim();
@@ -22743,7 +23167,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 throw new Error(await resp.text());
             }
             await refreshPrepassRecipes();
-            setSamStatus("Recipe saved.", { variant: "info", duration: 2500 });
+            setSamStatus("EDR saved.", { variant: "info", duration: 2500 });
         } catch (error) {
             setSamStatus(`Save failed: ${error.message || error}`, { variant: "error", duration: 4000 });
         } finally {
@@ -22766,7 +23190,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const recipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select a recipe to load.", { variant: "warn", duration: 2500 });
+            setSamStatus("Select an EDR to load.", { variant: "warn", duration: 2500 });
             return;
         }
         const requestId = prepassRecipeEditorLoadRequestId + 1;
@@ -22790,7 +23214,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 qwenElements.prepassRecipeSelect.value = recipeId;
             }
             applyPrepassRecipeConfig(data.config || {}, data.glossary || "", { recipeId });
-            setSamStatus("Recipe loaded.", { variant: "info", duration: 2500 });
+            setSamStatus("EDR loaded.", { variant: "info", duration: 2500 });
         } catch (error) {
             if (requestId !== prepassRecipeEditorLoadRequestId) {
                 return;
@@ -22815,7 +23239,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 qwenElements.agentRecipeSelect.value = "";
             }
             if (!suppressMissingWarning) {
-                setSamStatus("Select a recipe before running prepass.", { variant: "warn", duration: 2500 });
+                setSamStatus("Select an EDR before running inference.", { variant: "warn", duration: 2500 });
             }
             return null;
         }
@@ -22840,7 +23264,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (requestId !== prepassRecipeLoadRequestId) {
                 return null;
             }
-            setSamStatus(`Recipe load failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+            setSamStatus(`EDR load failed: ${error.message || error}`, { variant: "error", duration: 4000 });
             return null;
         }
     }
@@ -22851,10 +23275,10 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const recipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select a recipe to delete.", { variant: "warn", duration: 2500 });
+            setSamStatus("Select an EDR to delete.", { variant: "warn", duration: 2500 });
             return;
         }
-        if (!confirm("Delete this recipe? This cannot be undone.")) {
+        if (!confirm("Delete this EDR? This cannot be undone.")) {
             return;
         }
         prepassRecipeDeleteInFlight = true;
@@ -22865,7 +23289,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 throw new Error(await resp.text());
             }
             await refreshPrepassRecipes();
-            setSamStatus("Recipe deleted.", { variant: "info", duration: 2500 });
+            setSamStatus("EDR deleted.", { variant: "info", duration: 2500 });
         } catch (error) {
             setSamStatus(`Delete failed: ${error.message || error}`, { variant: "error", duration: 4000 });
         } finally {
@@ -22880,7 +23304,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const recipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select a recipe to export.", { variant: "warn", duration: 2500 });
+            setSamStatus("Select an EDR to export.", { variant: "warn", duration: 2500 });
             return;
         }
         prepassRecipeExportInFlight = true;
@@ -22912,7 +23336,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             const payload = await resp.json();
             await refreshPrepassRecipes();
-            const notice = payload?.notice || "Recipe imported.";
+            const notice = payload?.notice || "EDR imported.";
             setSamStatus(notice, { variant: "info", duration: 4000 });
         } catch (error) {
             setSamStatus(`Import failed: ${error.message || error}`, { variant: "error", duration: 4000 });
@@ -22955,11 +23379,20 @@ async function cancelRfDetrTrainingJobRequest() {
                 const total = Number.isFinite(job.total) ? job.total : 0;
                 const phase = job.phase || job.status || "running";
                 const message = job.message || phase;
+                const recipeMode = String(job?.result?.recipe_mode || job?.request?.recipe_mode || qwenElements.calibrationRecipeMode?.value || "auto");
+                const laneSelection = String(job?.result?.lane_selection || job?.request?.lane_selection || qwenElements.calibrationLaneSelection?.value || "window");
+                const recipeFingerprint = String(job?.result?.recipe_fingerprint || job?.request?.recipe_fingerprint || "").trim();
+                const recipeState = job?.result?.recipe_discovered
+                    ? "EDR discovered"
+                    : (job?.result?.recipe_reused ? "EDR reused" : "EDR pending");
+                const fingerprintSuffix = recipeFingerprint ? ` • ${recipeFingerprint.slice(0, 10)}` : "";
+                setCalibrationRecipeInfo(`${recipeState} • mode ${recipeMode.replaceAll("_", " ")} • lane ${laneSelection.replaceAll("_", " ")}${fingerprintSuffix}`);
                 emitCalibrationProgress(job);
                 if (qwenCalibrationState.overlay) {
+                    const stepSummary = formatCalibrationStepSummary(job);
                     const detail = total > 0
-                        ? `Calibration ${phase}: ${message} (${processed}/${total})`
-                        : `Calibration ${phase}: ${message}`;
+                        ? `${stepSummary ? `${stepSummary} • ` : ""}EDR build ${phase}: ${message} (${processed}/${total})`
+                        : `${stepSummary ? `${stepSummary} • ` : ""}EDR build ${phase}: ${message}`;
                     qwenCalibrationState.overlay.update(detail, (Number.isFinite(job.progress) ? job.progress : 0));
                 }
                 if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
@@ -22979,9 +23412,22 @@ async function cancelRfDetrTrainingJobRequest() {
                     setCalibrationStatus(job.status === "completed" ? "Done" : job.status);
                     updateCalibrationButtons();
                     if (job.status === "completed") {
-                        enqueueTaskNotice("Calibration completed.", { durationMs: 4500 });
-                    } else if (job.error) {
-                        setSamStatus(`Calibration error: ${job.error}`, { variant: "error", duration: 5000 });
+                        const selectedPolicy = job?.result?.policy_layer_summary?.selected_variant;
+                        const suffix = selectedPolicy ? ` Selected policy: ${selectedPolicy}.` : "";
+                        const recipeSummary = job?.result?.recipe_discovered
+                            ? " EDR discovered and promoted."
+                            : (job?.result?.recipe_reused ? " Promoted EDR reused." : "");
+                        enqueueTaskNotice(`EDR build completed.${suffix}`, { durationMs: 5000 });
+                        setCalibrationRecipeInfo(`${job?.result?.recipe_discovered ? "EDR discovered" : (job?.result?.recipe_reused ? "EDR reused" : "EDR applied")} • lane ${laneSelection.replaceAll("_", " ")}${recipeFingerprint ? ` • ${recipeFingerprint.slice(0, 10)}` : ""}.${recipeSummary}`.trim());
+                        fetchCalibrationReportBundle(job.job_id).catch((error) => {
+                            console.debug("EDR report fetch failed", error);
+                        });
+                    } else {
+                        setCalibrationRecipeInfo("EDR flow did not complete.");
+                        setCalibrationReportStatus("No EDR report bundle available for this build.", { visible: false });
+                        if (job.error) {
+                            setSamStatus(`EDR build error: ${job.error}`, { variant: "error", duration: 5000 });
+                        }
                     }
                 }
             } catch (error) {
@@ -22991,12 +23437,12 @@ async function cancelRfDetrTrainingJobRequest() {
                 emitCalibrationProgress({
                     progress: 0,
                     phase: "error",
-                    message: `Calibration status error: ${error.message || error}`,
+                    message: `EDR status error: ${error.message || error}`,
                     processed: 0,
                     total: 0,
                 });
                 if (qwenCalibrationState.overlay) {
-                    qwenCalibrationState.overlay.update(`Calibration status error: ${error.message || error}`, 0);
+                    qwenCalibrationState.overlay.update(`EDR status error: ${error.message || error}`, 0);
                 }
             } finally {
                 qwenCalibrationState.pollInFlight = false;
@@ -28345,6 +28791,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     document.addEventListener("DOMContentLoaded", () => {
         initHelpTooltips();
+        applyPlaywrightTestIds();
         autoModeCheckbox = document.getElementById("autoMode");
         autoClassMarginEnabledCheckbox = document.getElementById("autoClassMarginEnabled");
         autoClassMarginValueInput = document.getElementById("autoClassMarginValue");

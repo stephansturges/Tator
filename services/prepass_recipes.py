@@ -1,4 +1,4 @@
-"""Prepass recipe helpers."""
+"""EDR helpers for the legacy prepass-recipe compatibility layer."""
 
 from __future__ import annotations
 

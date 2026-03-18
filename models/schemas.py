@@ -1061,7 +1061,7 @@ class QwenPrepassRequest(BaseModel):
     sam_variant: Optional[str] = "sam3"
     enable_sam3_text: Optional[bool] = True
     sam3_text_synonym_budget: Optional[int] = 10
-    sam3_text_window_extension: Optional[bool] = False
+    sam3_text_window_extension: Optional[bool] = True
     sam3_text_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
     sam3_text_window_size: Optional[int] = None
     sam3_text_window_overlap: Optional[float] = None
@@ -1077,7 +1077,7 @@ class QwenPrepassRequest(BaseModel):
     similarity_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
     similarity_window_size: Optional[int] = None
     similarity_window_overlap: Optional[float] = None
-    similarity_window_extension: Optional[bool] = False
+    similarity_window_extension: Optional[bool] = True
     prepass_mode: Optional[str] = "ensemble_sahi_sam3_text_similarity"
     prepass_only: Optional[bool] = True
     prepass_finalize: Optional[bool] = True
@@ -1124,6 +1124,8 @@ class CalibrationRequest(BaseModel):
     dataset_id: str
     max_images: Optional[int] = 2000
     seed: Optional[int] = 42
+    recipe_mode: Optional[Literal["auto", "reuse_only", "force_rediscover"]] = "auto"
+    lane_selection: Optional[Literal["window", "nonwindow", "compare_both"]] = "window"
     enable_yolo: Optional[bool] = True
     enable_rfdetr: Optional[bool] = True
     base_fp_ratio: Optional[float] = 0.2
@@ -1135,7 +1137,7 @@ class CalibrationRequest(BaseModel):
     target_fp_ratio_by_label_json: Optional[str] = None
     min_recall_by_label_json: Optional[str] = None
     sam3_text_synonym_budget: Optional[int] = 10
-    sam3_text_window_extension: Optional[bool] = False
+    sam3_text_window_extension: Optional[bool] = True
     sam3_text_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
     sam3_text_window_size: Optional[int] = None
     sam3_text_window_overlap: Optional[float] = None
@@ -1143,6 +1145,8 @@ class CalibrationRequest(BaseModel):
     prepass_similarity_score: Optional[float] = 0.3
     sam3_score_thr: Optional[float] = 0.2
     sam3_mask_threshold: Optional[float] = 0.2
+    image_embed_proj_dim: Optional[int] = 0
+    image_embed_proj_seed: Optional[int] = 4242
     similarity_min_exemplar_score: Optional[float] = 0.6
     similarity_exemplar_count: Optional[int] = 3
     similarity_exemplar_strategy: Optional[Literal["top", "random", "diverse"]] = "top"
@@ -1151,8 +1155,8 @@ class CalibrationRequest(BaseModel):
     similarity_exemplar_min: Optional[int] = 3
     similarity_exemplar_max: Optional[int] = 12
     similarity_exemplar_source_quota: Optional[int] = 1
-    similarity_window_extension: Optional[bool] = False
-    similarity_window_mode: Optional[Literal["grid", "sahi"]] = None
+    similarity_window_extension: Optional[bool] = True
+    similarity_window_mode: Optional[Literal["grid", "sahi"]] = "grid"
     similarity_window_size: Optional[int] = None
     similarity_window_overlap: Optional[float] = None
     detector_conf: Optional[float] = 0.45
@@ -1194,9 +1198,12 @@ class CalibrationRequest(BaseModel):
     xgb_standardize: Optional[bool] = None
     apply_default_ensemble_policy: Optional[bool] = True
     ensemble_policy_json: Optional[str] = None
-    split_head_by_support: Optional[bool] = True
+    split_head_by_support: Optional[bool] = None
     train_sam3_text_quality: Optional[bool] = True
-    sam3_text_quality_alpha: Optional[float] = 0.35
+    sam3_text_quality_alpha: Optional[float] = None
+    train_sam3_similarity_quality: Optional[bool] = None
+    sam3_similarity_quality_alpha: Optional[float] = None
+    policy_layer_variant: Optional[Literal["none", "bakeoff", "xgb", "lreg"]] = "none"
 
 
 class AgentToolCall(BaseModel):

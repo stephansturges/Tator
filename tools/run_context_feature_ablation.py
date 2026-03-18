@@ -150,7 +150,7 @@ def _default_hp_grid(mode: str) -> list[dict[str, Any]]:
         "reg_lambda": 3.0,
         "reg_alpha": 0.1,
     }
-    best_noimg = {
+    best_baseline = {
         "max_depth": 10,
         "n_estimators": 1200,
         "learning_rate": 0.03,
@@ -173,8 +173,8 @@ def _default_hp_grid(mode: str) -> list[dict[str, Any]]:
         "reg_alpha": 0.0,
     }
     if mode == "pilot_1000":
-        return [best_noimg, best_imgraw, conservative]
-    return [best_noimg]
+        return [best_baseline, best_imgraw, conservative]
+    return [best_baseline]
 
 
 def _load_hp_grid(path_or_json: str, *, mode: str) -> list[dict[str, Any]]:

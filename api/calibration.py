@@ -1,7 +1,7 @@
 """APIRouter for calibration job endpoints."""
 
 
-from typing import Any, Callable, Type
+from typing import Any, Callable, Optional, Type
 
 from fastapi import APIRouter, Body
 
@@ -12,6 +12,7 @@ def build_calibration_router(
     list_fn: Callable[[], Any],
     get_fn: Callable[[str], Any],
     cancel_fn: Callable[[str], Any],
+    report_bundle_fn: Optional[Callable[[str], Any]] = None,
     request_cls: Type[Any],
 ) -> APIRouter:
     router = APIRouter()
@@ -31,5 +32,11 @@ def build_calibration_router(
     @router.post("/calibration/jobs/{job_id}/cancel")
     def cancel_calibration_job(job_id: str):
         return cancel_fn(job_id)
+
+    if report_bundle_fn is not None:
+
+        @router.get("/calibration/jobs/{job_id}/artifacts/report_bundle")
+        def get_calibration_report_bundle(job_id: str):
+            return report_bundle_fn(job_id)
 
     return router

@@ -48,22 +48,22 @@
     </div>
     <div class="tab-shell">
 	        <div class="tab-bar" role="tablist">
-	            <button class="tab-button active" data-tab="labeling" id="tabLabelingButton" type="button">Label Images</button>
-            <button class="tab-button" data-tab="prepass-builder" id="tabPrepassBuilderButton" type="button">Prepass Builder</button>
-            <button class="tab-button" data-tab="training" id="tabTrainingButton" type="button">Train Class Predictor</button>
-            <button class="tab-button" data-tab="qwen-train" id="tabQwenTrainButton" type="button">Train Qwen 3</button>
-            <button class="tab-button" data-tab="sam3-train" id="tabSam3TrainButton" type="button">Train SAM3</button>
-            <button class="tab-button" data-tab="yolo-train" id="tabYoloTrainButton" type="button">Train YOLO</button>
-            <button class="tab-button" data-tab="rfdetr-train" id="tabRfDetrTrainButton" type="button">Train RF-DETR</button>
-            <button class="tab-button" data-tab="agent-mining" id="tabAgentMiningButton" type="button">SAM3 Recipe Mining</button>
-            <button class="tab-button" data-tab="prompt-helper" id="tabPromptHelperButton" type="button">SAM3 Vocabulary Explorer</button>
-            <button class="tab-button" data-tab="datasets" id="tabDatasetsButton" type="button">Dataset Management</button>
-            <button class="tab-button" data-tab="sam3-prompt-models" id="tabSam3PromptModelsButton" type="button">SAM Model Selection</button>
-            <button class="tab-button" data-tab="detectors" id="tabDetectorsButton" type="button">Detector Selection</button>
-            <button class="tab-button" data-tab="active" id="tabActiveButton" type="button">Class Predictor Settings</button>
-            <button class="tab-button" data-tab="qwen" id="tabQwenButton" type="button">Qwen Models</button>
-            <button class="tab-button" data-tab="predictors" id="tabPredictorsButton" type="button">SAM Predictors</button>
-            <button class="tab-button" data-tab="settings" id="tabSettingsButton" type="button">Backend Config</button>
+	            <button class="tab-button active" data-tab="labeling" data-testid="tab.labeling.open" id="tabLabelingButton" type="button">Label Images</button>
+            <button class="tab-button" data-tab="prepass-builder" data-testid="tab.prepass_builder.open" id="tabPrepassBuilderButton" type="button">EDR Builder</button>
+            <button class="tab-button" data-tab="training" data-testid="tab.training.open" id="tabTrainingButton" type="button">Train Class Predictor</button>
+            <button class="tab-button" data-tab="qwen-train" data-testid="tab.qwen_train.open" id="tabQwenTrainButton" type="button">Train Qwen 3</button>
+            <button class="tab-button" data-tab="sam3-train" data-testid="tab.sam3_train.open" id="tabSam3TrainButton" type="button">Train SAM3</button>
+            <button class="tab-button" data-tab="yolo-train" data-testid="tab.yolo_train.open" id="tabYoloTrainButton" type="button">Train YOLO</button>
+            <button class="tab-button" data-tab="rfdetr-train" data-testid="tab.rfdetr_train.open" id="tabRfDetrTrainButton" type="button">Train RF-DETR</button>
+            <button class="tab-button" data-tab="agent-mining" data-testid="tab.agent_mining.open" id="tabAgentMiningButton" type="button">SAM3 Recipe Mining</button>
+            <button class="tab-button" data-tab="prompt-helper" data-testid="tab.prompt_helper.open" id="tabPromptHelperButton" type="button">SAM3 Vocabulary Explorer</button>
+            <button class="tab-button" data-tab="datasets" data-testid="tab.datasets.open" id="tabDatasetsButton" type="button">Dataset Management</button>
+            <button class="tab-button" data-tab="sam3-prompt-models" data-testid="tab.sam3_prompt_models.open" id="tabSam3PromptModelsButton" type="button">SAM Model Selection</button>
+            <button class="tab-button" data-tab="detectors" data-testid="tab.detectors.open" id="tabDetectorsButton" type="button">Detector Selection</button>
+            <button class="tab-button" data-tab="active" data-testid="tab.active_classifier.open" id="tabActiveButton" type="button">Class Predictor Settings</button>
+            <button class="tab-button" data-tab="qwen" data-testid="tab.qwen_models.open" id="tabQwenButton" type="button">Qwen Models</button>
+            <button class="tab-button" data-tab="predictors" data-testid="tab.sam_predictors.open" id="tabPredictorsButton" type="button">SAM Predictors</button>
+            <button class="tab-button" data-tab="settings" data-testid="tab.settings.open" id="tabSettingsButton" type="button">Backend Config</button>
         </div>
         <div class="tab-panels">
             <div class="tab-panel active" id="tabLabeling" data-tab-panel="labeling">
@@ -78,18 +78,18 @@
                             <label for="imageSearch">Search:</label>
                             <input type="text" id="imageSearch" name="imageSearch" />
                             <label for="imageList"></label>
-                            <select name="imageList" id="imageList" size="10" multiple></select>
+                            <select name="imageList" data-testid="input.labeling.image_list" id="imageList" size="10" multiple></select>
                             <div id="imageInformation"></div>
                             <div id="datasetTypeBadge" class="training-help"></div>
                             <div id="annotationSourcePanel" class="training-help" style="margin:8px 0 10px; border-left:3px solid #475569; padding-left:10px;">
-                                <div><strong>Annotation source:</strong> <span id="annotationSourceMode">local files</span></div>
-                                <div id="annotationSourceSummary">Load images + classes from local files, or open a dataset from Dataset Manager.</div>
-                                <div id="annotationSourceLock" style="margin-top:4px;"></div>
+                                <div><strong>Annotation source:</strong> <span data-testid="status.annotation.mode" id="annotationSourceMode">local files</span></div>
+                                <div data-testid="status.annotation.summary" id="annotationSourceSummary">Load images + classes from local files, or open a dataset from Dataset Manager.</div>
+                                <div data-testid="status.annotation.lock" id="annotationSourceLock" style="margin-top:4px;"></div>
                                 <div class="training-actions" style="margin-top:6px;">
-                                    <button type="button" id="annotationTakeoverBtn" class="training-button secondary" disabled>Take over lock</button>
-                                    <button type="button" id="annotationSaveNowBtn" class="training-button secondary" disabled>Save now</button>
-                                    <button type="button" id="annotationReloadBtn" class="training-button secondary" disabled>Reload</button>
-                                    <button type="button" id="annotationCloseBtn" class="training-button secondary" disabled>Close dataset</button>
+                                    <button type="button" data-testid="action.annotation.takeover_lock" id="annotationTakeoverBtn" class="training-button secondary" disabled>Take over lock</button>
+                                    <button type="button" data-testid="action.annotation.save_now" id="annotationSaveNowBtn" class="training-button secondary" disabled>Save now</button>
+                                    <button type="button" data-testid="action.annotation.reload_manifest" id="annotationReloadBtn" class="training-button secondary" disabled>Reload</button>
+                                    <button type="button" data-testid="action.annotation.close_dataset" id="annotationCloseBtn" class="training-button secondary" disabled>Close dataset</button>
                                 </div>
                             </div>
                             <div id="labelingGpuLockNotice" class="automation-lock-panel" style="display:none; margin:8px 0 10px;">
@@ -393,29 +393,29 @@
                                 </div>
                                                                 <div class="qwen-prepass">
                                     <div class="qwen-caption__header">
-                                        <strong>Prepass (inference)</strong>
+                                        <strong>EDR (inference)</strong>
                                         <span id="prepassStatus" class="qwen-caption-status"></span>
                                     </div>
-                                    <div class="training-help">Apply a saved prepass recipe to the current image or the next batch.</div>
+                                    <div class="training-help">Apply a saved Ensemble Detection Recipe (EDR) to the current image or the next batch.</div>
                                     <div class="qwen-caption-row">
-                                        <label for="prepassRecipeSelect">Prepass recipe</label>
+                                        <label for="prepassRecipeSelect">Saved EDR</label>
                                         <select id="prepassRecipeSelect"></select>
                                         <button type="button" id="prepassRecipeRefresh" class="training-button secondary">Refresh</button>
                                     </div>
                                     <div class="qwen-caption-options">
-                                        <label for="prepassBatchCount">Apply prepass to next N images</label>
+                                        <label for="prepassBatchCount">Apply EDR to next N images</label>
                                         <div class="qwen-caption-row">
                                             <input type="number" id="prepassBatchCount" min="1" value="3" />
-                                            <button type="button" id="prepassBatchRun" class="training-button secondary">Run prepass on next N</button>
+                                            <button type="button" id="prepassBatchRun" class="training-button secondary">Run EDR on next N</button>
                                         </div>
                                         <label><input type="checkbox" id="prepassBatchIncludeCurrent" checked /> Include current image</label>
                                     </div>
                                     <div class="training-actions">
-                                        <button type="button" id="prepassRun" class="training-button secondary">Run prepass on image</button>
-                                        <button type="button" id="prepassStop" class="training-button secondary" disabled>Stop prepass</button>
+                                        <button type="button" id="prepassRun" class="training-button secondary">Run EDR on image</button>
+                                        <button type="button" id="prepassStop" class="training-button secondary" disabled>Stop EDR</button>
                                     </div>
                                     <div class="qwen-agent-trace">
-                                        <div class="training-help">Prepass trace (latest steps)</div>
+                                        <div class="training-help">EDR trace (latest steps)</div>
                                         <div id="prepassTraceList" class="qwen-agent-trace__list"></div>
                                     </div>
                                 </div>
@@ -531,37 +531,37 @@
             <div class="tab-panel" id="tabPrepassBuilder" data-tab-panel="prepass-builder">
                 <div class="container">
                     <div class="left">
-                        <h2>Prepass Builder</h2>
-                        <div class="training-help">Build, calibrate, and export prepass recipes. Use the Label Images tab to apply recipes.</div>
+                        <h2>EDR Builder</h2>
+                        <div class="training-help">Build, calibrate, and export Ensemble Detection Recipes (EDRs). Use the Label Images tab to apply saved EDRs.</div>
                         <div class="training-help" style="margin-top:8px; border-left:3px solid #4a5568; padding-left:10px;">
-                            <strong>How this works:</strong> The prepass runs a deterministic pipeline (detectors → SAM3 text → dedupe → SAM3 similarity → dedupe → optional calibration).
-                            Use this panel to define a reusable recipe, then apply it in the Label Images tab. Defaults favor recall; calibration or classifier tightening handles precision.
-                            handles precision later. If you are unsure, keep defaults and only change one knob at a time.
+                            <strong>What an EDR is:</strong> An Ensemble Detection Recipe combines a <strong>prepass</strong> and a <strong>calibration</strong>.
+                            The prepass builds a broad candidate pool from detectors + SAM3. The calibration learns how to filter that pool into cleaner final detections.
+                            Defaults favor recall first; the calibrator and policy settings handle precision later. If you are unsure, keep defaults and only change one knob at a time.
                         </div>
 <div class="qwen-prepass">
                                     <div class="qwen-caption__header">
-                                        <strong>Prepass (detectors + SAM3)</strong>
+                                        <strong>EDR prepass (detectors + SAM3)</strong>
                                         <span id="qwenAgentStatus" class="qwen-caption-status"></span>
                                     </div>
-                                                                        <div class="training-help">Save and reuse prepass recipes across sessions or share them with teammates.</div>
+                                                                        <div class="training-help">Save and reuse EDRs across sessions or share them with teammates.</div>
                                     <div class="qwen-caption-grid">
                                         <div>
-                                            <label for="qwenAgentRecipeName">Recipe name</label>
-                                            <input type="text" id="qwenAgentRecipeName" placeholder="e.g., qwen_dataset_prepass_v1" />
+                                            <label for="qwenAgentRecipeName">EDR name</label>
+                                            <input type="text" id="qwenAgentRecipeName" placeholder="e.g., qwen_dataset_edr_v1" />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentRecipeSelect">Saved recipes</label>
+                                            <label for="qwenAgentRecipeSelect">Saved EDRs</label>
                                             <select id="qwenAgentRecipeSelect"></select>
                                         </div>
                                         <div>
                                             <label for="qwenAgentRecipeDescription">Description</label>
-                                            <input type="text" id="qwenAgentRecipeDescription" placeholder="Optional notes for this recipe" />
+                                            <input type="text" id="qwenAgentRecipeDescription" placeholder="Optional notes for this EDR" />
                                         </div>
                                         <div>
                                             <label>&nbsp;</label>
                                             <div class="qwen-caption-row">
-                                                <button type="button" id="qwenAgentRecipeSave" class="training-button secondary">Save recipe</button>
-                                                <button type="button" id="qwenAgentRecipeLoad" class="training-button secondary">Load recipe</button>
+                                                <button type="button" id="qwenAgentRecipeSave" class="training-button secondary">Save EDR</button>
+                                                <button type="button" id="qwenAgentRecipeLoad" class="training-button secondary">Load EDR</button>
                                             </div>
                                             <div class="qwen-caption-row" style="margin-top:6px;">
                                                 <button type="button" id="qwenAgentRecipeDelete" class="training-button secondary">Delete</button>
@@ -571,10 +571,12 @@
                                             </div>
                                         </div>
                                     </div>
-<div class="training-help">Runs a prepass (detectors + SAM3 + dedupe + optional calibration). Uses the current labelmap or a selected dataset.</div>
+<div class="training-help">Runs the EDR prepass stage (detectors + SAM3 + dedupe + optional calibrator application). Uses the current labelmap or a selected dataset.</div>
                                     <details class="training-help" style="margin-bottom: 10px;">
-                                        <summary><strong>Full Prepass Logic + Knob Map</strong></summary>
+                                        <summary><strong>Full EDR Logic + Knob Map</strong></summary>
                                         <div style="margin-top: 6px;">
+                                            <div><strong>How the EDR is split</strong></div>
+                                            <div>The EDR has two parts. The <strong>prepass</strong> generates a high-recall candidate pool. The <strong>calibration</strong> scores those candidates, tunes thresholds, and keeps the settings that survive promotion gates.</div>
                                             <div><strong>Deterministic execution order</strong></div>
                                             <ol style="margin: 6px 0 0 18px;">
                                                 <li><strong>Context setup:</strong> load dataset labelmap + glossary, selected model overrides, selected detector runs, and recipe config.</li>
@@ -602,7 +604,9 @@
                                             <div><strong>Grid/overlay:</strong> Grid columns, Grid rows, Grid overlap.</div>
                                             <div><strong>Caption metadata knobs:</strong> Caption profile, caption model, caption variant, caption max tokens (for trace/caption outputs).</div>
                                             <div style="margin-top: 8px;"><strong>Calibration knobs (same tab, section below)</strong></div>
-                                            <div>Images to sample, Max SAM3 terms/class, base + relaxed FP/TP caps, recall floor, per-class thresholds, threshold steps, optimize metric, Label IoU, Eval IoU, Eval IoU grid, Calibration dedupe IoU, Dedupe IoU grid, Support IoU, fusion mode, cross-class dedupe controls.</div>
+                                            <div>Images to sample, Max SAM3 terms/class, base + relaxed FP/TP caps, recall floor, per-class thresholds, threshold steps, optimize metric, Label IoU, Eval IoU, Eval IoU grid, calibration dedupe IoU, dedupe IoU grid, Support IoU, fusion mode, cross-class dedupe controls.</div>
+                                            <div style="margin-top: 8px;"><strong>What the final calibrator does</strong></div>
+                                            <div>The final calibrator does not create boxes. It builds one feature row per candidate from source provenance, detector and SAM scores, agreement signals, geometry, and optional classifier features. XGBoost learns which candidates are likely real objects, then threshold tuning searches per-class cutoffs that satisfy the recall / false-positive targets while optimizing the selected metric, usually F1.</div>
                                             <div style="margin-top: 8px;"><strong>Metric tiers</strong>: raw detector replay, post-prepass, post-cluster, post-XGB (all compared at IoU 0.50 by default).</div>
                                             <div style="margin-top: 8px;"><strong>Heavy-job behavior</strong>: prepass/calibration are GPU-heavy backend tasks. While active, automation locks disable competing GPU tabs/actions until the job completes or is cancelled.</div>
                                             <div style="margin-top: 8px;"><strong>Default baseline</strong>: detector conf 0.45, SAM3 text 0.20, similarity 0.30, exemplar min 0.60, SAM3 runtime 0.20/0.20, dedupe IoU 0.75, cross-class dedupe off, eval IoU 0.50, scoreless IoU 0.00.</div>
@@ -793,8 +797,8 @@
                                             <input type="number" id="qwenAgentSam3TextScoreThr" min="0" max="1" step="0.05" value="0.2" />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentSam3TextWindowExtension">Windowed SAM3 text<span class="help-icon" title="Runs an extra windowed SAM3 text pass in addition to full-frame inference. Disabled by default because it is slower and currently underperforms non-windowed on this dataset.">?</span></label>
-                                            <input type="checkbox" id="qwenAgentSam3TextWindowExtension" />
+                                            <label for="qwenAgentSam3TextWindowExtension">Windowed SAM3 text<span class="help-icon" title="Runs an extra windowed SAM3 text pass in addition to full-frame inference. Enabled by default because the current calibrated windowed recipe outperforms the non-windowed path on qwen_dataset, at higher runtime cost.">?</span></label>
+                                            <input type="checkbox" id="qwenAgentSam3TextWindowExtension" checked />
                                         </div>
                                         <div>
                                             <label for="qwenAgentSam3TextWindowMode">SAM3 text window mode<span class="help-icon" title="How to slice windows for the extra SAM3 text pass. Grid uses the grid columns/rows below; SAHI uses fixed-size tiles.">?</span></label>
@@ -882,8 +886,8 @@
                                             <input type="number" id="qwenAgentSimilarityWindowOverlap" min="0" max="0.9" step="0.05" value="0.2" />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentSimilarityWindowExtension">Windowed similarity extension<span class="help-icon" title="Runs an extra windowed similarity pass after the global pass. Slower, but can find small or edge objects missed globally.">?</span></label>
-                                            <input type="checkbox" id="qwenAgentSimilarityWindowExtension" />
+                                            <label for="qwenAgentSimilarityWindowExtension">Windowed similarity extension<span class="help-icon" title="Runs an extra windowed similarity pass after the global pass. Enabled by default because the current calibrated windowed recipe performs best, at higher runtime cost.">?</span></label>
+                                            <input type="checkbox" id="qwenAgentSimilarityWindowExtension" checked />
                                         </div>
                                     </div>
                                     <div class="training-help">Grid + overlay</div>
@@ -923,6 +927,24 @@
                                         <div>
                                             <label for="qwenCalibrationImageCount">Images to sample</label>
                                             <input type="number" id="qwenCalibrationImageCount" min="10" max="100000" value="2000" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenCalibrationRecipeMode">EDR mode<span class="help-icon" title="Auto reuses a promoted EDR for this exact dataset/settings fingerprint if available; otherwise it runs discovery, promotes an EDR, then trains. Reuse only requires an existing promoted EDR. Force rediscover always reruns discovery first.">?</span></label>
+                                            <select id="qwenCalibrationRecipeMode">
+                                                <option value="auto" selected>Auto</option>
+                                                <option value="reuse_only">Reuse only</option>
+                                                <option value="force_rediscover">Force rediscover</option>
+                                            </select>
+                                            <div class="training-help">Recommended: Auto. Keep one-click calibration and let the backend decide reuse vs discovery.</div>
+                                        </div>
+                                        <div>
+                                            <label for="qwenCalibrationLaneSelection">Lane selection<span class="help-icon" title="Choose the prepass lane family to run. Windowed is the current trusted default. Compare both runs the standard comparison between the windowed and non-windowed lanes and picks the winner.">?</span></label>
+                                            <select id="qwenCalibrationLaneSelection">
+                                                <option value="window" selected>Windowed (Default)</option>
+                                                <option value="nonwindow">Non-windowed</option>
+                                                <option value="compare_both">Compare Both</option>
+                                            </select>
+                                            <div class="training-help">Recommended: Windowed. Compare Both is slower and intended only when you want an explicit lane-family comparison.</div>
                                         </div>
                                         <div>
                                             <label for="qwenCalibrationMaxTerms">Max SAM3 terms per class<span class="help-icon" title="Cap for Qwen-expanded glossary terms per class used during the calibration prepass. Higher values increase recall but expand the prompt set and slow down calibration. Leave blank for no cap.">?</span></label>
@@ -981,9 +1003,20 @@
                                         </div>
                                     </div>
                                     <div class="training-actions">
-                                        <button type="button" id="qwenCalibrationRun" class="training-button secondary">Start calibration</button>
+                                        <button type="button" id="qwenCalibrationRun" class="training-button secondary">Build EDR</button>
                                         <button type="button" id="qwenCalibrationCancel" class="training-button secondary" disabled>Cancel</button>
                                     </div>
+                                    <div id="qwenCalibrationRecipeInfo" class="training-help" style="margin-top: 8px;">EDR mode: Auto. Waiting to start.</div>
+                                    <details id="qwenCalibrationReportWrap" class="training-help" style="margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc; padding: 10px 12px;" hidden>
+                                        <summary id="qwenCalibrationReportSummary" style="cursor: pointer; font-weight: 600; color: #0f172a;">EDR report bundle</summary>
+                                        <div id="qwenCalibrationReportStatus" class="training-help" style="margin-top: 8px;">No EDR report bundle available yet.</div>
+                                        <div id="qwenCalibrationReportOverview" style="margin-top: 10px;"></div>
+                                        <div id="qwenCalibrationReportPerClass" style="margin-top: 10px;"></div>
+                                        <div id="qwenCalibrationReportPerSource" style="margin-top: 10px;"></div>
+                                        <div id="qwenCalibrationReportBoundary" style="margin-top: 10px;"></div>
+                                        <div id="qwenCalibrationReportUncertainty" style="margin-top: 10px;"></div>
+                                        <div id="qwenCalibrationReportDiagnostics" style="margin-top: 10px;"></div>
+                                    </details>
                                 </div>
                                                     </div>
                 </div>
@@ -3185,10 +3218,10 @@
                                     </div>
                                     <div class="training-help">Dataset type is advisory; we’ll still validate the label files and adjust to segmentation if polygon labels are detected.</div>
                                     <div class="training-actions">
-                                        <button type="button" id="datasetUploadBtn" class="training-button">Upload dataset</button>
-                                        <button type="button" id="datasetListRefresh" class="training-button training-button--ghost">Refresh list</button>
+                                        <button type="button" data-testid="action.datasets.upload_zip" id="datasetUploadBtn" class="training-button">Upload dataset</button>
+                                        <button type="button" data-testid="action.datasets.refresh_list" id="datasetListRefresh" class="training-button training-button--ghost">Refresh list</button>
                                     </div>
-                                    <div id="datasetUploadMessage" class="training-message"></div>
+                                    <div data-testid="status.datasets.upload_message" id="datasetUploadMessage" class="training-message"></div>
                                 </div>
                                 <div class="training-subsection">
                                     <div class="training-subsection__title">Open dataset from server path</div>
@@ -3199,33 +3232,33 @@
                                     <div class="training-grid">
                                         <div>
                                             <label for="datasetPathInput">Absolute path</label>
-                                            <input type="text" id="datasetPathInput" placeholder="/abs/path/to/dataset" />
+                                            <input type="text" data-testid="input.datasets.server_path" id="datasetPathInput" placeholder="/abs/path/to/dataset" />
                                         </div>
                                         <div>
                                             <label for="datasetPathId">Library dataset id (optional)</label>
-                                            <input type="text" id="datasetPathId" placeholder="Defaults to folder name" />
+                                            <input type="text" data-testid="input.datasets.library_dataset_id" id="datasetPathId" placeholder="Defaults to folder name" />
                                         </div>
                                     </div>
                                     <div class="training-grid">
                                         <div>
                                             <label for="datasetPathLabel">Display label (optional)</label>
-                                            <input type="text" id="datasetPathLabel" placeholder="Human-friendly name" />
+                                            <input type="text" data-testid="input.datasets.library_label" id="datasetPathLabel" placeholder="Human-friendly name" />
                                         </div>
                                         <div>
                                             <label for="datasetPathContext">Context (optional)</label>
-                                            <input type="text" id="datasetPathContext" placeholder="Optional prompt context" />
+                                            <input type="text" data-testid="input.datasets.library_context" id="datasetPathContext" placeholder="Optional prompt context" />
                                         </div>
                                     </div>
                                     <label for="datasetPathNotes">Notes (optional)</label>
-                                    <textarea id="datasetPathNotes" rows="3" placeholder="Annotation progress notes or handoff details"></textarea>
+                                    <textarea data-testid="input.datasets.library_notes" id="datasetPathNotes" rows="3" placeholder="Annotation progress notes or handoff details"></textarea>
                                     <div class="training-actions">
-                                        <button type="button" id="datasetPathOpenBtn" class="training-button secondary">Open transient</button>
-                                        <button type="button" id="datasetPathSaveBtn" class="training-button secondary">Save transient to library</button>
-                                        <button type="button" id="datasetPathRegisterBtn" class="training-button">Register path in library</button>
-                                        <button type="button" id="datasetPathAnnotateBtn" class="training-button secondary">Open in annotation</button>
+                                        <button type="button" data-testid="action.datasets.open_transient" id="datasetPathOpenBtn" class="training-button secondary">Open transient</button>
+                                        <button type="button" data-testid="action.datasets.save_transient" id="datasetPathSaveBtn" class="training-button secondary">Save transient to library</button>
+                                        <button type="button" data-testid="action.datasets.register_path" id="datasetPathRegisterBtn" class="training-button">Register path in library</button>
+                                        <button type="button" data-testid="action.datasets.open_transient_annotation" id="datasetPathAnnotateBtn" class="training-button secondary">Open in annotation</button>
                                     </div>
-                                    <div id="datasetPathSummary" class="training-help"></div>
-                                    <div id="datasetPathMessage" class="training-message"></div>
+                                    <div data-testid="status.datasets.path_summary" id="datasetPathSummary" class="training-help"></div>
+                                    <div data-testid="status.datasets.path_message" id="datasetPathMessage" class="training-message"></div>
                                 </div>
                             </div>
                         </div>
@@ -3236,9 +3269,9 @@
                             </div>
                             <div class="training-card__body">
                                 <div class="training-actions">
-                                    <button type="button" id="datasetListRefreshTop" class="training-button">Refresh list</button>
+                                    <button type="button" data-testid="action.datasets.refresh_list_top" id="datasetListRefreshTop" class="training-button">Refresh list</button>
                                 </div>
-                                <div id="datasetList" class="training-history"></div>
+                                <div data-testid="list.datasets.entries" id="datasetList" class="training-history"></div>
                             </div>
                         </div>
                     </div>

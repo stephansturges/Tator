@@ -6493,6 +6493,90 @@ def _sam3_text_payloads_from_state(
     return payloads, assigned_label, class_id
 
 
+def _sam3_similarity_payloads_from_state(
+    *,
+    full_img: Image.Image,
+    crop_img: Image.Image,
+    exemplar_boxes: List[Dict[str, Any]],
+    label: str,
+    score_thr: Optional[float],
+    mask_threshold: Optional[float],
+    max_results: Optional[int],
+    window_xyxy: Optional[Sequence[float]] = None,
+    window_bbox_2d: Optional[Sequence[float]] = None,
+    processor_override: Optional[Any] = None,
+    state: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    img_w, img_h = full_img.size
+    offset_x = 0.0
+    offset_y = 0.0
+    if window_xyxy:
+        offset_x, offset_y = float(window_xyxy[0]), float(window_xyxy[1])
+    boxes_xywh: List[Tuple[float, float, float, float]] = []
+    for box in exemplar_boxes or []:
+        ann: Dict[str, Any] = {}
+        window_ref = window_bbox_2d
+        if isinstance(box, dict):
+            ann["bbox_space"] = box.get("bbox_space") or "full"
+            if "bbox_2d" in box:
+                ann["bbox_2d"] = box.get("bbox_2d")
+            if "bbox_xyxy_px" in box:
+                ann["bbox_xyxy_px"] = box.get("bbox_xyxy_px")
+            if box.get("window_bbox_2d") is not None:
+                window_ref = box.get("window_bbox_2d")
+        elif isinstance(box, (list, tuple)) and len(box) >= 4:
+            ann["bbox_xyxy_px"] = list(box[:4])
+            ann["bbox_space"] = "full"
+        xyxy_full = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=window_ref)
+        if xyxy_full is None:
+            continue
+        x1, y1, x2, y2 = xyxy_full
+        if window_xyxy:
+            x1 -= offset_x
+            y1 -= offset_y
+            x2 -= offset_x
+            y2 -= offset_y
+        w = max(0.0, x2 - x1)
+        h = max(0.0, y2 - y1)
+        if w <= 0 or h <= 0:
+            continue
+        boxes_xywh.append((x1, y1, w, h))
+    if not boxes_xywh:
+        return []
+    threshold_val = float(score_thr) if score_thr is not None else 0.2
+    mask_val = float(mask_threshold) if mask_threshold is not None else 0.2
+    detections = _run_sam3_visual_inference_multi(
+        crop_img,
+        boxes_xywh,
+        None,
+        threshold_val,
+        mask_val,
+        max_results,
+        processor_override=processor_override,
+        state=state,
+    )
+    payloads: List[Dict[str, Any]] = []
+    for det in detections:
+        x1, y1, x2, y2 = _yolo_to_xyxy(crop_img.width, crop_img.height, det.bbox)
+        x1 += offset_x
+        y1 += offset_y
+        x2 += offset_x
+        y2 += offset_y
+        payloads.append(
+            _agent_det_payload(
+                img_w,
+                img_h,
+                (x1, y1, x2, y2),
+                label=label,
+                class_id=None,
+                score=det.score,
+                source="sam3_similarity",
+                window=window_xyxy,
+            )
+        )
+    return payloads
+
+
 @_register_agent_tool("sam3_text")
 def _agent_tool_sam3_text(
     image_base64: Optional[str] = None,
@@ -8441,11 +8525,15 @@ _agent_readable_write = lambda line: _agent_readable_write_impl(  # noqa: E731
         *args,
         **kwargs,
         sam3_similarity_fn=lambda **inner: _agent_tool_sam3_similarity(**inner),
+        similarity_payloads_fn=_sam3_similarity_payloads_from_state,
+        ensure_sam3_text_runtime_fn=_ensure_sam3_text_runtime,
     ),
     run_similarity_windowed_fn=lambda *args, **kwargs: _agent_run_similarity_expansion(
         *args,
         **kwargs,
         sam3_similarity_fn=lambda **inner: _agent_tool_sam3_similarity(**inner),
+        similarity_payloads_fn=_sam3_similarity_payloads_from_state,
+        ensure_sam3_text_runtime_fn=_ensure_sam3_text_runtime,
         grid_overlap_ratio_default=PREPASS_GRID_OVERLAP_RATIO,
     ),
     finalize_provenance_fn=_agent_finalize_provenance,

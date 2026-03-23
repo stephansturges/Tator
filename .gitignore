@@ -276,12 +276,24 @@ scrn.png
 /*.txt
 !requirements.txt
 !requirements-dev.txt
-!refactor.txt
 prepass_*
 qwen_agentic_*
 !services/
 !services/*.py
+/qwen_prepass_benchmark_*.jsonl
+/qwen_prepass_benchmark_*.summary.json
+/qwen_prepass_benchmark_*.yolo.summary.json
+/qwen_prepass_smoke_*.jsonl
+/fuzz_tier1_summary.json
 
 # Local scratch/docs (never commit)
 docs/_local/
+docs/*_deep_review*.md
+docs/*_final_review*.md
+docs/*_issue_ledger.json
+docs/*_validation_checklist.md
+docs/*_acceptance_checklist.md
+docs/*_usability_checklist.md
+docs/windowed_text_guardrail_policy_v1.json
 tools/calibration_presets/
+tmp/

@@ -132,69 +132,68 @@ Notes:
   - **Diagnostics only:** `raw_detector` replay (`yolo`, `rfdetr`, `yolo_rfdetr_union`)
 - Acceptance gate: the `post_xgb.accepted_all` ensemble must beat `post_cluster.source_attributed.yolo_rfdetr_union` on the agreed target metric (typically F1, with precision/recall shown).
 
-### Current default snapshot (2026-03-16)
-The current promoted EDR is the repaired `window` lane, with strengthened source-aware hand policy and the promoted SAM3 similarity-quality head:
+### From fast annotation to reusable prelabeling
+Tator is meant to feel like one continuous workflow: annotate faster, train from the same interface, build a stronger prelabeling recipe, and then reuse that recipe so the next round of work starts with much better suggestions.
 
-- lane: `window`
-- scenario:
-  - `split_head=false`
-  - `sam3_text_quality=true`, `sam3_text_quality_alpha=0.8`
-  - `sam3_similarity_quality=true`, `sam3_similarity_quality_alpha=0.5`
-- policy:
-  - `sam_bias_scope=sam_only`
-  - `sam3_text` bias `-1.4`
-  - `sam3_similarity` bias `-1.2`
-  - `sam_only_min_prob_default=0.15`
-  - `consensus_iou_default=0.7`
-- learned second-stage policy: **research-only, not part of the default promotion path**
-- selection protocol:
-  - main sweep on `intersection`
-  - winner-only alpha extension
-  - `sam_only` bias-scope ablation
-  - bias-magnitude sweep
-  - full-window similarity-quality confirmation
-  - non-window fallback confirmation
+Typical workflow in the product:
 
-Final promoted full-window result:
+1. Use the annotation helpers to speed up manual work.
+   - Auto-class correction helps snap a box to the likely label.
+   - SAM refinement helps tighten loose boxes.
+   - Point-to-box and multi-point prompting help with small, thin, crowded, or awkward objects.
+   - The goal is simple: spend more time approving and correcting, less time drawing everything from scratch.
+   - [**insert GIF: annotation helpers, box refinement, point-to-box flow**]
+2. Build better dataset-specific coverage.
+   - The glossary gives the system the right words for the dataset.
+   - SAM3 text uses that vocabulary to find candidates the detectors may miss.
+   - Similarity helps extend from strong examples to repeated look-alike objects.
+   - [**insert screenshot: glossary-driven prompting and similarity-assisted suggestions**]
+3. Train the supporting models directly from the browser.
+   - You can launch classifier, YOLO, RF-DETR, and SAM3 training runs from the same product.
+   - Runs are managed in one place instead of being split across separate annotation and training workflows.
+   - [**insert screenshot: model training and run management in the UI**]
+4. Build an EDR when you want stronger automation.
+   - The EDR combines a broad candidate-generating prepass with a learned calibrator.
+   - In plain terms: it gathers a lot of plausible detections, then learns which ones are worth keeping.
+   - Once saved, that EDR becomes a reusable recipe for the dataset and configuration it was built for.
+   - [**insert GIF: EDR builder / recipe creation flow**]
+5. Apply the saved EDR back through the interface.
+   - Future prelabeling jobs can start from the saved recipe instead of from raw detector output.
+   - That makes review much faster because users are mostly cleaning up strong suggestions instead of constructing the first draft themselves.
+   - [**insert screenshot: applying a saved EDR to a new job from the interface**]
 
-| Variant | Precision | Recall | F1 | Delta vs refined hand baseline |
+### Why this is useful in practice
+The value of the EDR workflow is not just that it finds more objects. It is that it makes automation easier to trust and easier to reuse.
+
+- The prepass is broad on purpose, so it can recover objects that a plain detector-only pass would miss.
+- The calibrator cuts back the false-positive tail, so that broad candidate pool becomes something a human can review efficiently.
+- Windowed detection, glossary-driven SAM3 text, and similarity search all help widen coverage.
+- Source-aware calibration helps keep the final output practical instead of shipping every possible candidate to the user.
+
+In short: the system is designed to increase useful recall first, then restore precision so the result is still fast to review.
+
+### Example result on the current experimental dataset
+On the current experimental `qwen_dataset`, the canonical EDR materially improves the final accepted detections over the detector-union post-cluster baseline:
+
+| Surface | Precision | Recall | F1 | Delta vs detector-union baseline |
 |---|---:|---:|---:|---:|
-| `refined_hand_baseline` | 0.8885 | 0.8010 | 0.8425 | +0.0000 |
-| `refined_hand + sam3_similarity_quality(a=0.5)` | 0.8910 | 0.8009 | **0.8436** | **+0.0011** |
+| Final EDR executor | **0.9227** | **0.8062** | **0.8605** | **+0.0856** |
+| Detector-union attributed post-cluster baseline | 0.6613 | 0.9356 | 0.7749 | +0.0000 |
 
-Trust-analysis result for the learned second stage:
-
-| Variant | Mean F1 | Delta vs refined hand baseline |
-|---|---:|---:|
-| `learned_selected` | 0.7057 | -0.1370 |
-| `learned_base_thresholds` | 0.7636 | -0.0791 |
-| `learned_gate_only` | 0.7701 | -0.0726 |
-| `learned_full_hand` | 0.8155 | -0.0272 |
-
-Takeaways:
-
-- the shipped default is **windowed prepass + no full-image context + refined hand-policy XGB + SAM3 similarity-quality**
-- the meaningful gains are coming from **policy/scenario choices**, not whole-image embeddings or learned second-stage replacement
-- the current learned second-stage policy is **not trusted** on the real post-dedupe detection surface and stays experimental only
-- whole-image context, candidate-embedding transforms, and anchor-similarity experiments all failed to produce a promotable gain
+The useful takeaway is not the exact internal recipe settings. It is that the system trades a portion of raw recall for a large precision improvement, and that trade produces a meaningfully better prelabeling result for human review.
 
 Canonical EDR discovery now lives in:
 
 - `tools/run_canonical_prepass_discovery.py`
 
-This runner is the authoritative offline EDR promotion path. It:
-
-- reruns or reuses the sweep/ablation chain,
-- consumes the per-stage `decision_summary.json` artifacts,
-- re-discovers the promoted quality alphas and policy settings,
-- and writes the canonical windowed + non-windowed EDRs.
+This runner is the authoritative offline EDR promotion path. It reruns or reuses the sweep/ablation chain and writes the canonical reusable EDR artifacts.
 
 Normal calibration jobs now run in **smart EDR mode** by default:
 
 - `recipe_mode = auto`
 - compute a strict fingerprint from the dataset, labelmap/glossary, detector/classifier context, windowing settings, and calibration feature version
 - reuse a promoted canonical EDR for that exact fingerprint if one already exists
-- otherwise run canonical discovery, promote an EDR, and then train the final calibration job with it
+- otherwise build/promote a matching EDR and then train the final calibration job with it
 
 Advanced overrides exist for:
 
@@ -212,51 +211,6 @@ Legacy compatibility aliases `canonical_prepass_recipe.json` and `canonical_prep
 
 Under the chosen run root, the promoted EDR is derived from the sweep sequence rather than hand-copied defaults.
 
-### Historical apples-to-apples benchmark snapshot (2026-02-20)
-The metrics below are retained as historical context. These runs used:
-
-- fixed validation slice,
-- IoU `0.50` for evaluation,
-- identical detector targets (YOLO labels),
-- strict tiered reporting (`raw_detector`, `post_prepass`, `post_cluster`, `post_xgb`).
-
-Artifacts:
-
-- Base evals: `tmp/emb1024_calibration_20260219_161507/nonwindow_20c8.eval.json`, `tmp/emb1024_calibration_20260219_161507/window_ceab.eval.json`
-- Projection sweep: `tmp/emb1024_calibration_20260219_161507/projection_sweep/projection_sweep_report.json`
-- Hybrid follow-up: `tmp/emb1024_calibration_20260219_161507/hybrid_after_sweep_jl_d512/selected_projection_hybrid_summary.json`
-
-Primary apples-to-apples comparator (same split, IoU=0.50, same candidate tier):
-
-| Variant | Baseline (`post_cluster.source_attributed.yolo_rfdetr_union`) | Ensemble (`post_xgb.accepted_all`) | Delta F1 |
-|---|---|---|---:|
-| nonwindow_20c8 | P=0.6643 R=0.9164 F1=0.7702 | P=0.9278 R=0.7048 F1=0.8011 | +0.0308 |
-| window_ceab | P=0.6480 R=0.9164 F1=0.7591 | P=0.9094 R=0.6908 F1=0.7852 | +0.0260 |
-
-Model comparison within the post-XGB tier (same split, IoU=0.50):
-
-| Variant | Method | Precision | Recall | F1 |
-|---|---|---:|---:|---:|
-| nonwindow_20c8 | XGB (1024-d embedding block) | 0.9278 | 0.7048 | **0.8011** |
-| nonwindow_20c8 | XGB (JL 512 projection) | 0.9335 | 0.6984 | 0.7990 |
-| nonwindow_20c8 | LR_dense + XGB_struct + blender | 0.7864 | 0.7791 | 0.7827 |
-| nonwindow_20c8 | MLP_dense + XGB_struct + blender | 0.7823 | 0.7830 | 0.7827 |
-| window_ceab | XGB (1024-d embedding block) | 0.9094 | 0.6908 | 0.7852 |
-| window_ceab | XGB (JL 512 projection) | 0.9149 | 0.6877 | 0.7852 |
-| window_ceab | LR_dense + XGB_struct + blender | 0.8824 | 0.6734 | 0.7639 |
-| window_ceab | MLP_dense + XGB_struct + blender | 0.8835 | 0.6768 | 0.7665 |
-
-Raw detector replay metrics are retained in eval artifacts as diagnostics (`metric_tiers.raw_detector.*`), but are not used as the primary acceptance comparator.
-
-Projection sweep note:
-
-- Best projected setup by mean F1 across both variants was `jl.d512` (mean F1 `0.7921`), but it did not beat the 1024-d XGB baseline overall.
-- On the windowed variant only, `pca.d512` was marginally highest (`F1=0.7855` vs `0.7852` baseline), not a meaningful gain.
-
-Historical takeaway:
-
-- At that stage, the best calibrator was still single-stage XGB with the 1024-d embedding block.
-- That conclusion is now superseded by the 2026-03-10 promoted windowed result above.
 
 ### Calibration automation helpers (current toolchain)
 - `tools/build_feature_lanes_from_prepass.py`
@@ -270,17 +224,6 @@ Historical takeaway:
   - Injects or refreshes full-image embedding blocks into existing feature matrices for ablation work.
 - `tools/tune_ensemble_thresholds_xgb.py`
   - Accepts deprecated `--relax-fp-ratio` as a compatibility no-op for older orchestration scripts.
-
----
-
-### 2000 vs 4000 extension snapshot
-Using the same XGB-1024 pipeline and IoU=0.50 policy, we extended each prepass variant by +2000 images (from 2000 to 4000).
-
-| Variant | F1@2000 | F1@4000 | Delta F1 | CovPres@2000 | CovPres@4000 | Delta CovPres |
-|---|---:|---:|---:|---:|---:|---:|
-| nonwindow | 0.8011 | 0.7849 | -0.0162 | 0.7503 | 0.7345 | -0.0158 |
-| windowed | 0.7852 | 0.7690 | -0.0162 | 0.7267 | 0.7014 | -0.0253 |
-
 
 ## Feature highlights (current status)
 - **Labeling assists**: auto‑class, SAM refinement, multi‑point prompts.

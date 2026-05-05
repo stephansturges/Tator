@@ -76,6 +76,12 @@ def test_register_promoted_recipe_persists_registry_entry(tmp_path: Path) -> Non
         canonical_recipe_md=canonical_md,
         report_bundle_json=None,
         discovery_run_root=discovery_root,
+        edr_package={
+            "id": "canonical_edr_pkg_demo_abcd1234",
+            "package_root": str((tmp_path / "edr_packages" / "canonical_edr_pkg_demo_abcd1234").resolve()),
+            "package_zip": str((tmp_path / "edr_packages" / "canonical_edr_pkg_demo_abcd1234" / "package.edr.zip").resolve()),
+            "package_sha256": "sha256",
+        },
     )
 
     assert entry["fingerprint"] == fingerprint
@@ -83,6 +89,9 @@ def test_register_promoted_recipe_persists_registry_entry(tmp_path: Path) -> Non
     assert Path(entry["canonical_recipe_md"]).exists()
     assert Path(entry["canonical_edr_json"]).exists()
     assert Path(entry["legacy_canonical_recipe_json"]).exists()
+    assert Path(entry["registry_entry_json"]).exists()
+    assert entry["edr_package_id"] == "canonical_edr_pkg_demo_abcd1234"
+    assert entry["edr_package_sha256"] == "sha256"
     assert find_matching_recipe(cache_root, fingerprint)["fingerprint"] == fingerprint
     registry = load_registry(cache_root)
     assert fingerprint in registry["entries"]

@@ -1503,6 +1503,11 @@ const AUTOMATION_LOCKED_TABS = new Set([
         agentRecipeDescription: null,
         agentRecipeSave: null,
         agentRecipeLoad: null,
+        canonicalRecipeSelect: null,
+        canonicalRecipeRefresh: null,
+        canonicalRecipeLoad: null,
+        canonicalRecipeUse: null,
+        canonicalRecipeSummary: null,
         agentRecipeDelete: null,
         agentRecipeExport: null,
         agentRecipeImport: null,
@@ -1580,6 +1585,20 @@ const AUTOMATION_LOCKED_TABS = new Set([
         calibrationReportBoundary: null,
         calibrationReportUncertainty: null,
         calibrationReportDiagnostics: null,
+        autoLabelStatus: null,
+        autoLabelModeSummary: null,
+        autoLabelMaxImages: null,
+        autoLabelSplit: null,
+        autoLabelUnlabeledOnly: null,
+        autoLabelClassNames: null,
+        autoLabelWindowMode: null,
+        autoLabelOverlap: null,
+        autoLabelUsePlannerCaption: null,
+        autoLabelRun: null,
+        autoLabelCancel: null,
+        autoLabelProgressWrap: null,
+        autoLabelProgressFill: null,
+        autoLabelProgressText: null,
         agentEnsembleJob: null,
         agentEnsembleRefresh: null,
         agentDetectorRefresh: null,
@@ -1708,6 +1727,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     let qwenAgentWindowOverlays = [];
     let qwenAgentRecipeLabelmap = null;
     let qwenAgentRecipeLabelmapRecipeId = "";
+    let qwenActiveInferenceRecipe = null;
     let prepassRecipeLoadRequestId = 0;
     // Guards async recipe-list refreshes from stale responses.
     let prepassRecipeRefreshRequestId = 0;
@@ -1715,6 +1735,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     let prepassRecipeEditorLoadRequestId = 0;
     let prepassRecipeRefreshInFlight = false;
     let prepassRecipeRefreshNeedsRefresh = false;
+    let canonicalPrepassRecipes = [];
     let prepassRecipeSaveInFlight = false;
     let prepassRecipeEditorLoadInFlight = false;
     let prepassRecipeDeleteInFlight = false;
@@ -1730,6 +1751,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
     let qwenAgentEnsembleRefreshInFlight = false;
     let qwenAgentEnsembleRefreshNeedsRefresh = false;
     let qwenAgentEnsembleRefreshPendingId = "";
+    let qwenAgentSelectedEnsembleJobId = "";
+    let qwenAgentSelectedEdrPackageId = "";
+    let qwenAgentEnsembleJobSummaries = new Map();
     let qwenAgentDetectorRefreshInFlight = false;
     let qwenAgentDetectorRefreshNeedsRefresh = false;
     let qwenAgentDetectorRefreshPendingSelected = null;
@@ -1785,6 +1809,17 @@ const AUTOMATION_LOCKED_TABS = new Set([
         pollRequestId: 0,
         startInFlight: false,
         cancelInFlight: false,
+    };
+    const qwenAutoLabelState = {
+        jobId: null,
+        overlay: null,
+        timerId: null,
+        pollInFlight: false,
+        pollRequestId: 0,
+        startInFlight: false,
+        cancelInFlight: false,
+        lastJob: null,
+        annotationSessionId: "",
     };
     const calibrationProgressCallbacks = new Set();
     const CAPTION_PRESETS = [
@@ -2684,6 +2719,7 @@ const sam3TrainState = {
     const ANNOTATION_AUTOSAVE_INTERVAL_MS = 1500;
     const ANNOTATION_HEARTBEAT_INTERVAL_MS = 10000;
     const ANNOTATION_EDITOR_NAME = "webui";
+    const ANNOTATION_EDITOR_STORAGE_KEY = "tator.annotationEditorId";
 
     const annotationSourceState = {
         mode: "none", // "none" | "linked" | "transient"
@@ -2697,6 +2733,7 @@ const sam3TrainState = {
         manifest: null,
         imageRowsByKey: new Map(),
         rawLabelLinesByKey: new Map(),
+        hydrationStateByKey: new Map(),
         hydratedKeys: new Set(),
         savedSnapshotByKey: new Map(),
         dirtyRecordsByKey: new Map(),
@@ -2795,6 +2832,108 @@ const sam3TrainState = {
         return isAnnotationDatasetModeActive() && !!annotationSourceState.readOnly;
     }
 
+    function getAnnotationEditorName() {
+        try {
+            let value = window.sessionStorage.getItem(ANNOTATION_EDITOR_STORAGE_KEY) || "";
+            if (!value) {
+                value = `${ANNOTATION_EDITOR_NAME}:${generateUUID().slice(0, 8)}`;
+                window.sessionStorage.setItem(ANNOTATION_EDITOR_STORAGE_KEY, value);
+            }
+            return value;
+        } catch (_error) {
+            return ANNOTATION_EDITOR_NAME;
+        }
+    }
+
+    function setAnnotationHydrationState(imageKey, state) {
+        if (!imageKey) {
+            return;
+        }
+        const normalized = String(state || "").trim().toLowerCase();
+        if (!normalized || normalized === "idle") {
+            annotationSourceState.hydrationStateByKey.delete(imageKey);
+            return;
+        }
+        annotationSourceState.hydrationStateByKey.set(imageKey, normalized);
+    }
+
+    function getAnnotationHydrationState(imageKey) {
+        if (!imageKey) {
+            return "idle";
+        }
+        const stored = String(annotationSourceState.hydrationStateByKey.get(imageKey) || "").trim().toLowerCase();
+        if (stored) {
+            return stored;
+        }
+        return annotationSourceState.hydratedKeys.has(imageKey) ? "ready" : "idle";
+    }
+
+    function getCurrentAnnotationHydrationState() {
+        if (!isAnnotationDatasetModeActive() || !currentImage || !isDatasetBackedImageRecord(currentImage)) {
+            return "idle";
+        }
+        return getAnnotationHydrationState(currentImage.name);
+    }
+
+    function isCurrentAnnotationHydrationBlocked() {
+        const state = getCurrentAnnotationHydrationState();
+        return state === "pending" || state === "error";
+    }
+
+    function annotationHydrationStatusText() {
+        const state = getCurrentAnnotationHydrationState();
+        if (state === "pending") {
+            return "Annotations loading for current image.";
+        }
+        if (state === "error") {
+            return "Annotations failed to load for current image.";
+        }
+        return "";
+    }
+
+    function hasLocalAnnotationGeometry(imageKey) {
+        const buckets = bboxes?.[imageKey];
+        if (!buckets || typeof buckets !== "object") {
+            return false;
+        }
+        return Object.values(buckets).some((items) => Array.isArray(items) && items.length > 0);
+    }
+
+    function isAutoLabelUsingCurrentAnnotationSession() {
+        if (!isAnnotationDatasetModeActive()) {
+            return false;
+        }
+        if (!qwenAutoLabelState.jobId && !qwenAutoLabelState.startInFlight) {
+            return false;
+        }
+        const runningSessionId = String(qwenAutoLabelState.annotationSessionId || "").trim();
+        const currentSessionId = String(annotationSourceState.lockSessionId || "").trim();
+        return !!runningSessionId && !!currentSessionId && runningSessionId === currentSessionId;
+    }
+
+    function isAnnotationMutationBlocked() {
+        return isAnnotationReadOnly() || isAutoLabelUsingCurrentAnnotationSession() || isCurrentAnnotationHydrationBlocked();
+    }
+
+    function annotationMutationBlockedMessage(actionLabel) {
+        const prefix = actionLabel || "Editing";
+        if (isAnnotationReadOnly()) {
+            const holder = String(annotationSourceState.lock?.holder || "another editor");
+            return `${prefix} is disabled in read-only mode (lock held by ${holder}).`;
+        }
+        if (isAutoLabelUsingCurrentAnnotationSession()) {
+            return `${prefix} is disabled while Automatic Labeling is running on this annotation session.`;
+        }
+        const hydrationState = getCurrentAnnotationHydrationState();
+        if (hydrationState === "pending") {
+            return `${prefix} is disabled while annotations are still loading for this image.`;
+        }
+        if (hydrationState === "error") {
+            return `${prefix} is disabled because annotations failed to load for this image.`;
+        }
+        return "";
+    }
+
     function annotationSourceLabel() {
         if (annotationSourceState.mode === "linked") {
             return "linked dataset";
@@ -2829,6 +2968,7 @@ const sam3TrainState = {
                     "Load images + classes from local files, or open a dataset from Dataset Manager.";
             } else {
                 const progress = annotationProgressLabel();
+                const hydrationStatus = annotationHydrationStatusText();
                 const bits = [
                     annotationSourceState.datasetLabel || "(unnamed dataset)",
                     annotationSourceState.mode === "transient" ? `session ${annotationSourceState.sessionId}` : annotationSourceState.datasetId,
@@ -2839,38 +2979,61 @@ const sam3TrainState = {
                 if (annotationSourceState.statusMessage) {
                     bits.push(annotationSourceState.statusMessage);
                 }
+                if (hydrationStatus) {
+                    bits.push(hydrationStatus);
+                }
                 annotationSourceSummaryEl.textContent = bits.filter(Boolean).join(" • ");
             }
         }
         if (annotationSourceLockEl) {
+            const hydrationStatus = annotationHydrationStatusText();
             if (!isAnnotationDatasetModeActive()) {
                 annotationSourceLockEl.textContent = "";
             } else if (isAnnotationReadOnly()) {
                 const holder = String(annotationSourceState.lock?.holder || "another editor");
                 annotationSourceLockEl.textContent = `Read-only: lock held by ${holder}.`;
+            } else if (isAutoLabelUsingCurrentAnnotationSession()) {
+                const holder = String(annotationSourceState.lock?.holder || "you");
+                annotationSourceLockEl.textContent = `Writable: lock held by ${holder} • automatic labeling running.`;
+            } else if (hydrationStatus) {
+                const holder = String(annotationSourceState.lock?.holder || "you");
+                annotationSourceLockEl.textContent = `Writable: lock held by ${holder} • ${hydrationStatus}`;
             } else {
                 const holder = String(annotationSourceState.lock?.holder || "you");
                 annotationSourceLockEl.textContent = `Writable: lock held by ${holder}.`;
             }
         }
         if (annotationTakeoverButton) {
-            annotationTakeoverButton.disabled = !isAnnotationDatasetModeActive() || !isAnnotationReadOnly();
+            annotationTakeoverButton.disabled =
+                !isAnnotationDatasetModeActive()
+                || !isAnnotationReadOnly()
+                || isAutoLabelUsingCurrentAnnotationSession();
         }
         if (annotationSaveNowButton) {
             annotationSaveNowButton.disabled =
-                !isAnnotationDatasetModeActive() || isAnnotationReadOnly() || annotationSourceState.saveInFlight;
+                !isAnnotationDatasetModeActive()
+                || isAnnotationMutationBlocked()
+                || annotationSourceState.saveInFlight;
         }
         if (annotationReloadButton) {
-            annotationReloadButton.disabled = !isAnnotationDatasetModeActive() || annotationSourceState.saveInFlight;
+            annotationReloadButton.disabled =
+                !isAnnotationDatasetModeActive()
+                || annotationSourceState.saveInFlight
+                || isAutoLabelUsingCurrentAnnotationSession();
         }
         if (annotationCloseButton) {
-            annotationCloseButton.disabled = !isAnnotationDatasetModeActive() || annotationSourceState.saveInFlight;
+            annotationCloseButton.disabled =
+                !isAnnotationDatasetModeActive()
+                || annotationSourceState.saveInFlight
+                || isAutoLabelUsingCurrentAnnotationSession();
         }
+        updateAutoLabelModeSummary();
+        updateAutoLabelButtons();
     }
 
     function syncLabelingSourceControls() {
         const datasetMode = isAnnotationDatasetModeActive();
-        const readOnly = isAnnotationReadOnly();
+        const readOnly = isAnnotationMutationBlocked();
         const imagesInput = document.getElementById("images");
         const classesInput = document.getElementById("classes");
         if (imagesInput) {
@@ -2924,7 +3087,7 @@ const sam3TrainState = {
             annotationSourceState.lockSessionId = generateUUID();
         }
         return {
-            editor_name: ANNOTATION_EDITOR_NAME,
+            editor_name: getAnnotationEditorName(),
             session_id: annotationSourceState.lockSessionId,
             ...extra,
         };
@@ -2956,6 +3119,7 @@ const sam3TrainState = {
         annotationSourceState.manifest = null;
         annotationSourceState.imageRowsByKey = new Map();
         annotationSourceState.rawLabelLinesByKey = new Map();
+        annotationSourceState.hydrationStateByKey = new Map();
         annotationSourceState.hydratedKeys = new Set();
         annotationSourceState.savedSnapshotByKey = new Map();
         annotationSourceState.dirtyRecordsByKey = new Map();
@@ -3115,11 +3279,15 @@ const sam3TrainState = {
         });
     }
 
-    function captureCurrentAnnotationDirtyState() {
-        if (!isAnnotationDatasetModeActive() || !currentImage || !isDatasetBackedImageRecord(currentImage)) {
+    function captureAnnotationDirtyStateForImage(imageKey) {
+        if (!isAnnotationDatasetModeActive() || !imageKey) {
             return;
         }
-        const key = currentImage.name;
+        const imageRecord = images?.[imageKey];
+        if (!isDatasetBackedImageRecord(imageRecord)) {
+            return;
+        }
+        const key = imageKey;
         if (!annotationSourceState.hydratedKeys.has(key)) {
             return;
         }
@@ -3131,11 +3299,21 @@ const sam3TrainState = {
         const saved = annotationSourceState.savedSnapshotByKey.get(key);
         if (saved === undefined) {
             annotationSourceState.savedSnapshotByKey.set(key, serialized);
+            annotationSourceState.dirtyRecordsByKey.delete(key);
             return;
         }
         if (serialized !== saved) {
             annotationSourceState.dirtyRecordsByKey.set(key, record);
+        } else {
+            annotationSourceState.dirtyRecordsByKey.delete(key);
         }
+    }
+
+    function captureCurrentAnnotationDirtyState() {
+        if (!isAnnotationDatasetModeActive() || !currentImage || !isDatasetBackedImageRecord(currentImage)) {
+            return;
+        }
+        captureAnnotationDirtyStateForImage(currentImage.name);
     }
 
     async function handleAnnotationTransientExpiry() {
@@ -3203,7 +3381,16 @@ const sam3TrainState = {
     }
 
     async function flushAnnotationSnapshot({ manual = false } = {}) {
-        if (!isAnnotationDatasetModeActive() || isAnnotationReadOnly()) {
+        if (!isAnnotationDatasetModeActive()) {
+            return false;
+        }
+        if (isAnnotationMutationBlocked()) {
+            if (manual) {
+                setSamStatus(annotationMutationBlockedMessage("Saving"), {
+                    variant: "warn",
+                    duration: 4000,
+                });
+            }
             return false;
         }
         captureCurrentAnnotationDirtyState();
@@ -3334,18 +3521,30 @@ const sam3TrainState = {
         }, ANNOTATION_HEARTBEAT_INTERVAL_MS);
     }
 
-    function hydrateDatasetBboxesForImage(imageRecord) {
+    function hydrateDatasetBboxesForImage(imageRecord, options = {}) {
         if (!isDatasetBackedImageRecord(imageRecord)) {
-            return;
+            return true;
         }
         const imageKey = imageRecord.name;
+        const allowApply = typeof options.allowApply === "function" ? options.allowApply : null;
+        const setHydrationFailure = (message) => {
+            setAnnotationHydrationState(imageKey, "error");
+            if (currentImage && currentImage.name === imageKey) {
+                syncLabelingSourceControls();
+                if (message) {
+                    setSamStatus(message, { variant: "error", duration: 5000 });
+                }
+            }
+        };
         if (annotationSourceState.hydratedKeys.has(imageKey)) {
-            return;
+            setAnnotationHydrationState(imageKey, "ready");
+            return true;
         }
         const imageWidth = Number(imageRecord.width);
         const imageHeight = Number(imageRecord.height);
         if (!(Number.isFinite(imageWidth) && Number.isFinite(imageHeight) && imageWidth > 0 && imageHeight > 0)) {
-            return;
+            setHydrationFailure("Annotations could not be loaded for this image.");
+            return false;
         }
         const labelLines = annotationSourceState.rawLabelLinesByKey.get(imageKey) || [];
         const imageBuckets = {};
@@ -3427,10 +3626,26 @@ const sam3TrainState = {
             stampBboxCreation(bboxRecord);
             imageBuckets[className].push(bboxRecord);
         }
+        if (allowApply && !allowApply()) {
+            return false;
+        }
+        const hasLocalUnsavedGeometry =
+            annotationSourceState.dirtyRecordsByKey.has(imageKey)
+            || (!annotationSourceState.savedSnapshotByKey.has(imageKey) && hasLocalAnnotationGeometry(imageKey));
+        if (hasLocalUnsavedGeometry) {
+            console.warn("Refusing to hydrate annotations over locally modified image state", imageKey);
+            setHydrationFailure("Annotations changed locally before loading completed.");
+            return false;
+        }
         bboxes[imageKey] = imageBuckets;
         annotationSourceState.hydratedKeys.add(imageKey);
+        setAnnotationHydrationState(imageKey, "ready");
         const snapshot = serializeAnnotationRecord(buildAnnotationRecord(imageKey));
         annotationSourceState.savedSnapshotByKey.set(imageKey, snapshot);
+        if (currentImage && currentImage.name === imageKey) {
+            syncLabelingSourceControls();
+        }
+        return true;
     }
 
     async function stopAnnotationSession() {
@@ -3455,6 +3670,15 @@ const sam3TrainState = {
     async function closeAnnotationDataset({ clearCanvas = true } = {}) {
         if (!isAnnotationDatasetModeActive()) {
             return true;
+        }
+        if (isAutoLabelUsingCurrentAnnotationSession()) {
+            annotationSourceState.statusMessage = "Automatic labeling is running. Close is blocked.";
+            updateAnnotationSourceUi();
+            setSamStatus(
+                "Close is blocked while Automatic Labeling is running on this annotation session.",
+                { variant: "warn", duration: 5000 }
+            );
+            return false;
         }
         // Invalidate outstanding async loads before close side effects run.
         annotationSourceState.loadToken += 1;
@@ -3515,6 +3739,13 @@ const sam3TrainState = {
         if (!isAnnotationDatasetModeActive()) {
             return;
         }
+        if (isAutoLabelUsingCurrentAnnotationSession()) {
+            setSamStatus(
+                "Lock takeover is unavailable while Automatic Labeling is running on this annotation session.",
+                { variant: "warn", duration: 4000 }
+            );
+            return;
+        }
         try {
             await startAnnotationSession({ force: true });
             annotationSourceState.readOnly = false;
@@ -3532,11 +3763,10 @@ const sam3TrainState = {
     }
 
     function annotationEditableGuard(actionLabel) {
-        if (!isAnnotationReadOnly()) {
+        if (!isAnnotationMutationBlocked()) {
             return true;
         }
-        const holder = String(annotationSourceState.lock?.holder || "another editor");
-        const message = `${actionLabel || "Editing"} is disabled in read-only mode (lock held by ${holder}).`;
+        const message = annotationMutationBlockedMessage(actionLabel);
         setSamStatus(message, { variant: "warn", duration: 4000 });
         return false;
     }
@@ -3577,10 +3807,11 @@ const sam3TrainState = {
             annotationSourceState.manifest = null;
             annotationSourceState.imageRowsByKey = new Map();
             annotationSourceState.rawLabelLinesByKey = new Map();
+            annotationSourceState.hydrationStateByKey = new Map();
             annotationSourceState.hydratedKeys = new Set();
             annotationSourceState.savedSnapshotByKey = new Map();
             annotationSourceState.dirtyRecordsByKey = new Map();
-            annotationSourceState.statusMessage = "Loading manifest…";
+            annotationSourceState.statusMessage = "Acquiring annotation session…";
             if (annotationSourceState.mode === "transient" && annotationSourceState.transientOpenPath) {
                 datasetManagerState.transientOpenPath = annotationSourceState.transientOpenPath;
             }
@@ -3594,18 +3825,19 @@ const sam3TrainState = {
             if (!base) {
                 throw new Error("Unable to resolve annotation API path.");
             }
+            await startAnnotationSession({ force: false });
+            if (loadToken !== annotationSourceState.loadToken) {
+                return;
+            }
+            annotationSourceState.statusMessage = "Loading manifest…";
+            updateAnnotationSourceUi();
+            syncLabelingSourceControls();
             const manifestResp = await fetch(`${base}/manifest`);
             const detail = await manifestResp.text();
             if (!manifestResp.ok) {
                 throw new Error(parseApiError(detail, `HTTP ${manifestResp.status}`));
             }
             const manifest = parseJsonObjectSafe(detail, {});
-            if (loadToken !== annotationSourceState.loadToken) {
-                return;
-            }
-
-            // Resolve lock semantics before mutating the current workspace.
-            await startAnnotationSession({ force: false });
             if (loadToken !== annotationSourceState.loadToken) {
                 return;
             }
@@ -3647,6 +3879,7 @@ const sam3TrainState = {
                     object: undefined,
                     dataUrl: null,
                     sourceType: "dataset",
+                    datasetId: String(annotationSourceState.datasetId || "").trim(),
                     annotationSplit: row.split || "train",
                     annotationRelpath: row.image_relpath || row.image_name || "",
                     displayName: row.image_name || row.image_relpath || key,
@@ -3695,6 +3928,7 @@ const sam3TrainState = {
             );
         } catch (error) {
             // If loading fails, reset annotation linkage but preserve any existing local workspace.
+            await stopAnnotationSession();
             stopAnnotationTimers();
             resetAnnotationSourceState();
             throw error;
@@ -3730,6 +3964,13 @@ const sam3TrainState = {
 
     async function reloadAnnotationManifest() {
         if (!isAnnotationDatasetModeActive()) {
+            return;
+        }
+        if (isAutoLabelUsingCurrentAnnotationSession()) {
+            setSamStatus(
+                "Reload is unavailable while Automatic Labeling is running on this annotation session.",
+                { variant: "warn", duration: 4000 }
+            );
             return;
         }
         const mode = annotationSourceState.mode;
@@ -7160,13 +7401,14 @@ async function refreshAutomationLockStatus() {
     automationLockState.refreshInFlight = true;
     automationLockState.refreshNeedsRefresh = false;
     try {
-        const [clipJobs, qwenJobs, sam3Jobs, yoloJobs, rfdetrJobs, calibrationJobs] = await Promise.all([
+        const [clipJobs, qwenJobs, sam3Jobs, yoloJobs, rfdetrJobs, calibrationJobs, autoLabelJobs] = await Promise.all([
             fetchAutomationJobs(`${API_ROOT}/clip/train`),
             fetchAutomationJobs(`${API_ROOT}/qwen/train/jobs`),
             fetchAutomationJobs(`${API_ROOT}/sam3/train/jobs`),
             fetchAutomationJobs(`${API_ROOT}/yolo/train/jobs`),
             fetchAutomationJobs(`${API_ROOT}/rfdetr/train/jobs`),
             fetchAutomationJobs(`${API_ROOT}/calibration/jobs`),
+            fetchAutomationJobs(`${API_ROOT}/auto_label/jobs`),
         ]);
         // Ignore stale refresh completions from an older request cycle.
         if (requestId !== automationLockState.refreshRequestId) {
@@ -7195,6 +7437,7 @@ async function refreshAutomationLockStatus() {
         pushActive(yoloJobs, "YOLO training");
         pushActive(rfdetrJobs, "RF-DETR training");
         pushActive(calibrationJobs, "Calibration");
+        pushActive(autoLabelJobs, "Auto Label");
         automationLockState.active = active.length > 0;
         automationLockState.jobs = active;
         automationLockState.calibrationActive = calibrationActive;
@@ -7310,9 +7553,8 @@ function updateAutomationLockTabs() {
 }
 
 function ensureAutomationAvailable(actionLabel) {
-    if (isAnnotationReadOnly()) {
-        const holder = String(annotationSourceState.lock?.holder || "another editor");
-        const message = `${actionLabel || "Automation"} is disabled in read-only mode (lock held by ${holder}).`;
+    if (isAnnotationMutationBlocked()) {
+        const message = annotationMutationBlockedMessage(actionLabel || "Automation");
         setSamStatus(message, { variant: "warn", duration: 4000 });
         enqueueTaskNotice(message, { durationMs: 5000 });
         return false;
@@ -17822,6 +18064,8 @@ async function cancelRfDetrTrainingJobRequest() {
             refreshQwenAgentClassifiers().catch((err) => console.error("Failed to refresh agent classifiers", err));
             refreshQwenAgentEnsembleJobs().catch((err) => console.error("Failed to refresh ensemble jobs", err));
             refreshPrepassRecipes().catch((err) => console.error("Failed to refresh EDRs", err));
+            updateAutoLabelModeSummary();
+            updateAutoLabelButtons();
             return;
         }
         qwenPanelInitialized = true;
@@ -17883,6 +18127,11 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.agentRecipeDescription = document.getElementById("qwenAgentRecipeDescription");
         qwenElements.agentRecipeSave = document.getElementById("qwenAgentRecipeSave");
         qwenElements.agentRecipeLoad = document.getElementById("qwenAgentRecipeLoad");
+        qwenElements.canonicalRecipeSelect = document.getElementById("qwenCanonicalRecipeSelect");
+        qwenElements.canonicalRecipeRefresh = document.getElementById("qwenCanonicalRecipeRefresh");
+        qwenElements.canonicalRecipeLoad = document.getElementById("qwenCanonicalRecipeLoad");
+        qwenElements.canonicalRecipeUse = document.getElementById("qwenCanonicalRecipeUse");
+        qwenElements.canonicalRecipeSummary = document.getElementById("qwenCanonicalRecipeSummary");
         qwenElements.agentRecipeDelete = document.getElementById("qwenAgentRecipeDelete");
         qwenElements.agentRecipeExport = document.getElementById("qwenAgentRecipeExport");
         qwenElements.agentRecipeImport = document.getElementById("qwenAgentRecipeImport");
@@ -17961,6 +18210,20 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.calibrationReportBoundary = document.getElementById("qwenCalibrationReportBoundary");
         qwenElements.calibrationReportUncertainty = document.getElementById("qwenCalibrationReportUncertainty");
         qwenElements.calibrationReportDiagnostics = document.getElementById("qwenCalibrationReportDiagnostics");
+        qwenElements.autoLabelStatus = document.getElementById("qwenAutoLabelStatus");
+        qwenElements.autoLabelModeSummary = document.getElementById("qwenAutoLabelModeSummary");
+        qwenElements.autoLabelMaxImages = document.getElementById("qwenAutoLabelMaxImages");
+        qwenElements.autoLabelSplit = document.getElementById("qwenAutoLabelSplit");
+        qwenElements.autoLabelUnlabeledOnly = document.getElementById("qwenAutoLabelUnlabeledOnly");
+        qwenElements.autoLabelClassNames = document.getElementById("qwenAutoLabelClassNames");
+        qwenElements.autoLabelWindowMode = document.getElementById("qwenAutoLabelWindowMode");
+        qwenElements.autoLabelOverlap = document.getElementById("qwenAutoLabelOverlap");
+        qwenElements.autoLabelUsePlannerCaption = document.getElementById("qwenAutoLabelUsePlannerCaption");
+        qwenElements.autoLabelRun = document.getElementById("qwenAutoLabelRun");
+        qwenElements.autoLabelCancel = document.getElementById("qwenAutoLabelCancel");
+        qwenElements.autoLabelProgressWrap = document.getElementById("qwenAutoLabelProgressWrap");
+        qwenElements.autoLabelProgressFill = document.getElementById("qwenAutoLabelProgressFill");
+        qwenElements.autoLabelProgressText = document.getElementById("qwenAutoLabelProgressText");
         onCalibrationProgress((job) => {
             updateCalibrationProgressUi(job);
         });
@@ -18060,6 +18323,32 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.agentRecipeLoad.addEventListener("click", () => {
                 loadPrepassRecipe().catch((error) => {
                     console.error("Prepass recipe load failed", error);
+                });
+            });
+        }
+        if (qwenElements.canonicalRecipeRefresh) {
+            qwenElements.canonicalRecipeRefresh.addEventListener("click", () => {
+                refreshPrepassRecipes().catch((error) => {
+                    console.error("Failed to refresh canonical EDRs", error);
+                });
+            });
+        }
+        if (qwenElements.canonicalRecipeSelect) {
+            qwenElements.canonicalRecipeSelect.addEventListener("change", () => {
+                updateCanonicalRecipeSummary();
+            });
+        }
+        if (qwenElements.canonicalRecipeLoad) {
+            qwenElements.canonicalRecipeLoad.addEventListener("click", () => {
+                loadCanonicalRecipeIntoBuilder().catch((error) => {
+                    console.error("Canonical recipe load failed", error);
+                });
+            });
+        }
+        if (qwenElements.canonicalRecipeUse) {
+            qwenElements.canonicalRecipeUse.addEventListener("click", () => {
+                useCanonicalRecipeForInference().catch((error) => {
+                    console.error("Canonical recipe apply failed", error);
                 });
             });
         }
@@ -18322,6 +18611,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 });
             });
         }
+        if (qwenElements.agentEnsembleJob) {
+            qwenElements.agentEnsembleJob.addEventListener("change", () => {
+                qwenAgentSelectedEnsembleJobId = String(qwenElements.agentEnsembleJob?.value || "").trim();
+            });
+        }
         if (qwenElements.agentDatasetSelect) {
             qwenElements.agentDatasetSelect.addEventListener("change", () => {
                 qwenAgentDatasetState.selectedId = qwenElements.agentDatasetSelect.value || "";
@@ -18363,6 +18657,20 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.prepassRecipeSelect.addEventListener("change", () => {
                 loadPrepassRecipeForInference({ suppressMissingWarning: true }).catch((error) => {
                     console.error("Prepass recipe load on selection failed", error);
+                });
+            });
+        }
+        if (qwenElements.autoLabelRun) {
+            qwenElements.autoLabelRun.addEventListener("click", () => {
+                startAutoLabelJob().catch((error) => {
+                    console.error("Automatic labeling start failed", error);
+                });
+            });
+        }
+        if (qwenElements.autoLabelCancel) {
+            qwenElements.autoLabelCancel.addEventListener("click", () => {
+                cancelAutoLabelJob().catch((error) => {
+                    console.error("Automatic labeling cancel failed", error);
                 });
             });
         }
@@ -18442,6 +18750,9 @@ async function cancelRfDetrTrainingJobRequest() {
         updateQwenCaptionButton();
         updateQwenAgentButtons();
         updateCalibrationButtons();
+        updateAutoLabelModeSummary();
+        updateAutoLabelProgressUi(null);
+        updateAutoLabelButtons();
         setQwenCaptionStatus("Idle");
         updateQwenClassOptions({ resetOverride: true });
         refreshQwenCaptionDatasets({ silent: true }).catch((error) => {
@@ -20990,6 +21301,21 @@ async function cancelRfDetrTrainingJobRequest() {
         return String(selected || "").trim();
     }
 
+    function getQwenAgentInferenceDatasetId(imageRecord = null) {
+        const record = imageRecord && typeof imageRecord === "object" ? imageRecord : null;
+        if (record && isDatasetBackedImageRecord(record)) {
+            const recordDatasetId = String(record.datasetId || "").trim();
+            if (recordDatasetId) {
+                return recordDatasetId;
+            }
+            const annotationDatasetId = String(annotationSourceState.datasetId || "").trim();
+            if (annotationDatasetId) {
+                return annotationDatasetId;
+            }
+        }
+        return "";
+    }
+
     function getQwenAgentDatasetEntry() {
         const id = getQwenAgentDatasetId();
         if (!id) {
@@ -21317,6 +21643,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 return;
             }
             const list = Array.isArray(jobs) ? jobs : [];
+            qwenAgentEnsembleJobSummaries = new Map();
             qwenElements.agentEnsembleJob.innerHTML = "";
             const empty = document.createElement("option");
             empty.value = "";
@@ -21326,17 +21653,29 @@ async function cancelRfDetrTrainingJobRequest() {
                 .filter((job) => job?.status === "completed" && job?.result?.model && job?.result?.meta)
                 .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
                 .forEach((job) => {
+                    const jobId = String(job?.job_id || "").trim();
+                    if (!jobId) {
+                        return;
+                    }
+                    qwenAgentEnsembleJobSummaries.set(jobId, job);
                     const opt = document.createElement("option");
-                    opt.value = job.job_id || "";
-                    const datasetId = job?.request?.dataset_id || "dataset";
-                    const count = job?.request?.max_images || job?.total || "";
-                    opt.textContent = `${job.job_id} • ${datasetId} • ${count} imgs`;
+                    opt.value = jobId;
+                    opt.textContent = describeAgentEnsembleJob(job);
                     qwenElements.agentEnsembleJob.appendChild(opt);
                 });
-            const preferred = selectedId || "";
-            const match = Array.from(qwenElements.agentEnsembleJob.options || []).some((opt) => opt.value === preferred);
-            if (match) {
-                qwenElements.agentEnsembleJob.value = preferred;
+            const preferred = String(
+                selectedId !== undefined && selectedId !== null
+                    ? selectedId
+                    : getSelectedAgentEnsembleJobId()
+            ).trim();
+            qwenAgentSelectedEnsembleJobId = preferred;
+            if (preferred) {
+                ensureAgentEnsembleJobOption(
+                    preferred,
+                    qwenAgentEnsembleJobSummaries.get(preferred) || null,
+                );
+            } else {
+                qwenElements.agentEnsembleJob.value = "";
             }
         } catch (error) {
             if (requestId !== qwenAgentEnsembleRefreshRequestId) {
@@ -21443,9 +21782,37 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+    function resolveCaptionPersistenceContext(datasetIdOverride = null) {
+        const requestedDatasetId = String(datasetIdOverride || getCaptionDatasetId() || "").trim();
+        if (!isAnnotationDatasetModeActive()) {
+            return { mode: "direct", datasetId: requestedDatasetId };
+        }
+        if (annotationSourceState.mode === "linked") {
+            const activeDatasetId = String(annotationSourceState.datasetId || "").trim();
+            if (requestedDatasetId && activeDatasetId && requestedDatasetId !== activeDatasetId) {
+                throw new Error(
+                    "Caption saving is locked to the active annotation dataset while annotation mode is open."
+                );
+            }
+            return { mode: "annotation", datasetId: activeDatasetId };
+        }
+        if (requestedDatasetId) {
+            throw new Error(
+                "Caption saving is locked to the active annotation session while annotation mode is open."
+            );
+        }
+        return { mode: "annotation", datasetId: "" };
+    }
+
     async function loadCaptionForImage(imageName, datasetIdOverride = null) {
+        if (!imageName) {
+            return null;
+        }
+        if (isAnnotationDatasetModeActive()) {
+            return String(textLabels?.[imageName] || "").trim();
+        }
         const datasetId = datasetIdOverride || getCaptionDatasetId();
-        if (!datasetId || !imageName) {
+        if (!datasetId) {
             return null;
         }
         const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/text_labels/${encodeURIComponent(imageName)}`);
@@ -21499,6 +21866,10 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const imageName = currentImage.name;
+        if (isAnnotationDatasetModeActive()) {
+            qwenElements.captionOutput.value = String(textLabels?.[imageName] || "");
+            return;
+        }
         const datasetId = getCaptionDatasetId();
         ensureCaptionLabelStoreForDataset(datasetId || "");
         if (!datasetId) {
@@ -21529,6 +21900,9 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function captionExistsForImage(imageName, datasetIdOverride = null) {
+        if (isAnnotationDatasetModeActive()) {
+            return !!String(textLabels?.[imageName] || "").trim();
+        }
         const datasetId = datasetIdOverride || getCaptionDatasetId();
         ensureCaptionLabelStoreForDataset(datasetId || "");
         if (textLabels?.[imageName]) {
@@ -21550,14 +21924,47 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function persistCaptionLabel(imageName, caption, datasetIdOverride = null) {
-        const datasetId = datasetIdOverride || getCaptionDatasetId();
-        if (!datasetId || !imageName) {
+        const context = resolveCaptionPersistenceContext(datasetIdOverride);
+        const normalizedCaption = String(caption || "").trim();
+        if (!imageName) {
+            return { skipped: true };
+        }
+        if (context.mode === "annotation") {
+            if (!annotationEditableGuard("Edit text label")) {
+                return { skipped: true, blocked: true };
+            }
+            if (!textLabels) {
+                textLabels = {};
+            }
+            textLabels[imageName] = normalizedCaption;
+            captureAnnotationDirtyStateForImage(imageName);
+            if (!annotationSourceState.dirtyRecordsByKey.has(imageName)) {
+                return {
+                    status: "saved",
+                    caption: normalizedCaption,
+                    dataset_id: context.datasetId || null,
+                    persistence: "annotation_snapshot",
+                };
+            }
+            const saved = await flushAnnotationSnapshot({ manual: false });
+            if (!saved && annotationSourceState.dirtyRecordsByKey.has(imageName)) {
+                throw new Error("Annotation save failed");
+            }
+            return {
+                status: "saved",
+                caption: normalizedCaption,
+                dataset_id: context.datasetId || null,
+                persistence: "annotation_snapshot",
+            };
+        }
+        const datasetId = context.datasetId;
+        if (!datasetId) {
             return { skipped: true };
         }
         const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/text_labels/${encodeURIComponent(imageName)}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ caption: String(caption || "") }),
+            body: JSON.stringify({ caption: normalizedCaption }),
         });
         if (!resp.ok) {
             const detail = await resp.text();
@@ -21570,20 +21977,23 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!imageName) {
             return;
         }
-        if (isAnnotationReadOnly()) {
+        if (isAnnotationMutationBlocked()) {
             annotationEditableGuard("Edit text label");
-            return;
-        }
-        const datasetId = (options.datasetId || getCaptionDatasetId() || "").trim();
-        ensureCaptionLabelStoreForDataset(datasetId);
-        if (!datasetId) {
             return;
         }
         const trimmed = String(caption || "").trim();
         try {
-            await persistCaptionLabel(imageName, trimmed, datasetId);
+            const context = resolveCaptionPersistenceContext(options.datasetId || null);
+            ensureCaptionLabelStoreForDataset(context.datasetId || "");
+            await persistCaptionLabel(imageName, trimmed, context.datasetId || null);
             captionAutoSaveState.lastSaved.set(imageName, trimmed);
-            storeCaptionRecord(imageName, trimmed, null, { model: null, datasetId }, `autosave_${Date.now()}`);
+            storeCaptionRecord(
+                imageName,
+                trimmed,
+                null,
+                { model: null, datasetId: context.datasetId || null },
+                `autosave_${Date.now()}`
+            );
             setQwenCaptionStatus("Saved");
         } catch (error) {
             setQwenCaptionStatus("Save failed");
@@ -21595,14 +22005,22 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!qwenElements.captionSaveText?.checked) {
             return;
         }
-        if (isAnnotationReadOnly()) {
+        if (isAnnotationMutationBlocked()) {
             return;
         }
-        const datasetId = getCaptionDatasetId();
+        let datasetId = "";
+        try {
+            datasetId = resolveCaptionPersistenceContext().datasetId || "";
+        } catch (error) {
+            setQwenCaptionStatus(error?.message || "Caption save blocked");
+            return;
+        }
         ensureCaptionLabelStoreForDataset(datasetId);
         if (!datasetId) {
-            setQwenCaptionStatus("Select dataset to save");
-            return;
+            if (!isAnnotationDatasetModeActive()) {
+                setQwenCaptionStatus("Select dataset to save");
+                return;
+            }
         }
         const trimmed = String(caption || "").trim();
         const lastSaved = captionAutoSaveState.lastSaved.get(imageName);
@@ -21677,8 +22095,11 @@ async function cancelRfDetrTrainingJobRequest() {
         setQwenCaptionStatus("Running…");
         setSamStatus("Running Qwen caption…", { variant: "info", duration: 0 });
         try {
-            const captionDatasetId = getCaptionDatasetId();
-            ensureCaptionLabelStoreForDataset(captionDatasetId || "");
+            const captionSaveContext = qwenElements.captionSaveText?.checked
+                ? resolveCaptionPersistenceContext()
+                : { mode: "direct", datasetId: String(getCaptionDatasetId() || "").trim() };
+            const captionDatasetId = captionSaveContext.datasetId || "";
+            ensureCaptionLabelStoreForDataset(captionDatasetId);
             if (qwenElements.unloadOthers?.checked) {
                 setSamStatus("Unloading other models before Qwen run…", { variant: "info", duration: 2000 });
                 try {
@@ -21709,7 +22130,9 @@ async function cancelRfDetrTrainingJobRequest() {
                     : "No label hints";
                 const truncBadge = result?.truncated ? " • summarized" : "";
                 const savedLabel = qwenElements.captionSaveText?.checked
-                    ? (captionDatasetId ? " • saved to dataset text labels" : " • saved to text labels")
+                    ? (isAnnotationDatasetModeActive()
+                        ? " • saved to annotation session"
+                        : (captionDatasetId ? " • saved to dataset text labels" : " • saved to text labels"))
                     : "";
                 qwenElements.captionMeta.textContent = `Hints: ${hints.length} • Used boxes: ${result?.used_boxes ?? 0}${truncBadge} • ${countSummary}${savedLabel}`;
             }
@@ -21722,7 +22145,11 @@ async function cancelRfDetrTrainingJobRequest() {
                     `single_${Date.now()}`,
                 );
                 try {
-                    await persistCaptionLabel(requestImageName, result?.caption || "", captionDatasetId || null);
+                    await persistCaptionLabel(
+                        requestImageName,
+                        result?.caption || "",
+                        captionDatasetId || null
+                    );
                     captionAutoSaveState.lastSaved.set(requestImageName, String(result?.caption || "").trim());
                 } catch (error) {
                     console.warn("Caption save failed", error);
@@ -21833,8 +22260,11 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenCaptionBatchCancel = false;
         updateQwenCaptionButton();
         const total = runnableImages.length;
-        const captionDatasetId = getCaptionDatasetId();
-        ensureCaptionLabelStoreForDataset(captionDatasetId || "");
+        const captionSaveContext = qwenElements.captionSaveText?.checked
+            ? resolveCaptionPersistenceContext()
+            : { mode: "direct", datasetId: String(getCaptionDatasetId() || "").trim() };
+        const captionDatasetId = captionSaveContext.datasetId || "";
+        ensureCaptionLabelStoreForDataset(captionDatasetId);
         setQwenCaptionStatus(`Batch running (0/${total})…`);
         setSamStatus("Running Qwen caption batch…", { variant: "info", duration: 0 });
         try {
@@ -21879,7 +22309,11 @@ async function cancelRfDetrTrainingJobRequest() {
                             runId,
                         );
                         try {
-                            await persistCaptionLabel(imageName, result?.caption || "", captionDatasetId || null);
+                            await persistCaptionLabel(
+                                imageName,
+                                result?.caption || "",
+                                captionDatasetId || null
+                            );
                             captionAutoSaveState.lastSaved.set(imageName, String(result?.caption || "").trim());
                         } catch (error) {
                             console.warn("Caption save failed", error);
@@ -22330,6 +22764,7 @@ async function cancelRfDetrTrainingJobRequest() {
             // Disable repeated stop clicks once a stop request is already latched.
             qwenElements.prepassStopButton.disabled = !busy || stopRequested;
         }
+        updateAutoLabelButtons();
     }
 
     function updateCalibrationButtons() {
@@ -22339,6 +22774,394 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.calibrationCancel) {
             qwenElements.calibrationCancel.disabled = !qwenCalibrationState.jobId || qwenCalibrationState.cancelInFlight;
+        }
+    }
+
+    function setAutoLabelStatus(message, state = "info") {
+        if (!qwenElements.autoLabelStatus) {
+            return;
+        }
+        qwenElements.autoLabelStatus.textContent = message || "";
+        qwenElements.autoLabelStatus.classList.remove("qwen-status-label--ready", "qwen-status-label--error");
+        if (state === "ready") {
+            qwenElements.autoLabelStatus.classList.add("qwen-status-label--ready");
+        } else if (state === "error") {
+            qwenElements.autoLabelStatus.classList.add("qwen-status-label--error");
+        }
+    }
+
+    function inferAutoLabelModeFromManifest(manifest) {
+        const rows = Array.isArray(manifest?.images) ? manifest.images : [];
+        let bboxCount = 0;
+        let polygonCount = 0;
+        rows.forEach((row) => {
+            const lines = Array.isArray(row?.label_lines) ? row.label_lines : [];
+            lines.forEach((rawLine) => {
+                const parts = String(rawLine || "").trim().split(/\s+/).filter(Boolean);
+                if (parts.length < 5) {
+                    return;
+                }
+                if (parts.length > 5 && ((parts.length - 1) % 2 === 0)) {
+                    polygonCount += 1;
+                } else {
+                    bboxCount += 1;
+                }
+            });
+        });
+        if (polygonCount > 0) {
+            return {
+                mode: "segmentation",
+                reason: "existing polygons",
+                bboxCount,
+                polygonCount,
+            };
+        }
+        if (bboxCount > 0) {
+            return {
+                mode: "detection",
+                reason: "existing boxes",
+                bboxCount,
+                polygonCount,
+            };
+        }
+        return {
+            mode: null,
+            reason: "no existing labels",
+            bboxCount,
+            polygonCount,
+        };
+    }
+
+    function updateAutoLabelModeSummary() {
+        if (!qwenElements.autoLabelModeSummary) {
+            return;
+        }
+        if (annotationSourceState.mode !== "linked" || !String(annotationSourceState.datasetId || "").trim()) {
+            qwenElements.autoLabelModeSummary.textContent =
+                "Automatic labeling requires a linked dataset annotation session.";
+            return;
+        }
+        const inferred = inferAutoLabelModeFromManifest(annotationSourceState.manifest);
+        const bits = [
+            `Dataset ${String(annotationSourceState.datasetId || "").trim()}`,
+        ];
+        if (inferred.mode === "segmentation") {
+            bits.push(`mode: segmentation (${inferred.reason})`);
+        } else if (inferred.mode === "detection") {
+            bits.push(`mode: detection (${inferred.reason})`);
+        } else {
+            bits.push("no existing boxes or polygons; you will be asked to choose the write mode at launch");
+        }
+        bits.push("writes directly into the current dataset overlay");
+        qwenElements.autoLabelModeSummary.textContent = bits.join(" • ");
+    }
+
+    function updateAutoLabelProgressUi(job) {
+        if (!qwenElements.autoLabelProgressWrap || !qwenElements.autoLabelProgressFill || !qwenElements.autoLabelProgressText) {
+            return;
+        }
+        if (!job) {
+            qwenElements.autoLabelProgressWrap.hidden = true;
+            qwenElements.autoLabelProgressFill.style.width = "0%";
+            qwenElements.autoLabelProgressText.textContent = "Waiting to start…";
+            return;
+        }
+        const progress = Number.isFinite(job.progress) ? Math.max(0, Math.min(1, Number(job.progress))) : 0;
+        const percent = Math.round(progress * 100);
+        const result = job && typeof job.result === "object" ? job.result : {};
+        const processed = Number.isFinite(result.images_processed) ? Number(result.images_processed) : 0;
+        const total = Number.isFinite(result.images_total) ? Number(result.images_total) : 0;
+        const labelsAdded = Number.isFinite(result.labels_added) ? Number(result.labels_added) : 0;
+        const dropped = Number.isFinite(result.duplicates_dropped) ? Number(result.duplicates_dropped) : 0;
+        qwenElements.autoLabelProgressWrap.hidden = false;
+        qwenElements.autoLabelProgressFill.style.width = `${percent}%`;
+        const bits = [
+            `${String(job.status || "running")}: ${String(job.message || "").trim() || "working"}`,
+            total > 0 ? `${processed}/${total}` : `${percent}%`,
+        ];
+        if (labelsAdded > 0) {
+            bits.push(`added ${labelsAdded}`);
+        }
+        if (dropped > 0) {
+            bits.push(`dropped ${dropped}`);
+        }
+        qwenElements.autoLabelProgressText.textContent = bits.join(" • ");
+    }
+
+    function updateAutoLabelButtons() {
+        const linkedDatasetReady =
+            annotationSourceState.mode === "linked"
+            && !!String(annotationSourceState.datasetId || "").trim()
+            && !isAnnotationReadOnly();
+        const running = !!qwenAutoLabelState.jobId || qwenAutoLabelState.startInFlight;
+        if (qwenElements.autoLabelRun) {
+            qwenElements.autoLabelRun.disabled = running || isGpuHeavyLockActive() || !linkedDatasetReady;
+        }
+        if (qwenElements.autoLabelCancel) {
+            qwenElements.autoLabelCancel.disabled = !qwenAutoLabelState.jobId || qwenAutoLabelState.cancelInFlight;
+        }
+    }
+
+    function parseAutoLabelClassNames() {
+        const raw = String(qwenElements.autoLabelClassNames?.value || "").trim();
+        if (!raw) {
+            return null;
+        }
+        const seen = new Set();
+        const values = [];
+        raw.split(/[\n,]+/).forEach((item) => {
+            const cleaned = String(item || "").trim();
+            if (!cleaned) {
+                return;
+            }
+            const key = cleaned.toLowerCase();
+            if (seen.has(key)) {
+                return;
+            }
+            seen.add(key);
+            values.push(cleaned);
+        });
+        return values.length ? values : null;
+    }
+
+    async function chooseAutoLabelTargetMode() {
+        const inferred = inferAutoLabelModeFromManifest(annotationSourceState.manifest);
+        if (inferred.mode === "segmentation" || inferred.mode === "detection") {
+            return inferred.mode;
+        }
+        const raw = window.prompt(
+            "This dataset has no existing boxes or polygons. Type \"detection\" to write boxes or \"segmentation\" to write polygons.",
+            "detection",
+        );
+        const normalized = String(raw || "").trim().toLowerCase();
+        if (normalized === "detection" || normalized === "segmentation") {
+            return normalized;
+        }
+        return null;
+    }
+
+    async function buildAutoLabelPayload() {
+        const datasetId = String(annotationSourceState.datasetId || "").trim();
+        if (annotationSourceState.mode !== "linked" || !datasetId) {
+            throw new Error("Automatic labeling currently requires a linked dataset annotation session.");
+        }
+        if (isAnnotationReadOnly()) {
+            throw new Error("Dataset is read-only. Take the annotation lock before starting automatic labeling.");
+        }
+        const targetMode = await chooseAutoLabelTargetMode();
+        if (!targetMode) {
+            throw new Error("Automatic labeling cancelled because no output mode was selected.");
+        }
+        const maxImages = parseInt(qwenElements.autoLabelMaxImages?.value || "100", 10);
+        const overlap = parseFloat(qwenElements.autoLabelOverlap?.value || "0.1");
+        const payload = {
+            dataset_id: datasetId,
+            annotation_session_id: String(annotationSourceState.lockSessionId || "").trim() || null,
+            max_images: Number.isFinite(maxImages) && maxImages > 0 ? maxImages : 100,
+            split: String(qwenElements.autoLabelSplit?.value || "all").trim() || "all",
+            unlabeled_only: !!qwenElements.autoLabelUnlabeledOnly?.checked,
+            target_mode: targetMode,
+            falcon_window_mode: String(qwenElements.autoLabelWindowMode?.value || "full_image").trim() || "full_image",
+            falcon_overlap_ratio: Number.isFinite(overlap) ? overlap : 0.1,
+            dedupe_existing_same_class_iou: 0.5,
+            class_names: parseAutoLabelClassNames(),
+            edr_package_id: qwenAgentSelectedEdrPackageId || null,
+            enable_yolo: qwenElements.agentEnableYolo?.checked !== false,
+            enable_rfdetr: qwenElements.agentEnableRfdetr?.checked !== false,
+            yolo_id: (qwenElements.agentYoloRun?.value || "").trim() || null,
+            rfdetr_id: (qwenElements.agentRfdetrRun?.value || "").trim() || null,
+            classifier_id: (qwenElements.agentClassifierId?.value || "").trim() || null,
+            use_planner_caption: !!qwenElements.autoLabelUsePlannerCaption?.checked,
+            planner_model_id: resolveCaptionModelId() || resolveAgentModelId() || null,
+            simplify_epsilon: Number(polygonSimplifyInput?.value || 20) / 10,
+            force_annotation_lock: false,
+        };
+        return payload;
+    }
+
+    async function pollAutoLabelJob() {
+        if (!qwenAutoLabelState.jobId) {
+            return;
+        }
+        if (qwenAutoLabelState.timerId) {
+            clearInterval(qwenAutoLabelState.timerId);
+        }
+        qwenAutoLabelState.pollInFlight = false;
+        qwenAutoLabelState.timerId = window.setInterval(async () => {
+            if (!qwenAutoLabelState.jobId || qwenAutoLabelState.pollInFlight) {
+                return;
+            }
+            const jobId = qwenAutoLabelState.jobId;
+            const requestId = qwenAutoLabelState.pollRequestId + 1;
+            qwenAutoLabelState.pollRequestId = requestId;
+            qwenAutoLabelState.pollInFlight = true;
+            try {
+                const resp = await fetch(`${API_ROOT}/auto_label/jobs/${encodeURIComponent(jobId)}`);
+                if (!resp.ok) {
+                    throw new Error((await resp.text()) || `HTTP ${resp.status}`);
+                }
+                const job = await resp.json();
+                if (requestId !== qwenAutoLabelState.pollRequestId || qwenAutoLabelState.jobId !== jobId) {
+                    return;
+                }
+                qwenAutoLabelState.lastJob = job;
+                qwenAutoLabelState.annotationSessionId = String(job?.request?.annotation_session_id || qwenAutoLabelState.annotationSessionId || "").trim();
+                updateAutoLabelProgressUi(job);
+                setAutoLabelStatus(String(job.status || "running"), job.status === "failed" ? "error" : (job.status === "completed" ? "ready" : "info"));
+                if (qwenAutoLabelState.overlay) {
+                    qwenAutoLabelState.overlay.update(
+                        qwenElements.autoLabelProgressText?.textContent || `Automatic labeling ${job.status || "running"}`,
+                        Number.isFinite(job.progress) ? job.progress : 0,
+                    );
+                }
+                if (["completed", "failed", "cancelled"].includes(String(job.status || "").toLowerCase())) {
+                    if (qwenAutoLabelState.overlay) {
+                        qwenAutoLabelState.overlay.close();
+                    }
+                    if (qwenAutoLabelState.timerId) {
+                        clearInterval(qwenAutoLabelState.timerId);
+                        qwenAutoLabelState.timerId = null;
+                    }
+                    qwenAutoLabelState.jobId = null;
+                    qwenAutoLabelState.annotationSessionId = "";
+                    if (String(annotationSourceState.statusMessage || "").includes("Automatic labeling")) {
+                        annotationSourceState.statusMessage = "";
+                    }
+                    qwenAutoLabelState.pollRequestId += 1;
+                    updateAutoLabelButtons();
+                    updateAnnotationSourceUi();
+                    if (job.status === "completed") {
+                        const result = job && typeof job.result === "object" ? job.result : {};
+                        const added = Number.isFinite(result.labels_added) ? Number(result.labels_added) : 0;
+                        const imagesChanged = Number.isFinite(result.images_with_changes) ? Number(result.images_with_changes) : 0;
+                        setSamStatus(`Automatic labeling complete. Added ${added} labels across ${imagesChanged} images.`, { variant: "success", duration: 4500 });
+                        enqueueTaskNotice(`Automatic labeling complete: ${added} labels added.`, { durationMs: 5000 });
+                        if (annotationSourceState.mode === "linked") {
+                            reloadAnnotationManifest().catch((error) => {
+                                console.error("Annotation manifest reload failed after automatic labeling", error);
+                            });
+                        }
+                    } else if (job.status === "failed") {
+                        setSamStatus(`Automatic labeling failed: ${job.error || job.message || "unknown error"}`, { variant: "error", duration: 5000 });
+                    } else {
+                        setSamStatus("Automatic labeling cancelled.", { variant: "warn", duration: 3500 });
+                    }
+                    refreshAutomationLockStatus().catch((error) => {
+                        console.debug("Automation-lock refresh failed after auto-label terminal state", error);
+                    });
+                }
+            } catch (error) {
+                if (requestId !== qwenAutoLabelState.pollRequestId || qwenAutoLabelState.jobId !== jobId) {
+                    return;
+                }
+                setAutoLabelStatus("poll error", "error");
+                updateAutoLabelProgressUi({
+                    status: "error",
+                    message: `Automatic labeling status error: ${error.message || error}`,
+                    progress: 0,
+                    result: null,
+                });
+            } finally {
+                qwenAutoLabelState.pollInFlight = false;
+            }
+        }, 3000);
+    }
+
+    async function startAutoLabelJob() {
+        if (qwenAutoLabelState.startInFlight || qwenAutoLabelState.jobId) {
+            return;
+        }
+        if (isGpuHeavyLockActive()) {
+            setSamStatus("Automatic labeling is locked while another heavy backend job is active.", { variant: "warn", duration: 3500 });
+            return;
+        }
+        let payload;
+        try {
+            payload = await buildAutoLabelPayload();
+        } catch (error) {
+            setSamStatus(error?.message || error, { variant: "warn", duration: 3500 });
+            return;
+        }
+        captureCurrentAnnotationDirtyState();
+        if (annotationSourceState.dirtyRecordsByKey.size) {
+            const saved = await flushAnnotationSnapshot({ manual: false });
+            if (!saved && annotationSourceState.dirtyRecordsByKey.size) {
+                setSamStatus(
+                    "Save existing annotation changes before starting automatic labeling.",
+                    { variant: "warn", duration: 4000 }
+                );
+                return;
+            }
+        }
+        qwenAutoLabelState.startInFlight = true;
+        qwenAutoLabelState.annotationSessionId = String(payload.annotation_session_id || "").trim();
+        updateAutoLabelButtons();
+        updateAnnotationSourceUi();
+        setAutoLabelStatus("starting");
+        try {
+            const resp = await fetch(`${API_ROOT}/auto_label/jobs`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                throw new Error((await resp.text()) || `HTTP ${resp.status}`);
+            }
+            const job = await resp.json();
+            qwenAutoLabelState.jobId = job.job_id;
+            qwenAutoLabelState.lastJob = job;
+            qwenAutoLabelState.annotationSessionId = String(job?.request?.annotation_session_id || payload.annotation_session_id || "").trim();
+            qwenAutoLabelState.pollRequestId += 1;
+            qwenAutoLabelState.pollInFlight = false;
+            qwenAutoLabelState.overlay = showProgressModal("Automatic labeling starting…");
+            updateAutoLabelProgressUi(job);
+            setAutoLabelStatus(`job ${job.job_id}`, "ready");
+            updateAutoLabelButtons();
+            updateAnnotationSourceUi();
+            refreshAutomationLockStatus().catch((error) => {
+                console.debug("Automation-lock refresh failed after auto-label start", error);
+            });
+            setSamStatus("Automatic labeling started.", { variant: "info", duration: 3000 });
+            pollAutoLabelJob().catch((error) => {
+                console.error("Automatic labeling poll failed", error);
+            });
+        } catch (error) {
+            qwenAutoLabelState.annotationSessionId = "";
+            setAutoLabelStatus("start failed", "error");
+            setSamStatus(`Automatic labeling start failed: ${error.message || error}`, { variant: "error", duration: 5000 });
+        } finally {
+            qwenAutoLabelState.startInFlight = false;
+            updateAutoLabelButtons();
+            updateAnnotationSourceUi();
+        }
+    }
+
+    async function cancelAutoLabelJob() {
+        if (!qwenAutoLabelState.jobId || qwenAutoLabelState.cancelInFlight) {
+            return;
+        }
+        qwenAutoLabelState.cancelInFlight = true;
+        updateAutoLabelButtons();
+        try {
+            const resp = await fetch(`${API_ROOT}/auto_label/jobs/${encodeURIComponent(qwenAutoLabelState.jobId)}/cancel`, {
+                method: "POST",
+            });
+            if (!resp.ok) {
+                throw new Error((await resp.text()) || `HTTP ${resp.status}`);
+            }
+            const job = await resp.json();
+            qwenAutoLabelState.lastJob = job;
+            updateAutoLabelProgressUi(job);
+            setAutoLabelStatus(String(job.status || "cancelled"));
+            setSamStatus("Automatic labeling cancel requested.", { variant: "warn", duration: 3000 });
+            refreshAutomationLockStatus().catch((error) => {
+                console.debug("Automation-lock refresh failed after auto-label cancel", error);
+            });
+        } catch (error) {
+            setSamStatus(`Automatic labeling cancel failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+        } finally {
+            qwenAutoLabelState.cancelInFlight = false;
+            updateAutoLabelButtons();
         }
     }
 
@@ -22451,6 +23274,63 @@ async function cancelRfDetrTrainingJobRequest() {
         };
     }
 
+    function getSelectedInferenceRecipeId() {
+        return String(qwenElements.prepassRecipeSelect?.value || "").trim();
+    }
+
+    function getActiveInferenceRecipe() {
+        const recipeId = getSelectedInferenceRecipeId();
+        if (!recipeId) {
+            return null;
+        }
+        if (!qwenActiveInferenceRecipe || String(qwenActiveInferenceRecipe.id || "").trim() !== recipeId) {
+            return null;
+        }
+        return qwenActiveInferenceRecipe;
+    }
+
+    function getSelectedAgentEnsembleJobId() {
+        return String(
+            qwenAgentSelectedEnsembleJobId
+            || qwenElements.agentEnsembleJob?.value
+            || "",
+        ).trim();
+    }
+
+    function describeAgentEnsembleJob(job) {
+        const jobId = String(job?.job_id || "").trim();
+        const datasetId = String(job?.request?.dataset_id || "").trim() || "dataset";
+        const jobKind = String(job?.job_kind || "").trim().toLowerCase();
+        const persistentBundle = !!job?.persistent_bundle || jobKind === "canonical_bundle";
+        if (persistentBundle) {
+            return `${jobId} • ${datasetId} • canonical bundle`;
+        }
+        const count = job?.request?.max_images || job?.total || "";
+        return count ? `${jobId} • ${datasetId} • ${count} imgs` : `${jobId} • ${datasetId}`;
+    }
+
+    function ensureAgentEnsembleJobOption(jobId, jobSummary = null) {
+        const normalizedId = String(jobId || "").trim();
+        if (!qwenElements.agentEnsembleJob || !normalizedId) {
+            return;
+        }
+        const existing = Array.from(qwenElements.agentEnsembleJob.options || []).find(
+            (opt) => opt.value === normalizedId,
+        );
+        if (existing) {
+            qwenElements.agentEnsembleJob.value = normalizedId;
+            return;
+        }
+        const option = document.createElement("option");
+        option.value = normalizedId;
+        option.textContent = jobSummary
+            ? describeAgentEnsembleJob(jobSummary)
+            : `${normalizedId} • saved deployment`;
+        option.dataset.synthetic = "true";
+        qwenElements.agentEnsembleJob.appendChild(option);
+        qwenElements.agentEnsembleJob.value = normalizedId;
+    }
+
     function assertSupportedPrepassRecipeConfig(config) {
         if (!config || typeof config !== "object") {
             return;
@@ -22476,29 +23356,68 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!base64) {
             throw new Error(`Failed to encode image: ${imageName}`);
         }
-        const variant = qwenElements.agentVariant?.value || "auto";
-        const enableYolo = !!qwenElements.agentEnableYolo?.checked;
-        const enableRfdetr = !!qwenElements.agentEnableRfdetr?.checked;
-        const yoloRunId = (qwenElements.agentYoloRun?.value || "").trim() || null;
-        const rfdetrRunId = (qwenElements.agentRfdetrRun?.value || "").trim() || null;
-        const sahiWindow = parseInt(qwenElements.agentSahiWindow?.value || "", 10);
-        const sahiOverlap = parseFloat(qwenElements.agentSahiOverlap?.value || "");
-        const enableSam3Text = !!qwenElements.agentEnableSam3Text?.checked;
-        const sam3TextWindowExtension = !!qwenElements.agentSam3TextWindowExtension?.checked;
-        const sam3TextWindowMode = (qwenElements.agentSam3TextWindowMode?.value || "grid").trim();
-        const sam3TextWindowSize = parseInt(qwenElements.agentSam3TextWindowSize?.value || "", 10);
-        const sam3TextWindowOverlap = parseFloat(qwenElements.agentSam3TextWindowOverlap?.value || "");
-        const sam3SynBudget = parseInt(qwenElements.agentSam3SynBudget?.value || "", 10);
-        const enableSam3Similarity = !!qwenElements.agentEnableSam3Similarity?.checked;
-        const similarityScoreThr = parseFloat(qwenElements.agentSimilarityScoreThr?.value || "");
-        const similarityMinScore = parseFloat(qwenElements.agentSimilarityMinScore?.value || "");
-        const similarityExemplarStrategy = (qwenElements.agentSimilarityExemplarStrategy?.value || "top").trim();
-        const similarityExemplarCount = parseInt(qwenElements.agentSimilarityExemplarCount?.value || "", 10);
-        const similarityExemplarSeed = parseInt(qwenElements.agentSimilarityExemplarSeed?.value || "", 10);
-        const similarityExemplarFraction = parseFloat(qwenElements.agentSimilarityExemplarFraction?.value || "");
-        const similarityExemplarMin = parseInt(qwenElements.agentSimilarityExemplarMin?.value || "", 10);
-        const similarityExemplarMax = parseInt(qwenElements.agentSimilarityExemplarMax?.value || "", 10);
-        const similaritySourceQuota = parseInt(qwenElements.agentSimilaritySourceQuota?.value || "", 10);
+        const activeInferenceRecipe = getActiveInferenceRecipe();
+        const recipeConfig = activeInferenceRecipe?.config && typeof activeInferenceRecipe.config === "object"
+            ? activeInferenceRecipe.config
+            : null;
+        const recipeGlossary = String(activeInferenceRecipe?.glossary || "").trim();
+        const useRecipeConfig = !!recipeConfig;
+        const getConfigString = (key, fallback = "") => {
+            if (!useRecipeConfig) {
+                return fallback;
+            }
+            const value = recipeConfig[key];
+            return value === null || value === undefined ? fallback : String(value).trim();
+        };
+        const getConfigInt = (key, fallback = NaN) => {
+            if (!useRecipeConfig) {
+                return fallback;
+            }
+            const value = parseInt(String(recipeConfig[key] ?? ""), 10);
+            return Number.isFinite(value) ? value : fallback;
+        };
+        const getConfigFloat = (key, fallback = NaN) => {
+            if (!useRecipeConfig) {
+                return fallback;
+            }
+            const value = Number(recipeConfig[key]);
+            return Number.isFinite(value) ? value : fallback;
+        };
+        const getConfigBool = (key, fallback = false) => {
+            if (!useRecipeConfig || !Object.prototype.hasOwnProperty.call(recipeConfig, key)) {
+                return fallback;
+            }
+            return !!recipeConfig[key];
+        };
+        const getConfigEnabled = (key, fallback = true) => {
+            if (!useRecipeConfig || !Object.prototype.hasOwnProperty.call(recipeConfig, key)) {
+                return fallback;
+            }
+            return recipeConfig[key] !== false;
+        };
+        const variant = useRecipeConfig ? (getConfigString("model_variant", "auto") || "auto") : (qwenElements.agentVariant?.value || "auto");
+        const enableYolo = useRecipeConfig ? getConfigEnabled("enable_yolo", true) : !!qwenElements.agentEnableYolo?.checked;
+        const enableRfdetr = useRecipeConfig ? getConfigEnabled("enable_rfdetr", true) : !!qwenElements.agentEnableRfdetr?.checked;
+        const yoloRunId = useRecipeConfig ? (getConfigString("yolo_id") || null) : ((qwenElements.agentYoloRun?.value || "").trim() || null);
+        const rfdetrRunId = useRecipeConfig ? (getConfigString("rfdetr_id") || null) : ((qwenElements.agentRfdetrRun?.value || "").trim() || null);
+        const sahiWindow = useRecipeConfig ? getConfigInt("sahi_window_size") : parseInt(qwenElements.agentSahiWindow?.value || "", 10);
+        const sahiOverlap = useRecipeConfig ? getConfigFloat("sahi_overlap_ratio") : parseFloat(qwenElements.agentSahiOverlap?.value || "");
+        const enableSam3Text = useRecipeConfig ? getConfigEnabled("enable_sam3_text", true) : !!qwenElements.agentEnableSam3Text?.checked;
+        const sam3TextWindowExtension = useRecipeConfig ? getConfigBool("sam3_text_window_extension", false) : !!qwenElements.agentSam3TextWindowExtension?.checked;
+        const sam3TextWindowMode = useRecipeConfig ? (getConfigString("sam3_text_window_mode", "grid") || "grid") : ((qwenElements.agentSam3TextWindowMode?.value || "grid").trim());
+        const sam3TextWindowSize = useRecipeConfig ? getConfigInt("sam3_text_window_size") : parseInt(qwenElements.agentSam3TextWindowSize?.value || "", 10);
+        const sam3TextWindowOverlap = useRecipeConfig ? getConfigFloat("sam3_text_window_overlap") : parseFloat(qwenElements.agentSam3TextWindowOverlap?.value || "");
+        const sam3SynBudget = useRecipeConfig ? getConfigInt("sam3_text_synonym_budget") : parseInt(qwenElements.agentSam3SynBudget?.value || "", 10);
+        const enableSam3Similarity = useRecipeConfig ? getConfigEnabled("enable_sam3_similarity", true) : !!qwenElements.agentEnableSam3Similarity?.checked;
+        const similarityScoreThr = useRecipeConfig ? getConfigFloat("prepass_similarity_score") : parseFloat(qwenElements.agentSimilarityScoreThr?.value || "");
+        const similarityMinScore = useRecipeConfig ? getConfigFloat("similarity_min_exemplar_score") : parseFloat(qwenElements.agentSimilarityMinScore?.value || "");
+        const similarityExemplarStrategy = useRecipeConfig ? (getConfigString("similarity_exemplar_strategy", "top") || "top") : ((qwenElements.agentSimilarityExemplarStrategy?.value || "top").trim());
+        const similarityExemplarCount = useRecipeConfig ? getConfigInt("similarity_exemplar_count") : parseInt(qwenElements.agentSimilarityExemplarCount?.value || "", 10);
+        const similarityExemplarSeed = useRecipeConfig ? getConfigInt("similarity_exemplar_seed") : parseInt(qwenElements.agentSimilarityExemplarSeed?.value || "", 10);
+        const similarityExemplarFraction = useRecipeConfig ? getConfigFloat("similarity_exemplar_fraction") : parseFloat(qwenElements.agentSimilarityExemplarFraction?.value || "");
+        const similarityExemplarMin = useRecipeConfig ? getConfigInt("similarity_exemplar_min") : parseInt(qwenElements.agentSimilarityExemplarMin?.value || "", 10);
+        const similarityExemplarMax = useRecipeConfig ? getConfigInt("similarity_exemplar_max") : parseInt(qwenElements.agentSimilarityExemplarMax?.value || "", 10);
+        const similaritySourceQuota = useRecipeConfig ? getConfigInt("similarity_exemplar_source_quota") : parseInt(qwenElements.agentSimilaritySourceQuota?.value || "", 10);
         const similarityExemplarConfig = canonicalizeSimilarityExemplarConfig({
             strategy: similarityExemplarStrategy,
             count: similarityExemplarCount,
@@ -22508,40 +23427,47 @@ async function cancelRfDetrTrainingJobRequest() {
             maxCount: similarityExemplarMax,
             sourceQuota: similaritySourceQuota,
         });
-        const similarityWindowMode = (qwenElements.agentSimilarityWindowMode?.value || "grid").trim();
-        const similarityWindowSize = parseInt(qwenElements.agentSimilarityWindowSize?.value || "", 10);
-        const similarityWindowOverlap = parseFloat(qwenElements.agentSimilarityWindowOverlap?.value || "");
-        const similarityWindowExtension = !!qwenElements.agentSimilarityWindowExtension?.checked;
-        const gridCols = parseInt(qwenElements.agentGridCols?.value || "", 10);
-        const gridRows = parseInt(qwenElements.agentGridRows?.value || "", 10);
-        const gridOverlap = parseFloat(qwenElements.agentGridOverlap?.value || "");
-        const classifierId = (qwenElements.agentClassifierId?.value || "").trim() || null;
-        const ensembleJobId = (qwenElements.agentEnsembleJob?.value || "").trim();
-        const selectedSamVariant = (qwenElements.agentSamVariant?.value || "").trim() || "sam3";
-        const fusionMode = (qwenElements.agentFusionMode?.value || "primary").trim();
-        const iou = parseFloat(qwenElements.agentIou?.value || "0.75");
-        const crossClassDedupeEnabled = !!qwenElements.agentCrossClassDedupeEnabled?.checked;
-        const crossClassDedupeIou = parseFloat(qwenElements.agentCrossClassDedupeIou?.value || "");
+        const similarityWindowMode = useRecipeConfig ? (getConfigString("similarity_window_mode", "grid") || "grid") : ((qwenElements.agentSimilarityWindowMode?.value || "grid").trim());
+        const similarityWindowSize = useRecipeConfig ? getConfigInt("similarity_window_size") : parseInt(qwenElements.agentSimilarityWindowSize?.value || "", 10);
+        const similarityWindowOverlap = useRecipeConfig ? getConfigFloat("similarity_window_overlap") : parseFloat(qwenElements.agentSimilarityWindowOverlap?.value || "");
+        const similarityWindowExtension = useRecipeConfig ? getConfigBool("similarity_window_extension", false) : !!qwenElements.agentSimilarityWindowExtension?.checked;
+        const gridCols = useRecipeConfig ? getConfigInt("grid_cols") : parseInt(qwenElements.agentGridCols?.value || "", 10);
+        const gridRows = useRecipeConfig ? getConfigInt("grid_rows") : parseInt(qwenElements.agentGridRows?.value || "", 10);
+        const gridOverlap = useRecipeConfig ? getConfigFloat("grid_overlap_ratio") : parseFloat(qwenElements.agentGridOverlap?.value || "");
+        const edrPackageId = useRecipeConfig ? (getConfigString("edr_package_id") || null) : (qwenAgentSelectedEdrPackageId || null);
+        const usePackageRuntime = !!edrPackageId;
+        const classifierId = useRecipeConfig
+            ? (getConfigString("resolved_classifier_id") || getConfigString("classifier_id") || null)
+            : ((qwenElements.agentClassifierId?.value || "").trim() || null);
+        const ensembleJobId = useRecipeConfig ? getConfigString("ensemble_job_id") : getSelectedAgentEnsembleJobId();
+        const selectedSamVariant = useRecipeConfig ? (getConfigString("sam_variant", "sam3") || "sam3") : ((qwenElements.agentSamVariant?.value || "").trim() || "sam3");
+        const fusionMode = useRecipeConfig ? (getConfigString("fusion_mode", "primary") || "primary") : ((qwenElements.agentFusionMode?.value || "primary").trim());
+        const iou = useRecipeConfig ? getConfigFloat("iou", 0.75) : parseFloat(qwenElements.agentIou?.value || "0.75");
+        const crossClassDedupeEnabled = useRecipeConfig ? getConfigBool("cross_class_dedupe_enabled", false) : !!qwenElements.agentCrossClassDedupeEnabled?.checked;
+        const crossClassDedupeIou = useRecipeConfig ? getConfigFloat("cross_class_dedupe_iou") : parseFloat(qwenElements.agentCrossClassDedupeIou?.value || "");
         const crossClassConfig = canonicalizeCrossClassDedupeConfig(
             crossClassDedupeEnabled,
             crossClassDedupeIou,
         );
-        const captionProfile = (qwenElements.agentCaptionProfile?.value || "light").trim();
-        const captionVariant = (qwenElements.agentCaptionVariant?.value || "").trim();
-        const captionMaxTokens = parseInt(qwenElements.agentCaptionMaxTokens?.value || "", 10);
-        const tightenFp = !!qwenElements.agentTightenFp?.checked;
-        const detectorConf = parseFloat(qwenElements.agentDetectorConf?.value || "");
-        const sam3ScoreThr = parseFloat(qwenElements.agentSam3ScoreThr?.value || "");
-        const sam3TextScoreThr = parseFloat(qwenElements.agentSam3TextScoreThr?.value || "");
-        const sam3MaskThr = parseFloat(qwenElements.agentSam3MaskThr?.value || "");
-        const classifierMinProb = parseFloat(qwenElements.agentClassifierMinProb?.value || "");
-        const classifierMargin = parseFloat(qwenElements.agentClassifierMargin?.value || "");
-        const classifierBgMargin = parseFloat(qwenElements.agentClassifierBgMargin?.value || "");
-        const scorelessIou = parseFloat(qwenElements.agentScorelessIou?.value || "");
-        const datasetId = getQwenAgentDatasetId();
-        const glossarySource = (qwenElements.agentGlossarySource?.value || "dataset").trim();
-        const glossaryText = glossarySource === "dataset" ? "" : (qwenElements.agentGlossary?.value || "");
-        const expandGlossary = qwenElements.agentSam3ExpandGlossary?.checked !== false;
+        const captionProfile = useRecipeConfig ? getConfigString("prepass_caption_profile", "light") : ((qwenElements.agentCaptionProfile?.value || "light").trim());
+        const captionVariant = useRecipeConfig ? getConfigString("prepass_caption_variant") : ((qwenElements.agentCaptionVariant?.value || "").trim());
+        const captionMaxTokens = useRecipeConfig ? getConfigInt("prepass_caption_max_tokens") : parseInt(qwenElements.agentCaptionMaxTokens?.value || "", 10);
+        const tightenFp = useRecipeConfig ? getConfigBool("tighten_fp", false) : !!qwenElements.agentTightenFp?.checked;
+        const detectorConf = useRecipeConfig ? getConfigFloat("detector_conf") : parseFloat(qwenElements.agentDetectorConf?.value || "");
+        const sam3ScoreThr = useRecipeConfig ? getConfigFloat("sam3_score_thr") : parseFloat(qwenElements.agentSam3ScoreThr?.value || "");
+        const sam3TextScoreThr = useRecipeConfig ? getConfigFloat("prepass_sam3_text_thr") : parseFloat(qwenElements.agentSam3TextScoreThr?.value || "");
+        const sam3MaskThr = useRecipeConfig ? getConfigFloat("sam3_mask_threshold") : parseFloat(qwenElements.agentSam3MaskThr?.value || "");
+        const classifierMinProb = useRecipeConfig ? getConfigFloat("classifier_min_prob") : parseFloat(qwenElements.agentClassifierMinProb?.value || "");
+        const classifierMargin = useRecipeConfig ? getConfigFloat("classifier_margin") : parseFloat(qwenElements.agentClassifierMargin?.value || "");
+        const classifierBgMargin = useRecipeConfig ? getConfigFloat("classifier_bg_margin") : parseFloat(qwenElements.agentClassifierBgMargin?.value || "");
+        const scorelessIou = useRecipeConfig ? getConfigFloat("scoreless_iou") : parseFloat(qwenElements.agentScorelessIou?.value || "");
+        const datasetId = getQwenAgentInferenceDatasetId(imageRecord);
+        const recipeSourceDatasetId = useRecipeConfig ? getConfigString("dataset_id") : "";
+        const glossarySource = useRecipeConfig ? (getConfigString("prepass_glossary_source", "dataset") || "dataset") : ((qwenElements.agentGlossarySource?.value || "dataset").trim());
+        const glossaryText = useRecipeConfig
+            ? (glossarySource === "dataset" ? "" : recipeGlossary)
+            : (glossarySource === "dataset" ? "" : (qwenElements.agentGlossary?.value || ""));
+        const expandGlossary = useRecipeConfig ? !usePackageRuntime : qwenElements.agentSam3ExpandGlossary?.checked !== false;
         const sam3SynBudgetValue = Number.isFinite(sam3SynBudget) ? sam3SynBudget : null;
         const selectedPrepassRecipeId = (qwenElements.prepassRecipeSelect?.value || "").trim();
         const selectedAgentRecipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
@@ -22555,9 +23481,11 @@ async function cancelRfDetrTrainingJobRequest() {
             : null;
         return {
             dataset_id: datasetId || null,
+            recipe_source_dataset_id: recipeSourceDatasetId || null,
+            edr_package_id: edrPackageId || null,
             labelmap: recipeLabelmap,
             image_base64: base64,
-            model_id: resolveAgentModelId(),
+            model_id: useRecipeConfig ? (getConfigString("model_id") || resolveAgentModelId()) : resolveAgentModelId(),
             model_variant: variant,
             enable_yolo: enableYolo,
             enable_rfdetr: enableRfdetr,
@@ -22574,7 +23502,7 @@ async function cancelRfDetrTrainingJobRequest() {
             sam3_text_window_mode: sam3TextWindowMode || "grid",
             sam3_text_window_size: Number.isFinite(sam3TextWindowSize) ? sam3TextWindowSize : null,
             sam3_text_window_overlap: Number.isFinite(sam3TextWindowOverlap) ? sam3TextWindowOverlap : null,
-            sam3_text_synonym_budget: expandGlossary ? sam3SynBudgetValue : 0,
+            sam3_text_synonym_budget: usePackageRuntime ? 0 : (expandGlossary ? sam3SynBudgetValue : 0),
             enable_sam3_similarity: enableSam3Similarity,
             prepass_sam3_text_thr: Number.isFinite(sam3TextScoreThr)
                 ? sam3TextScoreThr
@@ -22599,9 +23527,10 @@ async function cancelRfDetrTrainingJobRequest() {
             iou: Number.isFinite(iou) ? iou : 0.75,
             cross_class_dedupe_enabled: crossClassConfig.enabled,
             cross_class_dedupe_iou: crossClassConfig.iou,
+            prepass_caption: usePackageRuntime ? false : true,
             prepass_caption_profile: captionProfile || null,
             prepass_caption_variant: captionVariant || null,
-            prepass_caption_model_id: resolveCaptionModelId(),
+            prepass_caption_model_id: useRecipeConfig ? (getConfigString("prepass_caption_model_id") || resolveCaptionModelId()) : resolveCaptionModelId(),
             prepass_caption_max_tokens: Number.isFinite(captionMaxTokens) ? captionMaxTokens : null,
             labelmap_glossary: glossaryText || null,
             tighten_fp: tightenFp,
@@ -22656,7 +23585,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const gridRows = parseInt(qwenElements.agentGridRows?.value || "", 10);
         const gridOverlap = parseFloat(qwenElements.agentGridOverlap?.value || "");
         const classifierId = (qwenElements.agentClassifierId?.value || "").trim() || null;
-        const ensembleJobId = (qwenElements.agentEnsembleJob?.value || "").trim();
+        const ensembleJobId = getSelectedAgentEnsembleJobId();
         const selectedSamVariant = (qwenElements.agentSamVariant?.value || "").trim() || "sam3";
         const fusionMode = (qwenElements.agentFusionMode?.value || "primary").trim();
         const iou = parseFloat(qwenElements.agentIou?.value || "0.75");
@@ -22682,8 +23611,11 @@ async function cancelRfDetrTrainingJobRequest() {
         const glossaryConfig = getPrepassGlossaryConfig();
         const expandGlossary = qwenElements.agentSam3ExpandGlossary?.checked !== false;
         const sam3SynBudgetValue = Number.isFinite(sam3SynBudget) ? sam3SynBudget : null;
+        const edrPackageId = qwenAgentSelectedEdrPackageId || null;
         return {
             dataset_id: datasetId || null,
+            edr_package_id: edrPackageId || null,
+            edr_runtime_mode: edrPackageId ? "package" : null,
             model_id: resolveAgentModelId(),
             model_variant: variant,
             enable_yolo: enableYolo,
@@ -22701,7 +23633,7 @@ async function cancelRfDetrTrainingJobRequest() {
             sam3_text_window_mode: sam3TextWindowMode || "grid",
             sam3_text_window_size: Number.isFinite(sam3TextWindowSize) ? sam3TextWindowSize : null,
             sam3_text_window_overlap: Number.isFinite(sam3TextWindowOverlap) ? sam3TextWindowOverlap : null,
-            sam3_text_synonym_budget: expandGlossary ? sam3SynBudgetValue : 0,
+            sam3_text_synonym_budget: edrPackageId ? 0 : (expandGlossary ? sam3SynBudgetValue : 0),
             enable_sam3_similarity: enableSam3Similarity,
             prepass_sam3_text_thr: Number.isFinite(sam3TextScoreThr)
                 ? sam3TextScoreThr
@@ -22726,6 +23658,7 @@ async function cancelRfDetrTrainingJobRequest() {
             iou: Number.isFinite(iou) ? iou : 0.75,
             cross_class_dedupe_enabled: crossClassConfig.enabled,
             cross_class_dedupe_iou: crossClassConfig.iou,
+            prepass_caption: edrPackageId ? false : true,
             prepass_caption_profile: captionProfile || null,
             prepass_caption_variant: captionVariant || null,
             prepass_caption_model_id: resolveCaptionModelId(),
@@ -22741,6 +23674,50 @@ async function cancelRfDetrTrainingJobRequest() {
             classifier_margin: Number.isFinite(classifierMargin) ? classifierMargin : null,
             classifier_bg_margin: Number.isFinite(classifierBgMargin) ? classifierBgMargin : null,
             scoreless_iou: Number.isFinite(scorelessIou) ? scorelessIou : null,
+        };
+    }
+
+    function buildCalibrationRecipeConfigSnapshot() {
+        const datasetId = (qwenElements.calibrationDataset?.value || getQwenAgentDatasetId() || "").trim();
+        const imageCount = parseInt(qwenElements.calibrationImageCount?.value || "", 10);
+        const recipeMode = (qwenElements.calibrationRecipeMode?.value || "auto").trim().toLowerCase();
+        const laneSelection = (qwenElements.calibrationLaneSelection?.value || "window").trim().toLowerCase();
+        const baseFp = parseFloat(qwenElements.calibrationBaseFp?.value || "");
+        const relaxFp = parseFloat(qwenElements.calibrationRelaxFp?.value || "");
+        const recallFloor = parseFloat(qwenElements.calibrationRecallFloor?.value || "");
+        const perClass = qwenElements.calibrationPerClass?.checked !== false;
+        const thresholdSteps = parseInt(qwenElements.calibrationThresholdSteps?.value || "", 10);
+        const optimizeMetric = (qwenElements.calibrationOptimize?.value || "f1").trim();
+        const labelIou = parseFloat(qwenElements.calibrationLabelIou?.value || "");
+        const evalIou = parseFloat(qwenElements.calibrationEvalIou?.value || "");
+        const evalIouGrid = (qwenElements.calibrationEvalIouGrid?.value || "").trim();
+        const dedupeIou = parseFloat(qwenElements.calibrationDedupeIou?.value || "");
+        const dedupeIouGrid = (qwenElements.calibrationDedupeIouGrid?.value || "").trim();
+        const supportIou = parseFloat(qwenElements.calibrationSupportIou?.value || "");
+        return {
+            dataset_id: datasetId || null,
+            calibration_max_images: Number.isFinite(imageCount) ? imageCount : null,
+            recipe_mode: recipeMode || "auto",
+            lane_selection: laneSelection || "window",
+            base_fp_ratio: Number.isFinite(baseFp) ? baseFp : null,
+            relax_fp_ratio: Number.isFinite(relaxFp) ? relaxFp : null,
+            recall_floor: Number.isFinite(recallFloor) ? recallFloor : null,
+            per_class_thresholds: perClass,
+            threshold_steps: Number.isFinite(thresholdSteps) ? thresholdSteps : null,
+            optimize_metric: optimizeMetric || "f1",
+            label_iou: Number.isFinite(labelIou) ? labelIou : null,
+            eval_iou: Number.isFinite(evalIou) ? evalIou : null,
+            eval_iou_grid: evalIouGrid || null,
+            dedupe_iou: Number.isFinite(dedupeIou) ? dedupeIou : null,
+            dedupe_iou_grid: dedupeIouGrid || null,
+            support_iou: Number.isFinite(supportIou) ? supportIou : null,
+        };
+    }
+
+    function buildSavedEdrRecipeConfig() {
+        return {
+            ...buildPrepassRecipeConfig(),
+            ...buildCalibrationRecipeConfigSnapshot(),
         };
     }
 
@@ -22931,8 +23908,105 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+    function isCanonicalPrepassRecipeItem(item) {
+        const recipeKind = String(item?.recipe_kind || "").trim().toLowerCase();
+        const savedSource = String(item?.edr_saved_source || "").trim().toLowerCase();
+        return recipeKind === "canonical_edr" || savedSource === "canonical_discovery";
+    }
+
+    function syncCanonicalRecipeSelect(recipeId) {
+        if (!qwenElements.canonicalRecipeSelect) {
+            return;
+        }
+        const normalized = String(recipeId || "").trim();
+        const hasOption = Array.from(qwenElements.canonicalRecipeSelect.options || []).some(
+            (option) => String(option?.value || "").trim() === normalized,
+        );
+        qwenElements.canonicalRecipeSelect.value = hasOption ? normalized : "";
+        updateCanonicalRecipeSummary();
+    }
+
+    function updateCanonicalRecipeSummary() {
+        if (!qwenElements.canonicalRecipeSummary) {
+            return;
+        }
+        const recipeId = String(qwenElements.canonicalRecipeSelect?.value || "").trim();
+        if (!recipeId) {
+            qwenElements.canonicalRecipeSummary.textContent = "No canonical EDR selected.";
+            return;
+        }
+        const item = canonicalPrepassRecipes.find((entry) => String(entry?.id || "").trim() === recipeId);
+        if (!item) {
+            qwenElements.canonicalRecipeSummary.textContent = "Canonical EDR metadata unavailable.";
+            return;
+        }
+        const datasetId = String(item?.dataset_id || "").trim();
+        const lane = String(item?.lane_selection || "").trim();
+        const fingerprint = String(item?.recipe_fingerprint || "").trim();
+        const meanF1 = Number(item?.expected_mean_f1);
+        const parts = [];
+        if (datasetId) {
+            parts.push(`Dataset ${datasetId}`);
+        }
+        if (lane) {
+            parts.push(`lane ${lane}`);
+        }
+        if (Number.isFinite(meanF1)) {
+            parts.push(`expected mean F1 ${meanF1.toFixed(4)}`);
+        }
+        if (fingerprint) {
+            parts.push(`fingerprint ${fingerprint.slice(0, 10)}`);
+        }
+        qwenElements.canonicalRecipeSummary.textContent = parts.length
+            ? parts.join(" • ")
+            : "Canonical EDR selected.";
+    }
+
+    function applyLoadedRecipeToBuilder(data, recipeId) {
+        assertSupportedPrepassRecipeConfig(data?.config);
+        if (qwenElements.agentRecipeName) {
+            qwenElements.agentRecipeName.value = data?.name || "";
+        }
+        if (qwenElements.agentRecipeDescription) {
+            qwenElements.agentRecipeDescription.value = data?.description || "";
+        }
+        if (qwenElements.agentRecipeSelect) {
+            qwenElements.agentRecipeSelect.value = recipeId;
+        }
+        applyPrepassRecipeConfig(data?.config || {}, data?.glossary || "", { recipeId });
+    }
+
+    async function loadCanonicalRecipeIntoBuilder() {
+        const recipeId = String(qwenElements.canonicalRecipeSelect?.value || "").trim();
+        if (!recipeId) {
+            setSamStatus("Select a canonical EDR to load.", { variant: "warn", duration: 2500 });
+            return;
+        }
+        syncCanonicalRecipeSelect(recipeId);
+        const data = await fetchPrepassRecipe(recipeId);
+        applyLoadedRecipeToBuilder(data, recipeId);
+        setSamStatus("Canonical EDR loaded into builder.", { variant: "info", duration: 2500 });
+    }
+
+    async function useCanonicalRecipeForInference() {
+        const recipeId = String(qwenElements.canonicalRecipeSelect?.value || "").trim();
+        if (!recipeId) {
+            setSamStatus("Select a canonical EDR to use.", { variant: "warn", duration: 2500 });
+            return;
+        }
+        if (qwenElements.prepassRecipeSelect) {
+            qwenElements.prepassRecipeSelect.value = recipeId;
+        }
+        syncCanonicalRecipeSelect(recipeId);
+        const loaded = await loadPrepassRecipeForInference({ suppressMissingWarning: true });
+        if (!loaded) {
+            return;
+        }
+        setSamStatus("Canonical EDR is now active for Label Images.", { variant: "info", duration: 2500 });
+    }
+
     async function refreshPrepassRecipes() {
-        if (!qwenElements.agentRecipeSelect && !qwenElements.prepassRecipeSelect) {
+        if (!qwenElements.agentRecipeSelect && !qwenElements.prepassRecipeSelect && !qwenElements.canonicalRecipeSelect) {
             return;
         }
         if (prepassRecipeRefreshInFlight) {
@@ -22945,8 +24019,12 @@ async function cancelRfDetrTrainingJobRequest() {
         prepassRecipeRefreshRequestId = requestId;
         const previousAgent = (qwenElements.agentRecipeSelect?.value || "").trim();
         const previousInference = (qwenElements.prepassRecipeSelect?.value || "").trim();
+        const previousCanonical = (qwenElements.canonicalRecipeSelect?.value || "").trim();
         if (qwenElements.prepassRecipeRefresh) {
             qwenElements.prepassRecipeRefresh.disabled = true;
+        }
+        if (qwenElements.canonicalRecipeRefresh) {
+            qwenElements.canonicalRecipeRefresh.disabled = true;
         }
         try {
             const resp = await fetch(`${API_ROOT}/prepass/recipes`);
@@ -22954,29 +24032,39 @@ async function cancelRfDetrTrainingJobRequest() {
                 throw new Error(await resp.text());
             }
             const items = await resp.json();
+            const recipeItems = Array.isArray(items) ? items : [];
+            canonicalPrepassRecipes = recipeItems.filter((item) => isCanonicalPrepassRecipeItem(item));
+            const genericRecipeItems = recipeItems.filter((item) => !isCanonicalPrepassRecipeItem(item));
             // Ignore out-of-order responses when multiple refreshes race.
             if (requestId !== prepassRecipeRefreshRequestId) {
                 return;
             }
-            const populate = (select, previousValue) => {
+            const populate = (select, previousValue, entries, placeholderText = "Select EDR") => {
                 if (!select) return;
                 select.innerHTML = "";
                 const placeholder = document.createElement("option");
                 placeholder.value = "";
-                placeholder.textContent = "Select EDR";
+                placeholder.textContent = placeholderText;
                 select.appendChild(placeholder);
-                items.forEach((item) => {
+                entries.forEach((item) => {
                     const option = document.createElement("option");
                     option.value = item.id;
                     option.textContent = item.name || item.id;
                     select.appendChild(option);
                 });
-                if (previousValue && items.some((item) => item?.id === previousValue)) {
+                if (previousValue && entries.some((item) => item?.id === previousValue)) {
                     select.value = previousValue;
                 }
             };
-            populate(qwenElements.agentRecipeSelect, previousAgent);
-            populate(qwenElements.prepassRecipeSelect, previousInference);
+            populate(qwenElements.agentRecipeSelect, previousAgent, genericRecipeItems);
+            populate(qwenElements.prepassRecipeSelect, previousInference, recipeItems);
+            populate(
+                qwenElements.canonicalRecipeSelect,
+                previousCanonical,
+                canonicalPrepassRecipes,
+                "Select Canonical EDR",
+            );
+            updateCanonicalRecipeSummary();
         } catch (error) {
             if (requestId !== prepassRecipeRefreshRequestId) {
                 return;
@@ -22988,6 +24076,12 @@ async function cancelRfDetrTrainingJobRequest() {
                 && qwenElements.prepassRecipeRefresh
             ) {
                 qwenElements.prepassRecipeRefresh.disabled = false;
+            }
+            if (
+                requestId === prepassRecipeRefreshRequestId
+                && qwenElements.canonicalRecipeRefresh
+            ) {
+                qwenElements.canonicalRecipeRefresh.disabled = false;
             }
             prepassRecipeRefreshInFlight = false;
             if (prepassRecipeRefreshNeedsRefresh) {
@@ -23014,6 +24108,7 @@ async function cancelRfDetrTrainingJobRequest() {
         };
 
         setValue(qwenElements.agentDatasetSelect, config.dataset_id || "");
+        setValue(qwenElements.calibrationDataset, config.dataset_id || "");
         setValue(qwenElements.agentModel, config.model_id || "active");
         setValue(qwenElements.agentVariant, config.model_variant || "auto");
         setChecked(qwenElements.agentEnableYolo, config.enable_yolo !== false);
@@ -23065,8 +24160,13 @@ async function cancelRfDetrTrainingJobRequest() {
         setValue(qwenElements.agentGridCols, config.grid_cols ?? "");
         setValue(qwenElements.agentGridRows, config.grid_rows ?? "");
         setValue(qwenElements.agentGridOverlap, config.grid_overlap_ratio ?? "");
-        setValue(qwenElements.agentClassifierId, config.classifier_id ?? "");
-        setValue(qwenElements.agentEnsembleJob, config.ensemble_job_id ?? "");
+        setValue(qwenElements.agentClassifierId, config.resolved_classifier_id ?? config.classifier_id ?? "");
+        qwenAgentSelectedEdrPackageId = String(config.edr_package_id || "").trim();
+        qwenAgentSelectedEnsembleJobId = String(config.ensemble_job_id || "").trim();
+        ensureAgentEnsembleJobOption(
+            qwenAgentSelectedEnsembleJobId,
+            qwenAgentEnsembleJobSummaries.get(qwenAgentSelectedEnsembleJobId) || null,
+        );
         setValue(qwenElements.agentSamVariant, config.sam_variant ?? "sam3");
         setValue(qwenElements.agentFusionMode, config.fusion_mode ?? "primary");
         setValue(qwenElements.agentIou, config.iou ?? 0.75);
@@ -23094,12 +24194,28 @@ async function cancelRfDetrTrainingJobRequest() {
         setValue(qwenElements.agentClassifierMargin, config.classifier_margin ?? "");
         setValue(qwenElements.agentClassifierBgMargin, config.classifier_bg_margin ?? "");
         setValue(qwenElements.agentScorelessIou, config.scoreless_iou ?? "");
+        setValue(qwenElements.calibrationImageCount, config.calibration_max_images ?? "");
+        setValue(qwenElements.calibrationRecipeMode, config.recipe_mode ?? "auto");
+        setValue(qwenElements.calibrationLaneSelection, config.lane_selection ?? "window");
+        setValue(qwenElements.calibrationBaseFp, config.base_fp_ratio ?? "");
+        setValue(qwenElements.calibrationRelaxFp, config.relax_fp_ratio ?? "");
+        setValue(qwenElements.calibrationRecallFloor, config.recall_floor ?? "");
+        setChecked(qwenElements.calibrationPerClass, config.per_class_thresholds !== false);
+        setValue(qwenElements.calibrationThresholdSteps, config.threshold_steps ?? "");
+        setValue(qwenElements.calibrationOptimize, config.optimize_metric ?? "f1");
+        setValue(qwenElements.calibrationSupportIou, config.support_iou ?? "");
+        setValue(qwenElements.calibrationLabelIou, config.label_iou ?? "");
+        setValue(qwenElements.calibrationEvalIou, config.eval_iou ?? "");
+        setValue(qwenElements.calibrationEvalIouGrid, config.eval_iou_grid ?? "");
+        setValue(qwenElements.calibrationDedupeIou, config.dedupe_iou ?? "");
+        setValue(qwenElements.calibrationDedupeIouGrid, config.dedupe_iou_grid ?? "");
         updateAgentPrecisionControlsUi();
         qwenAgentRecipeLabelmap = Array.isArray(config.labelmap) ? config.labelmap.slice() : null;
         const explicitRecipeId = typeof options.recipeId === "string" ? options.recipeId.trim() : "";
         const selectedRecipeId = explicitRecipeId
             || (qwenElements.prepassRecipeSelect?.value || "").trim()
             || (qwenElements.agentRecipeSelect?.value || "").trim();
+        syncCanonicalRecipeSelect(selectedRecipeId);
         if (Array.isArray(qwenAgentRecipeLabelmap) && selectedRecipeId) {
             qwenAgentRecipeLabelmapRecipeId = selectedRecipeId;
         } else if (!Array.isArray(qwenAgentRecipeLabelmap)) {
@@ -23111,6 +24227,8 @@ async function cancelRfDetrTrainingJobRequest() {
         const glossarySource = (glossarySourceRaw === "custom" || glossarySourceRaw === "library" || glossarySourceRaw === "dataset")
             ? glossarySourceRaw
             : (glossaryText ? "custom" : "dataset");
+        qwenAgentDatasetState.selectedId = String(config.dataset_id || qwenElements.agentDatasetSelect?.value || "").trim();
+        updateQwenAgentDatasetSummary();
         if (qwenElements.agentGlossarySource) {
             qwenElements.agentGlossarySource.value = glossarySource;
         }
@@ -23151,9 +24269,8 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const description = (qwenElements.agentRecipeDescription?.value || "").trim();
-        const config = buildPrepassRecipeConfig();
-        const glossaryCfg = getPrepassGlossaryConfig();
-        const glossary = glossaryCfg.source === "custom" ? glossaryCfg.glossaryText : null;
+        const config = buildSavedEdrRecipeConfig();
+        const glossary = (qwenElements.agentGlossary?.value || "").trim() || null;
         const payload = { name, description, config, glossary };
         prepassRecipeSaveInFlight = true;
         updatePrepassRecipeActionButtons();
@@ -23207,13 +24324,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (selectedRecipeId !== recipeId) {
                 return;
             }
-            assertSupportedPrepassRecipeConfig(data.config);
-            qwenElements.agentRecipeName.value = data.name || "";
-            qwenElements.agentRecipeDescription.value = data.description || "";
-            if (qwenElements.prepassRecipeSelect) {
-                qwenElements.prepassRecipeSelect.value = recipeId;
-            }
-            applyPrepassRecipeConfig(data.config || {}, data.glossary || "", { recipeId });
+            applyLoadedRecipeToBuilder(data, recipeId);
             setSamStatus("EDR loaded.", { variant: "info", duration: 2500 });
         } catch (error) {
             if (requestId !== prepassRecipeEditorLoadRequestId) {
@@ -23235,9 +24346,8 @@ async function cancelRfDetrTrainingJobRequest() {
             prepassRecipeLoadRequestId += 1;
             qwenAgentRecipeLabelmap = null;
             qwenAgentRecipeLabelmapRecipeId = "";
-            if (qwenElements.agentRecipeSelect) {
-                qwenElements.agentRecipeSelect.value = "";
-            }
+            qwenActiveInferenceRecipe = null;
+            qwenAgentSelectedEdrPackageId = "";
             if (!suppressMissingWarning) {
                 setSamStatus("Select an EDR before running inference.", { variant: "warn", duration: 2500 });
             }
@@ -23255,15 +24365,21 @@ async function cancelRfDetrTrainingJobRequest() {
                 return null;
             }
             assertSupportedPrepassRecipeConfig(data.config);
-            if (qwenElements.agentRecipeSelect) {
-                qwenElements.agentRecipeSelect.value = recipeId;
-            }
-            applyPrepassRecipeConfig(data.config || {}, data.glossary || "", { recipeId });
+            qwenActiveInferenceRecipe = {
+                id: recipeId,
+                config: data.config || {},
+                glossary: data.glossary || "",
+            };
+            qwenAgentSelectedEdrPackageId = String(qwenActiveInferenceRecipe?.config?.edr_package_id || "").trim();
+            qwenAgentRecipeLabelmap = Array.isArray(data?.config?.labelmap) ? data.config.labelmap.slice() : null;
+            qwenAgentRecipeLabelmapRecipeId = Array.isArray(qwenAgentRecipeLabelmap) ? recipeId : "";
             return data;
         } catch (error) {
             if (requestId !== prepassRecipeLoadRequestId) {
                 return null;
             }
+            qwenActiveInferenceRecipe = null;
+            qwenAgentSelectedEdrPackageId = "";
             setSamStatus(`EDR load failed: ${error.message || error}`, { variant: "error", duration: 4000 });
             return null;
         }
@@ -23310,8 +24426,27 @@ async function cancelRfDetrTrainingJobRequest() {
         prepassRecipeExportInFlight = true;
         updatePrepassRecipeActionButtons();
         try {
-            const url = `${API_ROOT}/prepass/recipes/${encodeURIComponent(recipeId)}/export`;
-            window.open(url, "_blank", "noopener");
+            const resp = await fetch(`${API_ROOT}/prepass/recipes/${encodeURIComponent(recipeId)}/export`, {
+                method: "POST",
+            });
+            if (!resp.ok) {
+                throw new Error(await resp.text());
+            }
+            const blob = await resp.blob();
+            const header = resp.headers.get("Content-Disposition") || "";
+            const match = /filename=\"?([^\";]+)\"?/i.exec(header);
+            const filename = (match?.[1] || `prepass_recipe_${recipeId}.zip`).trim();
+            const objectUrl = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = objectUrl;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+            setSamStatus("EDR exported.", { variant: "info", duration: 2500 });
+        } catch (error) {
+            setSamStatus(`Export failed: ${error.message || error}`, { variant: "error", duration: 4000 });
         } finally {
             prepassRecipeExportInFlight = false;
             updatePrepassRecipeActionButtons();
@@ -23417,8 +24552,28 @@ async function cancelRfDetrTrainingJobRequest() {
                         const recipeSummary = job?.result?.recipe_discovered
                             ? " EDR discovered and promoted."
                             : (job?.result?.recipe_reused ? " Promoted EDR reused." : "");
+                        const savedRecipeId = String(job?.result?.saved_prepass_recipe_id || "").trim();
                         enqueueTaskNotice(`EDR build completed.${suffix}`, { durationMs: 5000 });
                         setCalibrationRecipeInfo(`${job?.result?.recipe_discovered ? "EDR discovered" : (job?.result?.recipe_reused ? "EDR reused" : "EDR applied")} • lane ${laneSelection.replaceAll("_", " ")}${recipeFingerprint ? ` • ${recipeFingerprint.slice(0, 10)}` : ""}.${recipeSummary}`.trim());
+                        if (savedRecipeId) {
+                            refreshPrepassRecipes().then(() => {
+                                const genericHasSavedRecipe = Array.from(qwenElements.agentRecipeSelect?.options || []).some(
+                                    (option) => String(option?.value || "").trim() === savedRecipeId,
+                                );
+                                const inferenceHasSavedRecipe = Array.from(qwenElements.prepassRecipeSelect?.options || []).some(
+                                    (option) => String(option?.value || "").trim() === savedRecipeId,
+                                );
+                                if (qwenElements.agentRecipeSelect && genericHasSavedRecipe) {
+                                    qwenElements.agentRecipeSelect.value = savedRecipeId;
+                                }
+                                if (qwenElements.prepassRecipeSelect && inferenceHasSavedRecipe) {
+                                    qwenElements.prepassRecipeSelect.value = savedRecipeId;
+                                }
+                                syncCanonicalRecipeSelect(savedRecipeId);
+                            }).catch((error) => {
+                                console.debug("Failed to refresh Saved EDRs after calibration completion", error);
+                            });
+                        }
                         fetchCalibrationReportBundle(job.job_id).catch((error) => {
                             console.debug("EDR report fetch failed", error);
                         });
@@ -29226,6 +30381,8 @@ async function cancelRfDetrTrainingJobRequest() {
         if (added > 0) {
             if (targetIsCurrentImage) {
                 updateBboxAfterTransform();
+            } else {
+                captureAnnotationDirtyStateForImage(imageName);
             }
             const classSummary = Object.entries(perClassCounts)
                 .sort((a, b) => b[1] - a[1])
@@ -31603,11 +32760,11 @@ async function cancelRfDetrTrainingJobRequest() {
         mouse.realX = zoomXInv(mouse.x);
         mouse.realY = zoomYInv(mouse.y);
         mouse.shiftKeyActive = !!event.shiftKey;
-        if (isAnnotationReadOnly() && event.type === "mousedown" && event.which === 1) {
-            setSamStatus(
-                "Read-only mode: lock is held by another editor. Use Take over lock to edit.",
-                { variant: "warn", duration: 3200 }
-            );
+        if (isAnnotationMutationBlocked() && event.type === "mousedown" && event.which === 1) {
+            setSamStatus(annotationMutationBlockedMessage("Editing"), {
+                variant: "warn",
+                duration: 3200,
+            });
             mouse.buttonL = false;
             return;
         }
@@ -32597,6 +33754,21 @@ async function cancelRfDetrTrainingJobRequest() {
         syncLabelingSourceControls();
     };
 
+    function scheduleAfterFirstPaint(callback) {
+        if (typeof callback !== "function") {
+            return;
+        }
+        requestAnimationFrame(() => {
+            window.setTimeout(() => {
+                try {
+                    callback();
+                } catch (error) {
+                    console.error("Deferred post-paint work failed", error);
+                }
+            }, 0);
+        });
+    }
+
     function setCurrentImage(image) {
         if (!image) return;
         captureCurrentAnnotationDirtyState();
@@ -32629,21 +33801,42 @@ async function cancelRfDetrTrainingJobRequest() {
             resetCanvasPlacement();
         }
         const messagePrefix = cancellation.message;
-        const finalizeCurrentImageSelection = () => {
-            if (!currentImage?.name) {
-                return;
-            }
-            // Keep list/caption UI synchronized with the image that actually became current.
-            syncImageSelectionToName(currentImage.name, { ensureVisible: true });
-            loadCaptionForCurrentImage().catch((error) => {
-                console.debug("Unable to load caption for current image", error);
-            });
-        };
         const setImageInfo = (text) => {
             const imageInformation = document.getElementById("imageInformation");
             if (imageInformation) {
                 imageInformation.textContent = text || "";
             }
+        };
+        const isLoadedImageStale = (expectedName) => (
+            isSelectionStale()
+            || image._loadVersion !== loadVersion
+            || !currentImage
+            || currentImage.name !== expectedName
+        );
+        const runDeferredCurrentImageSelection = (expectedName) => {
+            scheduleAfterFirstPaint(() => {
+                if (isLoadedImageStale(expectedName)) {
+                    return;
+                }
+                if (typeof refreshSam3CascadeControls === "function") {
+                    refreshSam3CascadeControls();
+                }
+                hydrateDatasetBboxesForImage(currentImage, {
+                    allowApply: () => !isLoadedImageStale(expectedName),
+                });
+                prepareSamForCurrentImage({ messagePrefix, immediate: true }).catch((err) => {
+                    console.debug("prepareSamForCurrentImage failed", err);
+                });
+                syncImageSelectionToName(currentImage.name, { ensureVisible: true });
+                scheduleAfterFirstPaint(() => {
+                    if (isLoadedImageStale(expectedName)) {
+                        return;
+                    }
+                    loadCaptionForCurrentImage().catch((error) => {
+                        console.debug("Unable to load caption for current image", error);
+                    });
+                });
+            });
         };
         const finalizeLoadedImage = (imageObject, dataUrl = null) => {
             if (isSelectionStale() || image._loadVersion !== loadVersion) {
@@ -32655,8 +33848,9 @@ async function cancelRfDetrTrainingJobRequest() {
             const naturalHeight = imageObject.naturalHeight || imageObject.height || image.height || 0;
             image.width = naturalWidth;
             image.height = naturalHeight;
+            const nextImageName = image.meta?.name || image.name;
             currentImage = {
-                name: image.meta?.name || image.name,
+                name: nextImageName,
                 object: imageObject,
                 width: naturalWidth,
                 height: naturalHeight,
@@ -32675,14 +33869,17 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!bboxes[currentImage.name]) {
                 bboxes[currentImage.name] = {};
             }
-            hydrateDatasetBboxesForImage(currentImage);
-            prepareSamForCurrentImage({ messagePrefix, immediate: true }).catch((err) => {
-                console.debug("prepareSamForCurrentImage failed", err);
-            });
-            if (typeof refreshSam3CascadeControls === "function") {
-                refreshSam3CascadeControls();
+            if (isDatasetBackedImageRecord(currentImage)) {
+                setAnnotationHydrationState(
+                    currentImage.name,
+                    annotationSourceState.hydratedKeys.has(currentImage.name) ? "ready" : "pending"
+                );
+            } else {
+                setAnnotationHydrationState(currentImage.name, "idle");
             }
-            finalizeCurrentImageSelection();
+            syncLabelingSourceControls();
+            syncImageSelectionToName(currentImage.name, { ensureVisible: false });
+            runDeferredCurrentImageSelection(nextImageName);
         };
         if (!image.object) {
             setGlobalCursor("wait");

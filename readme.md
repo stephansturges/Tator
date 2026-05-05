@@ -275,6 +275,9 @@ Tator integrates several upstream tools. You are responsible for reviewing and c
    pip install -r requirements.txt
    ```
    Torch wheels are hardware‑specific; install the build matching your CUDA stack if needed.
+   If you want Falcon automatic-labeling on NVIDIA GPU, use the tested setup in
+   [docs/environment_setup.md](docs/environment_setup.md) instead of a generic
+   `pip install -r requirements.txt`.
 3. **Install dev tools (optional)**
    ```bash
    pip install -r requirements-dev.txt
@@ -392,6 +395,19 @@ SAM3 support is optional but recommended for text prompting + similarity.
    hf auth login
    ```
 4. **Run API** — select SAM3 in the UI.
+
+## Optional: Falcon automatic-labeling setup
+
+Falcon support is more sensitive to PyTorch/FlexAttention versions than the
+rest of the repo. Start with the documented wheel-based setup before changing
+the system CUDA install or NVIDIA driver:
+
+```bash
+bash tools/setup_venv_falcon_cu118.sh
+```
+
+See [docs/environment_setup.md](docs/environment_setup.md) for the exact
+version set and the reasoning behind it.
 
 ---
 

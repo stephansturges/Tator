@@ -287,6 +287,35 @@ def test_stop_session_requires_matching_session_or_force(tmp_path, monkeypatch) 
     assert meta.get("annotation_lock") == {}
 
 
+def test_start_session_rejects_same_holder_name_with_different_session(tmp_path, monkeypatch) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    meta = {
+        "annotation_lock": {
+            "holder": "webui:tab-a",
+            "session_id": "sess-a",
+            "expires_at": time.time() + 300.0,
+        }
+    }
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api, "_dataset_effective_root_from_entry", lambda _entry: Path(_entry["dataset_root"])
+    )
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: {"progress": {}})
+    monkeypatch.setattr(
+        api, "_annotation_load_or_create_meta", lambda _entry: (Path("/tmp/meta.json"), meta)
+    )
+    monkeypatch.setattr(api, "_annotation_persist_meta", lambda _entry, _meta: None)
+
+    out = api.start_dataset_annotation_session(
+        "ds",
+        {"session_id": "sess-b", "editor_name": "webui:tab-a"},
+    )
+
+    assert out["status"] == "warning"
+    assert out["warning"] == "annotation_lock_active"
+    assert meta["annotation_lock"]["session_id"] == "sess-a"
+
+
 def test_transient_snapshot_and_meta_patch_require_lock(monkeypatch) -> None:
     session_id = "transient-lock"
     now = time.time()

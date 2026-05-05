@@ -264,6 +264,36 @@ def main() -> None:
     feature_names = [str(name) for name in data.get("feature_names", [])]
     meta_rows = [json.loads(str(row)) for row in meta_raw]
 
+    def _scalar(value, default=None):
+        if value is None:
+            return default
+        if hasattr(value, "item"):
+            try:
+                value = value.item()
+            except Exception:
+                pass
+        return value if value is not None else default
+
+    def _float_meta(key, default=None):
+        value = _scalar(data.get(key), default)
+        try:
+            return float(value) if value is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    def _int_meta(key, default=None):
+        value = _scalar(data.get(key), default)
+        try:
+            return int(value) if value is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    labelmap = [str(name) for name in data.get("labelmap", [])]
+    classifier_classes = [str(name) for name in data.get("classifier_classes", [])]
+    feature_schema_hash = str(_scalar(data.get("feature_schema_hash"), "") or "")
+    context_variant_id = str(_scalar(data.get("context_variant_id"), "") or "")
+    variant_config_json = str(_scalar(data.get("variant_config_json"), "{}") or "{}")
+
     fixed_val_images = (
         _load_fixed_val_images(args.fixed_val_images)
         if args.fixed_val_images
@@ -501,6 +531,24 @@ def main() -> None:
         "calibrated_threshold": calibrated_threshold,
         "calibration_metrics": best_thr,
         "calibrated_thresholds": thresholds_by_label,
+        "feature_names": feature_names,
+        "labelmap": labelmap,
+        "classifier_classes": classifier_classes,
+        "feature_schema_version": int(_int_meta("feature_schema_version", 1) or 1),
+        "feature_schema_hash": feature_schema_hash,
+        "support_iou": _float_meta("support_iou", 0.5),
+        "sam3_iou": _float_meta("sam3_iou", 0.5),
+        "context_radius": _float_meta("context_radius", 0.075),
+        "label_iou": _float_meta("label_iou", 0.5),
+        "eval_iou": _float_meta("eval_iou", 0.5),
+        "min_crop_size": int(_int_meta("min_crop_size", 4) or 4),
+        "embed_proj_dim": int(_int_meta("embed_proj_dim", 0) or 0),
+        "embed_proj_seed": int(_int_meta("embed_proj_seed", 42) or 42),
+        "image_embed_proj_dim": int(_int_meta("image_embed_proj_dim", 0) or 0),
+        "image_embed_proj_seed": int(_int_meta("image_embed_proj_seed", 4242) or 4242),
+        "embed_l2_normalize": bool(_scalar(data.get("embed_l2_normalize"), True)),
+        "context_variant_id": context_variant_id,
+        "variant_config_json": variant_config_json,
         "feature_mean": mean.tolist() if mean is not None else None,
         "feature_std": std.tolist() if std is not None else None,
         "log1p_counts": bool(args.log1p_counts),

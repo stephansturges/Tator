@@ -23,13 +23,19 @@ import numpy as np
 import torch
 from PIL import Image
 
+from services.canonical_edr_completion import (
+    build_canonical_completion_context,
+    canonical_completion_context_path,
+    canonical_completion_summary_path,
+    persist_canonical_edr_completion,
+    write_canonical_completion_context,
+)
 from services.calibration_recipe_registry import (
     build_recipe_fingerprint,
     build_recipe_fingerprint_payload,
     discovery_lock,
     discovery_runs_root,
     find_matching_recipe,
-    register_promoted_recipe,
 )
 
 DEFAULT_EMBED_PROJ_DIM = 1024
@@ -1786,9 +1792,21 @@ def _run_calibration_job(
             job.request = req
         except Exception:
             pass
+        completion_context_payload = build_canonical_completion_context(
+            dataset_id=payload.dataset_id,
+            recipe_fingerprint=recipe_fingerprint,
+            recipe_fingerprint_payload=recipe_fingerprint_payload,
+            calibration_request=dict(job.request or {}),
+            resolved_classifier_id=classifier_id_resolved,
+            glossary_text=glossary or "",
+            labelmap=list(labelmap or []),
+        )
 
         canonical_recipe_payload: Optional[Dict[str, Any]] = None
         recipe_registry_entry: Optional[Dict[str, Any]] = None
+        saved_prepass_recipe_entry: Optional[Dict[str, Any]] = None
+        canonical_deployment_entry: Optional[Dict[str, Any]] = None
+        edr_package_entry: Optional[Dict[str, Any]] = None
         recipe_reused = False
         recipe_discovered = False
         discovery_run_root: Optional[Path] = None
@@ -1876,6 +1894,7 @@ def _run_calibration_job(
         if canonical_recipe_payload is None:
             discovery_run_root = discovery_runs_root(calibration_cache_root) / recipe_fingerprint
             discovery_inputs_dir = discovery_run_root / "inputs"
+            write_canonical_completion_context(discovery_run_root, completion_context_payload)
             _update_calibration_phase(
                 job=job,
                 update_fn=_persisting_update_fn,
@@ -1894,15 +1913,34 @@ def _run_calibration_job(
                 canonical_recipe_path = _canonical_recipe_json_path(discovery_run_root)
                 if canonical_recipe_payload is None and recipe_mode != "force_rediscover" and canonical_recipe_path.exists():
                     canonical_recipe_payload = json.loads(canonical_recipe_path.read_text(encoding="utf-8"))
-                    recipe_registry_entry = register_promoted_recipe(
-                        calibration_cache_root,
-                        fingerprint=recipe_fingerprint,
-                        fingerprint_payload=recipe_fingerprint_payload,
-                        dataset_id=payload.dataset_id,
+                    completion_summary = persist_canonical_edr_completion(
+                        calibration_cache_root=calibration_cache_root,
+                        run_root=discovery_run_root,
                         canonical_recipe_json=canonical_recipe_path,
                         canonical_recipe_md=_canonical_recipe_md_path(discovery_run_root),
+                        canonical_recipe_payload=canonical_recipe_payload,
+                        completion_context=completion_context_payload,
                         report_bundle_json=discovery_run_root / "report_bundle.json",
-                        discovery_run_root=discovery_run_root,
+                    )
+                    recipe_registry_entry = (
+                        completion_summary.get("recipe_registry_entry")
+                        if isinstance(completion_summary.get("recipe_registry_entry"), dict)
+                        else None
+                    )
+                    saved_prepass_recipe_entry = (
+                        completion_summary.get("saved_prepass_recipe")
+                        if isinstance(completion_summary.get("saved_prepass_recipe"), dict)
+                        else None
+                    )
+                    canonical_deployment_entry = (
+                        completion_summary.get("canonical_deployment_job")
+                        if isinstance(completion_summary.get("canonical_deployment_job"), dict)
+                        else None
+                    )
+                    edr_package_entry = (
+                        completion_summary.get("edr_package")
+                        if isinstance(completion_summary.get("edr_package"), dict)
+                        else None
                     )
                     recipe_reused = True
 
@@ -1995,17 +2033,88 @@ def _run_calibration_job(
                     if not canonical_recipe_path.exists():
                         raise RuntimeError("canonical_recipe_missing_after_discovery")
                     canonical_recipe_payload = json.loads(canonical_recipe_path.read_text(encoding="utf-8"))
-                    recipe_registry_entry = register_promoted_recipe(
-                        calibration_cache_root,
-                        fingerprint=recipe_fingerprint,
-                        fingerprint_payload=recipe_fingerprint_payload,
-                        dataset_id=payload.dataset_id,
+                    completion_summary = persist_canonical_edr_completion(
+                        calibration_cache_root=calibration_cache_root,
+                        run_root=discovery_run_root,
                         canonical_recipe_json=canonical_recipe_path,
                         canonical_recipe_md=_canonical_recipe_md_path(discovery_run_root),
+                        canonical_recipe_payload=canonical_recipe_payload,
+                        completion_context=completion_context_payload,
                         report_bundle_json=discovery_run_root / "report_bundle.json",
-                        discovery_run_root=discovery_run_root,
+                    )
+                    recipe_registry_entry = (
+                        completion_summary.get("recipe_registry_entry")
+                        if isinstance(completion_summary.get("recipe_registry_entry"), dict)
+                        else None
+                    )
+                    saved_prepass_recipe_entry = (
+                        completion_summary.get("saved_prepass_recipe")
+                        if isinstance(completion_summary.get("saved_prepass_recipe"), dict)
+                        else None
+                    )
+                    canonical_deployment_entry = (
+                        completion_summary.get("canonical_deployment_job")
+                        if isinstance(completion_summary.get("canonical_deployment_job"), dict)
+                        else None
+                    )
+                    edr_package_entry = (
+                        completion_summary.get("edr_package")
+                        if isinstance(completion_summary.get("edr_package"), dict)
+                        else None
                     )
                     recipe_discovered = True
+
+        if isinstance(canonical_recipe_payload, dict) and saved_prepass_recipe_entry is None:
+            candidate_recipe_json = None
+            candidate_recipe_md = None
+            candidate_report_bundle = None
+            if isinstance(recipe_registry_entry, dict):
+                raw_json = recipe_registry_entry.get("canonical_recipe_json")
+                raw_md = recipe_registry_entry.get("canonical_recipe_md")
+                raw_report = recipe_registry_entry.get("report_bundle_json")
+                candidate_recipe_json = Path(str(raw_json)).resolve() if raw_json else None
+                candidate_recipe_md = Path(str(raw_md)).resolve() if raw_md else None
+                candidate_report_bundle = Path(str(raw_report)).resolve() if raw_report else None
+            if candidate_recipe_json is None and discovery_run_root is not None:
+                candidate_recipe_json = _canonical_recipe_json_path(discovery_run_root)
+                candidate_recipe_md = _canonical_recipe_md_path(discovery_run_root)
+                report_path = discovery_run_root / "report_bundle.json"
+                candidate_report_bundle = report_path if report_path.exists() else None
+            if candidate_recipe_json is not None and candidate_recipe_json.exists():
+                completion_summary = persist_canonical_edr_completion(
+                    calibration_cache_root=calibration_cache_root,
+                    run_root=discovery_run_root if discovery_run_root is not None else None,
+                    canonical_recipe_json=candidate_recipe_json,
+                    canonical_recipe_md=candidate_recipe_md if candidate_recipe_md and candidate_recipe_md.exists() else None,
+                    canonical_recipe_payload=canonical_recipe_payload,
+                    completion_context=completion_context_payload,
+                    existing_registry_entry=recipe_registry_entry,
+                    report_bundle_json=(
+                        candidate_report_bundle
+                        if candidate_report_bundle is not None and candidate_report_bundle.exists()
+                        else None
+                    ),
+                )
+                recipe_registry_entry = (
+                    completion_summary.get("recipe_registry_entry")
+                    if isinstance(completion_summary.get("recipe_registry_entry"), dict)
+                    else recipe_registry_entry
+                )
+                saved_prepass_recipe_entry = (
+                    completion_summary.get("saved_prepass_recipe")
+                    if isinstance(completion_summary.get("saved_prepass_recipe"), dict)
+                    else None
+                )
+                canonical_deployment_entry = (
+                    completion_summary.get("canonical_deployment_job")
+                    if isinstance(completion_summary.get("canonical_deployment_job"), dict)
+                    else canonical_deployment_entry
+                )
+                edr_package_entry = (
+                    completion_summary.get("edr_package")
+                    if isinstance(completion_summary.get("edr_package"), dict)
+                    else edr_package_entry
+                )
 
         if not isinstance(canonical_recipe_payload, dict):
             raise RuntimeError("canonical_recipe_invalid")
@@ -2647,6 +2756,24 @@ def _run_calibration_job(
             "recipe_reused": recipe_reused,
             "recipe_discovered": recipe_discovered,
             "recipe_registry_entry": recipe_registry_entry,
+            "saved_prepass_recipe": saved_prepass_recipe_entry,
+            "saved_prepass_recipe_id": (
+                str(saved_prepass_recipe_entry.get("id"))
+                if isinstance(saved_prepass_recipe_entry, dict) and saved_prepass_recipe_entry.get("id")
+                else None
+            ),
+            "canonical_deployment_job": canonical_deployment_entry,
+            "canonical_deployment_job_id": (
+                str(canonical_deployment_entry.get("job_id"))
+                if isinstance(canonical_deployment_entry, dict) and canonical_deployment_entry.get("job_id")
+                else None
+            ),
+            "edr_package": edr_package_entry,
+            "edr_package_id": (
+                str(edr_package_entry.get("id"))
+                if isinstance(edr_package_entry, dict) and edr_package_entry.get("id")
+                else None
+            ),
             "canonical_recipe_json": (
                 str((Path(str(recipe_registry_entry.get("canonical_recipe_json")))).resolve())
                 if isinstance(recipe_registry_entry, dict) and recipe_registry_entry.get("canonical_recipe_json")
@@ -2666,6 +2793,16 @@ def _run_calibration_job(
                 )
             ),
             "canonical_recipe_branch": lane_family,
+            "canonical_completion_context_json": (
+                str(canonical_completion_context_path(discovery_run_root).resolve())
+                if discovery_run_root is not None and canonical_completion_context_path(discovery_run_root).exists()
+                else None
+            ),
+            "canonical_completion_summary_json": (
+                str(canonical_completion_summary_path(discovery_run_root).resolve())
+                if discovery_run_root is not None and canonical_completion_summary_path(discovery_run_root).exists()
+                else None
+            ),
             "discovery_run_root": str(discovery_run_root) if discovery_run_root is not None else None,
             "report_bundle_json": str(report_bundle_json) if report_bundle_json.exists() else None,
             "report_bundle_md": str(report_bundle_md) if report_bundle_md.exists() else None,

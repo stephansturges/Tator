@@ -16,6 +16,8 @@ CALIBRATION_RECIPE_REGISTRY_VERSION = 1
 CALIBRATION_DISCOVERY_PIPELINE_VERSION = 1
 CANONICAL_EDR_SCHEMA_VERSION = 1
 CANONICAL_PREPASS_RECIPE_SCHEMA_VERSION = CANONICAL_EDR_SCHEMA_VERSION
+CANONICAL_EDR_ORIGIN_DISCOVERY_BACKED = "discovery_backed"
+CANONICAL_EDR_ORIGIN_IMPORTED_PORTABLE = "imported_portable"
 
 
 def _stable_json(payload: Any) -> str:
@@ -153,7 +155,10 @@ def register_promoted_recipe(
     canonical_recipe_json: Path,
     canonical_recipe_md: Optional[Path],
     report_bundle_json: Optional[Path],
-    discovery_run_root: Path,
+    discovery_run_root: Optional[Path],
+    origin_kind: str = CANONICAL_EDR_ORIGIN_DISCOVERY_BACKED,
+    canonical_deployment: Optional[Dict[str, Any]] = None,
+    edr_package: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     root = registry_root(cache_root)
     recipe_dir = root / str(fingerprint)
@@ -179,10 +184,23 @@ def register_promoted_recipe(
 
     fingerprint_payload_path = recipe_dir / "fingerprint.json"
     fingerprint_payload_path.write_text(json.dumps(fingerprint_payload, indent=2), encoding="utf-8")
+    normalized_origin = str(origin_kind or CANONICAL_EDR_ORIGIN_DISCOVERY_BACKED).strip().lower()
+    if normalized_origin not in {
+        CANONICAL_EDR_ORIGIN_DISCOVERY_BACKED,
+        CANONICAL_EDR_ORIGIN_IMPORTED_PORTABLE,
+    }:
+        normalized_origin = CANONICAL_EDR_ORIGIN_DISCOVERY_BACKED
+    canonical_deployment = (
+        dict(canonical_deployment)
+        if isinstance(canonical_deployment, dict)
+        else {}
+    )
+    edr_package = dict(edr_package) if isinstance(edr_package, dict) else {}
 
     entry = {
         "fingerprint": str(fingerprint),
         "dataset_id": str(dataset_id),
+        "origin_kind": normalized_origin,
         "labelmap_hash": str(fingerprint_payload.get("labelmap_hash") or ""),
         "glossary_hash": str(fingerprint_payload.get("glossary_hash") or ""),
         "classifier_id": str(fingerprint_payload.get("classifier_id") or ""),
@@ -209,10 +227,31 @@ def register_promoted_recipe(
         "legacy_canonical_recipe_json": str(legacy_canonical_dst.resolve()),
         "legacy_canonical_recipe_md": str((recipe_dir / "canonical_prepass_recipe.md").resolve()) if canonical_md_dst else None,
         "report_bundle_json": str(report_dst.resolve()) if report_dst else None,
-        "discovery_run_root": str(discovery_run_root.resolve()),
+        "discovery_run_root": (
+            str(discovery_run_root.resolve())
+            if discovery_run_root is not None
+            else None
+        ),
         "fingerprint_json": str(fingerprint_payload_path.resolve()),
+        "canonical_deployment_job_id": (
+            str(canonical_deployment.get("job_id") or "").strip() or None
+        ),
+        "canonical_deployment_job_dir": (
+            str(canonical_deployment.get("job_dir") or "").strip() or None
+        ),
+        "canonical_deployment_source_stage": (
+            str(canonical_deployment.get("source_stage") or "").strip() or None
+        ),
+        "canonical_deployment_source_seed": canonical_deployment.get("source_seed"),
+        "edr_package_id": str(edr_package.get("id") or "").strip() or None,
+        "edr_package_root": str(edr_package.get("package_root") or "").strip() or None,
+        "edr_package_zip": str(edr_package.get("package_zip") or "").strip() or None,
+        "edr_package_sha256": str(edr_package.get("package_sha256") or "").strip() or None,
         "status": "promoted",
     }
+    entry_path = recipe_dir / "registry_entry.json"
+    entry["registry_entry_json"] = str(entry_path.resolve())
+    _atomic_write_json(entry_path, entry)
 
     with _exclusive_lock(registry_root(cache_root) / ".index.lock"):
         registry = load_registry(cache_root)

@@ -42,7 +42,12 @@ pretty = true
 
 [tool.pytest.ini_options]
 markers = [
+  "auto_label_smoke: fast correctness checks for the automatic labeling stack",
+  "auto_label_full: broader automatic labeling integration matrix for nightly/full runs",
+  "auto_label_gpu: real-model automatic labeling runs that require GPU/runtime assets",
+  "auto_label_perf: automatic labeling performance/regression checks",
   "ui: browser end-to-end smoke tests (requires RUN_UI_E2E=1 and Playwright)",
+  "ui_auto_label: browser tests focused on automatic labeling flows",
   "ui_smoke: fast UI smoke scenarios for PR validation",
   "ui_full: broader UI flow matrix for nightly/full runs",
   "ui_usability_smoke: fast usability/legibility UI checks for PR validation",

@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import argparse
+import functools
 import hashlib
 import json
 import sys
@@ -28,10 +29,73 @@ SOURCE_RUNS = [
 DEFAULT_EMBED_PROJ_DIM = 1024
 
 
-def _activate_classifier_runtime(classifier_path: Path, dataset_id: str) -> None:
-    labelmap_path = Path(f"uploads/clip_dataset_uploads/{dataset_id}_yolo/labelmap.txt")
+@functools.lru_cache(maxsize=32)
+def _resolve_dataset_bundle(dataset_id: str) -> Dict[str, Any]:
+    dataset_key = str(dataset_id or "").strip()
+    if not dataset_key:
+        raise SystemExit("dataset_id_required")
+    entry = None
+    dataset_root = None
+    try:
+        entry = api._resolve_dataset_entry(dataset_key)
+        dataset_root = api._dataset_effective_root_from_entry(entry)
+    except Exception:
+        entry = None
+        try:
+            dataset_root = api._resolve_sam3_or_qwen_dataset(dataset_key)
+        except Exception as exc:  # noqa: BLE001
+            raise SystemExit(f"dataset_resolve_failed:{dataset_key}:{exc}") from exc
+    dataset_root = Path(dataset_root).resolve()
+    layout = "flat"
+    try:
+        layout_info = api._detect_yolo_layout_impl(dataset_root)
+        layout = str(layout_info.get("yolo_layout") or "flat").strip().lower() or "flat"
+    except Exception:
+        layout = str((entry or {}).get("yolo_layout") or "flat").strip().lower() or "flat"
+    return {
+        "dataset_id": dataset_key,
+        "entry": entry,
+        "root": dataset_root,
+        "layout": layout,
+    }
+
+
+def _dataset_labelmap_path(dataset_id: str) -> Path:
+    bundle = _resolve_dataset_bundle(dataset_id)
+    labelmap_path = bundle["root"] / "labelmap.txt"
     if not labelmap_path.exists():
-        raise SystemExit(f"labelmap_missing_for_classifier_activation:{labelmap_path}")
+        raise SystemExit(f"Missing labelmap at {labelmap_path}")
+    return labelmap_path
+
+
+def _dataset_label_path(dataset_id: str, split: str, image_name: str) -> Optional[Path]:
+    bundle = _resolve_dataset_bundle(dataset_id)
+    dataset_root = Path(bundle["root"])
+    layout = str(bundle["layout"] or "flat")
+    stem = Path(str(image_name or "")).stem
+    candidates: List[Path] = []
+    if layout == "split":
+        candidates.extend(
+            [
+                dataset_root / split / "labels" / f"{stem}.txt",
+                dataset_root / "labels" / split / f"{stem}.txt",
+            ]
+        )
+    else:
+        candidates.extend(
+            [
+                dataset_root / "labels" / f"{stem}.txt",
+                dataset_root / "labels" / split / f"{stem}.txt",
+            ]
+        )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _activate_classifier_runtime(classifier_path: Path, dataset_id: str) -> None:
+    labelmap_path = _dataset_labelmap_path(dataset_id)
     labelmap_target = (api.UPLOAD_ROOT / "labelmaps" / f"{dataset_id}_labelmap.txt").resolve()
     labelmap_target.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -53,18 +117,36 @@ def _activate_classifier_runtime(classifier_path: Path, dataset_id: str) -> None
 
 
 def _load_labelmap(dataset_id: str) -> List[str]:
-    labelmap_path = Path(f"uploads/clip_dataset_uploads/{dataset_id}_yolo/labelmap.txt")
-    if not labelmap_path.exists():
-        raise SystemExit(f"Missing labelmap at {labelmap_path}")
+    labelmap_path = _dataset_labelmap_path(dataset_id)
     return [line.strip() for line in labelmap_path.read_text().splitlines() if line.strip()]
 
 
 def _resolve_image_path(dataset_id: str, image_name: str) -> Path:
-    dataset_root = Path("uploads/qwen_runs/datasets") / dataset_id
+    bundle = _resolve_dataset_bundle(dataset_id)
+    dataset_root = Path(bundle["root"])
+    layout = str(bundle["layout"] or "flat")
+    image_key = str(image_name or "").strip()
+    if not image_key:
+        raise FileNotFoundError(f"Missing image name for dataset {dataset_id}")
     for split in ("val", "train"):
-        candidate = dataset_root / split / image_name
-        if candidate.exists():
-            return candidate
+        candidates: List[Path] = []
+        if layout == "split":
+            candidates.extend(
+                [
+                    dataset_root / split / "images" / image_key,
+                    dataset_root / split / image_key,
+                ]
+            )
+        else:
+            candidates.extend(
+                [
+                    dataset_root / "images" / image_key,
+                    dataset_root / image_key,
+                ]
+            )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
     raise FileNotFoundError(f"Missing image {image_name} in {dataset_root}")
 
 
@@ -82,7 +164,6 @@ def _load_gt_geometry_priors(
     image_names: Sequence[str],
     labelmap: Sequence[str],
 ) -> Dict[str, Dict[str, float]]:
-    yolo_root = Path(f"uploads/clip_dataset_uploads/{dataset_id}_yolo")
     values: Dict[str, Dict[str, List[float]]] = {
         str(lbl).strip().lower(): {"log_area": [], "log_aspect": []}
         for lbl in labelmap
@@ -91,10 +172,10 @@ def _load_gt_geometry_priors(
         image_name = str(image_name or "").strip()
         if not image_name:
             continue
-        label_path = yolo_root / "labels" / "val" / f"{Path(image_name).stem}.txt"
-        if not label_path.exists():
-            label_path = yolo_root / "labels" / "train" / f"{Path(image_name).stem}.txt"
-        if not label_path.exists():
+        label_path = _dataset_label_path(dataset_id, "val", image_name)
+        if label_path is None:
+            label_path = _dataset_label_path(dataset_id, "train", image_name)
+        if label_path is None or not label_path.exists():
             continue
         try:
             img_path = _resolve_image_path(dataset_id, image_name)
@@ -1132,11 +1213,13 @@ def main() -> None:
         sam3_iou=float(args.sam3_iou),
         support_iou=float(args.support_iou),
         context_radius=float(args.context_radius),
+        min_crop_size=int(args.min_crop_size),
         embed_proj_dim=int(embed_proj_dim),
         embed_proj_seed=int(embed_proj_seed),
         image_embed_proj_dim=int(image_embed_proj_dim),
         image_embed_proj_seed=int(image_embed_proj_seed),
         embed_l2_normalize=bool(embed_l2_normalize),
+        feature_schema_version=int(1),
         feature_schema_hash=np.asarray(
             compute_feature_schema_hash(
                 feature_names,

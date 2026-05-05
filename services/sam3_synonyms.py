@@ -60,12 +60,17 @@ def _agent_generate_sam3_synonyms(
     if not labels:
         return {}, {}
     glossary_terms = _parse_glossary_mapping(glossary, labels)
+    glossary_complete = True
+    for label in labels:
+        if not _normalize_synonym_list(glossary_terms.get(label, [])):
+            glossary_complete = False
+            break
     if max_synonyms is None:
         limit: Optional[int] = None
     else:
         limit = max(0, int(max_synonyms))
     mapping: Dict[str, List[str]] = {}
-    if limit is None or limit > 0:
+    if not glossary_complete and (limit is None or limit > 0):
         cache_key = _sam3_synonym_cache_key(labels, glossary or "", limit)
         cached = _get_cached_sam3_synonyms(cache_key)
         if cached is None:

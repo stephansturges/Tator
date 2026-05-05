@@ -1042,6 +1042,9 @@ class AgentCascadeSaveRequest(BaseModel):
 
 class QwenPrepassRequest(BaseModel):
     dataset_id: Optional[str] = None
+    recipe_source_dataset_id: Optional[str] = None
+    edr_package_id: Optional[str] = None
+    edr_package_apply_ensemble: Optional[bool] = True
     image_base64: Optional[str] = None
     image_token: Optional[str] = None
     image_name: Optional[str] = None
@@ -1107,7 +1110,7 @@ class QwenPrepassRequest(BaseModel):
     ensemble_enabled: Optional[bool] = False
     ensemble_job_id: Optional[str] = None
     iou: Optional[float] = 0.75
-    fusion_mode: Optional[Literal["primary", "wbf"]] = "primary"
+    fusion_mode: Optional[Literal["primary", "wbf", "source_weighted"]] = "primary"
     cross_class_dedupe_enabled: Optional[bool] = False
     cross_class_dedupe_iou: Optional[float] = 0.8
     max_new_tokens: Optional[int] = 4096
@@ -1118,6 +1121,83 @@ class QwenPrepassRequest(BaseModel):
     immediate_action_min_seconds: Optional[float] = 2.0
     immediate_action_logit_bias: Optional[float] = 6.0
     trace_verbose: Optional[bool] = False
+
+
+class AutoLabelPlannerCellAssignment(BaseModel):
+    cell: str
+    classes: List[str] = Field(default_factory=list)
+
+
+class AutoLabelPlannerDecision(BaseModel):
+    decision: Literal["skip", "full_image", "quadrants", "grid_cells"] = "full_image"
+    scene_tags: List[Literal["crowded", "small_objects", "text_heavy", "coverage_gap", "spatially_localized"]] = Field(default_factory=list)
+    global_classes: List[str] = Field(default_factory=list)
+    cells: List[str] = Field(default_factory=list)
+    cell_classes: List[AutoLabelPlannerCellAssignment] = Field(default_factory=list)
+    reason: Optional[str] = None
+    confidence: Literal["low", "medium", "high"] = "medium"
+
+
+class AutoLabelRequest(BaseModel):
+    dataset_id: str
+    annotation_session_id: Optional[str] = None
+    max_images: Optional[int] = Field(100, ge=1, le=100_000)
+    split: Optional[Literal["all", "train", "val"]] = "all"
+    unlabeled_only: bool = True
+    image_relpaths: Optional[List[str]] = None
+    target_mode: Literal["auto", "segmentation", "detection"] = "auto"
+    falcon_window_mode: Literal["full_image", "quadrants", "planner_auto"] = "full_image"
+    enable_falcon: bool = True
+    falcon_overlap_ratio: float = Field(0.1, ge=0.0, le=0.45)
+    dedupe_existing_same_class_iou: float = Field(0.5, ge=0.0, le=1.0)
+    class_names: Optional[List[str]] = None
+    edr_package_id: Optional[str] = None
+    enable_yolo: bool = True
+    enable_rfdetr: bool = True
+    yolo_id: Optional[str] = None
+    rfdetr_id: Optional[str] = None
+    classifier_id: Optional[str] = None
+    use_planner_caption: bool = True
+    planner_grid_cols: int = Field(3, ge=1, le=6)
+    planner_grid_rows: int = Field(3, ge=1, le=6)
+    planner_model_id: Optional[str] = None
+    planner_model_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = "auto"
+    falcon_model_id: Optional[str] = None
+    falcon_device: Optional[str] = None
+    falcon_backend: Literal["embedded", "server"] = "embedded"
+    falcon_detection_strategy: Literal["native_detection", "segmentation_boxes"] = "native_detection"
+    falcon_component_mode: Literal["largest_component", "component_split", "component_cluster"] = "component_split"
+    falcon_local_files_only: bool = True
+    falcon_min_dimension: int = Field(256, ge=64, le=4096)
+    falcon_max_dimension: int = Field(1024, ge=128, le=8192)
+    falcon_max_new_tokens: int = Field(1024, ge=32, le=4096)
+    falcon_compile: bool = False
+    falcon_coord_dedup_threshold: float = Field(0.01, ge=0.0, le=1.0)
+    falcon_hr_upsample_ratio: int = Field(8, ge=1, le=32)
+    falcon_segmentation_threshold: float = Field(0.3, ge=0.0, le=1.0)
+    simplify_epsilon: float = Field(2.0, ge=0.0, le=100.0)
+    force_annotation_lock: bool = False
+
+    @root_validator(skip_on_failure=True)
+    def _validate_auto_label_request(cls, values):  # noqa: N805
+        class_names = values.get("class_names")
+        if isinstance(class_names, list):
+            cleaned = [str(item or "").strip() for item in class_names if str(item or "").strip()]
+            values["class_names"] = cleaned or None
+        image_relpaths = values.get("image_relpaths")
+        if isinstance(image_relpaths, list):
+            seen = set()
+            cleaned_relpaths = []
+            for item in image_relpaths:
+                normalized = str(item or "").strip().replace("\\", "/")
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                cleaned_relpaths.append(normalized)
+            values["image_relpaths"] = cleaned_relpaths or None
+        session_id = str(values.get("annotation_session_id") or "").strip()
+        values["annotation_session_id"] = session_id or None
+        return values
 
 
 class CalibrationRequest(BaseModel):
@@ -1169,7 +1249,7 @@ class CalibrationRequest(BaseModel):
     eval_iou: Optional[float] = 0.5
     eval_iou_grid: Optional[str] = None
     dedupe_iou: Optional[float] = 0.75
-    fusion_mode: Optional[Literal["primary", "wbf"]] = "primary"
+    fusion_mode: Optional[Literal["primary", "wbf", "source_weighted"]] = "primary"
     cross_class_dedupe_enabled: Optional[bool] = False
     cross_class_dedupe_iou: Optional[float] = 0.8
     dedupe_iou_grid: Optional[str] = None

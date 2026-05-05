@@ -3,15 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20251220" rel="stylesheet">
+    <link href="ybat.css?v=20260409a" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
          before we call listenImageCrop().
     -->
-    <script src="canvas.min.js?v=20251220"></script>
-    <script src="jszip.min.js?v=20251220"></script>
-    <script src="filesaver.min.js?v=20251220"></script>
-    <script src="ybat.js?v=20251220"></script>
+    <script src="canvas.min.js?v=20260409a"></script>
+    <script src="jszip.min.js?v=20260409a"></script>
+    <script src="filesaver.min.js?v=20260409a"></script>
+    <script src="ybat.js?v=20260409a"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -209,6 +209,56 @@
                             </div>
                             <div class="training-actions">
                                 <button type="button" id="detectorBatchAllButton" class="training-button secondary">Run detector on entire dataset</button>
+                            </div>
+                            <div class="training-help" style="margin-top:12px; border:1px solid #e2e8f0; border-radius:12px; background:#f8fafc; padding:10px 12px;">
+                                <div class="qwen-caption__header">
+                                    <strong>Automatic Labeling</strong>
+                                    <span id="qwenAutoLabelStatus" class="qwen-caption-status"></span>
+                                </div>
+                                <div class="training-help" style="margin-top:4px;">
+                                    Runs dataset-scale automatic labeling on the current linked dataset. Falcon writes labels directly into the dataset overlay. Same-class duplicates with IoU greater than 0.5 are dropped before save.
+                                </div>
+                                <div id="qwenAutoLabelModeSummary" class="training-help" style="margin-top:6px;">Open a linked dataset to use automatic labeling.</div>
+                                <div class="qwen-caption-grid" style="margin-top:10px;">
+                                    <div>
+                                        <label for="qwenAutoLabelMaxImages">Max images</label>
+                                        <input type="number" id="qwenAutoLabelMaxImages" min="1" max="100000" value="100" />
+                                    </div>
+                                    <div>
+                                        <label for="qwenAutoLabelSplit">Split</label>
+                                        <select id="qwenAutoLabelSplit">
+                                            <option value="all" selected>All</option>
+                                            <option value="train">Train</option>
+                                            <option value="val">Val</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label for="qwenAutoLabelWindowMode">Falcon window mode</label>
+                                        <select id="qwenAutoLabelWindowMode">
+                                            <option value="full_image" selected>Full image</option>
+                                            <option value="quadrants">Quadrants (2x2)</option>
+                                            <option value="planner_auto">Planner auto</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label for="qwenAutoLabelOverlap">Window overlap</label>
+                                        <input type="number" id="qwenAutoLabelOverlap" min="0" max="0.45" step="0.01" value="0.10" />
+                                    </div>
+                                </div>
+                                <div class="qwen-caption-options" style="margin-top:10px;">
+                                    <label><input type="checkbox" id="qwenAutoLabelUnlabeledOnly" checked /> Only fill unlabeled images</label>
+                                    <label><input type="checkbox" id="qwenAutoLabelUsePlannerCaption" checked /> Use caption context for planner mode</label>
+                                </div>
+                                <label for="qwenAutoLabelClassNames" style="margin-top:10px;">Limit to classes (optional)</label>
+                                <textarea id="qwenAutoLabelClassNames" rows="2" placeholder="Leave blank for all dataset classes. You can use commas or one class per line."></textarea>
+                                <div id="qwenAutoLabelProgressWrap" class="sam-status-progress" aria-hidden="true" hidden style="margin-top:10px;">
+                                    <div id="qwenAutoLabelProgressFill"></div>
+                                </div>
+                                <div id="qwenAutoLabelProgressText" class="training-help" style="margin-top:6px;">Waiting to start…</div>
+                                <div class="training-actions" style="margin-top:10px;">
+                                    <button type="button" id="qwenAutoLabelRun" class="training-button secondary">Run Automatic Labeling</button>
+                                    <button type="button" id="qwenAutoLabelCancel" class="training-button secondary" disabled>Cancel</button>
+                                </div>
                             </div>
                             <div class="training-field" id="polygonSimplifyField">
                                 <label for="polygonSimplifyEpsilon">Polygon detail</label>
@@ -571,6 +621,25 @@
                                             </div>
                                         </div>
                                     </div>
+                                    <div class="training-help" style="margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc; padding: 10px 12px;">
+                                        <div style="font-weight: 600; color: #0f172a;">Canonical EDRs</div>
+                                        <div style="margin-top: 4px;">Promoted dataset-specific EDRs live here so they are easy to find, load, and reuse from the WebUI without browsing the filesystem.</div>
+                                        <div class="qwen-caption-grid" style="margin-top: 10px;">
+                                            <div>
+                                                <label for="qwenCanonicalRecipeSelect">Canonical EDR</label>
+                                                <select id="qwenCanonicalRecipeSelect"></select>
+                                            </div>
+                                            <div>
+                                                <label>&nbsp;</label>
+                                                <div class="qwen-caption-row">
+                                                    <button type="button" id="qwenCanonicalRecipeRefresh" class="training-button secondary">Refresh</button>
+                                                    <button type="button" id="qwenCanonicalRecipeLoad" class="training-button secondary">Load in Builder</button>
+                                                    <button type="button" id="qwenCanonicalRecipeUse" class="training-button secondary">Use in Label Images</button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div id="qwenCanonicalRecipeSummary" class="training-help" style="margin-top: 8px;">No canonical EDR selected.</div>
+                                    </div>
 <div class="training-help">Runs the EDR prepass stage (detectors + SAM3 + dedupe + optional calibrator application). Uses the current labelmap or a selected dataset.</div>
                                     <details class="training-help" style="margin-bottom: 10px;">
                                         <summary><strong>Full EDR Logic + Knob Map</strong></summary>
@@ -676,10 +745,11 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label for="qwenAgentFusionMode">Fusion mode<span class="help-icon" title="How merged clusters choose final geometry. Primary keeps the highest-score box. WBF blends overlapping boxes by score-weighted averaging.">?</span></label>
+                                            <label for="qwenAgentFusionMode">Fusion mode<span class="help-icon" title="How merged clusters choose final geometry. Primary keeps the highest-score box. WBF blends overlapping boxes by score-weighted averaging. Source-weighted keeps source-aware weighting from the promoted EDR policy.">?</span></label>
                                             <select id="qwenAgentFusionMode">
                                                 <option value="primary" selected>Primary winner</option>
                                                 <option value="wbf">Weighted box fusion (WBF)</option>
+                                                <option value="source_weighted">Source-weighted</option>
                                             </select>
                                         </div>
                                         <div>

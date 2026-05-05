@@ -12,8 +12,15 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from services.canonical_edr_completion import (
+    derive_calibration_cache_root_from_run_root,
+    load_canonical_completion_context,
+    persist_canonical_edr_completion,
+)
 PROGRESS_FILENAME = "canonical_discovery_progress.json"
 CANONICAL_EDR_JSON_NAME = "canonical_edr.json"
 CANONICAL_EDR_MD_NAME = "canonical_edr.md"
@@ -404,6 +411,7 @@ def main() -> None:
     parser.add_argument("--window-labeled", default="")
     parser.add_argument("--nonwindow-features", default="")
     parser.add_argument("--nonwindow-labeled", default="")
+    parser.add_argument("--completion-context-json", default="")
     args = parser.parse_args()
 
     run_root = (REPO_ROOT / args.run_root).resolve()
@@ -623,6 +631,24 @@ def main() -> None:
     # entries, tests, and in-flight runs continue to work during the rename.
     _write_json(run_root / LEGACY_CANONICAL_RECIPE_JSON_NAME, payload)
     _write_text(run_root / LEGACY_CANONICAL_RECIPE_MD_NAME, _render_md(payload))
+    completion_context_path = Path(str(args.completion_context_json)).resolve() if str(args.completion_context_json).strip() else None
+    loaded_completion_context = load_canonical_completion_context(
+        run_root=run_root,
+        context_path=completion_context_path,
+    )
+    completion_summary = persist_canonical_edr_completion(
+        calibration_cache_root=(
+            derive_calibration_cache_root_from_run_root(run_root)
+            if loaded_completion_context is not None
+            else run_root
+        ),
+        run_root=run_root,
+        canonical_recipe_json=canonical_edr_json,
+        canonical_recipe_md=canonical_edr_md,
+        canonical_recipe_payload=payload,
+        completion_context=loaded_completion_context,
+        report_bundle_json=(run_root / "report_bundle.json") if (run_root / "report_bundle.json").exists() else None,
+    )
     _write_progress(
         run_root,
         stage_key="write_canonical_recipe",
@@ -637,7 +663,7 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "status": "completed",
+                **completion_summary,
                 "run_root": str(run_root),
                 "canonical_recipe": str(canonical_edr_json.resolve()),
                 "legacy_canonical_recipe": str((run_root / LEGACY_CANONICAL_RECIPE_JSON_NAME).resolve()),

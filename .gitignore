@@ -226,6 +226,9 @@ logs/
 lightning_logs/
 *.log
 *.swp
+.codex
+.codex/
+*.legacy_backup
 PCS.txt
 crashlog.txt
 fuzz_long.log

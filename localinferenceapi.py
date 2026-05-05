@@ -20,7 +20,7 @@ from typing import (
     Set,
     Iterator,
 )
-from collections import deque
+from collections import Counter, deque
 import torch, clip, joblib
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException, Request
@@ -42,6 +42,8 @@ from api.sam_preload import build_sam_preload_router
 from api.qwen_infer import build_qwen_infer_router
 from api.qwen_caption import build_qwen_caption_router
 from api.calibration import build_calibration_router
+from api.auto_label import build_auto_label_router
+from api.edr_packages import build_edr_packages_router
 from api.prepass import build_prepass_router
 from api.qwen_prepass import build_qwen_prepass_router
 from api.clip_registry import build_clip_registry_router
@@ -87,6 +89,8 @@ from models.schemas import (
     QwenCaptionResponse,
     QwenPrepassRequest,
     QwenPrepassResponse,
+    AutoLabelPlannerDecision,
+    AutoLabelRequest,
     CalibrationRequest,
     AgentToolCall,
     AgentToolResult,
@@ -152,10 +156,8 @@ except Exception:  # noqa: BLE001
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
     HTTP_412_PRECONDITION_FAILED,
-    HTTP_413_CONTENT_TOO_LARGE,
     HTTP_415_UNSUPPORTED_MEDIA_TYPE,
     HTTP_404_NOT_FOUND,
-    HTTP_422_UNPROCESSABLE_CONTENT,
     HTTP_428_PRECONDITION_REQUIRED,
     HTTP_409_CONFLICT,
     HTTP_500_INTERNAL_SERVER_ERROR,
@@ -170,6 +172,7 @@ from utils.io import (
     _dir_size_bytes as _dir_size_bytes_impl,
     _path_is_within_root_impl as _path_is_within_root_impl,
 )
+from utils.status_compat import HTTP_413_CONTENT_TOO_LARGE, HTTP_422_UNPROCESSABLE_CONTENT
 
 _sanitize_rfdetr_run_id_impl = _sanitize_yolo_run_id_impl
 from utils.network import _find_free_port_impl as _find_free_port_impl
@@ -248,6 +251,8 @@ from services.prepass_recipes import (
     _save_prepass_recipe_impl as _save_prepass_recipe_impl,
     _delete_prepass_recipe_impl as _delete_prepass_recipe_impl,
     _get_prepass_recipe_impl as _get_prepass_recipe_impl,
+    _prepass_recipe_dir_impl as _prepass_recipe_dir_impl,
+    _is_canonical_prepass_recipe_config as _is_canonical_prepass_recipe_config,
 )
 from services.agent_cascades import (
     _persist_agent_cascade_impl as _persist_agent_cascade_impl,
@@ -537,6 +542,50 @@ from services.calibration import (
     _cancel_calibration_job as _cancel_calibration_job_impl,
     _list_persisted_calibration_job_payloads as _list_persisted_calibration_job_payloads_impl,
     _load_persisted_calibration_job_payload as _load_persisted_calibration_job_payload_impl,
+)
+from services.canonical_edr_completion import (
+    get_canonical_deployment_job as _get_canonical_deployment_job_impl,
+    list_canonical_deployment_jobs as _list_canonical_deployment_jobs_impl,
+    rewrite_canonical_deployment_bundle_metadata as _rewrite_canonical_deployment_bundle_metadata_impl,
+)
+from services.edr_packages import (
+    export_edr_package as _export_edr_package_impl,
+    get_edr_package as _get_edr_package_impl,
+    import_edr_package_from_zip as _import_edr_package_from_zip_impl,
+    list_edr_packages as _list_edr_packages_impl,
+    load_edr_package_payload as _load_edr_package_payload_impl,
+    resolve_edr_package_runtime as _resolve_edr_package_runtime_impl,
+)
+from services.falcon_perception import (
+    decode_mask_rle as _decode_falcon_mask_rle,
+    falcon_runtime_error_detail as _falcon_runtime_error_detail,
+    prediction_bbox_xyxy as _falcon_prediction_bbox_xyxy,
+    run_falcon_queries as _run_falcon_queries_impl,
+)
+from services.auto_labeling import (
+    AUTO_LABEL_TARGET_MODE_AUTO,
+    AUTO_LABEL_TARGET_MODE_DETECTION,
+    AUTO_LABEL_TARGET_MODE_SEGMENTATION,
+    AUTO_LABEL_WINDOW_MODE_FULL,
+    adjust_falcon_candidate_score as _auto_label_adjust_falcon_candidate_score,
+    AUTO_LABEL_WINDOW_MODE_PLANNER,
+    AUTO_LABEL_WINDOW_MODE_QUADRANTS,
+    bbox_iou_xyxy as _auto_label_bbox_iou_xyxy,
+    build_falcon_query_rows as _auto_label_build_falcon_query_rows,
+    build_falcon_query_tiers as _auto_label_build_falcon_query_tiers,
+    build_grid_windows as _auto_label_build_grid_windows,
+    build_quadrant_windows as _auto_label_build_quadrant_windows,
+    derive_mask_component_candidates as _auto_label_derive_mask_component_candidates,
+    derive_label_bbox_from_line as _auto_label_derive_label_bbox_from_line,
+    infer_dataset_annotation_mode as _infer_dataset_annotation_mode_impl,
+    mask_bbox_xyxy as _auto_label_mask_bbox_xyxy,
+    mask_iou as _auto_label_mask_iou,
+    parse_yolo_label_line as _auto_label_parse_yolo_label_line,
+    polygon_mask_from_yolo_line as _auto_label_polygon_mask_from_yolo_line,
+    score_falcon_candidate as _auto_label_score_falcon_candidate,
+    serialize_bbox_label_line as _auto_label_serialize_bbox_label_line,
+    serialize_bbox_polygon_label_line as _auto_label_serialize_bbox_polygon_label_line,
+    serialize_mask_label_line as _auto_label_serialize_mask_label_line,
 )
 from services.calibration_metrics import (
     _build_gt_index_for_class_impl as _build_gt_index_for_class_impl,
@@ -1450,9 +1499,29 @@ def _resume_classifier_backbone() -> None:
 # 4) Load the SAM model (segment-anything) as normal:
 MODEL_TYPE = os.environ.get("SAM_MODEL_TYPE", "vit_h")
 CHECKPOINT_PATH = os.environ.get("SAM_CHECKPOINT_PATH", "./sam_vit_h_4b8939.pth")
+
+
+def _resolve_hf_cached_model_file(repo_id: str, filename: str) -> Optional[str]:
+    hf_home = Path(os.environ.get("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+    snapshots_root = hf_home / "hub" / f"models--{repo_id.replace('/', '--')}" / "snapshots"
+    if not snapshots_root.exists():
+        return None
+    candidates = sorted(
+        snapshots_root.glob(f"*/{filename}"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+        reverse=True,
+    )
+    for path in candidates:
+        if path.exists():
+            return str(path)
+    return None
+
+
 SAM3_MODEL_ID = os.environ.get("SAM3_MODEL_ID", "facebook/sam3")
 SAM3_PROCESSOR_ID = os.environ.get("SAM3_PROCESSOR_ID", SAM3_MODEL_ID)
-SAM3_CHECKPOINT_PATH = os.environ.get("SAM3_CHECKPOINT_PATH")
+SAM3_CHECKPOINT_PATH = os.environ.get("SAM3_CHECKPOINT_PATH") or _resolve_hf_cached_model_file(
+    SAM3_MODEL_ID, "sam3.pt"
+)
 SAM3_DEVICE_PREF = os.environ.get("SAM3_DEVICE", "auto").strip().lower()
 active_sam3_model_id = "default"
 active_sam3_checkpoint = SAM3_CHECKPOINT_PATH
@@ -1461,7 +1530,7 @@ active_sam3_metadata: Dict[str, Any] = {
     "id": "default",
     "label": "Base SAM3",
     "checkpoint": SAM3_CHECKPOINT_PATH,
-    "source": "env",
+    "source": "env" if os.environ.get("SAM3_CHECKPOINT_PATH") else ("hf_cache" if SAM3_CHECKPOINT_PATH else "env"),
     "enable_segmentation": True,
 }
 
@@ -5154,9 +5223,40 @@ def _encode_pil_batch_for_head(
     batch_size = max(1, min(batch_size, len(images)))
     features: List[np.ndarray] = []
     if encoder_type == "dinov3":
+        global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_model_device, dinov3_initialized
+        model_name = str(
+            head.get("encoder_model") or head.get("clip_model") or DINOv3_MODEL_NAME or ""
+        ).strip()
+        target_device = device_override or _dinov3_resolve_device_impl(
+            device, cuda_disabled=dinov3_cuda_disabled
+        )
+        if (
+            dinov3_model is None
+            or dinov3_processor is None
+            or (model_name and dinov3_model_name != model_name)
+            or (dinov3_model_device and dinov3_model_device != target_device)
+        ):
+            with dinov3_lock:
+                if (
+                    dinov3_model is None
+                    or dinov3_processor is None
+                    or (model_name and dinov3_model_name != model_name)
+                    or (dinov3_model_device and dinov3_model_device != target_device)
+                ):
+                    load_name = model_name or DINOv3_MODEL_NAME
+                    model_obj, processor_obj = _load_dinov3_backbone(
+                        load_name,
+                        target_device,
+                    )
+                    if model_obj is not None and processor_obj is not None:
+                        dinov3_model = model_obj
+                        dinov3_processor = processor_obj
+                        dinov3_model_name = load_name
+                        dinov3_model_device = target_device
+                        dinov3_initialized = True
         if dinov3_model is None or dinov3_processor is None:
             return None
-        device_name = device_override or dinov3_model_device or device
+        device_name = device_override or dinov3_model_device or target_device or device
         for idx in range(0, len(images), batch_size):
             batch = images[idx : idx + batch_size]
             inputs = dinov3_processor(images=batch, return_tensors="pt")
@@ -5172,6 +5272,8 @@ def _encode_pil_batch_for_head(
             feats_np = feats.detach().float().cpu().numpy()
             features.append(feats_np)
     else:
+        if clip_model is None or clip_preprocess is None or _clip_reload_needed:
+            _resume_clip_backbone()
         if clip_model is None or clip_preprocess is None:
             return None
         device_name = device_override or device
@@ -8005,6 +8107,7 @@ def _agent_apply_ensemble_filter(
     image_name: Optional[str],
     classifier_id: Optional[str],
     job_id: Optional[str],
+    feature_contract: Optional[Dict[str, Any]] = None,
     prepass_provenance: Optional[Dict[str, Any]] = None,
     trace_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
     trace_full_writer: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -8070,6 +8173,15 @@ def _agent_apply_ensemble_filter(
                 + "\n"
             )
         root_dir = Path(__file__).resolve().parent
+        contract = dict(feature_contract or {})
+        support_iou = float(contract.get("support_iou") or 0.5)
+        min_crop_size = int(contract.get("min_crop_size") or 4)
+        context_radius = contract.get("context_radius")
+        embed_proj_dim = int(contract.get("embed_proj_dim") or 0)
+        embed_proj_seed = int(contract.get("embed_proj_seed") or 42)
+        image_embed_proj_dim = int(contract.get("image_embed_proj_dim") or 0)
+        image_embed_proj_seed = int(contract.get("image_embed_proj_seed") or 4242)
+        embed_l2_normalize = bool(True if contract.get("embed_l2_normalize") is None else contract.get("embed_l2_normalize"))
         build_cmd = [
             sys.executable,
             str(root_dir / "tools" / "build_ensemble_features.py"),
@@ -8080,15 +8192,45 @@ def _agent_apply_ensemble_filter(
             "--output",
             str(features_path),
             "--support-iou",
-            "0.5",
+            str(support_iou),
             "--min-crop-size",
-            "4",
+            str(min_crop_size),
+            "--context-radius",
+            str(float(context_radius) if context_radius is not None else 0.075),
+            "--embed-proj-dim",
+            str(embed_proj_dim),
+            "--embed-proj-seed",
+            str(embed_proj_seed),
+            "--image-embed-proj-dim",
+            str(image_embed_proj_dim),
+            "--image-embed-proj-seed",
+            str(image_embed_proj_seed),
             "--device",
             "cuda",
             "--classifier-id",
             str(classifier_path),
+            "--require-classifier",
         ]
+        if not embed_l2_normalize:
+            build_cmd.append("--embed-no-l2-normalize")
         subprocess.run(build_cmd, check=True)
+        if contract:
+            built = np.load(features_path, allow_pickle=True)
+            built_hash_raw = built.get("feature_schema_hash")
+            if hasattr(built_hash_raw, "item"):
+                try:
+                    built_hash_raw = built_hash_raw.item()
+                except Exception:
+                    pass
+            built_hash = str(built_hash_raw or "")
+            expected_hash = str(contract.get("feature_schema_hash") or "").strip()
+            if expected_hash and built_hash and built_hash != expected_hash:
+                raise RuntimeError("ensemble_filter_feature_schema_mismatch")
+            expected_labelmap = [str(x).strip() for x in contract.get("labelmap") or [] if str(x).strip()]
+            if expected_labelmap:
+                built_labelmap = [str(x).strip() for x in built.get("labelmap", []) if str(x).strip()]
+                if built_labelmap != expected_labelmap:
+                    raise RuntimeError("ensemble_filter_labelmap_mismatch")
         score_cmd = [
             sys.executable,
             str(root_dir / "tools" / score_tool),
@@ -8138,7 +8280,141 @@ def _agent_apply_ensemble_filter(
     except Exception as exc:  # noqa: BLE001
         if warnings is not None:
             warnings.append(f"ensemble_filter_failed:{exc}")
-        return detections
+        if trace_readable:
+            trace_readable(f"ensemble filter failed: {exc}")
+        raise HTTPException(
+            status_code=HTTP_412_PRECONDITION_FAILED,
+            detail=f"ensemble_filter_failed:{exc}",
+        ) from exc
+
+
+def _agent_apply_edr_package_runtime(
+    payload: QwenPrepassRequest,
+) -> Tuple[QwenPrepassRequest, Optional[Dict[str, Any]]]:
+    package_id = str(getattr(payload, "edr_package_id", "") or "").strip()
+    if not package_id:
+        return payload, None
+    dataset_id = str(getattr(payload, "dataset_id", "") or "").strip()
+    if not dataset_id:
+        raise HTTPException(
+            status_code=HTTP_412_PRECONDITION_FAILED,
+            detail="edr_package_target_dataset_missing",
+        )
+    runtime = _resolve_edr_package_runtime_impl(
+        packages_root=EDR_PACKAGES_ROOT,
+        package_id=package_id,
+        upload_root=UPLOAD_ROOT,
+        yolo_job_root=YOLO_JOB_ROOT,
+        rfdetr_job_root=RFDETR_JOB_ROOT,
+        calibration_root=CALIBRATION_ROOT,
+        classifiers_root=(UPLOAD_ROOT / "classifiers"),
+    )
+    package_labelmap = [str(item).strip() for item in runtime.get("labelmap") or [] if str(item).strip()]
+    runtime_config = dict(runtime.get("runtime_config") or {})
+    if not package_labelmap:
+        source_dataset_id = (
+            str(runtime_config.get("recipe_source_dataset_id") or runtime_config.get("dataset_id") or "").strip()
+        )
+        if source_dataset_id:
+            source_labelmap, _ = _agent_load_labelmap_meta(source_dataset_id)
+            package_labelmap = [str(item).strip() for item in source_labelmap if str(item).strip()]
+    if not package_labelmap:
+        raise HTTPException(
+            status_code=HTTP_412_PRECONDITION_FAILED,
+            detail="edr_package_labelmap_missing",
+        )
+    dataset_labelmap, _ = _agent_load_labelmap_meta(dataset_id)
+    dataset_labelmap = [str(item).strip() for item in dataset_labelmap if str(item).strip()]
+    if package_labelmap and dataset_labelmap != package_labelmap:
+        raise HTTPException(
+            status_code=HTTP_412_PRECONDITION_FAILED,
+            detail="edr_package_labelmap_mismatch",
+        )
+    classifier_id = (
+        str(runtime.get("staged_classifier_id") or "").strip()
+        or str(runtime_config.get("resolved_classifier_id") or runtime_config.get("classifier_id") or "").strip()
+        or None
+    )
+    ensemble_job_id = str(runtime.get("staged_ensemble_job_id") or "").strip()
+    if not ensemble_job_id:
+        raise HTTPException(
+            status_code=HTTP_412_PRECONDITION_FAILED,
+            detail="edr_package_missing_calibration_bundle",
+        )
+    apply_ensemble = bool(
+        payload.edr_package_apply_ensemble
+        if payload.edr_package_apply_ensemble is not None
+        else True
+    )
+    updates = {
+        "dataset_id": dataset_id,
+        "recipe_source_dataset_id": (
+            str(runtime_config.get("recipe_source_dataset_id") or runtime_config.get("dataset_id") or "").strip()
+            or None
+        ),
+        "labelmap": package_labelmap or dataset_labelmap or None,
+        "labelmap_glossary": str(runtime.get("glossary_text") or runtime_config.get("labelmap_glossary") or "").strip() or None,
+        "model_id": runtime_config.get("model_id") or payload.model_id,
+        "model_variant": runtime_config.get("model_variant") or payload.model_variant,
+        "enable_yolo": runtime_config.get("enable_yolo", payload.enable_yolo),
+        "enable_rfdetr": runtime_config.get("enable_rfdetr", payload.enable_rfdetr),
+        "yolo_id": runtime.get("staged_yolo_id") or runtime_config.get("yolo_id") or payload.yolo_id,
+        "rfdetr_id": runtime.get("staged_rfdetr_id") or runtime_config.get("rfdetr_id") or payload.rfdetr_id,
+        "sahi_window_size": runtime_config.get("sahi_window_size", payload.sahi_window_size),
+        "sahi_overlap_ratio": runtime_config.get("sahi_overlap_ratio", payload.sahi_overlap_ratio),
+        "classifier_id": classifier_id,
+        "sam_variant": runtime_config.get("sam_variant") or payload.sam_variant,
+        "enable_sam3_text": runtime_config.get("enable_sam3_text", payload.enable_sam3_text),
+        "sam3_text_window_extension": runtime_config.get("sam3_text_window_extension", payload.sam3_text_window_extension),
+        "sam3_text_window_mode": runtime_config.get("sam3_text_window_mode", payload.sam3_text_window_mode),
+        "sam3_text_window_size": runtime_config.get("sam3_text_window_size", payload.sam3_text_window_size),
+        "sam3_text_window_overlap": runtime_config.get("sam3_text_window_overlap", payload.sam3_text_window_overlap),
+        "sam3_text_synonym_budget": 0,
+        "enable_sam3_similarity": runtime_config.get("enable_sam3_similarity", payload.enable_sam3_similarity),
+        "prepass_sam3_text_thr": runtime_config.get("prepass_sam3_text_thr", payload.prepass_sam3_text_thr),
+        "prepass_similarity_score": runtime_config.get("prepass_similarity_score", payload.prepass_similarity_score),
+        "similarity_min_exemplar_score": runtime_config.get("similarity_min_exemplar_score", payload.similarity_min_exemplar_score),
+        "similarity_exemplar_strategy": runtime_config.get("similarity_exemplar_strategy", payload.similarity_exemplar_strategy),
+        "similarity_exemplar_count": runtime_config.get("similarity_exemplar_count", payload.similarity_exemplar_count),
+        "similarity_exemplar_seed": runtime_config.get("similarity_exemplar_seed", payload.similarity_exemplar_seed),
+        "similarity_exemplar_fraction": runtime_config.get("similarity_exemplar_fraction", payload.similarity_exemplar_fraction),
+        "similarity_exemplar_min": runtime_config.get("similarity_exemplar_min", payload.similarity_exemplar_min),
+        "similarity_exemplar_max": runtime_config.get("similarity_exemplar_max", payload.similarity_exemplar_max),
+        "similarity_exemplar_source_quota": runtime_config.get("similarity_exemplar_source_quota", payload.similarity_exemplar_source_quota),
+        "similarity_window_mode": runtime_config.get("similarity_window_mode", payload.similarity_window_mode),
+        "similarity_window_size": runtime_config.get("similarity_window_size", payload.similarity_window_size),
+        "similarity_window_overlap": runtime_config.get("similarity_window_overlap", payload.similarity_window_overlap),
+        "similarity_window_extension": runtime_config.get("similarity_window_extension", payload.similarity_window_extension),
+        "grid_cols": runtime_config.get("grid_cols", payload.grid_cols),
+        "grid_rows": runtime_config.get("grid_rows", payload.grid_rows),
+        "grid_overlap_ratio": runtime_config.get("grid_overlap_ratio", payload.grid_overlap_ratio),
+        "ensemble_enabled": apply_ensemble,
+        "ensemble_job_id": ensemble_job_id if apply_ensemble else None,
+        "iou": runtime_config.get("iou", payload.iou),
+        "fusion_mode": runtime_config.get("fusion_mode") or payload.fusion_mode,
+        "cross_class_dedupe_enabled": runtime_config.get("cross_class_dedupe_enabled", payload.cross_class_dedupe_enabled),
+        "cross_class_dedupe_iou": runtime_config.get("cross_class_dedupe_iou", payload.cross_class_dedupe_iou),
+        "prepass_caption": False,
+        "prepass_caption_profile": runtime_config.get("prepass_caption_profile", payload.prepass_caption_profile),
+        "prepass_caption_variant": runtime_config.get("prepass_caption_variant", payload.prepass_caption_variant),
+        "prepass_caption_model_id": runtime_config.get("prepass_caption_model_id", payload.prepass_caption_model_id),
+        "prepass_caption_max_tokens": runtime_config.get("prepass_caption_max_tokens", payload.prepass_caption_max_tokens),
+        "tighten_fp": runtime_config.get("tighten_fp", payload.tighten_fp),
+        "detector_conf": runtime_config.get("detector_conf", payload.detector_conf),
+        "sam3_score_thr": runtime_config.get("sam3_score_thr", payload.sam3_score_thr),
+        "sam3_mask_threshold": runtime_config.get("sam3_mask_threshold", payload.sam3_mask_threshold),
+        "classifier_min_prob": runtime_config.get("classifier_min_prob", payload.classifier_min_prob),
+        "classifier_margin": runtime_config.get("classifier_margin", payload.classifier_margin),
+        "classifier_bg_margin": runtime_config.get("classifier_bg_margin", payload.classifier_bg_margin),
+        "scoreless_iou": runtime_config.get("scoreless_iou", payload.scoreless_iou),
+        "edr_package_id": package_id,
+        "edr_package_apply_ensemble": apply_ensemble,
+    }
+    sam3_checkpoint_path = str(runtime.get("sam3_checkpoint_path") or "").strip()
+    if sam3_checkpoint_path:
+        global active_sam3_checkpoint
+        active_sam3_checkpoint = sam3_checkpoint_path
+    return payload.copy(update=updates), runtime
 
 
 @_register_agent_tool("log_observation")
@@ -8598,8 +8874,20 @@ def _run_prepass_annotation_qwen(
     cancel_event: Optional[threading.Event] = None,
 ) -> QwenPrepassResponse:
     global QWEN_CAPTION_CACHE_LIMIT
+    payload, edr_package_runtime = _agent_apply_edr_package_runtime(payload)
     # Prepass-only mode is enforced; no agentic review loop is executed.
     payload = payload.copy(update={"prepass_only": True})
+    if payload.edr_package_id and not bool(payload.ensemble_enabled and payload.ensemble_job_id):
+        # Package-backed raw/runtime evaluation should not run the legacy classifier gate
+        # ahead of downstream scoring/merge logic. The canonical EDR package already
+        # defines the promoted runtime contract; forcing a hard CLIP accept/reject here
+        # collapses valid detector proposals before they can be fused or handed to Falcon.
+        payload = payload.copy(update={"prepass_keep_all": True})
+    if bool(payload.ensemble_enabled and payload.ensemble_job_id):
+        # Canonical EDR deployment expects the saved ensemble bundle to score the raw
+        # prepass candidate pool. Do not run the legacy finalize/classifier gate first,
+        # or the live runtime can diverge sharply from the promoted offline recipe.
+        payload = payload.copy(update={"prepass_keep_all": True, "prepass_finalize": False})
     _require_sam3_for_prepass_impl(
         bool(payload.enable_sam3_text),
         bool(payload.enable_sam3_similarity),
@@ -8786,6 +9074,10 @@ def _run_prepass_annotation_qwen(
     warnings: List[str] = []
     if not labelmap:
         warnings.append("labelmap_missing")
+    recipe_source_dataset_id = str(getattr(payload, "recipe_source_dataset_id", "") or "").strip()
+    active_dataset_id = str(payload.dataset_id or "").strip()
+    if recipe_source_dataset_id and active_dataset_id and recipe_source_dataset_id != active_dataset_id:
+        warnings.append("recipe_source_dataset_mismatch")
     if payload.labelmap_glossary is not None:
         glossary = _normalize_labelmap_glossary(payload.labelmap_glossary)
     _AGENT_ACTIVE_LABELMAP = labelmap
@@ -8884,6 +9176,7 @@ def _run_prepass_annotation_qwen(
     _trace_write_readable(
         "start: "
         f"dataset_id={payload.dataset_id or 'none'} "
+        f"recipe_source_dataset_id={recipe_source_dataset_id or 'none'} "
         f"image={payload.image_name or 'unknown'} "
         f"model={readable_model_id} "
         f"variant={payload.model_variant or 'auto'}"
@@ -8938,6 +9231,11 @@ def _run_prepass_annotation_qwen(
             image_name=payload.image_name,
             classifier_id=classifier_id_for_run,
             job_id=payload.ensemble_job_id,
+            feature_contract=(
+                dict(edr_package_runtime.get("feature_contract") or {})
+                if isinstance(edr_package_runtime, dict)
+                else None
+            ),
             prepass_provenance=deep_prepass.get("provenance"),
             trace_writer=_trace_write,
             trace_full_writer=_trace_write_full,
@@ -9529,6 +9827,21 @@ class AgentMiningJob:
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
+@dataclass
+class AutoLabelJob:
+    job_id: str
+    status: str = "queued"
+    message: str = "Queued"
+    progress: float = 0.0
+    request: Dict[str, Any] = field(default_factory=dict)
+    result: Optional[Dict[str, Any]] = None
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
 QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
@@ -9545,6 +9858,8 @@ PROMPT_HELPER_JOBS: Dict[str, PromptHelperJob] = {}
 PROMPT_HELPER_JOBS_LOCK = threading.Lock()
 AGENT_MINING_JOBS: Dict[str, AgentMiningJob] = {}
 AGENT_MINING_JOBS_LOCK = threading.Lock()
+AUTO_LABEL_JOBS: Dict[str, AutoLabelJob] = {}
+AUTO_LABEL_JOBS_LOCK = threading.Lock()
 CALIBRATION_JOBS: Dict[str, CalibrationJob] = {}
 CALIBRATION_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
@@ -9553,6 +9868,8 @@ GLOSSARY_LIBRARY_ROOT = UPLOAD_ROOT / "glossaries"
 GLOSSARY_LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
 PREPASS_RECIPE_ROOT = UPLOAD_ROOT / "prepass_recipes"
 PREPASS_RECIPE_ROOT.mkdir(parents=True, exist_ok=True)
+EDR_PACKAGES_ROOT = UPLOAD_ROOT / "edr_packages"
+EDR_PACKAGES_ROOT.mkdir(parents=True, exist_ok=True)
 PREPASS_RECIPE_META = "prepass.meta.json"
 PREPASS_RECIPE_ASSETS = "assets"
 PREPASS_RECIPE_SCHEMA_VERSION = 1
@@ -9564,6 +9881,13 @@ PREPASS_RECIPE_EXPORT_ROOT = Path(
 PREPASS_RECIPE_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 PROMPT_HELPER_PRESET_ROOT = UPLOAD_ROOT / "prompt_helper_presets"
 PROMPT_HELPER_PRESET_ROOT.mkdir(parents=True, exist_ok=True)
+AUTO_LABEL_ROOT = UPLOAD_ROOT / "auto_label_jobs"
+AUTO_LABEL_ROOT.mkdir(parents=True, exist_ok=True)
+AUTO_LABEL_FALCON_MODEL_ID = str(
+    os.environ.get("FALCON_PERCEPTION_MODEL_ID", "tiiuae/Falcon-Perception") or "tiiuae/Falcon-Perception"
+).strip()
+AUTO_LABEL_FALCON_DEVICE = str(os.environ.get("FALCON_PERCEPTION_DEVICE", "cuda:0") or "cuda:0").strip()
+AUTO_LABEL_FALCON_LOCAL_ONLY = _parse_bool(os.environ.get("FALCON_PERCEPTION_LOCAL_ONLY", "1"))
 
 
 CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
@@ -10309,12 +10633,11 @@ def _annotation_update_lock(
     existing = meta.get("annotation_lock")
     existing_lock = existing if isinstance(existing, dict) else {}
     existing_active = _annotation_lock_is_active(existing_lock)
-    existing_holder = str(existing_lock.get("holder") or "").strip()
     existing_session = str(existing_lock.get("session_id") or "").strip()
     warning = None
     if existing_active:
         same_session = bool(requested_session and requested_session == existing_session)
-        if not same_session and existing_holder and existing_holder != editor_name and not force:
+        if not same_session and existing_session and not force:
             warning = "annotation_lock_active"
     if warning and not force:
         return {
@@ -12557,6 +12880,760 @@ def _serialize_agent_mining_job(job: AgentMiningJob) -> Dict[str, Any]:
         "logs": job.logs,
         "error": job.error,
     }
+
+
+def _serialize_auto_label_job(job: AutoLabelJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "message": job.message,
+        "progress": job.progress,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "request": job.request,
+        "result": job.result,
+        "logs": job.logs,
+        "error": job.error,
+    }
+
+
+def _auto_label_log(job: AutoLabelJob, message: str) -> None:
+    try:
+        job.logs.append({"ts": time.time(), "msg": str(message)})
+        if len(job.logs) > MAX_JOB_LOGS:
+            job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+    except Exception:
+        pass
+    job.updated_at = time.time()
+
+
+def _auto_label_pick_default_edr_package(dataset_id: str) -> Optional[str]:
+    dataset_id_norm = str(dataset_id or "").strip()
+    if not dataset_id_norm:
+        return None
+    candidates = []
+    for entry in _list_edr_packages_impl(EDR_PACKAGES_ROOT):
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("dataset_id") or "").strip() != dataset_id_norm:
+            continue
+        candidates.append(entry)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda row: float(row.get("updated_at") or row.get("created_at") or 0.0), reverse=True)
+    for entry in candidates:
+        if str(entry.get("recipe_kind") or "").strip() == "canonical_edr":
+            return str(entry.get("id") or "").strip() or None
+    return str(candidates[0].get("id") or "").strip() or None
+
+
+def _auto_label_effective_target_mode(
+    requested_mode: str,
+    rows: Sequence[Dict[str, Any]],
+) -> Tuple[str, Dict[str, Any]]:
+    inferred = _infer_dataset_annotation_mode_impl(rows)
+    requested = str(requested_mode or AUTO_LABEL_TARGET_MODE_AUTO).strip().lower()
+    if requested and requested != AUTO_LABEL_TARGET_MODE_AUTO:
+        return requested, inferred
+    resolved = str(inferred.get("mode") or "").strip().lower()
+    if resolved not in {AUTO_LABEL_TARGET_MODE_DETECTION, AUTO_LABEL_TARGET_MODE_SEGMENTATION}:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="auto_label_target_mode_required",
+        )
+    return resolved, inferred
+
+
+def _auto_label_class_selection(
+    labelmap: Sequence[str],
+    requested_classes: Optional[Sequence[str]],
+) -> List[str]:
+    if not requested_classes:
+        return [str(label).strip() for label in labelmap if str(label).strip()]
+    selected: List[str] = []
+    seen: set[str] = set()
+    for raw in requested_classes:
+        aligned = _agent_fuzzy_align_label(raw, labelmap) or str(raw or "").strip()
+        if not aligned:
+            continue
+        key = _normalize_class_name_for_match(aligned)
+        if key and key not in seen:
+            seen.add(key)
+            selected.append(aligned)
+    return selected
+
+
+def _auto_label_image_base64(image_path: Path) -> str:
+    return base64.b64encode(image_path.read_bytes()).decode("utf-8")
+
+
+def _auto_label_build_existing_annotations(
+    label_lines: Sequence[str],
+    *,
+    width: int,
+    height: int,
+    labelmap: Sequence[str],
+    target_mode: str,
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for line in label_lines or []:
+        parsed = _auto_label_parse_yolo_label_line(line, width=width, height=height)
+        if not parsed:
+            continue
+        class_id = int(parsed.get("class_id") or 0)
+        class_name = (
+            str(labelmap[class_id]).strip()
+            if 0 <= class_id < len(labelmap)
+            else str(class_id)
+        )
+        mask = None
+        if target_mode == AUTO_LABEL_TARGET_MODE_SEGMENTATION:
+            try:
+                mask = _auto_label_polygon_mask_from_yolo_line(line, width=width, height=height)
+            except Exception:
+                mask = None
+        out.append(
+            {
+                "class_id": class_id,
+                "class_name": class_name,
+                "bbox_xyxy": tuple(float(v) for v in parsed.get("bbox_xyxy") or []),
+                "mask": mask,
+                "source": "existing",
+                "score": 1.0,
+                "label_line": str(line).strip(),
+            }
+        )
+    return out
+
+
+def _auto_label_candidate_iou(
+    left: Dict[str, Any],
+    right: Dict[str, Any],
+    *,
+    target_mode: str,
+) -> float:
+    if (
+        target_mode == AUTO_LABEL_TARGET_MODE_SEGMENTATION
+        and left.get("mask") is not None
+        and right.get("mask") is not None
+    ):
+        score = _auto_label_mask_iou(left.get("mask"), right.get("mask"))
+        if score > 0.0:
+            return score
+    return _auto_label_bbox_iou_xyxy(
+        left.get("bbox_xyxy") or (),
+        right.get("bbox_xyxy") or (),
+    )
+
+
+def _auto_label_dedupe_candidates(
+    candidates: Sequence[Dict[str, Any]],
+    *,
+    existing: Sequence[Dict[str, Any]],
+    target_mode: str,
+    iou_threshold: float,
+) -> Tuple[List[Dict[str, Any]], int]:
+    iou_threshold = max(0.0, min(1.0, float(iou_threshold or 0.0)))
+    dropped = 0
+    filtered: List[Dict[str, Any]] = []
+    for candidate in candidates or []:
+        class_key = _normalize_class_name_for_match(candidate.get("class_name"))
+        duplicate = False
+        for current in existing:
+            if _normalize_class_name_for_match(current.get("class_name")) != class_key:
+                continue
+            if _auto_label_candidate_iou(candidate, current, target_mode=target_mode) > iou_threshold:
+                duplicate = True
+                dropped += 1
+                break
+        if duplicate:
+            continue
+        filtered.append(candidate)
+
+    kept: List[Dict[str, Any]] = []
+    for candidate in sorted(filtered, key=_auto_label_candidate_rank_key, reverse=True):
+        class_key = _normalize_class_name_for_match(candidate.get("class_name"))
+        duplicate = False
+        for current in kept:
+            if _normalize_class_name_for_match(current.get("class_name")) != class_key:
+                continue
+            if _auto_label_candidate_iou(candidate, current, target_mode=target_mode) > iou_threshold:
+                duplicate = True
+                dropped += 1
+                break
+        if not duplicate:
+            kept.append(candidate)
+    return kept, dropped
+
+
+def _auto_label_candidate_rank_key(item: Dict[str, Any]) -> Tuple[int, float, int, float, int, int]:
+    source = str(item.get("source") or "")
+    source_rank = 2 if source == "baseline" else 1
+    class_key = _normalize_class_name_for_match(item.get("class_name"))
+    component_area_px = int(item.get("component_area_px") or item.get("area_px") or 0)
+    area_fraction = float(
+        item.get("bbox_area_fraction_crop")
+        if item.get("bbox_area_fraction_crop") is not None
+        else item.get("bbox_area_fraction") or 1.0
+    )
+    ideal_area_fraction = {
+        _normalize_class_name_for_match("utility_pole"): 0.003,
+        _normalize_class_name_for_match("light_vehicle"): 0.025,
+        _normalize_class_name_for_match("person"): 0.01,
+        _normalize_class_name_for_match("building"): 0.12,
+    }.get(class_key)
+    if ideal_area_fraction and area_fraction > 0.0:
+        area_distance = -abs(math.log(max(area_fraction, 1e-6) / ideal_area_fraction))
+    else:
+        area_distance = 0.0
+    if class_key == _normalize_class_name_for_match("utility_pole"):
+        area_rank = -component_area_px
+    else:
+        area_rank = component_area_px
+    border_touch = int(item.get("border_touch_count") or 0)
+    component_count = int(item.get("component_count") or 1)
+    return (
+        source_rank,
+        float(item.get("score") or 0.0),
+        area_distance,
+        area_rank,
+        area_fraction,
+        -border_touch,
+        -component_count,
+    )
+
+
+def _auto_label_collapse_query_candidates(
+    candidates: Sequence[Dict[str, Any]],
+    *,
+    target_mode: str,
+    max_keep: int = 6,
+    iou_threshold: float = 0.9,
+) -> List[Dict[str, Any]]:
+    bbox_unique: Dict[Tuple[int, int, int, int, str], Dict[str, Any]] = {}
+    for candidate in sorted(list(candidates or []), key=_auto_label_candidate_rank_key, reverse=True):
+        bbox = tuple(float(v) for v in (candidate.get("bbox_xyxy") or ())[:4])
+        if len(bbox) < 4:
+            continue
+        bbox_key = (
+            int(round(bbox[0])),
+            int(round(bbox[1])),
+            int(round(bbox[2])),
+            int(round(bbox[3])),
+            str(candidate.get("derivation_mode") or ""),
+        )
+        if bbox_key not in bbox_unique:
+            bbox_unique[bbox_key] = candidate
+    kept, _ = _auto_label_dedupe_candidates(
+        list(bbox_unique.values()),
+        existing=[],
+        target_mode=target_mode,
+        iou_threshold=iou_threshold,
+    )
+    return sorted(kept, key=_auto_label_candidate_rank_key, reverse=True)[: max(1, int(max_keep or 1))]
+
+
+def _auto_label_crop_window(
+    pil_img: Image.Image,
+    xyxy: Sequence[float],
+) -> Tuple[Image.Image, Tuple[int, int]]:
+    x1, y1, x2, y2 = [int(round(float(v))) for v in xyxy[:4]]
+    crop = pil_img.crop((x1, y1, x2, y2))
+    return crop, (x1, y1)
+
+
+def _auto_label_full_mask_from_crop(
+    crop_mask: np.ndarray,
+    *,
+    full_width: int,
+    full_height: int,
+    offset_x: int,
+    offset_y: int,
+) -> np.ndarray:
+    full = np.zeros((full_height, full_width), dtype=bool)
+    crop_h, crop_w = crop_mask.shape[:2]
+    x2 = min(full_width, offset_x + crop_w)
+    y2 = min(full_height, offset_y + crop_h)
+    full[offset_y:y2, offset_x:x2] = crop_mask[: y2 - offset_y, : x2 - offset_x].astype(bool)
+    return full
+
+
+def _auto_label_caption_for_planner(
+    pil_img: Image.Image,
+    *,
+    model_id_override: Optional[str],
+) -> str:
+    messages = [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "You are a concise visual captioner."}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": pil_img},
+                {
+                    "type": "text",
+                    "text": "Describe this image in one short sentence. Mention only visible object types and scene layout. No coordinates.",
+                },
+            ],
+        },
+    ]
+    raw = _run_qwen_chat(
+        messages,
+        max_new_tokens=96,
+        decode_override={"temperature": 0.2, "top_p": 0.9},
+        model_id_override=model_id_override,
+    )
+    return _sanitize_qwen_caption_impl(raw)
+
+
+def _auto_label_parse_planner_decision(
+    raw_text: str,
+    *,
+    labelmap: Sequence[str],
+    valid_cells: Sequence[str],
+    allowed_classes: Optional[Sequence[str]] = None,
+) -> Optional[AutoLabelPlannerDecision]:
+    object_text = _extract_balanced_json_impl(str(raw_text or ""), "{", "}")
+    if not object_text:
+        return None
+    try:
+        payload = json.loads(object_text)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    cell_set = {str(cell).strip().upper() for cell in valid_cells if str(cell).strip()}
+    allowed_set = {
+        _normalize_class_name_for_match(item)
+        for item in (allowed_classes or [])
+        if _normalize_class_name_for_match(item)
+    }
+
+    def _align_allowed_class(value: Any) -> str:
+        aligned = (_agent_fuzzy_align_label(value, labelmap) or "").strip()
+        if not aligned:
+            return ""
+        if not allowed_set:
+            return aligned
+        return aligned if _normalize_class_name_for_match(aligned) in allowed_set else ""
+
+    for key in ("global_classes", "cells"):
+        if not isinstance(payload.get(key), list):
+            payload[key] = []
+    if not isinstance(payload.get("cell_classes"), list):
+        payload["cell_classes"] = []
+    payload["global_classes"] = [
+        allowed
+        for value in payload.get("global_classes") or []
+        for allowed in [_align_allowed_class(value)]
+        if allowed
+    ]
+    payload["cells"] = [
+        str(value).strip().upper()
+        for value in payload.get("cells") or []
+        if str(value).strip().upper() in cell_set
+    ]
+    normalized_cell_classes = []
+    for row in payload.get("cell_classes") or []:
+        if not isinstance(row, dict):
+            continue
+        cell = str(row.get("cell") or "").strip().upper()
+        if cell not in cell_set:
+            continue
+        classes = []
+        for value in row.get("classes") or []:
+            aligned = _align_allowed_class(value)
+            if aligned:
+                classes.append(aligned)
+        normalized_cell_classes.append({"cell": cell, "classes": classes})
+    payload["cell_classes"] = normalized_cell_classes
+    try:
+        return AutoLabelPlannerDecision.parse_obj(payload)
+    except Exception:
+        return None
+
+
+def _auto_label_run_planner(
+    pil_img: Image.Image,
+    *,
+    model_id_override: Optional[str],
+    labelmap: Sequence[str],
+    target_classes: Sequence[str],
+    baseline_counts: Mapping[str, int],
+    window_overlap_ratio: float,
+    use_caption: bool,
+    grid_cols: int,
+    grid_rows: int,
+) -> Dict[str, Any]:
+    grid_windows = _auto_label_build_grid_windows(
+        pil_img.width,
+        pil_img.height,
+        cols=grid_cols,
+        rows=grid_rows,
+        overlap_ratio=window_overlap_ratio,
+    )
+    valid_cells = [str(row.get("id") or "").strip().upper() for row in grid_windows]
+    caption_text = ""
+    if use_caption:
+        try:
+            caption_text = _auto_label_caption_for_planner(
+                pil_img,
+                model_id_override=model_id_override,
+            )
+        except Exception:
+            caption_text = ""
+    coverage_bits = []
+    for label in target_classes:
+        coverage_bits.append(f"{label}: {int(baseline_counts.get(label, 0) or 0)} baseline hits")
+    cell_bits = []
+    for row in grid_windows:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in row.get("xyxy") or (0, 0, 0, 0)]
+        cell_bits.append(f"{row.get('id')}: [{x1},{y1},{x2},{y2}]")
+    prompt_lines = [
+        "Return one JSON object only.",
+        "Choose the best Falcon execution plan for finding missing objects.",
+        "Allowed decision values: skip, full_image, quadrants, grid_cells.",
+        "Use only canonical class labels from the allowed list.",
+        "Do not invent pixel coordinates. Use only the provided grid cell ids.",
+        "If the image looks globally sparse or simple, use full_image.",
+        "If the image looks crowded or has many small objects, use quadrants or grid_cells.",
+        f"Allowed classes: {', '.join(target_classes) if target_classes else '(none)'}",
+        f"Current baseline coverage: {'; '.join(coverage_bits) if coverage_bits else 'none'}",
+        f"Grid cells: {'; '.join(cell_bits)}",
+    ]
+    if caption_text:
+        prompt_lines.append(f"Caption: {caption_text}")
+    prompt_lines.append(
+        'Schema: {"decision":"full_image|quadrants|grid_cells|skip","scene_tags":[],"global_classes":[],"cells":[],"cell_classes":[{"cell":"A1","classes":["class"]}],"reason":"short","confidence":"low|medium|high"}'
+    )
+    base_system = {
+        "role": "system",
+        "content": [{"type": "text", "text": "You are a visual planner. Output JSON only."}],
+    }
+
+    def _planner_messages(retry: bool = False) -> List[Dict[str, Any]]:
+        lines = list(prompt_lines)
+        if retry:
+            lines.append(
+                "Previous output was invalid. Return exactly one valid JSON object matching the schema."
+            )
+        return [
+            base_system,
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": pil_img},
+                    {"type": "text", "text": "\n".join(lines)},
+                ],
+            },
+        ]
+
+    raw_attempts: List[str] = []
+    parsed = None
+    attempt_count = 0
+    for retry in (False, True):
+        attempt_count += 1
+        raw = _run_qwen_chat(
+            _planner_messages(retry=retry),
+            max_new_tokens=256,
+            decode_override={"temperature": 0.1, "top_p": 0.9},
+            model_id_override=model_id_override,
+        )
+        raw_attempts.append(raw)
+        parsed = _auto_label_parse_planner_decision(
+            raw,
+            labelmap=labelmap,
+            valid_cells=valid_cells,
+            allowed_classes=target_classes,
+        )
+        if parsed is not None:
+            break
+    return {
+        "caption": caption_text,
+        "raw_text": raw_attempts[-1] if raw_attempts else "",
+        "raw_attempts": raw_attempts,
+        "attempt_count": attempt_count,
+        "retry_count": max(0, attempt_count - 1),
+        "parsed": parsed.dict() if parsed is not None else None,
+        "grid_windows": grid_windows,
+    }
+
+
+def _auto_label_falcon_candidates_for_window(
+    *,
+    pil_img: Image.Image,
+    crop_window: Dict[str, Any],
+    class_names: Sequence[str],
+    class_id_map: Mapping[str, int],
+    labelmap: Sequence[str],
+    glossary: str,
+    payload: AutoLabelRequest,
+    target_mode: str,
+) -> List[Dict[str, Any]]:
+    if not class_names:
+        return {"candidates": [], "query_count": 0, "diagnostics": []}
+    crop, (offset_x, offset_y) = _auto_label_crop_window(pil_img, crop_window.get("xyxy") or ())
+    crop_w, crop_h = crop.size
+    full_w, full_h = pil_img.size
+    query_tiers = _auto_label_build_falcon_query_tiers(
+        class_names,
+        labelmap=labelmap,
+        glossary=glossary or "",
+    )
+    if not query_tiers:
+        return {"candidates": [], "query_count": 0, "diagnostics": []}
+    out: List[Dict[str, Any]] = []
+    diagnostics: List[Dict[str, Any]] = []
+    query_count = 0
+    detection_strategy = str(payload.falcon_detection_strategy or "native_detection").strip().lower()
+    component_mode = str(payload.falcon_component_mode or "component_split").strip().lower()
+    tier_accept_score = 0.86
+    force_fallback_class_keys = {
+        _normalize_class_name_for_match("digger"),
+        _normalize_class_name_for_match("light_vehicle"),
+        _normalize_class_name_for_match("gastank"),
+        _normalize_class_name_for_match("truck"),
+        _normalize_class_name_for_match("utility_pole"),
+    }
+    falcon_task = (
+        "segmentation"
+        if target_mode == AUTO_LABEL_TARGET_MODE_SEGMENTATION or detection_strategy == "segmentation_boxes"
+        else "detection"
+    )
+    for class_name in class_names:
+        class_key = _normalize_class_name_for_match(class_name)
+        tier_rows = query_tiers.get(str(class_name or "").strip()) or []
+        if not tier_rows:
+            continue
+        tier_order = ["A", "B", "C"]
+        class_kept = False
+        class_candidates: List[Dict[str, Any]] = []
+        for tier_name in tier_order:
+            active_rows = [row for row in tier_rows if str(row.get("tier") or "") == tier_name]
+            if not active_rows:
+                continue
+            query_count += len(active_rows)
+            predictions = _run_falcon_queries_impl(
+                pil_image=crop,
+                queries=[str(row.get("query") or "") for row in active_rows],
+                model_id=str(payload.falcon_model_id or AUTO_LABEL_FALCON_MODEL_ID),
+                device=str(payload.falcon_device or AUTO_LABEL_FALCON_DEVICE),
+                local_files_only=bool(
+                    payload.falcon_local_files_only
+                    if payload.falcon_local_files_only is not None
+                    else AUTO_LABEL_FALCON_LOCAL_ONLY
+                ),
+                compile_model=bool(payload.falcon_compile),
+                min_dimension=int(payload.falcon_min_dimension),
+                max_dimension=int(payload.falcon_max_dimension),
+                max_new_tokens=int(payload.falcon_max_new_tokens),
+                task=falcon_task,
+                backend=str(payload.falcon_backend or "embedded"),
+                coord_dedup_threshold=float(payload.falcon_coord_dedup_threshold),
+                hr_upsample_ratio=int(payload.falcon_hr_upsample_ratio),
+                segmentation_threshold=float(payload.falcon_segmentation_threshold),
+            )
+            tier_candidates: List[Dict[str, Any]] = []
+            for query_row, preds in zip(active_rows, predictions, strict=False):
+                class_name_norm = str(query_row.get("class_name") or "").strip()
+                class_id = int(class_id_map.get(class_name_norm, -1))
+                query_component_candidates: List[Dict[str, Any]] = []
+                drop_reason_counter: Counter[str] = Counter()
+                component_count_max = 0
+                for pred in preds or []:
+                    mask_rle = pred.get("mask_rle") if isinstance(pred.get("mask_rle"), dict) else None
+                    crop_mask = None
+                    if mask_rle:
+                        try:
+                            crop_mask = _decode_falcon_mask_rle(mask_rle)
+                        except Exception:
+                            crop_mask = None
+                    if falcon_task == "segmentation" and crop_mask is not None:
+                        component_summary = _auto_label_derive_mask_component_candidates(
+                            crop_mask,
+                            crop_width=crop_w,
+                            crop_height=crop_h,
+                            mode=component_mode,
+                        )
+                        candidates = component_summary.get("candidates") or []
+                        component_count_max = max(
+                            int(component_count_max),
+                            int(len(component_summary.get("components") or [])),
+                        )
+                        drop_reason_counter.update(
+                            str(item.get("drop_reason") or "unknown")
+                            for item in (component_summary.get("dropped") or [])
+                        )
+                        for component_candidate in candidates:
+                            bbox_crop = tuple(float(v) for v in component_candidate.get("bbox_xyxy") or ())
+                            if len(bbox_crop) < 4:
+                                continue
+                            x1, y1, x2, y2 = bbox_crop
+                            bbox_area_fraction = float(
+                                component_candidate.get("bbox_area_fraction") or 0.0
+                            )
+                            border_touch_count = int(
+                                component_candidate.get("border_touch_count") or 0
+                            )
+                            component_count = int(
+                                component_candidate.get("component_count") or 1
+                            )
+                            derivation_mode = str(
+                                component_candidate.get("derivation_mode") or component_mode
+                            )
+                            full_bbox = (
+                                float(offset_x + x1),
+                                float(offset_y + y1),
+                                float(offset_x + x2),
+                                float(offset_y + y2),
+                            )
+                            base_score = _auto_label_score_falcon_candidate(
+                                bbox_area_fraction=bbox_area_fraction,
+                                border_touch_count=border_touch_count,
+                                component_count=component_count,
+                                derivation_mode=derivation_mode,
+                            )
+                            full_mask = None
+                            if target_mode == AUTO_LABEL_TARGET_MODE_SEGMENTATION and crop_mask is not None:
+                                full_mask = _auto_label_full_mask_from_crop(
+                                    crop_mask,
+                                    full_width=full_w,
+                                    full_height=full_h,
+                                    offset_x=offset_x,
+                                    offset_y=offset_y,
+                                )
+                            query_component_candidates.append(
+                                {
+                                    "class_id": class_id,
+                                    "class_name": class_name_norm,
+                                    "bbox_xyxy": full_bbox,
+                                    "mask": full_mask,
+                                    "score": _auto_label_adjust_falcon_candidate_score(
+                                        class_name=class_name_norm,
+                                        query=str(query_row.get("query") or ""),
+                                        tier=tier_name,
+                                        base_score=base_score,
+                                        bbox_xyxy=bbox_crop,
+                                        bbox_area_fraction=bbox_area_fraction,
+                                    ),
+                                    "source": "falcon_fill_in",
+                                    "window_id": str(crop_window.get("id") or ""),
+                                    "query": str(query_row.get("query") or ""),
+                                    "term": str(query_row.get("term") or ""),
+                                    "tier": tier_name,
+                                    "backend": str(payload.falcon_backend or "embedded"),
+                                    "falcon_task": falcon_task,
+                                    "bbox_area_fraction_crop": bbox_area_fraction,
+                                    "component_area_px": int(component_candidate.get("area_px") or 0),
+                                    "border_touch_count": border_touch_count,
+                                    "component_count": component_count,
+                                    "component_ids": list(component_candidate.get("component_ids") or []),
+                                    "derivation_mode": derivation_mode,
+                                }
+                            )
+                        if query_component_candidates:
+                            query_component_candidates = _auto_label_collapse_query_candidates(
+                                query_component_candidates,
+                                target_mode=target_mode,
+                                max_keep=6,
+                                iou_threshold=0.9,
+                            )
+                            tier_candidates.extend(query_component_candidates)
+                        continue
+                    bbox_crop = _falcon_prediction_bbox_xyxy(pred, width=crop_w, height=crop_h)
+                    if bbox_crop is None:
+                        continue
+                    x1, y1, x2, y2 = bbox_crop
+                    full_bbox = (
+                        float(offset_x + x1),
+                        float(offset_y + y1),
+                        float(offset_x + x2),
+                        float(offset_y + y2),
+                    )
+                    full_mask = None
+                    if target_mode == AUTO_LABEL_TARGET_MODE_SEGMENTATION and crop_mask is not None:
+                        full_mask = _auto_label_full_mask_from_crop(
+                            crop_mask,
+                            full_width=full_w,
+                            full_height=full_h,
+                            offset_x=offset_x,
+                            offset_y=offset_y,
+                        )
+                    tier_candidates.append(
+                        {
+                            "class_id": class_id,
+                            "class_name": class_name_norm,
+                            "bbox_xyxy": full_bbox,
+                            "mask": full_mask,
+                            "score": 0.5,
+                            "source": "falcon_fill_in",
+                            "window_id": str(crop_window.get("id") or ""),
+                            "query": str(query_row.get("query") or ""),
+                            "term": str(query_row.get("term") or ""),
+                            "tier": tier_name,
+                            "backend": str(payload.falcon_backend or "embedded"),
+                            "falcon_task": falcon_task,
+                        }
+                    )
+                diagnostics.append(
+                    {
+                        "class_name": class_name_norm,
+                        "query": str(query_row.get("query") or ""),
+                        "term": str(query_row.get("term") or ""),
+                        "tier": tier_name,
+                        "backend": str(payload.falcon_backend or "embedded"),
+                        "task": falcon_task,
+                        "prediction_count": int(len(preds or [])),
+                        "component_count": int(component_count_max),
+                        "derived_count": int(len(query_component_candidates)),
+                        "drop_reasons": dict(drop_reason_counter),
+                    }
+                )
+            if tier_candidates:
+                tier_candidates = sorted(
+                    tier_candidates,
+                    key=_auto_label_candidate_rank_key,
+                    reverse=True,
+                )[:64]
+                class_candidates.extend(tier_candidates)
+                class_kept = True
+                if (
+                    class_key not in force_fallback_class_keys
+                    and max(float(item.get("score") or 0.0) for item in tier_candidates) >= tier_accept_score
+                ):
+                    break
+        if class_candidates:
+            class_candidates = _auto_label_collapse_query_candidates(
+                class_candidates,
+                target_mode=target_mode,
+                max_keep=24,
+                iou_threshold=0.9,
+            )
+            out.extend(
+                sorted(
+                    class_candidates,
+                    key=_auto_label_candidate_rank_key,
+                    reverse=True,
+                )[:64]
+            )
+        if not class_kept:
+            diagnostics.append(
+                {
+                    "class_name": str(class_name or "").strip(),
+                    "query": "",
+                    "term": "",
+                    "tier": "none",
+                    "backend": str(payload.falcon_backend or "embedded"),
+                    "task": falcon_task,
+                    "prediction_count": 0,
+                    "component_count": 0,
+                    "derived_count": 0,
+                    "drop_reasons": {},
+                }
+            )
+    return {"candidates": out, "query_count": query_count, "diagnostics": diagnostics}
 
 
 _calibration_update = _calibration_update_impl
@@ -15943,6 +17020,525 @@ def _cancel_agent_mining_job(job_id: str) -> AgentMiningJob:
     return job
 
 
+def _run_auto_label_job(job: AutoLabelJob, payload: AutoLabelRequest) -> None:
+    with AUTO_LABEL_JOBS_LOCK:
+        AUTO_LABEL_JOBS[job.job_id] = job
+    job.status = "running"
+    job.message = "Preparing dataset…"
+    job.request = payload.dict()
+    job.updated_at = time.time()
+    session_id = str(payload.annotation_session_id or "").strip() or uuid.uuid4().hex
+    lock_started = False
+    lock_holder = f"auto_label:{job.job_id}"
+    try:
+        falcon_err = _falcon_runtime_error_detail(torch)
+        if falcon_err:
+            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=falcon_err)
+
+        entry = _resolve_dataset_entry(payload.dataset_id)
+        if payload.annotation_session_id:
+            _meta_path, meta = _annotation_load_or_create_meta(entry)
+            owned_lock = _require_annotation_lock_owner(meta, {"session_id": session_id})
+            lock_holder = str(owned_lock.get("holder") or "").strip() or lock_holder
+        manifest = _annotation_manifest_for_entry(entry)
+        rows = list(manifest.get("images") or [])
+        labelmap = [str(label).strip() for label in (manifest.get("labelmap") or []) if str(label).strip()]
+        if not labelmap:
+            labelmap, glossary = _agent_load_labelmap_meta(payload.dataset_id)
+        else:
+            glossary = get_dataset_glossary(payload.dataset_id).get("glossary") or ""
+        if not rows:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="auto_label_no_images")
+        target_mode, inferred_mode = _auto_label_effective_target_mode(payload.target_mode, rows)
+        class_names = _auto_label_class_selection(labelmap, payload.class_names)
+        class_id_map = {str(label).strip(): idx for idx, label in enumerate(labelmap)}
+        edr_package_id = str(payload.edr_package_id or "").strip() or _auto_label_pick_default_edr_package(payload.dataset_id)
+        baseline_mode = "edr_package" if edr_package_id else "detector_classifier"
+
+        selected_rows = []
+        split_filter = str(payload.split or "all").strip().lower()
+        requested_relpaths = {
+            _annotation_normalise_image_relpath(item).as_posix()
+            for item in (payload.image_relpaths or [])
+            if str(item or "").strip()
+        }
+        for row in rows:
+            row_split = str(row.get("split") or "train").strip().lower()
+            if split_filter in {"train", "val"} and row_split != split_filter:
+                continue
+            row_relpath = _annotation_normalise_image_relpath(
+                row.get("image_relpath") or row.get("image_name")
+            ).as_posix()
+            if requested_relpaths and row_relpath not in requested_relpaths:
+                continue
+            lines = row.get("label_lines") or []
+            if payload.unlabeled_only and isinstance(lines, list) and any(str(line).strip() for line in lines):
+                continue
+            selected_rows.append(row)
+        max_images = int(payload.max_images or len(selected_rows))
+        selected_rows = selected_rows[: max(0, max_images)]
+        if not selected_rows:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="auto_label_no_target_images")
+
+        if not payload.annotation_session_id:
+            lock_payload = {
+                "session_id": session_id,
+                "editor_name": lock_holder,
+                "force": bool(payload.force_annotation_lock),
+            }
+            lock_response = start_dataset_annotation_session(payload.dataset_id, lock_payload)
+            if str(lock_response.get("status") or "").strip().lower() != "ok":
+                raise HTTPException(
+                    status_code=HTTP_409_CONFLICT,
+                    detail=str(lock_response.get("warning") or "annotation_lock_active"),
+                )
+            lock_started = True
+
+        result_summary: Dict[str, Any] = {
+            "dataset_id": payload.dataset_id,
+            "annotation_session_id": session_id if payload.annotation_session_id else None,
+            "target_mode": target_mode,
+            "mode_inferred": inferred_mode,
+            "baseline_mode": baseline_mode,
+            "edr_package_id": edr_package_id,
+            "images_total": len(selected_rows),
+            "images_processed": 0,
+            "images_with_changes": 0,
+            "labels_added": 0,
+            "duplicates_dropped": 0,
+            "zero_write_images": 0,
+            "falcon_query_count": 0,
+            "falcon_window_count": 0,
+            "baseline_candidate_count": 0,
+            "falcon_candidate_count": 0,
+            "kept_candidate_count": 0,
+            "writes_attempted": 0,
+            "writes_applied": 0,
+            "planner_retry_count": 0,
+            "planner_decisions": [],
+            "falcon_diagnostics": [],
+            "per_class_added": {},
+            "errors": [],
+            "timings_sec": {
+                "baseline": 0.0,
+                "planner": 0.0,
+                "falcon": 0.0,
+                "save": 0.0,
+                "total": 0.0,
+            },
+            "image_times_sec": [],
+        }
+        job.result = dict(result_summary)
+        last_heartbeat = 0.0
+
+        def _maybe_lock_heartbeat() -> None:
+            nonlocal last_heartbeat
+            now_local = time.time()
+            if now_local - last_heartbeat <= 20.0:
+                return
+            try:
+                heartbeat_dataset_annotation_session(
+                    payload.dataset_id,
+                    {"session_id": session_id, "editor_name": lock_holder},
+                )
+                last_heartbeat = now_local
+            except Exception:
+                pass
+
+        for idx, row in enumerate(selected_rows, start=1):
+            if job.cancel_event.is_set():
+                break
+            image_started = time.perf_counter()
+            _maybe_lock_heartbeat()
+            split = _annotation_normalise_split(row.get("split"))
+            image_relpath = _annotation_normalise_image_relpath(row.get("image_relpath") or row.get("image_name"))
+            image_path = _resolve_annotation_image_path(
+                _dataset_effective_root_from_entry(entry),
+                str(entry.get("yolo_layout") or "flat"),
+                split,
+                image_relpath,
+            )
+            job.message = f"Auto-labeling {image_relpath.name} ({idx}/{len(selected_rows)})"
+            job.progress = max(0.0, min(1.0, float(idx - 1) / float(max(1, len(selected_rows)))))
+            job.updated_at = time.time()
+            current_lines = _annotation_effective_label_lines(entry, split, image_relpath)
+            try:
+                pil_img = Image.open(image_path).convert("RGB")
+            except Exception as exc:
+                result_summary["errors"].append(
+                    {"image_relpath": str(image_relpath.as_posix()), "error": f"image_open_failed:{exc}"}
+                )
+                continue
+            img_w, img_h = pil_img.size
+            existing_annotations = _auto_label_build_existing_annotations(
+                current_lines,
+                width=img_w,
+                height=img_h,
+                labelmap=labelmap,
+                target_mode=target_mode,
+            )
+            existing_classes = {
+                str(item.get("class_name") or "").strip()
+                for item in existing_annotations
+                if str(item.get("class_name") or "").strip()
+            }
+            image_base64 = _auto_label_image_base64(image_path)
+            baseline_candidates: List[Dict[str, Any]] = []
+            baseline_counts: Dict[str, int] = {}
+            if edr_package_id or payload.enable_yolo or payload.enable_rfdetr:
+                baseline_started = time.perf_counter()
+                baseline_request = QwenPrepassRequest(
+                    dataset_id=payload.dataset_id,
+                    edr_package_id=edr_package_id or None,
+                    edr_package_apply_ensemble=False,
+                    image_base64=image_base64,
+                    image_name=image_relpath.name,
+                    labelmap=labelmap,
+                    labelmap_glossary=glossary or None,
+                    enable_yolo=bool(payload.enable_yolo),
+                    enable_rfdetr=bool(payload.enable_rfdetr),
+                    yolo_id=payload.yolo_id,
+                    rfdetr_id=payload.rfdetr_id,
+                    classifier_id=payload.classifier_id,
+                    enable_sam3_text=bool(edr_package_id),
+                    enable_sam3_similarity=bool(edr_package_id),
+                    prepass_caption=False,
+                    ensemble_enabled=False,
+                    prepass_only=True,
+                    prepass_keep_all=True,
+                    prepass_finalize=False,
+                )
+                baseline_response = _run_prepass_annotation_qwen(
+                    baseline_request,
+                    cancel_event=job.cancel_event,
+                )
+                result_summary["timings_sec"]["baseline"] += time.perf_counter() - baseline_started
+                _maybe_lock_heartbeat()
+                for det in baseline_response.detections or []:
+                    class_name = str(det.get("label") or "").strip()
+                    if class_name and class_names and class_name not in class_names:
+                        continue
+                    bbox = det.get("bbox_yolo")
+                    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+                        continue
+                    x1, y1, x2, y2 = _yolo_to_xyxy(img_w, img_h, bbox[:4])
+                    baseline_candidates.append(
+                        {
+                            "class_id": int(class_id_map.get(class_name, -1)),
+                            "class_name": class_name,
+                            "bbox_xyxy": (float(x1), float(y1), float(x2), float(y2)),
+                            "mask": None,
+                            "score": float(det.get("score") or 0.5),
+                            "source": "baseline",
+                        }
+                    )
+                    if class_name:
+                        baseline_counts[class_name] = baseline_counts.get(class_name, 0) + 1
+            result_summary["baseline_candidate_count"] += len(baseline_candidates)
+
+            manual_window_mode = bool(payload.enable_falcon) and payload.falcon_window_mode in {
+                AUTO_LABEL_WINDOW_MODE_FULL,
+                AUTO_LABEL_WINDOW_MODE_QUADRANTS,
+            }
+            explicit_class_subset = bool(payload.class_names)
+            if not bool(payload.enable_falcon):
+                target_classes = []
+            elif manual_window_mode and explicit_class_subset:
+                # In explicit manual window modes, the user's requested class subset is the
+                # contract. Baseline detections should not suppress Falcon entirely for a class.
+                target_classes = [name for name in class_names if name not in existing_classes]
+            else:
+                covered_classes = set(existing_classes)
+                for class_name in baseline_counts:
+                    covered_classes.add(class_name)
+                target_classes = [name for name in class_names if name not in covered_classes]
+            falcon_candidates: List[Dict[str, Any]] = []
+            planner_summary = None
+            if target_classes:
+                if payload.falcon_window_mode == AUTO_LABEL_WINDOW_MODE_FULL:
+                    windows = [{"id": "FULL", "xyxy": (0.0, 0.0, float(img_w), float(img_h)), "classes": target_classes}]
+                elif payload.falcon_window_mode == AUTO_LABEL_WINDOW_MODE_QUADRANTS:
+                    windows = [
+                        {**window, "classes": list(target_classes)}
+                        for window in _auto_label_build_quadrant_windows(
+                            img_w,
+                            img_h,
+                            overlap_ratio=float(payload.falcon_overlap_ratio),
+                        )
+                    ]
+                else:
+                    planner_started = time.perf_counter()
+                    planner_summary = _auto_label_run_planner(
+                        pil_img,
+                        model_id_override=payload.planner_model_id,
+                        labelmap=labelmap,
+                        target_classes=target_classes,
+                        baseline_counts=baseline_counts,
+                        window_overlap_ratio=float(payload.falcon_overlap_ratio),
+                        use_caption=bool(payload.use_planner_caption),
+                        grid_cols=int(payload.planner_grid_cols),
+                        grid_rows=int(payload.planner_grid_rows),
+                    )
+                    result_summary["timings_sec"]["planner"] += time.perf_counter() - planner_started
+                    planner_payload = planner_summary.get("parsed") if isinstance(planner_summary, dict) else None
+                    decision = str((planner_payload or {}).get("decision") or "").strip().lower()
+                    grid_windows = {
+                        str(row.get("id") or ""): row
+                        for row in (planner_summary.get("grid_windows") or [])
+                        if isinstance(row, dict)
+                    }
+                    windows = []
+                    if decision == "skip":
+                        windows = []
+                    elif decision == AUTO_LABEL_WINDOW_MODE_FULL:
+                        classes_for_full = list((planner_payload or {}).get("global_classes") or target_classes) or list(target_classes)
+                        windows = [{"id": "FULL", "xyxy": (0.0, 0.0, float(img_w), float(img_h)), "classes": classes_for_full}]
+                    elif decision == AUTO_LABEL_WINDOW_MODE_QUADRANTS:
+                        windows = [
+                            {**window, "classes": list(target_classes)}
+                            for window in _auto_label_build_quadrant_windows(
+                                img_w,
+                                img_h,
+                                overlap_ratio=float(payload.falcon_overlap_ratio),
+                            )
+                        ]
+                    elif decision == "grid_cells":
+                        seen_cells = set()
+                        for row in (planner_payload or {}).get("cell_classes") or []:
+                            if not isinstance(row, dict):
+                                continue
+                            cell_id = str(row.get("cell") or "").strip().upper()
+                            if cell_id in seen_cells:
+                                continue
+                            window = grid_windows.get(cell_id)
+                            if not window:
+                                continue
+                            seen_cells.add(cell_id)
+                            window_classes = [
+                                cls_name
+                                for cls_name in (row.get("classes") or [])
+                                if cls_name in target_classes
+                            ] or list(target_classes)
+                            windows.append({**window, "classes": window_classes})
+                        for cell_id in (planner_payload or {}).get("cells") or []:
+                            cell_norm = str(cell_id or "").strip().upper()
+                            if cell_norm in seen_cells:
+                                continue
+                            window = grid_windows.get(cell_norm)
+                            if not window:
+                                continue
+                            seen_cells.add(cell_norm)
+                            windows.append({**window, "classes": list(target_classes)})
+                    else:
+                        windows = [
+                            {**window, "classes": list(target_classes)}
+                            for window in _auto_label_build_quadrant_windows(
+                                img_w,
+                                img_h,
+                                overlap_ratio=float(payload.falcon_overlap_ratio),
+                            )
+                        ]
+                result_summary["falcon_window_count"] += len(windows)
+                if planner_summary is not None:
+                    result_summary["planner_retry_count"] += int(
+                        planner_summary.get("retry_count") or 0
+                    )
+                    result_summary["planner_decisions"].append(
+                        {
+                            "image_relpath": str(image_relpath.as_posix()),
+                            "planner": planner_summary,
+                        }
+                    )
+                for window in windows:
+                    window_classes = [
+                        cls_name for cls_name in (window.get("classes") or []) if cls_name in target_classes
+                    ]
+                    if not window_classes:
+                        continue
+                    falcon_started = time.perf_counter()
+                    falcon_window_result = _auto_label_falcon_candidates_for_window(
+                        pil_img=pil_img,
+                        crop_window=window,
+                        class_names=window_classes,
+                        class_id_map=class_id_map,
+                        labelmap=labelmap,
+                        glossary=glossary or "",
+                        payload=payload,
+                        target_mode=target_mode,
+                    )
+                    if isinstance(falcon_window_result, dict):
+                        falcon_candidates.extend(list(falcon_window_result.get("candidates") or []))
+                        result_summary["falcon_query_count"] += int(
+                            falcon_window_result.get("query_count") or 0
+                        )
+                        result_summary["falcon_diagnostics"].extend(
+                            list(falcon_window_result.get("diagnostics") or [])
+                        )
+                    else:
+                        falcon_candidates.extend(list(falcon_window_result or []))
+                        result_summary["falcon_query_count"] += len(window_classes)
+                    result_summary["timings_sec"]["falcon"] += time.perf_counter() - falcon_started
+                    _maybe_lock_heartbeat()
+            result_summary["falcon_candidate_count"] += len(falcon_candidates)
+
+            merge_candidates = [*baseline_candidates, *falcon_candidates]
+            kept, dropped = _auto_label_dedupe_candidates(
+                merge_candidates,
+                existing=existing_annotations,
+                target_mode=target_mode,
+                iou_threshold=float(payload.dedupe_existing_same_class_iou),
+            )
+            result_summary["duplicates_dropped"] += int(dropped)
+            result_summary["kept_candidate_count"] += len(kept)
+            if not kept:
+                image_elapsed = time.perf_counter() - image_started
+                result_summary["zero_write_images"] += 1
+                result_summary["timings_sec"]["total"] += image_elapsed
+                result_summary["image_times_sec"].append(image_elapsed)
+                result_summary["images_processed"] += 1
+                job.result = dict(result_summary)
+                job.progress = max(0.0, min(1.0, float(idx) / float(max(1, len(selected_rows)))))
+                continue
+
+            new_lines: List[str] = []
+            for candidate in kept:
+                class_id = int(candidate.get("class_id", -1))
+                if class_id < 0:
+                    class_name = str(candidate.get("class_name") or "").strip()
+                    if class_name not in class_id_map:
+                        continue
+                    class_id = int(class_id_map[class_name])
+                if target_mode == AUTO_LABEL_TARGET_MODE_SEGMENTATION and candidate.get("mask") is not None:
+                    try:
+                        line = _auto_label_serialize_mask_label_line(
+                            class_id,
+                            candidate.get("mask"),
+                            width=img_w,
+                            height=img_h,
+                            simplify_epsilon=float(payload.simplify_epsilon),
+                        )
+                    except Exception:
+                        continue
+                elif target_mode == AUTO_LABEL_TARGET_MODE_SEGMENTATION:
+                    line = _auto_label_serialize_bbox_polygon_label_line(
+                        class_id,
+                        candidate.get("bbox_xyxy") or (),
+                        width=img_w,
+                        height=img_h,
+                    )
+                else:
+                    line = _auto_label_serialize_bbox_label_line(
+                        class_id,
+                        candidate.get("bbox_xyxy") or (),
+                        width=img_w,
+                        height=img_h,
+                    )
+                new_lines.append(line)
+                class_name = (
+                    str(labelmap[class_id]).strip()
+                    if 0 <= class_id < len(labelmap)
+                    else str(candidate.get("class_name") or class_id)
+                )
+                result_summary["per_class_added"][class_name] = (
+                    int(result_summary["per_class_added"].get(class_name) or 0) + 1
+                )
+            result_summary["writes_attempted"] += len(new_lines)
+            final_lines = list(current_lines) + new_lines
+            _maybe_lock_heartbeat()
+            save_started = time.perf_counter()
+            save_dataset_annotation_snapshot(
+                payload.dataset_id,
+                {
+                    "session_id": session_id,
+                    "records": [
+                        {
+                            "split": split,
+                            "image_relpath": str(image_relpath.as_posix()),
+                            "label_lines": final_lines,
+                        }
+                    ],
+                    "cursor": {"image_relpath": str(image_relpath.as_posix())},
+                },
+            )
+            result_summary["timings_sec"]["save"] += time.perf_counter() - save_started
+            result_summary["images_with_changes"] += 1
+            result_summary["labels_added"] += len(new_lines)
+            result_summary["writes_applied"] += len(new_lines)
+            result_summary["images_processed"] += 1
+            image_elapsed = time.perf_counter() - image_started
+            result_summary["timings_sec"]["total"] += image_elapsed
+            result_summary["image_times_sec"].append(image_elapsed)
+            job.result = dict(result_summary)
+            _auto_label_log(
+                job,
+                f"saved {image_relpath.as_posix()} added={len(new_lines)} dropped={dropped} mode={target_mode}",
+            )
+            job.progress = max(0.0, min(1.0, float(idx) / float(max(1, len(selected_rows)))))
+
+        if job.cancel_event.is_set():
+            job.status = "cancelled"
+            job.message = "Cancelled"
+        else:
+            job.status = "completed"
+            job.message = "Done"
+            job.progress = 1.0
+        job.result = result_summary
+        try:
+            job_dir = AUTO_LABEL_ROOT / job.job_id
+            job_dir.mkdir(parents=True, exist_ok=True)
+            (job_dir / "result.json").write_text(json.dumps(result_summary, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+    except HTTPException as exc:
+        logger.exception("Auto-label job %s failed", job.job_id)
+        job.status = "failed"
+        job.error = str(exc.detail or exc)
+        job.message = "Failed"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Auto-label job %s failed", job.job_id)
+        job.status = "failed"
+        job.error = str(exc)
+        job.message = "Failed"
+    finally:
+        if lock_started:
+            try:
+                stop_dataset_annotation_session(
+                    payload.dataset_id,
+                    {
+                        "session_id": session_id,
+                        "editor_name": lock_holder,
+                        "force": bool(payload.force_annotation_lock),
+                    },
+                )
+            except Exception:
+                pass
+        job.updated_at = time.time()
+
+
+def _start_auto_label_job(payload: AutoLabelRequest) -> AutoLabelJob:
+    job_id = f"al_{uuid.uuid4().hex[:8]}"
+    job = AutoLabelJob(job_id=job_id)
+    with AUTO_LABEL_JOBS_LOCK:
+        AUTO_LABEL_JOBS[job.job_id] = job
+    thread = threading.Thread(target=_run_auto_label_job, args=(job, payload), daemon=True)
+    thread.start()
+    return job
+
+
+def _cancel_auto_label_job(job_id: str) -> AutoLabelJob:
+    with AUTO_LABEL_JOBS_LOCK:
+        job = AUTO_LABEL_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="auto_label_job_not_found")
+    if job.status in {"completed", "failed", "cancelled"}:
+        return job
+    job.cancel_event.set()
+    job.status = "cancelled"
+    job.message = "Cancelled"
+    job.updated_at = time.time()
+    return job
+
+
 def _start_prompt_helper_search_job(payload: PromptHelperSearchRequest) -> PromptHelperJob:
     job_id = f"phs_{uuid.uuid4().hex[:8]}"
     job = PromptHelperJob(job_id=job_id)
@@ -15989,6 +17585,32 @@ def get_agent_mining_job(job_id: str):
 def cancel_agent_mining_job(job_id: str):
     job = _cancel_agent_mining_job(job_id)
     return _serialize_agent_mining_job(job)
+
+
+def start_auto_label_job(payload: AutoLabelRequest):
+    job = _start_auto_label_job(payload)
+    return _serialize_auto_label_job(job)
+
+
+def list_auto_label_jobs():
+    _prune_job_registry(AUTO_LABEL_JOBS, AUTO_LABEL_JOBS_LOCK)
+    with AUTO_LABEL_JOBS_LOCK:
+        jobs = list(AUTO_LABEL_JOBS.values())
+    jobs.sort(key=lambda j: j.created_at, reverse=True)
+    return [_serialize_auto_label_job(job) for job in jobs]
+
+
+def get_auto_label_job(job_id: str):
+    with AUTO_LABEL_JOBS_LOCK:
+        job = AUTO_LABEL_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="auto_label_job_not_found")
+    return _serialize_auto_label_job(job)
+
+
+def cancel_auto_label_job(job_id: str):
+    job = _cancel_auto_label_job(job_id)
+    return _serialize_auto_label_job(job)
 
 
 def get_latest_agent_mining_result():
@@ -17431,7 +19053,7 @@ def _start_sam3_training_worker(
             env.setdefault("CUDA_LAUNCH_BLOCKING", "1")
             env.setdefault("TORCH_SHOW_CPP_STACKTRACES", "1")
             env.setdefault("NCCL_DEBUG", "INFO")
-            # Enable runtime monkeypatches (loaded via sitecustomize.py) to keep vendor tree untouched.
+            # Preserve the legacy SAM3 runtime toggle expected by the patched training stack.
             env.setdefault("SAM3_MONKEYPATCH", "1")
             if val_score_thresh is not None:
                 try:
@@ -23240,6 +24862,17 @@ app.include_router(
 )
 
 
+app.include_router(
+    build_auto_label_router(
+        start_fn=start_auto_label_job,
+        list_fn=list_auto_label_jobs,
+        get_fn=get_auto_label_job,
+        cancel_fn=cancel_auto_label_job,
+        request_cls=AutoLabelRequest,
+    )
+)
+
+
 def start_calibration_job(payload: CalibrationRequest = Body(...)):
     job = _start_calibration_job_impl(
         payload,
@@ -23276,6 +24909,13 @@ def list_calibration_jobs():
                 mark_interrupted=True,
             ) or payload
         jobs_by_id[persisted_job_id] = payload
+    for payload in _list_canonical_deployment_jobs_impl(CALIBRATION_ROOT):
+        if not isinstance(payload, dict):
+            continue
+        bundle_job_id = str(payload.get("job_id") or "").strip()
+        if not bundle_job_id:
+            continue
+        jobs_by_id.setdefault(bundle_job_id, payload)
     jobs_by_id.update(live_jobs)
     jobs = list(jobs_by_id.values())
     jobs.sort(key=lambda j: float(j.get("created_at") or 0.0), reverse=True)
@@ -23294,6 +24934,9 @@ def get_calibration_job(job_id: str):
     )
     if persisted:
         return persisted
+    canonical_bundle = _get_canonical_deployment_job_impl(CALIBRATION_ROOT, job_id)
+    if canonical_bundle:
+        return canonical_bundle
     raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
 
 
@@ -23356,6 +24999,29 @@ app.include_router(
 )
 
 
+def list_edr_packages():
+    return _list_edr_packages_impl(EDR_PACKAGES_ROOT)
+
+
+def get_edr_package(package_id: str):
+    try:
+        return _get_edr_package_impl(EDR_PACKAGES_ROOT, package_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="edr_package_not_found") from exc
+
+
+def export_edr_package(package_id: str):
+    try:
+        zip_path = _export_edr_package_impl(EDR_PACKAGES_ROOT, package_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="edr_package_not_found") from exc
+    return FileResponse(
+        path=str(zip_path),
+        media_type="application/zip",
+        filename=f"{package_id}.edr.zip",
+    )
+
+
 def get_prepass_recipe(recipe_id: str):
     data = _get_prepass_recipe_impl(
         recipe_id,
@@ -23391,6 +25057,22 @@ def delete_prepass_recipe(recipe_id: str):
 
 
 def export_prepass_recipe(recipe_id: str):
+    recipe_dir = _prepass_recipe_dir_impl(
+        recipe_id,
+        create=False,
+        recipes_root=PREPASS_RECIPE_ROOT,
+        sanitize_id_fn=_sanitize_yolo_run_id_impl,
+    )
+    meta = _load_prepass_recipe_meta(recipe_dir)
+    config = meta.get("config") if isinstance(meta.get("config"), dict) else {}
+    package_id = str(config.get("edr_package_id") or "").strip()
+    if package_id:
+        zip_path = _export_edr_package_impl(EDR_PACKAGES_ROOT, package_id)
+        return FileResponse(
+            path=str(zip_path),
+            media_type="application/zip",
+            filename=f"{package_id}.edr.zip",
+        )
     zip_path = _export_prepass_recipe_impl(
         recipe_id,
         prepass_recipe_meta=PREPASS_RECIPE_META,
@@ -23430,6 +25112,125 @@ def export_prepass_recipe(recipe_id: str):
         media_type="application/zip",
         filename=f"prepass_recipe_{recipe_id}.zip",
     )
+
+
+def _zip_contains_edr_package_manifest(zip_path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            return "edr_manifest.json" in set(zf.namelist())
+    except Exception:
+        return False
+
+
+def _import_edr_package_bundle(zip_path: Path) -> tuple[Dict[str, Any], PrepassRecipeResponse]:
+    package_summary = _import_edr_package_from_zip_impl(
+        zip_path=zip_path,
+        packages_root=EDR_PACKAGES_ROOT,
+    )
+    package_id = str(package_summary.get("id") or "").strip()
+    package_payload = _load_edr_package_payload_impl(EDR_PACKAGES_ROOT, package_id)
+    saved_recipe = dict(package_payload.get("saved_recipe") or {})
+    manifest = dict(package_payload.get("manifest") or {})
+    registry_entry_payload = dict(package_payload.get("registry_entry") or {})
+    fingerprint_payload = dict(package_payload.get("fingerprint_payload") or {})
+    runtime = _resolve_edr_package_runtime_impl(
+        packages_root=EDR_PACKAGES_ROOT,
+        package_id=package_id,
+        upload_root=UPLOAD_ROOT,
+        yolo_job_root=YOLO_JOB_ROOT,
+        rfdetr_job_root=RFDETR_JOB_ROOT,
+        calibration_root=CALIBRATION_ROOT,
+        classifiers_root=(UPLOAD_ROOT / "classifiers"),
+    )
+    config = dict(saved_recipe.get("config") or {})
+    config["edr_package_id"] = package_id
+    config["edr_package_root"] = str(package_summary.get("package_root") or "")
+    config["edr_package_zip"] = str(package_summary.get("package_zip") or "")
+    config["edr_runtime_mode"] = "package"
+    config["prepass_caption"] = False
+    config["sam3_text_synonym_budget"] = 0
+    config["dataset_id"] = str(config.get("dataset_id") or manifest.get("dataset_id") or "").strip() or None
+    if runtime.get("staged_yolo_id"):
+        config["yolo_id"] = runtime["staged_yolo_id"]
+    if runtime.get("staged_rfdetr_id"):
+        config["rfdetr_id"] = runtime["staged_rfdetr_id"]
+    if runtime.get("staged_classifier_id"):
+        config["classifier_id"] = runtime["staged_classifier_id"]
+        config["resolved_classifier_id"] = runtime["staged_classifier_id"]
+    if runtime.get("staged_ensemble_job_id"):
+        staged_job_id = str(runtime["staged_ensemble_job_id"])
+        staged_job_dir = CALIBRATION_ROOT / staged_job_id
+        canonical_root = Path(runtime["payload_root"]) / "canonical"
+        canonical_json = canonical_root / "canonical_edr.json"
+        canonical_md = canonical_root / "canonical_edr.md"
+        canonical_report = canonical_root / "report_bundle.json"
+        _rewrite_canonical_deployment_bundle_metadata_impl(
+            staged_job_dir,
+            job_id=staged_job_id,
+            dataset_id=str(config.get("dataset_id") or ""),
+            canonical_recipe_json=canonical_json if canonical_json.exists() else None,
+            canonical_recipe_md=canonical_md if canonical_md.exists() else None,
+            canonical_report_bundle_json=canonical_report if canonical_report.exists() else None,
+            source_stage=str(manifest.get("canonical_deployment_source_stage") or ""),
+            source_seed=manifest.get("canonical_deployment_source_seed"),
+            source_dir=staged_job_dir,
+        )
+        config["ensemble_enabled"] = True
+        config["ensemble_job_id"] = staged_job_id
+        config["canonical_deployment_job_id"] = staged_job_id
+        config["canonical_deployment_job_dir"] = str(staged_job_dir.resolve())
+    if runtime.get("labelmap"):
+        config["labelmap"] = list(runtime["labelmap"])
+    saved_recipe["config"] = {key: value for key, value in config.items() if value is not None}
+    saved_recipe.setdefault("name", package_summary.get("name") or package_id)
+    saved_recipe.setdefault("description", package_summary.get("description") or "")
+    saved_recipe.setdefault("glossary", runtime.get("glossary_text") or saved_recipe.get("glossary") or "")
+    recipe_id = str(saved_recipe.get("id") or package_payload.get("manifest", {}).get("saved_recipe_id") or package_id).strip() or package_id
+    saved = _save_prepass_recipe_impl(
+        saved_recipe,
+        recipe_id=recipe_id,
+        prepass_schema_version=PREPASS_RECIPE_SCHEMA_VERSION,
+        recipes_root=PREPASS_RECIPE_ROOT,
+        sanitize_run_id_fn=_sanitize_yolo_run_id_impl,
+        normalize_glossary_fn=_normalize_labelmap_glossary,
+        write_meta_fn=_write_prepass_recipe_meta,
+    )
+    if _is_canonical_prepass_recipe_config(config):
+        canonical_root = Path(runtime["payload_root"]) / "canonical"
+        canonical_json = canonical_root / "canonical_edr.json"
+        canonical_md = canonical_root / "canonical_edr.md"
+        canonical_report = canonical_root / "report_bundle.json"
+        canonical_deployment = {
+            "job_id": str(config.get("canonical_deployment_job_id") or config.get("ensemble_job_id") or ""),
+            "job_dir": str(config.get("canonical_deployment_job_dir") or ""),
+            "source_stage": config.get("canonical_deployment_source_stage"),
+            "source_seed": config.get("canonical_deployment_source_seed"),
+        }
+        register_promoted_recipe(
+            CALIBRATION_CACHE_ROOT,
+            fingerprint=str(
+                registry_entry_payload.get("fingerprint")
+                or config.get("recipe_registry_fingerprint")
+                or config.get("recipe_fingerprint")
+                or manifest.get("recipe_fingerprint")
+                or ""
+            ),
+            fingerprint_payload=fingerprint_payload,
+            dataset_id=str(config.get("dataset_id") or manifest.get("dataset_id") or ""),
+            canonical_recipe_json=canonical_json,
+            canonical_recipe_md=canonical_md if canonical_md.exists() else None,
+            report_bundle_json=canonical_report if canonical_report.exists() else None,
+            discovery_run_root=None,
+            origin_kind=CANONICAL_EDR_ORIGIN_IMPORTED_PORTABLE,
+            canonical_deployment=canonical_deployment,
+            edr_package=package_summary,
+        )
+    return package_summary, PrepassRecipeResponse(**saved)
+
+
+def _import_edr_package_from_zip(zip_path: Path) -> PrepassRecipeResponse:
+    _package, response = _import_edr_package_bundle(zip_path)
+    return response
 
 
 def _validate_prepass_recipe_manifest(manifest: Dict[str, Any], extract_dir: Path) -> None:
@@ -23490,6 +25291,8 @@ def _unique_prepass_recipe_name(name: str) -> tuple[str, Optional[str]]:
 
 
 def _import_prepass_recipe_from_zip(zip_path: Path) -> PrepassRecipeResponse:
+    if _zip_contains_edr_package_manifest(zip_path):
+        return _import_edr_package_from_zip(zip_path)
     data = _import_prepass_recipe_from_zip_impl(
         zip_path,
         prepass_recipe_meta=PREPASS_RECIPE_META,
@@ -23560,6 +25363,60 @@ async def import_prepass_recipe_raw(request: Request):
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def import_edr_package(file: UploadFile = File(...)):  # noqa: B008
+    temp_dir = Path(tempfile.mkdtemp(prefix="edr_package_import_"))
+    try:
+        zip_path = temp_dir / "upload.edr.zip"
+        written = 0
+        with zip_path.open("wb") as f:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if PREPASS_RECIPE_UPLOAD_MAX_BYTES and written > PREPASS_RECIPE_UPLOAD_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=HTTP_413_CONTENT_TOO_LARGE,
+                        detail="edr_package_upload_too_large",
+                    )
+                f.write(chunk)
+        package_summary, saved_recipe = _import_edr_package_bundle(zip_path)
+        return {
+            "package": package_summary,
+            "saved_prepass_recipe": saved_recipe.dict(),
+        }
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+async def import_edr_package_raw(request: Request):
+    if "application/zip" not in (request.headers.get("content-type") or ""):
+        raise HTTPException(
+            status_code=HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="edr_package_invalid_media",
+        )
+    temp_dir = Path(tempfile.mkdtemp(prefix="edr_package_import_raw_"))
+    try:
+        zip_path = temp_dir / "upload.edr.zip"
+        written = 0
+        with zip_path.open("wb") as f:
+            async for chunk in request.stream():
+                written += len(chunk)
+                if PREPASS_RECIPE_UPLOAD_MAX_BYTES and written > PREPASS_RECIPE_UPLOAD_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=HTTP_413_CONTENT_TOO_LARGE,
+                        detail="edr_package_upload_too_large",
+                    )
+                f.write(chunk)
+        package_summary, saved_recipe = _import_edr_package_bundle(zip_path)
+        return {
+            "package": package_summary,
+            "saved_prepass_recipe": saved_recipe.dict(),
+        }
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 app.include_router(
     build_prepass_router(
         list_fn=lambda: _list_prepass_recipes_impl(
@@ -23574,6 +25431,16 @@ app.include_router(
         import_raw_fn=import_prepass_recipe_raw,
         response_cls=PrepassRecipeResponse,
         request_cls=PrepassRecipeRequest,
+    )
+)
+
+app.include_router(
+    build_edr_packages_router(
+        list_fn=list_edr_packages,
+        get_fn=get_edr_package,
+        export_fn=export_edr_package,
+        import_fn=import_edr_package,
+        import_raw_fn=import_edr_package_raw,
     )
 )
 

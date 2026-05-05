@@ -7,7 +7,8 @@ import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
-from starlette.status import HTTP_404_NOT_FOUND, HTTP_422_UNPROCESSABLE_CONTENT
+from starlette.status import HTTP_404_NOT_FOUND
+from utils.status_compat import HTTP_422_UNPROCESSABLE_CONTENT
 
 
 def _context_store(

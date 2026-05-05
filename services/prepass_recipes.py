@@ -21,13 +21,19 @@ from typing import Any, Dict, Optional, Literal, List, Tuple
 from fastapi import HTTPException
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
+    HTTP_409_CONFLICT,
     HTTP_404_NOT_FOUND,
     HTTP_412_PRECONDITION_FAILED,
-    HTTP_413_CONTENT_TOO_LARGE,
     HTTP_500_INTERNAL_SERVER_ERROR,
 )
 import math
 from PIL import Image
+from utils.status_compat import HTTP_413_CONTENT_TOO_LARGE
+
+from services.calibration_recipe_registry import (
+    CANONICAL_EDR_ORIGIN_IMPORTED_PORTABLE,
+    register_promoted_recipe,
+)
 
 
 def _write_prepass_recipe_meta(recipe_dir: Path, payload: Dict[str, Any]) -> None:
@@ -296,6 +302,289 @@ def _validate_prepass_recipe_config_impl(config: Any) -> Dict[str, Any]:
             detail="prepass_recipe_legacy_cross_iou_unsupported",
         )
     return dict(config)
+
+
+def _is_canonical_prepass_recipe_config(config: Any) -> bool:
+    if not isinstance(config, dict):
+        return False
+    recipe_kind = str(config.get("recipe_kind") or "").strip().lower()
+    saved_source = str(config.get("edr_saved_source") or "").strip().lower()
+    return recipe_kind == "canonical_edr" or saved_source == "canonical_discovery"
+
+
+def _canonical_edr_saved_recipe_id(dataset_id: str, recipe_fingerprint: str) -> str:
+    dataset_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(dataset_id or "").strip()).strip("_") or "dataset"
+    fingerprint_slug = re.sub(r"[^a-zA-Z0-9]+", "", str(recipe_fingerprint or "").strip())[:12] or "unknown"
+    return f"canonical_edr_{dataset_slug}_{fingerprint_slug}"
+
+
+def _canonical_edr_saved_recipe_payload(
+    *,
+    dataset_id: str,
+    calibration_request: Dict[str, Any],
+    classifier_id: Optional[str],
+    recipe_fingerprint: str,
+    canonical_recipe: Dict[str, Any],
+    canonical_recipe_json: Optional[Path],
+    canonical_recipe_md: Optional[Path],
+    report_bundle_json: Optional[Path],
+    recipe_registry_entry: Optional[Dict[str, Any]],
+    glossary_text: str,
+    canonical_deployment: Optional[Dict[str, Any]],
+    labelmap: Optional[List[str]] = None,
+    edr_package: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    request = dict(calibration_request or {})
+    winner_lane = str(
+        canonical_recipe.get("discovered_winner_lane")
+        or canonical_recipe.get("lane_selection")
+        or "window"
+    ).strip().lower() or "window"
+    lane_key = "canonical_windowed_recipe" if winner_lane == "window" else "canonical_nonwindowed_recipe"
+    lane_recipe = (
+        canonical_recipe.get(lane_key)
+        if isinstance(canonical_recipe.get(lane_key), dict)
+        else {}
+    )
+    if not lane_recipe and isinstance(canonical_recipe.get("canonical_windowed_recipe"), dict):
+        winner_lane = "window"
+        lane_recipe = canonical_recipe.get("canonical_windowed_recipe") or {}
+    if not lane_recipe and isinstance(canonical_recipe.get("canonical_nonwindowed_recipe"), dict):
+        winner_lane = "nonwindow"
+        lane_recipe = canonical_recipe.get("canonical_nonwindowed_recipe") or {}
+    scenario = lane_recipe.get("scenario") if isinstance(lane_recipe.get("scenario"), dict) else {}
+    policy = lane_recipe.get("policy") if isinstance(lane_recipe.get("policy"), dict) else {}
+    expected = (
+        lane_recipe.get("expected_metrics")
+        if isinstance(lane_recipe.get("expected_metrics"), dict)
+        else {}
+    )
+    mean_f1 = expected.get("full_mean_f1")
+    lane_selection = str(
+        canonical_recipe.get("lane_selection")
+        or winner_lane
+        or request.get("lane_selection")
+        or "window"
+    ).strip() or "window"
+    fingerprint_prefix = str(recipe_fingerprint or "").strip()[:10]
+    name = f"Canonical EDR • {str(dataset_id).strip() or 'dataset'}"
+    if lane_selection:
+        name = f"{name} • {lane_selection}"
+    if fingerprint_prefix:
+        name = f"{name} • {fingerprint_prefix}"
+    description_parts = [f"Canonical promoted EDR for {dataset_id}."]
+    if isinstance(mean_f1, (int, float)):
+        description_parts.append(f"Expected full-window mean F1 {float(mean_f1):.4f}.")
+    requested_classifier_id = request.get("classifier_id") or classifier_id
+    source_bias_by_class = (
+        policy.get("logit_bias_by_source_class")
+        if isinstance(policy.get("logit_bias_by_source_class"), dict)
+        else {}
+    )
+    text_bias_map = (
+        source_bias_by_class.get("sam3_text")
+        if isinstance(source_bias_by_class.get("sam3_text"), dict)
+        else {}
+    )
+    sim_bias_map = (
+        source_bias_by_class.get("sam3_similarity")
+        if isinstance(source_bias_by_class.get("sam3_similarity"), dict)
+        else {}
+    )
+    deployment_job_id = (
+        str(canonical_deployment.get("job_id"))
+        if isinstance(canonical_deployment, dict) and canonical_deployment.get("job_id")
+        else None
+    )
+    edr_package_id = (
+        str(edr_package.get("id"))
+        if isinstance(edr_package, dict) and edr_package.get("id")
+        else None
+    )
+    config: Dict[str, Any] = {
+        "dataset_id": str(dataset_id),
+        "labelmap": [str(item).strip() for item in (labelmap or []) if str(item).strip()],
+        "recipe_kind": "canonical_edr",
+        "model_id": request.get("model_id"),
+        "model_variant": request.get("model_variant"),
+        "enable_yolo": request.get("enable_yolo", True),
+        "enable_rfdetr": request.get("enable_rfdetr", True),
+        "yolo_id": request.get("yolo_id"),
+        "rfdetr_id": request.get("rfdetr_id"),
+        "sahi_window_size": request.get("sahi_window_size"),
+        "sahi_overlap_ratio": request.get("sahi_overlap_ratio"),
+        "classifier_id": requested_classifier_id,
+        "resolved_classifier_id": classifier_id,
+        "sam_variant": request.get("sam_variant"),
+        "enable_sam3_text": request.get("enable_sam3_text", True),
+        "sam3_text_window_extension": request.get("sam3_text_window_extension"),
+        "sam3_text_window_mode": request.get("sam3_text_window_mode"),
+        "sam3_text_window_size": request.get("sam3_text_window_size"),
+        "sam3_text_window_overlap": request.get("sam3_text_window_overlap"),
+        "sam3_text_synonym_budget": 0,
+        "enable_sam3_similarity": request.get("enable_sam3_similarity", True),
+        "prepass_sam3_text_thr": request.get("prepass_sam3_text_thr"),
+        "prepass_similarity_score": request.get("prepass_similarity_score"),
+        "similarity_min_exemplar_score": request.get("similarity_min_exemplar_score"),
+        "similarity_exemplar_strategy": request.get("similarity_exemplar_strategy"),
+        "similarity_exemplar_count": request.get("similarity_exemplar_count"),
+        "similarity_exemplar_seed": request.get("similarity_exemplar_seed"),
+        "similarity_exemplar_fraction": request.get("similarity_exemplar_fraction"),
+        "similarity_exemplar_min": request.get("similarity_exemplar_min"),
+        "similarity_exemplar_max": request.get("similarity_exemplar_max"),
+        "similarity_exemplar_source_quota": request.get("similarity_exemplar_source_quota"),
+        "similarity_window_extension": request.get("similarity_window_extension"),
+        "similarity_window_mode": request.get("similarity_window_mode"),
+        "similarity_window_size": request.get("similarity_window_size"),
+        "similarity_window_overlap": request.get("similarity_window_overlap"),
+        "fusion_mode": request.get("fusion_mode"),
+        "iou": request.get("dedupe_iou"),
+        "cross_class_dedupe_enabled": request.get("cross_class_dedupe_enabled"),
+        "cross_class_dedupe_iou": request.get("cross_class_dedupe_iou"),
+        "labelmap_glossary": glossary_text or None,
+        "prepass_glossary_source": "custom" if glossary_text else "dataset",
+        # Also persist calibration-builder defaults so loading the saved EDR
+        # restores the intended build path in the WebUI.
+        "recipe_mode": "reuse_only",
+        "lane_selection": lane_selection,
+        "calibration_max_images": request.get("max_images") or request.get("calibration_max_images"),
+        "base_fp_ratio": request.get("base_fp_ratio"),
+        "relax_fp_ratio": request.get("relax_fp_ratio"),
+        "recall_floor": request.get("recall_floor"),
+        "per_class_thresholds": request.get("per_class_thresholds"),
+        "threshold_steps": request.get("threshold_steps"),
+        "optimize_metric": request.get("optimize_metric"),
+        "support_iou": request.get("support_iou"),
+        "label_iou": request.get("label_iou"),
+        "eval_iou": request.get("eval_iou"),
+        "eval_iou_grid": request.get("eval_iou_grid"),
+        "dedupe_iou": request.get("dedupe_iou"),
+        "dedupe_iou_grid": request.get("dedupe_iou_grid"),
+        "apply_default_ensemble_policy": False if policy else request.get("apply_default_ensemble_policy"),
+        "ensemble_policy_json": (
+            json.dumps(policy, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+            if policy
+            else request.get("ensemble_policy_json")
+        ),
+        "ensemble_enabled": bool(deployment_job_id),
+        "ensemble_job_id": deployment_job_id,
+        "edr_package_id": edr_package_id,
+        "edr_package_root": (
+            str(edr_package.get("package_root"))
+            if isinstance(edr_package, dict) and edr_package.get("package_root")
+            else None
+        ),
+        "edr_package_zip": (
+            str(edr_package.get("package_zip"))
+            if isinstance(edr_package, dict) and edr_package.get("package_zip")
+            else None
+        ),
+        "edr_runtime_mode": "package" if edr_package_id else None,
+        "prepass_caption": False,
+        "train_sam3_text_quality": bool(scenario.get("train_sam3_text_quality", True)),
+        "sam3_text_quality_alpha": scenario.get("sam3_text_quality_alpha"),
+        "train_sam3_similarity_quality": bool(scenario.get("train_sam3_similarity_quality", False)),
+        "sam3_similarity_quality_alpha": scenario.get("sam3_similarity_quality_alpha"),
+        "split_head_by_support": (
+            bool(scenario.get("split_head"))
+            if "split_head" in scenario
+            else request.get("split_head_by_support")
+        ),
+        "threshold_by_class_override": policy.get("threshold_by_class_override"),
+        "consensus_iou_by_source_class": policy.get("consensus_iou_by_source_class"),
+        "consensus_iou_default": policy.get("consensus_iou_default"),
+        "consensus_class_aware": policy.get("consensus_class_aware"),
+        "sam_bias_scope": policy.get("sam_bias_scope"),
+        "sam_only_min_prob_default": policy.get("sam_only_min_prob_default"),
+        "sam3_text_bias_default": text_bias_map.get("__default__"),
+        "sam3_similarity_bias_default": sim_bias_map.get("__default__"),
+        # Canonical EDR metadata for later inspection/export.
+        "canonical_edr_json": str(canonical_recipe_json.resolve()) if canonical_recipe_json and canonical_recipe_json.exists() else None,
+        "canonical_edr_md": str(canonical_recipe_md.resolve()) if canonical_recipe_md and canonical_recipe_md.exists() else None,
+        "canonical_report_bundle_json": str(report_bundle_json.resolve()) if report_bundle_json and report_bundle_json.exists() else None,
+        "canonical_deployment_job_id": deployment_job_id,
+        "canonical_deployment_job_dir": (
+            str(canonical_deployment.get("job_dir"))
+            if isinstance(canonical_deployment, dict) and canonical_deployment.get("job_dir")
+            else None
+        ),
+        "canonical_deployment_source_stage": (
+            str(canonical_deployment.get("source_stage"))
+            if isinstance(canonical_deployment, dict) and canonical_deployment.get("source_stage")
+            else None
+        ),
+        "canonical_deployment_source_seed": (
+            canonical_deployment.get("source_seed")
+            if isinstance(canonical_deployment, dict)
+            else None
+        ),
+        "recipe_fingerprint": str(recipe_fingerprint),
+        "recipe_registry_fingerprint": (
+            str(recipe_registry_entry.get("fingerprint"))
+            if isinstance(recipe_registry_entry, dict) and recipe_registry_entry.get("fingerprint")
+            else str(recipe_fingerprint)
+        ),
+        "recipe_registry_root": (
+            str(recipe_registry_entry.get("recipe_root"))
+            if isinstance(recipe_registry_entry, dict) and recipe_registry_entry.get("recipe_root")
+            else None
+        ),
+        "expected_mean_f1": float(mean_f1) if isinstance(mean_f1, (int, float)) else None,
+        "edr_saved_source": "canonical_discovery",
+    }
+    return {
+        "name": name,
+        "description": " ".join(part for part in description_parts if part),
+        "config": {key: value for key, value in config.items() if value is not None},
+        "glossary": glossary_text or "",
+    }
+
+
+def upsert_canonical_edr_saved_recipe_impl(
+    *,
+    recipes_root: Path,
+    dataset_id: str,
+    calibration_request: Dict[str, Any],
+    classifier_id: Optional[str],
+    recipe_fingerprint: str,
+    canonical_recipe: Dict[str, Any],
+    canonical_recipe_json: Optional[Path],
+    canonical_recipe_md: Optional[Path],
+    report_bundle_json: Optional[Path],
+    recipe_registry_entry: Optional[Dict[str, Any]],
+    glossary_text: str,
+    prepass_schema_version: int,
+    canonical_deployment: Optional[Dict[str, Any]] = None,
+    labelmap: Optional[List[str]] = None,
+    edr_package: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload = _canonical_edr_saved_recipe_payload(
+        dataset_id=dataset_id,
+        calibration_request=calibration_request,
+        classifier_id=classifier_id,
+        recipe_fingerprint=recipe_fingerprint,
+        canonical_recipe=canonical_recipe,
+        canonical_recipe_json=canonical_recipe_json,
+        canonical_recipe_md=canonical_recipe_md,
+        report_bundle_json=report_bundle_json,
+        recipe_registry_entry=recipe_registry_entry,
+        glossary_text=glossary_text,
+        canonical_deployment=canonical_deployment,
+        labelmap=labelmap,
+        edr_package=edr_package,
+    )
+    recipe_id = _canonical_edr_saved_recipe_id(dataset_id, recipe_fingerprint)
+    saved = _save_prepass_recipe_impl(
+        payload,
+        recipe_id=recipe_id,
+        prepass_schema_version=prepass_schema_version,
+        recipes_root=recipes_root,
+        sanitize_run_id_fn=lambda value: value,
+        normalize_glossary_fn=lambda value: str(value or "").strip(),
+        write_meta_fn=_write_prepass_recipe_meta,
+    )
+    saved["recipe_id"] = recipe_id
+    return saved
 
 
 def _delete_agent_recipe_impl(
@@ -1340,6 +1629,13 @@ def _list_prepass_recipes_impl(
                 "description": meta.get("description") or "",
                 "created_at": meta.get("created_at"),
                 "updated_at": meta.get("updated_at"),
+                "recipe_kind": str((meta.get("config") or {}).get("recipe_kind") or "saved_edr"),
+                "edr_saved_source": (meta.get("config") or {}).get("edr_saved_source"),
+                "dataset_id": (meta.get("config") or {}).get("dataset_id"),
+                "lane_selection": (meta.get("config") or {}).get("lane_selection"),
+                "recipe_fingerprint": (meta.get("config") or {}).get("recipe_fingerprint"),
+                "edr_package_id": (meta.get("config") or {}).get("edr_package_id"),
+                "expected_mean_f1": (meta.get("config") or {}).get("expected_mean_f1"),
             }
         )
     recipes.sort(
@@ -1479,6 +1775,85 @@ def _collect_recipe_assets_impl(
         else:
             assets["missing"].append({"kind": "calibration_job", "id": job_id})
 
+    if _is_canonical_prepass_recipe_config(config):
+        canonical_root = temp_dir / "canonical"
+        canonical_root.mkdir(parents=True, exist_ok=True)
+        for key, filename in (
+            ("canonical_edr_json", "canonical_edr.json"),
+            ("canonical_edr_md", "canonical_edr.md"),
+            ("canonical_report_bundle_json", "report_bundle.json"),
+        ):
+            raw_path = config.get(key)
+            if not raw_path:
+                continue
+            src = Path(str(raw_path)).expanduser()
+            try:
+                src = src.resolve()
+            except Exception:
+                src = Path(str(raw_path))
+            if not src.exists() or not src.is_file():
+                assets["missing"].append({"kind": key, "path": str(raw_path)})
+                continue
+            target = canonical_root / filename
+            shutil.copy2(src, target)
+            assets["copied"].append(
+                {
+                    "path": str(target.relative_to(temp_dir)),
+                    "size": target.stat().st_size,
+                    "sha256": sha256_fn(target),
+                }
+            )
+        if config.get("recipe_fingerprint"):
+            registry_root_value = str(config.get("recipe_registry_root") or "").strip()
+            registry_root_path = Path(registry_root_value).expanduser() if registry_root_value else None
+            try:
+                registry_root_path = (
+                    registry_root_path.resolve() if registry_root_path is not None else None
+                )
+            except Exception:
+                registry_root_path = Path(registry_root_value) if registry_root_value else None
+            registry_payload: Dict[str, Any] = {}
+            fingerprint_payload: Dict[str, Any] = {}
+            if registry_root_path is not None:
+                registry_entry_path = registry_root_path / "registry_entry.json"
+                if registry_entry_path.exists():
+                    try:
+                        registry_payload = json.loads(registry_entry_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        registry_payload = {}
+                fingerprint_path = registry_root_path / "fingerprint.json"
+                if fingerprint_path.exists():
+                    try:
+                        fingerprint_payload = json.loads(fingerprint_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        fingerprint_payload = {}
+            if not registry_payload:
+                registry_payload = {
+                    "fingerprint": config.get("recipe_registry_fingerprint") or config.get("recipe_fingerprint"),
+                    "dataset_id": config.get("dataset_id"),
+                    "recipe_fingerprint": config.get("recipe_fingerprint"),
+                    "canonical_deployment_job_id": config.get("canonical_deployment_job_id"),
+                }
+            registry_path = canonical_root / "registry_entry.json"
+            registry_path.write_text(json.dumps(registry_payload, indent=2), encoding="utf-8")
+            assets["copied"].append(
+                {
+                    "path": str(registry_path.relative_to(temp_dir)),
+                    "size": registry_path.stat().st_size,
+                    "sha256": sha256_fn(registry_path),
+                }
+            )
+            if fingerprint_payload:
+                fingerprint_path = canonical_root / "fingerprint.json"
+                fingerprint_path.write_text(json.dumps(fingerprint_payload, indent=2), encoding="utf-8")
+                assets["copied"].append(
+                    {
+                        "path": str(fingerprint_path.relative_to(temp_dir)),
+                        "size": fingerprint_path.stat().st_size,
+                        "sha256": sha256_fn(fingerprint_path),
+                    }
+                )
+
     return assets
 
 
@@ -1573,7 +1948,12 @@ def _import_prepass_recipe_from_zip_impl(
         meta = json.loads(meta_path.read_text())
         validate_manifest_fn(manifest, extract_dir)
         config = _validate_prepass_recipe_config_impl(meta.get("config"))
-        config.pop("dataset_id", None)
+        is_canonical_recipe = _is_canonical_prepass_recipe_config(config)
+        imported_dataset_id = str(config.get("dataset_id") or "").strip()
+        if not is_canonical_recipe:
+            config.pop("dataset_id", None)
+        elif imported_dataset_id:
+            config["dataset_id"] = imported_dataset_id
         glossary = meta.get("glossary") or ""
         labelmap_file = None
         for candidate in (extract_dir / "labelmap.txt", extract_dir / "labelmaps" / "labelmap.txt"):
@@ -1680,6 +2060,7 @@ def _import_prepass_recipe_from_zip_impl(
                     config["classifier_id"] = str(dest.relative_to(upload_root / "classifiers"))
                     break
 
+        imported_ensemble_job_id: Optional[str] = None
         calib_root = extract_dir / "models" / "calibration_jobs"
         if calib_root.exists():
             for job_dir in calib_root.iterdir():
@@ -1687,7 +2068,7 @@ def _import_prepass_recipe_from_zip_impl(
                     continue
                 existing = calibration_root / job_dir.name
                 if _run_dir_matches(job_dir, existing, keep_files=None):
-                    config["ensemble_job_id"] = job_dir.name
+                    imported_ensemble_job_id = job_dir.name
                 else:
                     new_job = uuid.uuid4().hex
                     dest = calibration_root / new_job
@@ -1695,22 +2076,169 @@ def _import_prepass_recipe_from_zip_impl(
                     for item in job_dir.iterdir():
                         if item.is_file():
                             shutil.copy2(item, dest / item.name)
-                    config["ensemble_job_id"] = new_job
+                    imported_ensemble_job_id = new_job
                 break
+        if imported_ensemble_job_id:
+            config["ensemble_job_id"] = imported_ensemble_job_id
+            if is_canonical_recipe:
+                config["canonical_deployment_job_id"] = imported_ensemble_job_id
+                config["canonical_deployment_job_dir"] = str(
+                    (calibration_root / imported_ensemble_job_id).resolve()
+                )
 
         original_name = meta.get("name") or f"Imported recipe {uuid.uuid4().hex[:8]}"
-        unique_name, renamed_from = unique_name_fn(original_name)
+        renamed_from = None
         notice = None
-        if renamed_from:
-            notice = f"Recipe name '{renamed_from}' already exists. Imported as '{unique_name}'."
-        recipe_id = uuid.uuid4().hex
+        if is_canonical_recipe and imported_dataset_id and str(config.get("recipe_fingerprint") or "").strip():
+            unique_name = str(original_name or "").strip() or f"Canonical EDR • {imported_dataset_id}"
+            recipe_id = _canonical_edr_saved_recipe_id(
+                imported_dataset_id,
+                str(config.get("recipe_fingerprint") or ""),
+            )
+        else:
+            unique_name, renamed_from = unique_name_fn(original_name)
+            if renamed_from:
+                notice = f"Recipe name '{renamed_from}' already exists. Imported as '{unique_name}'."
+            recipe_id = uuid.uuid4().hex
         recipe_dir = _prepass_recipe_dir_impl(
             recipe_id,
             create=True,
             recipes_root=prepass_recipe_root,
             sanitize_id_fn=sanitize_run_id_fn,
         )
+        canonical_extract_dir = extract_dir / "canonical"
+        local_canonical_json = None
+        local_canonical_md = None
+        local_report_bundle = None
+        rewritten_canonical_bundle = None
+        imported_registry_entry_payload: Dict[str, Any] = {}
+        imported_fingerprint_payload: Dict[str, Any] = {}
+        if is_canonical_recipe:
+            if canonical_extract_dir.exists() and canonical_extract_dir.is_dir():
+                canonical_dest_dir = recipe_dir / "canonical"
+                canonical_dest_dir.mkdir(parents=True, exist_ok=True)
+                canonical_json_src = canonical_extract_dir / "canonical_edr.json"
+                if canonical_json_src.exists():
+                    local_canonical_json = canonical_dest_dir / "canonical_edr.json"
+                    shutil.copy2(canonical_json_src, local_canonical_json)
+                    config["canonical_edr_json"] = str(local_canonical_json.resolve())
+                canonical_md_src = canonical_extract_dir / "canonical_edr.md"
+                if canonical_md_src.exists():
+                    local_canonical_md = canonical_dest_dir / "canonical_edr.md"
+                    shutil.copy2(canonical_md_src, local_canonical_md)
+                    config["canonical_edr_md"] = str(local_canonical_md.resolve())
+                report_src = canonical_extract_dir / "report_bundle.json"
+                if report_src.exists():
+                    local_report_bundle = canonical_dest_dir / "report_bundle.json"
+                    shutil.copy2(report_src, local_report_bundle)
+                    config["canonical_report_bundle_json"] = str(local_report_bundle.resolve())
+                registry_entry_src = canonical_extract_dir / "registry_entry.json"
+                if registry_entry_src.exists():
+                    try:
+                        imported_registry_entry_payload = json.loads(
+                            registry_entry_src.read_text(encoding="utf-8")
+                        )
+                    except Exception:
+                        imported_registry_entry_payload = {}
+                fingerprint_src = canonical_extract_dir / "fingerprint.json"
+                if fingerprint_src.exists():
+                    try:
+                        imported_fingerprint_payload = json.loads(
+                            fingerprint_src.read_text(encoding="utf-8")
+                        )
+                    except Exception:
+                        imported_fingerprint_payload = {}
+            for key in ("canonical_edr_json", "canonical_edr_md", "canonical_report_bundle_json"):
+                if key in config and config.get(key) is None:
+                    config.pop(key, None)
+            fingerprint = str(config.get("recipe_registry_fingerprint") or config.get("recipe_fingerprint") or "").strip()
+            if imported_dataset_id:
+                config["dataset_id"] = imported_dataset_id
+            if imported_ensemble_job_id:
+                from services.canonical_edr_completion import (
+                    rewrite_canonical_deployment_bundle_metadata,
+                )
+
+                raw_source_seed = str(config.get("canonical_deployment_source_seed") or "").strip()
+                source_seed = None
+                if raw_source_seed:
+                    try:
+                        source_seed = int(raw_source_seed)
+                    except (TypeError, ValueError):
+                        source_seed = None
+                rewritten_canonical_bundle = rewrite_canonical_deployment_bundle_metadata(
+                    calibration_root / imported_ensemble_job_id,
+                    job_id=imported_ensemble_job_id,
+                    dataset_id=imported_dataset_id or str(config.get("dataset_id") or "").strip() or None,
+                    canonical_recipe_json=local_canonical_json,
+                    canonical_recipe_md=local_canonical_md,
+                    canonical_report_bundle_json=local_report_bundle,
+                    source_stage=(
+                        str(config.get("canonical_deployment_source_stage") or "").strip() or None
+                    ),
+                    source_seed=source_seed,
+                    # Imported canonical bundles must be locally self-consistent even
+                    # though the original training source directory is not present.
+                    source_dir=(calibration_root / imported_ensemble_job_id).resolve(),
+                )
+                config["canonical_deployment_job_dir"] = str(
+                    (calibration_root / imported_ensemble_job_id).resolve()
+                )
+            if local_canonical_json is not None and fingerprint:
+                source_stage = (
+                    str(config.get("canonical_deployment_source_stage") or "").strip()
+                    or str(imported_registry_entry_payload.get("canonical_deployment_source_stage") or "").strip()
+                    or None
+                )
+                raw_source_seed = (
+                    config.get("canonical_deployment_source_seed")
+                    if config.get("canonical_deployment_source_seed") is not None
+                    else imported_registry_entry_payload.get("canonical_deployment_source_seed")
+                )
+                source_seed = None
+                if raw_source_seed not in (None, ""):
+                    try:
+                        source_seed = int(raw_source_seed)
+                    except (TypeError, ValueError):
+                        source_seed = None
+                recipe_registry_entry = register_promoted_recipe(
+                    calibration_root.parent / "calibration_cache",
+                    fingerprint=fingerprint,
+                    fingerprint_payload=(
+                        dict(imported_fingerprint_payload)
+                        if isinstance(imported_fingerprint_payload, dict)
+                        else {}
+                    ),
+                    dataset_id=imported_dataset_id or str(config.get("dataset_id") or "").strip(),
+                    canonical_recipe_json=local_canonical_json.resolve(),
+                    canonical_recipe_md=local_canonical_md.resolve() if local_canonical_md is not None else None,
+                    report_bundle_json=local_report_bundle.resolve() if local_report_bundle is not None else None,
+                    discovery_run_root=None,
+                    origin_kind=CANONICAL_EDR_ORIGIN_IMPORTED_PORTABLE,
+                    canonical_deployment=(
+                        {
+                            "job_id": imported_ensemble_job_id,
+                            "job_dir": str((calibration_root / imported_ensemble_job_id).resolve()),
+                            "source_stage": source_stage,
+                            "source_seed": source_seed,
+                            "source_dir": str((calibration_root / imported_ensemble_job_id).resolve()),
+                        }
+                        if imported_ensemble_job_id
+                        else None
+                    ),
+                )
+                config["recipe_registry_fingerprint"] = str(recipe_registry_entry.get("fingerprint") or fingerprint)
+                if recipe_registry_entry.get("recipe_root"):
+                    config["recipe_registry_root"] = str(recipe_registry_entry.get("recipe_root"))
         now = time.time()
+        created_at = now
+        existing_meta_path = recipe_dir / "prepass.meta.json"
+        if existing_meta_path.exists():
+            try:
+                existing_meta = json.loads(existing_meta_path.read_text(encoding="utf-8"))
+                created_at = float(existing_meta.get("created_at") or now)
+            except Exception:
+                created_at = now
         recipe_meta = {
             "id": recipe_id,
             "schema_version": prepass_schema_version,
@@ -1718,7 +2246,7 @@ def _import_prepass_recipe_from_zip_impl(
             "description": meta.get("description") or "",
             "config": config,
             "glossary": normalize_glossary_fn(glossary),
-            "created_at": now,
+            "created_at": created_at,
             "updated_at": now,
         }
         write_meta_fn(recipe_dir, recipe_meta)
@@ -1727,12 +2255,13 @@ def _import_prepass_recipe_from_zip_impl(
             "schema_version": prepass_schema_version,
             "name": recipe_meta["name"],
             "description": recipe_meta.get("description"),
-            "created_at": now,
+            "created_at": created_at,
             "updated_at": now,
             "config": recipe_meta["config"],
             "glossary": recipe_meta.get("glossary") or None,
             "renamed_from": renamed_from,
             "notice": notice,
+            "canonical_bundle_rewrite": rewritten_canonical_bundle,
         }
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1761,7 +2290,11 @@ def _export_prepass_recipe_impl(
     )
     meta_copy = json.loads(json.dumps(meta))
     config_copy = meta_copy.get("config") or {}
-    if isinstance(config_copy, dict) and "dataset_id" in config_copy:
+    if (
+        isinstance(config_copy, dict)
+        and "dataset_id" in config_copy
+        and not _is_canonical_prepass_recipe_config(config_copy)
+    ):
         config_copy = dict(config_copy)
         config_copy.pop("dataset_id", None)
         meta_copy["config"] = config_copy
@@ -1849,6 +2382,9 @@ def _delete_prepass_recipe_impl(
     )
     if not recipe_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prepass_recipe_not_found")
+    meta = _load_prepass_recipe_meta(recipe_dir)
+    if _is_canonical_prepass_recipe_config(meta.get("config")):
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="prepass_recipe_canonical_delete_forbidden")
     shutil.rmtree(recipe_dir, ignore_errors=True)
 
 

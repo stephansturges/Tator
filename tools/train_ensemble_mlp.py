@@ -281,6 +281,30 @@ def main() -> None:
     sam3_iou = float(data.get("sam3_iou", 0.5))
     label_iou = float(data.get("label_iou", 0.5))
 
+    def _scalar(value, default=None):
+        if value is None:
+            return default
+        if hasattr(value, "item"):
+            try:
+                value = value.item()
+            except Exception:
+                pass
+        return value if value is not None else default
+
+    def _float_meta(key, default=None):
+        value = _scalar(data.get(key), default)
+        try:
+            return float(value) if value is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    def _int_meta(key, default=None):
+        value = _scalar(data.get(key), default)
+        try:
+            return int(value) if value is not None else default
+        except (TypeError, ValueError):
+            return default
+
     split = _split_by_image(meta, seed=args.seed, val_ratio=args.val_ratio)
     train_idx = np.asarray(split["train"], dtype=np.int64)
     val_idx = np.asarray(split["val"], dtype=np.int64)
@@ -467,7 +491,20 @@ def main() -> None:
         "labelmap": labelmap,
         "classifier_classes": classifier_classes,
         "sam3_iou": sam3_iou,
+        "support_iou": _float_meta("support_iou", 0.5),
+        "context_radius": _float_meta("context_radius", 0.075),
         "label_iou": label_iou,
+        "eval_iou": _float_meta("eval_iou", 0.5),
+        "min_crop_size": int(_int_meta("min_crop_size", 4) or 4),
+        "feature_schema_version": int(_int_meta("feature_schema_version", 1) or 1),
+        "feature_schema_hash": str(_scalar(data.get("feature_schema_hash"), "") or ""),
+        "embed_proj_dim": int(_int_meta("embed_proj_dim", 0) or 0),
+        "embed_proj_seed": int(_int_meta("embed_proj_seed", 42) or 42),
+        "image_embed_proj_dim": int(_int_meta("image_embed_proj_dim", 0) or 0),
+        "image_embed_proj_seed": int(_int_meta("image_embed_proj_seed", 4242) or 4242),
+        "embed_l2_normalize": bool(_scalar(data.get("embed_l2_normalize"), True)),
+        "context_variant_id": str(_scalar(data.get("context_variant_id"), "") or ""),
+        "variant_config_json": str(_scalar(data.get("variant_config_json"), "{}") or "{}"),
         "train_samples": int(len(train_idx)),
         "val_samples": int(len(val_idx)),
         "split_train_images": train_images,

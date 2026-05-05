@@ -18,8 +18,8 @@ from starlette.status import (
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
     HTTP_500_INTERNAL_SERVER_ERROR,
-    HTTP_413_CONTENT_TOO_LARGE,
 )
+from utils.status_compat import HTTP_413_CONTENT_TOO_LARGE
 
 
 def _persist_agent_cascade_impl(

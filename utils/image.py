@@ -13,11 +13,11 @@ import numpy as np
 from fastapi import HTTPException
 from starlette.status import (
     HTTP_400_BAD_REQUEST,
-    HTTP_413_CONTENT_TOO_LARGE,
     HTTP_428_PRECONDITION_REQUIRED,
     HTTP_500_INTERNAL_SERVER_ERROR,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
+from utils.status_compat import HTTP_413_CONTENT_TOO_LARGE
 
 logger = logging.getLogger(__name__)
 

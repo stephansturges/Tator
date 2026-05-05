@@ -48,6 +48,50 @@ def test_transient_path_opens_in_annotation(playwright_page):
     ensure_local_mode(page)
 
 
+# CASE_ID: DATASET_FIRST_VISIT_HYDRATION_BLOCK
+
+def test_first_visit_blocks_annotation_edits_until_deferred_hydration_finishes(playwright_page):
+    page, dataset_path = playwright_page
+    ensure_local_mode(page)
+    page.evaluate(
+        """
+() => {
+  const orig = window.requestAnimationFrame.bind(window);
+  window.__pwOriginalRequestAnimationFrame = orig;
+  window.requestAnimationFrame = (callback) => orig((ts) => window.setTimeout(() => callback(ts), 700));
+}
+"""
+    )
+    try:
+        open_transient_in_annotation(page, dataset_path)
+        page.wait_for_function(
+            "(() => { const c = document.querySelector('#canvas'); return !!c && c.width > 0 && c.height > 0; })()",
+            timeout=20000,
+        )
+        page.wait_for_function(
+            "document.querySelector('#annotationSourceSummary')?.textContent?.toLowerCase().includes('annotations loading for current image')",
+            timeout=5000,
+        )
+        caption_disabled = page.eval_on_selector("#qwenCaptionOutput", "el => !!el.disabled")
+        assert caption_disabled is True
+        page.wait_for_function(
+            "document.querySelector('#qwenCaptionOutput') && !document.querySelector('#qwenCaptionOutput').disabled",
+            timeout=5000,
+        )
+    finally:
+        page.evaluate(
+            """
+() => {
+  if (window.__pwOriginalRequestAnimationFrame) {
+    window.requestAnimationFrame = window.__pwOriginalRequestAnimationFrame;
+    delete window.__pwOriginalRequestAnimationFrame;
+  }
+}
+"""
+        )
+        ensure_local_mode(page)
+
+
 # CASE_ID: DATASET_REGISTER_LINKED_OPEN
 
 def test_register_path_creates_linked_card_and_opens_annotation(playwright_page):

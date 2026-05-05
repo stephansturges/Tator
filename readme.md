@@ -11,18 +11,43 @@ tools, detector passes, Qwen captions, dataset glossaries, recipe mining, and
 calibrated prelabeling so extending a dataset can become mostly review and
 correction work instead of first-draft annotation.
 
-## Screenshot Slots
+## What Tator Looks Like In Use
 
-Place README images and GIFs under `docs/assets/`.
+Tator lets you use SAM to refine bounding boxes. Draw a rough box, run SAM, and
+turn the rough annotation into a tighter object outline before accepting it.
 
-| Slot | Suggested file | What to show |
-|---|---|---|
-| Labeling assists | `docs/assets/tator-labeling-assists.gif` | Draw or select a box, auto-class it, refine it with SAM, and accept the result. |
-| Dataset management | `docs/assets/tator-dataset-management.gif` | Upload/register a dataset, inspect health, edit glossary/context, and open it for labeling. |
-| Qwen workflow | `docs/assets/tator-qwen-captioning.gif` | Run Qwen captioning/windowed captioning and use the caption/context in a labeling flow. |
-| SAM3 vocabulary | `docs/assets/tator-sam3-vocabulary.gif` | Use glossary terms or the SAM3 Vocabulary Explorer to expand text prompts. |
-| EDR builder | `docs/assets/tator-edr-builder.gif` | Build/calibrate/export an Ensemble Detection Recipe. |
-| Training and model selection | `docs/assets/tator-model-training.gif` | Train/select CLIP, SAM3, YOLO, RF-DETR, and Qwen models from the UI. |
+[Place GIF of SAM bounding-box refinement here]
+
+Tator lets you turn one labeled dataset into the context for the next labeling
+session. Register or upload a dataset, inspect its health, edit its label
+glossary, and open it for annotation without losing track of where the images
+came from.
+
+[Place GIF of dataset registration and glossary editing here]
+
+Tator lets you use Qwen as visual context while you label. Generate captions or
+windowed captions, feed that context back into the annotation flow, and keep the
+final boxes under human control.
+
+[Place GIF of Qwen captioning inside the labeling flow here]
+
+Tator lets you use SAM3 with project vocabulary instead of generic prompts.
+Explore glossary terms, expand prompt language, and use text or visual prompts
+to find objects that ordinary detector passes miss.
+
+[Place GIF of SAM3 vocabulary or prompt exploration here]
+
+Tator lets you package repeatable prelabeling logic as an Ensemble Detection
+Recipe. Build broad candidate pools, calibrate them against reviewed labels, and
+reuse the recipe on the next image batch.
+
+[Place GIF of EDR building, calibration, or application here]
+
+Tator lets you train and switch between local helpers from the UI. CLIP/DINO,
+SAM3, YOLO, RF-DETR, and Qwen workflows can all be selected close to the review
+loop instead of living in separate scripts.
+
+[Place GIF of model training and active-model selection here]
 
 ## What Tator Helps With
 

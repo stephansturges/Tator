@@ -1,0 +1,44 @@
+# macOS Apple Silicon inference/runtime environment.
+# This intentionally excludes training-only stacks. Use requirements.txt for full Linux/GPU training.
+
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.24,<1.0
+numpy>=1.26,<2.0
+pillow>=10.0,<11.0
+albumentations>=1.4,<2.0
+joblib>=1.3,<2.0
+scikit-learn>=1.3,<2.0
+scipy>=1.10,<2.0
+pydantic>=2.7,<3.0
+python-multipart>=0.0.6,<1.0
+psutil>=5.9,<6.0
+packaging>=23.0,<25.0
+pyyaml>=6.0,<7.0
+json5>=0.9,<1.0
+omegaconf>=2.3,<3.0
+tiktoken>=0.6,<1.0
+prometheus-client>=0.16,<1.0
+
+# PyTorch wheels include the MPS backend on Apple Silicon.
+torch>=2.3,<3.0
+torchvision>=0.18,<1.0
+
+# Annotation assists and detector inference.
+ftfy
+regex
+tqdm
+git+https://github.com/openai/CLIP.git
+git+https://github.com/facebookresearch/segment-anything.git
+git+https://github.com/facebookresearch/sam3.git
+einops>=0.7,<1.0
+ultralytics>=8.2,<9.0
+rfdetr>=1.0,<2.0
+sahi>=0.11,<0.12
+xgboost>=2.0,<3.0
+
+# Secondary VLM path. The backend can start without these, but captioning uses them.
+transformers>=4.57,<5.0
+accelerate>=1.0,<2.0
+qwen-vl-utils>=0.0.8
+safetensors>=0.4,<0.5
+sentencepiece>=0.1.99,<0.2

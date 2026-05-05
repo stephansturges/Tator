@@ -148,7 +148,7 @@ def _ensure_rfdetr_inference_runtime_impl(
                 pass
         return None
 
-    device_str = resolve_device_fn() if torch_available() else "cpu"
+    device_str = resolve_device_fn()
     with rfdetr_lock:
         model, path, labelmap, cached_task, cached_variant = get_state_fn()
         if model is not None and path == best_path:
@@ -1594,6 +1594,7 @@ def _agent_tool_run_detector_impl(
     yolo_lock: Any,
     rfdetr_lock: Any,
     http_exception_cls: Any,
+    yolo_device_fn: Optional[Callable[[], Optional[str]]] = None,
 ) -> Dict[str, Any]:
     pil_img, _, _ = resolve_image_fn(image_base64, image_token, None)
     img_w, img_h = pil_img.size
@@ -1622,6 +1623,8 @@ def _agent_tool_run_detector_impl(
         conf_val = clamp_conf_fn(float(conf) if conf is not None else 0.25, warnings)
         iou_val = clamp_iou_fn(float(iou) if iou is not None else 0.45, warnings)
         max_det_val = clamp_max_det_fn(int(max_det) if max_det is not None else 300, warnings)
+        yolo_device = yolo_device_fn() if yolo_device_fn is not None else None
+        yolo_predict_kwargs = {"device": yolo_device} if yolo_device else {}
         raw: List[Dict[str, Any]] = []
         if sahi and sahi.get("enabled"):
             try:
@@ -1644,6 +1647,7 @@ def _agent_tool_run_detector_impl(
                             iou=iou_val,
                             max_det=max_det_val,
                             verbose=False,
+                            **yolo_predict_kwargs,
                         )
                     raw.extend(yolo_extract_fn(results, labelmap, tile_offset_x, tile_offset_y, img_w, img_h))
                 raw = merge_nms_fn(raw, merge_iou_val, max_det_val)
@@ -1661,6 +1665,7 @@ def _agent_tool_run_detector_impl(
                     iou=iou_val,
                     max_det=max_det_val,
                     verbose=False,
+                    **yolo_predict_kwargs,
                 )
             raw = yolo_extract_fn(results, labelmap, offset_x, offset_y, img_w, img_h)
         for det in raw:

@@ -280,35 +280,6 @@ def build_falcon_query_tiers(
     return out
 
 
-def build_falcon_query_rows(
-    class_names: Sequence[str],
-    *,
-    labelmap: Sequence[str],
-    glossary: str = "",
-    prompt_style: str = "default",
-    query_frame: str = "term",
-) -> List[Dict[str, str]]:
-    rows: List[Dict[str, str]] = []
-    for class_name in class_names:
-        canonical = str(class_name or "").strip()
-        if not canonical:
-            continue
-        for term in _build_falcon_terms_for_class(
-            canonical,
-            labelmap=labelmap,
-            glossary=glossary or "",
-            prompt_style=prompt_style,
-        ):
-            rows.append(
-                {
-                    "class_name": canonical,
-                    "query": _falcon_query_from_term(term, query_frame=query_frame),
-                    "term": term,
-                }
-            )
-    return rows
-
-
 def infer_dataset_annotation_mode(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     bbox_count = 0
     polygon_count = 0
@@ -578,18 +549,6 @@ def serialize_mask_label_line(
         coords.append(f"{max(0.0, min(1.0, float(x) / float(width))):.6f}")
         coords.append(f"{max(0.0, min(1.0, float(y) / float(height))):.6f}")
     return f"{int(class_id)} " + " ".join(coords)
-
-
-def derive_label_bbox_from_line(
-    line: str,
-    *,
-    width: int,
-    height: int,
-) -> Optional[Tuple[int, Tuple[float, float, float, float]]]:
-    parsed = parse_yolo_label_line(line, width=width, height=height)
-    if not parsed:
-        return None
-    return int(parsed["class_id"]), tuple(float(v) for v in parsed["bbox_xyxy"])
 
 
 def _component_bbox_gap(

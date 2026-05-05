@@ -213,7 +213,16 @@ from utils.parsing import (
     _normalize_device_list,
     _agent_extract_json_array,
 )
-from utils.gpu import _validate_cuda_device_ids_impl as _validate_cuda_device_ids_impl
+from utils.gpu import (
+    _resolve_torch_inference_device_impl as _resolve_torch_inference_device_impl,
+    _torch_mps_available_impl as _torch_mps_available_impl,
+    _torch_mps_built_impl as _torch_mps_built_impl,
+    _validate_cuda_device_ids_impl as _validate_cuda_device_ids_impl,
+)
+from utils.sam3_compat import (
+    _sam3_finalize_macos_import_impl as _sam3_finalize_macos_import_impl,
+    _sam3_prepare_macos_import_impl as _sam3_prepare_macos_import_impl,
+)
 from utils.errors import _agent_error_payload, _agent_error_from_detail
 from utils.hashing import _stable_hash_impl as _stable_hash_impl
 from utils.glossary import (
@@ -571,12 +580,10 @@ from services.auto_labeling import (
     AUTO_LABEL_WINDOW_MODE_PLANNER,
     AUTO_LABEL_WINDOW_MODE_QUADRANTS,
     bbox_iou_xyxy as _auto_label_bbox_iou_xyxy,
-    build_falcon_query_rows as _auto_label_build_falcon_query_rows,
     build_falcon_query_tiers as _auto_label_build_falcon_query_tiers,
     build_grid_windows as _auto_label_build_grid_windows,
     build_quadrant_windows as _auto_label_build_quadrant_windows,
     derive_mask_component_candidates as _auto_label_derive_mask_component_candidates,
-    derive_label_bbox_from_line as _auto_label_derive_label_bbox_from_line,
     infer_dataset_annotation_mode as _infer_dataset_annotation_mode_impl,
     mask_bbox_xyxy as _auto_label_mask_bbox_xyxy,
     mask_iou as _auto_label_mask_iou,
@@ -803,6 +810,7 @@ else:
 BASE64_IMAGE_MAX_BYTES = int(os.environ.get("IMAGE_MAX_BYTES", str(100 * 1024 * 1024)))
 BASE64_IMAGE_MAX_DIM = int(os.environ.get("IMAGE_MAX_DIM", "4096"))
 
+_SAM3_MACOS_IMPORT_TOKEN = _sam3_prepare_macos_import_impl()
 try:
     from sam3.model_builder import build_sam3_image_model
     from sam3.model.sam3_image_processor import Sam3Processor as Sam3ImageProcessor
@@ -812,6 +820,8 @@ except Exception as exc:  # noqa: BLE001
     Sam3ImageProcessor = None  # type: ignore[assignment]
 else:
     SAM3_NATIVE_IMAGE_IMPORT_ERROR = None
+finally:
+    _sam3_finalize_macos_import_impl(_SAM3_MACOS_IMPORT_TOKEN)
 
 try:
     from peft import PeftModel
@@ -1350,7 +1360,31 @@ except Exception:
     pass
 
 # 3) Attempt to load the CLIP model (only when the active classifier uses CLIP)
-device = "cuda" if torch.cuda.is_available() else "cpu"
+TATOR_INFERENCE_DEVICE_PREF = (
+    os.environ.get("TATOR_INFERENCE_DEVICE")
+    or os.environ.get("FORCE_DEVICE")
+    or "auto"
+).strip().lower()
+TATOR_ALLOW_MPS = _env_bool("TATOR_ALLOW_MPS", True)
+
+
+def _resolve_default_inference_device() -> str:
+    try:
+        return _resolve_torch_inference_device_impl(
+            TATOR_INFERENCE_DEVICE_PREF,
+            torch_module=torch,
+            prefer_mps=TATOR_ALLOW_MPS,
+        )
+    except RuntimeError as exc:  # noqa: BLE001
+        logger.warning(
+            "Invalid TATOR_INFERENCE_DEVICE=%s (%s); falling back to cpu.",
+            TATOR_INFERENCE_DEVICE_PREF,
+            exc,
+        )
+        return "cpu"
+
+
+device = _resolve_default_inference_device()
 if torch.cuda.is_available():
     try:
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -1568,6 +1602,8 @@ def _resolve_sam1_devices() -> List[torch.device]:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to enumerate CUDA devices for SAM1: %s", exc)
             devices = []
+    if not devices and TATOR_ALLOW_MPS and _torch_mps_available_impl(torch):
+        devices = [torch.device("mps")]
     if not devices:
         devices = [torch.device("cpu")]
     return devices
@@ -1601,13 +1637,14 @@ class _Sam3Backend:
             http_exception_cls=HTTPException,
             http_400=HTTP_400_BAD_REQUEST,
         )
-        device_str = "cuda" if self.device.type == "cuda" else "cpu"
+        device_type = str(getattr(self.device, "type", "") or "")
+        build_device_str = "cuda" if device_type == "cuda" else "cpu"
         source = (
             active_sam3_metadata.get("source") if isinstance(active_sam3_metadata, dict) else None
         )
         try:
             model = build_sam3_image_model(
-                device=device_str,
+                device=build_device_str,
                 checkpoint_path=active_sam3_checkpoint,
                 load_from_HF=active_sam3_checkpoint is None,
                 enable_inst_interactivity=True,
@@ -6323,6 +6360,7 @@ def _agent_tool_run_detector(
         yolo_lock=YOLO_INFER_LOCK,
         rfdetr_lock=RFDETR_INFER_LOCK,
         http_exception_cls=HTTPException,
+        yolo_device_fn=_resolve_yolo_infer_device,
     )
 
 
@@ -9676,7 +9714,27 @@ SAM3_PACKAGE_ROOT = SAM3_VENDOR_ROOT / "sam3"
 SAM3_CONFIG_TEMPLATE = SAM3_REPO_ROOT / "sam3_local" / "local_yolo_ft.yaml"
 SAM3_GENERATED_CONFIG_DIR = SAM3_PACKAGE_ROOT / "train/configs/generated"
 SAM3_GENERATED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-SAM3_BPE_PATH = SAM3_VENDOR_ROOT / "assets" / "bpe_simple_vocab_16e6.txt.gz"
+
+
+def _resolve_sam3_bpe_path() -> Path:
+    env_path = os.environ.get("SAM3_BPE_PATH")
+    if env_path:
+        return Path(env_path).expanduser()
+    vendored = SAM3_VENDOR_ROOT / "assets" / "bpe_simple_vocab_16e6.txt.gz"
+    if vendored.exists():
+        return vendored
+    try:
+        from importlib import resources
+
+        packaged = resources.files("sam3").joinpath("assets/bpe_simple_vocab_16e6.txt.gz")
+        if packaged.is_file():
+            return Path(str(packaged))
+    except Exception:
+        pass
+    return vendored
+
+
+SAM3_BPE_PATH = _resolve_sam3_bpe_path()
 SAM3_MAX_LOG_LINES = 500
 SAM3_MAX_METRIC_POINTS = 2000
 SAM3_STORAGE_SCOPES = {"all", "checkpoints", "logs", "tensorboard", "dumps"}
@@ -12520,10 +12578,43 @@ def _import_rfdetr_variants() -> Dict[str, Any]:
 
 
 def _resolve_rfdetr_infer_device() -> str:
-    return os.environ.get(
-        "RFDETR_INFER_DEVICE",
-        "cuda:0" if torch.cuda.is_available() and torch.cuda.device_count() == 1 else "cpu",
+    device_pref = (
+        os.environ.get("RFDETR_INFER_DEVICE")
+        or TATOR_INFERENCE_DEVICE_PREF
+        or "auto"
     )
+    return _resolve_torch_inference_device_impl(
+        device_pref,
+        torch_module=torch,
+        prefer_mps=TATOR_ALLOW_MPS,
+    )
+
+
+def _resolve_yolo_infer_device() -> Optional[str]:
+    device_pref = os.environ.get("YOLO_INFER_DEVICE") or TATOR_INFERENCE_DEVICE_PREF or "auto"
+    try:
+        return _resolve_torch_inference_device_impl(
+            device_pref,
+            torch_module=torch,
+            prefer_mps=TATOR_ALLOW_MPS,
+        )
+    except RuntimeError as exc:  # noqa: BLE001
+        logger.warning("Invalid YOLO inference device %s: %s; using cpu.", device_pref, exc)
+        return "cpu"
+
+
+def _yolo_predict_device_kwargs() -> Dict[str, str]:
+    yolo_device = _resolve_yolo_infer_device()
+    return {"device": yolo_device} if yolo_device else {}
+
+
+def _yolo_runtime_device_error_kind(exc: BaseException) -> Optional[str]:
+    message = str(exc)
+    if "CUDA" in message or "device-side assert" in message:
+        return "cuda"
+    if "MPS" in message or "mps" in message or "Metal" in message:
+        return "mps"
+    return None
 
 
 def _ensure_rfdetr_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
@@ -22489,9 +22580,16 @@ def yolo_predict_region(payload: YoloRegionRequest):
         warnings.append("labelmap_missing")
     elif expected and labelmap and expected != labelmap:
         warnings.append("labelmap_mismatch")
+    yolo_predict_kwargs = _yolo_predict_device_kwargs()
     with YOLO_INFER_LOCK:
-        with YOLO_INFER_LOCK:
-            results = model.predict(crop, conf=conf, iou=iou, max_det=max_det, verbose=False)
+        results = model.predict(
+            crop,
+            conf=conf,
+            iou=iou,
+            max_det=max_det,
+            verbose=False,
+            **yolo_predict_kwargs,
+        )
     detections: List[YoloRegionDetection] = []
     if results:
         det_boxes = results[0].boxes
@@ -22673,9 +22771,16 @@ def yolo_predict_full(payload: YoloFullRequest):
         int(payload.max_det) if payload.max_det is not None else 300, warnings
     )
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
+    yolo_predict_kwargs = _yolo_predict_device_kwargs()
 
     def _predict_with_fallback(device: Optional[str] = None):
-        kwargs = {"conf": conf, "iou": iou, "max_det": max_det, "verbose": False}
+        kwargs = {
+            "conf": conf,
+            "iou": iou,
+            "max_det": max_det,
+            "verbose": False,
+            **yolo_predict_kwargs,
+        }
         if device is not None:
             kwargs["device"] = device
         return model.predict(pil_img, **kwargs)
@@ -22684,9 +22789,9 @@ def yolo_predict_full(payload: YoloFullRequest):
         with YOLO_INFER_LOCK:
             results = _predict_with_fallback()
     except RuntimeError as exc:  # noqa: BLE001
-        msg = str(exc)
-        if "CUDA" in msg or "device-side assert" in msg:
-            warnings.append("yolo_cuda_error")
+        error_kind = _yolo_runtime_device_error_kind(exc)
+        if error_kind:
+            warnings.append(f"yolo_{error_kind}_error")
             _unload_detector_inference()
             if torch.cuda.is_available():
                 try:
@@ -22704,10 +22809,11 @@ def yolo_predict_full(payload: YoloFullRequest):
                         pass
                 with YOLO_INFER_LOCK:
                     results = _predict_with_fallback(device="cpu")
-                warnings.append("yolo_cuda_fallback_cpu")
+                warnings.append(f"yolo_{error_kind}_fallback_cpu")
             except Exception:
                 raise HTTPException(
-                    status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="yolo_cuda_error"
+                    status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"yolo_{error_kind}_error",
                 ) from exc
         else:
             raise
@@ -22754,12 +22860,19 @@ def yolo_predict_windowed(payload: YoloWindowedRequest):
         slice_size, overlap, merge_iou, img_w, img_h, warnings
     )
     _apply_expected_labelmap_warnings(payload.expected_labelmap, labelmap, warnings)
+    yolo_predict_kwargs = _yolo_predict_device_kwargs()
     slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
     raw_detections: List[Dict[str, Any]] = []
     fallback_device: Optional[str] = None
 
     def _predict_with_fallback(crop_img: Image.Image) -> Any:
-        kwargs = {"conf": conf, "iou": iou, "max_det": max_det, "verbose": False}
+        kwargs = {
+            "conf": conf,
+            "iou": iou,
+            "max_det": max_det,
+            "verbose": False,
+            **yolo_predict_kwargs,
+        }
         if fallback_device is not None:
             kwargs["device"] = fallback_device
         return model.predict(crop_img, **kwargs)
@@ -22770,9 +22883,9 @@ def yolo_predict_windowed(payload: YoloWindowedRequest):
         try:
             results = _predict_with_fallback(crop)
         except RuntimeError as exc:  # noqa: BLE001
-            msg = str(exc)
-            if "CUDA" in msg or "device-side assert" in msg:
-                warnings.append("yolo_cuda_error")
+            error_kind = _yolo_runtime_device_error_kind(exc)
+            if error_kind:
+                warnings.append(f"yolo_{error_kind}_error")
                 _unload_detector_inference()
                 if torch.cuda.is_available():
                     try:
@@ -22789,10 +22902,11 @@ def yolo_predict_windowed(payload: YoloWindowedRequest):
                             pass
                     fallback_device = "cpu"
                     results = _predict_with_fallback(crop)
-                    warnings.append("yolo_cuda_fallback_cpu")
+                    warnings.append(f"yolo_{error_kind}_fallback_cpu")
                 except Exception:
                     raise HTTPException(
-                        status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="yolo_cuda_error"
+                        status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"yolo_{error_kind}_error",
                     ) from exc
             else:
                 raise
@@ -23774,14 +23888,32 @@ app.include_router(
 
 
 def _gpu_status_payload() -> Dict[str, Any]:
-    payload: Dict[str, Any] = {"available": False, "device_count": 0, "devices": []}
+    mps_available = bool(TATOR_ALLOW_MPS and _torch_mps_available_impl(torch))
+    payload: Dict[str, Any] = {
+        "available": bool(torch.cuda.is_available() or mps_available),
+        "device_count": 0,
+        "devices": [],
+        "cuda_available": bool(torch.cuda.is_available()),
+        "mps": {
+            "available": mps_available,
+            "built": _torch_mps_built_impl(torch),
+        },
+        "preferred_inference_device": device,
+        "inference_backend": (
+            "torch_cuda"
+            if str(device).startswith("cuda")
+            else ("torch_mps" if str(device).startswith("mps") else "torch_cpu")
+        ),
+    }
     if not torch.cuda.is_available():
+        if mps_available:
+            payload["devices"] = [{"index": "mps", "name": "Apple Metal Performance Shaders"}]
+        payload["device_count"] = 1 if mps_available else 0
         return payload
     devices: List[Dict[str, Any]] = []
     try:
         device_count = torch.cuda.device_count()
-        payload["available"] = True
-        payload["device_count"] = device_count
+        payload["device_count"] = device_count + (1 if mps_available else 0)
         for idx in range(device_count):
             props = torch.cuda.get_device_properties(idx)
             device_info: Dict[str, Any] = {
@@ -23797,6 +23929,8 @@ def _gpu_status_payload() -> Dict[str, Any]:
             except Exception:
                 device_info["free_mb"] = None
             devices.append(device_info)
+        if mps_available:
+            devices.append({"index": "mps", "name": "Apple Metal Performance Shaders"})
     except Exception as exc:  # noqa: BLE001
         payload["error"] = str(exc)
     payload["devices"] = devices

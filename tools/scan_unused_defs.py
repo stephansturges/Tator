@@ -5,13 +5,18 @@ from __future__ import annotations
 
 import argparse
 import ast
+import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 EXCLUDE_DIRS = {
     ".git",
     ".venv",
+    ".venv-macos",
+    "venv",
+    "env",
     "__pycache__",
+    "CLIP",
     "Qwen-Agent",
     "Qwen3-VL",
     "rf-detr",
@@ -20,17 +25,20 @@ EXCLUDE_DIRS = {
     "sam3_local",
     "sahi",
     "uploads",
+    "corrected_labels",
+    "calib_example",
     "logs",
     "models",
     "lightning_logs",
     "tests",
     "tools",
 }
+USE_EXCLUDE_DIRS = EXCLUDE_DIRS - {"tools"}
 
 
-def iter_py_files(root: Path) -> Iterable[Path]:
+def iter_py_files(root: Path, *, exclude_dirs: set[str] = EXCLUDE_DIRS) -> Iterable[Path]:
     for path in root.rglob("*.py"):
-        if any(part in EXCLUDE_DIRS for part in path.parts):
+        if any(part in exclude_dirs for part in path.parts):
             continue
         yield path
 
@@ -130,10 +138,10 @@ def scan(root: Path) -> Dict[str, List[Tuple[str, int, str, bool]]]:
         try:
             source = path.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(path))
+            visitor = DefUseCollector()
+            visitor.visit(tree)
         except Exception:
             continue
-        visitor = DefUseCollector()
-        visitor.visit(tree)
         if visitor.defs:
             defs_by_file[str(path)] = visitor.defs
     return defs_by_file
@@ -141,26 +149,27 @@ def scan(root: Path) -> Dict[str, List[Tuple[str, int, str, bool]]]:
 
 def collect_uses(root: Path) -> Dict[str, int]:
     counts: Dict[str, int] = {}
-    for path in iter_py_files(root):
+    for path in iter_py_files(root, exclude_dirs=USE_EXCLUDE_DIRS):
         try:
             source = path.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(path))
+            visitor = DefUseCollector()
+            visitor.visit(tree)
         except Exception:
             continue
-        visitor = DefUseCollector()
-        visitor.visit(tree)
         for name in visitor.uses:
             counts[name] = counts.get(name, 0) + 1
     return counts
 
 
 def main() -> int:
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
     parser = argparse.ArgumentParser(description="Heuristic scan for unused defs.")
     parser.add_argument("--root", default=".", help="Repo root to scan.")
     parser.add_argument(
         "--max-uses",
         type=int,
-        default=1,
+        default=0,
         help="Report defs with use-count <= max-uses.",
     )
     parser.add_argument(

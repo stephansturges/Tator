@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Union
 
-from qwen_agent.tools.base import BaseTool, ToolServiceError
+from qwen_agent.tools.base import BaseTool
 
 
 def _normalize_tool_spec(spec: Dict[str, Any]) -> Dict[str, Any]:

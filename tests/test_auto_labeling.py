@@ -5,7 +5,6 @@ from services.auto_labeling import (
     AUTO_LABEL_TARGET_MODE_DETECTION,
     AUTO_LABEL_TARGET_MODE_SEGMENTATION,
     adjust_falcon_candidate_score,
-    build_falcon_query_rows,
     build_falcon_query_tiers,
     build_quadrant_windows,
     derive_mask_component_candidates,
@@ -17,6 +16,34 @@ from services.auto_labeling import (
 
 
 pytestmark = [pytest.mark.auto_label_smoke]
+
+
+def _flat_falcon_query_rows(
+    class_names,
+    *,
+    labelmap,
+    glossary="",
+    prompt_style="default",
+    query_frame="term",
+):
+    tiers = build_falcon_query_tiers(
+        class_names,
+        labelmap=labelmap,
+        glossary=glossary,
+        prompt_style=prompt_style,
+        query_frame=query_frame,
+    )
+    rows = []
+    for class_name in class_names:
+        for row in tiers.get(class_name, []):
+            rows.append(
+                {
+                    "class_name": row["class_name"],
+                    "query": row["query"],
+                    "term": row["term"],
+                }
+            )
+    return rows
 
 
 def test_infer_dataset_annotation_mode_prefers_segmentation_when_polygons_exist() -> None:
@@ -70,8 +97,8 @@ def test_serialize_bbox_polygon_label_line_writes_polygon_coordinates() -> None:
     assert line == "3 0.100000 0.100000 0.400000 0.100000 0.400000 0.600000 0.100000 0.600000"
 
 
-def test_build_falcon_query_rows_humanizes_special_labels() -> None:
-    rows = build_falcon_query_rows(
+def test_build_falcon_query_tiers_humanizes_special_labels() -> None:
+    rows = _flat_falcon_query_rows(
         ["light_vehicle", "utility_pole", "person"],
         labelmap=["light_vehicle", "utility_pole", "person"],
         glossary="",
@@ -89,8 +116,8 @@ def test_build_falcon_query_rows_humanizes_special_labels() -> None:
     assert all("," not in row["query"] for row in rows)
 
 
-def test_build_falcon_query_rows_uses_singular_natural_labels_for_generic_classes() -> None:
-    rows = build_falcon_query_rows(
+def test_build_falcon_query_tiers_uses_singular_natural_labels_for_generic_classes() -> None:
+    rows = _flat_falcon_query_rows(
         ["building", "truck"],
         labelmap=["building", "truck"],
         glossary="",
@@ -105,8 +132,8 @@ def test_build_falcon_query_rows_uses_singular_natural_labels_for_generic_classe
     assert {"class_name": "truck", "query": "lorry", "term": "lorry"} in rows
 
 
-def test_build_falcon_query_rows_uses_glossary_alternatives_as_separate_queries() -> None:
-    rows = build_falcon_query_rows(
+def test_build_falcon_query_tiers_uses_glossary_alternatives_as_separate_queries() -> None:
+    rows = _flat_falcon_query_rows(
         ["light_vehicle"],
         labelmap=["light_vehicle"],
         glossary='{"light_vehicle":["car","van","sedan","pickup truck","automobile"]}',
@@ -173,8 +200,8 @@ def test_build_falcon_query_tiers_can_force_canonical_only_style() -> None:
     ]
 
 
-def test_build_falcon_query_rows_can_use_priority_only_with_all_instances_frame() -> None:
-    rows = build_falcon_query_rows(
+def test_build_falcon_query_tiers_can_use_priority_only_with_all_instances_frame() -> None:
+    rows = _flat_falcon_query_rows(
         ["light_vehicle"],
         labelmap=["light_vehicle"],
         glossary='{"light_vehicle":["car","SUV","sedan"]}',
@@ -200,8 +227,8 @@ def test_build_falcon_query_rows_can_use_priority_only_with_all_instances_frame(
     ]
 
 
-def test_build_falcon_query_rows_can_use_priority_top1_style() -> None:
-    rows = build_falcon_query_rows(
+def test_build_falcon_query_tiers_can_use_priority_top1_style() -> None:
+    rows = _flat_falcon_query_rows(
         ["truck", "building"],
         labelmap=["truck", "building"],
         glossary="",

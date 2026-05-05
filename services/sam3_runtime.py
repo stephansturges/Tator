@@ -13,8 +13,18 @@ def _set_sam3_device_pref_impl(
 ) -> None:
     if torch_module.cuda.is_available():
         state["device_pref"] = f"cuda:{device_index}"
+    elif _torch_mps_available(torch_module):
+        state["device_pref"] = "mps"
     else:
         state["device_pref"] = "cpu"
+
+
+def _torch_mps_available(torch_module: Any) -> bool:
+    try:
+        mps_backend = getattr(torch_module.backends, "mps", None)
+        return bool(mps_backend and mps_backend.is_available())
+    except Exception:
+        return False
 
 
 def _resolve_sam3_device_impl(
@@ -25,7 +35,11 @@ def _resolve_sam3_device_impl(
     http_400: int,
 ) -> Any:
     if sam3_device_pref in {"", "auto"}:
-        return torch_module.device("cuda" if torch_module.cuda.is_available() else "cpu")
+        if torch_module.cuda.is_available():
+            return torch_module.device("cuda")
+        if _torch_mps_available(torch_module):
+            return torch_module.device("mps")
+        return torch_module.device("cpu")
     try:
         return torch_module.device(sam3_device_pref)
     except Exception as exc:  # noqa: BLE001
@@ -63,6 +77,8 @@ def _resolve_sam3_mining_devices_impl(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to enumerate CUDA devices for mining: %s", exc)
             devices = []
+    if not devices and _torch_mps_available(torch_module):
+        devices = [torch_module.device("mps")]
     if not devices:
         devices = [torch_module.device("cpu")]
     return devices
@@ -127,24 +143,26 @@ def _ensure_sam3_text_runtime_impl(
             detail = f"sam3_text_unavailable:{sam3_import_error}"
             raise http_exception_cls(status_code=http_503, detail=detail)
         try:
-            device_str = str(device) if getattr(device, "type", None) == "cuda" else "cpu"
+            device_type = str(getattr(device, "type", "") or "")
+            build_device_str = "cuda" if device_type == "cuda" else "cpu"
+            processor_device_str = str(device) if device_type in {"cuda", "mps"} else "cpu"
             enable_seg = True
             if sam3_checkpoint:
                 model = build_model_fn(
                     checkpoint_path=sam3_checkpoint,
-                    device=device_str,
+                    device=build_device_str,
                     load_from_HF=False,
                     enable_segmentation=enable_seg,
                     bpe_path=str(sam3_bpe_path),
                 ).to(device)
             else:
                 model = build_model_fn(
-                    device=device_str,
+                    device=build_device_str,
                     enable_segmentation=enable_seg,
                     bpe_path=str(sam3_bpe_path),
                 ).to(device)
             clear_caches_fn(model)
-            processor = processor_cls(model, device=device_str)
+            processor = processor_cls(model, device=processor_device_str)
         except Exception as exc:  # noqa: BLE001
             raise http_exception_cls(status_code=http_500, detail=f"sam3_text_load_failed:{exc}") from exc
         state["sam3_text_model"] = model

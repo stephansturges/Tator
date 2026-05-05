@@ -158,7 +158,11 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
+!.env.*.example
 .venv
+.venv-macos/
 env/
 venv/
 ENV/
@@ -279,7 +283,10 @@ scrn.png
 /*.txt
 !requirements.txt
 !requirements-dev.txt
+!requirements-macos-inference.txt
+!requirements-macos-vlm.txt
 prepass_*
+!models/prepass_recipes.py
 qwen_agentic_*
 !services/
 !services/*.py

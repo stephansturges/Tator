@@ -5,7 +5,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 import copy
 
 from qwen_agent.llm.function_calling import BaseFnCallModel
-from qwen_agent.llm.schema import ASSISTANT, FUNCTION, SYSTEM, USER, ContentItem, Message
+from qwen_agent.llm.schema import ASSISTANT, FUNCTION, ContentItem, Message
 from qwen_agent.utils.utils import extract_text_from_message
 
 

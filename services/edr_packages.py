@@ -108,10 +108,6 @@ def edr_package_zip_path(packages_root: Path, package_id: str) -> Path:
     return edr_package_dir(packages_root, package_id, create=False) / EDR_PACKAGE_ZIP_NAME
 
 
-def edr_package_payload_dir(packages_root: Path, package_id: str) -> Path:
-    return edr_package_dir(packages_root, package_id, create=False) / EDR_PACKAGE_PAYLOAD_DIRNAME
-
-
 def edr_package_meta_path(packages_root: Path, package_id: str) -> Path:
     return edr_package_dir(packages_root, package_id, create=False) / EDR_PACKAGE_META_NAME
 

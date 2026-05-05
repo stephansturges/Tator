@@ -1,446 +1,412 @@
-/!\ Under active development. Dataset management + training + calibration workflows evolve quickly; expect periodic changes. /!\
+# Tator
 
-# 🥔 Tator — Local CLIP + SAM Annotation & Prelabeling Toolkit
+Tator is a local annotation-assistance stack for building and extending object
+detection datasets. It combines a static browser UI with a FastAPI backend so
+you can label from scratch, train dataset-specific helpers, prelabel new images,
+and keep the final review loop human-controlled.
 
-Tator is a single‑machine annotation stack with a browser UI and a FastAPI backend. It focuses on fast, reliable **human labeling** (CLIP + SAM assists) and a deterministic **Ensemble Detection Recipe (EDR)** workflow for high‑quality prelabeling (prepass + calibration with detectors + SAM3 + XGBoost).
+The core idea is simple: drawing every box by hand is the slow path. Tator keeps
+manual labeling available, but adds CLIP/DINO class prediction, SAM/SAM3 prompt
+tools, detector passes, Qwen captions, dataset glossaries, recipe mining, and
+calibrated prelabeling so extending a dataset can become mostly review and
+correction work instead of first-draft annotation.
 
-We previously experimented with agentic annotation loops and removed them. Qwen is now used **only** for captioning and for optional glossary expansion used by SAM3 text prompting.
+## Screenshot Slots
 
-**Vision:** Tator is for teams who already have an object‑detection dataset (or need to grow one) and want to scale annotation without compromising quality. The goal is to combine strong human‑in‑the‑loop tools with deterministic automation so you can prelabel quickly, then review and correct with confidence.
+Place README images and GIFs under `docs/assets/`.
 
----
+| Slot | Suggested file | What to show |
+|---|---|---|
+| Labeling assists | `docs/assets/tator-labeling-assists.gif` | Draw or select a box, auto-class it, refine it with SAM, and accept the result. |
+| Dataset management | `docs/assets/tator-dataset-management.gif` | Upload/register a dataset, inspect health, edit glossary/context, and open it for labeling. |
+| Qwen workflow | `docs/assets/tator-qwen-captioning.gif` | Run Qwen captioning/windowed captioning and use the caption/context in a labeling flow. |
+| SAM3 vocabulary | `docs/assets/tator-sam3-vocabulary.gif` | Use glossary terms or the SAM3 Vocabulary Explorer to expand text prompts. |
+| EDR builder | `docs/assets/tator-edr-builder.gif` | Build/calibrate/export an Ensemble Detection Recipe. |
+| Training and model selection | `docs/assets/tator-model-training.gif` | Train/select CLIP, SAM3, YOLO, RF-DETR, and Qwen models from the UI. |
 
-## What you get
+## What Tator Helps With
 
-### Fast interactive labeling
-- **Auto Class Corrector** — CLIP snaps a box to the most likely class.
-- **Auto Box Refinement** — SAM tightens loose boxes; CLIP verifies the class.
-- **Point‑to‑Box** — click once and SAM draws a tight box.
-- **Multi‑point prompts** — add positive/negative points to sculpt tricky objects.
+- Start a dataset from raw images with a browser labeling UI.
+- Extend an existing YOLO/YOLO-seg dataset without redrawing everything.
+- Keep source datasets in place through linked-dataset records when copying data is undesirable.
+- Use a dataset glossary so text-prompted systems speak in the same labels and synonyms as the project.
+- Generate first-pass labels with detectors, SAM3 text/similarity, Qwen context, and optional Falcon proposals.
+- Train and select local helper models from the same interface.
+- Package reusable prelabeling recipes so the next batch starts from stronger suggestions.
 
-### Deterministic prelabeling (EDR workflow)
-- **Prepass (detectors + SAM3)** builds a high‑recall candidate pool.
-- **Dedupe** (IoU merge) stabilizes candidate clusters.
-- **Calibration (XGBoost)** filters candidates to maximize F1 while enforcing a recall floor.
-- **Glossary management** (dataset glossaries + library) and optional Qwen expansion.
+Tator is not meant to remove review. It is meant to automate the repetitive
+80 percent: candidate generation, class suggestions, box tightening, repeated
+object discovery, and first-pass dataset extension. The human stays responsible
+for the final labels.
 
-### Training & model management
-- **CLIP/DINOv3 head training** from the UI (cached embeddings).
-- **YOLOv8 training** and **RF‑DETR training** with saved‑run management.
-- **SAM3 training** from the UI (device selection + run management).
-- **Qwen captioning** with windowed mode and guardrails.
-- **YOLO head grafting (experimental)** to add new classes without retraining the base backbone.
+## Main Workflows
 
----
+| Workflow | UI area | Backend/API surface | Primary code |
+|---|---|---|---|
+| Manual and assisted labeling | Label Images | `/predict_base64`, `/sam_*`, `/sam3/*_prompt`, `/yolo/predict_*`, `/rfdetr/predict_*` | `ybat-master/`, `localinferenceapi.py`, `api/sam3_prompts.py`, `services/detectors.py` |
+| Dataset library | Dataset Management | `/datasets/*`, `/glossaries/*`, `/qwen/dataset/*`, `/sam3/datasets/*`, `/segmentation/build/*` | `api/datasets.py`, `services/datasets.py`, `services/segmentation.py`, `utils/coco.py`, `utils/glossary.py` |
+| Qwen captions and VLM inference | Qwen Models, Label Images | `/qwen/status`, `/qwen/settings`, `/qwen/caption`, `/qwen/infer`, `/qwen/prepass` | `services/qwen*.py`, `qwen_agent_llm.py`, `qwen_agent_tools.py` |
+| Class predictor training | Train Class Predictor | `/clip/train`, `/clip/classifiers/*`, `/clip/active_model` | `services/classifier*.py`, `services/clip_runtime.py`, `services/dinov3_runtime.py` |
+| Detector training and inference | Train YOLO, Train RF-DETR, Detector Selection | `/yolo/*`, `/rfdetr/*`, `/detectors/default` | `services/detectors.py`, `services/detector_jobs.py` |
+| SAM3 model workflows | Train SAM3, SAM Model Selection | `/sam3/models/*`, `/sam3/train/*`, `/sam3/storage/*` | `services/sam3_*.py`, `sam3_local/` |
+| SAM3 vocabulary and recipes | SAM3 Vocabulary Explorer, SAM3 Recipe Mining | `/sam3/prompt_helper/*`, `/agent_mining/*`, `/prepass/recipes/*` | `services/prompt_helper*.py`, `services/agent_cascades.py`, `services/prepass_recipes.py` |
+| EDR prelabeling and calibration | EDR Builder, Label Images | `/qwen/prepass`, `/calibration/jobs/*`, `/edr/packages/*`, `/auto_label/jobs/*` | `services/prepass*.py`, `services/calibration*.py`, `services/edr_packages.py`, `services/auto_labeling.py` |
+| Runtime and system controls | Backend Config, SAM Predictors | `/system/*`, `/runtime/unload`, `/predictor_settings`, `/sam_slots`, `/sam_preload` | `api/system.py`, `services/runtime_unload.py`, `localinferenceapi.py` |
 
-## Repository layout
-```
+## Repository Map
+
+```text
 Tator/
-├─ app/                  FastAPI app object (uvicorn imports this)
-├─ api/                  Route handlers (APIRouter modules)
-├─ services/             Core backend logic (prepass, calibration, detectors, sam3, qwen)
-├─ utils/                Shared helpers (coords, labels, image, io, parsing)
-├─ localinferenceapi.py  Router wiring + shared state (thin shim)
-├─ ybat-master/          Frontend UI (static HTML/JS/CSS)
-├─ tools/                CLI helpers
-├─ tests/                Unit tests
-└─ uploads/              Runtime artifacts + caches (git-ignored)
+  app/                    FastAPI app export for uvicorn
+  api/                    APIRouter builders for each endpoint family
+  services/               Backend business logic and model runtimes
+  utils/                  Shared image, label, parsing, GPU, COCO, and IO helpers
+  models/                 Pydantic schemas and recipe model helpers
+  ybat-master/            Static browser UI
+  tools/                  Setup, validation, calibration, EDR, benchmark, and debug CLIs
+  tests/                  Unit, integration, and UI contract tests
+  docs/                   Focused reports and setup notes
+  sam3_local/             Local SAM3 training config/extensions
+  constraints/            Locked optional environment constraints
+  uploads/                Runtime datasets, jobs, caches, and model artifacts; git-ignored
 ```
 
-### Backend module map (where core logic lives)
-- **EDR workflow (prepass + calibration)**: `services/prepass*.py`, `services/calibration*.py`
-- **Detectors (YOLO / RF‑DETR)**: `services/detectors.py` + `services/detector_jobs.py`
-- **Classifier heads (CLIP/DINOv3)**: `services/classifier*.py`
-- **SAM3**: `services/sam3_*.py`
-- **Qwen captioning + glossary expansion**: `services/qwen.py`, `services/qwen_generation.py`
-- **Datasets / glossaries**: `services/datasets.py`, `utils/glossary.py`
-- **Shared helpers**: `utils/coords.py`, `utils/image.py`, `utils/labels.py`, `utils/io.py`
+`localinferenceapi.py` is still the central wiring module. New endpoint handlers
+are split into `api/`, while most reusable behavior lives in `services/` and
+`utils/`.
 
-### Backend flow (high‑level)
+## Dataset Management Philosophy
+
+Datasets are the center of Tator. The system works best when every automation
+step is tied back to a concrete dataset record, labelmap, glossary, and optional
+context note.
+
+Tator supports three dataset patterns:
+
+- **Upload a dataset** when you want Tator to own a copy. YOLO and YOLO-seg are
+  the preferred internal formats; COCO uploads are converted where possible.
+- **Open a server path transiently** when you want to inspect or label a local
+  folder without committing it to the library.
+- **Register a linked dataset** when source images should stay where they are.
+  Tator stores metadata, overlays, glossaries, and labels, but linked dataset
+  deletion does not remove source files.
+
+Dataset records also carry:
+
+- labelmap and class order
+- linked-root health (`ok`, `missing`, or `invalid`)
+- canonical glossary text for SAM3 and Qwen-assisted prompting
+- optional dataset context for captions, prompt expansion, and recipe building
+- annotation lock state so concurrent writes fail loudly instead of silently
+  clobbering labels
+
+This is why Tator is useful for extension work. Once a dataset has a glossary,
+active helpers, and one or more saved recipes, new image batches can start from
+dataset-specific suggestions rather than generic detector output.
+
+## Assisted Labeling
+
+The Label Images tab is the everyday workspace.
+
+- Draw boxes manually and export labels.
+- Ask CLIP/DINO heads to suggest or correct classes.
+- Use SAM point, box, and multi-point prompts to tighten boxes or derive masks.
+- Use SAM3 visual and text prompts when the SAM3 runtime is available.
+- Run YOLO or RF-DETR full-frame, region, or windowed inference.
+- Apply saved SAM3 recipes, cascades, prepass recipes, or EDR packages to the
+  active image.
+- Use Qwen captions as visual context while keeping final labels editable.
+- Export selected crops through the chunked crop ZIP endpoints.
+
+The output remains an annotation draft. The UI is built around fast accept,
+correct, and reject loops.
+
+## Qwen
+
+Qwen is the local VLM path. In this repo it is used for:
+
+- image and windowed captions
+- structured `/qwen/infer` calls
+- dataset-aware context for prepass runs
+- optional glossary and prompt expansion support
+- Qwen dataset upload/build workflows
+- Qwen model activation, settings, unload, and training job endpoints
+- optional qwen-agent adapters for local tool-calling experiments
+
+The default model name is `Qwen/Qwen3-VL-4B-Instruct`. Model access, memory
+requirements, and device support depend on your environment.
+
+## Training and Model Management
+
+Tator keeps helper models close to the annotation workflow:
+
+- **CLIP/DINOv3 heads**: fast class predictors trained from managed datasets.
+- **YOLOv8**: detector training, active run selection, run summaries, downloads,
+  deletion, and experimental head grafting for disjoint new classes.
+- **RF-DETR**: detector training, active run selection, summaries, downloads,
+  deletion, and full/region/windowed inference.
+- **SAM3**: dataset conversion, training jobs, model registry, active model
+  selection, and run promotion/deletion.
+- **Qwen**: model registry, settings, cache management, and training jobs.
+
+Heavy jobs acquire an automation lock in the UI so competing GPU-heavy actions
+do not run over each other.
+
+## EDR: Short Version
+
+An Ensemble Detection Recipe (EDR) is a reusable prelabeling pipeline for a
+specific dataset fingerprint. It generates a broad candidate pool, scores and
+filters that pool, and packages the result so a future batch can reuse the same
+proven setup.
+
+Use EDR when a project is past the first few labels and you want repeatable
+automation for extension batches.
+
+<details>
+<summary>EDR details</summary>
+
+### What an EDR Contains
+
+An EDR combines:
+
+- a prepass recipe
+- detector and SAM3 source settings
+- candidate dedupe/fusion policy
+- calibration feature settings
+- XGBoost/MLP calibration outputs
+- threshold and policy choices
+- expected metrics and comparison metadata
+- enough package metadata to replay the runtime later
+
+### Prepass Structure
+
+```text
+Image
+  -> detector seeds
+     -> YOLO full-frame and optional SAHI/windowed passes
+     -> RF-DETR full-frame and optional SAHI/windowed passes
+  -> SAM3 text prompts from glossary terms and optional expansions
+  -> dedupe/fusion with provenance
+  -> SAM3 similarity expansion from confident exemplars
+  -> final candidate pool
 ```
-Frontend (ybat-master)
-   │
-   ▼
-FastAPI app (app/ + localinferenceapi.py)
-   │
-   ▼
-APIRouters (api/*) ──► Services (services/*) ──► Helpers (utils/*)
+
+The prepass is intentionally broad. It should recover objects that a single
+detector pass misses, especially small objects, boundary cases, unusual classes,
+and repeated look-alike objects.
+
+### Calibration
+
+Calibration turns the broad candidate pool into a practical review set. It
+builds feature rows from source provenance, detector/SAM scores, agreement,
+geometry, cluster structure, and optional classifier signals. The current
+default path uses XGBoost plus threshold tuning.
+
+The calibrator does not create new objects. It decides which generated
+candidates are worth sending to the reviewer.
+
+### Packaging and Reuse
+
+EDR packages are handled through `/edr/packages/*`. Saved packages can be
+exported, imported, and applied to later jobs. Canonical discovery and repair
+tools live in `tools/run_canonical_prepass_discovery.py` and
+`tools/backfill_edr_packages.py`.
+
+For a longer operator explanation, see
+[docs/ensemble_detection_recipe_explainer.md](docs/ensemble_detection_recipe_explainer.md).
+
+</details>
+
+## Linux Setup
+
+Use Linux for full training workflows, CUDA acceleration, Falcon automatic
+labeling, and the broadest package compatibility.
+
+### General Linux Backend
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip wheel "setuptools<81"
+python -m pip install -r requirements.txt
+cp .env.example .env
+python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
-Migration note: `localinferenceapi.py` now acts as a thin router shim; core logic
-has moved into `services/` and `utils/`.
 
----
+Open `ybat-master/ybat.html` in a browser. The UI defaults to
+`http://localhost:8000`.
 
-## Ensemble Detection Recipe (EDR) workflow
+### Linux Model Assets
 
-An **Ensemble Detection Recipe (EDR)** is the full reusable detection workflow made of:
+Set paths and model names in `.env`:
 
-- a **prepass**, which generates a broad candidate pool
-- a **calibration**, which scores and filters that candidate pool
-
-For the fuller operator-facing explanation, see [docs/ensemble_detection_recipe_explainer.md](docs/ensemble_detection_recipe_explainer.md).
-
-### EDR prepass architecture (detectors + SAM3 + dedupe)
-```
-Full image
-   │
-   ├─ Detectors (YOLO, RF‑DETR)
-   │    ├─ full‑frame pass
-   │    └─ SAHI windowed pass (slice + merge)
-   │
-   ├─ SAM3 text (glossary terms + optional Qwen expansion)
-   │
-   ├─ Dedupe A (IoU merge) + optional cleanup
-   │    └─ classifier cleanup only if prepass_keep_all=false
-   │
-   ├─ SAM3 similarity (global full‑frame)
-   │    └─ optional windowed similarity extension
-   │
-   └─ Dedupe B (IoU merge) + optional cleanup
-        └─ final prepass candidate set (with provenance)
+```bash
+LOGREG_PATH=./my_logreg_model.pkl
+LABELMAP_PATH=./my_label_list.pkl
+CLIP_MODEL_NAME=ViT-B/32
+SAM_MODEL_TYPE=vit_h
+SAM_CHECKPOINT_PATH=./sam_vit_h_4b8939.pth
+SAM_VARIANT=sam1
+SAM3_MODEL_ID=facebook/sam3
+SAM3_PROCESSOR_ID=facebook/sam3
+SAM3_CHECKPOINT_PATH=
+SAM3_DEVICE=auto
+QWEN_MODEL_NAME=Qwen/Qwen3-VL-4B-Instruct
+QWEN_DEVICE=auto
+QWEN_MAX_NEW_TOKENS=768
 ```
 
-Key notes:
-- **Full‑frame + SAHI**: every detector runs twice (full‑frame + SAHI) then merges.
-- **SAM3 text**: driven by the dataset glossary (optionally expanded by Qwen).
-- **Similarity**: global similarity is always on; windowed similarity is optional.
-- **Dedupe**: run twice (after detectors + text; after similarity).
-- **Calibration**: uses `prepass_keep_all=true` (no classifier gating) so the model sees the full candidate pool.
+SAM1 interactive prompts require a local SAM checkpoint. SAM3 and Qwen may
+download model assets from Hugging Face on first use, depending on your cache
+and authentication.
 
-### EDR calibration workflow + caching
-- Jobs stored under `uploads/calibration_jobs/<job_id>/`.
-- Intermediate prepass/features/labels cached under `uploads/calibration_cache/` keyed by payload hash.
-- Poll status via `GET /calibration/jobs/{job_id}`.
+### Optional SAM3 on Linux
 
-### Metric taxonomy (strict tiers, IoU=0.50 default)
-Calibration/evaluation now reports metrics in explicit tiers to avoid attribution ambiguity:
+`requirements.txt` keeps SAM3 optional because access and runtime constraints
+vary by machine. Install it when you want SAM3 text/visual prompting,
+similarity, training, or recipe mining:
 
-1. `raw_detector`: true replay baselines from raw detector atoms (YOLO-only, RF-DETR-only, YOLO+RF-DETR union).
-2. `post_prepass`: candidates after detector + SAM3 text/similarity generation, before cluster dedupe.
-3. `post_cluster`: candidates after dedupe/fusion.
-4. `post_xgb`: final accepted candidates after XGBoost calibration thresholding.
+```bash
+python -m pip install "git+https://github.com/facebookresearch/sam3.git" "einops>=0.7,<1.0"
+hf auth login
+```
 
-Notes:
-- Metric outputs are written under each calibration job in `uploads/calibration_jobs/<job_id>/ensemble_xgb.eval.json`.
-- Prepass cache artifacts under `uploads/calibration_cache/prepass/.../images/*.json` persist atom provenance so raw baselines do not require detector replay.
-- Ground truth targets are YOLO labels (for example `uploads/clip_dataset_uploads/qwen_dataset_yolo`).
+### Optional Falcon GPU Stack
 
-### Comparison policy and acceptance gate
-- Primary comparison IoU is `0.50`.
-- Report two baseline groups for every run:
-  - **Primary comparator (same tier):** `post_cluster.source_attributed.yolo_rfdetr_union`
-  - **Diagnostics only:** `raw_detector` replay (`yolo`, `rfdetr`, `yolo_rfdetr_union`)
-- Acceptance gate: the `post_xgb.accepted_all` ensemble must beat `post_cluster.source_attributed.yolo_rfdetr_union` on the agreed target metric (typically F1, with precision/recall shown).
-
-### From fast annotation to reusable prelabeling
-Tator is meant to feel like one continuous workflow: annotate faster, train from the same interface, build a stronger prelabeling recipe, and then reuse that recipe so the next round of work starts with much better suggestions.
-
-Typical workflow in the product:
-
-1. Use the annotation helpers to speed up manual work.
-   - Auto-class correction helps snap a box to the likely label.
-   - SAM refinement helps tighten loose boxes.
-   - Point-to-box and multi-point prompting help with small, thin, crowded, or awkward objects.
-   - The goal is simple: spend more time approving and correcting, less time drawing everything from scratch.
-   - [**insert GIF: annotation helpers, box refinement, point-to-box flow**]
-2. Build better dataset-specific coverage.
-   - The glossary gives the system the right words for the dataset.
-   - SAM3 text uses that vocabulary to find candidates the detectors may miss.
-   - Similarity helps extend from strong examples to repeated look-alike objects.
-   - [**insert screenshot: glossary-driven prompting and similarity-assisted suggestions**]
-3. Train the supporting models directly from the browser.
-   - You can launch classifier, YOLO, RF-DETR, and SAM3 training runs from the same product.
-   - Runs are managed in one place instead of being split across separate annotation and training workflows.
-   - [**insert screenshot: model training and run management in the UI**]
-4. Build an EDR when you want stronger automation.
-   - The EDR combines a broad candidate-generating prepass with a learned calibrator.
-   - In plain terms: it gathers a lot of plausible detections, then learns which ones are worth keeping.
-   - Once saved, that EDR becomes a reusable recipe for the dataset and configuration it was built for.
-   - [**insert GIF: EDR builder / recipe creation flow**]
-5. Apply the saved EDR back through the interface.
-   - Future prelabeling jobs can start from the saved recipe instead of from raw detector output.
-   - That makes review much faster because users are mostly cleaning up strong suggestions instead of constructing the first draft themselves.
-   - [**insert screenshot: applying a saved EDR to a new job from the interface**]
-
-### Why this is useful in practice
-The value of the EDR workflow is not just that it finds more objects. It is that it makes automation easier to trust and easier to reuse.
-
-- The prepass is broad on purpose, so it can recover objects that a plain detector-only pass would miss.
-- The calibrator cuts back the false-positive tail, so that broad candidate pool becomes something a human can review efficiently.
-- Windowed detection, glossary-driven SAM3 text, and similarity search all help widen coverage.
-- Source-aware calibration helps keep the final output practical instead of shipping every possible candidate to the user.
-
-In short: the system is designed to increase useful recall first, then restore precision so the result is still fast to review.
-
-### Example result on the current experimental dataset
-On the current experimental `qwen_dataset`, the canonical EDR materially improves the final accepted detections over the detector-union post-cluster baseline:
-
-| Surface | Precision | Recall | F1 | Delta vs detector-union baseline |
-|---|---:|---:|---:|---:|
-| Final EDR executor | **0.9227** | **0.8062** | **0.8605** | **+0.0856** |
-| Detector-union attributed post-cluster baseline | 0.6613 | 0.9356 | 0.7749 | +0.0000 |
-
-The useful takeaway is not the exact internal recipe settings. It is that the system trades a portion of raw recall for a large precision improvement, and that trade produces a meaningfully better prelabeling result for human review.
-
-Canonical EDR discovery now lives in:
-
-- `tools/run_canonical_prepass_discovery.py`
-
-This runner is the authoritative offline EDR promotion path. It reruns or reuses the sweep/ablation chain and writes the canonical reusable EDR artifacts.
-
-Normal calibration jobs now run in **smart EDR mode** by default:
-
-- `recipe_mode = auto`
-- compute a strict fingerprint from the dataset, labelmap/glossary, detector/classifier context, windowing settings, and calibration feature version
-- reuse a promoted canonical EDR for that exact fingerprint if one already exists
-- otherwise build/promote a matching EDR and then train the final calibration job with it
-
-Advanced overrides exist for:
-
-- `reuse_only`: require an existing promoted EDR
-- `force_rediscover`: rerun discovery before training
-
-The WebUI still exposes a single main calibration button. The backend decides reuse vs discovery.
-
-The discovery runner writes:
-
-- `canonical_edr.json`
-- `canonical_edr.md`
-
-Legacy compatibility aliases `canonical_prepass_recipe.json` and `canonical_prepass_recipe.md` are still emitted for older code paths.
-
-Under the chosen run root, the promoted EDR is derived from the sweep sequence rather than hand-copied defaults.
-
-
-### Calibration automation helpers (current toolchain)
-- `tools/build_feature_lanes_from_prepass.py`
-  - Builds fixed-split calibration lanes from cached prepass artifacts.
-  - Reuses precomputed labeled features when available to avoid redundant relabeling.
-- `tools/run_final_calibration_sweep.py`
-  - Runs coarse/refine/stack sweeps across lanes/views/seeds under a consistent evaluation policy.
-- `tools/report_final_calibration_decision.py`
-  - Produces a markdown decision report from ranked sweep JSON outputs.
-- `tools/augment_features_with_image_context.py`
-  - Injects or refreshes full-image embedding blocks into existing feature matrices for ablation work.
-- `tools/tune_ensemble_thresholds_xgb.py`
-  - Accepts deprecated `--relax-fp-ratio` as a compatibility no-op for older orchestration scripts.
-
-## Feature highlights (current status)
-- **Labeling assists**: auto‑class, SAM refinement, multi‑point prompts.
-- **SAM variants**: SAM1/SAM2 for interactive use; SAM3 for text prompting + similarity.
-- **Prepass + calibration**: deterministic prepass + XGBoost filtering (default).
-- **Glossary library**: dataset glossaries + named glossary library + optional Qwen expansion.
-- **Captioning**: Qwen captioning with windowed 2×2 tiles and detail‑preserving merge.
-- **Training**: CLIP/DINOv3 heads, YOLOv8, RF‑DETR, SAM3.
-- **Experimental**: YOLO head grafting (add new classes onto an existing YOLO run).
-- **Run management**: download/delete/rename for trained classifiers and detectors.
-
----
-
-## Third‑party tools & licenses (read before use)
-
-Tator integrates several upstream tools. You are responsible for reviewing and complying with their licenses:
-
-- **Ultralytics YOLOv8** — AGPL‑3.0
-  - https://github.com/ultralytics/ultralytics/blob/main/LICENSE
-  - https://www.ultralytics.com/license
-- **RF‑DETR** — Apache‑2.0
-  - https://github.com/roboflow/rf-detr/blob/main/LICENSE
-- **Meta SAM / SAM3** — check Meta’s licenses before use
-  - https://github.com/facebookresearch/segment-anything
-  - https://github.com/facebookresearch/sam3 (and the Hugging Face model cards)
-- **Qwen3** — review Qwen model license
-  - https://huggingface.co/Qwen
-- **XGBoost** — Apache‑2.0
-  - https://github.com/dmlc/xgboost/blob/master/LICENSE
-
----
-
-## Installation
-
-### Prerequisites
-- Python 3.10+ (3.11 recommended).
-- Optional NVIDIA GPU with CUDA for faster CLIP/SAM/Qwen.
-- Model weights (SAM1 required, SAM3 optional).
-- If you use YOLO training/head‑grafting, you must comply with the Ultralytics license/TOS.
-
-### Quick start
-1. **Create env**
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
-2. **Install deps**
-   ```bash
-   pip install -r requirements.txt
-   ```
-   Torch wheels are hardware‑specific; install the build matching your CUDA stack if needed.
-   If you want Falcon automatic-labeling on NVIDIA GPU, use the tested setup in
-   [docs/environment_setup.md](docs/environment_setup.md) instead of a generic
-   `pip install -r requirements.txt`.
-3. **Install dev tools (optional)**
-   ```bash
-   pip install -r requirements-dev.txt
-   pre-commit install
-   ```
-4. **Model weights**
-   - Place `sam_vit_h_4b8939.pth` in the repo root (SAM1).
-   - Optional SAM3 setup: see below.
-5. **Configure**
-   ```bash
-   cp .env.example .env
-   ```
-   Update `.env` as needed:
-   ```bash
-   LOGREG_PATH=./my_logreg_model.pkl
-   LABELMAP_PATH=./my_label_list.pkl
-   CLIP_MODEL_NAME=ViT-B/32
-   SAM_VARIANT=sam1
-   SAM_CHECKPOINT_PATH=./sam_vit_h_4b8939.pth
-   SAM3_MODEL_ID=facebook/sam3
-   SAM3_PROCESSOR_ID=facebook/sam3
-   SAM3_CHECKPOINT_PATH=
-   SAM3_DEVICE=
-   QWEN_MODEL_NAME=Qwen/Qwen3-VL-4B-Instruct
-   QWEN_DEVICE=auto
-   QWEN_MAX_NEW_TOKENS=768
-   ```
-6. **Run API**
-   ```bash
-   python -m uvicorn app:app --host 0.0.0.0 --port 8000
-   ```
-7. **Open UI**
-   - open `ybat-master/ybat.html` in a browser.
-
----
-
-## Dataset management & glossaries
-- Upload datasets in **Datasets** tab (YOLO preferred). COCO is auto‑converted to YOLO to preserve label order.
-- Uploading the current labeling session can optionally create a **train/val split** (seeded shuffle).
-- Server-path dataset workflows are explicitly split:
-  - **Open transient**: temporary backend session for immediate work (expires automatically and is lost on backend restart unless saved).
-  - **Save transient to library**: persists metadata + annotation overlays while keeping source files at the original path.
-  - **Register path in library**: creates a persistent linked dataset record without copying source images.
-- Linked datasets now expose a health status (`linked_root_status`: `ok`, `missing`, `invalid`) so moved/broken paths are visible in the UI.
-- Linked dataset delete is safe: delete removes the library record + overlays only; source files are never removed.
-- Each dataset has a **canonical glossary** for SAM3 text prompts.
-- A **glossary library** (named glossaries) is available for reuse across datasets.
-- Optional **dataset context** is stored with the dataset and used in Qwen captioning/term expansion prompts.
-
-### Dataset and annotation API semantics
-- `POST /datasets/register_path`
-  - Supports strict dataset-shape validation.
-  - Deduplicates by linked root/signature unless `force_new=true`.
-- `POST /datasets/open_path`
-  - Opens a transient session and refreshes TTL on use.
-- `DELETE /datasets/transient/{session_id}`
-  - Explicitly destroys transient sessions.
-- Annotation write safety:
-  - Snapshot/meta write endpoints require an active matching annotation lock session.
-  - Sessionless/wrong-session unlock or write attempts fail with `409` (no silent unlock/write).
-  - Annotation manifest responses do not expose internal server metadata paths.
-
----
-
-## Captioning (Qwen)
-- **Windowed mode** is always 2×2 tiles with ~20% overlap; tiles are scaled to model input size.
-- The merge prompt is tuned to preserve detail across windows (people counts, vehicles, unique objects).
-- Labelmap tokens are explicitly discouraged in final captions; natural language is preferred.
-
----
-
-## Experimental: YOLOv8 head grafting
-Head grafting lets you train a new detection head for <em>new classes</em> and merge it into an existing YOLOv8
-run without retraining the backbone. This is useful when you want to expand a labelmap incrementally.
-
-**Requirements**
-- Base run must be **YOLO detect** (not segmentation) and already trained.
-- New dataset must be **YOLO‑ready** and contain **only new classes**.
-- Base and new labelmaps must be **disjoint** (no overlapping class names).
-- Works with standard YOLOv8 and YOLOv8‑P2 variants.
-
-**How it works**
-1. Create a YOLOv8 head model for the new dataset (`nc = new classes`).
-2. Load base weights, freeze backbone, and train only the new head.
-3. Build a merged model with two Detect heads + a ConcatHead.
-4. Append the new labelmap to the base labelmap (base classes remain intact).
-
-**Outputs**
-- `best.pt` with merged weights.
-- `labelmap.txt` with base classes followed by new classes.
-- Optional ONNX export.
-- `head_graft_audit.jsonl` with a per‑step audit trail.
-- “Head‑graft bundle” download includes `best.pt`, `labelmap.txt`, merged YAML, audit log, and `run.json`.
-
-**Notes**
-- This flow patches Ultralytics at runtime to add `ConcatHead`. Treat as experimental.
-- The merged model’s class order is deterministic: base classes first, new classes last.
-- Launch from the **Train YOLO** tab → **YOLO Head Grafting (experimental)** panel.
- - Inference automatically loads the runtime patch when a grafted YOLO run is activated.
-
-
-## Optional: SAM3 setup
-SAM3 support is optional but recommended for text prompting + similarity.
-
-1. **Request checkpoint access** on Hugging Face.
-2. **Install SAM3 repo**
-   ```bash
-   git clone https://github.com/facebookresearch/sam3.git
-   cd sam3
-   pip install -e .
-   pip install einops
-   ```
-3. **Authenticate**
-   ```bash
-   hf auth login
-   ```
-4. **Run API** — select SAM3 in the UI.
-
-## Optional: Falcon automatic-labeling setup
-
-Falcon support is more sensitive to PyTorch/FlexAttention versions than the
-rest of the repo. Start with the documented wheel-based setup before changing
-the system CUDA install or NVIDIA driver:
+Falcon automatic labeling is the most version-sensitive path. Use the pinned
+CUDA 11.8 wheel setup before changing system CUDA or drivers:
 
 ```bash
 bash tools/setup_venv_falcon_cu118.sh
 ```
 
-See [docs/environment_setup.md](docs/environment_setup.md) for the exact
-version set and the reasoning behind it.
+See [docs/environment_setup.md](docs/environment_setup.md) for the exact stack
+and driver notes.
 
----
+## macOS Apple Silicon Setup
 
-## Updates (major changes)
-- **2026‑01‑23**: Removed agentic annotation loop; standardized deterministic prepass + calibration.
-- **2026‑01‑27**: Calibration caching + XGBoost context features stabilized.
-- **2026‑01‑29**: 4000‑image calibration evaluation (IoU=0.50) and glossary library updates.
-- **2026‑01‑29**: SAM3 text prepass reworked to reuse cached image state across prompts (tile‑first).
+The macOS path is inference-focused. It targets interactive annotation
+assistance with PyTorch MPS; training remains a Linux-first workflow.
 
----
-
-## Prepass smoke test (CLI)
 ```bash
-bash tools/run_qwen_prepass_smoke.sh --count 10 --seed 42 --dataset qwen_dataset
+tools/setup_venv_macos_inference.sh
+cp .env.macos.example .env.macos
+tools/run_macos_backend.sh
 ```
 
-## Prepass benchmark (CLI)
+The macOS venv installs CLIP, SAM1, SAM3, YOLO, RF-DETR, Qwen runtime packages,
+and the local MPS compatibility path. The runner defaults to:
+
 ```bash
-bash tools/run_qwen_prepass_benchmark.sh --count 10 --seed 42 --dataset qwen_dataset
+TATOR_INFERENCE_DEVICE=auto
+TATOR_ALLOW_MPS=1
+PYTORCH_ENABLE_MPS_FALLBACK=1
+SAM3_DEVICE=auto
+YOLO_INFER_DEVICE=auto
+RFDETR_INFER_DEVICE=auto
+QWEN_DEVICE=auto
 ```
 
----
+See [docs/macos_inference_setup.md](docs/macos_inference_setup.md) for MPS
+runtime details and known fallback behavior.
 
-## Codebase map (where to look)
+## API Families
+
+The backend exposes these endpoint groups:
+
+- `/datasets/*`, `/glossaries/*`: dataset library, linked paths, transient
+  sessions, annotation locks, text labels, glossaries, downloads.
+- `/segmentation/build/jobs/*`: bbox-to-segmentation dataset build jobs.
+- `/sam_*`, `/sam3/*_prompt`, `/sam3/models/*`, `/sam3/train/*`,
+  `/sam3/prompt_helper/*`: SAM and SAM3 prompt/model/training/vocabulary flows.
+- `/qwen/*`: Qwen status, settings, model activation, captions, inference,
+  prepass, dataset upload, and training.
+- `/clip/*`: class predictor training, active model, classifier registry,
+  labelmap registry, downloads, rename/delete.
+- `/fs/upload_classifier`, `/fs/upload_labelmap`, `/crop_zip_*`,
+  `/predict_base64`: support endpoints for uploaded model assets, crop exports,
+  and basic CLIP class prediction.
+- `/yolo/*`, `/rfdetr/*`, `/detectors/default`: detector inference, training,
+  active run selection, summaries, downloads, deletion, and YOLO head grafting.
+- `/prepass/recipes/*`, `/calibration/jobs/*`, `/edr/packages/*`,
+  `/auto_label/jobs/*`, `/agent_mining/*`: recipe mining, calibrated prelabeling,
+  EDR packaging, and automatic-labeling jobs.
+- `/system/*`, `/runtime/unload`, `/predictor_settings`, `/sam_slots`,
+  `/sam_preload`: health, GPU/storage status, runtime unload, and SAM predictor
+  slot management.
+
+Run this to inspect the live OpenAPI surface:
+
+```bash
+curl http://127.0.0.1:8000/openapi.json
 ```
-Tator/
-├─ app/                  FastAPI app object
-├─ api/                  Route handlers (APIRouter modules)
-├─ services/             Core backend logic (prepass, calibration, detectors, sam3, qwen)
-├─ utils/                Shared helpers (coords, labels, image, io, parsing)
-├─ localinferenceapi.py  Router wiring + shared state (thin shim)
-├─ ybat-master/          Frontend UI (HTML/JS/CSS)
-├─ tools/                CLI helpers
-├─ tests/                Unit tests
-└─ uploads/              Runtime artifacts + caches
+
+## Tools
+
+Common commands:
+
+```bash
+BASE_URL=http://127.0.0.1:8000 SKIP_GPU=1 tools/run_refactor_validation.sh
+BASE_URL=http://127.0.0.1:8000 SKIP_GPU=1 tools/run_fuzz_fast.sh
+python tools/scan_unused_defs.py
+python tools/run_openapi_missing_param_sanity.py
+python tools/run_openapi_missing_query_sanity.py
 ```
+
+Tool groups:
+
+- setup: `tools/setup_venv_falcon_cu118.sh`,
+  `tools/setup_venv_macos_inference.sh`
+- UI/API checks: `tools/run_ui_*`, `tools/check_ui_endpoints.py`
+- calibration and EDR: `tools/build_ensemble_features.py`,
+  `tools/train_ensemble_xgb.py`, `tools/tune_ensemble_thresholds_xgb.py`,
+  `tools/run_canonical_prepass_discovery.py`
+- automatic-labeling and Falcon diagnostics: `tools/run_auto_label_benchmark.py`,
+  `tools/debug_falcon_*.py`
+- dataset utilities: `tools/reorder_labelmap.py`,
+  `tools/detect_missclassifications.py`
+
+See [tools/README.md](tools/README.md) for a shorter command index.
+
+## Tests and Validation
+
+Fast targeted checks:
+
+```bash
+python -m py_compile localinferenceapi.py services/*.py utils/*.py models/*.py
+python -m pytest tests/test_api_route_uniqueness.py tests/test_dataset_zip_upload_security.py -q
+python -m pytest tests/test_macos_acceleration.py tests/test_detector_sahi_resilience.py -q
+```
+
+Broader suites are organized by feature area under `tests/`. UI tests live in
+`tests/ui/e2e/` and are marked so they can be run separately when Playwright and
+the backend are available.
+
+## Runtime Artifacts
+
+Most generated files are intentionally under `uploads/` and are git-ignored:
+
+- uploaded and linked dataset metadata
+- annotation overlays and lock/session state
+- training job records and model artifacts
+- SAM3/Qwen/agent-mining caches
+- calibration jobs and calibration cache
+- EDR packages and exported recipes
+
+Do not treat `uploads/` as source code. Back it up separately if a dataset or
+trained model matters.
+
+## Third-Party Licenses
+
+Review upstream licenses before using or redistributing model outputs or
+artifacts:
+
+- Ultralytics YOLOv8: AGPL-3.0 or commercial terms
+- RF-DETR: Apache-2.0
+- Meta Segment Anything and SAM3: review repository and model-card terms
+- Qwen/Qwen3-VL: review model license and acceptable-use terms
+- Falcon Perception: review model-card and remote-code terms
+- XGBoost: Apache-2.0
+
+Tator is local tooling; license compliance for models, datasets, and generated
+artifacts remains the operator's responsibility.

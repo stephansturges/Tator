@@ -1,0 +1,5 @@
+# Optional native MLX/VLM experiments for Apple Silicon captioning follow-up.
+# Not needed for the initial annotation-assistance runtime.
+
+mlx>=0.31,<1.0
+mlx-vlm>=0.3,<1.0

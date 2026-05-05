@@ -20,9 +20,11 @@ class _NoOpLock:
 @dataclass
 class _DummyYolo:
     calls: int = 0
+    last_kwargs: Optional[Dict[str, Any]] = None
 
-    def predict(self, *_args, **_kwargs) -> List[Dict[str, Any]]:
+    def predict(self, *_args, **kwargs) -> List[Dict[str, Any]]:
         self.calls += 1
+        self.last_kwargs = dict(kwargs)
         return [{"ok": True}]
 
 
@@ -164,8 +166,62 @@ def test_yolo_sahi_mismatched_slice_metadata_falls_back_to_full_image() -> None:
     )
 
     assert model.calls == 1
+    assert "device" not in (model.last_kwargs or {})
     assert len(out["detections"]) == 1
     assert out["detections"][0]["source"] == "yolo"
+
+
+def test_yolo_predict_receives_resolved_device() -> None:
+    model = _DummyYolo()
+
+    _agent_tool_run_detector_impl(
+        image_base64=None,
+        image_token=None,
+        detector_id=None,
+        mode="yolo",
+        conf=0.25,
+        sahi=None,
+        window=None,
+        window_bbox_2d=None,
+        grid_cell=None,
+        max_det=300,
+        iou=0.45,
+        merge_iou=0.5,
+        expected_labelmap=None,
+        register=False,
+        resolve_image_fn=_resolve_image,
+        normalize_window_fn=_normalize_window,
+        ensure_yolo_runtime_fn=lambda: (model, ["vehicle"], "detect"),
+        ensure_rfdetr_runtime_fn=lambda: (_DummyRfDetr(), ["vehicle"], "detect"),
+        ensure_yolo_runtime_by_id_fn=None,
+        ensure_rfdetr_runtime_by_id_fn=None,
+        raise_labelmap_mismatch_fn=lambda expected, actual, context: None,
+        clamp_conf_fn=_clamp_conf,
+        clamp_iou_fn=_clamp_iou,
+        clamp_max_det_fn=_clamp_max_det,
+        clamp_slice_params_fn=_clamp_slice,
+        slice_image_fn=_slice_image,
+        yolo_extract_fn=lambda *_args, **_kwargs: [
+            {"bbox": [1.0, 1.0, 8.0, 8.0], "class_name": "vehicle", "class_id": 0, "score": 0.9}
+        ],
+        rfdetr_extract_fn=lambda *_args, **_kwargs: ([], False),
+        merge_nms_fn=_merge_passthrough,
+        xywh_to_xyxy_fn=_xywh_to_xyxy,
+        det_payload_fn=_det_payload,
+        register_detections_fn=_register_none,
+        cluster_summaries_fn=_cluster_summary,
+        handles_from_cluster_ids_fn=_handles,
+        cluster_label_counts_fn=_label_counts,
+        agent_labelmap=["vehicle"],
+        agent_grid=None,
+        yolo_lock=_NoOpLock(),
+        rfdetr_lock=_NoOpLock(),
+        http_exception_cls=HTTPException,
+        yolo_device_fn=lambda: "mps",
+    )
+
+    assert model.last_kwargs is not None
+    assert model.last_kwargs["device"] == "mps"
 
 
 def test_rfdetr_sahi_mismatched_slice_metadata_falls_back_to_full_image() -> None:

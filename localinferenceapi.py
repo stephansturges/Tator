@@ -4375,10 +4375,11 @@ def resolve_image_payload(
     variant = _default_variant(sam_variant)
     if image_token:
         cached = _fetch_preloaded_image(image_token, variant)
-        if cached is None:
+        if cached is not None:
+            pil_img = Image.fromarray(cached)
+            return pil_img, cached, image_token
+        if not image_base64:
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found")
-        pil_img = Image.fromarray(cached)
-        return pil_img, cached, image_token
     pil_img, np_img = _decode_image_base64_impl(
         image_base64,
         max_bytes=BASE64_IMAGE_MAX_BYTES,

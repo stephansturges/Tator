@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20260409a" rel="stylesheet">
+    <link href="ybat.css?v=20260509a" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
          before we call listenImageCrop().
@@ -11,7 +11,7 @@
     <script src="canvas.min.js?v=20260409a"></script>
     <script src="jszip.min.js?v=20260409a"></script>
     <script src="filesaver.min.js?v=20260409a"></script>
-    <script src="ybat.js?v=20260409a"></script>
+    <script src="ybat.js?v=20260511b"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -33,14 +33,15 @@
         <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="batchTweakTitle">
             <div class="modal__title" id="batchTweakTitle">Apply SAM tweak?</div>
             <p class="modal__body" id="batchTweakMessage">
-                Apply SAM bbox tweak to all boxes in <span id="batchTweakClass">this class</span>?
+                Apply SAM bbox tweak to all boxes in <span id="batchTweakClass">this class</span>? SAM will load for this image if needed.
             </p>
             <div class="modal__actions">
                 <button type="button" class="modal__btn modal__btn--primary" id="batchTweakConfirm">Yes</button>
+                <button type="button" class="modal__btn modal__btn--primary" id="batchTweakConfirmAlways">Yes and don't ask for confirmation again</button>
                 <button type="button" class="modal__btn" id="batchTweakCancel">No</button>
             </div>
         </div>
-	    </div>
+    </div>
     <div id="taskQueue" class="task-queue" aria-live="polite" aria-atomic="true"></div>
     <div id="classScrollIndicator" class="class-scroll-indicator" aria-live="polite" aria-atomic="true"></div>
     <div id="automationLockBanner" class="training-help" style="display:none; margin:8px 16px 12px; padding:10px 12px; border:1px solid #f59e0b; border-radius:10px; background:#fff7ed; color:#9a3412;">
@@ -275,7 +276,7 @@
                                     SAM3 similarity prompt (use selected box(es))
                                 </button>
                                 <label for="sam3SimilarityThreshold" class="training-help" style="margin-top: 6px;">Similarity score (higher = stricter)</label>
-                                <input type="range" id="sam3SimilarityThreshold" min="0" max="1" step="0.05" value="0.5" />
+                                <input type="range" id="sam3SimilarityThreshold" min="0" max="1" step="0.05" value="0.2" />
                             </div>
                             <section class="qwen-panel" aria-labelledby="qwenPanelTitle">
                                 <div class="qwen-panel__header">
@@ -575,6 +576,7 @@
                         <div id="clipProgressBar"><div id="clipProgressFill"></div></div>
                         <canvas id="canvas"></canvas>
                         <canvas id="hiddenCanvas"></canvas>
+                        <div id="annotationFocusHud" class="annotation-focus-hud" aria-live="polite" aria-atomic="true"></div>
                     </div>
                 </div>
             </div>

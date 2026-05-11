@@ -113,7 +113,7 @@ body {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 8px;
+    gap: 12px;
     z-index: 55;
     pointer-events: none;
     opacity: 0;
@@ -127,29 +127,64 @@ body {
 }
 
 .class-scroll-indicator__bubble {
-    background: rgba(15, 23, 42, 0.92);
-    color: #f8fafc;
-    border-radius: 12px;
-    box-shadow: 0 10px 25px rgba(15, 23, 42, 0.35);
-    text-align: center;
-    min-width: 180px;
-    max-width: 280px;
+    background: var(--class-bg, rgba(15, 23, 42, 0.96));
+    border: 2px solid var(--class-color, rgba(248, 250, 252, 0.72));
+    color: var(--class-text, #f8fafc);
+    border-radius: 14px;
+    box-shadow: 0 14px 32px rgba(15, 23, 42, 0.4);
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.12;
+    min-width: 270px;
+    max-width: 420px;
+    opacity: var(--bubble-opacity, 0.75);
     overflow: hidden;
+    padding: 12px 18px;
+    text-align: center;
     text-overflow: ellipsis;
+    text-shadow: 0 1px 2px rgba(15, 23, 42, 0.45);
+    transform-origin: center;
     white-space: nowrap;
 }
 
+.class-scroll-indicator--slide-up .class-scroll-indicator__bubble {
+    animation: class-scroll-slide-up 110ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+    animation-delay: var(--row-delay, 0ms);
+}
+
+.class-scroll-indicator--slide-down .class-scroll-indicator__bubble {
+    animation: class-scroll-slide-down 110ms cubic-bezier(0.2, 0.9, 0.25, 1) both;
+    animation-delay: var(--row-delay, 0ms);
+}
+
+@keyframes class-scroll-slide-up {
+    from {
+        transform: translateY(22px) scale(0.98);
+    }
+    to {
+        transform: translateY(0) scale(1);
+    }
+}
+
+@keyframes class-scroll-slide-down {
+    from {
+        transform: translateY(-22px) scale(0.98);
+    }
+    to {
+        transform: translateY(0) scale(1);
+    }
+}
+
 .class-scroll-indicator__bubble--current {
-    font-size: 14px;
-    font-weight: 750;
-    padding: 10px 14px;
+    font-size: 21.6px;
+    font-weight: 800;
+    min-width: 324px;
+    padding: 14px 22px;
 }
 
 .class-scroll-indicator__bubble--adjacent {
-    font-size: 12px;
-    font-weight: 600;
-    opacity: 0.78;
-    padding: 8px 12px;
+    font-size: 18px;
+    font-weight: 700;
 }
 
 .modal {
@@ -180,7 +215,7 @@ body {
     background: #ffffff;
     border-radius: 12px;
     padding: 20px 22px;
-    width: min(320px, 90vw);
+    width: min(420px, 90vw);
     box-shadow: 0 15px 35px rgba(15, 23, 42, 0.25);
     z-index: 2;
     font-size: 14px;
@@ -205,6 +240,7 @@ body {
 
 .modal__actions {
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
     gap: 10px;
 }
@@ -407,6 +443,89 @@ hr {
     margin: 10px 10px 10px calc(24% + 10px);
     padding-left: 10px;
     position: relative;
+}
+
+body.annotation-focus-mode .tab-bar,
+body.annotation-focus-mode #tabLabeling .left,
+body.annotation-focus-mode #automationLockBanner {
+    display: none !important;
+}
+
+body.annotation-focus-mode .tab-shell,
+body.annotation-focus-mode .tab-panels,
+body.annotation-focus-mode #tabLabeling,
+body.annotation-focus-mode #tabLabeling .container {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    background: #050505;
+    z-index: 70;
+}
+
+body.annotation-focus-mode #tabLabeling .right {
+    position: fixed;
+    inset: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: #050505;
+    z-index: 71;
+}
+
+body.annotation-focus-mode #canvas {
+    display: block;
+    width: 100vw !important;
+    height: 100vh !important;
+}
+
+body.annotation-focus-mode #hiddenCanvas {
+    display: none;
+}
+
+.annotation-focus-hud {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 90;
+    max-width: min(520px, calc(100vw - 32px));
+    padding: 10px 12px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.88);
+    color: #f8fafc;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+    font-size: 12px;
+    line-height: 1.35;
+    opacity: 0;
+    transform: translateY(-6px);
+    pointer-events: none;
+    transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.annotation-focus-hud.visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.annotation-focus-hud__title {
+    font-size: 13px;
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.annotation-focus-hud__meta {
+    margin-top: 4px;
+    color: #cbd5e1;
+}
+
+body.annotation-focus-mode .class-scroll-indicator {
+    z-index: 92;
 }
 
 #clipProgressBar {

@@ -149,8 +149,8 @@ class Sam3VisualPrompt(BaseModel):
     bbox_height: Optional[float] = None
     bboxes: Optional[List[List[float]]] = None
     bbox_labels: Optional[List[bool]] = None
-    threshold: float = 0.5
-    mask_threshold: float = 0.5
+    threshold: float = 0.2
+    mask_threshold: float = 0.2
     simplify_epsilon: Optional[float] = None
     sam_variant: Optional[str] = None
     image_name: Optional[str] = None

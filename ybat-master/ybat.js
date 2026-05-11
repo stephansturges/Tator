@@ -20,23 +20,186 @@
         );
     }
 
-    // 1) Define a palette of 100 colors spread around the hue wheel
-    //    (First ~20 are roughly 0°, 18°, 36°, ..., 342°, then continuing).
-    const colorPalette = [];
-    for (let i = 0; i < 100; i++) {
-        const baseHue = i * 20; 
-        const randomOffset = Math.random() * 0.3;
-        const hue = (baseHue + randomOffset) % 360;
-        colorPalette.push(`hsla(${hue}, 100%, 45%, 1)`);
+    const curatedClassColors = [
+        "#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2", "#ca8a04", "#db2777",
+        "#4f46e5", "#65a30d", "#be123c", "#0d9488", "#7c3aed", "#d97706", "#0284c7", "#c026d3",
+        "#1d4ed8", "#b91c1c", "#15803d", "#6d28d9", "#f97316", "#0f766e", "#a16207", "#be185d",
+        "#4338ca", "#4d7c0f", "#e11d48", "#0369a1", "#a21caf", "#92400e", "#059669", "#7e22ce",
+        "#3b82f6", "#ef4444", "#22c55e", "#a855f7", "#f59e0b", "#06b6d4", "#84cc16", "#ec4899",
+        "#6366f1", "#14b8a6", "#f43f5e", "#8b5cf6", "#fb7185", "#10b981", "#eab308", "#38bdf8",
+    ];
+    const classColorCache = new Map();
+    const GOLDEN_ANGLE = 137.508;
+
+    function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
     }
 
-    function getColorFromClass(className) {
-        const index = classes[className] % 100; 
-        return colorPalette[index];
+    function normalizeHexColor(value) {
+        const raw = String(value || "").trim();
+        const match = raw.match(/^#?([a-f0-9]{3}|[a-f0-9]{6})$/i);
+        if (!match) {
+            return null;
+        }
+        let hex = match[1].toLowerCase();
+        if (hex.length === 3) {
+            hex = hex.split("").map((part) => `${part}${part}`).join("");
+        }
+        return `#${hex}`;
+    }
+
+    function hexToRgb(hex) {
+        const normalized = normalizeHexColor(hex);
+        if (!normalized) {
+            return null;
+        }
+        const value = parseInt(normalized.slice(1), 16);
+        return {
+            r: (value >> 16) & 255,
+            g: (value >> 8) & 255,
+            b: value & 255,
+        };
+    }
+
+    function rgbToHex({ r, g, b }) {
+        return `#${[r, g, b].map((value) => clamp(Math.round(value), 0, 255).toString(16).padStart(2, "0")).join("")}`;
+    }
+
+    function mixHexColors(baseHex, mixHex, mixAmount) {
+        const base = hexToRgb(baseHex);
+        const mix = hexToRgb(mixHex);
+        if (!base || !mix) {
+            return baseHex;
+        }
+        const t = clamp(Number(mixAmount) || 0, 0, 1);
+        return rgbToHex({
+            r: base.r * (1 - t) + mix.r * t,
+            g: base.g * (1 - t) + mix.g * t,
+            b: base.b * (1 - t) + mix.b * t,
+        });
+    }
+
+    function relativeLuminance(hex) {
+        const rgb = hexToRgb(hex);
+        if (!rgb) {
+            return 0;
+        }
+        const channel = (value) => {
+            const normalized = value / 255;
+            return normalized <= 0.03928
+                ? normalized / 12.92
+                : Math.pow((normalized + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * channel(rgb.r) + 0.7152 * channel(rgb.g) + 0.0722 * channel(rgb.b);
+    }
+
+    function colorWithAlpha(color, alpha) {
+        const alphaNumber = Number(alpha);
+        const normalizedAlpha = Number.isFinite(alphaNumber) ? clamp(alphaNumber, 0, 1) : 1;
+        const hexRgb = hexToRgb(color);
+        if (hexRgb) {
+            return `rgba(${hexRgb.r}, ${hexRgb.g}, ${hexRgb.b}, ${normalizedAlpha})`;
+        }
+        const raw = String(color || "").trim();
+        const commaPartsMatch = raw.match(/^(rgba?|hsla?)\((.+)\)$/i);
+        if (commaPartsMatch) {
+            const fn = commaPartsMatch[1].toLowerCase();
+            const parts = commaPartsMatch[2].split(",").map((part) => part.trim());
+            if (parts.length >= 3) {
+                return `${fn.startsWith("hsl") ? "hsla" : "rgba"}(${parts[0]}, ${parts[1]}, ${parts[2]}, ${normalizedAlpha})`;
+            }
+        }
+        return raw || `rgba(37, 99, 235, ${normalizedAlpha})`;
     }
 
     function withAlpha(color, alpha) {
-        return color.replace(/(\d?\.?\d+)\)$/, `${alpha})`);
+        return colorWithAlpha(color, alpha);
+    }
+
+    function hashStringForColor(value) {
+        let hash = 2166136261;
+        const input = String(value || "");
+        for (let i = 0; i < input.length; i++) {
+            hash ^= input.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        return hash >>> 0;
+    }
+
+    function resolveClassColorIndex(className) {
+        const mapped = classes && Object.prototype.hasOwnProperty.call(classes, className)
+            ? Number(classes[className])
+            : NaN;
+        if (Number.isFinite(mapped) && mapped >= 0) {
+            return Math.floor(mapped);
+        }
+        return hashStringForColor(className) % 4096;
+    }
+
+    function hslToHex(hue, saturation, lightness) {
+        const h = (((hue % 360) + 360) % 360) / 360;
+        const s = clamp(saturation, 0, 1);
+        const l = clamp(lightness, 0, 1);
+        if (s === 0) {
+            const value = l * 255;
+            return rgbToHex({ r: value, g: value, b: value });
+        }
+        const hueToRgb = (p, q, tRaw) => {
+            let t = tRaw;
+            if (t < 0) t += 1;
+            if (t > 1) t -= 1;
+            if (t < 1 / 6) return p + (q - p) * 6 * t;
+            if (t < 1 / 2) return q;
+            if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+            return p;
+        };
+        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        const p = 2 * l - q;
+        return rgbToHex({
+            r: hueToRgb(p, q, h + 1 / 3) * 255,
+            g: hueToRgb(p, q, h) * 255,
+            b: hueToRgb(p, q, h - 1 / 3) * 255,
+        });
+    }
+
+    function generatedClassColor(index) {
+        const overflowIndex = Math.max(0, index - curatedClassColors.length);
+        const hue = (23 + overflowIndex * GOLDEN_ANGLE) % 360;
+        const saturationBands = [0.82, 0.68, 0.9, 0.74];
+        const lightnessBands = [0.46, 0.58, 0.38, 0.66];
+        const band = overflowIndex % saturationBands.length;
+        return hslToHex(hue, saturationBands[band], lightnessBands[band]);
+    }
+
+    function getClassColorTokens(className) {
+        const label = String(className || "");
+        const index = resolveClassColorIndex(label);
+        const cacheKey = `${label}::${index}`;
+        const cached = classColorCache.get(cacheKey);
+        if (cached) {
+            return cached;
+        }
+        const stroke = index < curatedClassColors.length
+            ? (normalizeHexColor(curatedClassColors[index]) || generatedClassColor(index))
+            : generatedClassColor(index);
+        const strokeLuminance = relativeLuminance(stroke);
+        const strongBg = strokeLuminance > 0.42
+            ? mixHexColors(stroke, "#0f172a", 0.34)
+            : mixHexColors(stroke, "#ffffff", 0.1);
+        const textOnStrongBg = relativeLuminance(strongBg) > 0.42 ? "#111827" : "#f8fafc";
+        const tokens = {
+            stroke,
+            fill: colorWithAlpha(stroke, 0.2),
+            handleFill: colorWithAlpha(stroke, 0.35),
+            strongBg: colorWithAlpha(strongBg, 0.96),
+            textOnStrongBg,
+        };
+        classColorCache.set(cacheKey, tokens);
+        return tokens;
+    }
+
+    function getColorFromClass(className) {
+        return getClassColorTokens(className).stroke;
     }
 
     function dedupeStringList(list) {
@@ -183,6 +346,8 @@
     let multiPointWaitingForPreload = false;
 
     let samVariant = "sam3";
+    const SAM3_SIMILARITY_DEFAULT_THRESHOLD = 0.2;
+    const SAM3_SIMILARITY_DEFAULT_MASK_THRESHOLD = 0.2;
     let autoModeCheckbox = null;
     let autoClassMarginEnabledCheckbox = null;
     let autoClassMarginValueInput = null;
@@ -287,6 +452,8 @@
     let imageCropListenerBound = false;
     const tweakPreserveSet = new Set();
     let magicTweakRunning = false;
+    const BATCH_TWEAK_APPROVED_CLASSES_SESSION_KEY = "tator.batchTweakApprovedClasses";
+    const batchTweakApprovedClasses = loadBatchTweakApprovedClasses();
 
     const multiPointColors = {
         positive: { stroke: "#2ecc71", fill: "rgba(46, 204, 113, 0.35)" },
@@ -295,7 +462,16 @@
 
     const DEFAULT_API_ROOT = "http://localhost:8000";
     const API_STORAGE_KEY = "tator.apiRoot";
+    const YOLO_CAPTIONS_EXPORT_FILENAME = "bboxes_yolo.zip";
+    const YOLO_CAPTIONS_EXPORT_DOWNLOAD_COUNTER_KEY = "tator.yoloCaptionsExportDownloadCounter";
+    const YOLO_CAPTIONS_EXPORT_DOWNLOAD_COUNTER_START = "102";
+    const YOLO_EXPORT_HANDLE_DB_NAME = "tatorExportHandles";
+    const YOLO_EXPORT_HANDLE_STORE = "handles";
+    const YOLO_EXPORT_DIRECTORY_HANDLE_KEY = "yoloCaptionsExportDirectory";
     let API_ROOT = loadStoredApiRoot();
+    let yoloExportDirectoryHandle = null;
+    let yoloExportDirectoryHandleLoaded = false;
+    let yoloExportDirectoryHandleLoadPromise = null;
     const TAB_LABELING = "labeling";
     const TAB_PREPASS_BUILDER = "prepass-builder";
     const TAB_TRAINING = "training";
@@ -971,22 +1147,67 @@
         el.classList.remove("visible");
     }
 
-    function showClassScrollIndicator({ previousClass, currentClassName, nextClass }, { duration = 900 } = {}) {
+    function showClassScrollIndicator({ previousClass, currentClassName, nextClass, items }, { duration = 900, direction = 0 } = {}) {
         const el = ensureClassScrollIndicatorElement();
         if (!el) {
             return;
         }
-        const currentLabel = String(currentClassName || "").trim();
-        if (!currentLabel) {
+        const entries = Array.isArray(items) ? items : null;
+        const indicatorItems = entries && entries.length
+            ? entries
+            : [
+                { label: previousClass, offset: -1 },
+                { label: currentClassName, offset: 0 },
+                { label: nextClass, offset: 1 },
+            ];
+        const validItems = indicatorItems
+            .map((item) => {
+                const label = String(item?.label || "").trim();
+                if (!label) {
+                    return null;
+                }
+                const offset = Number.isFinite(item?.offset) ? item.offset : 0;
+                const distance = Math.min(3, Math.abs(offset));
+                const opacity = Number.isFinite(item?.opacity)
+                    ? Math.max(0.5, Math.min(1, item.opacity))
+                    : Math.max(0.5, 1 - (distance / 3) * 0.5);
+                const tokens = getClassColorTokens(label);
+                const classColor = item?.color || tokens.stroke || "#334155";
+                return {
+                    label,
+                    offset,
+                    opacity,
+                    color: classColor,
+                    background: item?.background || tokens.strongBg || colorWithAlpha(classColor, 0.96),
+                    textColor: item?.textColor || tokens.textOnStrongBg || "#f8fafc",
+                };
+            })
+            .filter(Boolean);
+        if (!validItems.length) {
             return;
         }
-        const prevLabel = String(previousClass || currentLabel).trim() || currentLabel;
-        const nextLabel = String(nextClass || currentLabel).trim() || currentLabel;
-        el.innerHTML = [
-            `<div class="class-scroll-indicator__bubble class-scroll-indicator__bubble--adjacent" title="Previous class">${escapeHtml(prevLabel)}</div>`,
-            `<div class="class-scroll-indicator__bubble class-scroll-indicator__bubble--current" title="Current class">${escapeHtml(currentLabel)}</div>`,
-            `<div class="class-scroll-indicator__bubble class-scroll-indicator__bubble--adjacent" title="Next class">${escapeHtml(nextLabel)}</div>`,
-        ].join("");
+        el.classList.remove("class-scroll-indicator--slide-up", "class-scroll-indicator--slide-down");
+        const directionValue = Number(direction);
+        if (Number.isFinite(directionValue) && directionValue !== 0) {
+            el.classList.add(directionValue > 0
+                ? "class-scroll-indicator--slide-up"
+                : "class-scroll-indicator--slide-down");
+        }
+        el.innerHTML = validItems.map((item) => {
+            const current = item.offset === 0;
+            const roleClass = current
+                ? "class-scroll-indicator__bubble--current"
+                : "class-scroll-indicator__bubble--adjacent";
+            const title = current ? "Current class" : (item.offset < 0 ? "Previous class" : "Next class");
+            const rowDistance = Math.min(3, Math.abs(item.offset || 0));
+            const rowDelay = `${rowDistance * 6}ms`;
+            return [
+                `<div class="class-scroll-indicator__bubble ${roleClass}"`,
+                ` title="${escapeHtml(title)}"`,
+                ` style="--class-color: ${item.color}; --class-bg: ${item.background}; --class-text: ${item.textColor}; --bubble-opacity: ${item.opacity.toFixed(3)}; --row-delay: ${rowDelay};">`,
+                `${escapeHtml(item.label)}</div>`,
+            ].join("");
+        }).join("");
         el.classList.add("visible");
         if (classScrollIndicatorState.timerId) {
             clearTimeout(classScrollIndicatorState.timerId);
@@ -1005,7 +1226,7 @@
         return option.text || option.textContent || null;
     }
 
-    function showClassScrollIndicatorForList(classListEl, currentIndex) {
+    function showClassScrollIndicatorForList(classListEl, currentIndex, options = {}) {
         if (!classListEl || !classListEl.options || !classListEl.options.length) {
             return;
         }
@@ -1016,15 +1237,19 @@
         if (!currentName) {
             return;
         }
-        if (total === 1) {
-            showClassScrollIndicator({ previousClass: currentName, currentClassName: currentName, nextClass: currentName });
-            return;
+        const visibleRadius = 3;
+        const items = [];
+        for (let offset = -visibleRadius; offset <= visibleRadius; offset++) {
+            const itemIndex = (safeIndex + offset + total) % total;
+            const label = getClassListOptionName(classListEl.options[itemIndex]) || currentName;
+            const distance = Math.abs(offset);
+            items.push({
+                label,
+                offset,
+                opacity: Math.max(0.5, 1 - (distance / visibleRadius) * 0.5),
+            });
         }
-        const prevIndex = (safeIndex - 1 + total) % total;
-        const nextIndex = (safeIndex + 1) % total;
-        const prevName = getClassListOptionName(classListEl.options[prevIndex]) || currentName;
-        const nextName = getClassListOptionName(classListEl.options[nextIndex]) || currentName;
-        showClassScrollIndicator({ previousClass: prevName, currentClassName: currentName, nextClass: nextName });
+        showClassScrollIndicator({ items }, options);
     }
 
     function enqueueTask({ kind, imageName, detail }) {
@@ -1145,12 +1370,25 @@
             batchTweakElements.modal = document.getElementById("batchTweakModal");
             batchTweakElements.backdrop = batchTweakElements.modal?.querySelector(".modal__backdrop");
             batchTweakElements.confirm = document.getElementById("batchTweakConfirm");
+            batchTweakElements.confirmAlways = document.getElementById("batchTweakConfirmAlways");
             batchTweakElements.cancel = document.getElementById("batchTweakCancel");
             batchTweakElements.classLabel = document.getElementById("batchTweakClass");
             if (batchTweakElements.confirm) {
                 batchTweakElements.confirm.addEventListener("click", () => {
+                    const requestedClass = batchTweakRequestedClass || currentClass;
                     closeBatchTweakModal();
-                    runBatchTweakForCurrentCategory().catch((err) => {
+                    runBatchTweakForClass(requestedClass).catch((err) => {
+                        console.error("Batch tweak failed", err);
+                        setSamStatus(`Batch tweak failed: ${err.message || err}`, { variant: "error", duration: 5000 });
+                    });
+                });
+            }
+            if (batchTweakElements.confirmAlways) {
+                batchTweakElements.confirmAlways.addEventListener("click", () => {
+                    const requestedClass = batchTweakRequestedClass || currentClass;
+                    approveBatchTweakClass(requestedClass);
+                    closeBatchTweakModal();
+                    runBatchTweakForClass(requestedClass).catch((err) => {
                         console.error("Batch tweak failed", err);
                         setSamStatus(`Batch tweak failed: ${err.message || err}`, { variant: "error", duration: 5000 });
                     });
@@ -1169,6 +1407,48 @@
                     closeBatchTweakModal();
                 }
             });
+        }
+    }
+
+    function batchTweakApprovalKey(className) {
+        return String(className || "").trim();
+    }
+
+    function loadBatchTweakApprovedClasses() {
+        try {
+            const raw = window.sessionStorage?.getItem(BATCH_TWEAK_APPROVED_CLASSES_SESSION_KEY);
+            const parsed = raw ? JSON.parse(raw) : [];
+            if (!Array.isArray(parsed)) {
+                return new Set();
+            }
+            return new Set(parsed.map(batchTweakApprovalKey).filter(Boolean));
+        } catch (error) {
+            console.debug("Unable to read batch tweak approvals", error);
+            return new Set();
+        }
+    }
+
+    function persistBatchTweakApprovedClasses() {
+        try {
+            window.sessionStorage?.setItem(
+                BATCH_TWEAK_APPROVED_CLASSES_SESSION_KEY,
+                JSON.stringify(Array.from(batchTweakApprovedClasses))
+            );
+        } catch (error) {
+            console.debug("Unable to persist batch tweak approvals", error);
+        }
+    }
+
+    function isBatchTweakClassApproved(className) {
+        const key = batchTweakApprovalKey(className);
+        return !!key && batchTweakApprovedClasses.has(key);
+    }
+
+    function approveBatchTweakClass(className) {
+        const key = batchTweakApprovalKey(className);
+        if (key) {
+            batchTweakApprovedClasses.add(key);
+            persistBatchTweakApprovedClasses();
         }
     }
 
@@ -1194,10 +1474,7 @@
             setSamStatus("No bboxes available for this class", { variant: "warn", duration: 3000 });
             return;
         }
-        if (!samMode) {
-            setSamStatus("Enable SAM mode to batch tweak", { variant: "warn", duration: 3000 });
-            return;
-        }
+        batchTweakRequestedClass = currentClass;
         if (batchTweakElements.classLabel) {
             batchTweakElements.classLabel.textContent = `${currentClass} (${bucket.length})`;
         }
@@ -1211,11 +1488,19 @@
         }
         batchTweakElements.modal.classList.remove("visible");
         batchTweakElements.modal.setAttribute("aria-hidden", "true");
+        batchTweakRequestedClass = null;
     }
 
     function requestBatchTweakModal() {
         if (!currentClass) {
             setSamStatus("Select a class in the list before batch tweaking", { variant: "warn", duration: 3000 });
+            return;
+        }
+        if (isBatchTweakClassApproved(currentClass)) {
+            runBatchTweakForClass(currentClass).catch((err) => {
+                console.error("Batch tweak failed", err);
+                setSamStatus(`Batch tweak failed: ${err.message || err}`, { variant: "error", duration: 5000 });
+            });
             return;
         }
         openBatchTweakModal();
@@ -1256,13 +1541,15 @@
     const DOUBLE_TAP_WINDOW_MS = 260;
     let xHotkeyTimeoutId = null;
     let batchTweakRunning = false;
-    const batchTweakElements = {
-        modal: null,
-        backdrop: null,
-        confirm: null,
-        cancel: null,
-        classLabel: null,
-    };
+	    const batchTweakElements = {
+	        modal: null,
+	        backdrop: null,
+	        confirm: null,
+	        confirmAlways: null,
+	        cancel: null,
+	        classLabel: null,
+	    };
+	    let batchTweakRequestedClass = null;
     const backgroundLoadModal = {
         element: null,
         dismissBtn: null,
@@ -5719,12 +6006,126 @@ const sam3TrainState = {
         return safe || fallback;
     }
 
+    function splitFilenameParts(filename) {
+        const safeName = sanitizeFilename(filename, "download.bin");
+        const dotIndex = safeName.lastIndexOf(".");
+        if (dotIndex <= 0 || dotIndex === safeName.length - 1) {
+            return { basename: safeName, extension: "" };
+        }
+        return {
+            basename: safeName.slice(0, dotIndex),
+            extension: safeName.slice(dotIndex),
+        };
+    }
+
+    function normalizeCounterText(value, fallback = "0") {
+        const text = String(value ?? "").trim();
+        if (!/^\d+$/.test(text)) {
+            return fallback;
+        }
+        return text.replace(/^0+(?=\d)/, "") || "0";
+    }
+
+    function incrementCounterText(value) {
+        const digits = normalizeCounterText(value).split("");
+        let carry = 1;
+        for (let i = digits.length - 1; i >= 0 && carry; i--) {
+            const nextDigit = digits[i].charCodeAt(0) - 48 + carry;
+            if (nextDigit >= 10) {
+                digits[i] = "0";
+            } else {
+                digits[i] = String(nextDigit);
+                carry = 0;
+            }
+        }
+        if (carry) {
+            digits.unshift("1");
+        }
+        return digits.join("");
+    }
+
+    function compareCounterText(left, right) {
+        const a = normalizeCounterText(left);
+        const b = normalizeCounterText(right);
+        if (a.length !== b.length) {
+            return a.length > b.length ? 1 : -1;
+        }
+        if (a === b) {
+            return 0;
+        }
+        return a > b ? 1 : -1;
+    }
+
+    function formatNumberedFilename(filename, counterText) {
+        const counter = normalizeCounterText(counterText);
+        const safeName = sanitizeFilename(filename, "download.bin");
+        if (counter === "0") {
+            return safeName;
+        }
+        const { basename, extension } = splitFilenameParts(safeName);
+        return `${basename} (${counter})${extension}`;
+    }
+
+    function escapeRegExp(value) {
+        return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    function getNumberedFilenameCounter(candidateFilename, baseFilename) {
+        const candidate = sanitizeFilename(candidateFilename, "");
+        const safeBase = sanitizeFilename(baseFilename, "download.bin");
+        if (!candidate) {
+            return null;
+        }
+        if (candidate === safeBase) {
+            return "0";
+        }
+        const { basename, extension } = splitFilenameParts(safeBase);
+        const pattern = new RegExp(`^${escapeRegExp(basename)} \\((\\d+)\\)${escapeRegExp(extension)}$`);
+        const match = candidate.match(pattern);
+        return match ? normalizeCounterText(match[1]) : null;
+    }
+
+    function readYoloExportDownloadCounter() {
+        try {
+            const stored = window.localStorage?.getItem(YOLO_CAPTIONS_EXPORT_DOWNLOAD_COUNTER_KEY);
+            const counter = normalizeCounterText(stored, YOLO_CAPTIONS_EXPORT_DOWNLOAD_COUNTER_START);
+            return compareCounterText(counter, YOLO_CAPTIONS_EXPORT_DOWNLOAD_COUNTER_START) < 0
+                ? YOLO_CAPTIONS_EXPORT_DOWNLOAD_COUNTER_START
+                : counter;
+        } catch (error) {
+            console.debug("Unable to read YOLO export download counter", error);
+            return YOLO_CAPTIONS_EXPORT_DOWNLOAD_COUNTER_START;
+        }
+    }
+
+    function writeYoloExportDownloadCounter(counterText) {
+        const nextCounter = normalizeCounterText(counterText, YOLO_CAPTIONS_EXPORT_DOWNLOAD_COUNTER_START);
+        try {
+            window.localStorage?.setItem(YOLO_CAPTIONS_EXPORT_DOWNLOAD_COUNTER_KEY, nextCounter);
+        } catch (error) {
+            console.debug("Unable to persist YOLO export download counter", error);
+        }
+    }
+
+    function writeYoloExportDownloadCounterAtLeast(counterText) {
+        const current = readYoloExportDownloadCounter();
+        if (compareCounterText(counterText, current) > 0) {
+            writeYoloExportDownloadCounter(counterText);
+        }
+    }
+
+    function nextYoloExportDownloadFilename(filename = YOLO_CAPTIONS_EXPORT_FILENAME) {
+        const counter = readYoloExportDownloadCounter();
+        writeYoloExportDownloadCounter(incrementCounterText(counter));
+        return formatNumberedFilename(filename, counter);
+    }
+
     function saveBlobToDisk(blob, filename) {
         const safeName = sanitizeFilename(filename, "download.bin");
         if (typeof saveAs === "function") {
             try {
                 saveAs(blob, safeName);
-                return;
+                return safeName;
             } catch (error) {
                 // Keep a robust fallback path if FileSaver throws at runtime.
                 console.warn("saveAs failed; falling back to anchor download", error);
@@ -5744,6 +6145,310 @@ const sam3TrainState = {
         }
         // Revoke asynchronously so slow browsers don't lose the download.
         window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+        return safeName;
+    }
+
+    function supportsLocalFolderExport() {
+        return typeof window.showDirectoryPicker === "function";
+    }
+
+    function supportsExportHandleStorage() {
+        return typeof window.indexedDB !== "undefined";
+    }
+
+    function openYoloExportHandleDb() {
+        return new Promise((resolve, reject) => {
+            if (!supportsExportHandleStorage()) {
+                reject(new Error("indexeddb_unavailable"));
+                return;
+            }
+            const request = window.indexedDB.open(YOLO_EXPORT_HANDLE_DB_NAME, 1);
+            request.onupgradeneeded = () => {
+                const db = request.result;
+                if (!db.objectStoreNames.contains(YOLO_EXPORT_HANDLE_STORE)) {
+                    db.createObjectStore(YOLO_EXPORT_HANDLE_STORE);
+                }
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error("indexeddb_open_failed"));
+            request.onblocked = () => reject(new Error("indexeddb_blocked"));
+        });
+    }
+
+    async function readStoredYoloExportDirectoryHandle() {
+        let db = null;
+        try {
+            db = await openYoloExportHandleDb();
+            return await new Promise((resolve, reject) => {
+                let settled = false;
+                const finish = (fn, value) => {
+                    if (settled) return;
+                    settled = true;
+                    try {
+                        db.close();
+                    } catch (error) {
+                        console.debug("Failed to close export handle DB", error);
+                    }
+                    fn(value);
+                };
+                const tx = db.transaction(YOLO_EXPORT_HANDLE_STORE, "readonly");
+                const request = tx.objectStore(YOLO_EXPORT_HANDLE_STORE).get(YOLO_EXPORT_DIRECTORY_HANDLE_KEY);
+                request.onsuccess = () => finish(resolve, request.result || null);
+                request.onerror = () => finish(reject, request.error || tx.error || new Error("indexeddb_read_failed"));
+                tx.onerror = () => finish(reject, tx.error || new Error("indexeddb_read_failed"));
+                tx.onabort = () => finish(reject, tx.error || new Error("indexeddb_read_aborted"));
+            });
+        } catch (error) {
+            if (db) {
+                try {
+                    db.close();
+                } catch (closeError) {
+                    console.debug("Failed to close export handle DB", closeError);
+                }
+            }
+            throw error;
+        }
+    }
+
+    async function saveStoredYoloExportDirectoryHandle(handle) {
+        if (!handle || !supportsExportHandleStorage()) {
+            return false;
+        }
+        let db = null;
+        try {
+            db = await openYoloExportHandleDb();
+            await new Promise((resolve, reject) => {
+                let settled = false;
+                const finish = (fn, value) => {
+                    if (settled) return;
+                    settled = true;
+                    try {
+                        db.close();
+                    } catch (error) {
+                        console.debug("Failed to close export handle DB", error);
+                    }
+                    fn(value);
+                };
+                const tx = db.transaction(YOLO_EXPORT_HANDLE_STORE, "readwrite");
+                tx.objectStore(YOLO_EXPORT_HANDLE_STORE).put(handle, YOLO_EXPORT_DIRECTORY_HANDLE_KEY);
+                tx.oncomplete = () => finish(resolve, true);
+                tx.onerror = () => finish(reject, tx.error || new Error("indexeddb_write_failed"));
+                tx.onabort = () => finish(reject, tx.error || new Error("indexeddb_write_aborted"));
+            });
+            return true;
+        } catch (error) {
+            if (db) {
+                try {
+                    db.close();
+                } catch (closeError) {
+                    console.debug("Failed to close export handle DB", closeError);
+                }
+            }
+            console.debug("Unable to persist local export folder handle", error);
+            return false;
+        }
+    }
+
+    async function clearStoredYoloExportDirectoryHandle() {
+        yoloExportDirectoryHandle = null;
+        if (!supportsExportHandleStorage()) {
+            return;
+        }
+        let db = null;
+        try {
+            db = await openYoloExportHandleDb();
+            await new Promise((resolve, reject) => {
+                let settled = false;
+                const finish = (fn, value) => {
+                    if (settled) return;
+                    settled = true;
+                    try {
+                        db.close();
+                    } catch (error) {
+                        console.debug("Failed to close export handle DB", error);
+                    }
+                    fn(value);
+                };
+                const tx = db.transaction(YOLO_EXPORT_HANDLE_STORE, "readwrite");
+                tx.objectStore(YOLO_EXPORT_HANDLE_STORE).delete(YOLO_EXPORT_DIRECTORY_HANDLE_KEY);
+                tx.oncomplete = () => finish(resolve, true);
+                tx.onerror = () => finish(reject, tx.error || new Error("indexeddb_delete_failed"));
+                tx.onabort = () => finish(reject, tx.error || new Error("indexeddb_delete_aborted"));
+            });
+        } catch (error) {
+            if (db) {
+                try {
+                    db.close();
+                } catch (closeError) {
+                    console.debug("Failed to close export handle DB", closeError);
+                }
+            }
+            console.debug("Unable to clear local export folder handle", error);
+        }
+    }
+
+    async function ensureYoloExportDirectoryPermission(handle, shouldRequest = false) {
+        if (!handle) {
+            return false;
+        }
+        const permissionOptions = { mode: "readwrite" };
+        try {
+            if (typeof handle.queryPermission === "function") {
+                const current = await handle.queryPermission(permissionOptions);
+                if (current === "granted") {
+                    return true;
+                }
+                if (!shouldRequest) {
+                    return false;
+                }
+            }
+            if (shouldRequest && typeof handle.requestPermission === "function") {
+                const next = await handle.requestPermission(permissionOptions);
+                return next === "granted";
+            }
+            return typeof handle.queryPermission !== "function";
+        } catch (error) {
+            console.debug("Local export folder permission check failed", error);
+            return false;
+        }
+    }
+
+    function preloadYoloExportDirectoryHandle() {
+        if (!supportsLocalFolderExport() || yoloExportDirectoryHandleLoadPromise) {
+            return yoloExportDirectoryHandleLoadPromise;
+        }
+        yoloExportDirectoryHandleLoadPromise = readStoredYoloExportDirectoryHandle()
+            .then((handle) => {
+                if (yoloExportDirectoryHandle) {
+                    yoloExportDirectoryHandleLoaded = true;
+                    return yoloExportDirectoryHandle;
+                }
+                yoloExportDirectoryHandle = handle && handle.kind === "directory" ? handle : null;
+                yoloExportDirectoryHandleLoaded = true;
+                return yoloExportDirectoryHandle;
+            })
+            .catch((error) => {
+                yoloExportDirectoryHandleLoaded = true;
+                console.debug("No stored local export folder available", error);
+                return null;
+            });
+        return yoloExportDirectoryHandleLoadPromise;
+    }
+
+    async function getYoloExportDirectoryHandle({ prompt = false } = {}) {
+        if (!supportsLocalFolderExport()) {
+            return null;
+        }
+        let handle = yoloExportDirectoryHandle;
+        if (!handle && !prompt && !yoloExportDirectoryHandleLoaded) {
+            handle = await preloadYoloExportDirectoryHandle();
+        }
+        if (handle) {
+            const permitted = await ensureYoloExportDirectoryPermission(handle, prompt);
+            if (permitted) {
+                yoloExportDirectoryHandle = handle;
+                return handle;
+            }
+            const clearPromise = clearStoredYoloExportDirectoryHandle();
+            if (!prompt) {
+                await clearPromise;
+            } else {
+                clearPromise.catch((error) => {
+                    console.debug("Failed to clear stale local export folder handle", error);
+                });
+            }
+        }
+        if (!prompt) {
+            return null;
+        }
+        try {
+            const picked = await window.showDirectoryPicker({ mode: "readwrite" });
+            yoloExportDirectoryHandle = picked;
+            yoloExportDirectoryHandleLoaded = true;
+            await saveStoredYoloExportDirectoryHandle(picked);
+            return picked;
+        } catch (error) {
+            if (error?.name !== "AbortError") {
+                console.warn("Unable to choose local export folder", error);
+            }
+            return null;
+        }
+    }
+
+    async function getDirectoryFilenames(directoryHandle) {
+        if (!directoryHandle) {
+            return null;
+        }
+        try {
+            const names = new Set();
+            if (typeof directoryHandle.keys === "function") {
+                for await (const name of directoryHandle.keys()) {
+                    names.add(String(name));
+                }
+                return names;
+            }
+            if (typeof directoryHandle.entries === "function") {
+                for await (const [name] of directoryHandle.entries()) {
+                    names.add(String(name));
+                }
+                return names;
+            }
+        } catch (error) {
+            console.debug("Unable to enumerate local export folder names", error);
+        }
+        return null;
+    }
+
+    function nextAvailableNumberedFilename(filename, existingNames) {
+        const safeName = sanitizeFilename(filename, "download.bin");
+        if (!(existingNames instanceof Set)) {
+            return safeName;
+        }
+        let highestCounter = null;
+        existingNames.forEach((name) => {
+            const counter = getNumberedFilenameCounter(name, safeName);
+            if (counter === null) {
+                return;
+            }
+            if (highestCounter === null || compareCounterText(counter, highestCounter) > 0) {
+                highestCounter = counter;
+            }
+        });
+        if (highestCounter === null) {
+            return safeName;
+        }
+        let counter = incrementCounterText(highestCounter);
+        let candidate = formatNumberedFilename(safeName, counter);
+        while (existingNames.has(candidate)) {
+            counter = incrementCounterText(counter);
+            candidate = formatNumberedFilename(safeName, counter);
+        }
+        return candidate;
+    }
+
+    async function resolveDirectoryExportFilename(filename, directoryHandle) {
+        const existingNames = await getDirectoryFilenames(directoryHandle);
+        if (existingNames) {
+            const safeName = nextAvailableNumberedFilename(filename, existingNames);
+            const counter = getNumberedFilenameCounter(safeName, filename);
+            if (counter !== null) {
+                writeYoloExportDownloadCounterAtLeast(incrementCounterText(counter));
+            }
+            return safeName;
+        }
+        return nextYoloExportDownloadFilename(filename);
+    }
+
+    async function saveBlobToDirectory(blob, filename, directoryHandle) {
+        const safeName = await resolveDirectoryExportFilename(filename, directoryHandle);
+        const fileHandle = await directoryHandle.getFileHandle(safeName, { create: true });
+        const writable = await fileHandle.createWritable();
+        try {
+            await writable.write(blob);
+        } finally {
+            await writable.close();
+        }
+        return safeName;
     }
 
     function ensureJsZipAvailable(featureLabel = "zip operation") {
@@ -15486,6 +16191,9 @@ async function cancelRfDetrTrainingJobRequest() {
     function setActiveTab(tabName) {
         const previous = activeTab;
         activeTab = tabName;
+        if (annotationFocusMode && tabName !== TAB_LABELING) {
+            exitAnnotationFocusMode();
+        }
         if (tabElements.labelingButton) {
             tabElements.labelingButton.classList.toggle("active", tabName === TAB_LABELING);
         }
@@ -17043,6 +17751,15 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+    function isPopulatedSlotStatus(entry) {
+        return Boolean(
+            entry
+            && entry.enabled !== false
+            && entry.image_name
+            && entry.token
+        );
+    }
+
     function applySlotStatusClasses(options = {}) {
         const imageList = document.getElementById("imageList");
         if (!imageList) {
@@ -17050,7 +17767,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const slotStatusMap = new Map();
         latestSlotStatuses.forEach((entry) => {
-            if (entry?.image_name) {
+            if (isPopulatedSlotStatus(entry)) {
                 const existing = slotStatusMap.get(entry.image_name) || [];
                 existing.push(entry);
                 slotStatusMap.set(entry.image_name, existing);
@@ -17072,11 +17789,6 @@ async function cancelRfDetrTrainingJobRequest() {
                 || entries.find((entry) => entry?.variant === "sam3")
                 || entries[0];
             const loadingEntry = slotLoadingIndicators.get(name);
-            const tokenLoaded = !loadingEntry && (
-                getSamToken(name, slotEntry?.variant || samVariant)
-                || getSamToken(name, "sam3")
-                || getSamToken(name, "sam1")
-            );
             if (slotEntry?.slot) {
                 option.classList.add(`sam-slot-${slotEntry.slot}`);
             }
@@ -17087,7 +17799,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     }
                 });
                 option.classList.add("sam-slot-loading");
-            } else if (slotEntry?.slot || tokenLoaded) {
+            } else if (slotEntry?.slot) {
                 option.classList.add("sam-slot-loaded");
             }
             if (
@@ -17308,7 +18020,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return null;
         }
         return latestSlotStatuses.find((entry) => {
-            if (!entry || entry.image_name !== imageName) {
+            if (!isPopulatedSlotStatus(entry) || entry.image_name !== imageName) {
                 return false;
             }
             if (!entry.variant || !variant) {
@@ -20027,11 +20739,14 @@ async function cancelRfDetrTrainingJobRequest() {
 	                    max_results: maxResults,
 	                }),
 	            });
-	            if (resp.status === 428) {
+	            if (resp.status === 428 || resp.status === 404) {
+	                if (resp.status === 404 && imageNameForRequest) {
+	                    forgetSamToken(imageNameForRequest, variantForRequest);
+	                }
 	                imagePayload = await buildSamImagePayload({
 	                    forceBase64: true,
 	                    variantOverride: variantForRequest,
-	                    preferredToken: preloadToken,
+	                    preferredToken: null,
 	                    imageNameOverride: imageNameForRequest,
 	                });
 	                imagePayload.sam_variant = variantForRequest;
@@ -21035,11 +21750,14 @@ async function cancelRfDetrTrainingJobRequest() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ...requestFields, ...payload }),
         });
-        if (resp.status === 428) {
+        if (resp.status === 428 || resp.status === 404) {
+            if (resp.status === 404 && imageNameForRequest) {
+                forgetSamToken(imageNameForRequest, variantForRequest);
+            }
             payload = await buildSamImagePayload({
                 forceBase64: true,
                 variantOverride: variantForRequest,
-                preferredToken: preloadToken,
+                preferredToken: null,
                 imageNameOverride: imageNameForRequest,
             });
             if (imageNameForRequest && !payload.image_name) {
@@ -25651,11 +26369,11 @@ async function cancelRfDetrTrainingJobRequest() {
             setSam3TextStatus("Exemplar bbox is too small or missing for similarity.", "warn");
             return;
         }
-        let threshold = parseFloat(sam3TextElements.similarityThresholdInput?.value ?? sam3TextElements.thresholdInput?.value ?? "0.5");
-        if (Number.isNaN(threshold)) threshold = 0.5;
+        let threshold = parseFloat(sam3TextElements.similarityThresholdInput?.value ?? `${SAM3_SIMILARITY_DEFAULT_THRESHOLD}`);
+        if (Number.isNaN(threshold)) threshold = SAM3_SIMILARITY_DEFAULT_THRESHOLD;
         threshold = Math.min(Math.max(threshold, 0), 1);
-        let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || "0.5");
-        if (Number.isNaN(maskThreshold)) maskThreshold = 0.5;
+        let maskThreshold = parseFloat(sam3TextElements.maskThresholdInput?.value || `${SAM3_SIMILARITY_DEFAULT_MASK_THRESHOLD}`);
+        if (Number.isNaN(maskThreshold)) maskThreshold = SAM3_SIMILARITY_DEFAULT_MASK_THRESHOLD;
         maskThreshold = Math.min(Math.max(maskThreshold, 0), 1);
         let minSize = parseInt(sam3TextElements.minSizeInput?.value || "0", 10);
         if (Number.isNaN(minSize) || minSize < 0) minSize = 0;
@@ -25716,6 +26434,88 @@ async function cancelRfDetrTrainingJobRequest() {
             return rects;
         }
 
+        function countPhrase(count, singular, plural = `${singular}s`) {
+            return `${count} ${count === 1 ? singular : plural}`;
+        }
+
+        function shapePhrase(count, shapeLabel) {
+            const plural = shapeLabel === "bbox" ? "bboxes" : `${shapeLabel}s`;
+            return countPhrase(count, shapeLabel, plural);
+        }
+
+        function buildFilterReasonText({
+            exemplarFiltered,
+            existingFiltered,
+            invalidFiltered,
+            filteredTotal,
+        }) {
+            const parts = [];
+            if (exemplarFiltered) {
+                parts.push(`${countPhrase(exemplarFiltered, "seed/exemplar duplicate")}`);
+            }
+            if (existingFiltered) {
+                parts.push(`${countPhrase(existingFiltered, "existing annotation duplicate")}`);
+            }
+            if (invalidFiltered) {
+                parts.push(`${countPhrase(invalidFiltered, "invalid candidate")}`);
+            }
+            if (!parts.length && filteredTotal > 0) {
+                parts.push(`${countPhrase(filteredTotal, "candidate")} filtered by duplicate checks`);
+            }
+            return parts.join(", ");
+        }
+
+        function buildSimilarityOutcomeMessages({
+            added,
+            shapeLabel,
+            rawDetectionCount,
+            usableDetectionCount,
+            exemplarFiltered,
+            existingFiltered,
+            invalidFiltered,
+        }) {
+            const filteredTotal = Math.max(0, rawDetectionCount - usableDetectionCount);
+            const filterReasons = buildFilterReasonText({
+                exemplarFiltered,
+                existingFiltered,
+                invalidFiltered,
+                filteredTotal,
+            });
+            const promptSummary = `${countPhrase(posCount, "positive")} / ${countPhrase(negCount, "negative")}`;
+            const scoreSummary = `score >= ${threshold.toFixed(2)}`;
+            if (added > 0) {
+                const notApplied = Math.max(0, usableDetectionCount - added);
+                const details = [];
+                details.push(`${countPhrase(rawDetectionCount, "candidate")} from SAM3`);
+                if (filteredTotal > 0) {
+                    details.push(`${countPhrase(filteredTotal, "candidate")} filtered (${filterReasons})`);
+                }
+                if (notApplied > 0) {
+                    details.push(`${countPhrase(notApplied, "candidate")} passed filters but could not be applied`);
+                }
+                return {
+                    status: `Similarity added ${shapePhrase(added, shapeLabel)}.`,
+                    notice: `SAM3 similarity: added ${shapePhrase(added, shapeLabel)} to ${targetClass}; ${details.join("; ")}.`,
+                };
+            }
+            if (rawDetectionCount === 0) {
+                return {
+                    status: `SAM3 returned 0 candidates at ${scoreSummary}.`,
+                    notice: `SAM3 similarity: 0 added. SAM3 returned no candidates before UI filtering (${promptSummary}, ${scoreSummary}). Try a larger/cleaner exemplar or lower Similarity score.`,
+                };
+            }
+            if (usableDetectionCount === 0) {
+                return {
+                    status: `SAM3 returned ${rawDetectionCount}, all filtered.`,
+                    notice: `SAM3 similarity: 0 added. SAM3 returned ${countPhrase(rawDetectionCount, "candidate")}, but all were filtered: ${filterReasons || "duplicate checks removed them"}.`,
+                };
+            }
+            return {
+                status: `SAM3 returned ${usableDetectionCount} usable candidates, but none could be added.`,
+                notice: `SAM3 similarity: 0 added. SAM3 returned ${countPhrase(rawDetectionCount, "candidate")}; ${countPhrase(usableDetectionCount, "candidate")} passed filters but could not be converted/applied.`,
+            };
+        }
+
         sam3SimilarityRequestActive = true;
         updateSam3TextButtons();
         const posCount = promptLabels.filter(Boolean).length;
@@ -25738,6 +26538,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 rememberSamToken(requestImageName, samVariant, result.image_token);
             }
             let detections = Array.isArray(result?.detections) ? result.detections.slice() : [];
+            const rawDetectionCount = detections.length;
+            let exemplarFilteredCount = 0;
+            let existingFilteredCount = 0;
+            let invalidFilteredCount = 0;
             if (detections.length) {
                 const exemplarInfos = promptRects.map((rect) => ({
                     rect,
@@ -25747,7 +26551,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 }));
                 const existingRects = existingAnnotationRects();
                 detections = detections.filter((det) => {
-                    if (!det || !det.bbox) return false;
+                    if (!det || !det.bbox) {
+                        invalidFilteredCount += 1;
+                        return false;
+                    }
                     const rect = yoloBoxToPixelRect(det.bbox);
                     if (!rect) return true;
                     const rectCx = rect.x + rect.width / 2;
@@ -25758,19 +26565,22 @@ async function cancelRfDetrTrainingJobRequest() {
                         const nearCenter = dist <= info.maxDim * 0.1;
                         const highOverlap = iou >= 0.85;
                         if (nearCenter || highOverlap) {
+                            exemplarFilteredCount += 1;
                             return false;
                         }
                     }
                     for (const existing of existingRects) {
                         const overlap = rectIoU(rect, existing);
                         if (overlap >= 0.75) {
+                            existingFilteredCount += 1;
                             return false;
                         }
                         const exCx = existing.x + existing.width / 2;
                         const exCy = existing.y + existing.height / 2;
                         const exMax = Math.max(existing.width, existing.height);
                         const distEx = Math.hypot(rectCx - exCx, rectCy - exCy);
-                        if (distEx <= exMax * 0.1) {
+                        if (distEx <= exMax * 0.1 && overlap >= 0.2) {
+                            existingFilteredCount += 1;
                             return false;
                         }
                     }
@@ -25779,23 +26589,28 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             // Never apply similarity detections to a different image than the request target.
             if (!currentImage || currentImage.name !== requestImageName) {
-                setSam3TextStatus(
-                    `Similarity finished for ${requestImageName}, but view switched; skipped apply to avoid cross-image write.`,
-                    "warn",
-                );
+                const skippedMessage = `SAM3 similarity skipped: result was for ${requestImageName}, but the current image changed before apply.`;
+                setSam3TextStatus(skippedMessage, "warn");
+                enqueueTaskNotice(skippedMessage, { durationMs: 6500 });
                 return;
             }
             const added = applySegAwareDetections(detections, targetClass, "SAM3 similarity");
+            const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
+            const outcome = buildSimilarityOutcomeMessages({
+                added,
+                shapeLabel,
+                rawDetectionCount,
+                usableDetectionCount: detections.length,
+                exemplarFiltered: exemplarFilteredCount,
+                existingFiltered: existingFilteredCount,
+                invalidFiltered: invalidFilteredCount,
+            });
             if (added) {
-                const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
-                setSam3TextStatus(`Similarity added ${added} ${shapeLabel}${added === 1 ? "" : "es"}.`, "success");
-                enqueueTaskNotice(`SAM3 similarity: added ${added} ${shapeLabel}${added === 1 ? "" : "es"} to ${targetClass}.`, { durationMs: 4500 });
+                setSam3TextStatus(outcome.status, "success");
+                enqueueTaskNotice(outcome.notice, { durationMs: 6500 });
             } else {
-                const warning = Array.isArray(result?.warnings) && result.warnings.includes("no_results")
-                    ? "SAM3 found no similar objects."
-                    : "SAM3 returned no usable detections.";
-                setSam3TextStatus(warning, "warn");
-                enqueueTaskNotice("SAM3 similarity: no detections added.", { durationMs: 3500 });
+                setSam3TextStatus(outcome.status, "warn");
+                enqueueTaskNotice(outcome.notice, { durationMs: 8000 });
             }
         } catch (error) {
             const detail = error?.message || error;
@@ -25874,11 +26689,14 @@ async function cancelRfDetrTrainingJobRequest() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ...requestFields, ...payload }),
         });
-        if (resp.status === 428) {
+        if (resp.status === 428 || resp.status === 404) {
+            if (resp.status === 404 && imageNameForRequest) {
+                forgetSamToken(imageNameForRequest, variantForRequest);
+            }
             payload = await buildSamImagePayload({
                 forceBase64: true,
                 variantOverride: variantForRequest,
-                preferredToken: preloadToken,
+                preferredToken: null,
                 imageNameOverride: imageNameForRequest,
             });
             if (imageNameForRequest && !payload.image_name) {
@@ -25922,11 +26740,14 @@ async function cancelRfDetrTrainingJobRequest() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ...requestFields, ...payload }),
         });
-        if (resp.status === 428) {
+        if (resp.status === 428 || resp.status === 404) {
+            if (resp.status === 404 && imageNameForRequest) {
+                forgetSamToken(imageNameForRequest, variantForRequest);
+            }
             payload = await buildSamImagePayload({
                 forceBase64: true,
                 variantOverride: variantForRequest,
-                preferredToken: preloadToken,
+                preferredToken: null,
                 imageNameOverride: imageNameForRequest,
             });
             if (imageNameForRequest && !payload.image_name) {
@@ -25973,11 +26794,14 @@ async function cancelRfDetrTrainingJobRequest() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ...requestFields, ...payload }),
         });
-        if (resp.status === 428) {
+        if (resp.status === 428 || resp.status === 404) {
+            if (resp.status === 404 && imageNameForRequest) {
+                forgetSamToken(imageNameForRequest, variantForRequest);
+            }
             payload = await buildSamImagePayload({
                 forceBase64: true,
                 variantOverride: variantForRequest,
-                preferredToken: preloadToken,
+                preferredToken: null,
                 imageNameOverride: imageNameForRequest,
             });
             if (imageNameForRequest && !payload.image_name) {
@@ -30951,7 +31775,7 @@ async function cancelRfDetrTrainingJobRequest() {
             throw new Error(`Failed to encode image payload${targetImageName ? `: ${targetImageName}` : ""}`);
         }
         const payload = { image_base64: base64Img };
-        if (token) {
+        if (token && !forceBase64) {
             payload.image_token = token;
         }
         return payload;
@@ -30975,11 +31799,14 @@ async function cancelRfDetrTrainingJobRequest() {
             body: JSON.stringify({ ...fields, ...payload }),
             signal,
         });
-        if (resp.status === 428) {
+        if (resp.status === 428 || resp.status === 404) {
+            if (resp.status === 404 && imageNameForRequest) {
+                forgetSamToken(imageNameForRequest, variantForRequest);
+            }
             payload = await buildSamImagePayload({
                 forceBase64: true,
                 variantOverride: variantForRequest,
-                preferredToken: preloadToken,
+                preferredToken: null,
                 imageNameOverride: imageNameForRequest,
             });
             if (samSlotsEnabled && imageNameForRequest && !payload.image_name) {
@@ -31061,7 +31888,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             const result = await resp.json();
             if (!isSamJobActive(jobHandle)) {
-                return;
+                return false;
             }
             if (result.image_token && requestImageName) {
                 rememberSamToken(requestImageName, samVariant, result.image_token);
@@ -31073,7 +31900,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (placeholderContext) {
                     removePendingBbox(placeholderContext);
                 }
-                return;
+                return false;
             }
             // Prevent cross-image writes if the user navigated during async SAM call.
             if (!currentImage || currentImage.name !== requestImageName) {
@@ -31087,7 +31914,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     `SAM box prompt finished for ${requestImageName || "image"}, but view switched; skipped apply.`,
                     { variant: "warn", duration: 4000 },
                 );
-                return;
+                return false;
             }
             if (datasetType === "seg") {
                 const applied = applySamResultToSegDataset(result, targetBbox, targetBbox?.class);
@@ -31098,7 +31925,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (!applied) {
                     setSamStatus("SAM returned no mask/bbox to apply.", { variant: "warn", duration: 3000 });
                 }
-                return;
+                return applied;
             }
             currentBbox = {
                 bbox: targetBbox,
@@ -31128,15 +31955,17 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (placeholderContext) {
                     removePendingBbox(placeholderContext);
                 }
-                return;
+                return false;
             }
             delete pendingApiBboxes[returnedUUID];
+            return true;
         } catch (err) {
             console.error("sam_bbox error:", err);
             alert("sam_bbox call failed: " + err);
             if (placeholderContext) {
                 removePendingBbox(placeholderContext);
             }
+            return false;
         } finally {
             completeSamJob(jobHandle.id);
             endSamActionStatus(statusToken);
@@ -31403,7 +32232,7 @@ async function cancelRfDetrTrainingJobRequest() {
     async function samBboxAutoPrompt(bbox) {
         if (datasetType === "seg") {
             setSamStatus("Auto bbox prompt is disabled in polygon mode.", { variant: "warn", duration: 4000 });
-            return;
+            return false;
         }
         const statusToken = beginSamActionStatus("Running SAM auto box…");
         const imageName = currentImage ? currentImage.name : null;
@@ -31444,7 +32273,7 @@ async function cancelRfDetrTrainingJobRequest() {
             const result = await resp.json();
             console.debug("sam_bbox_auto =>", result);
             if (!isSamJobActive(jobHandle)) {
-                return;
+                return false;
             }
             if (result.image_token && requestImageName) {
                 rememberSamToken(requestImageName, samVariant, result.image_token);
@@ -31454,7 +32283,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (placeholderContext) {
                     removePendingBbox(placeholderContext);
                 }
-                return;
+                return false;
             }
             const returnedUUID = result.uuid;
             const targetBbox = pendingApiBboxes[returnedUUID];
@@ -31463,7 +32292,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (placeholderContext) {
                     removePendingBbox(placeholderContext);
                 }
-                return;
+                return false;
             }
             // Prevent cross-image writes if the user navigated during async SAM call.
             if (!currentImage || currentImage.name !== requestImageName) {
@@ -31477,7 +32306,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     `SAM auto box finished for ${requestImageName || "image"}, but view switched; skipped apply.`,
                     { variant: "warn", duration: 4000 },
                 );
-                return;
+                return false;
             }
             currentBbox = {
                 bbox: targetBbox,
@@ -31489,56 +32318,59 @@ async function cancelRfDetrTrainingJobRequest() {
                 moving: false,
                 resizing: null
             };
-        const [cx, cy, wNorm, hNorm] = result.bbox;
-        const absW = wNorm * requestImageWidth;
-        const absH = hNorm * requestImageHeight;
-        const absX = cx * requestImageWidth - absW / 2;
-        const absY = cy * requestImageHeight - absH / 2;
-        const imageBuckets = bboxes[currentImage.name] || (bboxes[currentImage.name] = {});
-        const oldClass = targetBbox.class;
-        const oldArr = Array.isArray(imageBuckets[oldClass]) ? imageBuckets[oldClass] : [];
-        if (!Array.isArray(imageBuckets[oldClass])) {
-            imageBuckets[oldClass] = oldArr;
-        }
-        const idx = oldArr.indexOf(targetBbox);
-        if (idx !== -1) oldArr.splice(idx, 1);
-        // If prediction present, move bbox to predicted class; else keep current class
-        const resolvedPrediction = resolveClipAutoPrediction(result);
-        if (resolvedPrediction) {
-            const newClass = resolvedPrediction;
-            if (typeof classes[newClass] === "undefined") {
-                console.warn("SAM bbox auto predicted unknown class:", newClass);
+            const [cx, cy, wNorm, hNorm] = result.bbox;
+            const absW = wNorm * requestImageWidth;
+            const absH = hNorm * requestImageHeight;
+            const absX = cx * requestImageWidth - absW / 2;
+            const absY = cy * requestImageHeight - absH / 2;
+            const imageBuckets = bboxes[currentImage.name] || (bboxes[currentImage.name] = {});
+            const oldClass = targetBbox.class;
+            const oldArr = Array.isArray(imageBuckets[oldClass]) ? imageBuckets[oldClass] : [];
+            if (!Array.isArray(imageBuckets[oldClass])) {
+                imageBuckets[oldClass] = oldArr;
+            }
+            const idx = oldArr.indexOf(targetBbox);
+            if (idx !== -1) oldArr.splice(idx, 1);
+            // If prediction present, move bbox to predicted class; else keep current class
+            const resolvedPrediction = resolveClipAutoPrediction(result);
+            if (resolvedPrediction) {
+                const newClass = resolvedPrediction;
+                if (typeof classes[newClass] === "undefined") {
+                    console.warn("SAM bbox auto predicted unknown class:", newClass);
+                    if (!imageBuckets[oldClass]) {
+                        imageBuckets[oldClass] = [];
+                    }
+                    targetBbox.class = oldClass;
+                    imageBuckets[oldClass].push(targetBbox);
+                } else {
+                    if (!imageBuckets[newClass]) {
+                        imageBuckets[newClass] = [];
+                    }
+                    targetBbox.class = newClass;
+                    imageBuckets[newClass].push(targetBbox);
+                }
+            } else {
+                // Keep original class
                 if (!imageBuckets[oldClass]) {
                     imageBuckets[oldClass] = [];
                 }
                 targetBbox.class = oldClass;
                 imageBuckets[oldClass].push(targetBbox);
-            } else {
-                if (!imageBuckets[newClass]) {
-                    imageBuckets[newClass] = [];
-                }
-                targetBbox.class = newClass;
-                imageBuckets[newClass].push(targetBbox);
             }
-        } else {
-            // Keep original class
-            if (!imageBuckets[oldClass]) {
-                imageBuckets[oldClass] = [];
-            }
-            imageBuckets[oldClass].push(targetBbox);
-        }
-        targetBbox.x = absX;
-        targetBbox.y = absY;
-        targetBbox.width = absW;
-        targetBbox.height = absH;
-        updateBboxAfterTransform();
-        delete pendingApiBboxes[returnedUUID];
+            targetBbox.x = absX;
+            targetBbox.y = absY;
+            targetBbox.width = absW;
+            targetBbox.height = absH;
+            updateBboxAfterTransform();
+            delete pendingApiBboxes[returnedUUID];
+            return true;
         } catch (err) {
             console.error("sam_bbox_auto error:", err);
             alert("sam_bbox_auto call failed: " + err);
             if (placeholderContext) {
                 removePendingBbox(placeholderContext);
             }
+            return false;
         } finally {
             completeSamJob(jobHandle.id);
             endSamActionStatus(statusToken);
@@ -32018,6 +32850,11 @@ async function cancelRfDetrTrainingJobRequest() {
     const minZoom = 0.1;
     const maxZoom = 5;
     const edgeSize = 5;
+    const cornerHitSize = edgeSize * 1.75;
+    const cornerHitScreenSize = 16;
+    const cornerResizeActivationDelayMs = 120;
+    const cornerResizeCancelDragScreenPx = 6;
+    const cornerResizePopDurationMs = 90;
     const resetCanvasOnChange = true;
     const defaultScale = 0.5;
     const drawCenterX = true;
@@ -32027,6 +32864,7 @@ async function cancelRfDetrTrainingJobRequest() {
     // Keep canvas/listener setup idempotent across any re-initialization path.
     let canvasDrawListenerBound = false;
     let canvasMouseListenersBound = false;
+    let pendingCornerResize = null;
     let images = {};
     let classes = {};
     let bboxes = {};
@@ -32175,6 +33013,11 @@ async function cancelRfDetrTrainingJobRequest() {
     const negativeBboxes = new Set();
     let imageListIndex = 0;
     let classListIndex = 0;
+    let annotationFocusMode = false;
+    let annotationFocusSnapshot = null;
+    let annotationFocusHudEl = null;
+    let annotationFocusHudTimer = null;
+    let annotationFocusEnteredFullscreen = false;
     let scale = defaultScale;
     let canvasX = 0;
     let canvasY = 0;
@@ -32226,6 +33069,7 @@ async function cancelRfDetrTrainingJobRequest() {
         listenBboxLoad();
         listenBboxSave();
         listenKeyboard();
+        preloadYoloExportDirectoryHandle();
         listenImageSearch();
         listenImageCrop();
         ensureBatchTweakElements();
@@ -32273,6 +33117,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 drawImage(context);
                 drawNewBbox(context);
                 drawExistingBboxes(context);
+                drawPendingCornerResize(context);
                 drawAgentWindows(context);
                 drawSelectionRect(context);
                 drawYoloSelectionRect(context);
@@ -32283,6 +33128,10 @@ async function cancelRfDetrTrainingJobRequest() {
             }
         }).start();
         window.addEventListener("resize", () => {
+            if (annotationFocusMode) {
+                syncAnnotationFocusLayout({ preservePan: false });
+                return;
+            }
             ensureCanvasDimensions();
             if (currentImage) {
                 fitZoom(currentImage, { preservePan: true });
@@ -32326,12 +33175,14 @@ async function cancelRfDetrTrainingJobRequest() {
             mouse.buttonL === true &&
             currentClass !== null &&
             (currentBbox === null || isSegDataset) &&
+            !isCornerResizePendingActivation() &&
             (segBboxMode || datasetType !== "seg" || samMode);
         if (canPreview) {
             const width = (mouse.realX - mouse.startRealX);
             const height = (mouse.realY - mouse.startRealY);
-            const strokeColor = getColorFromClass(currentClass);
-            const fillColor = withAlpha(strokeColor, 0.2);
+            const colorTokens = getClassColorTokens(currentClass);
+            const strokeColor = colorTokens.stroke;
+            const fillColor = colorTokens.fill;
             context.setLineDash([]);
             context.strokeStyle = strokeColor;
             context.fillStyle = fillColor;
@@ -32356,8 +33207,9 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!polygonDraft || !Array.isArray(polygonDraft.points) || polygonDraft.points.length === 0) {
             return;
         }
-        const strokeColor = getColorFromClass(polygonDraft.className || currentClass || "");
-        const fillColor = withAlpha(strokeColor, 0.2);
+        const colorTokens = getClassColorTokens(polygonDraft.className || currentClass || "");
+        const strokeColor = colorTokens.stroke;
+        const fillColor = colorTokens.fill;
         context.save();
         context.strokeStyle = strokeColor;
         context.fillStyle = fillColor;
@@ -32392,8 +33244,9 @@ async function cancelRfDetrTrainingJobRequest() {
             const classBoxes = Array.isArray(currentBboxes[className]) ? currentBboxes[className] : [];
             classBoxes.forEach((bbox) => {
                 context.save();
-                const strokeColor = getColorFromClass(className);
-                const fillColor = withAlpha(strokeColor, 0.2);
+                const colorTokens = getClassColorTokens(className);
+                const strokeColor = colorTokens.stroke;
+                const fillColor = colorTokens.fill;
                 const isCurrent = currentBbox && currentBbox.bbox === bbox;
                 const isSelected = !!bbox.uuid && selectedBboxes.has(bbox.uuid);
                 const isNegativeSelected = !!bbox.uuid && negativeBboxes.has(bbox.uuid);
@@ -32631,17 +33484,177 @@ async function cancelRfDetrTrainingJobRequest() {
         return x >= x1 && x <= x2 && y >= y1 && y <= y2;
     }
 
-    function drawCornerHandle(context, x, y, strokeColor) {
+    function drawCornerHandle(context, x, y, strokeColor, options = {}) {
         context.save();
-        const radius = Math.max(3, 5 * scale);
+        const alpha = Number.isFinite(options.alpha) ? clamp(options.alpha, 0, 1) : 1;
+        const fillAlpha = Number.isFinite(options.fillAlpha) ? clamp(options.fillAlpha, 0, 1) : 0.35;
+        const scaleMultiplier = Number.isFinite(options.scaleMultiplier) ? Math.max(0.1, options.scaleMultiplier) : 1;
+        const radius = Math.max(3, 5 * scale) * scaleMultiplier;
         context.beginPath();
-        context.strokeStyle = strokeColor;
-        context.fillStyle = withAlpha(strokeColor, 0.35);
-        context.lineWidth = Math.max(1.2, 1.2 * scale);
+        context.strokeStyle = withAlpha(strokeColor, alpha);
+        context.fillStyle = withAlpha(strokeColor, fillAlpha * alpha);
+        context.lineWidth = Math.max(1.2, 1.2 * scale) * Math.max(1, Math.min(1.8, scaleMultiplier));
         context.arc(zoomX(x), zoomY(y), radius, 0, Math.PI * 2);
         context.fill();
         context.stroke();
         context.restore();
+    }
+
+    function drawPendingCornerResize(context) {
+        const pending = pendingCornerResize;
+        if (!pending || !pending.bbox || !currentImage || pending.imageName !== currentImage.name) {
+            return;
+        }
+        const handlePoint = getCornerCoordinates(pending.bbox, pending.corner);
+        if (!handlePoint) {
+            return;
+        }
+        const now = performance.now();
+        const className = pending.className || pending.bbox.class || currentClass || "";
+        const strokeColor = getClassColorTokens(className).stroke;
+        if (pending.activatedAt) {
+            const popProgress = clamp((now - pending.activatedAt) / cornerResizePopDurationMs, 0, 1);
+            if (popProgress >= 1) {
+                pendingCornerResize = null;
+                return;
+            }
+            drawCornerHandle(context, handlePoint.x, handlePoint.y, strokeColor, {
+                alpha: 1 - popProgress * 0.25,
+                fillAlpha: 0.45,
+                scaleMultiplier: 1.9 - popProgress * 0.75,
+            });
+            return;
+        }
+        const progress = clamp((now - pending.startedAt) / pending.activationDelayMs, 0, 1);
+        drawCornerHandle(context, handlePoint.x, handlePoint.y, strokeColor, {
+            alpha: 0.45 + progress * 0.55,
+            fillAlpha: 0.2 + progress * 0.25,
+            scaleMultiplier: 0.75 + progress * 0.8,
+        });
+    }
+
+    function setCurrentBboxFromCornerHit(cornerHit, { resizing = null } = {}) {
+        if (!cornerHit || !cornerHit.bbox) {
+            return false;
+        }
+        if (!cornerHit.bbox.uuid) {
+            cornerHit.bbox.uuid = generateUUID();
+        }
+        currentBbox = {
+            bbox: cornerHit.bbox,
+            index: cornerHit.index,
+            originalX: cornerHit.bbox.x,
+            originalY: cornerHit.bbox.y,
+            originalWidth: cornerHit.bbox.width,
+            originalHeight: cornerHit.bbox.height,
+            moving: false,
+            resizing,
+        };
+        markOnlyBboxRecord(cornerHit.bbox);
+        return true;
+    }
+
+    function cancelPendingCornerResize() {
+        if (pendingCornerResize?.timerId) {
+            window.clearTimeout(pendingCornerResize.timerId);
+        }
+        pendingCornerResize = null;
+    }
+
+    function pendingCornerResizeMovedBeyondThreshold() {
+        if (!pendingCornerResize) {
+            return false;
+        }
+        const dx = mouse.x - pendingCornerResize.startScreenX;
+        const dy = mouse.y - pendingCornerResize.startScreenY;
+        return Math.hypot(dx, dy) > cornerResizeCancelDragScreenPx;
+    }
+
+    function isCornerResizePendingActivation() {
+        return !!pendingCornerResize && !pendingCornerResize.activatedAt;
+    }
+
+    function confirmPendingCornerResize() {
+        const pending = pendingCornerResize;
+        if (!pending || pending.activatedAt) {
+            return;
+        }
+        pending.timerId = null;
+        if (
+            !mouse.buttonL ||
+            !currentImage ||
+            currentImage.name !== pending.imageName ||
+            pendingCornerResizeMovedBeyondThreshold()
+        ) {
+            cancelPendingCornerResize();
+            return;
+        }
+        if (setCurrentBboxFromCornerHit(pending, { resizing: pending.corner })) {
+            const now = performance.now();
+            pending.activatedAt = now;
+            pending.popUntil = now + cornerResizePopDurationMs;
+        } else {
+            cancelPendingCornerResize();
+        }
+    }
+
+    function beginPendingCornerResize(cornerHit) {
+        if (!cornerHit || !cornerHit.bbox || !currentImage) {
+            return;
+        }
+        cancelPendingCornerResize();
+        currentBbox = null;
+        const pending = {
+            bbox: cornerHit.bbox,
+            className: cornerHit.className || cornerHit.bbox.class,
+            index: cornerHit.index,
+            corner: cornerHit.corner,
+            distanceSq: cornerHit.distanceSq,
+            area: cornerHit.area,
+            imageName: currentImage.name,
+            startScreenX: mouse.x,
+            startScreenY: mouse.y,
+            startedAt: performance.now(),
+            activationDelayMs: cornerResizeActivationDelayMs,
+            activatedAt: null,
+            popUntil: null,
+            timerId: null,
+        };
+        pending.timerId = window.setTimeout(confirmPendingCornerResize, cornerResizeActivationDelayMs);
+        pendingCornerResize = pending;
+    }
+
+    function updatePendingCornerResizeForPointer() {
+        if (!isCornerResizePendingActivation()) {
+            return;
+        }
+        if (pendingCornerResizeMovedBeyondThreshold()) {
+            cancelPendingCornerResize();
+        }
+    }
+
+    function handlePendingCornerResizeRelease(eventType) {
+        if (!isCornerResizePendingActivation()) {
+            return false;
+        }
+        const pending = pendingCornerResize;
+        const movedBeyondThreshold = pendingCornerResizeMovedBeyondThreshold();
+        const shouldSelect = eventType === "mouseup" && !movedBeyondThreshold;
+        cancelPendingCornerResize();
+        if (movedBeyondThreshold) {
+            return false;
+        }
+        if (shouldSelect) {
+            setCurrentBboxFromCornerHit(pending, { resizing: null });
+            if (currentBbox) {
+                updateBboxAfterTransform();
+            }
+        }
+        mouse.buttonR = false;
+        mouse.buttonL = false;
+        mouse.shiftSelectHit = false;
+        mouse.shiftSelectDrag = false;
+        return true;
     }
 
     const drawX = (context, x, y, width, height) => {
@@ -32800,13 +33813,26 @@ async function cancelRfDetrTrainingJobRequest() {
                     }
                 }
                 const segBboxMode = datasetType === "seg" && !polygonDrawEnabled;
-                if (datasetType !== "seg" || segBboxMode) {
+                const bboxInteractionMode = datasetType !== "seg" || segBboxMode || samMode;
+                if (bboxInteractionMode && !pointMode && !multiPointMode && !event.shiftKey) {
+                    const cornerHit = findBboxCornerAtPoint(mouse.realX, mouse.realY);
+                    if (cornerHit && cornerHit.bbox) {
+                        beginPendingCornerResize(cornerHit);
+                    }
+                }
+                if ((datasetType !== "seg" || segBboxMode) && !currentBbox?.resizing) {
                     const insideExisting = currentBbox && isPointInsideBbox(currentBbox.bbox, mouse.realX, mouse.realY);
                     if (!insideExisting) {
                         currentBbox = null;
                     }
                 }
             }
+        }
+        if (event.type === "mousemove") {
+            updatePendingCornerResizeForPointer();
+        }
+        if ((event.type === "mouseup" || event.type === "mouseout") && handlePendingCornerResizeRelease(event.type)) {
+            return;
         }
         if (event.type === "mousemove" && mouse.shiftSelectDrag) {
             mouse.shiftSelectEndRealX = mouse.realX;
@@ -32899,7 +33925,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     } else {
                         await samPointPrompt(mouse.realX, mouse.realY);
                     }
-                    setBboxMarkedState();
+                    markCurrentBboxDirectly();
                     if (currentBbox) {
                         updateBboxAfterTransform();
                     }
@@ -32921,13 +33947,7 @@ async function cancelRfDetrTrainingJobRequest() {
                             else if (samMode) {
                                 await samBboxPrompt(currentBbox.bbox);
                             }
-                            else {
-                                setBboxMarkedState();
-                                if (currentBbox) {
-                                    updateBboxAfterTransform();
-                                }
-                            }
-                            setBboxMarkedState();
+                            markCurrentBboxDirectly();
                             if (currentBbox) {
                                 updateBboxAfterTransform();
                             }
@@ -33117,7 +34137,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
                 if (samActive) {
                     // In SAM mode, do not start polygon drafting; allow bbox drawing.
-                    currentBbox = null;
+                    if (!currentBbox?.resizing) {
+                        currentBbox = null;
+                    }
                     polygonDrag = null;
                     polygonDraft = null;
                     return false;
@@ -33244,6 +34266,121 @@ async function cancelRfDetrTrainingJobRequest() {
         return found;
     }
 
+    function getCornerHitRadius() {
+        const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+        return Math.max(cornerHitSize, cornerHitScreenSize / safeScale);
+    }
+
+    function getBboxBounds(bx) {
+        const x1 = Number(bx?.x) || 0;
+        const y1 = Number(bx?.y) || 0;
+        const x2 = x1 + (Number(bx?.width) || 0);
+        const y2 = y1 + (Number(bx?.height) || 0);
+        return {
+            left: Math.min(x1, x2),
+            top: Math.min(y1, y2),
+            right: Math.max(x1, x2),
+            bottom: Math.max(y1, y2),
+        };
+    }
+
+    function getCornerHitForBbox(bx, x, y) {
+        if (!bx || bx.type === "polygon" || (Array.isArray(bx.points) && bx.points.length >= 3)) {
+            return null;
+        }
+        const { left, top, right, bottom } = getBboxBounds(bx);
+        const radius = getCornerHitRadius();
+        const corners = [
+            { corner: "topLeft", x: left, y: top },
+            { corner: "bottomLeft", x: left, y: bottom },
+            { corner: "topRight", x: right, y: top },
+            { corner: "bottomRight", x: right, y: bottom },
+        ];
+        let best = null;
+        corners.forEach((candidate) => {
+            const dx = x - candidate.x;
+            const dy = y - candidate.y;
+            if (Math.abs(dx) > radius || Math.abs(dy) > radius) {
+                return;
+            }
+            const distanceSq = dx * dx + dy * dy;
+            if (!best || distanceSq < best.distanceSq) {
+                best = { ...candidate, distanceSq };
+            }
+        });
+        return best;
+    }
+
+    function findBboxCornerAtPoint(x, y) {
+        if (!currentImage || !bboxes[currentImage.name]) return null;
+        if (currentBbox && currentBbox.bbox) {
+            const currentHit = getCornerHitForBbox(currentBbox.bbox, x, y);
+            if (currentHit) {
+                return {
+                    bbox: currentBbox.bbox,
+                    className: currentBbox.bbox.class,
+                    index: currentBbox.index,
+                    corner: currentHit.corner,
+                    distanceSq: currentHit.distanceSq,
+                    area: Math.abs((currentBbox.bbox.width || 0) * (currentBbox.bbox.height || 0)),
+                };
+            }
+        }
+        const currentBxs = bboxes[currentImage.name];
+        let found = null;
+        for (let className in currentBxs) {
+            const classBoxes = Array.isArray(currentBxs[className]) ? currentBxs[className] : [];
+            classBoxes.forEach((bx, i) => {
+                if (!bx || (currentBbox && currentBbox.bbox === bx)) {
+                    return;
+                }
+                const hit = getCornerHitForBbox(bx, x, y);
+                if (!hit) {
+                    return;
+                }
+                const area = Math.abs((bx.width || 0) * (bx.height || 0));
+                if (
+                    !found ||
+                    hit.distanceSq < found.distanceSq ||
+                    (hit.distanceSq === found.distanceSq && area < found.area)
+                ) {
+                    found = {
+                        bbox: bx,
+                        className,
+                        index: i,
+                        corner: hit.corner,
+                        distanceSq: hit.distanceSq,
+                        area,
+                    };
+                }
+            });
+        }
+        return found;
+    }
+
+    function markOnlyBboxRecord(bboxRecord) {
+        if (!currentImage || !bboxes[currentImage.name] || !bboxRecord) {
+            return;
+        }
+        const currentBxs = bboxes[currentImage.name];
+        Object.keys(currentBxs).forEach((className) => {
+            const classBoxes = Array.isArray(currentBxs[className]) ? currentBxs[className] : [];
+            classBoxes.forEach((bx) => {
+                if (bx) {
+                    bx.marked = bx === bboxRecord;
+                }
+            });
+        });
+        selectBboxRecord(bboxRecord, { additive: false });
+    }
+
+    function markCurrentBboxDirectly() {
+        if (!currentBbox || !currentBbox.bbox) {
+            return;
+        }
+        markOnlyBboxRecord(currentBbox.bbox);
+    }
+
     const setBboxMarkedState = ({ additive = false, negative = false } = {}) => {
         if (datasetType === "seg" && polygonDrawEnabled) {
             if (currentBbox && currentBbox.bbox) {
@@ -33300,6 +34437,84 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     };
 
+    async function preloadSamForMagicTweak(requestImageName, variantForRequest) {
+        const imageSnapshot = currentImage;
+        if (!requestImageName || !imageSnapshot || imageSnapshot.name !== requestImageName) {
+            return null;
+        }
+        let base64Img = null;
+        if (imageSnapshot.dataUrl && imageSnapshot.dataUrl.includes(',')) {
+            base64Img = imageSnapshot.dataUrl.split(',')[1];
+        } else {
+            base64Img = await extractBase64ForImage(imageSnapshot);
+        }
+        if (!base64Img) {
+            throw new Error(`Unable to encode image for SAM tweak: ${requestImageName}`);
+        }
+        if (!currentImage || currentImage.name !== requestImageName) {
+            return null;
+        }
+        const requestBody = {
+            image_base64: base64Img,
+            image_name: requestImageName,
+            sam_variant: variantForRequest,
+            slot: "current",
+        };
+        const resp = await fetch(`${API_ROOT}/sam_preload`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(requestBody),
+        });
+        if (resp.status === 409) {
+            return null;
+        }
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+        }
+        const result = await resp.json();
+        if (result?.token && currentImage && currentImage.name === requestImageName) {
+            rememberSamToken(requestImageName, variantForRequest, result.token);
+            scheduleSamSlotStatusRefresh(true);
+            return result.token;
+        }
+        return null;
+    }
+
+    async function ensureSamReadyForMagicTweak(requestImageName) {
+        if (!requestImageName || !currentImage || currentImage.name !== requestImageName) {
+            return null;
+        }
+        const variantForRequest = samVariant;
+        const cachedToken = getSamToken(requestImageName, variantForRequest);
+        if (cachedToken) {
+            return cachedToken;
+        }
+        if (!samPreloadEnabled) {
+            setSamStatus("Loading SAM for tweak…", { variant: "info", duration: 0 });
+            showSamPreloadProgress();
+            return preloadSamForMagicTweak(requestImageName, variantForRequest);
+        }
+        const alreadyQueued = isSamPreloadActiveFor(requestImageName, variantForRequest);
+        setSamStatus(
+            alreadyQueued ? "Waiting for SAM to load this image…" : "Loading SAM for tweak…",
+            { variant: "info", duration: 0 },
+        );
+        showSamPreloadProgress();
+        const token = alreadyQueued
+            ? await waitForSamPreloadIfActive(requestImageName, variantForRequest)
+            : null;
+        if (token) {
+            setSamStatus(`SAM ready for ${requestImageName}`, { variant: "success", duration: 1200 });
+            return token;
+        }
+        const loadedToken = await preloadSamForMagicTweak(requestImageName, variantForRequest);
+        if (loadedToken) {
+            setSamStatus(`SAM ready for ${requestImageName}`, { variant: "success", duration: 1200 });
+        }
+        return loadedToken || null;
+    }
+
     async function runMagicTweakForBbox(targetBbox, { updateSelection = false } = {}) {
         if (datasetType === "seg") {
             setSamStatus("Tweak is only available in bbox mode.", { variant: "warn", duration: 3000 });
@@ -33308,35 +34523,21 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!targetBbox) {
             return false;
         }
-        if (!samMode && !autoMode) {
-            setSamStatus("Enable SAM or Auto Class to tweak bboxes", { variant: "warn", duration: 3000 });
-            return false;
-        }
         if (!currentImage || !currentImage.name) {
             return false;
         }
         const requestImageName = currentImage.name;
-        if (samMode && samSlotsEnabled && samPreloadEnabled) {
-            let token = getSamToken(requestImageName, samVariant);
-            if (!token) {
-                const alreadyQueued = isSamPreloadActiveFor(requestImageName, samVariant);
-                setSamStatus("Waiting for SAM to load this image…", { variant: "info", duration: 0 });
-                showSamPreloadProgress();
-                if (!alreadyQueued) {
-                    prepareSamForCurrentImage({ messagePrefix: "Preparing SAM" }).catch((err) => {
-                        console.debug("prepareSamForCurrentImage (tweak) failed", err);
-                    });
-                }
-                token = await waitForSamPreloadIfActive(requestImageName, samVariant);
-                if (!token) {
-                    setSamStatus("Using fresh SAM load for this image", { variant: "info", duration: 2500 });
-                } else {
-                    setSamStatus(`SAM ready for ${requestImageName}`, { variant: "success", duration: 1200 });
-                }
+        try {
+            await ensureSamReadyForMagicTweak(requestImageName);
+        } catch (error) {
+            console.warn("SAM tweak preload failed; continuing with direct prompt", error);
+            if (currentImage && currentImage.name === requestImageName) {
+                setSamStatus("SAM preload for tweak failed; trying direct prompt…", { variant: "warn", duration: 2500 });
             }
         }
         // Guard against stale tweak operations if user switched images mid-run.
         if (!currentImage || currentImage.name !== requestImageName) {
+            hideSamPreloadProgress();
             setSamStatus("Tweak target changed while processing; skipped stale tweak.", { variant: "warn", duration: 3000 });
             return false;
         }
@@ -33346,20 +34547,19 @@ async function cancelRfDetrTrainingJobRequest() {
         pendingApiBboxes[targetBbox.uuid] = targetBbox;
         tweakPreserveSet.add(targetBbox.uuid);
         try {
-            if (samMode && autoMode) {
-                await samBboxAutoPrompt(targetBbox);
-            } else if (samMode) {
-                await samBboxPrompt(targetBbox);
-            } else if (autoMode) {
-                await autoPredictNewCrop(targetBbox);
+            let applied = false;
+            if (autoMode) {
+                applied = await samBboxAutoPrompt(targetBbox);
+            } else {
+                applied = await samBboxPrompt(targetBbox);
             }
-            if (updateSelection) {
+            if (applied && updateSelection) {
                 setBboxMarkedState();
                 if (currentBbox) {
                     updateBboxAfterTransform();
                 }
             }
-            return true;
+            return applied === true;
         } catch (error) {
             console.warn("One-click tweak failed", error);
             setSamStatus(`Tweak failed: ${error.message || error}`, { variant: "error", duration: 4000 });
@@ -33377,7 +34577,7 @@ async function cancelRfDetrTrainingJobRequest() {
         return runMagicTweakForBbox(currentBbox.bbox, { updateSelection: true });
     }
 
-    async function runBatchTweakForCurrentCategory() {
+    async function runBatchTweakForClass(className = currentClass) {
         if (batchTweakRunning) {
             setSamStatus("Batch tweak already running", { variant: "info", duration: 2500 });
             return;
@@ -33390,15 +34590,13 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus("Load an image before batch tweaking", { variant: "warn", duration: 3000 });
             return;
         }
-        if (!currentClass) {
+        const targetClass = String(className || "").trim();
+        if (!targetClass) {
             setSamStatus("Select a class before batch tweaking", { variant: "warn", duration: 3000 });
             return;
         }
-        if (!samMode) {
-            setSamStatus("Enable SAM mode to batch tweak", { variant: "warn", duration: 3000 });
-            return;
-        }
-        const bucket = (bboxes[currentImage.name] && bboxes[currentImage.name][currentClass]) || [];
+        const liveBucket = (bboxes[currentImage.name] && bboxes[currentImage.name][targetClass]) || [];
+        const bucket = Array.isArray(liveBucket) ? liveBucket.slice() : [];
         if (!bucket.length) {
             setSamStatus("No bboxes available for this class", { variant: "warn", duration: 3000 });
             return;
@@ -33408,9 +34606,20 @@ async function cancelRfDetrTrainingJobRequest() {
         if (batchTweakElements.confirm) {
             batchTweakElements.confirm.disabled = true;
         }
-        setSamStatus(`Tweaking ${bucket.length} ${currentClass} bbox${bucket.length === 1 ? "" : "es"}…`, { variant: "info", duration: 0 });
+        if (batchTweakElements.confirmAlways) {
+            batchTweakElements.confirmAlways.disabled = true;
+        }
+        setSamStatus(`Tweaking ${bucket.length} ${targetClass} bbox${bucket.length === 1 ? "" : "es"}…`, { variant: "info", duration: 0 });
         let successCount = 0;
         try {
+            try {
+                await ensureSamReadyForMagicTweak(batchImageName);
+            } catch (error) {
+                console.warn("SAM batch tweak preload failed; continuing with direct prompts", error);
+                if (currentImage && currentImage.name === batchImageName) {
+                    setSamStatus("SAM preload for class tweak failed; trying direct prompts…", { variant: "warn", duration: 2500 });
+                }
+            }
             for (const bbox of bucket) {
                 if (!currentImage || currentImage.name !== batchImageName) {
                     // Batch is image-local; stop if user navigated to avoid stale writes.
@@ -33422,9 +34631,13 @@ async function cancelRfDetrTrainingJobRequest() {
                     successCount += 1;
                 }
             }
-            setSamStatus(`Tweaked ${successCount}/${bucket.length} ${currentClass} bbox${bucket.length === 1 ? "" : "es"}.`, { variant: "success", duration: 3500 });
-            setBboxMarkedState();
+            const allTweaked = successCount === bucket.length;
+            setSamStatus(
+                `Tweaked ${successCount}/${bucket.length} ${targetClass} bbox${bucket.length === 1 ? "" : "es"}.`,
+                { variant: allTweaked ? "success" : "warn", duration: allTweaked ? 3500 : 5000 },
+            );
             if (currentBbox) {
+                markCurrentBboxDirectly();
                 updateBboxAfterTransform();
             }
         } catch (error) {
@@ -33435,24 +34648,35 @@ async function cancelRfDetrTrainingJobRequest() {
             if (batchTweakElements.confirm) {
                 batchTweakElements.confirm.disabled = false;
             }
+            if (batchTweakElements.confirmAlways) {
+                batchTweakElements.confirmAlways.disabled = false;
+            }
         }
+    }
+
+    async function runBatchTweakForCurrentCategory() {
+        return runBatchTweakForClass(currentClass);
     }
 
     const moveBbox = () => {
         if (mouse.shiftKeyActive || mouse.shiftSelectHit || mouse.shiftSelectDrag) {
             return;
         }
+        if (isCornerResizePendingActivation()) {
+            return;
+        }
         if (mouse.buttonL && currentBbox) {
             const bx = currentBbox.bbox;
-            const endX = bx.x + bx.width;
-            const endY = bx.y + bx.height;
+            const { left, top, right, bottom } = getBboxBounds(bx);
             if (
-                mouse.startRealX >= bx.x + edgeSize && mouse.startRealX <= endX - edgeSize &&
-                mouse.startRealY >= bx.y + edgeSize && mouse.startRealY <= endY - edgeSize
+                !currentBbox.resizing &&
+                !isPointNearBboxCorner(bx, mouse.startRealX, mouse.startRealY) &&
+                mouse.startRealX >= left + edgeSize && mouse.startRealX <= right - edgeSize &&
+                mouse.startRealY >= top + edgeSize && mouse.startRealY <= bottom - edgeSize
             ) {
                 currentBbox.moving = true;
             }
-            if (currentBbox.moving) {
+            if (currentBbox.moving && !currentBbox.resizing) {
                 bx.x = currentBbox.originalX + (mouse.realX - mouse.startRealX);
                 bx.y = currentBbox.originalY + (mouse.realY - mouse.startRealY);
             }
@@ -33463,21 +34687,23 @@ async function cancelRfDetrTrainingJobRequest() {
         if (mouse.shiftKeyActive || mouse.shiftSelectHit || mouse.shiftSelectDrag) {
             return;
         }
+        if (isCornerResizePendingActivation()) {
+            return;
+        }
         if (mouse.buttonL && currentBbox) {
             const bx = currentBbox.bbox;
-            const tlx = bx.x;
-            const tly = bx.y;
-            const brx = bx.x + bx.width;
-            const bry = bx.y + bx.height;
+            const { left, top, right, bottom } = getBboxBounds(bx);
 
-            if (nearCorner(mouse.startRealX, mouse.startRealY, tlx, tly)) {
-                currentBbox.resizing = "topLeft";
-            } else if (nearCorner(mouse.startRealX, mouse.startRealY, tlx, bry)) {
-                currentBbox.resizing = "bottomLeft";
-            } else if (nearCorner(mouse.startRealX, mouse.startRealY, brx, tly)) {
-                currentBbox.resizing = "topRight";
-            } else if (nearCorner(mouse.startRealX, mouse.startRealY, brx, bry)) {
-                currentBbox.resizing = "bottomRight";
+            if (!currentBbox.resizing) {
+                if (nearCorner(mouse.startRealX, mouse.startRealY, left, top)) {
+                    currentBbox.resizing = "topLeft";
+                } else if (nearCorner(mouse.startRealX, mouse.startRealY, left, bottom)) {
+                    currentBbox.resizing = "bottomLeft";
+                } else if (nearCorner(mouse.startRealX, mouse.startRealY, right, top)) {
+                    currentBbox.resizing = "topRight";
+                } else if (nearCorner(mouse.startRealX, mouse.startRealY, right, bottom)) {
+                    currentBbox.resizing = "bottomRight";
+                }
             }
 
             if (currentBbox.resizing === "topLeft") {
@@ -33485,20 +34711,17 @@ async function cancelRfDetrTrainingJobRequest() {
                 bx.y = mouse.realY;
                 bx.width = currentBbox.originalX + currentBbox.originalWidth - mouse.realX;
                 bx.height = currentBbox.originalY + currentBbox.originalHeight - mouse.realY;
-            }
-            else if (currentBbox.resizing === "bottomLeft") {
+            } else if (currentBbox.resizing === "bottomLeft") {
                 bx.x = mouse.realX;
                 bx.y = mouse.realY - (mouse.realY - currentBbox.originalY);
                 bx.width = currentBbox.originalX + currentBbox.originalWidth - mouse.realX;
                 bx.height = mouse.realY - currentBbox.originalY;
-            }
-            else if (currentBbox.resizing === "topRight") {
+            } else if (currentBbox.resizing === "topRight") {
                 bx.x = mouse.realX - (mouse.realX - currentBbox.originalX);
                 bx.y = mouse.realY;
                 bx.width = mouse.realX - currentBbox.originalX;
                 bx.height = currentBbox.originalY + currentBbox.originalHeight - mouse.realY;
-            }
-            else if (currentBbox.resizing === "bottomRight") {
+            } else if (currentBbox.resizing === "bottomRight") {
                 bx.x = mouse.realX - (mouse.realX - currentBbox.originalX);
                 bx.y = mouse.realY - (mouse.realY - currentBbox.originalY);
                 bx.width = mouse.realX - currentBbox.originalX;
@@ -33508,32 +34731,52 @@ async function cancelRfDetrTrainingJobRequest() {
     };
 
     function nearCorner(px, py, cx, cy) {
-        return (px >= (cx - edgeSize) && px <= (cx + edgeSize) &&
-                py >= (cy - edgeSize) && py <= (cy + edgeSize));
+        const radius = getCornerHitRadius();
+        return (px >= (cx - radius) && px <= (cx + radius) &&
+                py >= (cy - radius) && py <= (cy + radius));
+    }
+
+    function isPointNearBboxCorner(bx, x, y) {
+        if (!bx) {
+            return false;
+        }
+        const { left, top, right, bottom } = getBboxBounds(bx);
+        return (
+            nearCorner(x, y, left, top) ||
+            nearCorner(x, y, left, bottom) ||
+            nearCorner(x, y, right, top) ||
+            nearCorner(x, y, right, bottom)
+        );
     }
 
     const changeCursorByLocation = () => {
         if (!currentImage) return;
         setGlobalCursor("default");
+        const cornerHit = findBboxCornerAtPoint(mouse.realX, mouse.realY);
+        if (cornerHit) {
+            if (cornerHit.corner === "topLeft" || cornerHit.corner === "bottomRight") {
+                setGlobalCursor("nwse-resize");
+            } else {
+                setGlobalCursor("nesw-resize");
+            }
+            return;
+        }
         const currentBxs = bboxes[currentImage.name] || {};
         for (let className in currentBxs) {
             const classBoxes = Array.isArray(currentBxs[className]) ? currentBxs[className] : [];
             for (let bx of classBoxes) {
-                const endX = bx.x + bx.width;
-                const endY = bx.y + bx.height;
-                if (mouse.realX >= (bx.x + edgeSize) && mouse.realX <= (endX - edgeSize) &&
-                    mouse.realY >= (bx.y + edgeSize) && mouse.realY <= (endY - edgeSize)) {
+                const { left, top, right, bottom } = getBboxBounds(bx);
+                if (mouse.realX >= (left + edgeSize) && mouse.realX <= (right - edgeSize) &&
+                    mouse.realY >= (top + edgeSize) && mouse.realY <= (bottom - edgeSize)) {
                     setGlobalCursor("pointer");
                     break;
                 }
             }
         }
         if (currentBbox) {
-            const bx = currentBbox.bbox;
-            const brx = bx.x + bx.width;
-            const bry = bx.y + bx.height;
-            if (mouse.realX >= bx.x + edgeSize && mouse.realX <= brx - edgeSize &&
-                mouse.realY >= bx.y + edgeSize && mouse.realY <= bry - edgeSize) {
+            const { left, top, right, bottom } = getBboxBounds(currentBbox.bbox);
+            if (mouse.realX >= left + edgeSize && mouse.realX <= right - edgeSize &&
+                mouse.realY >= top + edgeSize && mouse.realY <= bottom - edgeSize) {
                 setGlobalCursor("move");
             }
         }
@@ -33879,6 +35122,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             syncLabelingSourceControls();
             syncImageSelectionToName(currentImage.name, { ensureVisible: false });
+            showAnnotationFocusHud();
             runDeferredCurrentImageSelection(nextImageName);
         };
         if (!image.object) {
@@ -33993,7 +35237,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         ensureCanvasDimensions();
-        const { preservePan = false } = options;
+        const { preservePan = false, center = annotationFocusMode } = options;
         const imgWidth = Math.max(1, image.width || image.object?.naturalWidth || image.object?.width || 1);
         const imgHeight = Math.max(1, image.height || image.object?.naturalHeight || image.object?.height || 1);
         const canvasWidth = Math.max(1, canvas?.width || canvas?.element?.width || canvas?.element?.clientWidth || window.innerWidth);
@@ -34003,10 +35247,207 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!preservePan) {
             canvasX = 0;
             canvasY = 0;
-            screenX = 0;
-            screenY = 0;
+            screenX = center ? Math.floor((canvasWidth - imgWidth * scale) / 2) : 0;
+            screenY = center ? Math.floor((canvasHeight - imgHeight * scale) / 2) : 0;
         }
     };
+
+    function getImageListPosition() {
+        const imageList = document.getElementById("imageList");
+        if (!imageList || !imageList.options?.length) {
+            return { index: 0, total: 0 };
+        }
+        const index = imageList.selectedIndex >= 0 ? imageList.selectedIndex : imageListIndex;
+        return {
+            index: Math.max(0, index),
+            total: imageList.options.length,
+        };
+    }
+
+    function getAnnotationFocusHudEl() {
+        if (!annotationFocusHudEl) {
+            annotationFocusHudEl = document.getElementById("annotationFocusHud");
+        }
+        return annotationFocusHudEl;
+    }
+
+    function showAnnotationFocusHud({ durationMs = 1400 } = {}) {
+        if (!annotationFocusMode) {
+            return;
+        }
+        const hud = getAnnotationFocusHudEl();
+        if (!hud) {
+            return;
+        }
+        const { index, total } = getImageListPosition();
+        const imageName = currentImage?.name || "(no image)";
+        const className = currentClass || "(no class)";
+        const modeBits = [];
+        if (datasetType === "seg") {
+            modeBits.push("Seg");
+        } else {
+            modeBits.push("BBox");
+        }
+        if (autoMode) {
+            modeBits.push("Auto");
+        }
+        if (samMode) {
+            modeBits.push((samVariant || "SAM").toUpperCase());
+        }
+        if (pointMode) {
+            modeBits.push("Point");
+        }
+        if (multiPointMode) {
+            modeBits.push("Multi-point");
+        }
+        const imageCount = total ? `${index + 1}/${total}` : "0/0";
+        hud.innerHTML = `
+            <div class="annotation-focus-hud__title">${escapeHtml(imageCount)} ${escapeHtml(imageName)}</div>
+            <div class="annotation-focus-hud__meta">Class: ${escapeHtml(className)} · ${escapeHtml(modeBits.join(" · "))}</div>
+        `;
+        hud.classList.add("visible");
+        if (annotationFocusHudTimer) {
+            clearTimeout(annotationFocusHudTimer);
+        }
+        annotationFocusHudTimer = setTimeout(() => {
+            hud.classList.remove("visible");
+            annotationFocusHudTimer = null;
+        }, Math.max(0, durationMs));
+    }
+
+    function syncAnnotationFocusLayout({ preservePan = false } = {}) {
+        requestAnimationFrame(() => {
+            ensureCanvasDimensions();
+            if (currentImage && fittedZoom) {
+                fitZoom(currentImage, { preservePan });
+            }
+        });
+    }
+
+    function enterAnnotationFocusMode() {
+        if (annotationFocusMode || activeTab !== TAB_LABELING) {
+            return;
+        }
+        annotationFocusSnapshot = {
+            imageName: currentImage?.name || null,
+            scale,
+            canvasX,
+            canvasY,
+            screenX,
+            screenY,
+        };
+        annotationFocusMode = true;
+        annotationFocusEnteredFullscreen = false;
+        document.documentElement.classList.add("annotation-focus-mode");
+        document.body.classList.add("annotation-focus-mode");
+        syncAnnotationFocusLayout({ preservePan: false });
+        showAnnotationFocusHud({ durationMs: 1800 });
+        const fullscreenTarget = document.documentElement;
+        if (fullscreenTarget?.requestFullscreen && !document.fullscreenElement) {
+            fullscreenTarget.requestFullscreen()
+                .then(() => {
+                    if (!annotationFocusMode) {
+                        if (document.fullscreenElement && document.exitFullscreen) {
+                            document.exitFullscreen().catch((error) => {
+                                console.debug("Late annotation focus fullscreen exit failed", error);
+                            });
+                        }
+                        return;
+                    }
+                    annotationFocusEnteredFullscreen = Boolean(document.fullscreenElement);
+                    syncAnnotationFocusLayout({ preservePan: false });
+                })
+                .catch((error) => {
+                    annotationFocusEnteredFullscreen = false;
+                    console.debug("Annotation focus fullscreen request failed", error);
+                });
+        }
+    }
+
+    function exitAnnotationFocusMode({ fromFullscreenChange = false } = {}) {
+        if (!annotationFocusMode) {
+            return;
+        }
+        const snapshot = annotationFocusSnapshot;
+        annotationFocusMode = false;
+        annotationFocusSnapshot = null;
+        annotationFocusEnteredFullscreen = false;
+        document.documentElement.classList.remove("annotation-focus-mode");
+        document.body.classList.remove("annotation-focus-mode");
+        const hud = getAnnotationFocusHudEl();
+        if (hud) {
+            hud.classList.remove("visible");
+        }
+        if (annotationFocusHudTimer) {
+            clearTimeout(annotationFocusHudTimer);
+            annotationFocusHudTimer = null;
+        }
+        requestAnimationFrame(() => {
+            ensureCanvasDimensions();
+            if (currentImage && snapshot && snapshot.imageName === currentImage.name) {
+                scale = snapshot.scale;
+                canvasX = snapshot.canvasX;
+                canvasY = snapshot.canvasY;
+                screenX = snapshot.screenX;
+                screenY = snapshot.screenY;
+            } else if (currentImage && fittedZoom) {
+                fitZoom(currentImage);
+            }
+        });
+        if (!fromFullscreenChange && document.fullscreenElement && document.exitFullscreen) {
+            document.exitFullscreen().catch((error) => {
+                console.debug("Annotation focus fullscreen exit failed", error);
+            });
+        }
+    }
+
+    function toggleAnnotationFocusMode() {
+        if (annotationFocusMode) {
+            exitAnnotationFocusMode();
+        } else {
+            enterAnnotationFocusMode();
+        }
+    }
+
+    document.addEventListener("fullscreenchange", () => {
+        if (annotationFocusMode && annotationFocusEnteredFullscreen && !document.fullscreenElement) {
+            exitAnnotationFocusMode({ fromFullscreenChange: true });
+        } else if (annotationFocusMode) {
+            syncAnnotationFocusLayout({ preservePan: false });
+        }
+    });
+
+    function navigateImage(delta, { wrap = true } = {}) {
+        const imageList = document.getElementById("imageList");
+        if (!imageList || imageList.options.length <= 1 || !Number.isFinite(delta) || delta === 0) {
+            return false;
+        }
+        const total = imageList.options.length;
+        let nextIndex = imageList.selectedIndex >= 0 ? imageList.selectedIndex : imageListIndex;
+        if (nextIndex < 0 || nextIndex >= total) {
+            nextIndex = 0;
+        }
+        nextIndex += delta;
+        if (wrap) {
+            nextIndex = ((nextIndex % total) + total) % total;
+        } else {
+            nextIndex = Math.max(0, Math.min(total - 1, nextIndex));
+        }
+        const releaseLock = lockImageSelection();
+        Array.from(imageList.options).forEach((option, idx) => {
+            option.selected = idx === nextIndex;
+        });
+        imageList.selectedIndex = nextIndex;
+        imageListIndex = nextIndex;
+        releaseLock();
+        const imageName = getOptionImageName(imageList.options[nextIndex]);
+        if (imageName && images[imageName]) {
+            setCurrentImage(images[imageName]);
+        }
+        setGlobalCursor("default");
+        showAnnotationFocusHud();
+        return true;
+    }
 
     const listenImageSelect = () => {
         if (imageSelectListenerBound) {
@@ -34116,6 +35557,7 @@ async function cancelRfDetrTrainingJobRequest() {
         clearMultiPointAnnotations();
         syncQwenClassToCurrent();
         updateSam3ClassOptions({ preserveSelection: true });
+        showAnnotationFocusHud();
     };
 
     const listenClassSelect = () => {
@@ -34529,6 +35971,171 @@ async function cancelRfDetrTrainingJobRequest() {
         return { ok: true, polygonCount, bboxCount };
     }
 
+    async function buildYoloCaptionsExportZip() {
+        let skippedInvalidClassCount = 0;
+        let skippedDimensionErrors = 0;
+        if (getCaptionDatasetId()) {
+            try {
+                setSamStatus("Loading captions for export…", { variant: "info", duration: 0 });
+                await ensureCaptionsForExport();
+            } catch (error) {
+                console.warn("Caption export preload failed", error);
+            }
+        }
+        const JSZipCtor = ensureJsZipAvailable("bbox export");
+        const zip = new JSZipCtor();
+        const textFolder = zip.folder("text_labels");
+        for (let imageName in bboxes) {
+            const image = images[imageName];
+            if (!image) continue;
+            try {
+                // Ensure dimensions are available before normalization math.
+                await ensureImageDimensions(image);
+            } catch (error) {
+                skippedDimensionErrors += 1;
+                console.warn(`Skipping export for ${imageName}: missing dimensions`, error);
+                continue;
+            }
+            const name = imageName.split(".");
+            name[name.length - 1] = "txt";
+            const result = [];
+            for (let className in bboxes[imageName]) {
+                const classBoxes = Array.isArray(bboxes[imageName][className]) ? bboxes[imageName][className] : [];
+                for (let i = 0; i < classBoxes.length; i++) {
+                    const bbox = classBoxes[i];
+                    const classIdx = classes[className];
+                    if (!Number.isFinite(classIdx)) {
+                        // Prevent writing malformed YOLO rows when class mapping is stale.
+                        skippedInvalidClassCount += 1;
+                        continue;
+                    }
+                    if (datasetType === "seg" && Array.isArray(bbox.points) && bbox.points.length >= 3) {
+                        const coords = bbox.points
+                            .map((pt) => {
+                                const nx = pt.x / image.width;
+                                const ny = pt.y / image.height;
+                                return `${nx} ${ny}`;
+                            })
+                            .join(" ");
+                        result.push(`${classIdx} ${coords}`);
+                    } else {
+                        const x = (bbox.x + bbox.width / 2) / image.width;
+                        const y = (bbox.y + bbox.height / 2) / image.height;
+                        const w = bbox.width / image.width;
+                        const h = bbox.height / image.height;
+                        result.push(`${classIdx} ${x} ${y} ${w} ${h}`);
+                    }
+                }
+            }
+            zip.file(name.join("."), result.join("\n"));
+            const textLabel = textLabels?.[imageName];
+            if (textFolder && textLabel) {
+                textFolder.file(name.join("."), String(textLabel).trim());
+            }
+        }
+        if (textFolder && textLabels) {
+            Object.keys(textLabels).forEach((imageName) => {
+                if (bboxes[imageName]) {
+                    return;
+                }
+                const name = imageName.split(".");
+                name[name.length - 1] = "txt";
+                textFolder.file(name.join("."), String(textLabels[imageName]).trim());
+            });
+        }
+        if (textFolder && Array.isArray(textLabelRecords) && textLabelRecords.length > 0) {
+            const jsonl = textLabelRecords.map((record) => JSON.stringify(record)).join("\n");
+            textFolder.file("captions.jsonl", jsonl);
+        }
+        const blob = await zip.generateAsync({ type: "blob" });
+        return { blob, skippedInvalidClassCount, skippedDimensionErrors };
+    }
+
+    function setYoloExportCompletionStatus(exportResult, successMessage) {
+        const skippedInvalidClassCount = Number(exportResult?.skippedInvalidClassCount) || 0;
+        const skippedDimensionErrors = Number(exportResult?.skippedDimensionErrors) || 0;
+        if (skippedInvalidClassCount > 0 || skippedDimensionErrors > 0) {
+            const parts = [];
+            if (skippedInvalidClassCount > 0) {
+                parts.push(`skipped ${skippedInvalidClassCount} bbox row${skippedInvalidClassCount === 1 ? "" : "s"} with unmapped classes`);
+            }
+            if (skippedDimensionErrors > 0) {
+                parts.push(`skipped ${skippedDimensionErrors} image${skippedDimensionErrors === 1 ? "" : "s"} with unreadable dimensions`);
+            }
+            setSamStatus(`Export completed with warnings: ${parts.join("; ")}.`, { variant: "warn", duration: 5500 });
+            return;
+        }
+        if (successMessage) {
+            setSamStatus(successMessage, { variant: "success", duration: 3500 });
+        }
+    }
+
+    async function runYoloCaptionsExport({ preferDirectory = false } = {}) {
+        if (bboxExportInProgress) {
+            setSamStatus("BBox export already running. Please wait.", { variant: "info", duration: 3000 });
+            return;
+        }
+        const validation = validateGeometryForSave();
+        if (!validation.ok) {
+            alert(validation.message);
+            return;
+        }
+        const saveButton = document.getElementById("saveBboxes");
+        let directoryHandle = null;
+        let fallbackReason = "";
+        bboxExportInProgress = true;
+        if (saveButton) {
+            saveButton.disabled = true;
+        }
+        try {
+            if (preferDirectory) {
+                if (supportsLocalFolderExport()) {
+                    setSamStatus("Choose a local export folder for YOLO + captions.", { variant: "info", duration: 2500 });
+                    directoryHandle = await getYoloExportDirectoryHandle({ prompt: true });
+                    if (!directoryHandle) {
+                        fallbackReason = "Folder not selected";
+                    }
+                } else {
+                    fallbackReason = "This browser cannot save to a remembered folder";
+                }
+            } else if (supportsLocalFolderExport()) {
+                directoryHandle = await getYoloExportDirectoryHandle({ prompt: false });
+            }
+            const exportResult = await buildYoloCaptionsExportZip();
+            if (directoryHandle) {
+                try {
+                    const savedName = await saveBlobToDirectory(
+                        exportResult.blob,
+                        YOLO_CAPTIONS_EXPORT_FILENAME,
+                        directoryHandle
+                    );
+                    setYoloExportCompletionStatus(exportResult, `Export saved as ${savedName}.`);
+                    return;
+                } catch (error) {
+                    console.warn("Local folder export failed; falling back to browser download", error);
+                    await clearStoredYoloExportDirectoryHandle();
+                    fallbackReason = "Local folder save failed";
+                }
+            }
+            const downloadName = nextYoloExportDownloadFilename(YOLO_CAPTIONS_EXPORT_FILENAME);
+            const savedName = saveBlobToDisk(exportResult.blob, downloadName) || downloadName;
+            setYoloExportCompletionStatus(
+                exportResult,
+                fallbackReason
+                    ? `${fallbackReason}; downloaded ${savedName} instead.`
+                    : `Export downloaded as ${savedName}.`
+            );
+        } catch (error) {
+            console.error("Failed to build bbox export archive", error);
+            setSamStatus(`Export failed: ${error.message || error}`, { variant: "error", duration: 5000 });
+        } finally {
+            bboxExportInProgress = false;
+            if (saveButton) {
+                saveButton.disabled = false;
+            }
+        }
+    }
+
     const listenBboxSave = () => {
         if (bboxSaveListenerBound) {
             return;
@@ -34538,113 +36145,10 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         bboxSaveListenerBound = true;
-        saveButton.addEventListener("click", async () => {
-            if (bboxExportInProgress) {
-                setSamStatus("BBox export already running. Please wait.", { variant: "info", duration: 3000 });
-                return;
-            }
-            const validation = validateGeometryForSave();
-            if (!validation.ok) {
-                alert(validation.message);
-                return;
-            }
-            let skippedInvalidClassCount = 0;
-            let skippedDimensionErrors = 0;
-            bboxExportInProgress = true;
-            saveButton.disabled = true;
-            try {
-                if (getCaptionDatasetId()) {
-                    try {
-                        setSamStatus("Loading captions for export…", { variant: "info", duration: 0 });
-                        await ensureCaptionsForExport();
-                    } catch (error) {
-                        console.warn("Caption export preload failed", error);
-                    }
-                }
-                const JSZipCtor = ensureJsZipAvailable("bbox export");
-                const zip = new JSZipCtor();
-                const textFolder = zip.folder("text_labels");
-                for (let imageName in bboxes) {
-                    const image = images[imageName];
-                    if (!image) continue;
-                    try {
-                        // Ensure dimensions are available before normalization math.
-                        await ensureImageDimensions(image);
-                    } catch (error) {
-                        skippedDimensionErrors += 1;
-                        console.warn(`Skipping export for ${imageName}: missing dimensions`, error);
-                        continue;
-                    }
-                    const name = imageName.split(".");
-                    name[name.length - 1] = "txt";
-                    const result = [];
-                    for (let className in bboxes[imageName]) {
-                        const classBoxes = Array.isArray(bboxes[imageName][className]) ? bboxes[imageName][className] : [];
-                        for (let i = 0; i < classBoxes.length; i++) {
-                            const bbox = classBoxes[i];
-                            const classIdx = classes[className];
-                            if (!Number.isFinite(classIdx)) {
-                                // Prevent writing malformed YOLO rows when class mapping is stale.
-                                skippedInvalidClassCount += 1;
-                                continue;
-                            }
-                            if (datasetType === "seg" && Array.isArray(bbox.points) && bbox.points.length >= 3) {
-                                const coords = bbox.points
-                                    .map((pt) => {
-                                        const nx = pt.x / image.width;
-                                        const ny = pt.y / image.height;
-                                        return `${nx} ${ny}`;
-                                    })
-                                    .join(" ");
-                                result.push(`${classIdx} ${coords}`);
-                            } else {
-                                const x = (bbox.x + bbox.width / 2) / image.width;
-                                const y = (bbox.y + bbox.height / 2) / image.height;
-                                const w = bbox.width / image.width;
-                                const h = bbox.height / image.height;
-                                result.push(`${classIdx} ${x} ${y} ${w} ${h}`);
-                            }
-                        }
-                    }
-                    zip.file(name.join("."), result.join("\n"));
-                    const textLabel = textLabels?.[imageName];
-                    if (textFolder && textLabel) {
-                        textFolder.file(name.join("."), String(textLabel).trim());
-                    }
-                }
-                if (textFolder && textLabels) {
-                    Object.keys(textLabels).forEach((imageName) => {
-                        if (bboxes[imageName]) {
-                            return;
-                        }
-                        const name = imageName.split(".");
-                        name[name.length - 1] = "txt";
-                        textFolder.file(name.join("."), String(textLabels[imageName]).trim());
-                    });
-                }
-                if (textFolder && Array.isArray(textLabelRecords) && textLabelRecords.length > 0) {
-                    const jsonl = textLabelRecords.map((record) => JSON.stringify(record)).join("\n");
-                    textFolder.file("captions.jsonl", jsonl);
-                }
-                const blob = await zip.generateAsync({ type: "blob" });
-                saveBlobToDisk(blob, "bboxes_yolo.zip");
-                if (skippedInvalidClassCount > 0 || skippedDimensionErrors > 0) {
-                    const parts = [];
-                    if (skippedInvalidClassCount > 0) {
-                        parts.push(`skipped ${skippedInvalidClassCount} bbox row${skippedInvalidClassCount === 1 ? "" : "s"} with unmapped classes`);
-                    }
-                    if (skippedDimensionErrors > 0) {
-                        parts.push(`skipped ${skippedDimensionErrors} image${skippedDimensionErrors === 1 ? "" : "s"} with unreadable dimensions`);
-                    }
-                    setSamStatus(`Export completed with warnings: ${parts.join("; ")}.`, { variant: "warn", duration: 5500 });
-                }
-            } catch (error) {
-                console.error("Failed to build bbox export archive", error);
-                setSamStatus(`Export failed: ${error.message || error}`, { variant: "error", duration: 5000 });
-            } finally {
-                bboxExportInProgress = false;
-                saveButton.disabled = false;
-            }
+        saveButton.addEventListener("click", () => {
+            runYoloCaptionsExport({ preferDirectory: false }).catch((error) => {
+                console.error("YOLO + captions export failed", error);
+            });
         });
     };
 
@@ -34655,6 +36159,27 @@ async function cancelRfDetrTrainingJobRequest() {
         const imageList = document.getElementById("imageList");
         const classList = document.getElementById("classList");
         let modeSnapshot = null;
+        const cycleClassSelection = (delta) => {
+            if (!classList || classList.length <= 1) {
+                return false;
+            }
+            const total = classList.length;
+            const currentIndex = classList.selectedIndex >= 0
+                ? classList.selectedIndex
+                : Math.min(Math.max(0, classListIndex || 0), total - 1);
+            const nextIndex = (currentIndex + delta + total) % total;
+            Array.from(classList.options).forEach((option) => {
+                option.selected = false;
+            });
+            classListIndex = nextIndex;
+            classList.options[classListIndex].selected = true;
+            classList.selectedIndex = classListIndex;
+            setCurrentClass();
+            showClassScrollIndicatorForList(classList, classListIndex, {
+                direction: delta > 0 ? 1 : -1,
+            });
+            return true;
+        };
 
         keyboardListenersBound = true;
         document.addEventListener("keydown", (event) => {
@@ -34670,6 +36195,27 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             const key = event.keyCode || event.charCode;
 
+            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 86 || event.key === "v" || event.key === "V")) {
+                toggleAnnotationFocusMode();
+                event.preventDefault();
+                return;
+            }
+
+            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && event.shiftKey && (key === 89 || event.key === "Y")) {
+                runYoloCaptionsExport({ preferDirectory: true }).catch((error) => {
+                    console.error("YOLO + captions hotkey export failed", error);
+                });
+                showShortcutToast("yolo_captions_export", "YOLO + captions export requested.");
+                event.preventDefault();
+                return;
+            }
+
+            if (annotationFocusMode && (key === 27 || event.key === "Escape")) {
+                exitAnnotationFocusMode();
+                event.preventDefault();
+                return;
+            }
+
             if (datasetType === "seg" && (key === 27 || event.key === "Escape")) {
                 polygonDraft = null;
                 polygonDrag = null;
@@ -34683,6 +36229,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     setDatasetType("seg");
                     setPolygonDrawEnabled(true);
                     showShortcutToast("polygon_toggle", "Polygon draw: ON (seg mode).");
+                    showAnnotationFocusHud();
                     event.preventDefault();
                     return;
                 }
@@ -34691,6 +36238,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     "polygon_toggle",
                     `Polygon draw: ${polygonDrawEnabled ? "ON" : "OFF"}.`
                 );
+                showAnnotationFocusHud();
                 event.preventDefault();
                 return;
             }
@@ -34706,12 +36254,27 @@ async function cancelRfDetrTrainingJobRequest() {
                     updateSamModeState(false, { preservePoints: true });
                     updateAutoModeState(false);
                     showShortcutToast("hold_z", "Hold Z: SAM/Auto paused.");
+                    showAnnotationFocusHud();
                 }
                 event.preventDefault();
                 return;
             }
 
-            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 82 || event.key === "r" || event.key === "R")) {
+            if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && (key === 69 || event.key === "e" || event.key === "E")) {
+                if (cycleClassSelection(-1)) {
+                    event.preventDefault();
+                    return;
+                }
+            }
+
+            if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && (key === 82 || event.key === "r" || event.key === "R")) {
+                if (cycleClassSelection(1)) {
+                    event.preventDefault();
+                    return;
+                }
+            }
+
+            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && event.shiftKey && (key === 82 || event.key === "R")) {
                 mouse.yoloKeyActive = true;
                 const regionModeLabel = getRegionDetectorMode() === "rfdetr" ? "RF-DETR" : "YOLO";
                 showShortcutToast(
@@ -34800,12 +36363,14 @@ async function cancelRfDetrTrainingJobRequest() {
             if (key === 65 && !modeSnapshot) {
                 updateAutoModeState(!autoMode);
                 showShortcutToast("auto_toggle", `Auto-class: ${autoMode ? "ON" : "OFF"}.`);
+                showAnnotationFocusHud();
                 event.preventDefault();
             }
             // 's' => toggle SAM
             if (key === 83 && !modeSnapshot) {
                 updateSamModeState(!samMode);
                 showShortcutToast("sam_toggle", `SAM mode: ${samMode ? "ON" : "OFF"}.`);
+                showAnnotationFocusHud();
                 event.preventDefault();
             }
             // 'd' => toggle SAM point mode
@@ -34819,6 +36384,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     updatePointModeState(false);
                 }
                 showShortcutToast("sam_point_toggle", `SAM point: ${pointMode ? "ON" : "OFF"}.`);
+                showAnnotationFocusHud();
                 event.preventDefault();
             }
             // 'm' => toggle SAM multi-point mode
@@ -34832,6 +36398,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     updateMultiPointState(false);
                 }
                 showShortcutToast("sam_multi_toggle", `SAM multi-point: ${multiPointMode ? "ON" : "OFF"}.`);
+                showAnnotationFocusHud();
                 event.preventDefault();
             }
             // '1' => SAM3 similarity (requires SAM3 predictor loaded for current image)
@@ -34865,69 +36432,19 @@ async function cancelRfDetrTrainingJobRequest() {
                 return;
             }
             if (key === 37) {
-                if (imageList.length > 1) {
-                    imageList.options[imageListIndex].selected = false;
-                    if (imageListIndex === 0) {
-                        imageListIndex = imageList.length - 1;
-                    } else {
-                        imageListIndex--;
-                    }
-                    imageList.options[imageListIndex].selected = true;
-                    imageList.selectedIndex = imageListIndex;
-                    const imageName = getOptionImageName(imageList.options[imageListIndex]);
-                    if (imageName && images[imageName]) {
-                        setCurrentImage(images[imageName]);
-                    }
-                    setGlobalCursor("default");
-                }
+                navigateImage(-1);
                 event.preventDefault();
             }
             if (key === 39) {
-                if (imageList.length > 1) {
-                    imageList.options[imageListIndex].selected = false;
-                    if (imageListIndex === imageList.length - 1) {
-                        imageListIndex = 0;
-                    } else {
-                        imageListIndex++;
-                    }
-                    imageList.options[imageListIndex].selected = true;
-                    imageList.selectedIndex = imageListIndex;
-                    const imageName = getOptionImageName(imageList.options[imageListIndex]);
-                    if (imageName && images[imageName]) {
-                        setCurrentImage(images[imageName]);
-                    }
-                    setGlobalCursor("default");
-                }
+                navigateImage(1);
                 event.preventDefault();
             }
             if (key === 38) {
-                if (classList.length > 1) {
-                    classList.options[classListIndex].selected = false;
-                    if (classListIndex === 0) {
-                        classListIndex = classList.length - 1;
-                    } else {
-                        classListIndex--;
-                    }
-                    classList.options[classListIndex].selected = true;
-                    classList.selectedIndex = classListIndex;
-                    setCurrentClass();
-                    showClassScrollIndicatorForList(classList, classListIndex);
-                }
+                cycleClassSelection(-1);
                 event.preventDefault();
             }
             if (key === 40) {
-                if (classList.length > 1) {
-                    classList.options[classListIndex].selected = false;
-                    if (classListIndex === classList.length - 1) {
-                        classListIndex = 0;
-                    } else {
-                        classListIndex++;
-                    }
-                    classList.options[classListIndex].selected = true;
-                    classList.selectedIndex = classListIndex;
-                    setCurrentClass();
-                    showClassScrollIndicatorForList(classList, classListIndex);
-                }
+                cycleClassSelection(1);
                 event.preventDefault();
             }
         });
@@ -34948,6 +36465,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 updatePointModeState(snapshot.point);
                 updateMultiPointState(snapshot.multi);
                 showShortcutToast("hold_z", "Z released: modes restored.", { cooldownMs: 800 });
+                showAnnotationFocusHud();
                 event.preventDefault();
             }
         });

@@ -31,18 +31,39 @@ def _run(cmd: Sequence[str]) -> None:
 def _ensure_symlink_or_copy(src: Path, dst: Path, *, force: bool) -> None:
     if not src.exists():
         raise SystemExit(f"precomputed_path_missing:{src}")
+    src_resolved = src.resolve()
+    try:
+        if src_resolved == dst.resolve(strict=False):
+            return
+    except RuntimeError:
+        if src_resolved == dst.absolute():
+            return
     dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.is_symlink() and not dst.exists():
+        target = dst.readlink()
+        if not target.is_absolute():
+            target = dst.parent / target
+        try:
+            target_identity = target.resolve(strict=False)
+        except RuntimeError:
+            target_identity = target.absolute()
+        try:
+            dst_identity = dst.resolve(strict=False)
+        except RuntimeError:
+            dst_identity = dst.absolute()
+        if target_identity == dst_identity:
+            dst.unlink()
     if dst.exists() or dst.is_symlink():
         if not force:
             return
         if dst.is_symlink() or dst.is_file():
             dst.unlink()
     try:
-        dst.symlink_to(src.resolve())
+        dst.symlink_to(src_resolved)
     except Exception:
         import shutil
 
-        shutil.copy2(src, dst)
+        shutil.copy2(src_resolved, dst)
 
 
 def _npz_image_set(npz_path: Path) -> Set[str]:

@@ -45,6 +45,37 @@ RECONSTRUCTED_REQUEST_DROP_KEYS = {
 }
 
 
+def _path_identity(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except RuntimeError:
+        return path.absolute()
+
+
+def _unlink_self_referential_symlink(path: Path) -> bool:
+    if not path.is_symlink():
+        return False
+    try:
+        target = Path(os.readlink(path))
+    except OSError:
+        return False
+    if not target.is_absolute():
+        target = path.parent / target
+    if _path_identity(target) != _path_identity(path):
+        return False
+    path.unlink(missing_ok=True)
+    return True
+
+
+def _copy2_if_different(src: Path, dest: Path) -> None:
+    src_resolved = src.resolve()
+    if src_resolved == _path_identity(dest):
+        return
+    _unlink_self_referential_symlink(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_resolved, dest)
+
+
 def _canonical_slug(value: Any, *, fallback: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(value or "").strip()).strip("_")
     return slug or fallback
@@ -399,7 +430,7 @@ def _rewrite_aux_model_path(
     if not src_path.exists():
         return None
     dest_path = target_dir / target_name
-    shutil.copy2(src_path, dest_path)
+    _copy2_if_different(src_path, dest_path)
     return dest_path.name
 
 
@@ -524,7 +555,7 @@ def materialize_canonical_deployment_bundle(
     temp_dir.mkdir(parents=True, exist_ok=True)
 
     base_model_name = "ensemble_xgb.json" if model_path.suffix.lower() == ".json" else model_path.name
-    shutil.copy2(model_path, temp_dir / base_model_name)
+    _copy2_if_different(model_path, temp_dir / base_model_name)
     meta_copy = dict(meta_payload)
     meta_copy["model_path"] = base_model_name
     meta_copy["ensemble_policy"] = dict(policy or {})
@@ -589,9 +620,9 @@ def materialize_canonical_deployment_bundle(
     ):
         src_path = source_dir / src_name
         if src_path.exists():
-            shutil.copy2(src_path, temp_dir / dest_name)
+            _copy2_if_different(src_path, temp_dir / dest_name)
     if report_bundle_json is not None and report_bundle_json.exists():
-        shutil.copy2(report_bundle_json, temp_dir / "report_bundle.json")
+        _copy2_if_different(report_bundle_json, temp_dir / "report_bundle.json")
 
     bundle_meta = {
         "job_id": job_id,

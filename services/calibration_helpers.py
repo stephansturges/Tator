@@ -60,16 +60,45 @@ def _calibration_hash_payload(payload: Dict[str, Any]) -> str:
     return hashlib.sha1(serialized.encode("utf-8")).hexdigest()
 
 
+def _path_identity(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except RuntimeError:
+        return path.absolute()
+
+
+def _unlink_self_referential_symlink(path: Path) -> bool:
+    if not path.is_symlink():
+        return False
+    try:
+        target = Path(os.readlink(path))
+    except OSError:
+        return False
+    if not target.is_absolute():
+        target = path.parent / target
+    if _path_identity(target) != _path_identity(path):
+        return False
+    path.unlink(missing_ok=True)
+    return True
+
+
 def _calibration_safe_link(src: Path, dest: Path) -> None:
     try:
+        src_resolved = src.resolve()
+        if src_resolved == _path_identity(dest):
+            return
+        _unlink_self_referential_symlink(dest)
         if dest.is_symlink() and not dest.exists():
             dest.unlink()
         if dest.exists() or dest.is_symlink():
             return
         dest.parent.mkdir(parents=True, exist_ok=True)
-        os.symlink(str(src.resolve()), dest)
+        os.symlink(str(src_resolved), dest)
     except Exception:
         try:
+            if src.resolve() == _path_identity(dest):
+                return
+            _unlink_self_referential_symlink(dest)
             if dest.exists():
                 return
             shutil.copy2(src, dest)

@@ -1317,6 +1317,34 @@ except Exception:
     active_encoder_model = None
     active_classifier_head = None
 
+def _startup_path_identity(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except RuntimeError:
+        return path.absolute()
+
+
+def _startup_unlink_self_referential_symlink(path: Path) -> None:
+    if not path.is_symlink():
+        return
+    try:
+        target = Path(os.readlink(path))
+    except OSError:
+        return
+    if not target.is_absolute():
+        target = path.parent / target
+    if _startup_path_identity(target) == _startup_path_identity(path):
+        path.unlink(missing_ok=True)
+
+
+def _startup_copy2_if_different(src: Path, dst: Path) -> None:
+    src_resolved = src.resolve()
+    if src_resolved == _startup_path_identity(dst):
+        return
+    _startup_unlink_self_referential_symlink(dst)
+    shutil.copy2(src_resolved, dst)
+
+
 # Keep default CLIP artifacts usable with path allowlists by mirroring them into uploads/.
 # This preserves older workflows that write my_logreg_model.pkl/my_label_list.pkl at repo root.
 try:
@@ -1337,7 +1365,7 @@ try:
                     or dst.stat().st_mtime < src.stat().st_mtime
                     or dst.stat().st_size != src.stat().st_size
                 ):
-                    shutil.copy2(src, dst)
+                    _startup_copy2_if_different(src, dst)
                 active_classifier_path = str(dst)
             except Exception:
                 pass
@@ -1352,7 +1380,7 @@ try:
                     or dst.stat().st_mtime < src.stat().st_mtime
                     or dst.stat().st_size != src.stat().st_size
                 ):
-                    shutil.copy2(src, dst)
+                    _startup_copy2_if_different(src, dst)
                 active_labelmap_path = str(dst)
             except Exception:
                 pass
@@ -10562,17 +10590,49 @@ def _annotation_lock_is_active(lock: Dict[str, Any]) -> bool:
     return expires_f > time.time()
 
 
+def _path_identity(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except RuntimeError:
+        return path.absolute()
+
+
+def _unlink_self_referential_symlink(path: Path) -> bool:
+    if not path.is_symlink():
+        return False
+    try:
+        target = Path(os.readlink(path))
+    except OSError:
+        return False
+    if not target.is_absolute():
+        target = path.parent / target
+    if _path_identity(target) != _path_identity(path):
+        return False
+    path.unlink(missing_ok=True)
+    return True
+
+
+def _copy2_if_different(src: Path, dest: Path) -> None:
+    src_resolved = src.resolve()
+    if src_resolved == _path_identity(dest):
+        return
+    if _unlink_self_referential_symlink(dest):
+        logger.warning("Removed self-referential artifact link before copy: %s", dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_resolved, dest)
+
+
 def _link_or_copy_file(src: Path, dest: Path, *, overwrite: bool = False) -> None:
     src_resolved = src.resolve()
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if src_resolved == _path_identity(dest):
+        return
     if dest.exists() or dest.is_symlink():
         if not overwrite:
             return
         if dest.is_dir():
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
         dest.unlink(missing_ok=True)
-    if src_resolved == dest.resolve() if dest.exists() else False:
-        return
     try:
         os.link(src_resolved, dest)
         return
@@ -11171,7 +11231,7 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
                 rel_name = image_path.name
                 target_image = target_root / split / rel_name
                 if not target_image.exists():
-                    shutil.copy2(image_path, target_image)
+                    _copy2_if_different(image_path, target_image)
                 payload = {
                     "image": rel_name,
                     "context": context_line,
@@ -18749,7 +18809,7 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
             (val_out / "labels").mkdir(parents=True, exist_ok=True)
             # Copy/link labelmap.
             if labelmap_file.exists():
-                shutil.copy2(labelmap_file, output_root / "labelmap.txt")
+                        _copy2_if_different(labelmap_file, output_root / "labelmap.txt")
             splits = []
             image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
@@ -18877,13 +18937,7 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
             progress_lock = threading.Lock()
 
             def _link_or_copy(src: Path, dst: Path) -> None:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                if dst.exists():
-                    return
-                try:
-                    os.link(src, dst)
-                except Exception:
-                    shutil.copy2(src, dst)
+                _link_or_copy_file(src, dst)
 
             def _process_entry(entry: Dict[str, Any], worker: Any) -> None:
                 nonlocal processed
@@ -19434,7 +19488,7 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             resolve_split_paths_fn=_yolo_resolve_split_paths_impl,
             yolo_load_labelmap_fn=_yolo_load_labelmap_impl,
             yaml_dump_fn=lambda data: yaml.safe_dump(data, sort_keys=False),
-            copy_file_fn=shutil.copy2,
+            copy_file_fn=_copy2_if_different,
         )
         from_scratch = bool(config.get("from_scratch"))
         base_weights = config.get("base_weights")
@@ -19537,13 +19591,13 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             train_dir = run_dir / "train"
             best_path = train_dir / "weights" / "best.pt"
             if best_path.exists():
-                shutil.copy2(best_path, run_dir / "best.pt")
+                _copy2_if_different(best_path, run_dir / "best.pt")
             results_csv = train_dir / "results.csv"
             args_yaml = train_dir / "args.yaml"
             if results_csv.exists():
-                shutil.copy2(results_csv, run_dir / "results.csv")
+                _copy2_if_different(results_csv, run_dir / "results.csv")
             if args_yaml.exists():
-                shutil.copy2(args_yaml, run_dir / "args.yaml")
+                _copy2_if_different(args_yaml, run_dir / "args.yaml")
             metrics_series: List[Dict[str, Any]] = []
             series_path = run_dir / "metrics_series.json"
             if (run_dir / "results.csv").exists():
@@ -19834,7 +19888,7 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                 resolve_split_paths_fn=_yolo_resolve_split_paths_impl,
                 yolo_load_labelmap_fn=_yolo_load_labelmap_impl,
                 yaml_dump_fn=lambda data: yaml.safe_dump(data, sort_keys=False),
-                copy_file_fn=shutil.copy2,
+                copy_file_fn=_copy2_if_different,
             )
             variant_base_yaml_fn = lambda variant, task, run_dir=None: _yolo_variant_base_yaml_impl(
                 variant,
@@ -21421,6 +21475,12 @@ async def start_clip_training(
     bg_class_count_i = max(1, min(10, bg_class_count_i))
     model_filename = Path(model_filename).name or "my_logreg_model.pkl"
     labelmap_filename = Path(labelmap_filename).name or "my_label_list.pkl"
+    model_output_path = Path(classifiers_dir) / model_filename
+    meta_output_path = Path(os.path.splitext(str(model_output_path))[0] + ".meta.pkl")
+    labelmap_output_path = Path(labelmaps_dir) / labelmap_filename
+    for artifact_path in (model_output_path, meta_output_path, labelmap_output_path):
+        if _unlink_self_referential_symlink(artifact_path):
+            logger.warning("Removed self-referential training artifact link: %s", artifact_path)
 
     extras = [solver_name]
     extras.append(classifier_type_norm)

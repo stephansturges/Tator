@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 import zipfile
@@ -126,9 +127,40 @@ def _load_json(path: Path) -> Dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _path_identity(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except RuntimeError:
+        return path.absolute()
+
+
+def _unlink_self_referential_symlink(path: Path) -> bool:
+    if not path.is_symlink():
+        return False
+    try:
+        target = Path(os.readlink(path))
+    except OSError:
+        return False
+    if not target.is_absolute():
+        target = path.parent / target
+    if _path_identity(target) != _path_identity(path):
+        return False
+    path.unlink(missing_ok=True)
+    return True
+
+
+def _copy2_if_different(src: Path, dest: Path) -> None:
+    src_resolved = src.resolve()
+    if src_resolved == _path_identity(dest):
+        return
+    _unlink_self_referential_symlink(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_resolved, dest)
+
+
 def _copy_file(src: Path, dest: Path, *, assets: List[Dict[str, Any]], kind: str) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dest)
+    _copy2_if_different(src, dest)
     assets.append(
         {
             "kind": kind,
@@ -716,12 +748,12 @@ def resolve_edr_package_runtime(
                 staged_name = f"{package_id}__{item.name}"
                 dest = classifiers_root / staged_name
                 if not dest.exists() or _sha256_path(dest) != _sha256_path(item):
-                    shutil.copy2(item, dest)
+                    _copy2_if_different(item, dest)
                 meta_src = item.with_suffix(".meta.pkl")
                 meta_dest = dest.with_suffix(".meta.pkl")
                 if meta_src.exists():
                     if not meta_dest.exists() or _sha256_path(meta_dest) != _sha256_path(meta_src):
-                        shutil.copy2(meta_src, meta_dest)
+                        _copy2_if_different(meta_src, meta_dest)
                 staged_classifier_id = staged_name
                 break
     staged_yolo_id = None
@@ -867,7 +899,7 @@ def import_edr_package_from_zip(
             shutil.rmtree(final_payload)
         shutil.copytree(payload_root, final_payload)
         zip_dest = package_root / EDR_PACKAGE_ZIP_NAME
-        shutil.copy2(zip_path, zip_dest)
+        _copy2_if_different(zip_path, zip_dest)
         saved_recipe = _load_json(final_payload / "saved_recipe.json")
         summary = _build_package_summary(
             package_id=package_id,

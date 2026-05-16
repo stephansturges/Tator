@@ -1538,6 +1538,37 @@ def _sha256_path_impl(path: Path) -> str:
     return h.hexdigest()
 
 
+def _path_identity(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except RuntimeError:
+        return path.absolute()
+
+
+def _unlink_self_referential_symlink(path: Path) -> bool:
+    if not path.is_symlink():
+        return False
+    try:
+        target = Path(os.readlink(path))
+    except OSError:
+        return False
+    if not target.is_absolute():
+        target = path.parent / target
+    if _path_identity(target) != _path_identity(path):
+        return False
+    path.unlink(missing_ok=True)
+    return True
+
+
+def _copy2_if_different(src: Path, dest: Path) -> None:
+    src_resolved = src.resolve()
+    if src_resolved == _path_identity(dest):
+        return
+    _unlink_self_referential_symlink(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_resolved, dest)
+
+
 def _copy_tree_filtered_impl(
     src: Path,
     dest: Path,
@@ -1557,7 +1588,7 @@ def _copy_tree_filtered_impl(
         if keep_files is not None and item.name not in keep_files:
             continue
         target = dest / item.name
-        shutil.copy2(item, target)
+        _copy2_if_different(item, target)
         copied.append(
             {
                 "path": str(target.relative_to(dest.parent)),
@@ -1755,7 +1786,7 @@ def _collect_recipe_assets_impl(
             dest = temp_dir / "models" / "classifiers"
             dest.mkdir(parents=True, exist_ok=True)
             target = dest / classifier_path.name
-            shutil.copy2(classifier_path, target)
+            _copy2_if_different(classifier_path, target)
             assets["copied"].append(
                 {
                     "path": str(target.relative_to(temp_dir)),
@@ -1795,7 +1826,7 @@ def _collect_recipe_assets_impl(
                 assets["missing"].append({"kind": key, "path": str(raw_path)})
                 continue
             target = canonical_root / filename
-            shutil.copy2(src, target)
+            _copy2_if_different(src, target)
             assets["copied"].append(
                 {
                     "path": str(target.relative_to(temp_dir)),
@@ -2000,7 +2031,7 @@ def _import_prepass_recipe_from_zip_impl(
                     if item.is_file():
                         if keep_files is not None and item.name not in keep_files:
                             continue
-                        shutil.copy2(item, dest / item.name)
+                        _copy2_if_different(item, dest / item.name)
                 return new_id
             return None
 
@@ -2030,7 +2061,7 @@ def _import_prepass_recipe_from_zip_impl(
                 dest.mkdir(parents=True, exist_ok=True)
                 for item in run_dir.iterdir():
                     if item.is_file():
-                        shutil.copy2(item, dest / item.name)
+                        _copy2_if_different(item, dest / item.name)
                 # Update metadata id to match new run id if we can.
                 meta_dest = dest / qwen_metadata_filename
                 if meta_dest.exists():
@@ -2056,7 +2087,7 @@ def _import_prepass_recipe_from_zip_impl(
                     dest = (upload_root / "classifiers") / item.name
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     if not dest.exists() or dest.stat().st_size != item.stat().st_size:
-                        shutil.copy2(item, dest)
+                        _copy2_if_different(item, dest)
                     config["classifier_id"] = str(dest.relative_to(upload_root / "classifiers"))
                     break
 
@@ -2075,7 +2106,7 @@ def _import_prepass_recipe_from_zip_impl(
                     dest.mkdir(parents=True, exist_ok=True)
                     for item in job_dir.iterdir():
                         if item.is_file():
-                            shutil.copy2(item, dest / item.name)
+                            _copy2_if_different(item, dest / item.name)
                     imported_ensemble_job_id = new_job
                 break
         if imported_ensemble_job_id:
@@ -2120,17 +2151,17 @@ def _import_prepass_recipe_from_zip_impl(
                 canonical_json_src = canonical_extract_dir / "canonical_edr.json"
                 if canonical_json_src.exists():
                     local_canonical_json = canonical_dest_dir / "canonical_edr.json"
-                    shutil.copy2(canonical_json_src, local_canonical_json)
+                    _copy2_if_different(canonical_json_src, local_canonical_json)
                     config["canonical_edr_json"] = str(local_canonical_json.resolve())
                 canonical_md_src = canonical_extract_dir / "canonical_edr.md"
                 if canonical_md_src.exists():
                     local_canonical_md = canonical_dest_dir / "canonical_edr.md"
-                    shutil.copy2(canonical_md_src, local_canonical_md)
+                    _copy2_if_different(canonical_md_src, local_canonical_md)
                     config["canonical_edr_md"] = str(local_canonical_md.resolve())
                 report_src = canonical_extract_dir / "report_bundle.json"
                 if report_src.exists():
                     local_report_bundle = canonical_dest_dir / "report_bundle.json"
-                    shutil.copy2(report_src, local_report_bundle)
+                    _copy2_if_different(report_src, local_report_bundle)
                     config["canonical_report_bundle_json"] = str(local_report_bundle.resolve())
                 registry_entry_src = canonical_extract_dir / "registry_entry.json"
                 if registry_entry_src.exists():

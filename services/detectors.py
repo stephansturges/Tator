@@ -4,12 +4,44 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 import shutil
 import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+
+def _path_identity(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except RuntimeError:
+        return path.absolute()
+
+
+def _unlink_self_referential_symlink(path: Path) -> bool:
+    if not path.is_symlink():
+        return False
+    try:
+        target = Path(os.readlink(path))
+    except OSError:
+        return False
+    if not target.is_absolute():
+        target = path.parent / target
+    if _path_identity(target) != _path_identity(path):
+        return False
+    path.unlink(missing_ok=True)
+    return True
+
+
+def _copy2_if_different(src: Path, dest: Path) -> None:
+    src_resolved = src.resolve()
+    if src_resolved == _path_identity(dest):
+        return
+    _unlink_self_referential_symlink(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_resolved, dest)
 
 
 def _set_yolo_infer_state_impl(
@@ -347,7 +379,7 @@ def _yolo_prune_run_dir_impl(
         target_best = run_dir / "best.pt"
         if best_path.exists() and not target_best.exists():
             try:
-                shutil.copy2(best_path, target_best)
+                _copy2_if_different(best_path, target_best)
             except Exception:
                 pass
     for child in list(run_dir.iterdir()):
@@ -977,12 +1009,16 @@ def _rfdetr_prepare_dataset_impl(
 
     def _link_split(name: str, source: Path) -> None:
         dest = dataset_dir / name
+        source_resolved = source.resolve()
+        if source_resolved == _path_identity(dest):
+            return
+        _unlink_self_referential_symlink(dest)
         if dest.exists() or dest.is_symlink():
             return
         try:
-            dest.symlink_to(source, target_is_directory=True)
+            dest.symlink_to(source_resolved, target_is_directory=True)
         except Exception:
-            shutil.copytree(source, dest)
+            shutil.copytree(source_resolved, dest)
 
     _link_split("train", train_src)
     _link_split("valid", valid_src)

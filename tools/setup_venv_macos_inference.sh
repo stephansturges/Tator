@@ -20,10 +20,6 @@ if [[ "${INSTALL_LOCAL_CLIP:-0}" == "1" && -d "${ROOT_DIR}/CLIP" && -f "${ROOT_D
   "${VENV_DIR}/bin/python" -m pip install --no-build-isolation -e "${ROOT_DIR}/CLIP"
 fi
 
-if [[ "${INSTALL_VLM:-0}" == "1" ]]; then
-  "${VENV_DIR}/bin/python" -m pip install -r requirements-macos-vlm.txt
-fi
-
 "${VENV_DIR}/bin/python" - <<'PY'
 import platform
 import torch

@@ -36,7 +36,10 @@ rfdetr>=1.0,<2.0
 sahi>=0.11,<0.12
 xgboost>=2.0,<3.0
 
-# Secondary VLM path. The backend can start without these, but captioning uses them.
+# Qwen VLM paths. Transformers remains the portable fallback; MLX-VLM is the
+# first-class Apple Silicon inference backend for quantized mlx-community models.
+mlx>=0.31,<1.0
+mlx-vlm>=0.3,<1.0
 transformers>=4.57,<5.0
 accelerate>=1.0,<2.0
 qwen-vl-utils>=0.0.8

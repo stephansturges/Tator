@@ -1,7 +1,11 @@
 import os
+from types import SimpleNamespace
 
+import joblib
+import numpy as np
 import pytest
 
+import localinferenceapi as api
 from localinferenceapi import (
     _copy2_if_different as _api_copy2_if_different,
     _link_or_copy_file,
@@ -86,3 +90,28 @@ def test_calibration_safe_link_replaces_self_referential_destination(tmp_path):
 
     assert dest.exists()
     assert dest.resolve() == source.resolve()
+
+
+def test_clip_auto_predict_loads_legacy_active_classifier_head(tmp_path, monkeypatch):
+    classifier_path = tmp_path / "legacy_logreg.pkl"
+    classifier = SimpleNamespace(
+        classes_=np.array(["LightVehicle", "Person"], dtype=object),
+        coef_=np.zeros((2, 512), dtype=np.float32),
+        intercept_=np.zeros(2, dtype=np.float32),
+        solver="lbfgs",
+        multi_class="auto",
+    )
+    classifier.coef_[0, 0] = 3.0
+    classifier.coef_[1, 1] = 3.0
+    joblib.dump(classifier, classifier_path)
+
+    monkeypatch.setattr(api, "active_classifier_head", None)
+    monkeypatch.setattr(api, "active_classifier_path", str(classifier_path))
+
+    features = np.zeros((1, 512), dtype=np.float32)
+    features[0, 0] = 1.0
+    details = api._clip_auto_predict_details(features, background_guard=False)
+
+    assert details["error"] is None
+    assert details["label"] == "LightVehicle"
+    assert isinstance(api.active_classifier_head, dict)

@@ -158,8 +158,23 @@ Qwen is the local VLM path. In this repo it is used for:
 - Qwen model activation, settings, unload, and training job endpoints
 - optional qwen-agent adapters for local tool-calling experiments
 
-The default model name is `Qwen/Qwen3-VL-4B-Instruct`. Model access, memory
-requirements, and device support depend on your environment.
+The portable default model name is `Qwen/Qwen3-VL-4B-Instruct`. On Apple
+Silicon, `QWEN_INFERENCE_PLATFORM=auto` selects MLX-VLM when the `mlx-vlm`
+package is installed and no adapter checkpoint is active. That path maps Qwen3
+VL model choices to quantized `mlx-community` models, with
+`mlx-community/Qwen3-VL-4B-Instruct-4bit` as the default. Use
+`QWEN_INFERENCE_PLATFORM=transformers` to force the PyTorch/Transformers path,
+or `QWEN_INFERENCE_PLATFORM=mlx_vlm` to require MLX-VLM.
+
+The UI exposes the same runtime controls under **Backend Config -> Qwen Runtime
+(advanced)**. The caption, prepass, and EDR controls can also select exact
+quantized MLX model IDs directly; when an exact ID is selected, the request is
+sent as that exact model rather than being rewritten by the Instruct/Thinking
+variant dropdown.
+
+Model access, memory requirements, and device support still depend on your
+machine and Hugging Face cache/authentication. Large Thinking and MoE models can
+be listed in the UI even when the local hardware cannot comfortably run them.
 
 ## Training and Model Management
 
@@ -278,6 +293,9 @@ SAM3_CHECKPOINT_PATH=
 SAM3_DEVICE=auto
 QWEN_MODEL_NAME=Qwen/Qwen3-VL-4B-Instruct
 QWEN_DEVICE=auto
+QWEN_INFERENCE_PLATFORM=auto
+QWEN_MLX_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
+QWEN_MLX_DEFAULT_QUANTIZATION=4bit
 QWEN_MAX_NEW_TOKENS=768
 ```
 
@@ -311,7 +329,8 @@ and driver notes.
 ## macOS Apple Silicon Setup
 
 The macOS path is inference-focused. It targets interactive annotation
-assistance with PyTorch MPS; training remains a Linux-first workflow.
+assistance with PyTorch MPS for CLIP/SAM/SAM3/detectors and MLX-VLM for Qwen
+when available. Training remains a Linux-first workflow.
 
 ```bash
 tools/setup_venv_macos_inference.sh
@@ -319,8 +338,8 @@ cp .env.macos.example .env.macos
 tools/run_macos_backend.sh
 ```
 
-The macOS venv installs CLIP, SAM1, SAM3, YOLO, RF-DETR, Qwen runtime packages,
-and the local MPS compatibility path. The runner defaults to:
+The macOS venv installs CLIP, SAM1, SAM3, YOLO, RF-DETR, Qwen Transformers,
+MLX, MLX-VLM, and the local MPS compatibility path. The runner defaults to:
 
 ```bash
 TATOR_INFERENCE_DEVICE=auto
@@ -330,6 +349,8 @@ SAM3_DEVICE=auto
 YOLO_INFER_DEVICE=auto
 RFDETR_INFER_DEVICE=auto
 QWEN_DEVICE=auto
+QWEN_INFERENCE_PLATFORM=auto
+QWEN_MLX_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
 ```
 
 See [docs/macos_inference_setup.md](docs/macos_inference_setup.md) for MPS

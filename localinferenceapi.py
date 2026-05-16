@@ -314,6 +314,16 @@ from services.qwen_runtime import (
     _evict_qwen_caption_entry_impl as _evict_qwen_caption_entry_impl,
     _resolve_qwen_device_impl as _resolve_qwen_device_impl,
 )
+from services.qwen_mlx import (
+    QWEN_MLX_DEFAULT_MODEL,
+    QWEN_MLX_MODEL_OPTIONS,
+    QWEN_PLATFORM_MLX,
+    QWEN_PLATFORM_TRANSFORMERS,
+    normalize_qwen_platform,
+    qwen_mlx_metadata_for_model,
+    resolve_mlx_model_id,
+    select_qwen_platform,
+)
 from services.qwen_generation import (
     _BASE_LOGITS_PROCESSOR,
     ThinkingEffortProcessor,
@@ -602,7 +612,6 @@ from services.calibration_metrics import (
 )
 from services.qwen import (
     _extract_balanced_json as _extract_balanced_json_impl,
-    _generate_qwen_text as _generate_qwen_text_impl,
     _caption_glossary_map as _caption_glossary_map_impl,
     _caption_preferred_label as _caption_preferred_label_impl,
     _build_qwen_caption_prompt as _build_qwen_caption_prompt_impl,
@@ -762,6 +771,28 @@ except Exception as exc:  # noqa: BLE001
 else:
     QWEN_IMPORT_ERROR = None
 
+try:
+    from mlx_vlm import generate as MLX_VLM_GENERATE
+    from mlx_vlm import load as MLX_VLM_LOAD
+    from mlx_vlm import stream_generate as MLX_VLM_STREAM_GENERATE
+    from mlx_vlm.prompt_utils import apply_chat_template as MLX_APPLY_CHAT_TEMPLATE
+    from mlx_vlm.utils import load_config as MLX_LOAD_CONFIG
+
+    try:
+        import mlx.core as MLX_CORE
+    except Exception:
+        MLX_CORE = None  # type: ignore[assignment]
+except Exception as exc:  # noqa: BLE001
+    MLX_VLM_IMPORT_ERROR = exc
+    MLX_VLM_GENERATE = None  # type: ignore[assignment]
+    MLX_VLM_LOAD = None  # type: ignore[assignment]
+    MLX_VLM_STREAM_GENERATE = None  # type: ignore[assignment]
+    MLX_APPLY_CHAT_TEMPLATE = None  # type: ignore[assignment]
+    MLX_LOAD_CONFIG = None  # type: ignore[assignment]
+    MLX_CORE = None  # type: ignore[assignment]
+else:
+    MLX_VLM_IMPORT_ERROR = None
+
 
 def _try_import_qwen_agent() -> (
     Tuple[Optional[Any], Optional[Any], Optional[Any], Optional[Any], Optional[Exception]]
@@ -912,6 +943,9 @@ QWEN_TEMPERATURE = _env_float("QWEN_TEMPERATURE", 0.2)
 QWEN_TOP_P = _env_float("QWEN_TOP_P", 0.9)
 QWEN_DEVICE_PREF = os.environ.get("QWEN_DEVICE", "auto").strip().lower()
 QWEN_TRUST_REMOTE_CODE = _env_bool("QWEN_TRUST_REMOTE_CODE", False)
+QWEN_INFERENCE_PLATFORM = normalize_qwen_platform(os.environ.get("QWEN_INFERENCE_PLATFORM", "auto"))
+QWEN_MLX_MODEL_NAME = os.environ.get("QWEN_MLX_MODEL_NAME", QWEN_MLX_DEFAULT_MODEL).strip() or QWEN_MLX_DEFAULT_MODEL
+QWEN_MLX_DEFAULT_QUANTIZATION = os.environ.get("QWEN_MLX_DEFAULT_QUANTIZATION", "4bit").strip() or "4bit"
 QWEN_CAPTION_CACHE_LIMIT = _env_int("QWEN_CAPTION_CACHE_LIMIT", 0)
 QWEN_WINDOW_DEFAULT_SIZE = _env_int("QWEN_WINDOW_SIZE", 672)
 QWEN_WINDOW_DEFAULT_OVERLAP = _env_float("QWEN_WINDOW_OVERLAP", 0.2)
@@ -946,10 +980,13 @@ def _is_qwen_moe_model_id(model_id: str) -> bool:
 qwen_model = None
 qwen_processor = None
 qwen_device: Optional[str] = None
+qwen_runtime_platform: Optional[str] = None
+qwen_loaded_effective_model_id: Optional[str] = None
+qwen_runtime_config: Optional[Any] = None
 qwen_last_error: Optional[str] = None
 qwen_lock = threading.RLock()
 qwen_config_lock = threading.RLock()
-qwen_caption_cache: Dict[str, Tuple[Any, Any]] = {}
+qwen_caption_cache: Dict[str, Any] = {}
 qwen_caption_order: deque[str] = deque()
 _HF_OFFLINE_AUTO_ENABLED = False
 _CAPTION_WINDOW_HOOK: ContextVar[Optional[Callable[[int, int, int, str], None]]] = ContextVar(
@@ -970,6 +1007,7 @@ def _default_qwen_metadata() -> Dict[str, Any]:
         "model_id": QWEN_MODEL_NAME,
         "model_family": "qwen3",
         "source": "huggingface",
+        "runtime_platform": QWEN_PLATFORM_TRANSFORMERS,
         "min_pixels": QWEN_MIN_PIXELS,
         "max_pixels": QWEN_MAX_PIXELS,
     }
@@ -1016,8 +1054,31 @@ active_qwen_metadata: Dict[str, Any] = _default_qwen_metadata()
 loaded_qwen_model_id: Optional[str] = None
 
 
+@dataclass
+class QwenRuntime:
+    model: Any
+    processor: Any
+    platform: str = QWEN_PLATFORM_TRANSFORMERS
+    model_id: Optional[str] = None
+    config: Optional[Any] = None
+
+    def __iter__(self):
+        yield self.model
+        yield self.processor
+
+
+def _clear_mlx_cache() -> None:
+    if MLX_CORE is None:
+        return
+    try:
+        MLX_CORE.clear_cache()
+    except Exception:
+        pass
+
+
 def _reset_qwen_runtime() -> None:
     global qwen_model, qwen_processor, qwen_last_error, loaded_qwen_model_id, qwen_device
+    global qwen_runtime_platform, qwen_loaded_effective_model_id, qwen_runtime_config
     state = {
         "qwen_model": qwen_model,
         "qwen_processor": qwen_processor,
@@ -1031,6 +1092,10 @@ def _reset_qwen_runtime() -> None:
     qwen_device = state["qwen_device"]
     loaded_qwen_model_id = state["loaded_qwen_model_id"]
     qwen_last_error = state["qwen_last_error"]
+    qwen_runtime_platform = None
+    qwen_loaded_effective_model_id = None
+    qwen_runtime_config = None
+    _clear_mlx_cache()
 
 
 def _unload_sam3_text_runtime() -> None:
@@ -1126,6 +1191,16 @@ def _set_active_qwen_model_default() -> None:
     active_qwen_model_id = "default"
     active_qwen_model_path = None
     active_qwen_metadata = _default_qwen_metadata()
+    _reset_qwen_runtime()
+
+
+def _set_active_qwen_model_builtin(model_id: str, metadata: Dict[str, Any]) -> None:
+    global active_qwen_model_id, active_qwen_model_path, active_qwen_metadata
+    active_qwen_model_id = str(model_id)
+    active_qwen_model_path = None
+    active_qwen_metadata = dict(metadata or {})
+    active_qwen_metadata.setdefault("id", str(model_id))
+    active_qwen_metadata.setdefault("model_id", str(model_id))
     _reset_qwen_runtime()
 
 
@@ -2190,166 +2265,6 @@ def _fetch_preloaded_image(token: str, variant: str) -> Optional[np.ndarray]:
         return arr
 
 
-_job_id_counter = itertools.count(1)
-
-
-@dataclass
-class SamPreloadJob:
-    request_id: int
-    variant: str
-    slot: str
-    generation: Optional[int]
-    image_token: Optional[str]
-    image_base64: Optional[str]
-    image_name: Optional[str]
-    event: threading.Event
-    result: Optional[SamPreloadResponse] = None
-    error: Optional[Exception] = None
-
-
-class SamPreloadManager:
-    def __init__(self):
-        self.queue: "queue.Queue[SamPreloadJob]" = queue.Queue()
-        self.lock = threading.Lock()
-        self.latest_request_id: Dict[Tuple[str, str], int] = {}
-        self.latest_generation: Dict[Tuple[str, str], int] = {}
-        self.worker = threading.Thread(target=self._worker, name="sam-preload-worker", daemon=True)
-        self.worker.start()
-
-    def submit(
-        self,
-        *,
-        variant: str,
-        slot: str,
-        generation: Optional[int],
-        image_token: Optional[str],
-        image_base64: Optional[str],
-        image_name: Optional[str],
-    ) -> SamPreloadResponse:
-        job = SamPreloadJob(
-            request_id=next(_job_id_counter),
-            variant=variant,
-            slot=slot,
-            generation=generation,
-            image_token=image_token,
-            image_base64=image_base64,
-            image_name=image_name,
-            event=threading.Event(),
-        )
-        key = (variant, slot)
-        with self.lock:
-            self.latest_request_id[key] = job.request_id
-            if generation is not None:
-                prev = self.latest_generation.get(key)
-                if prev is None or generation > prev:
-                    self.latest_generation[key] = generation
-        self.queue.put(job)
-        job.event.wait()
-        if job.error:
-            raise job.error
-        return job.result  # type: ignore[return-value]
-
-    def _worker(self) -> None:
-        while True:
-            job = self.queue.get()
-            try:
-                if self._is_superseded(job):
-                    job.result = self._superseded_response(job)
-                else:
-                    job.result = self._process_job(job)
-            except Exception as exc:  # noqa: BLE001
-                job.error = exc
-            finally:
-                job.event.set()
-                self.queue.task_done()
-
-    def _key(self, job: SamPreloadJob) -> Tuple[str, str]:
-        return (job.variant, job.slot)
-
-    def _is_superseded(self, job: SamPreloadJob) -> bool:
-        with self.lock:
-            latest_id = self.latest_request_id.get(self._key(job))
-            latest_generation = self.latest_generation.get(self._key(job))
-        if latest_id is not None and job.request_id < latest_id:
-            return True
-        if (
-            job.generation is not None
-            and latest_generation is not None
-            and job.generation < latest_generation
-        ):
-            return True
-        return False
-
-    def _superseded_response(self, job: SamPreloadJob) -> SamPreloadResponse:
-        width = 0
-        height = 0
-        if job.image_token:
-            cached = _fetch_preloaded_image(job.image_token, job.variant)
-            if cached is not None:
-                height, width = cached.shape[:2]
-        return SamPreloadResponse(
-            status="superseded", width=int(width), height=int(height), token=job.image_token or ""
-        )
-
-    def _process_job(self, job: SamPreloadJob) -> SamPreloadResponse:
-        variant = job.variant
-        slot = job.slot
-        image_name = job.image_name
-
-        if job.image_token:
-            cached = _fetch_preloaded_image(job.image_token, variant)
-            if cached is not None:
-                if self._is_superseded(job):
-                    height, width = cached.shape[:2]
-                    return SamPreloadResponse(
-                        status="superseded",
-                        width=int(width),
-                        height=int(height),
-                        token=job.image_token,
-                    )
-                predictor_manager.set_slot_with_wait(
-                    slot, cached, job.image_token, variant, image_name
-                )
-                height, width = cached.shape[:2]
-                return SamPreloadResponse(
-                    status="ready", width=int(width), height=int(height), token=job.image_token
-                )
-            if not job.image_base64:
-                raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="image_token_not_found")
-
-        if not job.image_base64:
-            raise HTTPException(
-                status_code=HTTP_428_PRECONDITION_REQUIRED, detail="image_base64_required"
-            )
-
-        np_img = self._decode_base64(job.image_base64)
-        token = hashlib.md5(np_img.tobytes()).hexdigest()
-        _store_preloaded_image(token, np_img, variant)
-
-        if self._is_superseded(job):
-            height, width = np_img.shape[:2]
-            return SamPreloadResponse(
-                status="superseded", width=int(width), height=int(height), token=token
-            )
-
-        predictor_manager.set_slot_with_wait(slot, np_img, token, variant, image_name)
-        height, width = np_img.shape[:2]
-        return SamPreloadResponse(status="ready", width=int(width), height=int(height), token=token)
-
-    @staticmethod
-    def _decode_base64(image_base64: str) -> np.ndarray:
-        _, np_img = _decode_image_base64_impl(
-            image_base64,
-            max_bytes=BASE64_IMAGE_MAX_BYTES,
-            max_dim=BASE64_IMAGE_MAX_DIM,
-            allow_downscale=True,
-        )
-        return np_img
-
-
-sam_preload_manager = SamPreloadManager()
-
-
 def _predict_with_cache(
     np_img: np.ndarray,
     token: Optional[str],
@@ -2966,6 +2881,7 @@ def _run_sam3_visual_inference(
     return_masks: bool = False,
     min_size: Optional[float] = None,
     simplify_epsilon: Optional[float] = None,
+    text_prompt: Optional[str] = None,
     processor_override: Optional[Any] = None,
     state: Optional[Any] = None,
 ) -> List[QwenDetection] | Tuple[List[QwenDetection], Optional[List[np.ndarray]]]:
@@ -2990,6 +2906,12 @@ def _run_sam3_visual_inference(
         except (TypeError, ValueError):
             normalized_limit = None
     img_state = state if state is not None else processor.set_image(pil_img)
+    semantic_prompt = str(text_prompt or "").strip()
+    if semantic_prompt:
+        try:
+            img_state = processor.set_text_prompt(semantic_prompt, state=img_state)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("SAM3 visual semantic prompt failed; continuing visual-only: %s", exc)
     img_w, img_h = float(pil_img.width), float(pil_img.height)
     x, y, w, h = bbox_xywh
     cx = (x + w / 2.0) / img_w
@@ -3177,6 +3099,7 @@ def _run_sam3_visual_inference_multi(
     return_masks: bool = False,
     min_size: Optional[float] = None,
     simplify_epsilon: Optional[float] = None,
+    text_prompt: Optional[str] = None,
     processor_override: Optional[Any] = None,
     state: Optional[Any] = None,
 ) -> List[QwenDetection] | Tuple[List[QwenDetection], Optional[List[np.ndarray]]]:
@@ -3225,6 +3148,12 @@ def _run_sam3_visual_inference_multi(
         elif len(labels) > len(cleaned_boxes):
             labels = labels[: len(cleaned_boxes)]
     img_state = state if state is not None else processor.set_image(pil_img)
+    semantic_prompt = str(text_prompt or "").strip()
+    if semantic_prompt:
+        try:
+            img_state = processor.set_text_prompt(semantic_prompt, state=img_state)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("SAM3 visual semantic prompt failed; continuing visual-only: %s", exc)
     img_w, img_h = float(pil_img.width), float(pil_img.height)
     output = None
     for bbox_xywh, label in zip(cleaned_boxes, labels, strict=False):
@@ -3392,8 +3321,207 @@ def _run_sam3_visual_inference_multi(
     return (detections, aligned_masks) if return_masks else detections
 
 
+def _qwen_runtime_platform_from_runtime(runtime: Any) -> str:
+    if isinstance(runtime, QwenRuntime):
+        return runtime.platform
+    return QWEN_PLATFORM_TRANSFORMERS
+
+
+def _qwen_runtime_model_id(runtime: Any) -> Optional[str]:
+    if isinstance(runtime, QwenRuntime):
+        return runtime.model_id
+    return None
+
+
+def _resolve_qwen_runtime_platform(
+    model_id: Optional[str] = None,
+    *,
+    adapter_path: Optional[Path] = None,
+) -> str:
+    return select_qwen_platform(
+        QWEN_INFERENCE_PLATFORM,
+        model_id=model_id,
+        adapter_path=adapter_path,
+        mlx_import_error=MLX_VLM_IMPORT_ERROR,
+        mlx_load_fn=MLX_VLM_LOAD,
+        mlx_generate_fn=MLX_VLM_GENERATE,
+    )
+
+
+def _qwen_mlx_dependency_error() -> Optional[str]:
+    if MLX_VLM_IMPORT_ERROR is not None:
+        return str(MLX_VLM_IMPORT_ERROR)
+    if MLX_VLM_LOAD is None or MLX_VLM_GENERATE is None:
+        return "mlx_vlm_generate_unavailable"
+    return None
+
+
+def _effective_qwen_model_id_for_platform(model_id: Optional[str], platform_name: str) -> str:
+    raw = str(model_id or QWEN_MODEL_NAME).strip() or QWEN_MODEL_NAME
+    if platform_name == QWEN_PLATFORM_MLX:
+        return resolve_mlx_model_id(
+            raw,
+            default_mlx_model_id=QWEN_MLX_MODEL_NAME,
+            default_quantization=QWEN_MLX_DEFAULT_QUANTIZATION,
+        )
+    return raw
+
+
+def _load_qwen_mlx_runtime(model_id: str) -> QwenRuntime:
+    if MLX_VLM_LOAD is None or MLX_VLM_GENERATE is None:
+        detail = _qwen_mlx_dependency_error() or "mlx_vlm_unavailable"
+        raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_mlx_missing:{detail}")
+    resolved_model_id = _effective_qwen_model_id_for_platform(model_id, QWEN_PLATFORM_MLX)
+    try:
+        model_local, processor_local = MLX_VLM_LOAD(str(resolved_model_id))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"qwen_mlx_load_failed:{exc}",
+        ) from exc
+    config = None
+    if MLX_LOAD_CONFIG is not None:
+        try:
+            config = MLX_LOAD_CONFIG(str(resolved_model_id))
+        except Exception:
+            config = getattr(model_local, "config", None)
+    else:
+        config = getattr(model_local, "config", None)
+    return QwenRuntime(
+        model=model_local,
+        processor=processor_local,
+        platform=QWEN_PLATFORM_MLX,
+        model_id=str(resolved_model_id),
+        config=config,
+    )
+
+
+def _ensure_qwen_mlx_ready(model_id: Optional[str] = None) -> QwenRuntime:
+    global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
+    global qwen_runtime_platform, qwen_loaded_effective_model_id, qwen_runtime_config
+    requested_model_id = _effective_qwen_model_id_for_platform(
+        model_id or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+        QWEN_PLATFORM_MLX,
+    )
+    runtime_key = f"{active_qwen_model_id}:{QWEN_PLATFORM_MLX}:{requested_model_id}"
+    if (
+        qwen_model is not None
+        and qwen_processor is not None
+        and loaded_qwen_model_id == runtime_key
+        and qwen_runtime_platform == QWEN_PLATFORM_MLX
+        and qwen_loaded_effective_model_id == requested_model_id
+    ):
+        return QwenRuntime(
+            model=qwen_model,
+            processor=qwen_processor,
+            platform=QWEN_PLATFORM_MLX,
+            model_id=requested_model_id,
+            config=qwen_runtime_config,
+        )
+    with qwen_lock:
+        if (
+            qwen_model is not None
+            and qwen_processor is not None
+            and loaded_qwen_model_id == runtime_key
+            and qwen_runtime_platform == QWEN_PLATFORM_MLX
+            and qwen_loaded_effective_model_id == requested_model_id
+        ):
+            return QwenRuntime(
+                model=qwen_model,
+                processor=qwen_processor,
+                platform=QWEN_PLATFORM_MLX,
+                model_id=requested_model_id,
+                config=qwen_runtime_config,
+            )
+        try:
+            runtime = _load_qwen_mlx_runtime(requested_model_id)
+        except HTTPException as exc:
+            qwen_last_error = str(exc.detail)
+            raise
+        qwen_model = runtime.model
+        qwen_processor = runtime.processor
+        qwen_device = QWEN_PLATFORM_MLX
+        qwen_runtime_platform = QWEN_PLATFORM_MLX
+        qwen_loaded_effective_model_id = runtime.model_id
+        qwen_runtime_config = runtime.config
+        loaded_qwen_model_id = runtime_key
+        qwen_last_error = None
+        return runtime
+
+
+def _ensure_qwen_mlx_ready_for_caption(model_id_override: str) -> QwenRuntime:
+    global qwen_device, qwen_last_error, qwen_caption_cache, qwen_caption_order
+    resolved_model_id = _effective_qwen_model_id_for_platform(
+        model_id_override or QWEN_MLX_MODEL_NAME,
+        QWEN_PLATFORM_MLX,
+    )
+    cache_key = f"caption:{QWEN_PLATFORM_MLX}:{resolved_model_id}"
+    cache_limit = max(0, int(QWEN_CAPTION_CACHE_LIMIT or 0))
+    if cache_limit == 0 and qwen_caption_cache:
+        for key, entry in list(qwen_caption_cache.items()):
+            _evict_qwen_caption_entry_impl(key, entry, torch_module=torch, gc_module=gc)
+        qwen_caption_cache.clear()
+        qwen_caption_order.clear()
+        _clear_mlx_cache()
+    cached = qwen_caption_cache.get(cache_key)
+    if cached and cache_limit:
+        try:
+            qwen_caption_order.remove(cache_key)
+        except ValueError:
+            pass
+        qwen_caption_order.append(cache_key)
+        if isinstance(cached, QwenRuntime):
+            return cached
+        model_local, processor_local = cached
+        return QwenRuntime(
+            model=model_local,
+            processor=processor_local,
+            platform=QWEN_PLATFORM_MLX,
+            model_id=resolved_model_id,
+        )
+    with qwen_lock:
+        cached = qwen_caption_cache.get(cache_key)
+        if cached and cache_limit:
+            try:
+                qwen_caption_order.remove(cache_key)
+            except ValueError:
+                pass
+            qwen_caption_order.append(cache_key)
+            if isinstance(cached, QwenRuntime):
+                return cached
+            model_local, processor_local = cached
+            return QwenRuntime(
+                model=model_local,
+                processor=processor_local,
+                platform=QWEN_PLATFORM_MLX,
+                model_id=resolved_model_id,
+            )
+        try:
+            runtime = _load_qwen_mlx_runtime(resolved_model_id)
+        except HTTPException as exc:
+            qwen_last_error = str(exc.detail)
+            raise
+        qwen_device = QWEN_PLATFORM_MLX
+        qwen_last_error = None
+        if cache_limit:
+            qwen_caption_cache[cache_key] = runtime
+            qwen_caption_order.append(cache_key)
+            while len(qwen_caption_order) > cache_limit:
+                evict_key = qwen_caption_order.popleft()
+                evict_entry = qwen_caption_cache.pop(evict_key, None)
+                _evict_qwen_caption_entry_impl(evict_key, evict_entry, torch_module=torch, gc_module=gc)
+        return runtime
+
+
 def _ensure_qwen_ready():
     global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
+    global qwen_runtime_platform, qwen_loaded_effective_model_id, qwen_runtime_config
+    metadata = active_qwen_metadata or {}
+    adapter_path = active_qwen_model_path
+    base_model_id = metadata.get("model_id") or QWEN_MODEL_NAME
+    platform_name = _resolve_qwen_runtime_platform(str(base_model_id), adapter_path=adapter_path)
+    if platform_name == QWEN_PLATFORM_MLX:
+        return _ensure_qwen_mlx_ready(str(base_model_id))
     if (
         QWEN_IMPORT_ERROR is not None
         or Qwen3VLForConditionalGeneration is None
@@ -3422,15 +3550,29 @@ def _ensure_qwen_ready():
         qwen_model is not None
         and qwen_processor is not None
         and loaded_qwen_model_id == active_qwen_model_id
+        and qwen_runtime_platform in (None, QWEN_PLATFORM_TRANSFORMERS)
     ):
-        return qwen_model, qwen_processor
+        return QwenRuntime(
+            model=qwen_model,
+            processor=qwen_processor,
+            platform=QWEN_PLATFORM_TRANSFORMERS,
+            model_id=qwen_loaded_effective_model_id or str(base_model_id),
+            config=qwen_runtime_config,
+        )
     with qwen_lock:
         if (
             qwen_model is not None
             and qwen_processor is not None
             and loaded_qwen_model_id == active_qwen_model_id
+            and qwen_runtime_platform in (None, QWEN_PLATFORM_TRANSFORMERS)
         ):
-            return qwen_model, qwen_processor
+            return QwenRuntime(
+                model=qwen_model,
+                processor=qwen_processor,
+                platform=QWEN_PLATFORM_TRANSFORMERS,
+                model_id=qwen_loaded_effective_model_id or str(base_model_id),
+                config=qwen_runtime_config,
+            )
         try:
             device = _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
         except RuntimeError as exc:  # noqa: BLE001
@@ -3453,9 +3595,6 @@ def _ensure_qwen_ready():
                 "torch_dtype": dtype,
                 "low_cpu_mem_usage": True,
             }
-        adapter_path = active_qwen_model_path
-        metadata = active_qwen_metadata or {}
-        base_model_id = metadata.get("model_id") or QWEN_MODEL_NAME
         if adapter_path and PeftModel is None:
             detail = "qwen_peft_missing"
             if PEFT_IMPORT_ERROR is not None:
@@ -3521,15 +3660,25 @@ def _ensure_qwen_ready():
         qwen_model = model
         qwen_processor = processor
         qwen_device = device
+        qwen_runtime_platform = QWEN_PLATFORM_TRANSFORMERS
+        qwen_loaded_effective_model_id = str(base_model_id)
+        qwen_runtime_config = getattr(model, "config", None)
         qwen_last_error = None
         loaded_qwen_model_id = active_qwen_model_id
         _enable_hf_offline_defaults()
-        return model, processor
+        return QwenRuntime(
+            model=model,
+            processor=processor,
+            platform=QWEN_PLATFORM_TRANSFORMERS,
+            model_id=str(base_model_id),
+            config=qwen_runtime_config,
+        )
 
 
 def _unload_qwen_runtime() -> None:
     """Release Qwen model/processor to free device memory."""
     global qwen_model, qwen_processor, qwen_device, loaded_qwen_model_id
+    global qwen_runtime_platform, qwen_loaded_effective_model_id, qwen_runtime_config
     global qwen_caption_cache, qwen_caption_order
     state = {
         "qwen_model": qwen_model,
@@ -3550,13 +3699,20 @@ def _unload_qwen_runtime() -> None:
     qwen_processor = state["qwen_processor"]
     qwen_device = state["qwen_device"]
     loaded_qwen_model_id = state["loaded_qwen_model_id"]
+    qwen_runtime_platform = None
+    qwen_loaded_effective_model_id = None
+    qwen_runtime_config = None
     qwen_caption_cache = state["qwen_caption_cache"]
     qwen_caption_order = state["qwen_caption_order"]
+    _clear_mlx_cache()
 
 
 def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
     global qwen_device, qwen_last_error
     global qwen_caption_cache, qwen_caption_order
+    platform_name = _resolve_qwen_runtime_platform(str(model_id_override), adapter_path=None)
+    if platform_name == QWEN_PLATFORM_MLX:
+        return _ensure_qwen_mlx_ready_for_caption(model_id_override)
     state = {
         "qwen_caption_cache": qwen_caption_cache,
         "qwen_caption_order": qwen_caption_order,
@@ -3637,7 +3793,12 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
     qwen_caption_order = state["qwen_caption_order"]
     qwen_device = state["qwen_device"]
     qwen_last_error = state["qwen_last_error"]
-    return model, processor
+    return QwenRuntime(
+        model=model,
+        processor=processor,
+        platform=QWEN_PLATFORM_TRANSFORMERS,
+        model_id=str(model_id_override),
+    )
 
 
 ## NOTE: caption prompt helpers call *_impl directly to avoid wrapper drift.
@@ -3713,6 +3874,244 @@ def _group_hints_by_window(
     return grouped
 
 
+def _qwen_message_text_parts(content: Any) -> List[str]:
+    if isinstance(content, str):
+        return [content]
+    parts: List[str] = []
+    if isinstance(content, (list, tuple)):
+        for item in content:
+            if isinstance(item, Mapping):
+                item_type = str(item.get("type") or "").lower()
+                if item_type == "text":
+                    parts.append(str(item.get("text") or item.get("content") or ""))
+            elif item is not None:
+                parts.append(str(item))
+    elif content is not None:
+        parts.append(str(content))
+    return [part for part in parts if part]
+
+
+def _normalize_qwen_messages_for_mlx(messages: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Any]]:
+    normalized: List[Dict[str, Any]] = []
+    image_inputs: List[Any] = []
+    for message in messages:
+        role = str(message.get("role") or "user")
+        content = message.get("content")
+        if isinstance(content, str):
+            normalized.append({"role": role, "content": content})
+            continue
+        normalized_content: List[Dict[str, Any]] = []
+        if isinstance(content, (list, tuple)):
+            for item in content:
+                if not isinstance(item, Mapping):
+                    if item is not None:
+                        normalized_content.append({"type": "text", "text": str(item)})
+                    continue
+                item_type = str(item.get("type") or "").lower()
+                if item_type == "image":
+                    image_value = item.get("image")
+                    if image_value is None:
+                        image_value = item.get("url")
+                    if image_value is None:
+                        image_value = item.get("path")
+                    if image_value is not None:
+                        image_inputs.append(image_value)
+                    normalized_content.append({"type": "image"})
+                elif item_type == "text":
+                    normalized_content.append({"type": "text", "text": str(item.get("text") or "")})
+                else:
+                    text = item.get("text") or item.get("content")
+                    if text is not None:
+                        normalized_content.append({"type": "text", "text": str(text)})
+        elif content is not None:
+            normalized_content.append({"type": "text", "text": str(content)})
+        normalized.append({"role": role, "content": normalized_content})
+    return normalized, image_inputs
+
+
+def _flatten_qwen_messages_for_mlx(messages: Sequence[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for message in messages:
+        role = str(message.get("role") or "user")
+        text = "\n".join(_qwen_message_text_parts(message.get("content"))).strip()
+        if text:
+            lines.append(f"{role}: {text}")
+    return "\n".join(lines)
+
+
+def _mlx_chat_prompt(
+    runtime: QwenRuntime,
+    messages: Sequence[Dict[str, Any]],
+    *,
+    add_generation_prompt: bool,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, List[Any]]:
+    normalized, image_inputs = _normalize_qwen_messages_for_mlx(messages)
+    processor = runtime.processor
+    try:
+        return (
+            processor.apply_chat_template(
+                normalized,
+                tokenize=False,
+                add_generation_prompt=bool(add_generation_prompt),
+                tools=tools,
+                chat_template_kwargs=chat_template_kwargs,
+            ),
+            image_inputs,
+        )
+    except TypeError:
+        try:
+            return (
+                processor.apply_chat_template(
+                    normalized,
+                    tokenize=False,
+                    add_generation_prompt=bool(add_generation_prompt),
+                ),
+                image_inputs,
+            )
+        except Exception:
+            pass
+    except Exception:
+        pass
+    prompt_text = _flatten_qwen_messages_for_mlx(normalized)
+    if MLX_APPLY_CHAT_TEMPLATE is not None:
+        try:
+            return (
+                MLX_APPLY_CHAT_TEMPLATE(
+                    processor,
+                    runtime.config or getattr(runtime.model, "config", {}) or {},
+                    prompt_text,
+                    add_generation_prompt=bool(add_generation_prompt),
+                    num_images=len(image_inputs),
+                ),
+                image_inputs,
+            )
+        except Exception:
+            pass
+    if add_generation_prompt:
+        prompt_text = f"{prompt_text}\nassistant:"
+    return prompt_text, image_inputs
+
+
+def _mlx_generation_kwargs(
+    max_new_tokens: Optional[int],
+    decode_override: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    max_tokens = int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS
+    kwargs: Dict[str, Any] = {"max_tokens": max(1, max_tokens), "verbose": False}
+    use_sampling = QWEN_DO_SAMPLE
+    if decode_override is not None and "do_sample" in decode_override:
+        use_sampling = bool(decode_override.get("do_sample"))
+    if use_sampling:
+        kwargs["temperature"] = float(
+            decode_override.get("temperature", QWEN_TEMPERATURE)
+            if decode_override is not None
+            else QWEN_TEMPERATURE
+        )
+        kwargs["top_p"] = float(
+            decode_override.get("top_p", QWEN_TOP_P)
+            if decode_override is not None
+            else QWEN_TOP_P
+        )
+    else:
+        kwargs["temperature"] = 0.0
+        kwargs["top_p"] = 1.0
+    kwargs["skip_special_tokens"] = True
+    return kwargs
+
+
+def _run_qwen_chat_mlx(
+    runtime: QwenRuntime,
+    messages: List[Dict[str, Any]],
+    *,
+    max_new_tokens: Optional[int] = None,
+    decode_override: Optional[Dict[str, Any]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
+    add_generation_prompt: bool = True,
+    assistant_prefix: Optional[str] = None,
+) -> str:
+    if MLX_VLM_GENERATE is None:
+        raise RuntimeError(_qwen_mlx_dependency_error() or "mlx_vlm_generate_unavailable")
+    prompt, image_inputs = _mlx_chat_prompt(
+        runtime,
+        messages,
+        add_generation_prompt=add_generation_prompt,
+        tools=tools,
+        chat_template_kwargs=chat_template_kwargs,
+    )
+    if assistant_prefix:
+        prompt = f"{prompt}{assistant_prefix}"
+    gen_kwargs = _mlx_generation_kwargs(max_new_tokens, decode_override)
+    result = MLX_VLM_GENERATE(
+        runtime.model,
+        runtime.processor,
+        prompt,
+        image=image_inputs or None,
+        **gen_kwargs,
+    )
+    return str(getattr(result, "text", result) or "")
+
+
+def _run_qwen_inference_mlx(
+    runtime: QwenRuntime,
+    prompt: str,
+    pil_img: Image.Image,
+    *,
+    max_new_tokens: Optional[int] = None,
+    system_prompt_override: Optional[str] = None,
+    decode_override: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, int, int]:
+    messages: List[Dict[str, Any]] = []
+    sys_prompt = (
+        system_prompt_override
+        if system_prompt_override is not None
+        else (active_qwen_metadata or {}).get("system_prompt")
+    )
+    if sys_prompt:
+        messages.append({"role": "system", "content": [{"type": "text", "text": sys_prompt}]})
+    messages.append(
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": pil_img},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    )
+    _agent_full_trace_write(
+        {
+            "type": "llm_input",
+            "source": "qwen_inference",
+            "runtime_platform": QWEN_PLATFORM_MLX,
+            "model_id": runtime.model_id,
+            "messages": messages,
+            "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else None,
+            "decode_override": decode_override,
+        }
+    )
+    output_text = _run_qwen_chat_mlx(
+        runtime,
+        messages,
+        max_new_tokens=max_new_tokens,
+        decode_override=decode_override,
+        add_generation_prompt=True,
+    )
+    _agent_full_trace_write(
+        {
+            "type": "llm_output",
+            "source": "qwen_inference",
+            "runtime_platform": QWEN_PLATFORM_MLX,
+            "model_id": runtime.model_id,
+            "output_text": output_text,
+        }
+    )
+    # mlx-vlm does not expose the processed vision grid that Transformers returns here.
+    # Qwen prompts in this app use the standard 0-1000 coordinate space.
+    return output_text, 1000, 1000
+
+
 def _run_qwen_inference(
     prompt: str,
     pil_img: Image.Image,
@@ -3724,11 +4123,21 @@ def _run_qwen_inference(
 ) -> Tuple[str, int, int]:
     """Execute a Qwen 3 VL inference following the reference recipe."""
     if runtime_override is not None:
-        model, processor = runtime_override
+        runtime = runtime_override
     elif model_id_override:
-        model, processor = _ensure_qwen_ready_for_caption(model_id_override)
+        runtime = _ensure_qwen_ready_for_caption(model_id_override)
     else:
-        model, processor = _ensure_qwen_ready()
+        runtime = _ensure_qwen_ready()
+    if isinstance(runtime, QwenRuntime) and runtime.platform == QWEN_PLATFORM_MLX:
+        return _run_qwen_inference_mlx(
+            runtime,
+            prompt,
+            pil_img,
+            max_new_tokens=max_new_tokens,
+            system_prompt_override=system_prompt_override,
+            decode_override=decode_override,
+        )
+    model, processor = runtime
     messages: List[Dict[str, Any]] = []
     sys_prompt = (
         system_prompt_override
@@ -3967,11 +4376,32 @@ def _run_qwen_chat(
     immediate_action_logit_bias: Optional[float] = None,
 ) -> str:
     if runtime_override is not None:
-        model, processor = runtime_override
+        runtime = runtime_override
     elif model_id_override:
-        model, processor = _ensure_qwen_ready_for_caption(model_id_override)
+        runtime = _ensure_qwen_ready_for_caption(model_id_override)
     else:
-        model, processor = _ensure_qwen_ready()
+        runtime = _ensure_qwen_ready()
+    if isinstance(runtime, QwenRuntime) and runtime.platform == QWEN_PLATFORM_MLX:
+        output_text = _run_qwen_chat_mlx(
+            runtime,
+            messages,
+            max_new_tokens=max_new_tokens,
+            decode_override=decode_override,
+            tools=tools,
+            chat_template_kwargs=chat_template_kwargs,
+            add_generation_prompt=add_generation_prompt,
+            assistant_prefix=assistant_prefix,
+        )
+        _agent_full_trace_write(
+            {
+                "type": "llm_output",
+                "runtime_platform": QWEN_PLATFORM_MLX,
+                "model_id": runtime.model_id,
+                "output_text": output_text,
+            }
+        )
+        return output_text
+    model, processor = runtime
     if assistant_prefix:
         add_generation_prompt = True
     text = processor.apply_chat_template(
@@ -4131,11 +4561,30 @@ def _run_qwen_chat_stream(
     immediate_action_logit_bias: Optional[float] = None,
 ) -> Iterator[str]:
     if runtime_override is not None:
-        model, processor = runtime_override
+        runtime = runtime_override
     elif model_id_override:
-        model, processor = _ensure_qwen_ready_for_caption(model_id_override)
+        runtime = _ensure_qwen_ready_for_caption(model_id_override)
     else:
-        model, processor = _ensure_qwen_ready()
+        runtime = _ensure_qwen_ready()
+    if isinstance(runtime, QwenRuntime) and runtime.platform == QWEN_PLATFORM_MLX:
+        yield _run_qwen_chat(
+            messages,
+            max_new_tokens=max_new_tokens,
+            runtime_override=runtime,
+            decode_override=decode_override,
+            tools=tools,
+            chat_template_kwargs=chat_template_kwargs,
+            add_generation_prompt=add_generation_prompt,
+            assistant_prefix=assistant_prefix,
+            thinking_effort=thinking_effort,
+            thinking_scale_factor=thinking_scale_factor,
+            immediate_action_bias=immediate_action_bias,
+            immediate_action_min_chars=immediate_action_min_chars,
+            immediate_action_min_seconds=immediate_action_min_seconds,
+            immediate_action_logit_bias=immediate_action_logit_bias,
+        )
+        return
+    model, processor = runtime
     if assistant_prefix:
         add_generation_prompt = True
     text = processor.apply_chat_template(
@@ -4332,6 +4781,26 @@ def _run_qwen_chat_stream(
             "output_text": generated_text,
         }
     )
+
+
+def _generate_qwen_text(
+    prompt: str,
+    *,
+    max_new_tokens: int = 128,
+    use_system_prompt: bool = True,
+    system_prompt: Optional[str] = None,
+) -> str:
+    messages: List[Dict[str, Any]] = []
+    if use_system_prompt:
+        sys_prompt = system_prompt or (active_qwen_metadata or {}).get("system_prompt")
+        if sys_prompt:
+            messages.append({"role": "system", "content": [{"type": "text", "text": str(sys_prompt)}]})
+    messages.append({"role": "user", "content": [{"type": "text", "text": str(prompt or "")}]})
+    return _run_qwen_chat(
+        messages,
+        max_new_tokens=max_new_tokens,
+        decode_override={"do_sample": False},
+    ).strip()
 
 
 def _load_qwen_vl_model(
@@ -4769,15 +5238,11 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
                     _AGENT_ACTIVE_LABELMAP or [],
                     _AGENT_ACTIVE_GLOSSARY or "",
                     max_synonyms=10,
-                    generate_text_fn=lambda prompt, max_new_tokens=128, use_system_prompt=True: _generate_qwen_text_impl(
+                    generate_text_fn=lambda prompt, max_new_tokens=128, use_system_prompt=True: _generate_qwen_text(
                         prompt,
                         max_new_tokens=max_new_tokens,
                         use_system_prompt=use_system_prompt,
                         system_prompt=(active_qwen_metadata or {}).get("system_prompt"),
-                        ensure_qwen_ready_fn=_ensure_qwen_ready,
-                        resolve_qwen_device_fn=lambda: _resolve_qwen_device_impl(
-                            QWEN_DEVICE_PREF, torch_module=torch
-                        ),
                     ),
                     extract_json_fn=_extract_balanced_json,
                     default_synonyms=_DEFAULT_SAM3_SYNONYMS,
@@ -4808,11 +5273,15 @@ def _dispatch_agent_tool(call: AgentToolCall) -> AgentToolResult:
                 if classifier_norm in {"default", "auto", "best"}:
                     classifier_id = None
                     args.pop("classifier_id", None)
-                    if _AGENT_ACTIVE_CLASSIFIER_ID and not isinstance(active_classifier_head, dict):
+                    if _AGENT_ACTIVE_CLASSIFIER_ID and not isinstance(
+                        _active_classifier_head_for_inference(), dict
+                    ):
                         args["classifier_id"] = _AGENT_ACTIVE_CLASSIFIER_ID
                 elif Path(classifier_id).suffix.lower() not in CLASSIFIER_ALLOWED_EXTS:
                     args.pop("classifier_id", None)
-            if not args.get("classifier_id") and not isinstance(active_classifier_head, dict):
+            if not args.get("classifier_id") and not isinstance(
+                _active_classifier_head_for_inference(), dict
+            ):
                 if _AGENT_ACTIVE_CLASSIFIER_ID:
                     args["classifier_id"] = _AGENT_ACTIVE_CLASSIFIER_ID
                 else:
@@ -5257,7 +5726,7 @@ def _calibration_run_job(job: CalibrationJob, request: CalibrationRequest) -> No
         calibration_root=CALIBRATION_ROOT,
         calibration_cache_root=CALIBRATION_CACHE_ROOT,
         prepass_request_cls=QwenPrepassRequest,
-        active_classifier_head=active_classifier_head,
+        active_classifier_head=_active_classifier_head_for_inference(),
         active_classifier_path=active_classifier_path,
         default_classifier_for_dataset_fn=_agent_default_classifier_for_dataset,
         calibration_features_version=CALIBRATION_FEATURES_VERSION,
@@ -5372,9 +5841,8 @@ def _encode_pil_batch_for_head(
 
 
 def _encode_pil_batch_for_active(images: Sequence[Image.Image]) -> Optional[np.ndarray]:
-    if isinstance(active_classifier_head, dict):
-        head = active_classifier_head
-    else:
+    head = _active_classifier_head_for_inference()
+    if not isinstance(head, dict):
         head = {
             "encoder_type": active_encoder_type or "clip",
             "normalize_embeddings": active_head_normalize_embeddings,
@@ -5384,6 +5852,36 @@ def _encode_pil_batch_for_active(images: Sequence[Image.Image]) -> Optional[np.n
             "embedding_std_values": (active_classifier_meta or {}).get("embedding_std_values"),
         }
     return _encode_pil_batch_for_head(images, head=head)
+
+
+def _active_classifier_head_for_inference() -> Optional[Dict[str, Any]]:
+    """Return the active classifier as a normalized inference head when possible."""
+    global active_classifier_head
+
+    if isinstance(active_classifier_head, dict):
+        return active_classifier_head
+    classifier_path = str(active_classifier_path or "").strip()
+    if not classifier_path or not os.path.isfile(classifier_path):
+        return None
+    try:
+        head = _load_clip_head_from_classifier_impl(
+            Path(classifier_path),
+            joblib_load_fn=joblib.load,
+            http_exception_cls=HTTPException,
+            clip_head_background_indices_fn=_clip_head_background_indices,
+            resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+            infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
+            active_clip_model_name=clip_model_name,
+            default_clip_model=DEFAULT_CLIP_MODEL,
+            logger=logger,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Active classifier head unavailable for %s: %s", classifier_path, exc)
+        return None
+    if isinstance(head, dict):
+        active_classifier_head = head
+        return active_classifier_head
+    return None
 
 
 def _clip_head_predict_proba(
@@ -5469,9 +5967,9 @@ def _clip_head_predict_proba(
 
 
 def _clip_auto_predict_details(feats_np: Any, *, background_guard: bool = True) -> Dict[str, Any]:
-    if not isinstance(active_classifier_head, dict):
+    head = _active_classifier_head_for_inference()
+    if not isinstance(head, dict):
         return {"error": "classifier_head_unavailable"}
-    head = active_classifier_head
     proba_arr = _clip_head_predict_proba(feats_np, head)
     if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] == 0:
         return {"error": "classifier_failed"}
@@ -6712,7 +7210,7 @@ def _sam3_similarity_payloads_from_state(
         boxes_xywh.append((x1, y1, w, h))
     if not boxes_xywh:
         return []
-    threshold_val = float(score_thr) if score_thr is not None else 0.2
+    threshold_val = float(score_thr) if score_thr is not None else 0.55
     mask_val = float(mask_threshold) if mask_threshold is not None else 0.2
     detections = _run_sam3_visual_inference_multi(
         crop_img,
@@ -6909,7 +7407,7 @@ def _agent_tool_sam3_similarity(
                 status_code=HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="sam3_similarity_exemplar_required",
             )
-        threshold_val = float(score_thr) if score_thr is not None else 0.2
+        threshold_val = float(score_thr) if score_thr is not None else 0.55
         mask_val = float(mask_threshold) if mask_threshold is not None else 0.2
         detections = _run_sam3_visual_inference_multi(
             crop_img,
@@ -7287,8 +7785,8 @@ def _agent_tool_classify_crop(
                 default_clip_model=DEFAULT_CLIP_MODEL,
                 logger=logger,
             )
-    elif isinstance(active_classifier_head, dict):
-        head = active_classifier_head
+    else:
+        head = _active_classifier_head_for_inference()
     if _AGENT_TRACE_FULL_WRITER is not None:
         _AGENT_TRACE_FULL_WRITER(
             {
@@ -7864,8 +8362,8 @@ def _agent_tool_get_labelmap(
                 default_clip_model=DEFAULT_CLIP_MODEL,
                 logger=logger,
             )
-    elif isinstance(active_classifier_head, dict):
-        head = active_classifier_head
+    else:
+        head = _active_classifier_head_for_inference()
     background = _agent_background_classes_from_head(head)
     return {
         "classes": classes,
@@ -8064,8 +8562,8 @@ def _agent_tool_submit_annotations(
                 default_clip_model=DEFAULT_CLIP_MODEL,
                 logger=logger,
             )
-    elif isinstance(active_classifier_head, dict):
-        head = active_classifier_head
+    else:
+        head = _active_classifier_head_for_inference()
     background = _agent_background_classes_from_head(head)
     normalized_annotations: List[Dict[str, Any]] = []
     cluster_id_list: List[int] = []
@@ -8818,15 +9316,11 @@ _agent_readable_write = lambda line: _agent_readable_write_impl(  # noqa: E731
     run_detector_fn=lambda **kwargs: _agent_tool_run_detector(**kwargs),
     attach_provenance_fn=_agent_attach_provenance,
     generate_sam3_synonyms_fn=_agent_generate_sam3_synonyms,
-    generate_text_fn=lambda prompt, max_new_tokens=128, use_system_prompt=True: _generate_qwen_text_impl(
+    generate_text_fn=lambda prompt, max_new_tokens=128, use_system_prompt=True: _generate_qwen_text(
         prompt,
         max_new_tokens=max_new_tokens,
         use_system_prompt=use_system_prompt,
         system_prompt=(active_qwen_metadata or {}).get("system_prompt"),
-        ensure_qwen_ready_fn=_ensure_qwen_ready,
-        resolve_qwen_device_fn=lambda: _resolve_qwen_device_impl(
-            QWEN_DEVICE_PREF, torch_module=torch
-        ),
     ),
     extract_json_fn=_extract_balanced_json,
     default_synonyms=_DEFAULT_SAM3_SYNONYMS,
@@ -8859,7 +9353,7 @@ _agent_readable_write = lambda line: _agent_readable_write_impl(  # noqa: E731
         default_clip_model=DEFAULT_CLIP_MODEL,
         logger=logger,
     ),
-    active_classifier_head=active_classifier_head,
+    active_classifier_head=_active_classifier_head_for_inference(),
     background_from_head_fn=_agent_background_classes_from_head,
     sanitize_fn=_agent_sanitize_detection_items,
     default_iou=PREPASS_CLUSTER_IOU,
@@ -9152,7 +9646,7 @@ def _run_prepass_annotation_qwen(
     _AGENT_ACTIVE_INSPECTED_WINDOWS = set()
     _agent_reset_registries()
     classifier_id_for_run = payload.classifier_id
-    if not classifier_id_for_run and not isinstance(active_classifier_head, dict):
+    if not classifier_id_for_run and not isinstance(_active_classifier_head_for_inference(), dict):
         classifier_id_for_run = _agent_default_classifier_for_dataset(payload.dataset_id)
     _AGENT_ACTIVE_CLASSIFIER_ID = classifier_id_for_run
     head: Optional[Dict[str, Any]] = None
@@ -9176,8 +9670,8 @@ def _run_prepass_annotation_qwen(
                 default_clip_model=DEFAULT_CLIP_MODEL,
                 logger=logger,
             )
-    elif isinstance(active_classifier_head, dict):
-        head = active_classifier_head
+    else:
+        head = _active_classifier_head_for_inference()
     if isinstance(head, dict):
         head = dict(head)
         if _AGENT_ACTIVE_TIGHTEN_FP:
@@ -9501,8 +9995,10 @@ def _run_prepass_annotation(
 DEFAULT_QWEN_PROMPT_CONFIG = QwenPromptConfig(
     bbox=QwenPromptSection(
         base_prompt=(
-            "Output a JSON formatted list of very tight bounding boxes with coordinates in format (x1,y1,x2,y2) "
-            "of detections in this {image_type}. Make a single bounding box for each unique instance of the things we want to detect. "
+            "Output a JSON formatted list of very tight bounding boxes for detections in this {image_type}. "
+            "Each entry must contain bbox_2d coordinates in format [x1,y1,x2,y2]. "
+            "Use 0-1000 coordinates relative to this image, not pixel coordinates. "
+            "Make a single bounding box for each unique instance of the things we want to detect. "
             "The objects we want to detect are: {items}. {extra_context}"
         ),
         default_image_type="image",
@@ -9510,7 +10006,8 @@ DEFAULT_QWEN_PROMPT_CONFIG = QwenPromptConfig(
     ),
     point=QwenPromptSection(
         base_prompt=(
-            "Output a JSON formatted list of positive click points with coordinates in format (x,y) for detections in this {image_type}. "
+            "Output a JSON formatted list of positive click points with point_2d coordinates in format [x, y]. "
+            "Use 0-1000 coordinates relative to this image, not pixel coordinates, for detections in this {image_type}. "
             "Each entry must contain \"point_2d\": [x, y] centered on the object so Segment Anything can turn it into a mask/bbox. "
             "Make one point per object. The objects we want to detect are: {items}. {extra_context}"
         ),
@@ -20643,6 +21140,7 @@ def _publish_clip_training_artifacts(artifacts: TrainingArtifacts) -> TrainingAr
 def _current_active_payload() -> Dict[str, Any]:
     encoder_ready = _active_encoder_ready()
     encoder_error = clip_last_error
+    head = _active_classifier_head_for_inference()
     return {
         "clip_model": clip_model_name,
         "classifier_path": active_classifier_path,
@@ -20655,8 +21153,8 @@ def _current_active_payload() -> Dict[str, Any]:
         "encoder_ready": encoder_ready,
         "encoder_error": encoder_error,
         "logit_adjustment_inference": (
-            bool(active_classifier_head.get("logit_adjustment_inference"))
-            if isinstance(active_classifier_head, dict)
+            bool(head.get("logit_adjustment_inference"))
+            if isinstance(head, dict)
             else None
         ),
     }
@@ -23477,7 +23975,7 @@ def qwen_train_cache_purge():
     return {"status": "ok", "deleted_bytes": deleted}
 
 
-def list_qwen_models():
+def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
     default_entry = {
         "id": "default",
         "label": "Base Qwen 3",
@@ -23485,10 +23983,52 @@ def list_qwen_models():
         "metadata": _default_qwen_metadata(),
         "path": None,
         "created_at": None,
-        "active": active_qwen_model_id == "default",
     }
+    mlx_entries: List[Dict[str, Any]] = []
+    for entry in QWEN_MLX_MODEL_OPTIONS:
+        model_id = str(entry.get("id") or entry.get("model_id") or "")
+        metadata = {
+            "id": model_id,
+            "label": str(entry.get("label") or model_id),
+            "system_prompt": DEFAULT_SYSTEM_PROMPT,
+            "dataset_context": "MLX quantized Qwen3-VL model for Apple Silicon inference.",
+            "classes": [],
+            "model_id": model_id,
+            "model_family": "qwen3",
+            "source": "mlx-community",
+            "runtime_platform": QWEN_PLATFORM_MLX,
+            "quantization": entry.get("quantization"),
+            "variant": entry.get("variant"),
+            "size": entry.get("size"),
+            "min_pixels": QWEN_MIN_PIXELS,
+            "max_pixels": QWEN_MAX_PIXELS,
+        }
+        mlx_entries.append(
+            {
+                "id": model_id,
+                "label": str(entry.get("label") or model_id),
+                "type": "builtin_mlx",
+                "metadata": metadata,
+                "path": None,
+                "created_at": None,
+            }
+        )
+    return [default_entry, *mlx_entries]
+
+
+def _get_builtin_qwen_model_entry(model_id: str) -> Optional[Dict[str, Any]]:
+    for entry in _builtin_qwen_model_entries():
+        if str(entry.get("id")) == str(model_id):
+            return entry
+    return None
+
+
+def list_qwen_models():
     entries = _list_qwen_model_entries()
-    data = [default_entry]
+    data = []
+    for entry in _builtin_qwen_model_entries():
+        entry["active"] = entry.get("id") == active_qwen_model_id
+        data.append(entry)
     for entry in entries:
         entry["active"] = entry.get("id") == active_qwen_model_id
         data.append(entry)
@@ -23505,15 +24045,19 @@ def activate_qwen_model(payload: QwenModelActivateRequest):
     if model_id == "default":
         _set_active_qwen_model_default()
     else:
-        entry = _get_qwen_model_entry(model_id)
-        if not entry:
-            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_model_not_found")
-        latest = entry.get("path")
-        if not latest or not Path(latest).exists():
-            raise HTTPException(
-                status_code=HTTP_404_NOT_FOUND, detail="qwen_model_missing_checkpoint"
-            )
-        _set_active_qwen_model_custom(model_id, Path(latest), entry.get("metadata") or {})
+        builtin = _get_builtin_qwen_model_entry(model_id)
+        if builtin and builtin.get("type") == "builtin_mlx":
+            _set_active_qwen_model_builtin(model_id, builtin.get("metadata") or qwen_mlx_metadata_for_model(model_id))
+        else:
+            entry = _get_qwen_model_entry(model_id)
+            if not entry:
+                raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_model_not_found")
+            latest = entry.get("path")
+            if not latest or not Path(latest).exists():
+                raise HTTPException(
+                    status_code=HTTP_404_NOT_FOUND, detail="qwen_model_missing_checkpoint"
+                )
+            _set_active_qwen_model_custom(model_id, Path(latest), entry.get("metadata") or {})
     return {
         "active": active_qwen_model_id,
         "metadata": active_qwen_metadata,
@@ -24116,21 +24660,41 @@ app.include_router(
 
 
 def qwen_status():
-    dependency_error = str(QWEN_IMPORT_ERROR) if QWEN_IMPORT_ERROR else None
+    platform_name = _resolve_qwen_runtime_platform(
+        (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+        adapter_path=active_qwen_model_path,
+    )
+    if platform_name == QWEN_PLATFORM_MLX:
+        dependency_error = _qwen_mlx_dependency_error()
+    else:
+        dependency_error = str(QWEN_IMPORT_ERROR) if QWEN_IMPORT_ERROR else None
     device_guess = qwen_device
     pending_error = qwen_last_error
-    if not device_guess and not dependency_error:
+    if platform_name == QWEN_PLATFORM_MLX and not device_guess and not dependency_error:
+        device_guess = QWEN_PLATFORM_MLX
+    elif not device_guess and not dependency_error:
         try:
             device_guess = _resolve_qwen_device_impl(QWEN_DEVICE_PREF, torch_module=torch)
         except RuntimeError as exc:  # noqa: BLE001
             pending_error = str(exc)
             device_guess = None
+    effective_model_id = _effective_qwen_model_id_for_platform(
+        (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
+        platform_name,
+    )
     return {
         "available": dependency_error is None,
         "loaded": qwen_model is not None,
         "model_name": QWEN_MODEL_NAME,
+        "effective_model_name": effective_model_id,
         "model_family": (active_qwen_metadata or {}).get("model_family", "qwen3"),
         "device": device_guess,
+        "platform": platform_name,
+        "configured_platform": QWEN_INFERENCE_PLATFORM,
+        "runtime_platform": qwen_runtime_platform or platform_name,
+        "mlx_model_name": QWEN_MLX_MODEL_NAME,
+        "mlx_available": _qwen_mlx_dependency_error() is None,
+        "mlx_dependency_error": _qwen_mlx_dependency_error(),
         "max_new_tokens": QWEN_MAX_NEW_TOKENS,
         "min_pixels": QWEN_MIN_PIXELS,
         "max_pixels": QWEN_MAX_PIXELS,
@@ -24138,21 +24702,41 @@ def qwen_status():
         "dependency_error": dependency_error,
         "active_model": active_qwen_model_id,
         "active_metadata": active_qwen_metadata,
+        "mlx_models": QWEN_MLX_MODEL_OPTIONS,
     }
 
 
 def qwen_settings():
-    return QwenRuntimeSettings(trust_remote_code=QWEN_TRUST_REMOTE_CODE)
+    return QwenRuntimeSettings(
+        trust_remote_code=QWEN_TRUST_REMOTE_CODE,
+        inference_platform=QWEN_INFERENCE_PLATFORM,
+        mlx_model_id=QWEN_MLX_MODEL_NAME,
+        mlx_available=_qwen_mlx_dependency_error() is None,
+        mlx_models=QWEN_MLX_MODEL_OPTIONS,
+    )
 
 
 def update_qwen_settings(payload: QwenRuntimeSettingsUpdate):
-    global QWEN_TRUST_REMOTE_CODE
+    global QWEN_TRUST_REMOTE_CODE, QWEN_INFERENCE_PLATFORM, QWEN_MLX_MODEL_NAME
+    needs_unload = False
     if payload.trust_remote_code is not None:
         desired = bool(payload.trust_remote_code)
         if desired != QWEN_TRUST_REMOTE_CODE:
             QWEN_TRUST_REMOTE_CODE = desired
-            _unload_qwen_runtime()
-    return QwenRuntimeSettings(trust_remote_code=QWEN_TRUST_REMOTE_CODE)
+            needs_unload = True
+    if payload.inference_platform is not None:
+        desired_platform = normalize_qwen_platform(payload.inference_platform)
+        if desired_platform != QWEN_INFERENCE_PLATFORM:
+            QWEN_INFERENCE_PLATFORM = desired_platform
+            needs_unload = True
+    if payload.mlx_model_id is not None:
+        desired_mlx_model = str(payload.mlx_model_id or "").strip() or QWEN_MLX_DEFAULT_MODEL
+        if desired_mlx_model != QWEN_MLX_MODEL_NAME:
+            QWEN_MLX_MODEL_NAME = desired_mlx_model
+            needs_unload = True
+    if needs_unload:
+        _unload_qwen_runtime()
+    return qwen_settings()
 
 
 app.include_router(
@@ -25871,6 +26455,7 @@ def sam3_visual_prompt(payload: Sam3VisualPrompt):
                 return_masks=True,
                 min_size=payload.min_size,
                 simplify_epsilon=payload.simplify_epsilon,
+                text_prompt=payload.text_prompt,
             )
         else:
             detections, masks_arr = _run_sam3_visual_inference(
@@ -25887,6 +26472,7 @@ def sam3_visual_prompt(payload: Sam3VisualPrompt):
                 return_masks=True,
                 min_size=payload.min_size,
                 simplify_epsilon=payload.simplify_epsilon,
+                text_prompt=payload.text_prompt,
             )
     except HTTPException:
         raise

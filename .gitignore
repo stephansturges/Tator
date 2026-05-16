@@ -243,6 +243,11 @@ sam3_lite/
 /.vscode/
 /.idea/
 
+# Local scratch/vendor/reference material
+CLIP/
+DEV_BRIEF.md
+references/
+
 # Front-end scratch artifacts
 ybat-master/ybat_*.js
 ybat-master/ybas_*.js

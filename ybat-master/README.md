@@ -1,45 +1,68 @@
-# Ybat - YOLO BBox Annotation Tool
-Fast and efficient BBox annotation for your images in YOLO, and now, VOC/COCO formats!
+# Tator Browser UI
 
-## INTRO
-To see why and for what this was created, please read [Ybat - YOLO BBox Annotation Tool](https://medium.com/@drainingsun/ybat-yolo-bbox-annotation-tool-96fb765d0036)
+`ybat-master/` contains the static browser workspace used by Tator. It began as
+Ybat, but this copy is now the Tator labeling interface: dataset-aware
+annotation, assisted class prediction, SAM/SAM3 tools, Qwen captioning, detector
+prepasses, EDR application, and export controls all live here.
 
-![Sample](cute.png)
+Open `ybat.html` from a browser, or serve the directory with a small static
+server during development:
 
-## USAGE
-1. Download the zip.
-2. Extract it.
-3. Open `ybat.html` in your browser.
-4. Load images and classes and start bboxing!
+```bash
+python3 -m http.server 8080 -d ybat-master
+```
 
-## CONFIGURATION
-1. Open ybat.js.
-2. Edit section named `parameters`.
+Then open:
 
-## COMPATIBILITY
-All browsers that support ES6 should work. Tested with:
+```text
+http://127.0.0.1:8080/ybat.html
+```
 
-* Chrome v65
-* Firefox v58
-* Safari v11
-* Opera v51
+The UI talks to the backend configured by `API_ROOT`, which defaults to
+`http://localhost:8000`.
 
-No idea about IE/Edge.
+## Main Areas
 
-## FEATURES
-* **NEW! Basic Pascal VOC and COCO format support.**
-* Works in your browser on any platform.
-* Complete YOLO format support.
-* No need for image upload - everything is done locally!
-* Zooming and panning images with guidelines for precise bboxing.
-* Fast navigation for quick bboxing.
-* Auto save in memory in case of accidental refreshes and crashes.
-* Ability to crop your bboxes and save the resulting images.
-* Information on both image and current bbox.
+- **Label Images**: manual box/polygon labeling, class cycling, full-screen
+  image mode, SAM/SAM3 prompts, detector suggestions, Qwen captions, and export.
+- **Dataset Management**: upload/register datasets, inspect linked-path health,
+  edit labelmaps and glossaries, and open datasets for labeling.
+- **Training**: CLIP/DINO class predictors, YOLO, RF-DETR, SAM3, and Qwen job
+  controls.
+- **Backend Config**: runtime status, predictor slots, Qwen runtime settings,
+  and install/system checks.
+- **EDR and Prepass**: build, calibrate, save, load, and apply reusable
+  prelabeling recipes.
 
-## CAVEATS
-* Loading many and or big images might take a while. This is because tool needs to figure out image dimensions.  
-* Cropping many items might crash your browser. This and above will be fixed at some point.
+## Development Notes
 
-## CONTRIBUTING
-Go nuts! Just don't forget to follow eslint guidelines. Credit will be given where it's due.
+- `ybat.js` is intentionally plain browser JavaScript. Keep additions local to
+  the existing helper/state pattern and run `node --check ybat-master/ybat.js`
+  after edits.
+- Bump the `ybat.js?v=...` cache key in `ybat.html` whenever frontend behavior
+  changes.
+- Imported YOLO/VOC/COCO labels are stamped with UUID and creation metadata so
+  SAM and auto-tweak responses can target the correct box.
+- Zip imports skip directory entries and keep importing remaining files if one
+  archived label file fails.
+- The frontend should remain usable from local file mode, but a static server is
+  better for development because it avoids stale browser cache and path issues.
+
+## Validation
+
+Fast checks for frontend-only edits:
+
+```bash
+node --check ybat-master/ybat.js
+git diff --check
+```
+
+For changes that touch backend endpoints used by the UI, also run the relevant
+pytest slice and verify the backend:
+
+```bash
+.venv-macos/bin/python -m pytest tests/test_api_route_uniqueness.py -q
+curl http://127.0.0.1:8000/system/health_summary
+```
+
+The root [readme.md](../readme.md) has the full repository map and setup paths.

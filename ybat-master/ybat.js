@@ -346,7 +346,7 @@
     let multiPointWaitingForPreload = false;
 
     let samVariant = "sam3";
-    const SAM3_SIMILARITY_DEFAULT_THRESHOLD = 0.2;
+    const SAM3_SIMILARITY_DEFAULT_THRESHOLD = 0.55;
     const SAM3_SIMILARITY_DEFAULT_MASK_THRESHOLD = 0.2;
     let autoModeCheckbox = null;
     let autoClassMarginEnabledCheckbox = null;
@@ -1730,6 +1730,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
     };
 
     const qwenSettingsElements = {
+        inferencePlatform: null,
+        mlxModel: null,
         trustRemoteCode: null,
         applyButton: null,
         status: null,
@@ -2051,6 +2053,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     let qwenAgentDetectorRefreshPendingSelected = null;
     let qwenSettingsRefreshInFlight = false;
     let qwenSettingsApplyInFlight = false;
+    let qwenMlxModelOptions = [];
     let installCheckInFlight = false;
     let backendFuzzerInFlight = false;
     let agentRecipeDownloadInFlight = false;
@@ -18247,6 +18250,8 @@ async function cancelRfDetrTrainingJobRequest() {
         settingsElements.applyButton = document.getElementById("settingsApply");
         settingsElements.testButton = document.getElementById("settingsTest");
         settingsElements.status = document.getElementById("settingsStatus");
+        qwenSettingsElements.inferencePlatform = document.getElementById("qwenInferencePlatform");
+        qwenSettingsElements.mlxModel = document.getElementById("qwenMlxModel");
         qwenSettingsElements.trustRemoteCode = document.getElementById("qwenTrustRemoteCode");
         qwenSettingsElements.applyButton = document.getElementById("qwenSettingsApply");
         qwenSettingsElements.status = document.getElementById("qwenSettingsStatus");
@@ -18310,16 +18315,150 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenSettingsElements.status.className = variant ? `settings-status ${variant}` : "settings-status";
     }
 
-    async function refreshQwenSettings() {
-        if (!qwenSettingsElements.trustRemoteCode || !qwenSettingsElements.applyButton) {
+    function normalizeQwenMlxModelOptions(models) {
+        const items = Array.isArray(models) ? models : [];
+        const seen = new Set();
+        const normalized = [];
+        items.forEach((entry) => {
+            const modelId = String(entry?.id || entry?.model_id || "").trim();
+            if (!modelId || seen.has(modelId)) {
+                return;
+            }
+            seen.add(modelId);
+            normalized.push({
+                ...entry,
+                id: modelId,
+                model_id: modelId,
+                label: entry?.label || modelId,
+            });
+        });
+        return normalized;
+    }
+
+    function removeGeneratedQwenMlxOptions(select) {
+        if (!select) {
             return;
         }
+        Array.from(select.querySelectorAll('optgroup[data-runtime-platform="mlx_vlm"]')).forEach((group) => {
+            group.remove();
+        });
+        Array.from(select.querySelectorAll('option[data-runtime-platform="mlx_vlm"]')).forEach((option) => {
+            option.remove();
+        });
+    }
+
+    function appendQwenMlxOptionsToSelect(select, models) {
+        if (!select) {
+            return;
+        }
+        const selectedValue = select.value;
+        removeGeneratedQwenMlxOptions(select);
+        const existingValues = new Set(Array.from(select.options).map((option) => option.value));
+        const group = document.createElement("optgroup");
+        group.label = "MLX quantized Qwen3-VL";
+        group.dataset.runtimePlatform = "mlx_vlm";
+        (Array.isArray(models) ? models : []).forEach((entry) => {
+            const modelId = String(entry?.id || entry?.model_id || "").trim();
+            if (!modelId || existingValues.has(modelId)) {
+                return;
+            }
+            const option = document.createElement("option");
+            option.value = modelId;
+            option.textContent = entry?.label || modelId;
+            option.title = modelId;
+            option.dataset.runtimePlatform = "mlx_vlm";
+            group.appendChild(option);
+            existingValues.add(modelId);
+        });
+        if (group.children.length) {
+            select.appendChild(group);
+        }
+        if (selectedValue && Array.from(select.options).some((option) => option.value === selectedValue)) {
+            select.value = selectedValue;
+        }
+    }
+
+    function isResolvedQwenModelId(value) {
+        return String(value || "").trim().includes("/");
+    }
+
+    function variantForResolvedQwenModel(value, variant) {
+        return isResolvedQwenModelId(value) ? "auto" : (variant || "auto");
+    }
+
+    function ensureQwenSelectOption(select, value, label = null) {
+        if (!select) {
+            return;
+        }
+        const optionValue = String(value || "").trim();
+        if (!optionValue || Array.from(select.options).some((option) => option.value === optionValue)) {
+            return;
+        }
+        const option = document.createElement("option");
+        option.value = optionValue;
+        option.textContent = label || optionValue;
+        option.title = optionValue;
+        if (isResolvedQwenModelId(optionValue)) {
+            option.dataset.runtimePlatform = optionValue.startsWith("mlx-community/")
+                ? "mlx_vlm"
+                : "transformers";
+        }
+        select.appendChild(option);
+    }
+
+    function populateQwenRuntimeModelSelects(models) {
+        const items = normalizeQwenMlxModelOptions(models);
+        [
+            qwenElements.captionModel,
+            qwenElements.agentModel,
+            qwenElements.agentCaptionModel,
+        ].forEach((select) => {
+            appendQwenMlxOptionsToSelect(select, items);
+        });
+    }
+
+    function populateQwenMlxModelSelect(models, selectedId) {
+        const select = qwenSettingsElements.mlxModel;
+        const items = normalizeQwenMlxModelOptions(models);
+        qwenMlxModelOptions = items;
+        populateQwenRuntimeModelSelects(items);
+        if (!select) {
+            return;
+        }
+        select.innerHTML = "";
+        items.forEach((entry) => {
+            const modelId = String(entry?.id || entry?.model_id || "").trim();
+            if (!modelId) {
+                return;
+            }
+            const option = document.createElement("option");
+            option.value = modelId;
+            option.textContent = entry?.label || modelId;
+            select.appendChild(option);
+        });
+        if (selectedId && Array.from(select.options).some((option) => option.value === selectedId)) {
+            select.value = selectedId;
+        } else if (select.options.length) {
+            select.selectedIndex = 0;
+        }
+    }
+
+    async function refreshQwenSettings(options = {}) {
+        const silent = !!options.silent;
+        const hasSettingsUi = !!(
+            qwenSettingsElements.trustRemoteCode
+            && qwenSettingsElements.applyButton
+        );
         if (qwenSettingsRefreshInFlight) {
             return;
         }
         qwenSettingsRefreshInFlight = true;
-        qwenSettingsElements.applyButton.disabled = true;
-        setQwenSettingsStatus("Loading Qwen settings…", "info");
+        if (qwenSettingsElements.applyButton) {
+            qwenSettingsElements.applyButton.disabled = true;
+        }
+        if (hasSettingsUi && !silent) {
+            setQwenSettingsStatus("Loading Qwen settings…", "info");
+        }
         let available = false;
         try {
             const resp = await fetch(`${API_ROOT}/qwen/settings`);
@@ -18327,18 +18466,42 @@ async function cancelRfDetrTrainingJobRequest() {
                 throw new Error(`HTTP ${resp.status}`);
             }
             const payload = await resp.json();
-            qwenSettingsElements.trustRemoteCode.checked = Boolean(payload?.trust_remote_code);
+            if (qwenSettingsElements.inferencePlatform) {
+                qwenSettingsElements.inferencePlatform.value = payload?.inference_platform || "auto";
+            }
+            populateQwenMlxModelSelect(payload?.mlx_models, payload?.mlx_model_id);
+            if (qwenSettingsElements.trustRemoteCode) {
+                qwenSettingsElements.trustRemoteCode.checked = Boolean(payload?.trust_remote_code);
+            }
             available = true;
-            setQwenSettingsStatus("Qwen settings loaded.", "success");
+            if (hasSettingsUi && !silent) {
+                setQwenSettingsStatus("Qwen settings loaded.", "success");
+            }
         } catch (err) {
             console.warn("Qwen settings unavailable", err);
-            qwenSettingsElements.trustRemoteCode.checked = false;
-            setQwenSettingsStatus("Qwen settings not available on this backend.", "warn");
+            if (qwenSettingsElements.inferencePlatform) {
+                qwenSettingsElements.inferencePlatform.value = "auto";
+            }
+            populateQwenMlxModelSelect([], null);
+            if (qwenSettingsElements.trustRemoteCode) {
+                qwenSettingsElements.trustRemoteCode.checked = false;
+            }
+            if (hasSettingsUi && !silent) {
+                setQwenSettingsStatus("Qwen settings not available on this backend.", "warn");
+            }
         } finally {
             qwenSettingsRefreshInFlight = false;
-            qwenSettingsElements.trustRemoteCode.disabled = !available;
+            if (qwenSettingsElements.inferencePlatform) {
+                qwenSettingsElements.inferencePlatform.disabled = !available;
+            }
+            if (qwenSettingsElements.mlxModel) {
+                qwenSettingsElements.mlxModel.disabled = !available || !qwenSettingsElements.mlxModel.options.length;
+            }
+            if (qwenSettingsElements.trustRemoteCode) {
+                qwenSettingsElements.trustRemoteCode.disabled = !available;
+            }
             // Keep apply disabled while writes are active; otherwise follow availability.
-            if (!qwenSettingsApplyInFlight) {
+            if (qwenSettingsElements.applyButton && !qwenSettingsApplyInFlight) {
                 qwenSettingsElements.applyButton.disabled = !available;
             }
         }
@@ -18362,6 +18525,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
+                    inference_platform: qwenSettingsElements.inferencePlatform?.value || "auto",
+                    mlx_model_id: qwenSettingsElements.mlxModel?.value || null,
                     trust_remote_code: Boolean(qwenSettingsElements.trustRemoteCode.checked),
                 }),
             });
@@ -18371,6 +18536,10 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             const raw = await resp.text();
             const payload = parseJsonObjectSafe(raw, {});
+            if (qwenSettingsElements.inferencePlatform && payload?.inference_platform) {
+                qwenSettingsElements.inferencePlatform.value = payload.inference_platform;
+            }
+            populateQwenMlxModelSelect(payload?.mlx_models, payload?.mlx_model_id);
             if (Object.prototype.hasOwnProperty.call(payload, "trust_remote_code")) {
                 qwenSettingsElements.trustRemoteCode.checked = Boolean(payload?.trust_remote_code);
             }
@@ -18776,6 +18945,7 @@ async function cancelRfDetrTrainingJobRequest() {
     function initQwenPanel() {
         if (qwenPanelInitialized) {
             refreshQwenStatus().catch((err) => console.error("Failed to refresh Qwen status", err));
+            refreshQwenSettings({ silent: true }).catch((err) => console.error("Failed to refresh Qwen settings", err));
             refreshQwenCaptionDatasets().catch((err) => console.error("Failed to refresh caption datasets", err));
             refreshQwenAgentDatasets().catch((err) => console.error("Failed to refresh agent datasets", err));
             refreshQwenAgentClassifiers().catch((err) => console.error("Failed to refresh agent classifiers", err));
@@ -19466,6 +19636,7 @@ async function cancelRfDetrTrainingJobRequest() {
         updateQwenRunButton();
         updateQwenCaptionButton();
         updateQwenAgentButtons();
+        populateQwenRuntimeModelSelects(qwenMlxModelOptions);
         updateCalibrationButtons();
         updateAutoLabelModeSummary();
         updateAutoLabelProgressUi(null);
@@ -19493,6 +19664,9 @@ async function cancelRfDetrTrainingJobRequest() {
         });
         refreshPrepassRecipes().catch((error) => {
             console.debug("Unable to load EDRs", error);
+        });
+        refreshQwenSettings({ silent: true }).catch((error) => {
+            console.debug("Unable to load Qwen runtime settings", error);
         });
         initSam3TextUi();
         updateSam3TextButtons();
@@ -21424,6 +21598,8 @@ async function cancelRfDetrTrainingJobRequest() {
         const familyLabel = modelFamily !== "qwen3" ? "Legacy (read-only)" : "Qwen3";
         const classes = Array.isArray(metadata.classes) ? metadata.classes.join(", ") : "(not specified)";
         const context = metadata.dataset_context || "(not specified)";
+        const runtimePlatform = metadata.runtime_platform || "transformers";
+        const quantization = metadata.quantization || "";
         const minPixelsValue = Number(metadata.min_pixels);
         const maxPixelsValue = Number(metadata.max_pixels);
         const minPixels = Number.isFinite(minPixelsValue) && minPixelsValue > 0 ? minPixelsValue : 12544;
@@ -21437,6 +21613,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenModelElements.details.innerHTML = `
             <p><strong>Name:</strong> ${safeName}</p>
             <p><strong>Base model:</strong> ${safeBaseModel}</p>
+            <p><strong>Runtime:</strong> ${escapeHtml(runtimePlatform)}${quantization ? ` (${escapeHtml(quantization)})` : ""}</p>
             <p><strong>Model family:</strong> ${safeFamily}</p>
             <p><strong>Context hint:</strong> ${safeContext}</p>
             <p><strong>Classes:</strong> ${safeClasses}</p>
@@ -21461,8 +21638,13 @@ async function cancelRfDetrTrainingJobRequest() {
             const context = entry.metadata?.dataset_context;
             const classes = Array.isArray(entry.metadata?.classes) ? entry.metadata.classes.join(", ") : "";
             const modelFamily = entry.metadata?.model_family || "qwen3";
+            const runtimePlatform = entry.metadata?.runtime_platform || "";
+            const quantization = entry.metadata?.quantization || "";
             const legacyTag = modelFamily !== "qwen3" ? "Legacy (read-only)" : "";
-            metaText.textContent = [context, classes, legacyTag].filter(Boolean).join(" • ") || "No context provided";
+            const runtimeTag = runtimePlatform === "mlx_vlm"
+                ? `MLX ${quantization || ""}`.trim()
+                : runtimePlatform;
+            metaText.textContent = [runtimeTag, context, classes, legacyTag].filter(Boolean).join(" • ") || "No context provided";
             card.appendChild(metaText);
             const button = document.createElement("button");
             button.type = "button";
@@ -21810,6 +21992,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const highVram = !!qwenElements.captionHighVram?.checked;
         const samplingPreset = qwenElements.captionSamplingPreset?.value || "recommended";
         const modelPick = qwenElements.captionModel?.value || "active";
+        const requestVariant = variantForResolvedQwenModel(modelPick, variant);
         const basePreset = getCaptionPresetText();
         const customHint = (qwenElements.captionHint?.value || "").trim();
         const stylePrompt = buildCaptionStylePrompt();
@@ -21834,13 +22017,13 @@ async function cancelRfDetrTrainingJobRequest() {
             if (modelPick.includes("/")) {
                 modelOverride = modelPick;
             } else {
-                const variantSuffix = variant === "Thinking" ? "Thinking" : "Instruct";
+                const variantSuffix = requestVariant === "Thinking" ? "Thinking" : "Instruct";
                 modelOverride = `Qwen/Qwen3-VL-${modelPick}-${variantSuffix}`;
             }
             warnIfFp8Unsupported(modelOverride);
         }
         const hints = collectCaptionLabelHintsForImage(imageName);
-        if (variant === "Thinking") {
+        if (requestVariant === "Thinking") {
             maxTokens = Math.max(maxTokens, 2000);
         } else if (captionMode === "windowed") {
             maxTokens = Math.max(maxTokens, 2000);
@@ -21856,7 +22039,7 @@ async function cancelRfDetrTrainingJobRequest() {
             include_coords: includeCoords,
             max_boxes: maxBoxes,
             max_new_tokens: maxTokens,
-            model_variant: variant,
+            model_variant: requestVariant,
             model_id: modelOverride,
             final_answer_only: finalOnly,
             two_stage_refine: twoStage,
@@ -24202,14 +24385,20 @@ async function cancelRfDetrTrainingJobRequest() {
         const recipeLabelmap = labelmapRecipeMatch && Array.isArray(qwenAgentRecipeLabelmap)
             ? qwenAgentRecipeLabelmap.slice()
             : null;
+        const agentModelId = useRecipeConfig ? (getConfigString("model_id") || resolveAgentModelId()) : resolveAgentModelId();
+        const requestVariant = variantForResolvedQwenModel(agentModelId, variant);
+        const captionModelId = useRecipeConfig
+            ? (getConfigString("prepass_caption_model_id") || resolveCaptionModelId())
+            : resolveCaptionModelId();
+        const requestCaptionVariant = variantForResolvedQwenModel(captionModelId, captionVariant || "auto");
         return {
             dataset_id: datasetId || null,
             recipe_source_dataset_id: recipeSourceDatasetId || null,
             edr_package_id: edrPackageId || null,
             labelmap: recipeLabelmap,
             image_base64: base64,
-            model_id: useRecipeConfig ? (getConfigString("model_id") || resolveAgentModelId()) : resolveAgentModelId(),
-            model_variant: variant,
+            model_id: agentModelId,
+            model_variant: requestVariant,
             enable_yolo: enableYolo,
             enable_rfdetr: enableRfdetr,
             yolo_id: yoloRunId,
@@ -24252,8 +24441,8 @@ async function cancelRfDetrTrainingJobRequest() {
             cross_class_dedupe_iou: crossClassConfig.iou,
             prepass_caption: usePackageRuntime ? false : true,
             prepass_caption_profile: captionProfile || null,
-            prepass_caption_variant: captionVariant || null,
-            prepass_caption_model_id: useRecipeConfig ? (getConfigString("prepass_caption_model_id") || resolveCaptionModelId()) : resolveCaptionModelId(),
+            prepass_caption_variant: requestCaptionVariant || null,
+            prepass_caption_model_id: captionModelId,
             prepass_caption_max_tokens: Number.isFinite(captionMaxTokens) ? captionMaxTokens : null,
             labelmap_glossary: glossaryText || null,
             tighten_fp: tightenFp,
@@ -24335,12 +24524,16 @@ async function cancelRfDetrTrainingJobRequest() {
         const expandGlossary = qwenElements.agentSam3ExpandGlossary?.checked !== false;
         const sam3SynBudgetValue = Number.isFinite(sam3SynBudget) ? sam3SynBudget : null;
         const edrPackageId = qwenAgentSelectedEdrPackageId || null;
+        const agentModelId = resolveAgentModelId();
+        const requestVariant = variantForResolvedQwenModel(agentModelId, variant);
+        const captionModelId = resolveCaptionModelId();
+        const requestCaptionVariant = variantForResolvedQwenModel(captionModelId, captionVariant || "auto");
         return {
             dataset_id: datasetId || null,
             edr_package_id: edrPackageId || null,
             edr_runtime_mode: edrPackageId ? "package" : null,
-            model_id: resolveAgentModelId(),
-            model_variant: variant,
+            model_id: agentModelId,
+            model_variant: requestVariant,
             enable_yolo: enableYolo,
             enable_rfdetr: enableRfdetr,
             yolo_id: yoloRunId,
@@ -24383,8 +24576,8 @@ async function cancelRfDetrTrainingJobRequest() {
             cross_class_dedupe_iou: crossClassConfig.iou,
             prepass_caption: edrPackageId ? false : true,
             prepass_caption_profile: captionProfile || null,
-            prepass_caption_variant: captionVariant || null,
-            prepass_caption_model_id: resolveCaptionModelId(),
+            prepass_caption_variant: requestCaptionVariant || null,
+            prepass_caption_model_id: captionModelId,
             prepass_caption_max_tokens: Number.isFinite(captionMaxTokens) ? captionMaxTokens : null,
             labelmap_glossary: glossaryConfig.glossaryText || null,
             prepass_glossary_source: glossaryConfig.source,
@@ -24832,6 +25025,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
         setValue(qwenElements.agentDatasetSelect, config.dataset_id || "");
         setValue(qwenElements.calibrationDataset, config.dataset_id || "");
+        ensureQwenSelectOption(qwenElements.agentModel, config.model_id);
         setValue(qwenElements.agentModel, config.model_id || "active");
         setValue(qwenElements.agentVariant, config.model_variant || "auto");
         setChecked(qwenElements.agentEnableYolo, config.enable_yolo !== false);
@@ -24906,6 +25100,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 !qwenElements.agentCrossClassDedupeEnabled.checked;
         }
         setValue(qwenElements.agentCaptionProfile, config.prepass_caption_profile ?? "light");
+        ensureQwenSelectOption(qwenElements.agentCaptionModel, config.prepass_caption_model_id);
+        setValue(qwenElements.agentCaptionModel, config.prepass_caption_model_id || "active");
         setValue(qwenElements.agentCaptionVariant, config.prepass_caption_variant ?? "auto");
         setValue(qwenElements.agentCaptionMaxTokens, config.prepass_caption_max_tokens ?? "");
         setChecked(qwenElements.agentTightenFp, !!config.tighten_fp);
@@ -26415,6 +26611,37 @@ async function cancelRfDetrTrainingJobRequest() {
             return inter / union;
         }
 
+        function rectArea(rect) {
+            return Math.max(0, Number(rect?.width) || 0) * Math.max(0, Number(rect?.height) || 0);
+        }
+
+        function passesSimilarityShapeGate(rect, positiveInfos) {
+            if (!rect || !positiveInfos.length) {
+                return true;
+            }
+            const area = rectArea(rect);
+            if (area <= 0) {
+                return false;
+            }
+            const aspect = Math.max(rect.width, rect.height) / Math.max(1, Math.min(rect.width, rect.height));
+            return positiveInfos.some((info) => {
+                const exemplarArea = rectArea(info.rect);
+                if (exemplarArea <= 0) {
+                    return true;
+                }
+                const areaRatio = area / exemplarArea;
+                if (areaRatio < 0.08 || areaRatio > 12) {
+                    return false;
+                }
+                const exemplarAspect = Math.max(info.rect.width, info.rect.height)
+                    / Math.max(1, Math.min(info.rect.width, info.rect.height));
+                const aspectRatio = aspect >= exemplarAspect
+                    ? aspect / Math.max(0.001, exemplarAspect)
+                    : exemplarAspect / Math.max(0.001, aspect);
+                return aspectRatio <= 3.5;
+            });
+        }
+
         function existingAnnotationRects() {
             const rects = [];
             const currentBboxes = bboxes[requestImageName];
@@ -26452,6 +26679,7 @@ async function cancelRfDetrTrainingJobRequest() {
             exemplarFiltered,
             existingFiltered,
             invalidFiltered,
+            shapeFiltered,
             filteredTotal,
         }) {
             const parts = [];
@@ -26463,6 +26691,9 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             if (invalidFiltered) {
                 parts.push(`${countPhrase(invalidFiltered, "invalid candidate")}`);
+            }
+            if (shapeFiltered) {
+                parts.push(`${countPhrase(shapeFiltered, "shape/scale mismatch")}`);
             }
             if (!parts.length && filteredTotal > 0) {
                 parts.push(`${countPhrase(filteredTotal, "candidate")} filtered by duplicate checks`);
@@ -26478,12 +26709,14 @@ async function cancelRfDetrTrainingJobRequest() {
             exemplarFiltered,
             existingFiltered,
             invalidFiltered,
+            shapeFiltered,
         }) {
             const filteredTotal = Math.max(0, rawDetectionCount - usableDetectionCount);
             const filterReasons = buildFilterReasonText({
                 exemplarFiltered,
                 existingFiltered,
                 invalidFiltered,
+                shapeFiltered,
                 filteredTotal,
             });
             const promptSummary = `${countPhrase(posCount, "positive")} / ${countPhrase(negCount, "negative")}`;
@@ -26547,8 +26780,16 @@ async function cancelRfDetrTrainingJobRequest() {
             let exemplarFilteredCount = 0;
             let existingFilteredCount = 0;
             let invalidFilteredCount = 0;
+            let shapeFilteredCount = 0;
             if (detections.length) {
                 const exemplarInfos = promptRects.map((rect) => ({
+                    rect,
+                    cx: rect.x + rect.width / 2,
+                    cy: rect.y + rect.height / 2,
+                    maxDim: Math.max(rect.width, rect.height),
+                    positive: true,
+                })).filter((info, idx) => !!promptLabels[idx]);
+                const duplicateInfos = promptRects.map((rect) => ({
                     rect,
                     cx: rect.x + rect.width / 2,
                     cy: rect.y + rect.height / 2,
@@ -26561,10 +26802,17 @@ async function cancelRfDetrTrainingJobRequest() {
                         return false;
                     }
                     const rect = yoloBoxToPixelRect(det.bbox);
-                    if (!rect) return true;
+                    if (!rect) {
+                        invalidFilteredCount += 1;
+                        return false;
+                    }
+                    if (!passesSimilarityShapeGate(rect, exemplarInfos)) {
+                        shapeFilteredCount += 1;
+                        return false;
+                    }
                     const rectCx = rect.x + rect.width / 2;
                     const rectCy = rect.y + rect.height / 2;
-                    for (const info of exemplarInfos) {
+                    for (const info of duplicateInfos) {
                         const dist = Math.hypot(rectCx - info.cx, rectCy - info.cy);
                         const iou = rectIoU(rect, info.rect);
                         const nearCenter = dist <= info.maxDim * 0.1;
@@ -26609,6 +26857,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 exemplarFiltered: exemplarFilteredCount,
                 existingFiltered: existingFilteredCount,
                 invalidFiltered: invalidFilteredCount,
+                shapeFiltered: shapeFilteredCount,
             });
             if (added) {
                 setSam3TextStatus(outcome.status, "success");
@@ -28123,16 +28372,49 @@ async function cancelRfDetrTrainingJobRequest() {
             .replace(/[^a-z0-9]+/g, "");
     }
 
+    function normalizeClassAliasForMatch(name) {
+        const normalized = normalizeClassNameForMatch(name);
+        const aliases = {
+            utilitypole: "upole",
+            utilitypoles: "upole",
+            utilitypost: "upole",
+            utilityposts: "upole",
+            utilitylinepole: "upole",
+            utilitylinepoles: "upole",
+        };
+        return aliases[normalized] || normalized;
+    }
+
+    function resolveKnownClassName(label) {
+        const raw = String(label || "").trim();
+        if (!raw || !classes) {
+            return null;
+        }
+        if (Object.prototype.hasOwnProperty.call(classes, raw)) {
+            return raw;
+        }
+        const target = normalizeClassAliasForMatch(raw);
+        if (!target) {
+            return null;
+        }
+        for (const className of Object.keys(classes)) {
+            if (normalizeClassAliasForMatch(className) === target) {
+                return className;
+            }
+        }
+        return null;
+    }
+
     function findClipHeadTargetIndex(classesList, className) {
         if (!Array.isArray(classesList) || !classesList.length) {
             return null;
         }
-        const target = normalizeClassNameForMatch(className);
+        const target = normalizeClassAliasForMatch(className);
         if (!target) {
             return null;
         }
         for (let idx = 0; idx < classesList.length; idx += 1) {
-            if (normalizeClassNameForMatch(classesList[idx]) === target) {
+            if (normalizeClassAliasForMatch(classesList[idx]) === target) {
                 return idx;
             }
         }
@@ -31159,9 +31441,7 @@ async function cancelRfDetrTrainingJobRequest() {
         let droppedUnmapped = 0;
         detections.forEach((det) => {
             const classId = typeof det.class_id === "number" ? det.class_id : -1;
-            let className = det.class_name && typeof classes[det.class_name] !== "undefined"
-                ? det.class_name
-                : null;
+            let className = resolveKnownClassName(det.class_name);
             if (!className && classId >= 0) {
                 className = getClassNameById(classId);
             }
@@ -32106,6 +32386,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!prediction || prediction === "unknown") {
             return null;
         }
+        const resolvedClass = resolveKnownClassName(prediction);
         const guard = getClipAutoGuardConfig();
         if (guard.enabled && Number.isFinite(proba) && Number.isFinite(secondProba) && secondLabel) {
             const margin = proba - secondProba;
@@ -32116,7 +32397,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 return null;
             }
         }
-        return prediction;
+        return resolvedClass || prediction;
     }
 
     async function autoPredictNewCrop(bbox) {

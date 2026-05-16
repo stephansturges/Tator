@@ -38,8 +38,13 @@ def test_deep_prepass_runs_detectors_and_similarity(monkeypatch):
         sim_calls.append(kwargs.get("label"))
         return {"detections": []}
 
+    def fake_similarity_payloads(*args, **kwargs):
+        sim_calls.append(kwargs.get("label"))
+        return []
+
     monkeypatch.setattr(api, "_agent_tool_run_detector", fake_run_detector)
     monkeypatch.setattr(api, "_agent_tool_sam3_similarity", fake_sam3_similarity)
+    monkeypatch.setattr(api, "_sam3_similarity_payloads_from_state", fake_similarity_payloads)
     monkeypatch.setattr(api, "_agent_tool_sam3_text", lambda **_: {"detections": []})
     monkeypatch.setattr(
         api,
@@ -59,6 +64,7 @@ def test_deep_prepass_runs_detectors_and_similarity(monkeypatch):
         sahi_overlap_ratio=0.2,
         prepass_similarity_score=0.2,
         sam3_mask_threshold=0.2,
+        similarity_window_extension=False,
     )
     pil_img = Image.new("RGB", (64, 64), (0, 0, 0))
     result = api._agent_run_deep_prepass(
@@ -117,6 +123,45 @@ def test_sam3_similarity_multi_prompt_seed_filter_no_type_error(monkeypatch):
     )
 
     assert len(detections) == 1
+
+
+def test_sam3_similarity_visual_prompt_uses_semantic_text(monkeypatch):
+    class DummyProcessor:
+        def __init__(self):
+            self.prompts = []
+
+        def set_confidence_threshold(self, *_args, **_kwargs):
+            return None
+
+        def set_image(self, _img):
+            return {"backbone_out": {}}
+
+        def set_text_prompt(self, prompt, state=None):
+            self.prompts.append(prompt)
+            state = state or {}
+            state["semantic_prompt"] = prompt
+            return state
+
+        def add_geometric_prompt(self, _box, _label, state=None):
+            assert state and state.get("semantic_prompt") == "utility pole"
+            return state
+
+    processor = DummyProcessor()
+    monkeypatch.setattr(api, "_ensure_sam3_text_runtime", lambda: (None, processor, None))
+    monkeypatch.setattr(api, "_sam3_text_detections", lambda *args, **kwargs: [])
+
+    pil_img = Image.new("RGB", (64, 64), (0, 0, 0))
+    api._run_sam3_visual_inference_multi(
+        pil_img,
+        bboxes_xywh=[(0.0, 0.0, 8.0, 8.0)],
+        bbox_labels=None,
+        threshold=0.55,
+        mask_threshold=0.2,
+        limit=None,
+        text_prompt="utility pole",
+    )
+
+    assert processor.prompts == ["utility pole"]
 
 
 def test_similarity_global_reports_type_error_warning():

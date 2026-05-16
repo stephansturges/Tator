@@ -149,7 +149,9 @@ class Sam3VisualPrompt(BaseModel):
     bbox_height: Optional[float] = None
     bboxes: Optional[List[List[float]]] = None
     bbox_labels: Optional[List[bool]] = None
-    threshold: float = 0.2
+    text_prompt: Optional[str] = None
+    prompt: Optional[str] = None
+    threshold: float = 0.55
     mask_threshold: float = 0.2
     simplify_epsilon: Optional[float] = None
     sam_variant: Optional[str] = None
@@ -231,6 +233,10 @@ class Sam3VisualPrompt(BaseModel):
             except (TypeError, ValueError):
                 eps_val = None
             values["simplify_epsilon"] = eps_val if eps_val is None or eps_val >= 0 else 0.0
+        prompt = values.get("text_prompt") or values.get("prompt")
+        if prompt is not None:
+            prompt = str(prompt).strip()
+            values["text_prompt"] = prompt or None
         return values
 
 
@@ -480,10 +486,16 @@ class QwenPromptConfig(BaseModel):
 
 class QwenRuntimeSettings(BaseModel):
     trust_remote_code: bool = False
+    inference_platform: Literal["auto", "transformers", "mlx_vlm"] = "auto"
+    mlx_model_id: Optional[str] = None
+    mlx_available: Optional[bool] = None
+    mlx_models: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class QwenRuntimeSettingsUpdate(BaseModel):
     trust_remote_code: Optional[bool] = None
+    inference_platform: Optional[str] = None
+    mlx_model_id: Optional[str] = None
 
 
 class Sam3ModelActivateRequest(BaseModel):

@@ -11,7 +11,7 @@
     <script src="canvas.min.js?v=20260409a"></script>
     <script src="jszip.min.js?v=20260409a"></script>
     <script src="filesaver.min.js?v=20260409a"></script>
-    <script src="ybat.js?v=20260516a"></script>
+    <script src="ybat.js?v=20260516f"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -276,7 +276,7 @@
                                     SAM3 similarity prompt (use selected box(es))
                                 </button>
                                 <label for="sam3SimilarityThreshold" class="training-help" style="margin-top: 6px;">Similarity score (higher = stricter)</label>
-                                <input type="range" id="sam3SimilarityThreshold" min="0" max="1" step="0.05" value="0.2" />
+                                <input type="range" id="sam3SimilarityThreshold" min="0" max="1" step="0.05" value="0.55" />
                             </div>
                             <section class="qwen-panel" aria-labelledby="qwenPanelTitle">
                                 <div class="qwen-panel__header">
@@ -3621,6 +3621,14 @@
                         <div class="training-divider"></div>
                         <h3>Qwen Runtime (advanced)</h3>
                         <p class="settings-help">These controls affect how Qwen models are loaded. Changes unload any loaded Qwen model so it can reload with the new setting.</p>
+                        <label for="qwenInferencePlatform">Inference platform</label>
+                        <select id="qwenInferencePlatform">
+                            <option value="auto">Auto (MLX on Mac, Transformers elsewhere)</option>
+                            <option value="mlx_vlm">MLX-VLM (Apple Silicon)</option>
+                            <option value="transformers">Transformers / PyTorch</option>
+                        </select>
+                        <label for="qwenMlxModel" style="margin-top: 8px;">Default MLX model</label>
+                        <select id="qwenMlxModel"></select>
                         <label style="display: inline-flex; align-items: center; gap: 8px;">
                             <input type="checkbox" id="qwenTrustRemoteCode" />
                             Allow Qwen models to run remote code

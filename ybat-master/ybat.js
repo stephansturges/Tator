@@ -1271,14 +1271,19 @@
         return entry.id;
     }
 
-    function enqueueTaskNotice(message, { durationMs = 3500 } = {}) {
+    function enqueueTaskNotice(message, { durationMs = 3500, key = null } = {}) {
         const container = ensureTaskQueueElement();
         if (!container) {
             return null;
         }
         const lingerMs = Math.max(1500, Number(durationMs) || 3500) * 2;
+        const noticeKey = key ? String(key) : null;
+        if (noticeKey) {
+            taskQueueState.notices = taskQueueState.notices.filter((item) => item.key !== noticeKey);
+        }
         const entry = {
             id: ++taskQueueState.counter,
+            key: noticeKey,
             message: String(message || "").trim() || "Notice",
             expiresAt: Date.now() + lingerMs,
         };
@@ -31440,18 +31445,22 @@ async function cancelRfDetrTrainingJobRequest() {
 
     const shortcutToastState = {
         lastShown: {},
+        lastMessage: {},
         cooldownMs: 1200,
     };
 
     const showShortcutToast = (key, message, { durationMs = 2500, cooldownMs = null } = {}) => {
         const now = Date.now();
         const last = shortcutToastState.lastShown[key] || 0;
+        const normalizedMessage = String(message || "").trim();
+        const lastMessage = shortcutToastState.lastMessage[key] || "";
         const windowMs = Number.isFinite(cooldownMs) ? cooldownMs : shortcutToastState.cooldownMs;
-        if (now - last < windowMs) {
+        if (now - last < windowMs && normalizedMessage === lastMessage) {
             return;
         }
         shortcutToastState.lastShown[key] = now;
-        enqueueTaskNotice(message, { durationMs });
+        shortcutToastState.lastMessage[key] = normalizedMessage;
+        enqueueTaskNotice(normalizedMessage, { durationMs, key: `shortcut:${key}` });
     };
 
     const getDetectorRunMode = () => {
@@ -32850,8 +32859,9 @@ async function cancelRfDetrTrainingJobRequest() {
     const minZoom = 0.1;
     const maxZoom = 5;
     const edgeSize = 5;
-    const cornerHitSize = edgeSize * 1.75;
     const cornerHitScreenSize = 16;
+    const cornerHitZoomedInScreenSize = 8;
+    const newBboxDragScreenSize = 6;
     const cornerResizeActivationDelayMs = 120;
     const cornerResizeCancelDragScreenPx = 6;
     const cornerResizePopDurationMs = 90;
@@ -33933,7 +33943,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 else {
                     const movedWidth  = Math.abs(mouse.realX - mouse.startRealX);
                     const movedHeight = Math.abs(mouse.realY - mouse.startRealY);
-                    if (movedWidth > minBBoxWidth && movedHeight > minBBoxHeight) {
+                    const newBboxDragThreshold = getNewBboxDragThreshold();
+                    if (movedWidth > newBboxDragThreshold && movedHeight > newBboxDragThreshold) {
                         if (currentBbox === null) {
                             storeNewBbox(movedWidth, movedHeight);
                             mouse.buttonL = false;
@@ -34266,9 +34277,24 @@ async function cancelRfDetrTrainingJobRequest() {
         return found;
     }
 
-    function getCornerHitRadius() {
+    function getSafeScale() {
         const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
-        return Math.max(cornerHitSize, cornerHitScreenSize / safeScale);
+        return safeScale;
+    }
+
+    function screenPxToImagePx(screenPx) {
+        return (Number(screenPx) || 0) / getSafeScale();
+    }
+
+    function getCornerHitRadius() {
+        const zoomT = clamp(getSafeScale() - 1, 0, 1);
+        const screenRadius = cornerHitScreenSize
+            + (cornerHitZoomedInScreenSize - cornerHitScreenSize) * zoomT;
+        return screenPxToImagePx(screenRadius);
+    }
+
+    function getNewBboxDragThreshold() {
+        return screenPxToImagePx(newBboxDragScreenSize);
     }
 
     function getBboxBounds(bx) {
@@ -34332,6 +34358,9 @@ async function cancelRfDetrTrainingJobRequest() {
             const classBoxes = Array.isArray(currentBxs[className]) ? currentBxs[className] : [];
             classBoxes.forEach((bx, i) => {
                 if (!bx || (currentBbox && currentBbox.bbox === bx)) {
+                    return;
+                }
+                if (!bx.uuid || (!selectedBboxes.has(bx.uuid) && !negativeBboxes.has(bx.uuid))) {
                     return;
                 }
                 const hit = getCornerHitForBbox(bx, x, y);

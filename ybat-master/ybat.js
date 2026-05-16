@@ -1,6 +1,161 @@
 (() => {
     "use strict";
 
+    const DARK_THEME_CLASS = "theme-dark";
+    const PIPBOY_THEME_CLASS = "theme-pipboy";
+    const DARK_THEME_STORAGE_KEY = "tator.darkMode";
+    const THEME_MODE_STORAGE_KEY = "tator.themeMode";
+    const THEME_CLASSIC_MODE_STORAGE_KEY = "tator.classicThemeMode";
+    const THEME_LIGHT = "light";
+    const THEME_DARK = "dark";
+    const THEME_PIPBOY = "pipboy";
+    const THEME_CLICK_DELAY_MS = 320;
+    let themeToggleButton = null;
+    let themeToggleClickTimer = null;
+    let previousClassicThemeMode = THEME_LIGHT;
+
+    function normalizeThemeMode(value) {
+        if (value === THEME_DARK || value === THEME_PIPBOY) {
+            return value;
+        }
+        return THEME_LIGHT;
+    }
+
+    function getSavedDarkModePreference() {
+        try {
+            return window.localStorage?.getItem(DARK_THEME_STORAGE_KEY) === "1";
+        } catch {
+            return false;
+        }
+    }
+
+    function getSavedClassicThemeMode() {
+        try {
+            const saved = window.localStorage?.getItem(THEME_CLASSIC_MODE_STORAGE_KEY);
+            if (saved === THEME_DARK || saved === THEME_LIGHT) {
+                return saved;
+            }
+        } catch {
+            return getSavedDarkModePreference() ? THEME_DARK : THEME_LIGHT;
+        }
+        return getSavedDarkModePreference() ? THEME_DARK : THEME_LIGHT;
+    }
+
+    function getSavedThemeMode() {
+        try {
+            const saved = window.localStorage?.getItem(THEME_MODE_STORAGE_KEY);
+            if (saved === THEME_DARK || saved === THEME_PIPBOY || saved === THEME_LIGHT) {
+                return saved;
+            }
+        } catch {
+            return getSavedDarkModePreference() ? THEME_DARK : THEME_LIGHT;
+        }
+        return getSavedDarkModePreference() ? THEME_DARK : THEME_LIGHT;
+    }
+
+    function saveThemeMode(mode) {
+        try {
+            window.localStorage?.setItem(THEME_MODE_STORAGE_KEY, mode);
+            window.localStorage?.setItem(DARK_THEME_STORAGE_KEY, mode === THEME_DARK ? "1" : "0");
+            if (mode === THEME_LIGHT || mode === THEME_DARK) {
+                window.localStorage?.setItem(THEME_CLASSIC_MODE_STORAGE_KEY, mode);
+            }
+        } catch {
+            // Theme persistence is best-effort; the toggle still works for the active page.
+        }
+    }
+
+    function isDarkModeEnabled() {
+        return document.documentElement.classList.contains(DARK_THEME_CLASS);
+    }
+
+    function isPipboyThemeEnabled() {
+        return document.documentElement.classList.contains(PIPBOY_THEME_CLASS);
+    }
+
+    function getActiveThemeMode() {
+        if (document.documentElement.classList.contains(PIPBOY_THEME_CLASS)) {
+            return THEME_PIPBOY;
+        }
+        if (document.documentElement.classList.contains(DARK_THEME_CLASS)) {
+            return THEME_DARK;
+        }
+        return THEME_LIGHT;
+    }
+
+    function updateThemeToggleButton(mode) {
+        if (!themeToggleButton) {
+            return;
+        }
+        if (mode === THEME_PIPBOY) {
+            themeToggleButton.textContent = "Pip";
+            themeToggleButton.setAttribute("aria-pressed", "true");
+            themeToggleButton.title = "Switch to the standard theme";
+            return;
+        }
+        const enabled = mode === THEME_DARK;
+        themeToggleButton.textContent = enabled ? "Light" : "Dark";
+        themeToggleButton.setAttribute("aria-pressed", enabled ? "true" : "false");
+        themeToggleButton.title = enabled ? "Switch to light mode" : "Switch to dark mode";
+    }
+
+    function setThemeMode(mode, options = {}) {
+        const normalized = normalizeThemeMode(mode);
+        const isDarkSurface = normalized === THEME_DARK || normalized === THEME_PIPBOY;
+        document.documentElement.classList.toggle(DARK_THEME_CLASS, isDarkSurface);
+        document.documentElement.classList.toggle(PIPBOY_THEME_CLASS, normalized === THEME_PIPBOY);
+        if (document.body) {
+            document.body.classList.toggle(DARK_THEME_CLASS, isDarkSurface);
+            document.body.classList.toggle(PIPBOY_THEME_CLASS, normalized === THEME_PIPBOY);
+        }
+        if (normalized === THEME_LIGHT || normalized === THEME_DARK) {
+            previousClassicThemeMode = normalized;
+        }
+        if (options.persist !== false) {
+            saveThemeMode(normalized);
+        }
+        updateThemeToggleButton(normalized);
+    }
+
+    function handleThemeToggleClick() {
+        window.clearTimeout(themeToggleClickTimer);
+        themeToggleClickTimer = window.setTimeout(() => {
+            themeToggleClickTimer = null;
+            const activeMode = getActiveThemeMode();
+            if (activeMode === THEME_PIPBOY) {
+                setThemeMode(previousClassicThemeMode);
+                return;
+            }
+            setThemeMode(activeMode === THEME_DARK ? THEME_LIGHT : THEME_DARK);
+        }, THEME_CLICK_DELAY_MS);
+    }
+
+    function handleThemeToggleDoubleClick() {
+        window.clearTimeout(themeToggleClickTimer);
+        themeToggleClickTimer = null;
+        const activeMode = getActiveThemeMode();
+        if (activeMode === THEME_PIPBOY) {
+            setThemeMode(previousClassicThemeMode);
+            return;
+        }
+        previousClassicThemeMode = activeMode === THEME_DARK ? THEME_DARK : THEME_LIGHT;
+        setThemeMode(THEME_PIPBOY);
+    }
+
+    function initializeThemeToggle() {
+        themeToggleButton = document.getElementById("themeToggleButton");
+        previousClassicThemeMode = getSavedClassicThemeMode();
+        setThemeMode(getSavedThemeMode(), { persist: false });
+        if (!themeToggleButton) {
+            return;
+        }
+        themeToggleButton.addEventListener("click", handleThemeToggleClick);
+        themeToggleButton.addEventListener("dblclick", handleThemeToggleDoubleClick);
+    }
+
+    previousClassicThemeMode = getSavedClassicThemeMode();
+    setThemeMode(getSavedThemeMode(), { persist: false });
+
     // -----------------------------------------
     // NEW CODE: Add a global dictionary for pending bboxes, and a UUID generator.
     // -----------------------------------------
@@ -2250,6 +2405,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
 
     const qwenTrainElements = {
         runNameInput: null,
+        modelPresetSelect: null,
         modelSizeSelect: null,
         modelVariantSelect: null,
         modelIdPreview: null,
@@ -2501,6 +2657,7 @@ const qwenTrainState = {
     pollHandle: null,
     pollRequestId: 0,
     historyRefreshRequestId: 0,
+    modelOptions: [],
     chartSmoothing: 15,
     lastJobSnapshot: null,
     gpuTotalMb: null,
@@ -4333,6 +4490,7 @@ const sam3TrainState = {
             tabQwenButton: "tab.qwen_models.open",
             tabPredictorsButton: "tab.sam_predictors.open",
             tabSettingsButton: "tab.settings.open",
+            themeToggleButton: "theme.dark.toggle",
             qwenAgentRecipeSave: "action.prepass.recipe_save",
             startTrainingBtn: "action.classifier_train.start",
             qwenTrainStartBtn: "action.qwen_train.start",
@@ -9782,16 +9940,27 @@ function getSelectedQwenTrainMode() {
 }
 
 const QWEN_VRAM_ESTIMATE_GB = {
-    official_lora: { "2B": 12.0, "4B": 20.0, "8B": 96.0, "32B": 192.0 },
-    trl_qlora: { "2B": 8.0, "4B": 10.0, "8B": 16.0, "32B": 48.0 },
+    official_lora: { "2B": 12.0, "4B": 20.0, "8B": 96.0, "32B": 192.0, "30B": 180.0, "235B": 800.0 },
+    trl_qlora: { "2B": 8.0, "4B": 10.0, "8B": 16.0, "32B": 48.0, "30B": 64.0, "235B": 260.0 },
 };
 const QWEN_VRAM_THINKING_SCALE = 1.08;
 const QWEN_VRAM_PIXEL_BASE = 451584;
 const QWEN_VRAM_PIXEL_SCALE_MIN = 0.6;
 const QWEN_VRAM_PIXEL_SCALE_MAX = 1.6;
+const QWEN_TRAINING_MODEL_FALLBACKS = [
+    { id: "Qwen/Qwen3-VL-2B-Instruct", label: "CUDA Qwen3-VL 2B Instruct" },
+    { id: "Qwen/Qwen3-VL-4B-Instruct", label: "CUDA Qwen3-VL 4B Instruct" },
+    { id: "Qwen/Qwen3-VL-8B-Instruct", label: "CUDA Qwen3-VL 8B Instruct" },
+    { id: "Qwen/Qwen3-VL-32B-Instruct", label: "CUDA Qwen3-VL 32B Instruct" },
+    { id: "cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit", label: "CUDA Qwen3-VL 4B Instruct AWQ 4-bit" },
+    { id: "cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit", label: "CUDA Qwen3-VL 8B Instruct AWQ 4-bit" },
+    { id: "pramjana/Qwen3-VL-4B-Instruct-4bit-GPTQ", label: "CUDA Qwen3-VL 4B Instruct GPTQ 4-bit" },
+    { id: "huihui-ai/Huihui-Qwen3-VL-4B-Instruct-abliterated", label: "CUDA Huihui Qwen3-VL 4B Instruct abliterated" },
+    { id: "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated", label: "CUDA Huihui Qwen3-VL 8B Instruct abliterated" },
+];
 
 function inferQwenModelSize(modelId) {
-    const sizes = ["2B", "4B", "8B", "32B"];
+    const sizes = ["235B", "30B", "32B", "8B", "4B", "2B"];
     for (const size of sizes) {
         if (modelId.includes(size)) return size;
     }
@@ -9856,6 +10025,86 @@ function maybeAutoSelectQwenTrainMode() {
     }
 }
 
+function normalizeQwenTrainingModelOptions(models) {
+    const source = Array.isArray(models) && models.length ? models : QWEN_TRAINING_MODEL_FALLBACKS;
+    const seen = new Set();
+    const options = [];
+    source.forEach((entry) => {
+        const metadata = entry?.metadata || entry || {};
+        const runtime = metadata.runtime_platform || entry?.runtime_platform || "transformers";
+        if (runtime === "mlx_vlm") {
+            return;
+        }
+        if (entry?.type === "finetune") {
+            return;
+        }
+        if (metadata.training_supported === false) {
+            return;
+        }
+        const modelId = String(metadata.model_id || entry?.model_id || entry?.id || "").trim();
+        if (!modelId || seen.has(modelId)) {
+            return;
+        }
+        seen.add(modelId);
+        const label = String(metadata.label || entry?.label || modelId);
+        const quant = metadata.quantization ? ` (${metadata.quantization})` : "";
+        const trainBase = metadata.training_model_id && metadata.training_model_id !== modelId
+            ? ` -> trains ${metadata.training_model_id}`
+            : "";
+        options.push({
+            id: modelId,
+            label: `${label}${quant}`,
+            title: `${modelId}${trainBase}`,
+            quantized: Boolean(metadata.quantized),
+            abliterated: Boolean(metadata.abliterated),
+        });
+    });
+    return options;
+}
+
+function populateQwenTrainingModelSelect(models) {
+    const select = qwenTrainElements.modelPresetSelect;
+    if (!select) {
+        return;
+    }
+    const selected = select.value;
+    const options = normalizeQwenTrainingModelOptions(models);
+    qwenTrainState.modelOptions = options;
+    select.innerHTML = "";
+    const defaultOption = document.createElement("option");
+    defaultOption.value = "";
+    defaultOption.textContent = "Use size/variant picker";
+    select.appendChild(defaultOption);
+    options.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.id;
+        option.textContent = entry.label;
+        option.title = entry.title || entry.id;
+        if (entry.quantized) option.dataset.quantized = "true";
+        if (entry.abliterated) option.dataset.abliterated = "true";
+        select.appendChild(option);
+    });
+    if (selected && Array.from(select.options).some((option) => option.value === selected)) {
+        select.value = selected;
+    }
+}
+
+async function loadQwenTrainingModelOptions() {
+    try {
+        const resp = await fetch(`${API_ROOT}/qwen/models`);
+        if (!resp.ok) {
+            throw new Error(await resp.text() || `HTTP ${resp.status}`);
+        }
+        const payload = await resp.json();
+        populateQwenTrainingModelSelect(payload?.models || []);
+    } catch (error) {
+        console.debug("Failed to load Qwen training model registry", error);
+        populateQwenTrainingModelSelect(QWEN_TRAINING_MODEL_FALLBACKS);
+    } finally {
+        updateQwenModelPreview();
+    }
+}
+
 function updateQwenVramEstimate() {
     if (!qwenTrainElements.vramEstimate) return;
     const modelId = resolveQwenModelId();
@@ -9903,6 +10152,10 @@ function updateQwenVramEstimate() {
 }
 
 function resolveQwenModelId() {
+    const preset = qwenTrainElements.modelPresetSelect?.value?.trim();
+    if (preset) {
+        return preset;
+    }
     const size = qwenTrainElements.modelSizeSelect?.value || "4B";
     const variant = qwenTrainElements.modelVariantSelect?.value || "Instruct";
     return `Qwen/Qwen3-VL-${size}-${variant}`;
@@ -9910,6 +10163,13 @@ function resolveQwenModelId() {
 
 function updateQwenModelPreview() {
     maybeAutoSelectQwenTrainMode();
+    const usingPreset = Boolean(qwenTrainElements.modelPresetSelect?.value);
+    if (qwenTrainElements.modelSizeSelect) {
+        qwenTrainElements.modelSizeSelect.disabled = usingPreset;
+    }
+    if (qwenTrainElements.modelVariantSelect) {
+        qwenTrainElements.modelVariantSelect.disabled = usingPreset;
+    }
     if (qwenTrainElements.modelIdPreview) {
         qwenTrainElements.modelIdPreview.textContent = resolveQwenModelId();
     }
@@ -14261,7 +14521,8 @@ function initQwenTrainingTab() {
 	            return;
 	        }
 	        qwenTrainElements.runNameInput = document.getElementById("qwenTrainRunName");
-	        qwenTrainElements.modelSizeSelect = document.getElementById("qwenTrainModelSize");
+		        qwenTrainElements.modelPresetSelect = document.getElementById("qwenTrainModelPreset");
+		        qwenTrainElements.modelSizeSelect = document.getElementById("qwenTrainModelSize");
 	        qwenTrainElements.modelVariantSelect = document.getElementById("qwenTrainModelVariant");
         qwenTrainElements.modelIdPreview = document.getElementById("qwenTrainModelIdPreview");
         qwenTrainElements.vramEstimate = document.getElementById("qwenTrainVramEstimate");
@@ -14325,12 +14586,15 @@ function initQwenTrainingTab() {
                 generateRandomQwenSample().catch((error) => console.error("Random Qwen sample failed", error));
             });
         }
-        if (qwenTrainElements.modelSizeSelect) {
-            qwenTrainElements.modelSizeSelect.addEventListener("change", updateQwenModelPreview);
-        }
-        if (qwenTrainElements.modelVariantSelect) {
-            qwenTrainElements.modelVariantSelect.addEventListener("change", updateQwenModelPreview);
-        }
+	        if (qwenTrainElements.modelSizeSelect) {
+	            qwenTrainElements.modelSizeSelect.addEventListener("change", updateQwenModelPreview);
+	        }
+	        if (qwenTrainElements.modelVariantSelect) {
+	            qwenTrainElements.modelVariantSelect.addEventListener("change", updateQwenModelPreview);
+	        }
+	        if (qwenTrainElements.modelPresetSelect) {
+	            qwenTrainElements.modelPresetSelect.addEventListener("change", updateQwenModelPreview);
+	        }
         if (qwenTrainElements.trainModeRadios && qwenTrainElements.trainModeRadios.forEach) {
             qwenTrainElements.trainModeRadios.forEach((radio) => {
                 radio.addEventListener("change", () => {
@@ -14350,7 +14614,11 @@ function initQwenTrainingTab() {
                 validateQwenDeviceIds(false);
             });
         }
-        updateQwenModelPreview();
+	        populateQwenTrainingModelSelect(QWEN_TRAINING_MODEL_FALLBACKS);
+	        updateQwenModelPreview();
+	        loadQwenTrainingModelOptions().catch((error) => {
+	            console.debug("Failed to initialize Qwen training model options", error);
+	        });
         validateQwenDeviceIds(false);
         refreshQwenGpuInfo().catch((error) => console.debug("Failed to refresh Qwen GPU info", error));
         if (qwenTrainElements.datasetSelect) {
@@ -31057,6 +31325,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     document.addEventListener("DOMContentLoaded", () => {
         initHelpTooltips();
+        initializeThemeToggle();
         applyPlaywrightTestIds();
         autoModeCheckbox = document.getElementById("autoMode");
         autoClassMarginEnabledCheckbox = document.getElementById("autoClassMarginEnabled");
@@ -33988,7 +34257,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     const setFontStyles = (context, marked) => {
         if (marked === false) {
-            context.fillStyle = fontColor;
+            context.fillStyle = isPipboyThemeEnabled() ? "#84ff5b" : isDarkModeEnabled() ? "#d9e6df" : fontColor;
         } else {
             context.fillStyle = markedFontColor;
         }

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20260509a" rel="stylesheet">
+    <link href="ybat.css?v=20260516j" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
          before we call listenImageCrop().
@@ -11,7 +11,7 @@
     <script src="canvas.min.js?v=20260409a"></script>
     <script src="jszip.min.js?v=20260409a"></script>
     <script src="filesaver.min.js?v=20260409a"></script>
-    <script src="ybat.js?v=20260516f"></script>
+    <script src="ybat.js?v=20260516j"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -48,7 +48,7 @@
         Heavy backend jobs are running (training/prepass/calibration). GPU-heavy actions are paused until they finish or are cancelled.
     </div>
     <div class="tab-shell">
-	        <div class="tab-bar" role="tablist">
+		        <div class="tab-bar">
 	            <button class="tab-button active" data-tab="labeling" data-testid="tab.labeling.open" id="tabLabelingButton" type="button">Label Images</button>
             <button class="tab-button" data-tab="prepass-builder" data-testid="tab.prepass_builder.open" id="tabPrepassBuilderButton" type="button">EDR Builder</button>
             <button class="tab-button" data-tab="training" data-testid="tab.training.open" id="tabTrainingButton" type="button">Train Class Predictor</button>
@@ -64,7 +64,10 @@
             <button class="tab-button" data-tab="active" data-testid="tab.active_classifier.open" id="tabActiveButton" type="button">Class Predictor Settings</button>
             <button class="tab-button" data-tab="qwen" data-testid="tab.qwen_models.open" id="tabQwenButton" type="button">Qwen Models</button>
             <button class="tab-button" data-tab="predictors" data-testid="tab.sam_predictors.open" id="tabPredictorsButton" type="button">SAM Predictors</button>
-            <button class="tab-button" data-tab="settings" data-testid="tab.settings.open" id="tabSettingsButton" type="button">Backend Config</button>
+            <div class="tab-bar__utility" role="presentation">
+                <button class="tab-button" data-tab="settings" data-testid="tab.settings.open" id="tabSettingsButton" type="button">Backend Config</button>
+                <button class="theme-toggle-button" data-testid="theme.dark.toggle" id="themeToggleButton" type="button" aria-pressed="false" title="Switch to dark mode">Dark</button>
+            </div>
         </div>
         <div class="tab-panels">
             <div class="tab-panel active" id="tabLabeling" data-tab-panel="labeling">
@@ -1506,6 +1509,13 @@
                         </div>
                         <div class="training-field">
                             <label>Base model</label>
+                            <div>
+                                <label for="qwenTrainModelPreset">Checkpoint</label>
+                                <select id="qwenTrainModelPreset">
+                                    <option value="">Use size/variant picker</option>
+                                </select>
+                                <div class="training-help">CUDA AWQ/GPTQ entries train adapters from the matching full checkpoint; QLoRA applies bitsandbytes 4-bit during training.</div>
+                            </div>
                             <div class="training-grid">
                                 <div>
                                     <label for="qwenTrainModelSize">Size</label>

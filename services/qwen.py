@@ -763,7 +763,9 @@ def _strip_qwen_model_suffix_impl(model_id: str) -> Optional[str]:
     base = str(model_id or "")
     if not base:
         return None
-    for suffix in ("-GPTQ-Int4", "-GPTQ-Int8", "-GGUF", "-AWQ", "-INT4", "-INT8"):
+    if base.endswith("-2507"):
+        return base[: -len("-2507")]
+    for suffix in ("-FP8", "-GPTQ-Int4", "-GPTQ-Int8", "-GGUF", "-AWQ", "-INT4", "-INT8"):
         if base.endswith(suffix):
             return base[: -len(suffix)]
     if ":" in base:
@@ -773,10 +775,23 @@ def _strip_qwen_model_suffix_impl(model_id: str) -> Optional[str]:
     return None
 
 
-def _format_qwen_load_error_impl(exc: Exception) -> str:
+def _format_qwen_load_error_impl(exc: Exception, *, torch_module: Any = None) -> str:
     text = str(exc or "")
     if not text:
         return "unknown"
+    if "FP8" in text and "compute capability" in text:
+        cc = None
+        if torch_module is not None and torch_module.cuda.is_available():
+            try:
+                major, minor = torch_module.cuda.get_device_capability(torch_module.cuda.current_device())
+                cc = f"{major}.{minor}"
+            except Exception:
+                cc = None
+        cc_note = f" Current GPU compute capability: {cc}." if cc else ""
+        return (
+            f"{text} FP8 models require GPU compute capability >= 8.9 (e.g., 4090/H100)."
+            f"{cc_note} Use an AWQ, GPTQ, or BF16 Qwen3-VL model on lower-capability GPUs."
+        )
     for needle in (
         "FileNotFoundError",
         "No such file",

@@ -37,6 +37,7 @@ try:
     )
 except Exception as exc:  # noqa: BLE001
     AutoProcessor = None  # type: ignore[assignment]
+    BitsAndBytesConfig = None  # type: ignore[assignment]
     Qwen3VLForConditionalGeneration = None  # type: ignore[assignment]
     Trainer = None  # type: ignore[assignment]
     TrainingArguments = None  # type: ignore[assignment]
@@ -122,6 +123,7 @@ class QwenTrainingConfig:
     dataset_root: str
     result_path: str
     model_id: str = "Qwen/Qwen3-VL-4B-Instruct"
+    requested_model_id: Optional[str] = None
     training_mode: str = "official_lora"  # official_lora | trl_qlora
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     run_name: Optional[str] = None
@@ -535,6 +537,8 @@ def _train_trl_qlora(
     _ensure_transformers_ready()
     if TRL_IMPORT_ERROR is not None or SFTTrainer is None or SFTConfig is None:
         raise TrainingError(f"qwen_trl_missing:{TRL_IMPORT_ERROR}")
+    if BitsAndBytesConfig is None:
+        raise TrainingError("qwen_bitsandbytes_config_missing")
     if PEFT_IMPORT_ERROR is not None or LoraConfig is None:
         raise TrainingError(f"qwen_peft_missing:{PEFT_IMPORT_ERROR}")
     _seed_all(config.seed)
@@ -549,7 +553,7 @@ def _train_trl_qlora(
 
     quant_config = BitsAndBytesConfig(
         load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_compute_dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="nf4",
     )

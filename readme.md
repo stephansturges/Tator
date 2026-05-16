@@ -146,6 +146,10 @@ The Label Images tab is the everyday workspace.
 The output remains an annotation draft. The UI is built around fast accept,
 correct, and reject loops.
 
+The top-right `Dark` button toggles the standard dark theme. Double-click the
+same button to switch into the hidden Pip-Boy-inspired terminal skin; single
+click again returns to the previous light/dark theme.
+
 ## Qwen
 
 Qwen is the local VLM path. In this repo it is used for:
@@ -171,6 +175,18 @@ The UI exposes the same runtime controls under **Backend Config -> Qwen Runtime
 quantized MLX model IDs directly; when an exact ID is selected, the request is
 sent as that exact model rather than being rewritten by the Instruct/Thinking
 variant dropdown.
+
+The Qwen Models tab also includes CUDA/Transformers presets for official
+Qwen3-VL checkpoints, curated AWQ/GPTQ 4-bit checkpoints, and Huihui
+abliterated checkpoints. AWQ/GPTQ presets are inference checkpoints; when they
+are selected for Qwen training, Tator records the requested quantized model but
+trains LoRA/QLoRA adapters from the matching full Transformers checkpoint. QLoRA
+then applies bitsandbytes NF4 4-bit quantization at training load time.
+
+FP8 Qwen3-VL checkpoints are not exposed as first-class PyTorch presets because
+the current Qwen model cards recommend vLLM/SGLang for those weights rather than
+direct Transformers loading. Use AWQ/GPTQ or the full BF16/FP16 checkpoints for
+the built-in backend path.
 
 Model access, memory requirements, and device support still depend on your
 machine and Hugging Face cache/authentication. Large Thinking and MoE models can

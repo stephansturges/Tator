@@ -17,6 +17,32 @@ def test_qwen_model_registry_exposes_mlx_quantized_models():
     assert mlx_entry["metadata"]["runtime_platform"] == "mlx_vlm"
 
 
+def test_qwen_model_registry_exposes_cuda_quantized_and_abliterated_models():
+    models = api.list_qwen_models()["models"]
+    by_id = {entry["id"]: entry for entry in models}
+
+    awq_entry = by_id["cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit"]
+    assert awq_entry["type"] == "builtin_transformers"
+    assert awq_entry["metadata"]["runtime_platform"] == "transformers"
+    assert awq_entry["metadata"]["quantization_backend"] == "awq"
+    assert awq_entry["metadata"]["training_model_id"] == "Qwen/Qwen3-VL-4B-Instruct"
+
+    abliterated_entry = by_id["huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated"]
+    assert abliterated_entry["metadata"]["abliterated"] is True
+    assert abliterated_entry["metadata"]["training_model_id"] == abliterated_entry["metadata"]["model_id"]
+
+
+def test_qwen_model_registry_exposes_abliterated_mlx_models():
+    models = api.list_qwen_models()["models"]
+    by_id = {entry["id"]: entry for entry in models}
+    model_id = "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx"
+
+    assert by_id[model_id]["type"] == "builtin_mlx"
+    assert by_id[model_id]["metadata"]["runtime_platform"] == "mlx_vlm"
+    assert by_id[model_id]["metadata"]["abliterated"] is True
+    assert by_id[model_id]["metadata"]["training_supported"] is False
+
+
 def test_qwen_mlx_model_id_resolution_maps_hf_to_quantized_default():
     assert (
         api._effective_qwen_model_id_for_platform(
@@ -24,6 +50,25 @@ def test_qwen_mlx_model_id_resolution_maps_hf_to_quantized_default():
             api.QWEN_PLATFORM_MLX,
         )
         == "mlx-community/Qwen3-VL-8B-Thinking-4bit"
+    )
+
+
+def test_qwen_mlx_model_id_resolution_keeps_explicit_abliterated_mlx_id():
+    model_id = "EZCon/Huihui-Qwen3-VL-2B-Instruct-abliterated-4bit-mlx"
+    assert api._effective_qwen_model_id_for_platform(model_id, api.QWEN_PLATFORM_MLX) == model_id
+
+
+def test_qwen_cuda_catalog_model_forces_transformers_runtime():
+    assert (
+        api._resolve_qwen_runtime_platform("cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit")
+        == api.QWEN_PLATFORM_TRANSFORMERS
+    )
+    assert (
+        api._resolve_qwen_runtime_platform(
+            "Qwen/Qwen3-VL-4B-Instruct",
+            metadata={"id": "Qwen/Qwen3-VL-4B-Instruct", "runtime_platform": "transformers"},
+        )
+        == api.QWEN_PLATFORM_TRANSFORMERS
     )
 
 

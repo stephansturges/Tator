@@ -131,8 +131,16 @@ Runtime selection rules:
 
 The UI lists the quantized Qwen3-VL options from the `mlx-community/qwen3-vl`
 collection, including 2B, 4B, 8B, 30B-A3B, 32B, and available 235B-A22B
-variants. Choose a model that fits local RAM/VRAM; the list is capability
-surface, not a guarantee that every model is practical on every Mac.
+variants. It also includes discovered EZCon Huihui abliterated MLX builds for
+2B/4B Instruct and Thinking. Choose a model that fits local RAM/VRAM; the list
+is capability surface, not a guarantee that every model is practical on every
+Mac.
+
+CUDA machines should use the Transformers model registry in **Qwen Models**.
+That registry exposes curated Qwen3-VL AWQ/GPTQ 4-bit checkpoints and Huihui
+abliterated Transformer checkpoints. AWQ/GPTQ activation uses the selected
+quantized checkpoint for inference; Qwen training resolves those selections to
+the matching full checkpoint and applies LoRA or bitsandbytes QLoRA there.
 
 ## SAM3 Notes
 
@@ -148,3 +156,4 @@ Upstream SAM3 currently imports a few CUDA/Triton helper modules even when the r
 - RF-DETR receives `device=mps`, but package-level MPS coverage must be verified with real weights. If it fails on unsupported ops, set `RFDETR_INFER_DEVICE=cpu` while keeping YOLO/SAM/CLIP on MPS.
 - Qwen MLX-VLM does not stream tokens yet; streaming endpoints return the final generated text once the MLX call completes.
 - Qwen adapter checkpoints use Transformers/PyTorch, not MLX-VLM.
+- Qwen FP8 checkpoints are not enabled as direct PyTorch presets because current Qwen model cards point those weights at vLLM/SGLang instead of direct Transformers loading.

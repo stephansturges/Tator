@@ -324,6 +324,14 @@ from services.qwen_mlx import (
     resolve_mlx_model_id,
     select_qwen_platform,
 )
+from services.qwen_model_catalog import (
+    QWEN_TRANSFORMERS_MODEL_OPTIONS,
+    QWEN_TRANSFORMERS_MODEL_IDS,
+    is_qwen_mlx_model_id,
+    qwen_transformers_load_kwargs,
+    qwen_transformers_metadata_for_model,
+    resolve_qwen_training_model_id,
+)
 from services.qwen_generation import (
     _BASE_LOGITS_PROCESSOR,
     ThinkingEffortProcessor,
@@ -3337,7 +3345,15 @@ def _resolve_qwen_runtime_platform(
     model_id: Optional[str] = None,
     *,
     adapter_path: Optional[Path] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
+    meta_platform = normalize_qwen_platform((metadata or {}).get("runtime_platform"))
+    meta_id = str((metadata or {}).get("id") or "")
+    if meta_platform == QWEN_PLATFORM_TRANSFORMERS and meta_id and meta_id != "default":
+        return QWEN_PLATFORM_TRANSFORMERS
+    raw_model_id = str(model_id or "").strip()
+    if raw_model_id in QWEN_TRANSFORMERS_MODEL_IDS and not raw_model_id.startswith("Qwen/Qwen3-VL-"):
+        return QWEN_PLATFORM_TRANSFORMERS
     return select_qwen_platform(
         QWEN_INFERENCE_PLATFORM,
         model_id=model_id,
@@ -3519,7 +3535,11 @@ def _ensure_qwen_ready():
     metadata = active_qwen_metadata or {}
     adapter_path = active_qwen_model_path
     base_model_id = metadata.get("model_id") or QWEN_MODEL_NAME
-    platform_name = _resolve_qwen_runtime_platform(str(base_model_id), adapter_path=adapter_path)
+    platform_name = _resolve_qwen_runtime_platform(
+        str(base_model_id),
+        adapter_path=adapter_path,
+        metadata=metadata,
+    )
     if platform_name == QWEN_PLATFORM_MLX:
         return _ensure_qwen_mlx_ready(str(base_model_id))
     if (
@@ -3580,21 +3600,12 @@ def _ensure_qwen_ready():
             raise HTTPException(
                 status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_device_unavailable:{exc}"
             ) from exc
-        use_auto_map = (
-            QWEN_DEVICE_PREF == "auto" and device.startswith("cuda") and torch.cuda.is_available()
+        load_kwargs = qwen_transformers_load_kwargs(
+            str(base_model_id),
+            device=device,
+            device_pref=QWEN_DEVICE_PREF,
+            torch_module=torch,
         )
-        load_kwargs: Dict[str, Any]
-        if use_auto_map:
-            load_kwargs = {
-                "torch_dtype": "auto",
-                "device_map": "auto",
-            }
-        else:
-            dtype = torch.float16 if device.startswith(("cuda", "mps")) else torch.float32
-            load_kwargs = {
-                "torch_dtype": dtype,
-                "low_cpu_mem_usage": True,
-            }
         if adapter_path and PeftModel is None:
             detail = "qwen_peft_missing"
             if PEFT_IMPORT_ERROR is not None:
@@ -15624,6 +15635,8 @@ def _persist_qwen_run_metadata(
         "id": model_id,
         "label": getattr(config, "run_name", None) or result_path.name,
         "model_id": getattr(config, "model_id", None),
+        "requested_model_id": getattr(config, "requested_model_id", None),
+        "training_model_id": getattr(config, "model_id", None),
         "path": str(result_path),
         "latest_checkpoint": getattr(result, "latest_checkpoint", None),
         "checkpoints": checkpoints,
@@ -15677,12 +15690,29 @@ def _build_qwen_config(
             prep_logs.append(
                 "random_split requested but current trainer uses existing dataset splits"
             )
+    requested_model_id = (
+        payload.model_id
+        or (active_qwen_metadata or {}).get("model_id")
+        or QWEN_MODEL_NAME
+    )
+    requested_model_id = str(requested_model_id or "").strip() or QWEN_MODEL_NAME
+    if is_qwen_mlx_model_id(requested_model_id):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="qwen_mlx_training_unsupported:select_a_transformers_cuda_model",
+        )
+    training_model_id = resolve_qwen_training_model_id(requested_model_id)
+    if prep_logs is not None:
+        prep_logs.append(f"Requested Qwen model: {requested_model_id}")
+        if training_model_id != requested_model_id:
+            prep_logs.append(
+                f"Adapter training base: {training_model_id} (resolved from quantized inference model)"
+            )
     kwargs = {
         "dataset_root": str(dataset_root),
         "result_path": str(result_path),
-        "model_id": payload.model_id
-        or (active_qwen_metadata or {}).get("model_id")
-        or QWEN_MODEL_NAME,
+        "model_id": training_model_id,
+        "requested_model_id": requested_model_id,
         "training_mode": payload.training_mode or "official_lora",
         "system_prompt": payload.system_prompt or DEFAULT_SYSTEM_PROMPT,
         "run_name": run_name,
@@ -23984,6 +24014,42 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
         "path": None,
         "created_at": None,
     }
+    transformers_entries: List[Dict[str, Any]] = []
+    for entry in QWEN_TRANSFORMERS_MODEL_OPTIONS:
+        model_id = str(entry.get("id") or entry.get("model_id") or "")
+        metadata = {
+            "id": model_id,
+            "label": str(entry.get("label") or model_id),
+            "system_prompt": DEFAULT_SYSTEM_PROMPT,
+            "dataset_context": str(entry.get("dataset_context") or "Qwen3-VL Transformer model."),
+            "classes": [],
+            "model_id": model_id,
+            "model_family": "qwen3",
+            "source": str(entry.get("source") or "huggingface"),
+            "runtime_platform": QWEN_PLATFORM_TRANSFORMERS,
+            "quantization": entry.get("quantization"),
+            "quantization_backend": entry.get("quantization_backend"),
+            "quantized": bool(entry.get("quantized")),
+            "abliterated": bool(entry.get("abliterated")),
+            "variant": entry.get("variant"),
+            "size": entry.get("size"),
+            "training_supported": bool(entry.get("training_supported", True)),
+            "training_modes": list(entry.get("training_modes") or ["official_lora", "trl_qlora"]),
+            "training_model_id": entry.get("training_model_id") or model_id,
+            "training_note": entry.get("training_note"),
+            "min_pixels": QWEN_MIN_PIXELS,
+            "max_pixels": QWEN_MAX_PIXELS,
+        }
+        transformers_entries.append(
+            {
+                "id": model_id,
+                "label": str(entry.get("label") or model_id),
+                "type": "builtin_transformers",
+                "metadata": metadata,
+                "path": None,
+                "created_at": None,
+            }
+        )
     mlx_entries: List[Dict[str, Any]] = []
     for entry in QWEN_MLX_MODEL_OPTIONS:
         model_id = str(entry.get("id") or entry.get("model_id") or "")
@@ -23995,11 +24061,14 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
             "classes": [],
             "model_id": model_id,
             "model_family": "qwen3",
-            "source": "mlx-community",
+            "source": str(entry.get("source") or "mlx-community"),
             "runtime_platform": QWEN_PLATFORM_MLX,
             "quantization": entry.get("quantization"),
+            "abliterated": bool(entry.get("abliterated")),
             "variant": entry.get("variant"),
             "size": entry.get("size"),
+            "training_supported": False,
+            "training_note": "MLX-VLM adapters are not loaded by the current PyTorch training backend.",
             "min_pixels": QWEN_MIN_PIXELS,
             "max_pixels": QWEN_MAX_PIXELS,
         }
@@ -24013,7 +24082,7 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
                 "created_at": None,
             }
         )
-    return [default_entry, *mlx_entries]
+    return [default_entry, *transformers_entries, *mlx_entries]
 
 
 def _get_builtin_qwen_model_entry(model_id: str) -> Optional[Dict[str, Any]]:
@@ -24046,8 +24115,13 @@ def activate_qwen_model(payload: QwenModelActivateRequest):
         _set_active_qwen_model_default()
     else:
         builtin = _get_builtin_qwen_model_entry(model_id)
-        if builtin and builtin.get("type") == "builtin_mlx":
-            _set_active_qwen_model_builtin(model_id, builtin.get("metadata") or qwen_mlx_metadata_for_model(model_id))
+        if builtin and builtin.get("type") in {"builtin_mlx", "builtin_transformers"}:
+            fallback_metadata = (
+                qwen_mlx_metadata_for_model(model_id)
+                if builtin.get("type") == "builtin_mlx"
+                else qwen_transformers_metadata_for_model(model_id)
+            )
+            _set_active_qwen_model_builtin(model_id, builtin.get("metadata") or fallback_metadata)
         else:
             entry = _get_qwen_model_entry(model_id)
             if not entry:
@@ -24663,6 +24737,7 @@ def qwen_status():
     platform_name = _resolve_qwen_runtime_platform(
         (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
         adapter_path=active_qwen_model_path,
+        metadata=active_qwen_metadata,
     )
     if platform_name == QWEN_PLATFORM_MLX:
         dependency_error = _qwen_mlx_dependency_error()
@@ -24702,6 +24777,7 @@ def qwen_status():
         "dependency_error": dependency_error,
         "active_model": active_qwen_model_id,
         "active_metadata": active_qwen_metadata,
+        "transformers_models": QWEN_TRANSFORMERS_MODEL_OPTIONS,
         "mlx_models": QWEN_MLX_MODEL_OPTIONS,
     }
 

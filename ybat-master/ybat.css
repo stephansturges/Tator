@@ -323,7 +323,11 @@ body {
 
 .tab-bar {
     display: flex;
+    align-items: center;
+    flex-wrap: wrap;
     gap: 6px;
+    row-gap: 8px;
+    overflow: visible;
     padding: 10px 16px 6px;
     background: #ffffff;
     border-bottom: 1px solid #d8dee9;
@@ -337,7 +341,10 @@ body {
     border-radius: 6px;
     font-size: 12px;
     font-weight: 600;
+    flex: 0 1 auto;
+    max-width: 100%;
     cursor: pointer;
+    white-space: nowrap;
     transition: background 0.2s ease, color 0.2s ease;
 }
 
@@ -348,6 +355,82 @@ body {
 .tab-button.active {
     background: #2563eb;
     color: #ffffff;
+}
+
+.tab-bar__utility {
+    display: inline-flex;
+    align-items: center;
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.theme-toggle-button {
+    border: 1px solid #0f172a;
+    background: #0f172a;
+    color: #ffffff;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+    min-height: 28px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+@media (max-width: 980px) {
+    .tab-bar {
+        padding: 8px 10px 7px;
+    }
+
+    .tab-button,
+    .theme-toggle-button {
+        padding-left: 10px;
+        padding-right: 10px;
+    }
+
+    .tab-bar__utility {
+        width: 100%;
+        justify-content: flex-end;
+        margin-left: 0;
+    }
+}
+
+@media (max-width: 560px) {
+    .tab-button,
+    .theme-toggle-button {
+        font-size: 11px;
+        padding-left: 8px;
+        padding-right: 8px;
+    }
+
+    .tab-bar__utility {
+        justify-content: stretch;
+    }
+
+    .tab-bar__utility .tab-button,
+    .tab-bar__utility .theme-toggle-button {
+        flex: 1 1 0;
+    }
+}
+
+.theme-toggle-button:hover {
+    background: #1e293b;
+    border-color: #1e293b;
+}
+
+.theme-toggle-button[aria-pressed="true"] {
+    background: #facc15;
+    border-color: #facc15;
+    color: #111827;
+}
+
+.theme-toggle-button[aria-pressed="true"]:hover {
+    background: #fde047;
+    border-color: #fde047;
 }
 
 .tab-button--locked {
@@ -2744,4 +2827,959 @@ details.training-card > summary::marker {
     display: flex;
     gap: 10px;
     align-items: center;
+}
+
+html.theme-dark {
+    color-scheme: dark;
+}
+
+html.theme-dark body,
+body.theme-dark {
+    background: #101314;
+    color: #eef3ef;
+}
+
+html.theme-dark .tab-bar {
+    background: #161a1d;
+    border-bottom-color: #343d43;
+}
+
+html.theme-dark .tab-button {
+    background: #242b30;
+    border: 1px solid #3a444b;
+    color: #dce5df;
+}
+
+html.theme-dark .tab-button:hover {
+    background: #303940;
+}
+
+html.theme-dark .tab-button.active {
+    background: #2f7dd3;
+    border-color: #2f7dd3;
+    color: #ffffff;
+}
+
+html.theme-dark .tab-button--locked:hover {
+    background: #242b30;
+}
+
+html.theme-dark .theme-toggle-button {
+    background: #facc15;
+    border-color: #facc15;
+    color: #111827;
+}
+
+html.theme-dark .theme-toggle-button:hover {
+    background: #fde047;
+    border-color: #fde047;
+}
+
+html.theme-dark .tab-panels,
+html.theme-dark .container {
+    background: #101314;
+}
+
+html.theme-dark .left {
+    color: #eef3ef;
+    scrollbar-color: #4b5560 #15191c;
+}
+
+html.theme-dark .right {
+    background: #0d0f10;
+    border-left-color: #394249;
+}
+
+html.theme-dark #canvas {
+    background: #0a0b0c;
+}
+
+html.theme-dark body.annotation-focus-mode .tab-shell,
+html.theme-dark body.annotation-focus-mode .tab-panels,
+html.theme-dark body.annotation-focus-mode #tabLabeling,
+html.theme-dark body.annotation-focus-mode #tabLabeling .container,
+html.theme-dark body.annotation-focus-mode #tabLabeling .right {
+    background: #050505;
+}
+
+html.theme-dark hr {
+    border-color: #394249;
+}
+
+html.theme-dark input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+html.theme-dark textarea,
+html.theme-dark select {
+    background: #1b2024;
+    border-color: #3b454c;
+    color: #eef3ef;
+}
+
+html.theme-dark input[type="checkbox"],
+html.theme-dark input[type="radio"] {
+    accent-color: #3b82f6;
+}
+
+html.theme-dark input::placeholder,
+html.theme-dark textarea::placeholder {
+    color: #8d9892;
+}
+
+html.theme-dark input:disabled,
+html.theme-dark select:disabled,
+html.theme-dark textarea:disabled {
+    background: #252b30;
+    color: #84908b;
+}
+
+html.theme-dark .modal__dialog,
+html.theme-dark .settings-panel,
+html.theme-dark .qwen-panel,
+html.theme-dark .sam3-text-panel,
+html.theme-dark .qwen-models-list,
+html.theme-dark .qwen-model-details,
+html.theme-dark .training-card,
+html.theme-dark .training-form-section,
+html.theme-dark .training-status-section,
+html.theme-dark .training-chart,
+html.theme-dark .qwen-sample-panel,
+html.theme-dark .training-history-item,
+html.theme-dark .training-convergence,
+html.theme-dark .per-class-metrics,
+html.theme-dark .metric-chart,
+html.theme-dark .metric-glossary,
+html.theme-dark .active-controls,
+html.theme-dark .storage-item {
+    background: #1a1f22;
+    border-color: #374149;
+    box-shadow: 0 10px 22px rgba(0, 0, 0, 0.18);
+    color: #eef3ef;
+}
+
+html.theme-dark .training-card__header,
+html.theme-dark .training-card__footer,
+html.theme-dark details.training-card > summary,
+html.theme-dark .training-subsection,
+html.theme-dark .qwen-agent-trace,
+html.theme-dark .qwen-agent-trace__item,
+html.theme-dark .sam3-text-cascade,
+html.theme-dark .sam3-text-cascade__step,
+html.theme-dark .qwen-advanced,
+html.theme-dark .qwen-model-card,
+html.theme-dark .qwen-train-callouts,
+html.theme-dark .qwen-radio-group,
+html.theme-dark .training-summary,
+html.theme-dark .training-progress,
+html.theme-dark .qwen-calibration-progress__bar,
+html.theme-dark .metric-bar-track,
+html.theme-dark .qwen-sample-canvas {
+    background: #20262a;
+    border-color: #3a444b;
+    color: #dce5df;
+}
+
+html.theme-dark .qwen-model-card.active {
+    background: #1c3552;
+    border-color: #60a5fa;
+}
+
+html.theme-dark .modal__title,
+html.theme-dark #batchTweakClass,
+html.theme-dark .qwen-panel__header,
+html.theme-dark .sam3-text-cascade__step-header,
+html.theme-dark .training-card__title,
+html.theme-dark details.training-card > summary,
+html.theme-dark .training-subsection__title,
+html.theme-dark .training-subsection h4,
+html.theme-dark .training-subsection h5,
+html.theme-dark .training-form-section h2,
+html.theme-dark .training-status-section h2,
+html.theme-dark .training-status-section h3,
+html.theme-dark .training-chart h3,
+html.theme-dark .qwen-sample-header h3,
+html.theme-dark .training-history-title,
+html.theme-dark .per-class-metrics h4,
+html.theme-dark .metric-chart h4,
+html.theme-dark .qwen-model-card h3,
+html.theme-dark .qwen-radio strong,
+html.theme-dark .qwen-train-callouts strong,
+html.theme-dark .active-inline,
+html.theme-dark .sam-status,
+html.theme-dark .settings-status,
+html.theme-dark .training-status-text,
+html.theme-dark .training-message,
+html.theme-dark .active-message,
+html.theme-dark .metric-label {
+    color: #f5f7f5;
+}
+
+html.theme-dark .modal__body,
+html.theme-dark .settings-help,
+html.theme-dark .training-help,
+html.theme-dark .qwen-status-label,
+html.theme-dark .qwen-caption-status,
+html.theme-dark .qwen-caption-options,
+html.theme-dark .qwen-agent-trace__title,
+html.theme-dark .qwen-agent-trace__phase,
+html.theme-dark .qwen-agent-trace__summary,
+html.theme-dark .sam3-text-status,
+html.theme-dark .sam3-text-hint,
+html.theme-dark .sam3-text-cascade__step-grid label,
+html.theme-dark .sam3-text-cascade__option,
+html.theme-dark .sam3-text-batch__option,
+html.theme-dark .qwen-models-help,
+html.theme-dark .qwen-model-status,
+html.theme-dark .qwen-model-card p,
+html.theme-dark .qwen-model-details__body,
+html.theme-dark .training-field label,
+html.theme-dark .training-field-double label,
+html.theme-dark .training-advanced-grid label,
+html.theme-dark .training-active-block label,
+html.theme-dark .training-grid label,
+html.theme-dark .training-epoch-detail,
+html.theme-dark .chart-smoothing,
+html.theme-dark .training-chart-legend,
+html.theme-dark .qwen-sample-status,
+html.theme-dark .qwen-sample-details label,
+html.theme-dark .qwen-sample-meta,
+html.theme-dark .training-toggle-row,
+html.theme-dark .training-convergence-note,
+html.theme-dark .metric-support,
+html.theme-dark .metric-chart-class,
+html.theme-dark .metric-chart-legend,
+html.theme-dark .active-help,
+html.theme-dark .storage-meta {
+    color: #aeb8b2;
+}
+
+html.theme-dark .help-icon {
+    border-color: #6b7780;
+    color: #c4cec8;
+}
+
+html.theme-dark .metrics-table,
+html.theme-dark .metric-table,
+html.theme-dark .training-table,
+html.theme-dark .training-convergence table {
+    color: #eef3ef;
+}
+
+html.theme-dark .metrics-table th,
+html.theme-dark .metrics-table td,
+html.theme-dark .metric-table th,
+html.theme-dark .metric-table td,
+html.theme-dark .training-table th,
+html.theme-dark .training-table td,
+html.theme-dark .training-convergence th,
+html.theme-dark .training-convergence td {
+    border-color: #3a444b;
+}
+
+html.theme-dark .metrics-table th,
+html.theme-dark .metrics-table tr:nth-child(even),
+html.theme-dark .metric-table th,
+html.theme-dark .metric-table tr:nth-child(even),
+html.theme-dark .training-table th,
+html.theme-dark .training-table tr:nth-child(even),
+html.theme-dark .training-convergence th {
+    background: #20262a;
+}
+
+html.theme-dark .metrics-table tr.highlight,
+html.theme-dark .metric-table__highlight {
+    background: #12353b;
+}
+
+html.theme-dark .training-button,
+html.theme-dark #startTrainingBtn,
+html.theme-dark #activateLatestModelBtn,
+html.theme-dark #applyActiveModelBtn,
+html.theme-dark #refreshActiveModelBtn {
+    background: #2f7dd3;
+    color: #ffffff;
+}
+
+html.theme-dark .training-button:hover,
+html.theme-dark #startTrainingBtn:hover,
+html.theme-dark #activateLatestModelBtn:hover,
+html.theme-dark #applyActiveModelBtn:hover,
+html.theme-dark #refreshActiveModelBtn:hover {
+    background: #2568b5;
+}
+
+html.theme-dark .training-button.secondary,
+html.theme-dark .training-button.training-button--ghost,
+html.theme-dark .button,
+html.theme-dark button.secondary {
+    background: #263036;
+    border: 1px solid #46515a;
+    color: #eef3ef;
+}
+
+html.theme-dark .training-button.secondary:hover,
+html.theme-dark .training-button.training-button--ghost:hover,
+html.theme-dark .button:hover,
+html.theme-dark button.secondary:hover {
+    background: #313b42;
+    border-color: #5a6872;
+}
+
+html.theme-dark .training-button-danger,
+html.theme-dark .training-button.danger {
+    background: #b91c1c;
+    border-color: #b91c1c;
+    color: #ffffff;
+}
+
+html.theme-dark .training-button-danger:hover,
+html.theme-dark .training-button.danger:hover {
+    background: #991b1b;
+}
+
+html.theme-dark .training-button.button-disabled,
+html.theme-dark .training-button[aria-disabled="true"],
+html.theme-dark #startTrainingBtn:disabled,
+html.theme-dark #activateLatestModelBtn:disabled,
+html.theme-dark #applyActiveModelBtn:disabled {
+    background: #4b5563;
+    color: #cbd5e1;
+}
+
+html.theme-dark .badge,
+html.theme-dark .storage-badge,
+html.theme-dark .metric-tag {
+    background: #303940;
+    color: #eef3ef;
+}
+
+html.theme-dark .storage-badge.warn {
+    background: #3b2c16;
+    color: #f6c967;
+}
+
+html.theme-dark .storage-badge.success {
+    background: #153a2a;
+    color: #86efac;
+}
+
+html.theme-dark .settings-status.info,
+html.theme-dark .qwen-active-model-label {
+    color: #7db7ff;
+}
+
+html.theme-dark .settings-status.success,
+html.theme-dark .training-message.success,
+html.theme-dark .active-message.success,
+html.theme-dark .sam-status.success,
+html.theme-dark .sam3-text-status.success,
+html.theme-dark .qwen-status-label--ready {
+    color: #86efac;
+}
+
+html.theme-dark .settings-status.error,
+html.theme-dark .training-message.error,
+html.theme-dark .active-message.error,
+html.theme-dark .sam-status.error,
+html.theme-dark .sam3-text-status.error,
+html.theme-dark .qwen-status-label--error,
+html.theme-dark .training-help.warn {
+    color: #fca5a5;
+}
+
+html.theme-dark .training-message.warn,
+html.theme-dark .active-message.warn,
+html.theme-dark .sam-status.warn,
+html.theme-dark .sam3-text-status.warn {
+    color: #f6c967;
+}
+
+html.theme-dark .qwen-advanced-toggle {
+    background: #23364c;
+    border-color: #3f6792;
+    color: #bfdbfe;
+}
+
+html.theme-dark .qwen-sample-status {
+    background: rgba(26, 31, 34, 0.92);
+}
+
+html.theme-dark .qwen-sample-status.success {
+    background: rgba(21, 58, 42, 0.92);
+    color: #86efac;
+}
+
+html.theme-dark .qwen-sample-status.error {
+    background: rgba(69, 26, 26, 0.94);
+    color: #fca5a5;
+}
+
+html.theme-dark .training-progress,
+html.theme-dark .qwen-calibration-progress__bar,
+html.theme-dark .metric-bar-track,
+html.theme-dark .metric-chart-bar,
+html.theme-dark .metric-chart-bar.empty {
+    background: #303940;
+}
+
+html.theme-dark .metric-glossary strong {
+    color: #93c5fd;
+}
+
+html.theme-dark .modal__btn {
+    background: #303940;
+    color: #eef3ef;
+}
+
+html.theme-dark .modal__btn--primary {
+    background: #2f7dd3;
+    color: #ffffff;
+}
+
+html.theme-dark .automation-lock-panel,
+html.theme-dark #automationLockBanner {
+    background: #312714 !important;
+    border-color: #b7791f !important;
+    color: #f6c967 !important;
+}
+
+html.theme-pipboy {
+    color-scheme: dark;
+    --pip-bg: #020703;
+    --pip-panel: #071708;
+    --pip-panel-2: #0b220d;
+    --pip-panel-3: #103114;
+    --pip-green: #84ff5b;
+    --pip-green-strong: #b7ff8a;
+    --pip-green-muted: #58c84d;
+    --pip-green-dim: #2f7d35;
+    --pip-border: rgba(132, 255, 91, 0.52);
+    --pip-border-strong: rgba(183, 255, 138, 0.82);
+    --pip-amber: #ffd85e;
+    --pip-red: #ff6848;
+}
+
+html.theme-pipboy body,
+body.theme-pipboy {
+    background:
+        radial-gradient(circle at 48% 18%, rgba(132, 255, 91, 0.12), transparent 38%),
+        radial-gradient(circle at 50% 92%, rgba(255, 216, 94, 0.08), transparent 32%),
+        var(--pip-bg);
+    color: var(--pip-green);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    text-shadow: 0 0 7px rgba(132, 255, 91, 0.45);
+}
+
+body.theme-pipboy::before,
+body.theme-pipboy::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 10000;
+}
+
+body.theme-pipboy::before {
+    background:
+        repeating-linear-gradient(
+            0deg,
+            rgba(132, 255, 91, 0.08) 0,
+            rgba(132, 255, 91, 0.08) 1px,
+            transparent 1px,
+            transparent 3px
+        ),
+        linear-gradient(180deg, transparent, rgba(132, 255, 91, 0.10), transparent);
+    background-size: 100% 3px, 100% 220px;
+    opacity: 0.34;
+    animation: pipboyScan 8s linear infinite;
+}
+
+body.theme-pipboy::after {
+    box-shadow:
+        inset 0 0 70px rgba(132, 255, 91, 0.18),
+        inset 0 0 190px rgba(0, 0, 0, 0.82);
+    background: radial-gradient(ellipse at center, transparent 54%, rgba(0, 0, 0, 0.36) 100%);
+    opacity: 0.86;
+}
+
+body.theme-pipboy.annotation-focus-mode::before {
+    opacity: 0.16;
+}
+
+body.theme-pipboy.annotation-focus-mode::after {
+    opacity: 0.46;
+}
+
+html.theme-pipboy ::selection {
+    background: rgba(132, 255, 91, 0.28);
+    color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .tab-bar {
+    background: rgba(3, 14, 5, 0.96);
+    border-bottom-color: var(--pip-border);
+    box-shadow: inset 0 -1px 0 rgba(132, 255, 91, 0.18), 0 0 28px rgba(132, 255, 91, 0.10);
+}
+
+html.theme-pipboy .tab-button {
+    background: rgba(9, 30, 10, 0.92);
+    border: 1px solid rgba(132, 255, 91, 0.32);
+    color: var(--pip-green);
+    text-shadow: 0 0 6px rgba(132, 255, 91, 0.52);
+}
+
+html.theme-pipboy .tab-button:hover {
+    background: rgba(18, 55, 22, 0.96);
+    border-color: var(--pip-border);
+}
+
+html.theme-pipboy .tab-button.active {
+    background: rgba(132, 255, 91, 0.18);
+    border-color: var(--pip-border-strong);
+    box-shadow: inset 0 0 12px rgba(132, 255, 91, 0.20), 0 0 12px rgba(132, 255, 91, 0.14);
+    color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .theme-toggle-button {
+    background: rgba(132, 255, 91, 0.18);
+    border-color: var(--pip-border-strong);
+    box-shadow: inset 0 0 14px rgba(132, 255, 91, 0.20), 0 0 18px rgba(132, 255, 91, 0.22);
+    color: var(--pip-green-strong);
+    text-shadow: 0 0 8px rgba(132, 255, 91, 0.65);
+}
+
+html.theme-pipboy .theme-toggle-button:hover {
+    background: rgba(132, 255, 91, 0.26);
+    border-color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .tab-panels,
+html.theme-pipboy .container,
+html.theme-pipboy .left {
+    background: transparent;
+}
+
+html.theme-pipboy .right {
+    background: rgba(1, 8, 2, 0.92);
+    border-left-color: rgba(132, 255, 91, 0.42);
+}
+
+html.theme-pipboy #canvas {
+    background: #010501;
+    box-shadow: inset 0 0 28px rgba(132, 255, 91, 0.10);
+}
+
+html.theme-pipboy body.annotation-focus-mode .tab-shell,
+html.theme-pipboy body.annotation-focus-mode .tab-panels,
+html.theme-pipboy body.annotation-focus-mode #tabLabeling,
+html.theme-pipboy body.annotation-focus-mode #tabLabeling .container,
+html.theme-pipboy body.annotation-focus-mode #tabLabeling .right {
+    background: #010501;
+}
+
+html.theme-pipboy input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+html.theme-pipboy textarea,
+html.theme-pipboy select {
+    background: rgba(2, 12, 3, 0.96);
+    border-color: rgba(132, 255, 91, 0.42);
+    color: var(--pip-green-strong);
+    caret-color: var(--pip-green-strong);
+    box-shadow: inset 0 0 12px rgba(132, 255, 91, 0.08);
+}
+
+html.theme-pipboy input[type="checkbox"],
+html.theme-pipboy input[type="radio"] {
+    accent-color: var(--pip-green);
+}
+
+html.theme-pipboy input::placeholder,
+html.theme-pipboy textarea::placeholder {
+    color: rgba(132, 255, 91, 0.55);
+}
+
+html.theme-pipboy .modal__dialog,
+html.theme-pipboy .settings-panel,
+html.theme-pipboy .qwen-panel,
+html.theme-pipboy .sam3-text-panel,
+html.theme-pipboy .qwen-models-list,
+html.theme-pipboy .qwen-model-details,
+html.theme-pipboy .training-card,
+html.theme-pipboy .training-form-section,
+html.theme-pipboy .training-status-section,
+html.theme-pipboy .training-chart,
+html.theme-pipboy .qwen-sample-panel,
+html.theme-pipboy .training-history-item,
+html.theme-pipboy .training-convergence,
+html.theme-pipboy .per-class-metrics,
+html.theme-pipboy .metric-chart,
+html.theme-pipboy .metric-glossary,
+html.theme-pipboy .active-controls,
+html.theme-pipboy .storage-item {
+    background: linear-gradient(180deg, rgba(9, 27, 10, 0.96), rgba(3, 12, 4, 0.98));
+    border-color: var(--pip-border);
+    box-shadow: inset 0 0 18px rgba(132, 255, 91, 0.09), 0 0 18px rgba(132, 255, 91, 0.08);
+    color: var(--pip-green);
+}
+
+html.theme-pipboy .training-card__header,
+html.theme-pipboy .training-card__footer,
+html.theme-pipboy details.training-card > summary,
+html.theme-pipboy .training-subsection,
+html.theme-pipboy .qwen-agent-trace,
+html.theme-pipboy .qwen-agent-trace__item,
+html.theme-pipboy .sam3-text-cascade,
+html.theme-pipboy .sam3-text-cascade__step,
+html.theme-pipboy .qwen-advanced,
+html.theme-pipboy .qwen-model-card,
+html.theme-pipboy .qwen-train-callouts,
+html.theme-pipboy .qwen-radio-group,
+html.theme-pipboy .training-summary,
+html.theme-pipboy .qwen-sample-canvas {
+    background: rgba(4, 18, 5, 0.86);
+    border-color: rgba(132, 255, 91, 0.34);
+    color: var(--pip-green);
+}
+
+html.theme-pipboy .qwen-model-card.active,
+html.theme-pipboy .metrics-table tr.highlight,
+html.theme-pipboy .metric-table__highlight {
+    background: rgba(132, 255, 91, 0.14);
+    border-color: var(--pip-border-strong);
+}
+
+html.theme-pipboy .modal__title,
+html.theme-pipboy #batchTweakClass,
+html.theme-pipboy .qwen-panel__header,
+html.theme-pipboy .sam3-text-cascade__step-header,
+html.theme-pipboy .training-card__title,
+html.theme-pipboy details.training-card > summary,
+html.theme-pipboy .training-subsection__title,
+html.theme-pipboy .training-subsection h4,
+html.theme-pipboy .training-subsection h5,
+html.theme-pipboy .training-form-section h2,
+html.theme-pipboy .training-status-section h2,
+html.theme-pipboy .training-status-section h3,
+html.theme-pipboy .training-chart h3,
+html.theme-pipboy .qwen-sample-header h3,
+html.theme-pipboy .training-history-title,
+html.theme-pipboy .per-class-metrics h4,
+html.theme-pipboy .metric-chart h4,
+html.theme-pipboy .qwen-model-card h3,
+html.theme-pipboy .qwen-radio strong,
+html.theme-pipboy .qwen-train-callouts strong,
+html.theme-pipboy .active-inline,
+html.theme-pipboy .sam-status,
+html.theme-pipboy .settings-status,
+html.theme-pipboy .training-status-text,
+html.theme-pipboy .training-message,
+html.theme-pipboy .active-message,
+html.theme-pipboy .metric-label {
+    color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .modal__body,
+html.theme-pipboy .settings-help,
+html.theme-pipboy .training-help,
+html.theme-pipboy .qwen-status-label,
+html.theme-pipboy .qwen-caption-status,
+html.theme-pipboy .qwen-caption-options,
+html.theme-pipboy .qwen-agent-trace__title,
+html.theme-pipboy .qwen-agent-trace__phase,
+html.theme-pipboy .qwen-agent-trace__summary,
+html.theme-pipboy .sam3-text-status,
+html.theme-pipboy .sam3-text-hint,
+html.theme-pipboy .sam3-text-cascade__step-grid label,
+html.theme-pipboy .sam3-text-cascade__option,
+html.theme-pipboy .sam3-text-batch__option,
+html.theme-pipboy .qwen-models-help,
+html.theme-pipboy .qwen-model-status,
+html.theme-pipboy .qwen-model-card p,
+html.theme-pipboy .qwen-model-details__body,
+html.theme-pipboy .training-field label,
+html.theme-pipboy .training-field-double label,
+html.theme-pipboy .training-advanced-grid label,
+html.theme-pipboy .training-active-block label,
+html.theme-pipboy .training-grid label,
+html.theme-pipboy .training-epoch-detail,
+html.theme-pipboy .chart-smoothing,
+html.theme-pipboy .training-chart-legend,
+html.theme-pipboy .qwen-sample-status,
+html.theme-pipboy .qwen-sample-details label,
+html.theme-pipboy .qwen-sample-meta,
+html.theme-pipboy .training-toggle-row,
+html.theme-pipboy .training-convergence-note,
+html.theme-pipboy .metric-support,
+html.theme-pipboy .metric-chart-class,
+html.theme-pipboy .metric-chart-legend,
+html.theme-pipboy .active-help,
+html.theme-pipboy .storage-meta {
+    color: rgba(132, 255, 91, 0.76);
+}
+
+html.theme-pipboy .metrics-table,
+html.theme-pipboy .metric-table,
+html.theme-pipboy .training-table,
+html.theme-pipboy .training-convergence table {
+    color: var(--pip-green);
+}
+
+html.theme-pipboy .metrics-table th,
+html.theme-pipboy .metrics-table td,
+html.theme-pipboy .metric-table th,
+html.theme-pipboy .metric-table td,
+html.theme-pipboy .training-table th,
+html.theme-pipboy .training-table td,
+html.theme-pipboy .training-convergence th,
+html.theme-pipboy .training-convergence td {
+    border-color: rgba(132, 255, 91, 0.32);
+}
+
+html.theme-pipboy .metrics-table th,
+html.theme-pipboy .metrics-table tr:nth-child(even),
+html.theme-pipboy .metric-table th,
+html.theme-pipboy .metric-table tr:nth-child(even),
+html.theme-pipboy .training-table th,
+html.theme-pipboy .training-table tr:nth-child(even),
+html.theme-pipboy .training-convergence th {
+    background: rgba(11, 34, 13, 0.92);
+}
+
+html.theme-pipboy .training-button,
+html.theme-pipboy #startTrainingBtn,
+html.theme-pipboy #activateLatestModelBtn,
+html.theme-pipboy #applyActiveModelBtn,
+html.theme-pipboy #refreshActiveModelBtn,
+html.theme-pipboy .button,
+html.theme-pipboy button.secondary {
+    background: rgba(8, 31, 9, 0.92);
+    border: 1px solid var(--pip-border);
+    color: var(--pip-green-strong);
+    text-shadow: 0 0 7px rgba(132, 255, 91, 0.52);
+    box-shadow: inset 0 0 12px rgba(132, 255, 91, 0.10);
+}
+
+html.theme-pipboy .training-button:hover,
+html.theme-pipboy #startTrainingBtn:hover,
+html.theme-pipboy #activateLatestModelBtn:hover,
+html.theme-pipboy #applyActiveModelBtn:hover,
+html.theme-pipboy #refreshActiveModelBtn:hover,
+html.theme-pipboy .button:hover,
+html.theme-pipboy button.secondary:hover {
+    background: rgba(132, 255, 91, 0.18);
+    border-color: var(--pip-border-strong);
+}
+
+html.theme-pipboy .training-button-danger,
+html.theme-pipboy .training-button.danger {
+    background: rgba(95, 20, 13, 0.92);
+    border-color: rgba(255, 104, 72, 0.72);
+    color: #ffd7cd;
+}
+
+html.theme-pipboy .training-button.button-disabled,
+html.theme-pipboy .training-button[aria-disabled="true"],
+html.theme-pipboy #startTrainingBtn:disabled,
+html.theme-pipboy #activateLatestModelBtn:disabled,
+html.theme-pipboy #applyActiveModelBtn:disabled {
+    background: rgba(30, 49, 31, 0.82);
+    color: rgba(132, 255, 91, 0.44);
+}
+
+html.theme-pipboy .badge,
+html.theme-pipboy .storage-badge,
+html.theme-pipboy .metric-tag {
+    background: rgba(132, 255, 91, 0.14);
+    border: 1px solid rgba(132, 255, 91, 0.24);
+    color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .storage-badge.warn,
+html.theme-pipboy .settings-status.info,
+html.theme-pipboy .training-message.warn,
+html.theme-pipboy .active-message.warn,
+html.theme-pipboy .sam-status.warn,
+html.theme-pipboy .sam3-text-status.warn,
+html.theme-pipboy [style*="color: #b45309"],
+html.theme-pipboy [style*="color:#b45309"],
+html.theme-pipboy [style*="color: #92400e"],
+html.theme-pipboy [style*="color:#92400e"],
+html.theme-pipboy [style*="color: #9a3412"],
+html.theme-pipboy [style*="color:#9a3412"] {
+    color: var(--pip-amber) !important;
+}
+
+html.theme-pipboy .settings-status.error,
+html.theme-pipboy .training-message.error,
+html.theme-pipboy .active-message.error,
+html.theme-pipboy .sam-status.error,
+html.theme-pipboy .sam3-text-status.error,
+html.theme-pipboy .qwen-status-label--error,
+html.theme-pipboy .training-help.warn,
+html.theme-pipboy [style*="color: #b91c1c"],
+html.theme-pipboy [style*="color:#b91c1c"],
+html.theme-pipboy [style*="color: #dc2626"],
+html.theme-pipboy [style*="color:#dc2626"] {
+    color: var(--pip-red) !important;
+}
+
+html.theme-pipboy .settings-status.success,
+html.theme-pipboy .training-message.success,
+html.theme-pipboy .active-message.success,
+html.theme-pipboy .sam-status.success,
+html.theme-pipboy .sam3-text-status.success,
+html.theme-pipboy .qwen-status-label--ready,
+html.theme-pipboy .storage-badge.success {
+    color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .training-progress,
+html.theme-pipboy .qwen-calibration-progress__bar,
+html.theme-pipboy .metric-bar-track,
+html.theme-pipboy .metric-chart-bar,
+html.theme-pipboy .metric-chart-bar.empty {
+    background: rgba(132, 255, 91, 0.12);
+}
+
+html.theme-pipboy .training-progress-fill,
+html.theme-pipboy .training-progress__fill,
+html.theme-pipboy .qwen-calibration-progress__fill,
+html.theme-pipboy .metric-bar-fill.precision,
+html.theme-pipboy .metric-bar-fill.recall,
+html.theme-pipboy .metric-bar-fill.f1 {
+    background: linear-gradient(90deg, var(--pip-green-dim), var(--pip-green-strong));
+}
+
+html.theme-pipboy .training-log,
+html.theme-pipboy .qwen-model-details__body pre,
+html.theme-pipboy .qwen-sample-details pre,
+html.theme-pipboy .training-logs pre {
+    background: #010501;
+    border: 1px solid rgba(132, 255, 91, 0.28);
+    color: var(--pip-green);
+    text-shadow: 0 0 7px rgba(132, 255, 91, 0.45);
+}
+
+html.theme-pipboy .modal__btn {
+    background: rgba(8, 31, 9, 0.92);
+    border: 1px solid var(--pip-border);
+    color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .modal__btn--primary,
+html.theme-pipboy .qwen-advanced-toggle {
+    background: rgba(132, 255, 91, 0.18);
+    border-color: var(--pip-border-strong);
+    color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .automation-lock-panel,
+html.theme-pipboy #automationLockBanner {
+    background: rgba(45, 35, 8, 0.96) !important;
+    border-color: rgba(255, 216, 94, 0.64) !important;
+    color: var(--pip-amber) !important;
+}
+
+html.theme-pipboy #annotationSourcePanel {
+    border-left-color: var(--pip-border-strong) !important;
+}
+
+html.theme-pipboy [style*="background: #f8fafc"],
+html.theme-pipboy [style*="background:#f8fafc"],
+html.theme-pipboy [style*="background: #ffffff"],
+html.theme-pipboy [style*="background:#ffffff"],
+html.theme-pipboy [style*="background: #fff"],
+html.theme-pipboy [style*="background:#fff"] {
+    background: rgba(6, 21, 7, 0.92) !important;
+}
+
+html.theme-pipboy [style*="border: 1px solid #e2e8f0"],
+html.theme-pipboy [style*="border:1px solid #e2e8f0"],
+html.theme-pipboy [style*="border-top: 1px solid #e2e8f0"],
+html.theme-pipboy [style*="border-top:1px solid #e2e8f0"] {
+    border-color: rgba(132, 255, 91, 0.34) !important;
+}
+
+html.theme-pipboy [style*="color: #0f172a"],
+html.theme-pipboy [style*="color:#0f172a"],
+html.theme-pipboy [style*="color: #1f2937"],
+html.theme-pipboy [style*="color:#1f2937"],
+html.theme-pipboy [style*="color: #475569"],
+html.theme-pipboy [style*="color:#475569"],
+html.theme-pipboy [style*="color: #64748b"],
+html.theme-pipboy [style*="color:#64748b"] {
+    color: rgba(132, 255, 91, 0.78) !important;
+}
+
+@keyframes pipboyScan {
+    0% {
+        background-position: 0 0, 0 -220px;
+    }
+    100% {
+        background-position: 0 0, 0 220px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    body.theme-pipboy::before {
+        animation: none;
+    }
+}
+
+html.theme-dark:not(.theme-pipboy) #annotationSourcePanel {
+    border-left-color: #6b7780 !important;
+}
+
+html.theme-dark:not(.theme-pipboy) [style*="background: #f8fafc"],
+html.theme-dark:not(.theme-pipboy) [style*="background:#f8fafc"],
+html.theme-dark:not(.theme-pipboy) [style*="background: #ffffff"],
+html.theme-dark:not(.theme-pipboy) [style*="background:#ffffff"],
+html.theme-dark:not(.theme-pipboy) [style*="background: #fff"],
+html.theme-dark:not(.theme-pipboy) [style*="background:#fff"] {
+    background: #1e2428 !important;
+}
+
+html.theme-dark:not(.theme-pipboy) [style*="border: 1px solid #e2e8f0"],
+html.theme-dark:not(.theme-pipboy) [style*="border:1px solid #e2e8f0"],
+html.theme-dark:not(.theme-pipboy) [style*="border-top: 1px solid #e2e8f0"],
+html.theme-dark:not(.theme-pipboy) [style*="border-top:1px solid #e2e8f0"] {
+    border-color: #3a444b !important;
+}
+
+html.theme-dark:not(.theme-pipboy) [style*="border-left:3px solid #475569"],
+html.theme-dark:not(.theme-pipboy) [style*="border-left: 3px solid #475569"],
+html.theme-dark:not(.theme-pipboy) [style*="border-left:3px solid #4a5568"],
+html.theme-dark:not(.theme-pipboy) [style*="border-left: 3px solid #4a5568"] {
+    border-left-color: #6b7780 !important;
+}
+
+html.theme-dark:not(.theme-pipboy) [style*="color: #0f172a"],
+html.theme-dark:not(.theme-pipboy) [style*="color:#0f172a"],
+html.theme-dark:not(.theme-pipboy) [style*="color: #1f2937"],
+html.theme-dark:not(.theme-pipboy) [style*="color:#1f2937"],
+html.theme-dark:not(.theme-pipboy) [style*="color: #475569"],
+html.theme-dark:not(.theme-pipboy) [style*="color:#475569"],
+html.theme-dark:not(.theme-pipboy) [style*="color: #64748b"],
+html.theme-dark:not(.theme-pipboy) [style*="color:#64748b"] {
+    color: #c7d0cb !important;
+}
+
+html.theme-dark:not(.theme-pipboy) [style*="color: #b45309"],
+html.theme-dark:not(.theme-pipboy) [style*="color:#b45309"],
+html.theme-dark:not(.theme-pipboy) [style*="color: #92400e"],
+html.theme-dark:not(.theme-pipboy) [style*="color:#92400e"],
+html.theme-dark:not(.theme-pipboy) [style*="color: #9a3412"],
+html.theme-dark:not(.theme-pipboy) [style*="color:#9a3412"] {
+    color: #f6c967 !important;
+}
+
+html.theme-dark:not(.theme-pipboy) [style*="color: #b91c1c"],
+html.theme-dark:not(.theme-pipboy) [style*="color:#b91c1c"],
+html.theme-dark:not(.theme-pipboy) [style*="color: #dc2626"],
+html.theme-dark:not(.theme-pipboy) [style*="color:#dc2626"] {
+    color: #fca5a5 !important;
+}
+
+html.theme-dark:not(.theme-pipboy) .automation-lock-panel,
+html.theme-dark:not(.theme-pipboy) #automationLockBanner {
+    background: #312714 !important;
+    border-color: #b7791f !important;
+    color: #f6c967 !important;
 }

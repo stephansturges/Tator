@@ -33,7 +33,16 @@ def is_mac_hardware() -> bool:
 
 
 def is_mlx_model_id(model_id: Optional[str]) -> bool:
-    return str(model_id or "").strip().startswith("mlx-community/")
+    raw = str(model_id or "").strip()
+    if raw.startswith("mlx-community/"):
+        return True
+    try:
+        if raw in QWEN_MLX_MODEL_IDS:
+            return True
+    except NameError:
+        pass
+    lowered = raw.lower()
+    return lowered.endswith("-mlx") or "-mlx-" in lowered
 
 
 def _model_entry(size: str, variant: str, quant: str, *, moe: bool = False) -> Dict[str, Any]:
@@ -49,6 +58,30 @@ def _model_entry(size: str, variant: str, quant: str, *, moe: bool = False) -> D
         "variant": variant,
         "quantization": quant,
         "runtime_platform": QWEN_PLATFORM_MLX,
+        "source": "mlx-community",
+    }
+
+
+def _external_mlx_entry(
+    model_id: str,
+    *,
+    label: str,
+    size: str,
+    variant: str,
+    quantization: str,
+    source: str,
+    abliterated: bool = False,
+) -> Dict[str, Any]:
+    return {
+        "id": model_id,
+        "label": label,
+        "model_id": model_id,
+        "size": size,
+        "variant": variant,
+        "quantization": quantization,
+        "runtime_platform": QWEN_PLATFORM_MLX,
+        "source": source,
+        "abliterated": abliterated,
     }
 
 
@@ -110,12 +143,29 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
             },
         ]
     )
+    for size in ("2B", "4B"):
+        for variant in ("Instruct", "Thinking"):
+            for quant in ("4bit", "8bit"):
+                model_id = f"EZCon/Huihui-Qwen3-VL-{size}-{variant}-abliterated-{quant}-mlx"
+                entries.append(
+                    _external_mlx_entry(
+                        model_id,
+                        label=f"MLX Huihui Qwen3-VL {size} {variant} abliterated {quant}",
+                        size=size,
+                        variant=variant,
+                        quantization=quant,
+                        source="EZCon",
+                        abliterated=True,
+                    )
+                )
     preferred = {
         "mlx-community/Qwen3-VL-4B-Instruct-4bit": 0,
         "mlx-community/Qwen3-VL-2B-Instruct-4bit": 1,
         "mlx-community/Qwen3-VL-8B-Instruct-4bit": 2,
         "mlx-community/Qwen3-VL-4B-Thinking-4bit": 3,
         "mlx-community/Qwen3-VL-8B-Thinking-4bit": 4,
+        "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx": 5,
+        "EZCon/Huihui-Qwen3-VL-2B-Instruct-abliterated-4bit-mlx": 6,
     }
     entries.sort(
         key=lambda entry: (

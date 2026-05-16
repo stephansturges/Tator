@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
+from services.qwen_model_catalog import qwen_transformers_load_kwargs
+
 
 def _reset_qwen_runtime_impl(
     *,
@@ -155,12 +157,12 @@ def _ensure_qwen_ready_for_caption_impl(
         except RuntimeError as exc:  # noqa: BLE001
             state["qwen_last_error"] = str(exc)
             raise RuntimeError(f"qwen_device_unavailable:{exc}") from exc
-        use_auto_map = device_pref == "auto" and str(device).startswith("cuda") and torch_module.cuda.is_available()
-        if use_auto_map:
-            load_kwargs = {"torch_dtype": "auto", "device_map": "auto"}
-        else:
-            dtype = torch_module.float16 if str(device).startswith(("cuda", "mps")) else torch_module.float32
-            load_kwargs = {"torch_dtype": dtype, "low_cpu_mem_usage": True}
+        load_kwargs = qwen_transformers_load_kwargs(
+            str(model_id_override),
+            device=str(device),
+            device_pref=device_pref,
+            torch_module=torch_module,
+        )
 
         def _load_candidate(candidate_id: str) -> tuple:
             local_only = hf_offline_enabled_fn()

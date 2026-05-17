@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20260517b" rel="stylesheet">
+    <link href="ybat.css?v=20260517c" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
          before we call listenImageCrop().
@@ -11,7 +11,7 @@
     <script src="canvas.min.js?v=20260409a"></script>
     <script src="jszip.min.js?v=20260409a"></script>
     <script src="filesaver.min.js?v=20260409a"></script>
-    <script src="ybat.js?v=20260517b"></script>
+    <script src="ybat.js?v=20260517c"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -286,6 +286,21 @@
                                     <span id="qwenPanelTitle">Qwen 3 Assist</span>
                                     <span id="qwenActiveModelLabel" class="qwen-active-model-label"></span>
                                     <span id="qwenStatusLabel" class="qwen-status-label">Checking…</span>
+                                </div>
+                                <div id="qwenRuntimeMonitor" class="qwen-runtime-monitor" aria-live="polite">
+                                    <div class="qwen-runtime-monitor__topline">
+                                        <span id="qwenRuntimePhase">Idle</span>
+                                        <span id="qwenRuntimeModel">Model pending</span>
+                                    </div>
+                                    <div class="qwen-runtime-monitor__meta">
+                                        <span id="qwenRuntimeAvailability">Cache status pending</span>
+                                        <span id="qwenRuntimeMemory">Memory pending</span>
+                                    </div>
+                                    <div class="qwen-runtime-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                                        <div id="qwenRuntimeProgressFill" class="qwen-runtime-progress__fill"></div>
+                                    </div>
+                                    <div id="qwenRuntimeProgressText" class="qwen-runtime-progress__text">0%</div>
+                                    <pre id="qwenRuntimeTokenPreview" class="qwen-runtime-token-preview"></pre>
                                 </div>
                                 <label for="qwenItems">Objects / keywords</label>
                                 <textarea id="qwenItems" rows="3" placeholder="List what to detect (comma or line separated)"></textarea>

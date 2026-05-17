@@ -995,6 +995,31 @@ qwen_runtime_config: Optional[Any] = None
 qwen_last_error: Optional[str] = None
 qwen_lock = threading.RLock()
 qwen_config_lock = threading.RLock()
+qwen_progress_lock = threading.RLock()
+qwen_progress_state: Dict[str, Any] = {
+    "run_id": None,
+    "active": False,
+    "kind": None,
+    "phase": "idle",
+    "phase_label": "Idle",
+    "progress": 0.0,
+    "message": "",
+    "model_id": None,
+    "platform": None,
+    "local": None,
+    "partial": None,
+    "needs_download": None,
+    "cache_path": None,
+    "loaded": False,
+    "input_tokens": None,
+    "generated_tokens": 0,
+    "max_new_tokens": None,
+    "token_preview": "",
+    "started_at": None,
+    "updated_at": None,
+    "completed_at": None,
+    "error": None,
+}
 qwen_caption_cache: Dict[str, Any] = {}
 qwen_caption_order: deque[str] = deque()
 _HF_OFFLINE_AUTO_ENABLED = False
@@ -1344,6 +1369,325 @@ def _finalize_qwen_training_environment() -> None:
 
 def _bytes_to_mb(value: int) -> float:
     return round(value / (1024 * 1024), 2)
+
+
+def _qwen_memory_snapshot() -> Dict[str, Any]:
+    process_ram_mb = None
+    system_total_mb = None
+    system_available_mb = None
+    try:
+        process_ram_mb = _bytes_to_mb(int(psutil.Process(os.getpid()).memory_info().rss))
+        vm = psutil.virtual_memory()
+        system_total_mb = _bytes_to_mb(int(vm.total))
+        system_available_mb = _bytes_to_mb(int(vm.available))
+    except Exception:
+        pass
+    payload: Dict[str, Any] = {
+        "backend": "system",
+        "devices": [],
+        "process_ram_mb": process_ram_mb,
+        "system_total_mb": system_total_mb,
+        "system_available_mb": system_available_mb,
+    }
+    try:
+        if torch.cuda.is_available():
+            devices: List[Dict[str, Any]] = []
+            for idx in range(torch.cuda.device_count()):
+                device_info: Dict[str, Any] = {"index": idx}
+                try:
+                    props = torch.cuda.get_device_properties(idx)
+                    device_info["name"] = props.name
+                    device_info["total_mb"] = _bytes_to_mb(int(props.total_memory))
+                except Exception:
+                    device_info["name"] = f"cuda:{idx}"
+                try:
+                    free_bytes, total_bytes = torch.cuda.mem_get_info(idx)
+                    total_mb = _bytes_to_mb(int(total_bytes))
+                    free_mb = _bytes_to_mb(int(free_bytes))
+                    device_info["total_mb"] = total_mb
+                    device_info["free_mb"] = free_mb
+                    device_info["used_mb"] = round(total_mb - free_mb, 2)
+                except Exception:
+                    device_info["free_mb"] = None
+                    device_info["used_mb"] = None
+                try:
+                    device_info["allocated_mb"] = _bytes_to_mb(
+                        int(torch.cuda.memory_allocated(idx))
+                    )
+                    device_info["reserved_mb"] = _bytes_to_mb(int(torch.cuda.memory_reserved(idx)))
+                except Exception:
+                    pass
+                devices.append(device_info)
+            payload["backend"] = "cuda"
+            payload["devices"] = devices
+            return payload
+    except Exception as exc:  # noqa: BLE001
+        payload["error"] = str(exc)
+    if MLX_CORE is not None:
+        payload["backend"] = "mlx"
+        try:
+            payload["mlx_active_mb"] = _bytes_to_mb(int(MLX_CORE.get_active_memory()))
+        except Exception:
+            payload["mlx_active_mb"] = None
+        try:
+            payload["mlx_peak_mb"] = _bytes_to_mb(int(MLX_CORE.get_peak_memory()))
+        except Exception:
+            payload["mlx_peak_mb"] = None
+        try:
+            payload["mlx_cache_mb"] = _bytes_to_mb(int(MLX_CORE.get_cache_memory()))
+        except Exception:
+            payload["mlx_cache_mb"] = None
+    elif TATOR_ALLOW_MPS and _torch_mps_available_impl(torch):
+        payload["backend"] = "mps"
+        payload["devices"] = [{"index": "mps", "name": "Apple Metal Performance Shaders"}]
+    return payload
+
+
+def _qwen_cache_snapshot_path(model_id: str) -> Optional[Path]:
+    raw = str(model_id or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    if candidate.exists():
+        return candidate.resolve()
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except Exception:
+        return None
+    for filename in ("config.json", "tokenizer_config.json", "preprocessor_config.json"):
+        try:
+            cached = try_to_load_from_cache(raw, filename)
+        except Exception:
+            cached = None
+        if isinstance(cached, str) and cached and os.path.exists(cached):
+            return Path(cached).resolve().parent
+    return None
+
+
+def _qwen_snapshot_has_weights(snapshot_path: Optional[Path]) -> bool:
+    if snapshot_path is None or not snapshot_path.exists() or not snapshot_path.is_dir():
+        return False
+    for pattern in (
+        "*.safetensors",
+        "*.bin",
+        "*.gguf",
+        "*.npz",
+        "model.safetensors.index.json",
+        "pytorch_model.bin.index.json",
+    ):
+        try:
+            if any(snapshot_path.glob(pattern)):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _qwen_loaded_for_model(model_id: str, platform_name: str) -> bool:
+    effective_id = _effective_qwen_model_id_for_platform(model_id, platform_name)
+    if qwen_model is not None and qwen_loaded_effective_model_id == effective_id:
+        return True
+    cache_suffix = f":{effective_id}"
+    try:
+        return any(str(key).endswith(cache_suffix) for key in qwen_caption_cache.keys())
+    except Exception:
+        return False
+
+
+def _qwen_model_local_state(
+    model_id: Optional[str],
+    platform_name: Optional[str] = None,
+    *,
+    entry_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    raw_model_id = str(model_id or QWEN_MODEL_NAME).strip() or QWEN_MODEL_NAME
+    platform = platform_name or _resolve_qwen_runtime_platform(raw_model_id)
+    effective_id = _effective_qwen_model_id_for_platform(raw_model_id, platform)
+    local_path = Path(entry_path).expanduser() if entry_path else None
+    if local_path and local_path.exists():
+        snapshot_path = local_path.resolve()
+        local = True
+        partial = False
+    else:
+        snapshot_path = _qwen_cache_snapshot_path(effective_id)
+        has_weights = _qwen_snapshot_has_weights(snapshot_path)
+        local = bool(snapshot_path and has_weights)
+        partial = bool(snapshot_path and not has_weights)
+    return {
+        "model_id": raw_model_id,
+        "effective_model_id": effective_id,
+        "platform": platform,
+        "local": bool(local),
+        "partial": bool(partial),
+        "needs_download": not bool(local),
+        "cache_path": str(snapshot_path) if snapshot_path else None,
+        "loaded": _qwen_loaded_for_model(raw_model_id, platform),
+    }
+
+
+def _qwen_progress_start(
+    *,
+    kind: str,
+    model_id: Optional[str],
+    platform: Optional[str],
+    message: str,
+    max_new_tokens: Optional[int] = None,
+) -> str:
+    now = time.time()
+    availability = _qwen_model_local_state(model_id, platform)
+    run_id = uuid.uuid4().hex
+    with qwen_progress_lock:
+        qwen_progress_state.clear()
+        qwen_progress_state.update(
+            {
+                "run_id": run_id,
+                "active": True,
+                "kind": kind,
+                "phase": "prepare",
+                "phase_label": "Preparing",
+                "progress": 0.02,
+                "message": message,
+                "model_id": availability.get("effective_model_id") or model_id,
+                "platform": availability.get("platform") or platform,
+                "local": availability.get("local"),
+                "partial": availability.get("partial"),
+                "needs_download": availability.get("needs_download"),
+                "cache_path": availability.get("cache_path"),
+                "loaded": availability.get("loaded"),
+                "input_tokens": None,
+                "generated_tokens": 0,
+                "max_new_tokens": max_new_tokens,
+                "token_preview": "",
+                "started_at": now,
+                "updated_at": now,
+                "completed_at": None,
+                "error": None,
+            }
+        )
+    return run_id
+
+
+def _qwen_progress_update(
+    *,
+    phase: Optional[str] = None,
+    phase_label: Optional[str] = None,
+    progress: Optional[float] = None,
+    message: Optional[str] = None,
+    model_id: Optional[str] = None,
+    platform: Optional[str] = None,
+    input_tokens: Optional[int] = None,
+    generated_tokens: Optional[int] = None,
+    max_new_tokens: Optional[int] = None,
+    token_piece: Optional[str] = None,
+    token_preview: Optional[str] = None,
+) -> None:
+    now = time.time()
+    with qwen_progress_lock:
+        if not qwen_progress_state.get("active"):
+            return
+        if phase is not None:
+            qwen_progress_state["phase"] = phase
+        if phase_label is not None:
+            qwen_progress_state["phase_label"] = phase_label
+        if progress is not None:
+            try:
+                qwen_progress_state["progress"] = max(0.0, min(1.0, float(progress)))
+            except Exception:
+                pass
+        if message is not None:
+            qwen_progress_state["message"] = message
+        if model_id is not None:
+            qwen_progress_state["model_id"] = model_id
+        if platform is not None:
+            qwen_progress_state["platform"] = platform
+        if input_tokens is not None:
+            qwen_progress_state["input_tokens"] = input_tokens
+        if generated_tokens is not None:
+            qwen_progress_state["generated_tokens"] = generated_tokens
+        if max_new_tokens is not None:
+            qwen_progress_state["max_new_tokens"] = max_new_tokens
+        if token_preview is not None:
+            qwen_progress_state["token_preview"] = str(token_preview)[-4000:]
+        if token_piece:
+            current = str(qwen_progress_state.get("token_preview") or "")
+            qwen_progress_state["token_preview"] = f"{current}{token_piece}"[-4000:]
+            if generated_tokens is None:
+                qwen_progress_state["generated_tokens"] = int(
+                    qwen_progress_state.get("generated_tokens") or 0
+                ) + 1
+        qwen_progress_state["updated_at"] = now
+
+
+def _qwen_progress_token(token_piece: str, *, generated_tokens: Optional[int], max_new_tokens: Optional[int]) -> None:
+    if not token_piece:
+        return
+    with qwen_progress_lock:
+        current_generated = int(qwen_progress_state.get("generated_tokens") or 0)
+    generated = generated_tokens if generated_tokens is not None else current_generated + 1
+    max_tokens = max_new_tokens
+    if max_tokens is None:
+        with qwen_progress_lock:
+            max_tokens = qwen_progress_state.get("max_new_tokens")
+    try:
+        max_token_count = max(1, int(max_tokens or 0))
+    except Exception:
+        max_token_count = 1
+    fraction = min(1.0, float(generated) / float(max_token_count))
+    _qwen_progress_update(
+        phase="generate",
+        phase_label="Generating",
+        progress=0.55 + (0.35 * fraction),
+        message="Generating response tokens",
+        generated_tokens=int(generated),
+        max_new_tokens=max_tokens,
+        token_piece=token_piece,
+    )
+
+
+def _qwen_progress_finish(message: str, *, token_preview: Optional[str] = None) -> None:
+    now = time.time()
+    with qwen_progress_lock:
+        if token_preview is not None:
+            qwen_progress_state["token_preview"] = str(token_preview)[-4000:]
+        qwen_progress_state.update(
+            {
+                "active": False,
+                "phase": "complete",
+                "phase_label": "Complete",
+                "progress": 1.0,
+                "message": message,
+                "loaded": qwen_model is not None or bool(qwen_caption_cache),
+                "updated_at": now,
+                "completed_at": now,
+                "error": None,
+            }
+        )
+
+
+def _qwen_progress_error(message: str) -> None:
+    now = time.time()
+    with qwen_progress_lock:
+        qwen_progress_state.update(
+            {
+                "active": False,
+                "phase": "error",
+                "phase_label": "Error",
+                "progress": 1.0,
+                "message": message,
+                "updated_at": now,
+                "completed_at": now,
+                "error": message,
+            }
+        )
+
+
+def qwen_progress() -> Dict[str, Any]:
+    with qwen_progress_lock:
+        snapshot = dict(qwen_progress_state)
+    snapshot["memory"] = _qwen_memory_snapshot()
+    snapshot["vram"] = snapshot["memory"]
+    snapshot["loaded"] = qwen_model is not None or bool(qwen_caption_cache)
+    return snapshot
 
 
 # ----------------------------------------------------------------
@@ -3407,6 +3751,19 @@ def _load_qwen_mlx_runtime(model_id: str, adapter_path: Optional[Path] = None) -
         detail = _qwen_mlx_dependency_error() or "mlx_vlm_unavailable"
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_mlx_missing:{detail}")
     resolved_model_id = _effective_qwen_model_id_for_platform(model_id, QWEN_PLATFORM_MLX)
+    availability = _qwen_model_local_state(resolved_model_id, QWEN_PLATFORM_MLX)
+    _qwen_progress_update(
+        phase="download" if availability.get("needs_download") else "load",
+        phase_label="Downloading" if availability.get("needs_download") else "Loading",
+        progress=0.10 if availability.get("needs_download") else 0.18,
+        message=(
+            "MLX weights are not cached yet; downloading before load"
+            if availability.get("needs_download")
+            else "Loading MLX Qwen model"
+        ),
+        model_id=str(resolved_model_id),
+        platform=QWEN_PLATFORM_MLX,
+    )
     try:
         load_kwargs = {}
         if adapter_path:
@@ -3417,6 +3774,14 @@ def _load_qwen_mlx_runtime(model_id: str, adapter_path: Optional[Path] = None) -
             status_code=HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"qwen_mlx_load_failed:{exc}",
         ) from exc
+    _qwen_progress_update(
+        phase="load",
+        phase_label="Loaded",
+        progress=0.38,
+        message="MLX Qwen model loaded",
+        model_id=str(resolved_model_id),
+        platform=QWEN_PLATFORM_MLX,
+    )
     config = None
     if MLX_LOAD_CONFIG is not None:
         try:
@@ -3634,6 +3999,19 @@ def _ensure_qwen_ready():
             if PEFT_IMPORT_ERROR is not None:
                 detail = f"{detail}:{PEFT_IMPORT_ERROR}"
             raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+        availability = _qwen_model_local_state(str(base_model_id), QWEN_PLATFORM_TRANSFORMERS)
+        _qwen_progress_update(
+            phase="download" if availability.get("needs_download") else "load",
+            phase_label="Downloading" if availability.get("needs_download") else "Loading",
+            progress=0.10 if availability.get("needs_download") else 0.18,
+            message=(
+                "Qwen weights are not cached yet; downloading before load"
+                if availability.get("needs_download")
+                else "Loading Qwen model"
+            ),
+            model_id=str(base_model_id),
+            platform=QWEN_PLATFORM_TRANSFORMERS,
+        )
 
         def _load_candidate(candidate_id: str, processor_source: str) -> Tuple[Any, Any]:
             local_only = _hf_offline_enabled()
@@ -3700,6 +4078,14 @@ def _ensure_qwen_ready():
         qwen_last_error = None
         loaded_qwen_model_id = active_qwen_model_id
         _enable_hf_offline_defaults()
+        _qwen_progress_update(
+            phase="load",
+            phase_label="Loaded",
+            progress=0.38,
+            message="Qwen model loaded",
+            model_id=str(base_model_id),
+            platform=QWEN_PLATFORM_TRANSFORMERS,
+        )
         return QwenRuntime(
             model=model,
             processor=processor,
@@ -3789,6 +4175,19 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
                             pass
             except Exception:
                 continue
+    availability = _qwen_model_local_state(str(model_id_override), QWEN_PLATFORM_TRANSFORMERS)
+    _qwen_progress_update(
+        phase="download" if availability.get("needs_download") else "load",
+        phase_label="Downloading" if availability.get("needs_download") else "Loading",
+        progress=0.10 if availability.get("needs_download") else 0.18,
+        message=(
+            "Caption model weights are not cached yet; downloading before load"
+            if availability.get("needs_download")
+            else "Loading Qwen caption model"
+        ),
+        model_id=str(model_id_override),
+        platform=QWEN_PLATFORM_TRANSFORMERS,
+    )
     try:
         model, processor = _ensure_qwen_ready_for_caption_impl(
             model_id_override,
@@ -3827,6 +4226,14 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
     qwen_caption_order = state["qwen_caption_order"]
     qwen_device = state["qwen_device"]
     qwen_last_error = state["qwen_last_error"]
+    _qwen_progress_update(
+        phase="load",
+        phase_label="Loaded",
+        progress=0.38,
+        message="Qwen caption model loaded",
+        model_id=str(model_id_override),
+        platform=QWEN_PLATFORM_TRANSFORMERS,
+    )
     return QwenRuntime(
         model=model,
         processor=processor,
@@ -4078,6 +4485,33 @@ def _run_qwen_chat_mlx(
     if assistant_prefix:
         prompt = f"{prompt}{assistant_prefix}"
     gen_kwargs = _mlx_generation_kwargs(max_new_tokens, decode_override)
+    if MLX_VLM_STREAM_GENERATE is not None:
+        try:
+            pieces: List[str] = []
+            for result in MLX_VLM_STREAM_GENERATE(
+                runtime.model,
+                runtime.processor,
+                prompt,
+                image=image_inputs or None,
+                **gen_kwargs,
+            ):
+                piece = str(getattr(result, "text", result) or "")
+                if not piece:
+                    continue
+                pieces.append(piece)
+                generation_tokens = getattr(result, "generation_tokens", None)
+                _qwen_progress_token(
+                    piece,
+                    generated_tokens=(
+                        int(generation_tokens) if generation_tokens is not None else None
+                    ),
+                    max_new_tokens=max_new_tokens,
+                )
+            output_text = "".join(pieces)
+            if output_text:
+                return output_text
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[qwen] mlx streaming failed; falling back to blocking generate: %s", exc)
     result = MLX_VLM_GENERATE(
         runtime.model,
         runtime.processor,
@@ -4085,7 +4519,15 @@ def _run_qwen_chat_mlx(
         image=image_inputs or None,
         **gen_kwargs,
     )
-    return str(getattr(result, "text", result) or "")
+    output_text = str(getattr(result, "text", result) or "")
+    _qwen_progress_update(
+        phase="generate",
+        phase_label="Generated",
+        progress=0.90,
+        message="Qwen response generated",
+        token_preview=output_text,
+    )
+    return output_text
 
 
 def _run_qwen_inference_mlx(
@@ -4226,6 +4668,14 @@ def _run_qwen_inference(
     input_len = int(preview_inputs.input_ids.shape[1])
     num_images = len(image_inputs) if image_inputs is not None else 0
     effective_len, vision_tokens = _qwen_effective_input_len(preview_inputs, input_len, num_images)
+    _qwen_progress_update(
+        phase="prompt",
+        phase_label="Preparing Prompt",
+        progress=0.45,
+        message="Tokenizing image prompt",
+        input_tokens=int(effective_len),
+        max_new_tokens=requested_max,
+    )
     if max_seq_len:
         if effective_len + requested_max > max_seq_len:
             requested_max = max(1, max_seq_len - effective_len)
@@ -4337,27 +4787,125 @@ def _run_qwen_inference(
             gen_kwargs["presence_penalty"] = float(presence_penalty)
     else:
         gen_kwargs["do_sample"] = False
-    with torch.inference_mode():
+    _qwen_progress_update(
+        phase="generate",
+        phase_label="Generating",
+        progress=0.55,
+        message="Starting Qwen generation",
+        max_new_tokens=int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
+    )
+    output_text: Optional[str] = None
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None:
         try:
-            generated_ids = model.generate(**inputs, **gen_kwargs)
-        except RuntimeError as exc:
-            if QWEN_DO_SAMPLE and "probability tensor" in str(exc).lower():
-                fallback_kwargs = {**gen_kwargs}
-                fallback_kwargs["do_sample"] = False
-                fallback_kwargs.pop("temperature", None)
-                fallback_kwargs.pop("top_p", None)
-                generated_ids = model.generate(**inputs, **fallback_kwargs)
-            else:
-                raise
-    generated_ids_trimmed = [
-        out_ids[len(in_ids) :]
-        for in_ids, out_ids in zip(inputs.input_ids, generated_ids, strict=False)
-    ]
-    output_text = processor.batch_decode(
-        generated_ids_trimmed,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )[0]
+            from transformers import TextIteratorStreamer
+
+            streamer = TextIteratorStreamer(
+                tokenizer,
+                skip_prompt=True,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+                timeout=1.0,
+            )
+            stream_kwargs = dict(gen_kwargs)
+            stream_kwargs["streamer"] = streamer
+            generated_parts: List[str] = []
+            generation_errors: List[BaseException] = []
+
+            def _generate_stream() -> None:
+                try:
+                    with torch.inference_mode():
+                        try:
+                            model.generate(**inputs, **stream_kwargs)
+                        except RuntimeError as exc:
+                            if QWEN_DO_SAMPLE and "probability tensor" in str(exc).lower():
+                                fallback_kwargs = {**stream_kwargs}
+                                fallback_kwargs["do_sample"] = False
+                                fallback_kwargs.pop("temperature", None)
+                                fallback_kwargs.pop("top_p", None)
+                                model.generate(**inputs, **fallback_kwargs)
+                            else:
+                                raise
+                except BaseException as exc:  # noqa: BLE001
+                    generation_errors.append(exc)
+
+            thread = threading.Thread(
+                target=_generate_stream,
+                name="qwen-vl-inference-streamer",
+                daemon=True,
+            )
+            thread.start()
+            iterator = iter(streamer)
+            while True:
+                try:
+                    new_text = next(iterator)
+                except StopIteration:
+                    break
+                except queue.Empty:
+                    if generation_errors:
+                        break
+                    if thread.is_alive():
+                        _qwen_progress_update(
+                            phase="generate",
+                            phase_label="Generating",
+                            message="Generating response tokens",
+                        )
+                        continue
+                    break
+                if not new_text:
+                    continue
+                generated_parts.append(new_text)
+                _qwen_progress_token(
+                    new_text,
+                    generated_tokens=None,
+                    max_new_tokens=int(max_new_tokens)
+                    if max_new_tokens is not None
+                    else QWEN_MAX_NEW_TOKENS,
+                )
+            thread.join()
+            if generation_errors:
+                raise generation_errors[0]
+            output_text = "".join(generated_parts)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[qwen] token streaming failed; falling back to blocking generate: %s", exc)
+            output_text = None
+    if output_text is None:
+        with torch.inference_mode():
+            try:
+                generated_ids = model.generate(**inputs, **gen_kwargs)
+            except RuntimeError as exc:
+                if QWEN_DO_SAMPLE and "probability tensor" in str(exc).lower():
+                    fallback_kwargs = {**gen_kwargs}
+                    fallback_kwargs["do_sample"] = False
+                    fallback_kwargs.pop("temperature", None)
+                    fallback_kwargs.pop("top_p", None)
+                    generated_ids = model.generate(**inputs, **fallback_kwargs)
+                else:
+                    raise
+        generated_ids_trimmed = [
+            out_ids[len(in_ids) :]
+            for in_ids, out_ids in zip(inputs.input_ids, generated_ids, strict=False)
+        ]
+        output_text = processor.batch_decode(
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0]
+        _qwen_progress_update(
+            phase="generate",
+            phase_label="Generated",
+            progress=0.90,
+            message="Qwen response generated",
+            token_preview=output_text,
+        )
+    else:
+        _qwen_progress_update(
+            phase="generate",
+            phase_label="Generated",
+            progress=0.90,
+            message="Qwen response generated",
+            token_preview=output_text,
+        )
     _agent_full_trace_write(
         {
             "type": "llm_output",
@@ -4486,6 +5034,14 @@ def _run_qwen_chat(
     input_len = int(preview_inputs.input_ids.shape[1])
     num_images = len(image_inputs) if image_inputs is not None else 0
     effective_len, vision_tokens = _qwen_effective_input_len(preview_inputs, input_len, num_images)
+    _qwen_progress_update(
+        phase="prompt",
+        phase_label="Preparing Prompt",
+        progress=0.45,
+        message="Tokenizing chat prompt",
+        input_tokens=int(effective_len),
+        max_new_tokens=requested_max,
+    )
     max_input_len = None
     if max_seq_len:
         if effective_len + requested_max > max_seq_len:
@@ -4553,6 +5109,13 @@ def _run_qwen_chat(
     )
     _qwen_append_logits_processor(gen_kwargs, thinking_processor)
     _qwen_append_logits_processor(gen_kwargs, immediate_processor)
+    _qwen_progress_update(
+        phase="generate",
+        phase_label="Generating",
+        progress=0.55,
+        message="Starting Qwen chat generation",
+        max_new_tokens=int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
+    )
     with torch.inference_mode():
         output_ids = model.generate(**inputs, **gen_kwargs)
     output_ids = [
@@ -4564,6 +5127,13 @@ def _run_qwen_chat(
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )[0]
+    _qwen_progress_update(
+        phase="generate",
+        phase_label="Generated",
+        progress=0.90,
+        message="Qwen chat response generated",
+        token_preview=output_text,
+    )
     _agent_full_trace_write(
         {
             "type": "llm_output",
@@ -4707,6 +5277,14 @@ def _run_qwen_chat_stream(
     input_len = int(preview_inputs.input_ids.shape[1])
     num_images = len(image_inputs) if image_inputs is not None else 0
     effective_len, vision_tokens = _qwen_effective_input_len(preview_inputs, input_len, num_images)
+    _qwen_progress_update(
+        phase="prompt",
+        phase_label="Preparing Prompt",
+        progress=0.45,
+        message="Tokenizing chat prompt",
+        input_tokens=int(effective_len),
+        max_new_tokens=requested_max,
+    )
     max_input_len = None
     if max_seq_len:
         if effective_len + requested_max > max_seq_len:
@@ -4716,7 +5294,6 @@ def _run_qwen_chat_stream(
                 max_input_len = max(1, max_seq_len - requested_max - vision_tokens + num_images)
             else:
                 max_input_len = max(1, max_seq_len - requested_max)
-            max_input_len = max(1, max_seq_len - requested_max)
     max_new_tokens = requested_max
     if max_input_len is None:
         inputs = preview_inputs
@@ -4775,6 +5352,13 @@ def _run_qwen_chat_stream(
     )
     _qwen_append_logits_processor(gen_kwargs, thinking_processor)
     _qwen_append_logits_processor(gen_kwargs, immediate_processor)
+    _qwen_progress_update(
+        phase="generate",
+        phase_label="Generating",
+        progress=0.55,
+        message="Starting Qwen chat generation",
+        max_new_tokens=int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
+    )
     streamer = TextIteratorStreamer(
         tokenizer,
         skip_prompt=True,
@@ -4794,6 +5378,13 @@ def _run_qwen_chat_stream(
     try:
         for new_text in streamer:
             generated_text += new_text
+            _qwen_progress_token(
+                new_text,
+                generated_tokens=None,
+                max_new_tokens=int(max_new_tokens)
+                if max_new_tokens is not None
+                else QWEN_MAX_NEW_TOKENS,
+            )
             yield generated_text
     except queue.Empty:
         _agent_full_trace_write(
@@ -4806,6 +5397,13 @@ def _run_qwen_chat_stream(
             }
         )
     thread.join()
+    _qwen_progress_update(
+        phase="generate",
+        phase_label="Generated",
+        progress=0.90,
+        message="Qwen chat response generated",
+        token_preview=generated_text,
+    )
     _agent_full_trace_write(
         {
             "type": "llm_output",
@@ -24159,13 +24757,48 @@ def list_qwen_models():
     data = []
     for entry in _builtin_qwen_model_entries():
         entry["active"] = entry.get("id") == active_qwen_model_id
+        metadata = entry.get("metadata") or {}
+        if entry.get("type") == "builtin":
+            platform_name = _resolve_qwen_runtime_platform(
+                metadata.get("model_id") or entry.get("id"),
+                metadata=metadata,
+            )
+        else:
+            platform_name = metadata.get("runtime_platform") or _resolve_qwen_runtime_platform(
+                metadata.get("model_id") or entry.get("id"),
+                metadata=metadata,
+            )
+        availability = _qwen_model_local_state(
+            metadata.get("model_id") or entry.get("id"),
+            platform_name,
+            entry_path=entry.get("path"),
+        )
+        entry["availability"] = availability
+        if isinstance(metadata, dict):
+            metadata["availability"] = availability
         data.append(entry)
     for entry in entries:
         entry["active"] = entry.get("id") == active_qwen_model_id
+        metadata = entry.get("metadata") or {}
+        platform_name = metadata.get("runtime_platform") or _resolve_qwen_runtime_platform(
+            metadata.get("model_id") or entry.get("id"),
+            adapter_path=Path(entry["path"]) if entry.get("path") else None,
+            metadata=metadata,
+        )
+        availability = _qwen_model_local_state(
+            metadata.get("model_id") or entry.get("id"),
+            platform_name,
+            entry_path=entry.get("path"),
+        )
+        entry["availability"] = availability
+        if isinstance(metadata, dict):
+            metadata["availability"] = availability
         data.append(entry)
     return {
         "active": active_qwen_model_id,
         "models": data,
+        "memory": _qwen_memory_snapshot(),
+        "progress": qwen_progress(),
     }
 
 
@@ -24819,9 +25452,11 @@ def qwen_status():
         (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
         platform_name,
     )
+    model_availability = _qwen_model_local_state(effective_model_id, platform_name)
+    memory = _qwen_memory_snapshot()
     return {
         "available": dependency_error is None,
-        "loaded": qwen_model is not None,
+        "loaded": qwen_model is not None or bool(qwen_caption_cache),
         "model_name": QWEN_MODEL_NAME,
         "effective_model_name": effective_model_id,
         "model_family": (active_qwen_metadata or {}).get("model_family", "qwen3"),
@@ -24839,6 +25474,10 @@ def qwen_status():
         "dependency_error": dependency_error,
         "active_model": active_qwen_model_id,
         "active_metadata": active_qwen_metadata,
+        "model_availability": model_availability,
+        "memory": memory,
+        "vram": memory,
+        "progress": qwen_progress(),
         "transformers_models": QWEN_TRANSFORMERS_MODEL_OPTIONS,
         "mlx_models": QWEN_MLX_MODEL_OPTIONS,
     }
@@ -24898,6 +25537,7 @@ app.include_router(
 app.include_router(
     build_qwen_status_router(
         status_fn=qwen_status,
+        progress_fn=qwen_progress,
         get_settings_fn=qwen_settings,
         update_settings_fn=update_qwen_settings,
         unload_fn=lambda: (_unload_qwen_runtime() or {"status": "unloaded"}),
@@ -24911,37 +25551,82 @@ def qwen_infer(payload: QwenInferenceRequest):
     prompt_type = payload.prompt_type.lower()
     if prompt_type not in {"bbox", "point", "bbox_sam"}:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_prompt_type")
-    pil_img, np_img, token = resolve_image_payload(
-        payload.image_base64,
-        payload.image_token,
-        getattr(payload, "sam_variant", None),
+    base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
+    platform_name = _resolve_qwen_runtime_platform(
+        str(base_model_id),
+        adapter_path=active_qwen_model_path,
+        metadata=active_qwen_metadata,
     )
-    manual_prompt = (payload.prompt or "").strip()
-    if manual_prompt:
-        final_prompt = manual_prompt
-    else:
-        item_list = (payload.item_list or "").strip()
-        final_prompt = _render_qwen_prompt_impl(
-            prompt_type,
-            items=item_list,
-            image_type=(payload.image_type or "").strip() or None,
-            extra_context=(payload.extra_context or "").strip() or None,
-            get_config_fn=lambda: _get_qwen_prompt_config_impl(
-                qwen_prompt_config, qwen_config_lock
-            ),
-            http_exception_cls=HTTPException,
-            http_422=HTTP_422_UNPROCESSABLE_CONTENT,
-        )
+    _qwen_progress_start(
+        kind="inference",
+        model_id=str(base_model_id),
+        platform=platform_name,
+        message="Preparing Qwen detection request",
+        max_new_tokens=QWEN_MAX_NEW_TOKENS,
+    )
     try:
-        qwen_text, proc_w, proc_h = _run_qwen_inference(final_prompt, pil_img)
+        pil_img, np_img, token = resolve_image_payload(
+            payload.image_base64,
+            payload.image_token,
+            getattr(payload, "sam_variant", None),
+        )
     except HTTPException:
+        _qwen_progress_error("Qwen inference image payload failed")
         raise
     except Exception as exc:  # noqa: BLE001
+        _qwen_progress_error(f"Qwen inference image payload failed: {exc}")
+        raise
+    try:
+        manual_prompt = (payload.prompt or "").strip()
+        if manual_prompt:
+            final_prompt = manual_prompt
+        else:
+            item_list = (payload.item_list or "").strip()
+            final_prompt = _render_qwen_prompt_impl(
+                prompt_type,
+                items=item_list,
+                image_type=(payload.image_type or "").strip() or None,
+                extra_context=(payload.extra_context or "").strip() or None,
+                get_config_fn=lambda: _get_qwen_prompt_config_impl(
+                    qwen_prompt_config, qwen_config_lock
+                ),
+                http_exception_cls=HTTPException,
+                http_422=HTTP_422_UNPROCESSABLE_CONTENT,
+            )
+    except HTTPException:
+        _qwen_progress_error("Qwen prompt rendering failed")
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _qwen_progress_error(f"Qwen prompt rendering failed: {exc}")
+        raise HTTPException(
+            status_code=HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"qwen_prompt_render_failed:{exc}",
+        ) from exc
+    try:
+        _qwen_progress_update(
+            phase="prepare",
+            phase_label="Preparing Image",
+            progress=0.06,
+            message="Preparing image for Qwen inference",
+        )
+        qwen_text, proc_w, proc_h = _run_qwen_inference(final_prompt, pil_img)
+    except HTTPException:
+        _qwen_progress_error("Qwen inference failed")
+        raise
+    except Exception as exc:  # noqa: BLE001
+        _qwen_progress_error(f"Qwen inference failed: {exc}")
         raise HTTPException(
             status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_inference_failed:{exc}"
         ) from exc
     print("[Qwen prompt]", final_prompt)
     print("[Qwen raw output]", qwen_text)
+    _qwen_progress_update(
+        phase="postprocess",
+        phase_label="Parsing",
+        progress=0.92,
+        message="Parsing Qwen detections",
+        token_preview=qwen_text,
+    )
     warnings: List[str] = []
     try:
         _, items = _extract_qwen_json_block(qwen_text)
@@ -24949,6 +25634,7 @@ def qwen_infer(payload: QwenInferenceRequest):
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         warnings.append(f"parse_error:{detail}")
         print(f"[Qwen parse error] {detail}; raw text follows:\n{qwen_text}")
+        _qwen_progress_finish("Qwen finished, but the response did not parse", token_preview=qwen_text)
         return QwenInferenceResponse(
             boxes=[],
             raw_response=qwen_text,
@@ -24961,6 +25647,7 @@ def qwen_infer(payload: QwenInferenceRequest):
     if not normalized_items:
         print("[Qwen parsed but empty list]", qwen_text)
         warnings.append("no_results")
+        _qwen_progress_finish("Qwen finished with no detections", token_preview=qwen_text)
         return QwenInferenceResponse(
             boxes=[],
             raw_response=qwen_text,
@@ -25002,6 +25689,10 @@ def qwen_infer(payload: QwenInferenceRequest):
         )
     if not boxes:
         warnings.append("no_results")
+    _qwen_progress_finish(
+        f"Qwen finished with {len(boxes)} detection{'s' if len(boxes) != 1 else ''}",
+        token_preview=qwen_text,
+    )
     return QwenInferenceResponse(
         boxes=boxes,
         raw_response=qwen_text,
@@ -25024,6 +25715,19 @@ def qwen_caption(payload: QwenCaptionRequest):
     active_runtime: Optional[Tuple[Any, Any]] = None
     request_model_cache: Dict[str, Tuple[Any, Any]] = {}
     default_caption_model_id: Optional[str] = None
+    caption_model_hint = (
+        payload.model_id
+        or (active_qwen_metadata or {}).get("model_id")
+        or QWEN_MODEL_NAME
+    )
+    caption_platform_hint = _resolve_qwen_runtime_platform(str(caption_model_hint), metadata=active_qwen_metadata)
+    _qwen_progress_start(
+        kind="caption",
+        model_id=str(caption_model_hint),
+        platform=caption_platform_hint,
+        message="Preparing Qwen caption request",
+        max_new_tokens=payload.max_new_tokens if payload.max_new_tokens is not None else 256,
+    )
 
     def get_runtime(model_id: Optional[str]) -> Tuple[Any, Any]:
         nonlocal active_model_id, active_runtime
@@ -25063,6 +25767,12 @@ def qwen_caption(payload: QwenCaptionRequest):
 
     try:
         if payload.unload_others and not fast_mode:
+            _qwen_progress_update(
+                phase="unload",
+                phase_label="Freeing Memory",
+                progress=0.04,
+                message="Unloading other inference models before captioning",
+            )
             _unload_non_qwen_runtimes_impl(
                 predictor_manager=predictor_manager,
                 unload_sam3_text_fn=_unload_sam3_text_runtime,
@@ -25072,6 +25782,12 @@ def qwen_caption(payload: QwenCaptionRequest):
                 torch_module=torch,
                 logger=logger,
             )
+        _qwen_progress_update(
+            phase="prepare",
+            phase_label="Preparing Image",
+            progress=0.06,
+            message="Preparing image and caption hints",
+        )
         pil_img, _, _ = resolve_image_payload(payload.image_base64, payload.image_token, None)
         user_prompt = (payload.user_prompt or "").strip()
         include_counts = bool(payload.include_counts)
@@ -25259,11 +25975,21 @@ def qwen_caption(payload: QwenCaptionRequest):
             grouped_hints = _group_hints_by_window(
                 label_hints, x_positions, y_positions, window_size
             )
+            total_windows = max(1, len(x_positions) * len(y_positions))
+            window_index = 0
             window_model_id = desired_model_id
             window_base_model_id = window_model_id
             window_is_thinking = "Thinking" in window_model_id
             for y0 in y_positions:
                 for x0 in x_positions:
+                    window_index += 1
+                    _qwen_progress_update(
+                        phase="window",
+                        phase_label="Captioning Window",
+                        progress=0.40 + (0.15 * (window_index - 1) / total_windows),
+                        message=f"Captioning window {window_index}/{total_windows}",
+                        model_id=window_model_id,
+                    )
                     window_hints = grouped_hints.get((x0, y0), [])
                     if not window_hints and not caption_all_windows:
                         continue
@@ -25489,6 +26215,13 @@ def qwen_caption(payload: QwenCaptionRequest):
                 )
                 prompt_text = f"{prompt_text}\n" + "\n".join(window_lines)
         if two_stage and is_thinking:
+            _qwen_progress_update(
+                phase="draft",
+                phase_label="Drafting",
+                progress=0.55,
+                message="Generating draft caption",
+                model_id=desired_model_id,
+            )
             draft_prompt = (
                 "Step 1: Look at the image and form a draft caption.\n"
                 "Respond with: DRAFT: <caption>"
@@ -25522,6 +26255,13 @@ def qwen_caption(payload: QwenCaptionRequest):
                 "Return only the final caption. Respond in English only."
             )
             refine_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+            _qwen_progress_update(
+                phase="refine",
+                phase_label="Refining",
+                progress=0.78,
+                message="Refining caption with Qwen Instruct",
+                model_id=refine_model,
+            )
             qwen_text, _, _ = _run_qwen_inference(
                 refine_prompt,
                 pil_img,
@@ -25534,6 +26274,13 @@ def qwen_caption(payload: QwenCaptionRequest):
             if final_only or is_thinking:
                 caption_text = _sanitize_qwen_caption_impl(caption_text)
         else:
+            _qwen_progress_update(
+                phase="generate",
+                phase_label="Generating",
+                progress=0.50,
+                message="Generating caption",
+                model_id=desired_model_id,
+            )
             qwen_text, _, _ = _run_qwen_inference(
                 prompt_text,
                 pil_img,
@@ -25568,6 +26315,12 @@ def qwen_caption(payload: QwenCaptionRequest):
                 cleanup_count += 1
         if caption_mode == "windowed" and windowed_captions and caption_text:
             merge_tokens = min(refine_max_tokens, 256)
+            _qwen_progress_update(
+                phase="merge",
+                phase_label="Merging",
+                progress=0.82,
+                message="Merging window captions",
+            )
             caption_text = _caption_merge(
                 caption_text,
                 windowed_captions,
@@ -25582,6 +26335,13 @@ def qwen_caption(payload: QwenCaptionRequest):
                 caption_text = _sanitize_qwen_caption_impl(caption_text)
         if _caption_is_degenerate_impl(caption_text):
             cleanup_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+            _qwen_progress_update(
+                phase="cleanup",
+                phase_label="Cleaning Up",
+                progress=0.86,
+                message="Cleaning up generated caption",
+                model_id=cleanup_model,
+            )
             caption_text = _caption_cleanup(
                 caption_text,
                 pil_img,
@@ -25599,6 +26359,13 @@ def qwen_caption(payload: QwenCaptionRequest):
             cleanup_count += 1
         if _caption_needs_completion_impl(caption_text) or _caption_has_meta_impl(caption_text):
             cleanup_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+            _qwen_progress_update(
+                phase="cleanup",
+                phase_label="Cleaning Up",
+                progress=0.88,
+                message="Removing meta text from caption",
+                model_id=cleanup_model,
+            )
             caption_text = _caption_cleanup(
                 caption_text,
                 pil_img,
@@ -25644,6 +26411,13 @@ def qwen_caption(payload: QwenCaptionRequest):
         )
         if needs_refine:
             refine_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+            _qwen_progress_update(
+                phase="refine",
+                phase_label="Refining",
+                progress=0.90,
+                message="Refining caption coverage",
+                model_id=refine_model,
+            )
             allowed_note = ""
             if restrict_to_labels and allowed_labels_prompt:
                 allowed_note = f"Allowed classes: {', '.join(allowed_labels_prompt)}. Do not introduce any other entity types."
@@ -25678,6 +26452,13 @@ def qwen_caption(payload: QwenCaptionRequest):
             refine_count += 1
         if caption_text and _caption_needs_english_rewrite_impl(caption_text):
             rewrite_model = _resolve_qwen_variant_model_id_impl(base_model_id, "Instruct")
+            _qwen_progress_update(
+                phase="rewrite",
+                phase_label="Rewriting",
+                progress=0.92,
+                message="Rewriting caption in English",
+                model_id=rewrite_model,
+            )
             rewrite_prompt = (
                 "Rewrite the caption in English only, preserving meaning and brevity.\n"
                 f"Caption: {caption_text}"
@@ -25700,6 +26481,13 @@ def qwen_caption(payload: QwenCaptionRequest):
             used_boxes=used_boxes,
             truncated=truncated,
         )
+        _qwen_progress_update(
+            phase="postprocess",
+            phase_label="Finalizing",
+            progress=0.95,
+            message="Finalizing caption",
+            token_preview=caption_text,
+        )
         word_count = len(caption_text.split()) if caption_text else 0
         logger.info(
             "[qwen-caption] hints=%s used=%s truncated=%s variant=%s model=%s final_only=%s windows=%s cleanup=%s refine=%s merge=%s words=%s",
@@ -25716,6 +26504,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             word_count,
         )
     except HTTPException:
+        _qwen_progress_error("Qwen caption failed")
         if force_unload:
             logger.warning("[qwen-caption] exception -> forcing unload")
             request_model_cache.clear()
@@ -25724,6 +26513,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             active_model_id = None
         raise
     except Exception as exc:  # noqa: BLE001
+        _qwen_progress_error(f"Qwen caption failed: {exc}")
         if force_unload:
             logger.warning("[qwen-caption] exception=%s -> forcing unload", exc)
             request_model_cache.clear()
@@ -25734,10 +26524,17 @@ def qwen_caption(payload: QwenCaptionRequest):
             status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_caption_failed:{exc}"
         ) from exc
     if force_unload:
+        _qwen_progress_update(
+            phase="unload",
+            phase_label="Unloading",
+            progress=0.98,
+            message="Unloading Qwen runtime after caption",
+        )
         request_model_cache.clear()
         _unload_qwen_runtime()
         active_runtime = None
         active_model_id = None
+    _qwen_progress_finish("Caption ready", token_preview=response.caption)
     return response
 
 
@@ -25759,12 +26556,35 @@ app.include_router(
 
 
 def qwen_prepass(payload: QwenPrepassRequest):
+    base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
+    platform_name = _resolve_qwen_runtime_platform(
+        str(base_model_id),
+        adapter_path=active_qwen_model_path,
+        metadata=active_qwen_metadata,
+    )
+    _qwen_progress_start(
+        kind="prepass",
+        model_id=str(base_model_id),
+        platform=platform_name,
+        message="Preparing EDR prepass",
+        max_new_tokens=getattr(payload, "caption_max_tokens", None) or QWEN_MAX_NEW_TOKENS,
+    )
     try:
+        _qwen_progress_update(
+            phase="prepare",
+            phase_label="Preparing EDR",
+            progress=0.05,
+            message="Preparing EDR prepass request",
+        )
         payload = payload.copy(update={"prepass_only": True})
-        return _run_prepass_annotation(payload)
+        result = _run_prepass_annotation(payload)
+        _qwen_progress_finish("EDR prepass complete")
+        return result
     except HTTPException:
+        _qwen_progress_error("EDR prepass failed")
         raise
     except Exception as exc:  # noqa: BLE001
+        _qwen_progress_error(f"EDR prepass failed: {exc}")
         raise HTTPException(
             status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_prepass_failed:{exc}"
         ) from exc

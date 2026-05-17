@@ -9,6 +9,7 @@ from fastapi import APIRouter
 def build_qwen_status_router(
     *,
     status_fn: Callable[[], Any],
+    progress_fn: Callable[[], Any],
     get_settings_fn: Callable[[], Any],
     update_settings_fn: Callable[[Any], Any],
     unload_fn: Callable[[], Any],
@@ -20,6 +21,10 @@ def build_qwen_status_router(
     @router.get("/qwen/status")
     def qwen_status():
         return status_fn()
+
+    @router.get("/qwen/progress")
+    def qwen_progress():
+        return progress_fn()
 
     @router.get("/qwen/settings", response_model=settings_cls)
     def qwen_settings():

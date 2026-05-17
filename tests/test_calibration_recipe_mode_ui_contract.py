@@ -22,11 +22,10 @@ def test_calibration_recipe_mode_ui_controls_exist() -> None:
     assert 'id="qwenCanonicalRecipeLoad"' in html_text
     assert 'id="qwenCanonicalRecipeUse"' in html_text
     assert "Canonical EDRs" in html_text
-    assert "Automatic Labeling" in html_text
-    assert 'id="qwenAutoLabelRun"' in html_text
-    assert 'id="qwenAutoLabelCancel"' in html_text
-    assert 'id="qwenAutoLabelWindowMode"' in html_text
-    assert 'id="qwenAutoLabelModeSummary"' in html_text
+    assert 'id="qwenAutoLabelRun"' not in html_text
+    assert 'id="qwenAutoLabelCancel"' not in html_text
+    assert 'id="qwenAutoLabelWindowMode"' not in html_text
+    assert 'id="qwenAutoLabelModeSummary"' not in html_text
     assert "canonicalRecipeSelect" in js_text
     assert "loadCanonicalRecipeIntoBuilder" in js_text
     assert "useCanonicalRecipeForInference" in js_text
@@ -54,8 +53,8 @@ def test_calibration_recipe_mode_ui_controls_exist() -> None:
     assert "getQwenAgentInferenceDatasetId" in js_text
     assert "const datasetId = getQwenAgentInferenceDatasetId(imageRecord);" in js_text
     assert 'datasetId: String(annotationSourceState.datasetId || "").trim()' in js_text
-    assert "qwenAutoLabelModeSummary" in html_text
-    assert "qwenAutoLabelUnlabeledOnly" in html_text
+    assert "qwenAutoLabelModeSummary" not in html_text
+    assert "qwenAutoLabelUnlabeledOnly" not in html_text
     assert "canonical bundle" in js_text
     assert "source_weighted" in html_text
     assert "edr_runtime_mode" in js_text

@@ -2018,6 +2018,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         maxResults: null,
         runButton: null,
         captionHint: null,
+        captionSystemPrompt: null,
         captionPreset: null,
         captionPresetApply: null,
         captionPresetRandom: null,
@@ -2283,6 +2284,10 @@ const AUTOMATION_LOCKED_TABS = new Set([
     let qwenProgressPollTimer = null;
     let qwenProgressRefreshInFlight = false;
     let qwenProgressStopTimer = null;
+    let qwenProgressPollFailureCount = 0;
+    let qwenProgressNoticeSignature = "";
+    let qwenProgressLastSeenAt = 0;
+    let qwenProgressActiveContext = null;
     let qwenAgentActive = false;
     let qwenAgentAbortController = null;
     let qwenAgentRunToken = 0;
@@ -2412,6 +2417,15 @@ const AUTOMATION_LOCKED_TABS = new Set([
         "A top-down view shows",
         "A wide shot shows",
     ];
+    const DEFAULT_CAPTION_SYSTEM_PROMPT = [
+        "You are a detailed captioning assistant. Use the image as truth.",
+        "Provide a rich, multi-sentence caption when there is a lot to see.",
+        "Do not mention labels, hints, bounding boxes, coordinates, or that counts were provided.",
+        "Do not output labelmap tags (e.g., light_vehicle). Use natural words like car, van, SUV.",
+        "Avoid any label tokens that contain underscores.",
+        "If the hints conflict with the image, mention the uncertainty briefly.",
+        "Stop when the caption is complete; never repeat a sentence or keep writing to fill the token budget.",
+    ].join(" ");
     const DEFAULT_CAPTION_WINDOW_SIZE = 672;
     const DEFAULT_CAPTION_WINDOW_OVERLAP = 0.1;
     let sam3TextUiInitialized = false;
@@ -18777,6 +18791,9 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!modelId || seen.has(modelId)) {
                 return;
             }
+            if (entry?.vision_inference_supported === false || entry?.inference_supported === false) {
+                return;
+            }
             seen.add(modelId);
             normalized.push({
                 ...entry,
@@ -18786,6 +18803,41 @@ async function cancelRfDetrTrainingJobRequest() {
             });
         });
         return normalized;
+    }
+
+    function qwenModelAvailabilityLabel(entry) {
+        const availability = entry?.availability || {};
+        if (availability.loaded) {
+            return "loaded";
+        }
+        if (availability.local) {
+            return "downloaded";
+        }
+        if (availability.partial) {
+            return "partial download";
+        }
+        if (availability.needs_download) {
+            return "download needed";
+        }
+        return "cache unknown";
+    }
+
+    function qwenModelOptionLabel(entry) {
+        const label = entry?.label || entry?.id || entry?.model_id || "Qwen model";
+        return `${label} [${qwenModelAvailabilityLabel(entry)}]`;
+    }
+
+    function qwenModelOptionTitle(entry) {
+        const modelId = String(entry?.id || entry?.model_id || "").trim();
+        const availability = entry?.availability || {};
+        const parts = [modelId, qwenModelAvailabilityLabel(entry)];
+        if (availability.cache_path) {
+            parts.push(`cache: ${availability.cache_path}`);
+        }
+        if (entry?.compatibility_note) {
+            parts.push(entry.compatibility_note);
+        }
+        return parts.filter(Boolean).join(" | ");
     }
 
     function removeGeneratedQwenMlxOptions(select) {
@@ -18817,9 +18869,10 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             const option = document.createElement("option");
             option.value = modelId;
-            option.textContent = entry?.label || modelId;
-            option.title = modelId;
+            option.textContent = qwenModelOptionLabel(entry);
+            option.title = qwenModelOptionTitle(entry);
             option.dataset.runtimePlatform = "mlx_vlm";
+            option.dataset.cacheState = qwenModelAvailabilityLabel(entry);
             group.appendChild(option);
             existingValues.add(modelId);
         });
@@ -18886,7 +18939,9 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             const option = document.createElement("option");
             option.value = modelId;
-            option.textContent = entry?.label || modelId;
+            option.textContent = qwenModelOptionLabel(entry);
+            option.title = qwenModelOptionTitle(entry);
+            option.dataset.cacheState = qwenModelAvailabilityLabel(entry);
             select.appendChild(option);
         });
         if (selectedId && Array.from(select.options).some((option) => option.value === selectedId)) {
@@ -19430,6 +19485,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.maxResults = document.getElementById("qwenMaxResults");
         qwenElements.runButton = document.getElementById("qwenRunButton");
         qwenElements.captionHint = document.getElementById("qwenCaptionHint");
+        qwenElements.captionSystemPrompt = document.getElementById("qwenCaptionSystemPrompt");
         qwenElements.captionPreset = document.getElementById("qwenCaptionPreset");
         qwenElements.captionPresetApply = document.getElementById("qwenCaptionPresetApply");
         qwenElements.captionPresetRandom = document.getElementById("qwenCaptionPresetRandom");
@@ -19459,6 +19515,13 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionPresencePenalty = document.getElementById("qwenCaptionPresencePenalty");
         qwenElements.captionSaveText = document.getElementById("qwenCaptionSaveText");
         qwenElements.captionRunButton = document.getElementById("qwenCaptionRunButton");
+        qwenElements.captionProgress = document.getElementById("qwenCaptionProgress");
+        qwenElements.captionProgressPhase = document.getElementById("qwenCaptionProgressPhase");
+        qwenElements.captionProgressText = document.getElementById("qwenCaptionProgressText");
+        qwenElements.captionProgressBar = document.getElementById("qwenCaptionProgressBar");
+        qwenElements.captionProgressFill = document.getElementById("qwenCaptionProgressFill");
+        qwenElements.captionProgressDetail = document.getElementById("qwenCaptionProgressDetail");
+        qwenElements.captionProgressPreview = document.getElementById("qwenCaptionProgressPreview");
         qwenElements.captionOutput = document.getElementById("qwenCaptionOutput");
         qwenElements.captionCopyButton = document.getElementById("qwenCaptionCopy");
         qwenElements.captionMeta = document.getElementById("qwenCaptionMeta");
@@ -19757,6 +19820,9 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionOpeningList && !qwenElements.captionOpeningList.value.trim()) {
             qwenElements.captionOpeningList.value = JSON.stringify(DEFAULT_CAPTION_OPENERS, null, 2);
+        }
+        if (qwenElements.captionSystemPrompt && !qwenElements.captionSystemPrompt.value.trim()) {
+            qwenElements.captionSystemPrompt.value = DEFAULT_CAPTION_SYSTEM_PROMPT;
         }
         if (qwenElements.captionWindowSize && !qwenElements.captionWindowSize.value.trim()) {
             qwenElements.captionWindowSize.value = DEFAULT_CAPTION_WINDOW_SIZE;
@@ -21751,7 +21817,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         qwenElements.runButton.disabled = isGpuHeavyLockActive() || !qwenAvailable || qwenRequestActive;
-        qwenElements.runButton.textContent = qwenRequestActive ? "Running…" : "Use Qwen";
+        qwenElements.runButton.textContent = qwenRequestActive ? "Running…" : "Run annotation assistant";
     }
 
     function updateQwenCaptionButton() {
@@ -21918,6 +21984,127 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionStatus.textContent = message || "";
     }
 
+    function getQwenProgressPercent(progress) {
+        return Math.max(0, Math.min(100, Math.round((Number(progress?.progress) || 0) * 100)));
+    }
+
+    function describeQwenProgress(progress) {
+        if (!progress || typeof progress !== "object") {
+            return "Qwen status unavailable";
+        }
+        const phase = progress.phase_label || progress.phase || (progress.active ? "Working" : "Idle");
+        const message = String(progress.message || progress.error || "").trim();
+        return message ? `${phase}: ${message}` : phase;
+    }
+
+    function announceQwenProgress(progress, { force = false, variant = "info" } = {}) {
+        const message = describeQwenProgress(progress);
+        if (!message) {
+            return;
+        }
+        const signature = [
+            progress?.run_id || "local",
+            progress?.phase || "",
+            progress?.phase_label || "",
+            progress?.message || progress?.error || "",
+            variant,
+        ].join("|");
+        if (!force && signature === qwenProgressNoticeSignature) {
+            return;
+        }
+        qwenProgressNoticeSignature = signature;
+        enqueueTaskNotice(message, {
+            key: "qwen-progress",
+            durationMs: variant === "error" ? 6500 : 4500,
+        });
+        if (variant === "warn" || variant === "error" || progress?.active) {
+            setSamStatus(message, {
+                variant,
+                duration: progress?.active ? 0 : (variant === "error" ? 6500 : 4500),
+            });
+        }
+    }
+
+    function renderQwenCaptionProgressState(progress, options = {}) {
+        if (!qwenElements.captionProgress || !progress || typeof progress !== "object") {
+            return;
+        }
+        const force = !!options.force;
+        const captionContext = progress.kind === "caption" || qwenCaptionActive || qwenProgressActiveContext === "caption";
+        if (!force && !captionContext) {
+            return;
+        }
+        const percent = getQwenProgressPercent(progress);
+        const phase = progress.phase_label || progress.phase || (progress.active ? "Working" : "Idle");
+        const detail = String(progress.message || progress.error || "").trim();
+        qwenElements.captionProgress.hidden = false;
+        qwenElements.captionProgress.classList.toggle("is-error", progress.phase === "error" || !!progress.error);
+        qwenElements.captionProgress.classList.toggle("is-complete", progress.phase === "complete");
+        if (qwenElements.captionProgressPhase) {
+            qwenElements.captionProgressPhase.textContent = phase;
+        }
+        if (qwenElements.captionProgressText) {
+            const generated = Number(progress.generated_tokens);
+            const maxTokens = Number(progress.max_new_tokens);
+            const tokenText = Number.isFinite(generated) && generated > 0
+                ? ` • ${generated}${Number.isFinite(maxTokens) && maxTokens > 0 ? `/${maxTokens}` : ""} tokens`
+                : "";
+            qwenElements.captionProgressText.textContent = `${percent}%${tokenText}`;
+        }
+        if (qwenElements.captionProgressFill) {
+            qwenElements.captionProgressFill.style.width = `${percent}%`;
+        }
+        if (qwenElements.captionProgressBar) {
+            qwenElements.captionProgressBar.setAttribute("aria-valuenow", String(percent));
+        }
+        if (qwenElements.captionProgressDetail) {
+            const availability = formatQwenAvailability(progress);
+            const model = progress.model_id ? ` • ${progress.model_id}` : "";
+            qwenElements.captionProgressDetail.textContent = [detail || "Waiting for Qwen", availability].filter(Boolean).join(" • ") + model;
+        }
+        if (qwenElements.captionProgressPreview) {
+            const logText = Array.isArray(progress.log_lines)
+                ? progress.log_lines.slice(-14).join("\n")
+                : "";
+            qwenElements.captionProgressPreview.textContent = progress.token_preview || logText || "";
+        }
+        if (progress.phase === "error" || progress.error) {
+            setQwenCaptionStatus("Error");
+        } else if (progress.phase === "complete") {
+            setQwenCaptionStatus("Ready");
+        } else if (progress.active) {
+            setQwenCaptionStatus(`${phase} ${percent}%`);
+        }
+    }
+
+    function renderQwenCaptionLocalProgress(message, {
+        phase = "queued",
+        phaseLabel = "Queued",
+        progress = 0.01,
+        modelId = null,
+        force = true,
+    } = {}) {
+        const snapshot = {
+            active: true,
+            kind: "caption",
+            phase,
+            phase_label: phaseLabel,
+            progress,
+            message,
+            model_id: modelId,
+            loaded: false,
+            local: null,
+            partial: null,
+            needs_download: null,
+            generated_tokens: 0,
+            max_new_tokens: null,
+            token_preview: "",
+        };
+        renderQwenProgressState(snapshot);
+        renderQwenCaptionProgressState(snapshot, { force });
+        announceQwenProgress(snapshot, { force: true });
+    }
+
     function formatQwenMemory(memory) {
         if (!memory || typeof memory !== "object") {
             return "Memory unavailable";
@@ -21977,10 +22164,30 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function renderQwenProgressState(progress) {
-        if (!qwenElements.runtimeMonitor || !progress || typeof progress !== "object") {
+        if (!progress || typeof progress !== "object") {
             return;
         }
-        const percent = Math.max(0, Math.min(100, Math.round((Number(progress.progress) || 0) * 100)));
+        if (progress.active || progress.run_id) {
+            qwenProgressLastSeenAt = Date.now();
+            qwenProgressPollFailureCount = 0;
+        }
+        const idleBeforeBackendRun = qwenProgressActiveContext
+            && !progress.active
+            && !progress.run_id
+            && (!progress.kind || progress.phase === "idle");
+        if (!idleBeforeBackendRun) {
+            renderQwenCaptionProgressState(progress);
+        }
+        const shouldAnnounce = progress.active || progress.phase === "error" || progress.phase === "complete";
+        if (shouldAnnounce && (progress.kind === "caption" || qwenProgressActiveContext === "caption")) {
+            announceQwenProgress(progress, {
+                variant: progress.phase === "error" || progress.error ? "error" : "info",
+            });
+        }
+        if (!qwenElements.runtimeMonitor) {
+            return;
+        }
+        const percent = getQwenProgressPercent(progress);
         const phase = progress.phase_label || progress.phase || (progress.active ? "Working" : "Idle");
         const model = progress.model_id || progress.effective_model_name || "Model pending";
         const availability = formatQwenAvailability(progress);
@@ -22014,7 +22221,10 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.runtimeProgressText.textContent = `${percent}%${tokenText}`;
         }
         if (qwenElements.runtimeTokenPreview) {
-            qwenElements.runtimeTokenPreview.textContent = progress.token_preview || "";
+            const logText = Array.isArray(progress.log_lines)
+                ? progress.log_lines.slice(-14).join("\n")
+                : "";
+            qwenElements.runtimeTokenPreview.textContent = progress.token_preview || logText || "";
         }
     }
 
@@ -22045,8 +22255,10 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         qwenProgressRefreshInFlight = true;
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 5000);
         try {
-            const resp = await fetch(`${API_ROOT}/qwen/progress`);
+            const resp = await fetch(`${API_ROOT}/qwen/progress`, { signal: controller.signal });
             if (!resp.ok) {
                 throw new Error(`HTTP ${resp.status}`);
             }
@@ -22054,16 +22266,42 @@ async function cancelRfDetrTrainingJobRequest() {
             renderQwenProgressState(data);
         } catch (error) {
             console.debug("Qwen progress refresh failed", error);
+            qwenProgressPollFailureCount += 1;
+            if (qwenCaptionActive || qwenRequestActive || qwenAgentActive || qwenProgressActiveContext) {
+                const waitingMs = qwenProgressLastSeenAt ? Date.now() - qwenProgressLastSeenAt : 0;
+                const detail = qwenProgressPollFailureCount >= 2
+                    ? "The backend progress endpoint is not responding; the caption request may still be loading, stalled, or the backend may have stopped."
+                    : "Waiting for backend progress response.";
+                const snapshot = {
+                    active: true,
+                    kind: qwenProgressActiveContext || (qwenCaptionActive ? "caption" : "qwen"),
+                    phase: "waiting",
+                    phase_label: "Waiting",
+                    progress: 0.02,
+                    message: waitingMs > 5000 ? `${detail} Last progress update was ${Math.round(waitingMs / 1000)}s ago.` : detail,
+                    generated_tokens: 0,
+                    token_preview: "",
+                };
+                renderQwenCaptionProgressState(snapshot, { force: qwenCaptionActive || qwenProgressActiveContext === "caption" });
+                announceQwenProgress(snapshot, {
+                    variant: qwenProgressPollFailureCount >= 2 ? "warn" : "info",
+                });
+            }
         } finally {
+            window.clearTimeout(timeoutId);
             qwenProgressRefreshInFlight = false;
         }
     }
 
-    function startQwenProgressPolling() {
+    function startQwenProgressPolling(context = null) {
         if (qwenProgressStopTimer) {
             clearTimeout(qwenProgressStopTimer);
             qwenProgressStopTimer = null;
         }
+        qwenProgressActiveContext = context || qwenProgressActiveContext;
+        qwenProgressPollFailureCount = 0;
+        qwenProgressNoticeSignature = "";
+        qwenProgressLastSeenAt = Date.now();
         refreshQwenProgress().catch((error) => console.debug("Qwen progress start refresh failed", error));
         if (!qwenProgressPollTimer) {
             qwenProgressPollTimer = setInterval(() => {
@@ -22084,7 +22322,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 qwenProgressPollTimer = null;
             }
             qwenProgressStopTimer = null;
-            refreshQwenProgress().catch((error) => console.debug("Qwen final progress refresh failed", error));
+            refreshQwenProgress()
+                .catch((error) => console.debug("Qwen final progress refresh failed", error))
+                .finally(() => {
+                    qwenProgressActiveContext = null;
+                });
         }, delayMs);
     }
 
@@ -22283,6 +22525,11 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenModelState.models.forEach((entry) => {
             const card = document.createElement("div");
             card.className = entry.active ? "qwen-model-card active" : "qwen-model-card";
+            const inferenceSupported = entry.metadata?.vision_inference_supported !== false
+                && entry.metadata?.inference_supported !== false;
+            if (!inferenceSupported) {
+                card.classList.add("incompatible");
+            }
             const title = document.createElement("h3");
             title.textContent = entry.label || entry.id;
             card.appendChild(title);
@@ -22321,6 +22568,9 @@ async function cancelRfDetrTrainingJobRequest() {
             } else {
                 addBadge("Cache unknown", "");
             }
+            if (!inferenceSupported) {
+                addBadge("No vision weights", "warn");
+            }
             card.appendChild(badgeWrap);
             const button = document.createElement("button");
             button.type = "button";
@@ -22329,10 +22579,12 @@ async function cancelRfDetrTrainingJobRequest() {
             if (isLegacy) {
                 card.classList.add("legacy");
             }
-            button.textContent = entry.active ? "Active" : isLegacy ? "Legacy" : "Activate";
-            button.disabled = !!entry.active || isLegacy || qwenModelState.activateInFlight || qwenModelState.refreshInFlight;
+            button.textContent = entry.active ? "Active" : isLegacy ? "Legacy" : !inferenceSupported ? "Unavailable" : "Activate";
+            button.disabled = !!entry.active || isLegacy || !inferenceSupported || qwenModelState.activateInFlight || qwenModelState.refreshInFlight;
             if (isLegacy) {
                 button.title = "Legacy Qwen2.5 checkpoints stay on disk but cannot be activated.";
+            } else if (!inferenceSupported) {
+                button.title = entry.metadata?.compatibility_note || "This checkpoint cannot run image inference.";
             } else {
                 button.addEventListener("click", () => {
                     activateQwenModel(entry.id).catch((error) => {
@@ -22498,7 +22750,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const requestImageName = currentImage.name;
         qwenRequestActive = true;
         updateQwenRunButton();
-        startQwenProgressPolling();
+        startQwenProgressPolling("inference");
         setSamStatus(`Running Qwen (${promptType === "point" ? "points" : "bbox"}) for ${targetClass}…`, { variant: "info", duration: 0 });
         try {
             if (qwenElements.unloadOthers?.checked) {
@@ -22612,6 +22864,11 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const imageNameForRequest = currentImage.name;
         const variantForRequest = samVariant;
+        renderQwenCaptionLocalProgress("Preparing image payload for Qwen captioning", {
+            phase: "prepare",
+            phaseLabel: "Preparing Image",
+            progress: 0.04,
+        });
         const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
         let payload = await buildSamImagePayload({
             variantOverride: variantForRequest,
@@ -22622,6 +22879,11 @@ async function cancelRfDetrTrainingJobRequest() {
             payload.image_name = imageNameForRequest;
         }
         payload.sam_variant = variantForRequest;
+        renderQwenCaptionLocalProgress("Caption request sent to backend; waiting for Qwen runtime", {
+            phase: "request",
+            phaseLabel: "Request Sent",
+            progress: 0.05,
+        });
         let resp = await fetch(`${API_ROOT}/qwen/caption`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -22641,6 +22903,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 payload.image_name = imageNameForRequest;
             }
             payload.sam_variant = variantForRequest;
+            renderQwenCaptionLocalProgress("Retrying caption request with inline image data", {
+                phase: "request",
+                phaseLabel: "Retrying",
+                progress: 0.05,
+            });
             resp = await fetch(`${API_ROOT}/qwen/caption`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -22649,7 +22916,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (!resp.ok) {
             const detail = await resp.text();
-            throw new Error(detail || resp.statusText || `HTTP ${resp.status}`);
+            throw new Error(parseApiError(detail, resp.statusText || `HTTP ${resp.status}`));
         }
         return resp.json();
     }
@@ -22722,8 +22989,10 @@ async function cancelRfDetrTrainingJobRequest() {
         const topP = parseFloat(qwenElements.captionTopP?.value || "");
         const topK = parseInt(qwenElements.captionTopK?.value || "", 10);
         const presencePenalty = parseFloat(qwenElements.captionPresencePenalty?.value || "");
+        const captionSystemPrompt = String(qwenElements.captionSystemPrompt?.value || "").trim();
         const requestFields = {
             user_prompt: combinedPrompt,
+            caption_system_prompt: captionSystemPrompt || null,
             label_hints: hints,
             include_counts: includeCounts,
             include_coords: includeCoords,
@@ -22757,6 +23026,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 includeCoords,
                 maxBoxes,
                 maxTokens,
+                captionSystemPrompt: captionSystemPrompt || null,
             },
             hints,
         };
@@ -23657,6 +23927,7 @@ async function cancelRfDetrTrainingJobRequest() {
             include_coords: meta?.includeCoords ?? null,
             max_boxes: meta?.maxBoxes ?? null,
             max_new_tokens: meta?.maxTokens ?? null,
+            caption_system_prompt: meta?.captionSystemPrompt || null,
             used_boxes: result?.used_boxes ?? null,
             counts: result?.used_counts ?? null,
             created_at: new Date().toISOString(),
@@ -23688,10 +23959,22 @@ async function cancelRfDetrTrainingJobRequest() {
         const requestImageHeight = currentImage.height;
         qwenCaptionActive = true;
         updateQwenCaptionButton();
-        setQwenCaptionStatus("Running…");
-        startQwenProgressPolling();
-        setSamStatus("Running Qwen caption…", { variant: "info", duration: 0 });
+        setQwenCaptionStatus("Queued…");
+        startQwenProgressPolling("caption");
+        renderQwenCaptionLocalProgress(`Caption request queued for ${requestImageName}`, {
+            phase: "queued",
+            phaseLabel: "Queued",
+            progress: 0.01,
+        });
+        setSamStatus(`Qwen caption queued for ${requestImageName}…`, { variant: "info", duration: 0 });
         try {
+            const { requestFields, meta, hints } = buildQwenCaptionRequestFields(requestImageName);
+            renderQwenCaptionLocalProgress(`Preparing caption request (${meta.model || "active model"})`, {
+                phase: "prepare",
+                phaseLabel: "Preparing",
+                progress: 0.03,
+                modelId: meta.model === "active" ? null : meta.model,
+            });
             const captionSaveContext = qwenElements.captionSaveText?.checked
                 ? resolveCaptionPersistenceContext()
                 : { mode: "direct", datasetId: String(getCaptionDatasetId() || "").trim() };
@@ -23709,7 +23992,6 @@ async function cancelRfDetrTrainingJobRequest() {
                     console.warn("Failed to unload other runtimes", error);
                 }
             }
-            const { requestFields, meta, hints } = buildQwenCaptionRequestFields(requestImageName);
             const result = await invokeQwenCaption({
                 ...requestFields,
                 image_width: requestImageWidth,
@@ -23760,10 +24042,33 @@ async function cancelRfDetrTrainingJobRequest() {
                     console.warn("Caption save failed", error);
                 }
             }
+            const completeSnapshot = {
+                active: false,
+                kind: "caption",
+                phase: "complete",
+                phase_label: "Complete",
+                progress: 1,
+                message: "Caption ready",
+                token_preview: result?.caption || "",
+            };
+            renderQwenCaptionProgressState(completeSnapshot, { force: true });
+            announceQwenProgress(completeSnapshot, { force: true });
             setQwenCaptionStatus("Ready");
             setSamStatus("Caption ready.", { variant: "success", duration: 3500 });
         } catch (error) {
             const message = error?.message || error;
+            const errorSnapshot = {
+                active: false,
+                kind: "caption",
+                phase: "error",
+                phase_label: "Error",
+                progress: 1,
+                message: `Caption failed: ${message}`,
+                error: String(message || "Caption failed"),
+                token_preview: "",
+            };
+            renderQwenCaptionProgressState(errorSnapshot, { force: true });
+            announceQwenProgress(errorSnapshot, { force: true, variant: "error" });
             setQwenCaptionStatus("Error");
             setSamStatus(`Caption error: ${message}`, { variant: "error", duration: 5000 });
             console.error("Qwen caption failed", error);
@@ -23865,7 +24170,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenCaptionBatchActive = true;
         qwenCaptionBatchCancel = false;
         updateQwenCaptionButton();
-        startQwenProgressPolling();
+        startQwenProgressPolling("caption");
         const total = runnableImages.length;
         const captionSaveContext = qwenElements.captionSaveText?.checked
             ? resolveCaptionPersistenceContext()
@@ -26444,7 +26749,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenAgentTraceSeen = 0;
         qwenAgentWindowOverlays = [];
         updateQwenAgentButtons();
-        startQwenProgressPolling();
+        startQwenProgressPolling("prepass");
         setQwenAgentStatus("Running prepass…");
         try {
             const payload = await buildQwenAgentPayload(imageName);
@@ -26550,7 +26855,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenAgentBatchActive = true;
         qwenAgentBatchCancel = false;
         updateQwenAgentButtons();
-        startQwenProgressPolling();
+        startQwenProgressPolling("prepass");
         const includeCurrent = options.includeCurrent !== false;
         const runnableImages = includeCurrent
             ? imageNames.slice()

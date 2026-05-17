@@ -369,6 +369,7 @@ class QwenCaptionRequest(BaseModel):
     top_p: Optional[float] = None
     top_k: Optional[int] = None
     presence_penalty: Optional[float] = None
+    caption_system_prompt: Optional[str] = None
     labelmap_glossary: Optional[str] = None
 
     @root_validator(skip_on_failure=True)
@@ -377,6 +378,8 @@ class QwenCaptionRequest(BaseModel):
             raise ValueError("image_payload_missing")
         user_prompt = (values.get("user_prompt") or "").strip()
         values["user_prompt"] = user_prompt
+        caption_system_prompt = (values.get("caption_system_prompt") or "").strip()
+        values["caption_system_prompt"] = caption_system_prompt
         max_boxes = values.get("max_boxes")
         if max_boxes is not None:
             try:

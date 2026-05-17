@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20260517c" rel="stylesheet">
+    <link href="ybat.css?v=20260517h" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
          before we call listenImageCrop().
@@ -11,7 +11,7 @@
     <script src="canvas.min.js?v=20260409a"></script>
     <script src="jszip.min.js?v=20260409a"></script>
     <script src="filesaver.min.js?v=20260409a"></script>
-    <script src="ybat.js?v=20260517c"></script>
+    <script src="ybat.js?v=20260517h"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -214,56 +214,6 @@
                             <div class="training-actions">
                                 <button type="button" id="detectorBatchAllButton" class="training-button secondary">Run detector on entire dataset</button>
                             </div>
-                            <div class="training-help" style="margin-top:12px; border:1px solid #e2e8f0; border-radius:12px; background:#f8fafc; padding:10px 12px;">
-                                <div class="qwen-caption__header">
-                                    <strong>Automatic Labeling</strong>
-                                    <span id="qwenAutoLabelStatus" class="qwen-caption-status"></span>
-                                </div>
-                                <div class="training-help" style="margin-top:4px;">
-                                    Runs dataset-scale automatic labeling on the current linked dataset. Falcon writes labels directly into the dataset overlay. Same-class duplicates with IoU greater than 0.5 are dropped before save.
-                                </div>
-                                <div id="qwenAutoLabelModeSummary" class="training-help" style="margin-top:6px;">Open a linked dataset to use automatic labeling.</div>
-                                <div class="qwen-caption-grid" style="margin-top:10px;">
-                                    <div>
-                                        <label for="qwenAutoLabelMaxImages">Max images</label>
-                                        <input type="number" id="qwenAutoLabelMaxImages" min="1" max="100000" value="100" />
-                                    </div>
-                                    <div>
-                                        <label for="qwenAutoLabelSplit">Split</label>
-                                        <select id="qwenAutoLabelSplit">
-                                            <option value="all" selected>All</option>
-                                            <option value="train">Train</option>
-                                            <option value="val">Val</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label for="qwenAutoLabelWindowMode">Falcon window mode</label>
-                                        <select id="qwenAutoLabelWindowMode">
-                                            <option value="full_image" selected>Full image</option>
-                                            <option value="quadrants">Quadrants (2x2)</option>
-                                            <option value="planner_auto">Planner auto</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label for="qwenAutoLabelOverlap">Window overlap</label>
-                                        <input type="number" id="qwenAutoLabelOverlap" min="0" max="0.45" step="0.01" value="0.10" />
-                                    </div>
-                                </div>
-                                <div class="qwen-caption-options" style="margin-top:10px;">
-                                    <label><input type="checkbox" id="qwenAutoLabelUnlabeledOnly" checked /> Only fill unlabeled images</label>
-                                    <label><input type="checkbox" id="qwenAutoLabelUsePlannerCaption" checked /> Use caption context for planner mode</label>
-                                </div>
-                                <label for="qwenAutoLabelClassNames" style="margin-top:10px;">Limit to classes (optional)</label>
-                                <textarea id="qwenAutoLabelClassNames" rows="2" placeholder="Leave blank for all dataset classes. You can use commas or one class per line."></textarea>
-                                <div id="qwenAutoLabelProgressWrap" class="sam-status-progress" aria-hidden="true" hidden style="margin-top:10px;">
-                                    <div id="qwenAutoLabelProgressFill"></div>
-                                </div>
-                                <div id="qwenAutoLabelProgressText" class="training-help" style="margin-top:6px;">Waiting to start…</div>
-                                <div class="training-actions" style="margin-top:10px;">
-                                    <button type="button" id="qwenAutoLabelRun" class="training-button secondary">Run Automatic Labeling</button>
-                                    <button type="button" id="qwenAutoLabelCancel" class="training-button secondary" disabled>Cancel</button>
-                                </div>
-                            </div>
                             <div class="training-field" id="polygonSimplifyField">
                                 <label for="polygonSimplifyEpsilon">Polygon detail</label>
                                 <input type="range" id="polygonSimplifyEpsilon" name="polygonSimplifyEpsilon" min="0" max="40" step="0.5" value="20" />
@@ -283,7 +233,7 @@
                             </div>
                             <section class="qwen-panel" aria-labelledby="qwenPanelTitle">
                                 <div class="qwen-panel__header">
-                                    <span id="qwenPanelTitle">Qwen 3 Assist</span>
+                                    <span id="qwenPanelTitle">Qwen 3 Annotation Assistant</span>
                                     <span id="qwenActiveModelLabel" class="qwen-active-model-label"></span>
                                     <span id="qwenStatusLabel" class="qwen-status-label">Checking…</span>
                                 </div>
@@ -302,35 +252,40 @@
                                     <div id="qwenRuntimeProgressText" class="qwen-runtime-progress__text">0%</div>
                                     <pre id="qwenRuntimeTokenPreview" class="qwen-runtime-token-preview"></pre>
                                 </div>
-                                <label for="qwenItems">Objects / keywords</label>
-                                <textarea id="qwenItems" rows="3" placeholder="List what to detect (comma or line separated)"></textarea>
-                                <button type="button" id="qwenAdvancedToggle" class="qwen-advanced-toggle" aria-expanded="false">Show advanced overrides</button>
-                                <div id="qwenAdvancedPanel" class="qwen-advanced" aria-hidden="true">
-                                    <label for="qwenCustomPrompt">Full prompt override</label>
-                                    <textarea id="qwenCustomPrompt" rows="3" placeholder="Optional: supply the exact prompt to send to Qwen"></textarea>
-                                    <label for="qwenImageType">Image type description</label>
-                                    <input type="text" id="qwenImageType" placeholder="Pulled from active Qwen model" />
-                                    <label for="qwenExtraContext">Extra context</label>
-                                    <textarea id="qwenExtraContext" rows="2" placeholder="Optional notes (lighting, camera, etc.)"></textarea>
-                                </div>
-                                <label for="qwenClassSelect">Assign detections to class</label>
-                                <select id="qwenClassSelect"></select>
-                                <label for="qwenPromptType">Prompt output</label>
-                                <select id="qwenPromptType">
-                                    <option value="bbox" selected>Bounding boxes</option>
-                                    <option value="bbox_sam">Bounding boxes → SAM cleanup</option>
-                                    <option value="point">Points → SAM boxes</option>
-                                </select>
-                                <label for="qwenMaxResults">Max detections</label>
-                                <input type="number" id="qwenMaxResults" min="1" max="50" value="8" />
-                                <button type="button" id="qwenRunButton" class="training-button" disabled>Use Qwen</button>
-                                <p class="qwen-hint">Uses the prompts saved with the active Qwen model; add extra context via the advanced overrides when needed.</p>
-                                <div class="qwen-caption-options">
-                                    <label><input type="checkbox" id="qwenUnloadOthers" /> Unload other models before Qwen run<span class="help-icon" title="Frees GPU memory by unloading SAM predictors, detectors, and classifier backbones before running Qwen. Slower if you switch back.">?</span></label>
+                                <div class="qwen-subpanel qwen-subpanel--annotation">
+                                    <div class="qwen-caption__header">
+                                        <strong>Annotation assistant</strong>
+                                    </div>
+                                    <label for="qwenItems">Objects / keywords</label>
+                                    <textarea id="qwenItems" rows="3" placeholder="List what to detect (comma or line separated)"></textarea>
+                                    <button type="button" id="qwenAdvancedToggle" class="qwen-advanced-toggle" aria-expanded="false">Show annotation prompt overrides</button>
+                                    <div id="qwenAdvancedPanel" class="qwen-advanced" aria-hidden="true">
+                                        <label for="qwenCustomPrompt">Full annotation prompt override</label>
+                                        <textarea id="qwenCustomPrompt" rows="3" placeholder="Optional: supply the exact annotation prompt to send to Qwen"></textarea>
+                                        <label for="qwenImageType">Image type description</label>
+                                        <input type="text" id="qwenImageType" placeholder="Pulled from active Qwen model" />
+                                        <label for="qwenExtraContext">Extra context</label>
+                                        <textarea id="qwenExtraContext" rows="2" placeholder="Optional notes (lighting, camera, etc.)"></textarea>
+                                    </div>
+                                    <label for="qwenClassSelect">Assign detections to class</label>
+                                    <select id="qwenClassSelect"></select>
+                                    <label for="qwenPromptType">Prompt output</label>
+                                    <select id="qwenPromptType">
+                                        <option value="bbox" selected>Bounding boxes</option>
+                                        <option value="bbox_sam">Bounding boxes → SAM cleanup</option>
+                                        <option value="point">Points → SAM boxes</option>
+                                    </select>
+                                    <label for="qwenMaxResults">Max detections</label>
+                                    <input type="number" id="qwenMaxResults" min="1" max="50" value="8" />
+                                    <button type="button" id="qwenRunButton" class="training-button" disabled>Run annotation assistant</button>
+                                    <p class="qwen-hint">Uses the prompts saved with the active Qwen model; add extra context via the advanced overrides when needed.</p>
+                                    <div class="qwen-caption-options">
+                                        <label><input type="checkbox" id="qwenUnloadOthers" /> Unload other models before Qwen run<span class="help-icon" title="Frees GPU memory by unloading SAM predictors, detectors, and classifier backbones before running Qwen. Slower if you switch back.">?</span></label>
+                                    </div>
                                 </div>
                                 <div class="qwen-caption">
                                     <div class="qwen-caption__header">
-                                        <strong>Caption current image</strong>
+                                        <strong>Captioning</strong>
                                         <span id="qwenCaptionStatus" class="qwen-caption-status"></span>
                                     </div>
                                     <label for="qwenCaptionDataset">Caption dataset (Dataset Manager)</label>
@@ -355,6 +310,11 @@
                                     </div>
                                     <label for="qwenCaptionHint">Caption hint (optional)</label>
                                     <textarea id="qwenCaptionHint" rows="2" placeholder="e.g., drone footage at dusk"></textarea>
+                                    <details class="qwen-caption-prompt">
+                                        <summary>Caption system prompt</summary>
+                                        <textarea id="qwenCaptionSystemPrompt" rows="5"></textarea>
+                                        <div class="training-help">This instruction is sent as the system prompt for captioning. It controls output style and stopping behavior before the image-specific hint and label context are added.</div>
+                                    </details>
                                     <div class="qwen-caption-grid">
                                         <div>
                                             <label for="qwenCaptionMode">Caption detail</label>
@@ -438,6 +398,17 @@
                                         <label><input type="checkbox" id="qwenCaptionSaveText" checked /> Auto-save to text labels</label>
                                     </div>
                                     <button type="button" id="qwenCaptionRunButton" class="training-button secondary">Caption image</button>
+                                    <div id="qwenCaptionProgress" class="qwen-caption-progress" aria-live="polite" hidden>
+                                        <div class="qwen-caption-progress__topline">
+                                            <span id="qwenCaptionProgressPhase">Queued</span>
+                                            <span id="qwenCaptionProgressText">0%</span>
+                                        </div>
+                                        <div id="qwenCaptionProgressBar" class="qwen-caption-progress__bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                                            <div id="qwenCaptionProgressFill" class="qwen-caption-progress__fill"></div>
+                                        </div>
+                                        <div id="qwenCaptionProgressDetail" class="qwen-caption-progress__detail"></div>
+                                        <pre id="qwenCaptionProgressPreview" class="qwen-caption-progress__preview"></pre>
+                                    </div>
                                     <div class="qwen-caption-output">
                                         <label for="qwenCaptionOutput">Caption</label>
                                         <textarea id="qwenCaptionOutput" rows="3"></textarea>

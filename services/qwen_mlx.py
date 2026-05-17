@@ -19,6 +19,14 @@ QWEN_PLATFORM_ALIASES = {
     "mlx_vlm": QWEN_PLATFORM_MLX,
 }
 QWEN_MLX_DEFAULT_MODEL = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+QWEN_MLX_LANGUAGE_ONLY_REPACK_IDS = {
+    "introvoyz041/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx-mlx-4Bit",
+    "introvoyz041/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx-mlx-4Bit",
+}
+QWEN_MLX_LANGUAGE_ONLY_REPACK_NOTE = (
+    "This MLX repack contains only language_model weights and no vision_tower weights, "
+    "so it cannot run Qwen3-VL image captioning, detection, or vision LoRA training."
+)
 
 
 def normalize_qwen_platform(value: Optional[str]) -> str:
@@ -63,6 +71,8 @@ def _model_entry(size: str, variant: str, quant: str, *, moe: bool = False) -> D
         "quantization": quant,
         "runtime_platform": QWEN_PLATFORM_MLX,
         "source": "mlx-community",
+        "vision_inference_supported": True,
+        "training_supported": True,
     }
 
 
@@ -86,6 +96,8 @@ def _external_mlx_entry(
         "runtime_platform": QWEN_PLATFORM_MLX,
         "source": source,
         "abliterated": abliterated,
+        "vision_inference_supported": True,
+        "training_supported": True,
     }
 
 
@@ -259,6 +271,12 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
         "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx": 7,
         "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx": 8,
     }
+    for entry in entries:
+        if str(entry.get("id")) in QWEN_MLX_LANGUAGE_ONLY_REPACK_IDS:
+            entry["vision_inference_supported"] = False
+            entry["training_supported"] = False
+            entry["compatibility_note"] = QWEN_MLX_LANGUAGE_ONLY_REPACK_NOTE
+            entry["training_note"] = QWEN_MLX_LANGUAGE_ONLY_REPACK_NOTE
     entries.sort(
         key=lambda entry: (
             preferred.get(str(entry["id"]), 1000),
@@ -272,6 +290,10 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
 
 QWEN_MLX_MODEL_OPTIONS = qwen_mlx_model_options()
 QWEN_MLX_MODEL_IDS = {str(entry["id"]) for entry in QWEN_MLX_MODEL_OPTIONS}
+QWEN_MLX_VISION_MODEL_OPTIONS = [
+    entry for entry in QWEN_MLX_MODEL_OPTIONS if entry.get("vision_inference_supported", True) is not False
+]
+QWEN_MLX_VISION_MODEL_IDS = {str(entry["id"]) for entry in QWEN_MLX_VISION_MODEL_OPTIONS}
 
 
 def mlx_available(import_error: Optional[BaseException], load_fn: Any, generate_fn: Any) -> bool:
@@ -346,4 +368,6 @@ def qwen_mlx_metadata_for_model(model_id: str) -> Dict[str, Any]:
         "label": str(model_id),
         "model_id": str(model_id),
         "runtime_platform": QWEN_PLATFORM_MLX,
+        "vision_inference_supported": True,
+        "training_supported": True,
     }

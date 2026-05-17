@@ -275,6 +275,37 @@ def _extract_caption_from_text(text: str, marker: Optional[str] = None) -> Tuple
     return cleaned, marker_found
 
 
+def _caption_sentence_key(sentence: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", sentence.lower()).strip()
+
+
+def _trim_repeated_caption_sentences(text: str) -> str:
+    if not text:
+        return text
+    units = re.findall(r"[^.!?]+[.!?]+(?:[\"')\]]+)?|[^.!?]+$", text)
+    if len(units) < 2:
+        return text
+    seen: set[str] = set()
+    kept: List[str] = []
+    for unit in units:
+        sentence = unit.strip()
+        if not sentence:
+            continue
+        key = _caption_sentence_key(sentence)
+        words = key.split()
+        if len(words) >= 5:
+            is_complete = bool(re.search(r"[.!?][\"')\]]*$", sentence))
+            if key in seen:
+                continue
+            if not is_complete and any(prev.startswith(key) for prev in seen if len(key) >= 28):
+                continue
+            seen.add(key)
+        kept.append(sentence)
+    if not kept:
+        return ""
+    return _collapse_whitespace(" ".join(kept))
+
+
 def _caption_needs_english_rewrite(text: str) -> bool:
     return bool(re.search(r"[^\x00-\x7F]", text))
 
@@ -351,6 +382,7 @@ def _sanitize_qwen_caption(text: str) -> str:
     cleaned = cleaned.strip()
     if cleaned.startswith(":"):
         cleaned = cleaned.lstrip(":").strip()
+    cleaned = _trim_repeated_caption_sentences(cleaned)
     return cleaned
 
 
@@ -459,12 +491,20 @@ def _caption_is_degenerate_impl(caption: str) -> bool:
 def _resolve_qwen_caption_decode(payload: Any, is_thinking: bool) -> Dict[str, Any]:
     use_sampling = payload.use_sampling if getattr(payload, "use_sampling", None) is not None else True
     if not use_sampling:
-        return {"do_sample": False}
+        return {
+            "do_sample": False,
+            "repetition_penalty": 1.08,
+            "repetition_context_size": 128,
+            "no_repeat_ngram_size": 8,
+        }
     defaults = {
         "temperature": 1.0 if is_thinking else 0.7,
         "top_p": 0.95 if is_thinking else 0.8,
         "top_k": 20,
         "presence_penalty": 0.0 if is_thinking else 1.5,
+        "repetition_penalty": 1.05 if is_thinking else 1.10,
+        "repetition_context_size": 128,
+        "no_repeat_ngram_size": 8,
     }
     temperature = payload.temperature if getattr(payload, "temperature", None) is not None else defaults["temperature"]
     top_p = payload.top_p if getattr(payload, "top_p", None) is not None else defaults["top_p"]
@@ -478,6 +518,9 @@ def _resolve_qwen_caption_decode(payload: Any, is_thinking: bool) -> Dict[str, A
         "top_p": top_p,
         "top_k": top_k,
         "presence_penalty": presence_penalty,
+        "repetition_penalty": defaults["repetition_penalty"],
+        "repetition_context_size": defaults["repetition_context_size"],
+        "no_repeat_ngram_size": defaults["no_repeat_ngram_size"],
     }
 
 
@@ -659,6 +702,12 @@ def _strip_qwen_model_suffix_impl(model_id: str) -> Optional[str]:
 
 def _format_qwen_load_error_impl(exc: Exception, *, torch_module: Any) -> str:
     msg = str(exc)
+    if "Missing" in msg and "vision_tower." in msg:
+        return (
+            "incompatible_checkpoint_missing_vision_tower: selected checkpoint is missing "
+            "vision tower weights and cannot run Qwen3-VL image inference. Pick a full "
+            "Qwen3-VL checkpoint for captioning or detection."
+        )
     if "FP8" in msg and "compute capability" in msg:
         cc = None
         if torch_module.cuda.is_available():
@@ -779,6 +828,12 @@ def _format_qwen_load_error_impl(exc: Exception, *, torch_module: Any = None) ->
     text = str(exc or "")
     if not text:
         return "unknown"
+    if "Missing" in text and "vision_tower." in text:
+        return (
+            "incompatible_checkpoint_missing_vision_tower: selected checkpoint is missing "
+            "vision tower weights and cannot run Qwen3-VL image inference. Pick a full "
+            "Qwen3-VL checkpoint for captioning or detection."
+        )
     if "FP8" in text and "compute capability" in text:
         cc = None
         if torch_module is not None and torch_module.cuda.is_available():

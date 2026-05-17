@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue, functools, math, stat
+import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue, functools, math, stat, importlib
 from contextvars import ContextVar
 from pathlib import Path
 import numpy as np
@@ -317,6 +317,7 @@ from services.qwen_runtime import (
 from services.qwen_mlx import (
     QWEN_MLX_DEFAULT_MODEL,
     QWEN_MLX_MODEL_OPTIONS,
+    QWEN_MLX_VISION_MODEL_OPTIONS,
     QWEN_PLATFORM_AUTO,
     QWEN_PLATFORM_MLX,
     QWEN_PLATFORM_TRANSFORMERS,
@@ -996,6 +997,7 @@ qwen_last_error: Optional[str] = None
 qwen_lock = threading.RLock()
 qwen_config_lock = threading.RLock()
 qwen_progress_lock = threading.RLock()
+qwen_mlx_generation_lock = threading.RLock()
 qwen_progress_state: Dict[str, Any] = {
     "run_id": None,
     "active": False,
@@ -1019,6 +1021,7 @@ qwen_progress_state: Dict[str, Any] = {
     "updated_at": None,
     "completed_at": None,
     "error": None,
+    "log_lines": [],
 }
 qwen_caption_cache: Dict[str, Any] = {}
 qwen_caption_order: deque[str] = deque()
@@ -1451,6 +1454,26 @@ def _qwen_cache_snapshot_path(model_id: str) -> Optional[Path]:
     if candidate.exists():
         return candidate.resolve()
     try:
+        repo_path = _qwen_cache_repo_path(raw)
+        if repo_path and repo_path.exists():
+            for ref_name in ("main", "master"):
+                ref_path = repo_path / "refs" / ref_name
+                try:
+                    commit = ref_path.read_text(encoding="utf-8").strip()
+                except Exception:
+                    commit = ""
+                if commit:
+                    snapshot_path = repo_path / "snapshots" / commit
+                    if snapshot_path.exists():
+                        return snapshot_path.resolve()
+            snapshots_dir = repo_path / "snapshots"
+            if snapshots_dir.exists():
+                snapshot_dirs = [path for path in snapshots_dir.iterdir() if path.is_dir()]
+                if snapshot_dirs:
+                    return max(snapshot_dirs, key=lambda path: path.stat().st_mtime).resolve()
+    except Exception:
+        pass
+    try:
         from huggingface_hub import try_to_load_from_cache
     except Exception:
         return None
@@ -1460,7 +1483,10 @@ def _qwen_cache_snapshot_path(model_id: str) -> Optional[Path]:
         except Exception:
             cached = None
         if isinstance(cached, str) and cached and os.path.exists(cached):
-            return Path(cached).resolve().parent
+            cached_path = Path(cached).resolve()
+            if "snapshots" in cached_path.parts:
+                return cached_path.parent
+            return cached_path.parent
     return None
 
 
@@ -1481,6 +1507,76 @@ def _qwen_snapshot_has_weights(snapshot_path: Optional[Path]) -> bool:
         except Exception:
             continue
     return False
+
+
+def _format_qwen_bytes(byte_count: Optional[int]) -> str:
+    try:
+        value = float(byte_count or 0)
+    except Exception:
+        value = 0.0
+    units = ("B", "KB", "MB", "GB", "TB")
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{value:.1f} TB"
+
+
+def _qwen_cache_repo_path(model_id: str) -> Optional[Path]:
+    raw = str(model_id or "").strip()
+    if not raw or raw.startswith(("http://", "https://")):
+        return None
+    candidate = Path(raw).expanduser()
+    if candidate.exists():
+        return candidate.resolve()
+    cache_root = (
+        os.environ.get("HUGGINGFACE_HUB_CACHE")
+        or os.environ.get("HF_HUB_CACHE")
+        or os.environ.get("TRANSFORMERS_CACHE")
+    )
+    if cache_root:
+        hub_dir = Path(cache_root).expanduser()
+    else:
+        hf_home = Path(os.environ.get("HF_HOME", "~/.cache/huggingface")).expanduser()
+        hub_dir = hf_home / "hub"
+    return hub_dir / f"models--{raw.replace('/', '--')}"
+
+
+def _qwen_cache_tree_stats(paths: Sequence[Optional[Path]]) -> Dict[str, Any]:
+    total_bytes = 0
+    file_count = 0
+    newest_mtime = 0.0
+    seen: Set[Tuple[int, int]] = set()
+    for root in paths:
+        if root is None:
+            continue
+        try:
+            root_path = Path(root)
+        except Exception:
+            continue
+        if not root_path.exists():
+            continue
+        try:
+            iterator = root_path.rglob("*") if root_path.is_dir() else iter([root_path])
+            for path in iterator:
+                try:
+                    if not path.is_file():
+                        continue
+                    stat_result = path.stat()
+                except Exception:
+                    continue
+                inode_key = (int(getattr(stat_result, "st_dev", 0)), int(getattr(stat_result, "st_ino", 0)))
+                if inode_key in seen:
+                    continue
+                seen.add(inode_key)
+                file_count += 1
+                total_bytes += int(getattr(stat_result, "st_size", 0) or 0)
+                newest_mtime = max(newest_mtime, float(getattr(stat_result, "st_mtime", 0.0) or 0.0))
+        except Exception:
+            continue
+    return {"bytes": total_bytes, "files": file_count, "newest_mtime": newest_mtime}
 
 
 def _qwen_loaded_for_model(model_id: str, platform_name: str) -> bool:
@@ -1562,9 +1658,87 @@ def _qwen_progress_start(
                 "updated_at": now,
                 "completed_at": None,
                 "error": None,
+                "log_lines": [
+                    f"{time.strftime('%H:%M:%S')} queued {kind} for {availability.get('effective_model_id') or model_id or 'Qwen'}",
+                ],
             }
         )
     return run_id
+
+
+def _qwen_progress_log(message: str) -> None:
+    text = str(message or "").strip()
+    if not text:
+        return
+    line = f"{time.strftime('%H:%M:%S')} {text}"
+    with qwen_progress_lock:
+        if not qwen_progress_state.get("active"):
+            return
+        lines = qwen_progress_state.get("log_lines")
+        if not isinstance(lines, list):
+            lines = []
+        lines.append(line)
+        qwen_progress_state["log_lines"] = lines[-80:]
+        qwen_progress_state["updated_at"] = time.time()
+
+
+def _start_qwen_cache_monitor(
+    *,
+    model_id: str,
+    platform: str,
+    phase: str,
+    phase_label: str,
+    paths: Sequence[Optional[Path]],
+    start_progress: float,
+    max_progress: float,
+) -> Tuple[threading.Event, threading.Thread]:
+    stop_event = threading.Event()
+
+    def _monitor() -> None:
+        started = time.time()
+        last_bytes: Optional[int] = None
+        last_change = started
+        last_log = ""
+        while not stop_event.wait(2.0):
+            now = time.time()
+            stats = _qwen_cache_tree_stats(paths)
+            byte_count = int(stats.get("bytes") or 0)
+            file_count = int(stats.get("files") or 0)
+            delta: Optional[int] = None
+            if last_bytes is not None:
+                delta = byte_count - last_bytes
+                if delta > 0:
+                    last_change = now
+            last_bytes = byte_count
+            elapsed = max(0.0, now - started)
+            stale_elapsed = max(0.0, now - last_change)
+            span = max(0.0, max_progress - start_progress)
+            progress = start_progress + span * min(1.0, elapsed / 240.0)
+            message_bits = [
+                f"{_format_qwen_bytes(byte_count)} cached",
+                f"{file_count} files",
+                f"{int(elapsed)}s elapsed",
+            ]
+            if delta is not None and delta > 0:
+                message_bits.append(f"+{_format_qwen_bytes(delta)} since last check")
+            elif stale_elapsed >= 20:
+                message_bits.append(f"no cache growth for {int(stale_elapsed)}s")
+            message = f"{phase_label} {'; '.join(message_bits)}"
+            _qwen_progress_update(
+                phase=phase,
+                phase_label=phase_label,
+                progress=progress,
+                message=message,
+                model_id=model_id,
+                platform=platform,
+            )
+            if message != last_log:
+                _qwen_progress_log(message)
+                last_log = message
+
+    thread = threading.Thread(target=_monitor, name="qwen-cache-monitor", daemon=True)
+    thread.start()
+    return stop_event, thread
 
 
 def _qwen_progress_update(
@@ -1679,6 +1853,18 @@ def _qwen_progress_error(message: str) -> None:
                 "error": message,
             }
         )
+
+
+def _http_exception_detail_text(exc: HTTPException) -> str:
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, str):
+        return detail
+    if detail is None:
+        return ""
+    try:
+        return json.dumps(detail, ensure_ascii=False)
+    except Exception:
+        return str(detail)
 
 
 def qwen_progress() -> Dict[str, Any]:
@@ -3735,12 +3921,204 @@ def _qwen_mlx_dependency_error() -> Optional[str]:
     return None
 
 
+def _qwen_mlx_incompatible_model_detail(model_id: str) -> Optional[str]:
+    metadata = qwen_mlx_metadata_for_model(str(model_id or ""))
+    if (
+        metadata.get("vision_inference_supported") is False
+        or metadata.get("inference_supported") is False
+    ):
+        note = str(metadata.get("compatibility_note") or "").strip()
+        if not note:
+            note = "Selected MLX checkpoint is not marked as compatible with image inference."
+        return f"{model_id}: {note}"
+    return None
+
+
+def _qwen_weight_key_has_language(key: str) -> bool:
+    text = str(key or "")
+    return text.startswith("language_model.") or ".language_model." in text
+
+
+def _qwen_weight_key_has_vision(key: str) -> bool:
+    text = str(key or "")
+    return (
+        text.startswith("vision_tower.")
+        or ".vision_tower." in text
+        or text.startswith("visual.")
+        or ".visual." in text
+        or text.startswith("vision_model.")
+        or ".vision_model." in text
+    )
+
+
+def _qwen_config_is_vision_model(model_id: str, config_path: Optional[Path]) -> bool:
+    config_data: Dict[str, Any] = {}
+    if config_path is not None:
+        try:
+            config_data = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            config_data = {}
+    model_type = str(config_data.get("model_type") or "").lower()
+    return (
+        "vl" in model_type
+        or "vision_start_token_id" in config_data
+        or "vision_end_token_id" in config_data
+        or "qwen3-vl" in str(model_id or "").lower()
+    )
+
+
+def _qwen_mlx_checkpoint_index_incompatibility_detail(
+    model_id: str,
+    index_path: Path,
+    *,
+    config_path: Optional[Path] = None,
+) -> Optional[str]:
+    try:
+        index_data = json.loads(index_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    weight_map = index_data.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        return None
+    keys = [str(key) for key in weight_map.keys()]
+    has_language = any(_qwen_weight_key_has_language(key) for key in keys)
+    has_vision = any(_qwen_weight_key_has_vision(key) for key in keys)
+    if not has_language or has_vision:
+        return None
+    resolved_config_path = config_path or index_path.with_name("config.json")
+    if not _qwen_config_is_vision_model(str(model_id), resolved_config_path):
+        return None
+    return (
+        f"{model_id}: checkpoint advertises a Qwen3-VL config, but its safetensor index "
+        "contains language weights and no visual/vision weights. It cannot run image "
+        "captioning or detection; select a full Qwen3-VL MLX checkpoint."
+    )
+
+
+def _qwen_mlx_cached_checkpoint_incompatibility_detail(
+    model_id: str, availability: Mapping[str, Any]
+) -> Optional[str]:
+    candidate_paths: List[Path] = []
+    for raw_path in (
+        availability.get("cache_path") if isinstance(availability, Mapping) else None,
+        _qwen_cache_repo_path(str(model_id)),
+    ):
+        if not raw_path:
+            continue
+        try:
+            path = Path(str(raw_path)).expanduser()
+        except Exception:
+            continue
+        if path.exists() and path not in candidate_paths:
+            candidate_paths.append(path)
+
+    index_paths: List[Path] = []
+    for base in candidate_paths:
+        direct = base / "model.safetensors.index.json"
+        if direct.exists():
+            index_paths.append(direct)
+        try:
+            index_paths.extend(base.glob("snapshots/*/model.safetensors.index.json"))
+        except Exception:
+            continue
+
+    seen: Set[Path] = set()
+    for index_path in index_paths:
+        if index_path in seen:
+            continue
+        seen.add(index_path)
+        detail = _qwen_mlx_checkpoint_index_incompatibility_detail(model_id, index_path)
+        if detail:
+            return detail
+    return None
+
+
+def _qwen_mlx_cached_model_incompatibility_detail(model_id: str) -> Optional[str]:
+    availability = {"cache_path": _qwen_cache_snapshot_path(str(model_id))}
+    return _qwen_mlx_cached_checkpoint_incompatibility_detail(str(model_id), availability)
+
+
+def _qwen_mlx_remote_checkpoint_incompatibility_detail(model_id: str) -> Optional[str]:
+    raw = str(model_id or "").strip()
+    if not raw or raw.startswith(("http://", "https://")):
+        return None
+    if Path(raw).expanduser().exists():
+        return None
+    try:
+        from huggingface_hub import hf_hub_download
+    except Exception:
+        return None
+    try:
+        config_path = Path(hf_hub_download(raw, "config.json"))
+    except Exception:
+        config_path = None
+    try:
+        index_path = Path(hf_hub_download(raw, "model.safetensors.index.json"))
+    except Exception:
+        return None
+    return _qwen_mlx_checkpoint_index_incompatibility_detail(
+        raw,
+        index_path,
+        config_path=config_path,
+    )
+
+
+def _effective_qwen_mlx_settings_model_id() -> str:
+    if _qwen_mlx_incompatible_model_detail(QWEN_MLX_MODEL_NAME):
+        return QWEN_MLX_DEFAULT_MODEL
+    if _qwen_mlx_cached_model_incompatibility_detail(QWEN_MLX_MODEL_NAME):
+        return QWEN_MLX_DEFAULT_MODEL
+    return QWEN_MLX_MODEL_NAME
+
+
+def _qwen_mlx_entry_with_runtime_state(entry: Mapping[str, Any]) -> Dict[str, Any]:
+    item = dict(entry)
+    model_id = str(item.get("id") or item.get("model_id") or "").strip()
+    if not model_id:
+        return item
+    availability = _qwen_model_local_state(model_id, QWEN_PLATFORM_MLX)
+    item["availability"] = availability
+    cached_incompatible = _qwen_mlx_cached_checkpoint_incompatibility_detail(
+        model_id, availability
+    )
+    if cached_incompatible:
+        item["vision_inference_supported"] = False
+        item["inference_supported"] = False
+        item["training_supported"] = False
+        item["compatibility_note"] = cached_incompatible
+        item["training_note"] = cached_incompatible
+    return item
+
+
+def _qwen_mlx_runtime_model_options() -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    for entry in QWEN_MLX_MODEL_OPTIONS:
+        enriched = _qwen_mlx_entry_with_runtime_state(entry)
+        if (
+            enriched.get("vision_inference_supported") is False
+            or enriched.get("inference_supported") is False
+        ):
+            continue
+        entries.append(enriched)
+    return entries
+
+
+def _bind_mlx_generation_stream_for_current_thread() -> None:
+    if MLX_CORE is None:
+        return
+    try:
+        generate_module = importlib.import_module("mlx_vlm.generate")
+        generate_module.generation_stream = MLX_CORE.new_stream(MLX_CORE.default_device())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[qwen] unable to bind MLX generation stream for current thread: %s", exc)
+
+
 def _effective_qwen_model_id_for_platform(model_id: Optional[str], platform_name: str) -> str:
     raw = str(model_id or QWEN_MODEL_NAME).strip() or QWEN_MODEL_NAME
     if platform_name == QWEN_PLATFORM_MLX:
         return resolve_mlx_model_id(
             raw,
-            default_mlx_model_id=QWEN_MLX_MODEL_NAME,
+            default_mlx_model_id=_effective_qwen_mlx_settings_model_id(),
             default_quantization=QWEN_MLX_DEFAULT_QUANTIZATION,
         )
     return raw
@@ -3751,7 +4129,26 @@ def _load_qwen_mlx_runtime(model_id: str, adapter_path: Optional[Path] = None) -
         detail = _qwen_mlx_dependency_error() or "mlx_vlm_unavailable"
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_mlx_missing:{detail}")
     resolved_model_id = _effective_qwen_model_id_for_platform(model_id, QWEN_PLATFORM_MLX)
+    incompatible_detail = _qwen_mlx_incompatible_model_detail(str(resolved_model_id))
+    if incompatible_detail:
+        detail = f"qwen_mlx_incompatible_checkpoint:{incompatible_detail}"
+        _qwen_progress_error(f"MLX Qwen model is not image-compatible: {incompatible_detail}")
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     availability = _qwen_model_local_state(resolved_model_id, QWEN_PLATFORM_MLX)
+    cached_incompatible_detail = _qwen_mlx_cached_checkpoint_incompatibility_detail(
+        str(resolved_model_id), availability
+    )
+    if cached_incompatible_detail:
+        detail = f"qwen_mlx_incompatible_checkpoint:{cached_incompatible_detail}"
+        _qwen_progress_error(f"MLX Qwen model is not image-compatible: {cached_incompatible_detail}")
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    remote_incompatible_detail = _qwen_mlx_remote_checkpoint_incompatibility_detail(
+        str(resolved_model_id)
+    )
+    if remote_incompatible_detail:
+        detail = f"qwen_mlx_incompatible_checkpoint:{remote_incompatible_detail}"
+        _qwen_progress_error(f"MLX Qwen model is not image-compatible: {remote_incompatible_detail}")
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     _qwen_progress_update(
         phase="download" if availability.get("needs_download") else "load",
         phase_label="Downloading" if availability.get("needs_download") else "Loading",
@@ -3768,12 +4165,42 @@ def _load_qwen_mlx_runtime(model_id: str, adapter_path: Optional[Path] = None) -
         load_kwargs = {}
         if adapter_path:
             load_kwargs["adapter_path"] = str(adapter_path)
-        model_local, processor_local = MLX_VLM_LOAD(str(resolved_model_id), **load_kwargs)
+        monitor_paths = [
+            availability.get("cache_path") and Path(str(availability.get("cache_path"))),
+            _qwen_cache_repo_path(str(resolved_model_id)),
+        ]
+        stop_monitor, monitor_thread = _start_qwen_cache_monitor(
+            model_id=str(resolved_model_id),
+            platform=QWEN_PLATFORM_MLX,
+            phase="download" if availability.get("needs_download") else "load",
+            phase_label="Downloading" if availability.get("needs_download") else "Loading",
+            paths=monitor_paths,
+            start_progress=0.10 if availability.get("needs_download") else 0.18,
+            max_progress=0.34 if availability.get("needs_download") else 0.36,
+        )
+        try:
+            model_local, processor_local = MLX_VLM_LOAD(str(resolved_model_id), **load_kwargs)
+        finally:
+            stop_monitor.set()
+            monitor_thread.join(timeout=1.0)
     except Exception as exc:  # noqa: BLE001
+        detail = _format_qwen_load_error_impl(exc, torch_module=torch)
+        _qwen_progress_log(f"MLX Qwen load failed: {detail}")
         raise HTTPException(
             status_code=HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"qwen_mlx_load_failed:{exc}",
+            detail=f"qwen_mlx_load_failed:{detail}",
         ) from exc
+    final_stats = _qwen_cache_tree_stats(
+        [
+            availability.get("cache_path") and Path(str(availability.get("cache_path"))),
+            _qwen_cache_repo_path(str(resolved_model_id)),
+        ]
+    )
+    _qwen_progress_log(
+        "MLX Qwen load returned; "
+        f"{_format_qwen_bytes(int(final_stats.get('bytes') or 0))} cached across "
+        f"{int(final_stats.get('files') or 0)} files"
+    )
     _qwen_progress_update(
         phase="load",
         phase_label="Loaded",
@@ -4458,6 +4885,13 @@ def _mlx_generation_kwargs(
     else:
         kwargs["temperature"] = 0.0
         kwargs["top_p"] = 1.0
+    if decode_override is not None:
+        repetition_penalty = decode_override.get("repetition_penalty")
+        repetition_context_size = decode_override.get("repetition_context_size")
+        if repetition_penalty is not None:
+            kwargs["repetition_penalty"] = float(repetition_penalty)
+        if repetition_context_size is not None:
+            kwargs["repetition_context_size"] = int(repetition_context_size)
     kwargs["skip_special_tokens"] = True
     return kwargs
 
@@ -4485,40 +4919,43 @@ def _run_qwen_chat_mlx(
     if assistant_prefix:
         prompt = f"{prompt}{assistant_prefix}"
     gen_kwargs = _mlx_generation_kwargs(max_new_tokens, decode_override)
-    if MLX_VLM_STREAM_GENERATE is not None:
-        try:
-            pieces: List[str] = []
-            for result in MLX_VLM_STREAM_GENERATE(
-                runtime.model,
-                runtime.processor,
-                prompt,
-                image=image_inputs or None,
-                **gen_kwargs,
-            ):
-                piece = str(getattr(result, "text", result) or "")
-                if not piece:
-                    continue
-                pieces.append(piece)
-                generation_tokens = getattr(result, "generation_tokens", None)
-                _qwen_progress_token(
-                    piece,
-                    generated_tokens=(
-                        int(generation_tokens) if generation_tokens is not None else None
-                    ),
-                    max_new_tokens=max_new_tokens,
-                )
-            output_text = "".join(pieces)
-            if output_text:
-                return output_text
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[qwen] mlx streaming failed; falling back to blocking generate: %s", exc)
-    result = MLX_VLM_GENERATE(
-        runtime.model,
-        runtime.processor,
-        prompt,
-        image=image_inputs or None,
-        **gen_kwargs,
-    )
+    with qwen_mlx_generation_lock:
+        _bind_mlx_generation_stream_for_current_thread()
+        if MLX_VLM_STREAM_GENERATE is not None:
+            try:
+                pieces: List[str] = []
+                for result in MLX_VLM_STREAM_GENERATE(
+                    runtime.model,
+                    runtime.processor,
+                    prompt,
+                    image=image_inputs or None,
+                    **gen_kwargs,
+                ):
+                    piece = str(getattr(result, "text", result) or "")
+                    if not piece:
+                        continue
+                    pieces.append(piece)
+                    generation_tokens = getattr(result, "generation_tokens", None)
+                    _qwen_progress_token(
+                        piece,
+                        generated_tokens=(
+                            int(generation_tokens) if generation_tokens is not None else None
+                        ),
+                        max_new_tokens=max_new_tokens,
+                    )
+                output_text = "".join(pieces)
+                if output_text:
+                    return output_text
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[qwen] mlx streaming failed; falling back to blocking generate: %s", exc)
+                _bind_mlx_generation_stream_for_current_thread()
+        result = MLX_VLM_GENERATE(
+            runtime.model,
+            runtime.processor,
+            prompt,
+            image=image_inputs or None,
+            **gen_kwargs,
+        )
     output_text = str(getattr(result, "text", result) or "")
     _qwen_progress_update(
         phase="generate",
@@ -4769,11 +5206,17 @@ def _run_qwen_inference(
         top_p = QWEN_TOP_P
         top_k = None
         presence_penalty = None
+        repetition_penalty = None
+        no_repeat_ngram_size = None
         if decode_override is not None:
             temperature = decode_override.get("temperature", temperature)
             top_p = decode_override.get("top_p", top_p)
             top_k = decode_override.get("top_k", top_k)
             presence_penalty = decode_override.get("presence_penalty", presence_penalty)
+            repetition_penalty = decode_override.get("repetition_penalty", repetition_penalty)
+            no_repeat_ngram_size = decode_override.get(
+                "no_repeat_ngram_size", no_repeat_ngram_size
+            )
         gen_kwargs.update(
             {
                 "do_sample": True,
@@ -4787,6 +5230,14 @@ def _run_qwen_inference(
             gen_kwargs["presence_penalty"] = float(presence_penalty)
     else:
         gen_kwargs["do_sample"] = False
+        repetition_penalty = decode_override.get("repetition_penalty") if decode_override else None
+        no_repeat_ngram_size = (
+            decode_override.get("no_repeat_ngram_size") if decode_override else None
+        )
+    if repetition_penalty is not None:
+        gen_kwargs["repetition_penalty"] = float(repetition_penalty)
+    if no_repeat_ngram_size is not None:
+        gen_kwargs["no_repeat_ngram_size"] = int(no_repeat_ngram_size)
     _qwen_progress_update(
         phase="generate",
         phase_label="Generating",
@@ -24708,6 +25159,12 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
     mlx_entries: List[Dict[str, Any]] = []
     for entry in QWEN_MLX_MODEL_OPTIONS:
         model_id = str(entry.get("id") or entry.get("model_id") or "")
+        vision_supported = entry.get("vision_inference_supported", True) is not False
+        training_supported = bool(entry.get("training_supported", True)) and vision_supported
+        default_training_note = (
+            "MLX-VLM trains LoRA adapters directly on Apple Silicon. Quantized MLX checkpoints use "
+            "the same adapter path as QLoRA-style training."
+        )
         metadata = {
             "id": model_id,
             "label": str(entry.get("label") or model_id),
@@ -24722,13 +25179,13 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
             "abliterated": bool(entry.get("abliterated")),
             "variant": entry.get("variant"),
             "size": entry.get("size"),
-            "training_supported": True,
-            "training_modes": ["official_lora", "trl_qlora"],
+            "vision_inference_supported": vision_supported,
+            "inference_supported": vision_supported,
+            "compatibility_note": entry.get("compatibility_note"),
+            "training_supported": training_supported,
+            "training_modes": ["official_lora", "trl_qlora"] if training_supported else [],
             "training_model_id": model_id,
-            "training_note": (
-                "MLX-VLM trains LoRA adapters directly on Apple Silicon. Quantized MLX checkpoints use "
-                "the same adapter path as QLoRA-style training."
-            ),
+            "training_note": entry.get("training_note") or default_training_note,
             "min_pixels": QWEN_MIN_PIXELS,
             "max_pixels": QWEN_MAX_PIXELS,
         }
@@ -24773,6 +25230,18 @@ def list_qwen_models():
             platform_name,
             entry_path=entry.get("path"),
         )
+        if entry.get("type") == "builtin_mlx" and isinstance(metadata, dict):
+            cached_incompatible = _qwen_mlx_cached_checkpoint_incompatibility_detail(
+                str(metadata.get("model_id") or entry.get("id")),
+                availability,
+            )
+            if cached_incompatible:
+                metadata["vision_inference_supported"] = False
+                metadata["inference_supported"] = False
+                metadata["training_supported"] = False
+                metadata["training_modes"] = []
+                metadata["compatibility_note"] = cached_incompatible
+                metadata["training_note"] = cached_incompatible
         entry["availability"] = availability
         if isinstance(metadata, dict):
             metadata["availability"] = availability
@@ -24816,7 +25285,19 @@ def activate_qwen_model(payload: QwenModelActivateRequest):
                 if builtin.get("type") == "builtin_mlx"
                 else qwen_transformers_metadata_for_model(model_id)
             )
-            _set_active_qwen_model_builtin(model_id, builtin.get("metadata") or fallback_metadata)
+            metadata = builtin.get("metadata") or fallback_metadata
+            if builtin.get("type") == "builtin_mlx" and (
+                metadata.get("vision_inference_supported") is False
+                or metadata.get("inference_supported") is False
+            ):
+                note = str(metadata.get("compatibility_note") or "").strip()
+                if not note:
+                    note = "Selected MLX checkpoint is not compatible with image inference."
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail=f"qwen_mlx_incompatible_checkpoint:{model_id}: {note}",
+                )
+            _set_active_qwen_model_builtin(model_id, metadata)
         else:
             entry = _get_qwen_model_entry(model_id)
             if not entry:
@@ -25429,6 +25910,7 @@ app.include_router(
 
 
 def qwen_status():
+    effective_mlx_model_id = _effective_qwen_mlx_settings_model_id()
     platform_name = _resolve_qwen_runtime_platform(
         (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
         adapter_path=active_qwen_model_path,
@@ -25464,7 +25946,7 @@ def qwen_status():
         "platform": platform_name,
         "configured_platform": QWEN_INFERENCE_PLATFORM,
         "runtime_platform": qwen_runtime_platform or platform_name,
-        "mlx_model_name": QWEN_MLX_MODEL_NAME,
+        "mlx_model_name": effective_mlx_model_id,
         "mlx_available": _qwen_mlx_dependency_error() is None,
         "mlx_dependency_error": _qwen_mlx_dependency_error(),
         "max_new_tokens": QWEN_MAX_NEW_TOKENS,
@@ -25479,7 +25961,7 @@ def qwen_status():
         "vram": memory,
         "progress": qwen_progress(),
         "transformers_models": QWEN_TRANSFORMERS_MODEL_OPTIONS,
-        "mlx_models": QWEN_MLX_MODEL_OPTIONS,
+        "mlx_models": QWEN_MLX_VISION_MODEL_OPTIONS,
     }
 
 
@@ -25487,9 +25969,9 @@ def qwen_settings():
     return QwenRuntimeSettings(
         trust_remote_code=QWEN_TRUST_REMOTE_CODE,
         inference_platform=QWEN_INFERENCE_PLATFORM,
-        mlx_model_id=QWEN_MLX_MODEL_NAME,
+        mlx_model_id=_effective_qwen_mlx_settings_model_id(),
         mlx_available=_qwen_mlx_dependency_error() is None,
-        mlx_models=QWEN_MLX_MODEL_OPTIONS,
+        mlx_models=_qwen_mlx_runtime_model_options(),
     )
 
 
@@ -25508,6 +25990,12 @@ def update_qwen_settings(payload: QwenRuntimeSettingsUpdate):
             needs_unload = True
     if payload.mlx_model_id is not None:
         desired_mlx_model = str(payload.mlx_model_id or "").strip() or QWEN_MLX_DEFAULT_MODEL
+        incompatible_detail = _qwen_mlx_incompatible_model_detail(desired_mlx_model)
+        if incompatible_detail:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"qwen_mlx_incompatible_checkpoint:{incompatible_detail}",
+            )
         if desired_mlx_model != QWEN_MLX_MODEL_NAME:
             QWEN_MLX_MODEL_NAME = desired_mlx_model
             needs_unload = True
@@ -25610,8 +26098,11 @@ def qwen_infer(payload: QwenInferenceRequest):
             message="Preparing image for Qwen inference",
         )
         qwen_text, proc_w, proc_h = _run_qwen_inference(final_prompt, pil_img)
-    except HTTPException:
-        _qwen_progress_error("Qwen inference failed")
+    except HTTPException as exc:
+        detail = _http_exception_detail_text(exc)
+        _qwen_progress_error(
+            f"Qwen inference failed: {detail}" if detail else "Qwen inference failed"
+        )
         raise
     except Exception as exc:  # noqa: BLE001
         _qwen_progress_error(f"Qwen inference failed: {exc}")
@@ -25855,7 +26346,12 @@ def qwen_caption(payload: QwenCaptionRequest):
         two_stage = bool(payload.two_stage_refine)
         is_thinking = "Thinking" in desired_model_id or variant == "Thinking"
         decode_params = _resolve_qwen_caption_decode_impl(payload, is_thinking)
-        deterministic_decode = {"do_sample": False}
+        deterministic_decode = {
+            "do_sample": False,
+            "repetition_penalty": 1.08,
+            "repetition_context_size": 128,
+            "no_repeat_ngram_size": 8,
+        }
         if is_thinking:
             prompt_text = _adjust_prompt_for_thinking_impl(prompt_text)
         # Keep caption max_new_tokens consistent across full/windowed/refine paths; cap at 2000.
@@ -25864,14 +26360,16 @@ def qwen_caption(payload: QwenCaptionRequest):
             max_new_tokens = max(max_new_tokens, 2000)
         max_new_tokens = min(max_new_tokens, 2000)
         refine_max_tokens = max_new_tokens
-        system_prompt = (
+        default_system_prompt = (
             "You are a detailed captioning assistant. Use the image as truth. "
             "Provide a rich, multi-sentence caption when there is a lot to see. "
             "Do not mention labels, hints, bounding boxes, coordinates, or that counts were provided. "
             "Do not output labelmap tags (e.g., light_vehicle). Use natural words like car, van, SUV. "
             "Avoid any label tokens that contain underscores. "
-            "If the hints conflict with the image, mention the uncertainty briefly."
+            "If the hints conflict with the image, mention the uncertainty briefly. "
+            "Stop when the caption is complete; never repeat a sentence or keep writing to fill the token budget."
         )
+        system_prompt = (payload.caption_system_prompt or "").strip() or default_system_prompt
         system_prompt = f"{system_prompt} Respond in English only."
         if final_only:
             system_prompt = f"{system_prompt} Return only the final caption. Do not include reasoning or preamble."
@@ -26271,8 +26769,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 decode_override=deterministic_decode,
             )
             caption_text, _ = _extract_caption_from_text_impl(qwen_text, marker=None)
-            if final_only or is_thinking:
-                caption_text = _sanitize_qwen_caption_impl(caption_text)
+            caption_text = _sanitize_qwen_caption_impl(caption_text)
         else:
             _qwen_progress_update(
                 phase="generate",
@@ -26290,8 +26787,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 decode_override=decode_params,
             )
             caption_text, _ = _extract_caption_from_text_impl(qwen_text, marker=None)
-            if final_only or is_thinking:
-                caption_text = _sanitize_qwen_caption_impl(caption_text)
+            caption_text = _sanitize_qwen_caption_impl(caption_text)
             if is_thinking and _thinking_caption_needs_cleanup_impl(caption_text, qwen_text):
                 cleanup_model = _resolve_qwen_variant_model_id_impl(
                     caption_base_model_id, "Instruct"
@@ -26331,8 +26827,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 glossary_line=glossary_line or None,
             )
             merge_count += 1
-            if final_only or is_thinking:
-                caption_text = _sanitize_qwen_caption_impl(caption_text)
+            caption_text = _sanitize_qwen_caption_impl(caption_text)
         if _caption_is_degenerate_impl(caption_text):
             cleanup_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
             _qwen_progress_update(
@@ -26473,8 +26968,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                 decode_override=deterministic_decode,
             )
             caption_text, _ = _extract_caption_from_text_impl(rewrite_text, marker=None)
-            if final_only or is_thinking:
-                caption_text = _sanitize_qwen_caption_impl(caption_text)
+            caption_text = _sanitize_qwen_caption_impl(caption_text)
+        caption_text = _sanitize_qwen_caption_impl(caption_text)
         response = QwenCaptionResponse(
             caption=caption_text,
             used_counts=counts,
@@ -26503,8 +26998,11 @@ def qwen_caption(payload: QwenCaptionRequest):
             merge_count,
             word_count,
         )
-    except HTTPException:
-        _qwen_progress_error("Qwen caption failed")
+    except HTTPException as exc:
+        detail = _http_exception_detail_text(exc)
+        _qwen_progress_error(
+            f"Qwen caption failed: {detail}" if detail else "Qwen caption failed"
+        )
         if force_unload:
             logger.warning("[qwen-caption] exception -> forcing unload")
             request_model_cache.clear()
@@ -26580,8 +27078,11 @@ def qwen_prepass(payload: QwenPrepassRequest):
         result = _run_prepass_annotation(payload)
         _qwen_progress_finish("EDR prepass complete")
         return result
-    except HTTPException:
-        _qwen_progress_error("EDR prepass failed")
+    except HTTPException as exc:
+        detail = _http_exception_detail_text(exc)
+        _qwen_progress_error(
+            f"EDR prepass failed: {detail}" if detail else "EDR prepass failed"
+        )
         raise
     except Exception as exc:  # noqa: BLE001
         _qwen_progress_error(f"EDR prepass failed: {exc}")

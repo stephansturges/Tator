@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -71,7 +72,6 @@ def test_qwen_model_registry_exposes_abliterated_mlx_models():
         "EZCon/Huihui-Qwen3-VL-2B-Thinking-abliterated-8bit-mlx",
         "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx",
         "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx",
-        "introvoyz041/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx-mlx-4Bit",
         "veeceey/Huihui-Qwen3-VL-8B-Instruct-abliterated-mlx-4bit",
         "Goekdeniz-Guelmez/Josiefied-Qwen3-VL-4B-Instruct-abliterated-beta-v1",
     }
@@ -83,6 +83,16 @@ def test_qwen_model_registry_exposes_abliterated_mlx_models():
         assert by_id[model_id]["metadata"]["abliterated"] is True
         assert by_id[model_id]["metadata"]["training_supported"] is True
         assert by_id[model_id]["metadata"]["training_modes"] == ["official_lora", "trl_qlora"]
+    for model_id in (
+        "introvoyz041/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx-mlx-4Bit",
+        "introvoyz041/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx-mlx-4Bit",
+    ):
+        assert model_id in by_id
+        assert by_id[model_id]["type"] == "builtin_mlx"
+        assert by_id[model_id]["metadata"]["abliterated"] is True
+        assert by_id[model_id]["metadata"]["vision_inference_supported"] is False
+        assert by_id[model_id]["metadata"]["training_supported"] is False
+        assert by_id[model_id]["metadata"]["training_modes"] == []
 
 
 def test_qwen_training_config_accepts_moe_transformers_model(tmp_path, monkeypatch):
@@ -135,6 +145,9 @@ def test_qwen_mlx_runtime_loads_adapter_path(monkeypatch, tmp_path):
     monkeypatch.setattr(api, "MLX_VLM_GENERATE", object())
     monkeypatch.setattr(api, "MLX_VLM_IMPORT_ERROR", None)
     monkeypatch.setattr(api, "MLX_LOAD_CONFIG", None)
+    monkeypatch.setattr(
+        api, "_qwen_mlx_remote_checkpoint_incompatibility_detail", lambda _model_id: None
+    )
 
     runtime = api._load_qwen_mlx_runtime(
         "mlx-community/Qwen3-VL-4B-Instruct-4bit",
@@ -144,6 +157,147 @@ def test_qwen_mlx_runtime_loads_adapter_path(monkeypatch, tmp_path):
     assert runtime.platform == api.QWEN_PLATFORM_MLX
     assert calls["model_id"] == "mlx-community/Qwen3-VL-4B-Instruct-4bit"
     assert calls["kwargs"]["adapter_path"] == str(adapter_dir)
+
+
+def test_qwen_mlx_runtime_rejects_language_only_repack(monkeypatch):
+    bad_model_id = (
+        "introvoyz041/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx-mlx-4Bit"
+    )
+
+    def fail_load(*_args, **_kwargs):
+        raise AssertionError("incompatible MLX repack should be rejected before load")
+
+    monkeypatch.setattr(api, "MLX_VLM_LOAD", fail_load)
+    monkeypatch.setattr(api, "MLX_VLM_GENERATE", object())
+    monkeypatch.setattr(api, "MLX_VLM_IMPORT_ERROR", None)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._load_qwen_mlx_runtime(bad_model_id)
+
+    assert excinfo.value.status_code == 400
+    assert "qwen_mlx_incompatible_checkpoint" in str(excinfo.value.detail)
+    assert "no vision_tower weights" in str(excinfo.value.detail)
+
+
+def test_qwen_settings_excludes_language_only_mlx_repack_options():
+    bad_model_id = (
+        "introvoyz041/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx-mlx-4Bit"
+    )
+
+    settings = api.qwen_settings()
+
+    assert bad_model_id not in {entry["id"] for entry in settings.mlx_models}
+
+
+def test_qwen_settings_mlx_options_include_cache_availability():
+    settings = api.qwen_settings()
+
+    assert settings.mlx_models
+    availability = settings.mlx_models[0].get("availability")
+    assert availability is not None
+    assert {"local", "partial", "needs_download", "loaded"} <= set(availability)
+
+
+def test_qwen_cache_snapshot_path_prefers_hf_snapshot_dir(tmp_path, monkeypatch):
+    model_id = "owner/model"
+    commit = "abc123"
+    repo = tmp_path / "hub" / "models--owner--model"
+    snapshot = repo / "snapshots" / commit
+    snapshot.mkdir(parents=True)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text(commit, encoding="utf-8")
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+    (snapshot / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"model.visual.blocks.0.weight": "model.safetensors"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HF_HOME", str(tmp_path))
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_CACHE", raising=False)
+
+    assert api._qwen_cache_snapshot_path(model_id) == snapshot.resolve()
+
+
+def test_qwen_settings_excludes_cached_language_only_mlx_options(monkeypatch):
+    bad_model_id = "mlx-community/Qwen3-VL-2B-Instruct-4bit"
+
+    def fake_cached_incompatibility(model_id, _availability):
+        if model_id == bad_model_id:
+            return f"{model_id}: language-only checkpoint"
+        return None
+
+    monkeypatch.setattr(
+        api,
+        "_qwen_mlx_cached_checkpoint_incompatibility_detail",
+        fake_cached_incompatibility,
+    )
+
+    settings = api.qwen_settings()
+
+    assert bad_model_id not in {entry["id"] for entry in settings.mlx_models}
+
+
+def test_qwen_mlx_checkpoint_index_detects_missing_visual_weights(tmp_path):
+    index_path = tmp_path / "model.safetensors.index.json"
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps({"model_type": "qwen3_vl", "vision_start_token_id": 151652}),
+        encoding="utf-8",
+    )
+    index_path.write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "model.language_model.layers.0.self_attn.q_proj.weight": "model.safetensors",
+                    "model.language_model.layers.0.mlp.up_proj.weight": "model.safetensors",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    detail = api._qwen_mlx_checkpoint_index_incompatibility_detail(
+        "example/Qwen3-VL-language-only", index_path
+    )
+
+    assert detail is not None
+    assert "no visual/vision weights" in detail
+
+
+def test_qwen_mlx_checkpoint_index_accepts_visual_weights(tmp_path):
+    index_path = tmp_path / "model.safetensors.index.json"
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"model_type": "qwen3_vl"}), encoding="utf-8")
+    index_path.write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "model.language_model.layers.0.self_attn.q_proj.weight": "model.safetensors",
+                    "model.visual.blocks.0.attn.qkv.weight": "model.safetensors",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    detail = api._qwen_mlx_checkpoint_index_incompatibility_detail(
+        "example/Qwen3-VL-full", index_path
+    )
+
+    assert detail is None
+
+
+def test_qwen_activation_rejects_language_only_mlx_repack():
+    bad_model_id = (
+        "introvoyz041/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx-mlx-4Bit"
+    )
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.activate_qwen_model(api.QwenModelActivateRequest(model_id=bad_model_id))
+
+    assert excinfo.value.status_code == 400
+    assert "qwen_mlx_incompatible_checkpoint" in str(excinfo.value.detail)
 
 
 def test_qwen_mlx_model_id_resolution_maps_hf_to_quantized_default():

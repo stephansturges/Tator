@@ -1,14 +1,17 @@
 accelerate==1.12.0
 bitsandbytes==0.48.2
+compressed-tensors==0.15.0.1
 datasets==4.4.2
 decord==0.6.0
 einops==0.8.1
 fastapi==0.121.2
 fsspec==2025.10.0
+gptqmodel==7.0.0
 huggingface_hub==0.36.0
 lightning==2.5.6
 nltk==3.9.2
 numpy==1.26.0
+optimum==2.1.0
 peft==0.18.0
 pydantic==2.12.5
 qwen-agent==0.0.31

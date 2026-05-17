@@ -2,35 +2,28 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_DIR="${1:-$ROOT_DIR/.venv}"
+if [[ $# -gt 0 && "$1" != --* ]]; then
+  ENV_DIR="$1"
+  shift
+else
+  ENV_DIR="$ROOT_DIR/.venv"
+fi
 INSTALL_DEV="${INSTALL_DEV:-0}"
-
-python3 -m venv "$ENV_DIR"
-# shellcheck disable=SC1090
-source "$ENV_DIR/bin/activate"
-
-python -m pip install --upgrade pip setuptools wheel
-
-# Falcon-Perception works better on newer PyTorch FlexAttention, but we do not
-# need a local CUDA toolkit install for this wheel-based path.
-python -m pip install \
-  --index-url https://download.pytorch.org/whl/cu118 \
-  torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1
-
-python -m pip install -r "$ROOT_DIR/requirements.txt" -c "$ROOT_DIR/constraints/falcon-cu118.txt"
+ARGS=(falcon-cu118 --venv-dir "$ENV_DIR")
+DRY_RUN=0
+for arg in "$@"; do
+  if [[ "$arg" == "--dry-run" ]]; then
+    DRY_RUN=1
+  fi
+done
 
 if [[ "$INSTALL_DEV" == "1" ]]; then
-  python -m pip install -r "$ROOT_DIR/requirements-dev.txt" -c "$ROOT_DIR/constraints/falcon-cu118.txt"
+  ARGS+=(--dev)
 fi
 
-PIP_CHECK_OUTPUT="$(python -m pip check 2>&1 || true)"
-if [[ -n "$PIP_CHECK_OUTPUT" ]]; then
-  if [[ "$PIP_CHECK_OUTPUT" == "decord 0.6.0 is not supported on this platform" ]]; then
-    echo "Ignoring known pip check false positive: $PIP_CHECK_OUTPUT"
-  else
-    echo "$PIP_CHECK_OUTPUT" >&2
-    exit 1
-  fi
+python3 "$ROOT_DIR/tools/setup_env.py" "${ARGS[@]}" "$@"
+if [[ "$DRY_RUN" == "1" ]]; then
+  exit 0
 fi
 
 cat <<EOF

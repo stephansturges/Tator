@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20260516j" rel="stylesheet">
+    <link href="ybat.css?v=20260516k" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
          before we call listenImageCrop().
@@ -11,7 +11,7 @@
     <script src="canvas.min.js?v=20260409a"></script>
     <script src="jszip.min.js?v=20260409a"></script>
     <script src="filesaver.min.js?v=20260409a"></script>
-    <script src="ybat.js?v=20260516j"></script>
+    <script src="ybat.js?v=20260516k"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -1514,7 +1514,7 @@
                                 <select id="qwenTrainModelPreset">
                                     <option value="">Use size/variant picker</option>
                                 </select>
-                                <div class="training-help">CUDA AWQ/GPTQ entries train adapters from the matching full checkpoint; QLoRA applies bitsandbytes 4-bit during training.</div>
+                                <div class="training-help">CUDA FP8/AWQ/GPTQ entries train adapters from the matching full checkpoint; QLoRA applies bitsandbytes 4-bit during training.</div>
                             </div>
                             <div class="training-grid">
                                 <div>
@@ -1537,7 +1537,7 @@
                             <div class="training-help">Resolved model ID: <code id="qwenTrainModelIdPreview">Qwen/Qwen3-VL-4B-Instruct</code></div>
                             <div class="training-help" id="qwenTrainVramEstimate">Estimated VRAM: --</div>
                             <div class="training-help" id="qwenTrainVramBreakdown">VRAM budget: --</div>
-                            <div class="training-help">Tip: on 48GB GPUs, 8B/32B usually require QLoRA. Official LoRA is best for 2B/4B.</div>
+                            <div class="training-help">CUDA and MLX presets are both trainable. Quantized CUDA presets resolve to the full checkpoint for bitsandbytes QLoRA; quantized MLX presets train MLX-VLM LoRA adapters directly.</div>
                         </div>
                         <div class="training-field">
                             <label for="qwenTrainSystemPrompt">System prompt</label>
@@ -1550,14 +1550,14 @@
                                 <input type="radio" name="qwenTrainMode" value="official_lora" checked />
                                 <span>
                                     <strong>Official LoRA (default)</strong>
-                                    <small>Qwen3 training recipe with LoRA adapters on the full-precision base model.</small>
+                                    <small>Transformers LoRA on CUDA, or MLX-VLM LoRA when an MLX model is selected.</small>
                                 </span>
                             </label>
                             <label class="qwen-radio">
                                 <input type="radio" name="qwenTrainMode" value="trl_qlora" />
                                 <span>
                                     <strong>TRL QLoRA</strong>
-                                    <small>4-bit NF4 quantization + adapters via TRL. Use when GPU memory is tight.</small>
+                                    <small>CUDA uses bitsandbytes NF4 + TRL; MLX uses quantized MLX checkpoints with LoRA adapters.</small>
                                 </span>
                             </label>
                         </fieldset>
@@ -1619,7 +1619,7 @@
                             <div>
                                 <label for="qwenTrainLoraTargets">LoRA target modules</label>
                                 <input type="text" id="qwenTrainLoraTargets" value="q_proj,k_proj,v_proj,o_proj" />
-                                <div class="training-help">Comma-separated module names.</div>
+                                <div class="training-help">Comma-separated module names for the CUDA PEFT path. Use all-linear for broad QLoRA targeting.</div>
                             </div>
                         </div>
                         <div class="training-actions">

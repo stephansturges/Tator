@@ -28,17 +28,21 @@ except Exception:  # noqa: BLE001
 
 try:
     from transformers import (
+        AutoConfig,
         AutoProcessor,
         BitsAndBytesConfig,
         Qwen3VLForConditionalGeneration,
+        Qwen3VLMoeForConditionalGeneration,
         Trainer,
         TrainerCallback,
         TrainingArguments,
     )
 except Exception as exc:  # noqa: BLE001
     AutoProcessor = None  # type: ignore[assignment]
+    AutoConfig = None  # type: ignore[assignment]
     BitsAndBytesConfig = None  # type: ignore[assignment]
     Qwen3VLForConditionalGeneration = None  # type: ignore[assignment]
+    Qwen3VLMoeForConditionalGeneration = None  # type: ignore[assignment]
     Trainer = None  # type: ignore[assignment]
     TrainingArguments = None  # type: ignore[assignment]
     TrainerCallback = object  # type: ignore[assignment]
@@ -47,10 +51,11 @@ else:
     TRANSFORMERS_IMPORT_ERROR = None
 
 try:
-    from peft import LoraConfig, get_peft_model
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 except Exception as exc:  # noqa: BLE001
     LoraConfig = None  # type: ignore[assignment]
     get_peft_model = None  # type: ignore[assignment]
+    prepare_model_for_kbit_training = None  # type: ignore[assignment]
     PEFT_IMPORT_ERROR = exc
 else:
     PEFT_IMPORT_ERROR = None
@@ -71,6 +76,8 @@ CancelCallback = Callable[[], bool]
 TelemetryCallback = Callable[[Dict[str, Any]], None]
 
 QWEN_MIN_TRANSFORMERS = "4.57.0"
+QWEN_PLATFORM_TRANSFORMERS = "transformers"
+QWEN_PLATFORM_MLX = "mlx_vlm"
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are an annotation assistant that only returns JSON objects shaped like {\"detections\":[{\"label\":\"class\"," \
@@ -124,6 +131,7 @@ class QwenTrainingConfig:
     result_path: str
     model_id: str = "Qwen/Qwen3-VL-4B-Instruct"
     requested_model_id: Optional[str] = None
+    runtime_platform: str = QWEN_PLATFORM_TRANSFORMERS
     training_mode: str = "official_lora"  # official_lora | trl_qlora
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     run_name: Optional[str] = None
@@ -178,6 +186,44 @@ def _ensure_transformers_ready() -> None:
         return
 
 
+def _is_qwen_moe_model_id(model_id: str) -> bool:
+    lowered = str(model_id or "").lower()
+    return "a3b" in lowered or "a22b" in lowered or "moe" in lowered
+
+
+def _qwen_training_model_class(model_id: str):
+    model_type = ""
+    if AutoConfig is not None:
+        try:
+            hf_config = AutoConfig.from_pretrained(str(model_id))
+            model_type = str(getattr(hf_config, "model_type", "") or "").lower()
+        except Exception:
+            model_type = ""
+    if model_type == "qwen3_vl_moe" or _is_qwen_moe_model_id(model_id):
+        if Qwen3VLMoeForConditionalGeneration is None:
+            raise TrainingError(
+                f"qwen3_vl_moe_unavailable:{TRANSFORMERS_IMPORT_ERROR}"
+            )
+        return Qwen3VLMoeForConditionalGeneration
+    if Qwen3VLForConditionalGeneration is None:
+        raise TrainingError(f"qwen3_vl_unavailable:{TRANSFORMERS_IMPORT_ERROR}")
+    return Qwen3VLForConditionalGeneration
+
+
+def _load_qwen_training_model(model_id: str, **kwargs):
+    model_cls = _qwen_training_model_class(model_id)
+    return model_cls.from_pretrained(str(model_id), **kwargs)
+
+
+def _lora_target_modules(config: QwenTrainingConfig, *, qlora: bool) -> Any:
+    targets = [str(item).strip() for item in (config.lora_target_modules or []) if str(item).strip()]
+    if not targets:
+        return "all-linear" if qlora else ["q_proj", "k_proj", "v_proj", "o_proj"]
+    if len(targets) == 1 and targets[0] == "all-linear":
+        return "all-linear"
+    return targets
+
+
 def _seed_all(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -192,6 +238,8 @@ def _filter_kwargs_for(cls, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     try:
         params = inspect.signature(cls).parameters
     except Exception:
+        return kwargs
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()):
         return kwargs
     allowed = set(params.keys())
     return {key: value for key, value in kwargs.items() if key in allowed}
@@ -392,6 +440,38 @@ class QwenConversationCollator:
         return inputs
 
 
+class _MlxConversationDatasetAdapter:
+    """Expose the repo's local dataset in the list/slice shape mlx-vlm expects."""
+
+    def __init__(self, dataset: QwenConversationDataset) -> None:
+        self.dataset = dataset
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    @staticmethod
+    def _collate(items: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        images: List[Any] = []
+        messages: List[Any] = []
+        for item in items:
+            raw_images = item.get("images") or []
+            if not isinstance(raw_images, list):
+                raw_images = [raw_images]
+            images.extend(raw_images)
+            messages.append(item["messages"])
+        return {"images": images, "messages": messages}
+
+    def __getitem__(self, idx):  # noqa: ANN001
+        if isinstance(idx, slice):
+            indices = list(range(*idx.indices(len(self))))
+            return self._collate([self.dataset[item_idx] for item_idx in indices])
+        if isinstance(idx, range):
+            return self._collate([self.dataset[item_idx] for item_idx in idx])
+        if isinstance(idx, (list, tuple)):
+            return self._collate([self.dataset[int(item_idx)] for item_idx in idx])
+        return self.dataset[int(idx)]
+
+
 class _QwenTrainingCallback(TrainerCallback):
     def __init__(self, progress_cb: Optional[ProgressCallback], cancel_cb: Optional[CancelCallback], metrics_cb: Optional[TelemetryCallback]):
         self.progress_cb = progress_cb
@@ -449,7 +529,7 @@ def _train_official_lora(
         min_pixels=config.min_pixels,
         max_pixels=config.max_pixels,
     )
-    model = Qwen3VLForConditionalGeneration.from_pretrained(
+    model = _load_qwen_training_model(
         config.model_id,
         torch_dtype=dtype if device == "cuda" else torch.float32,
         low_cpu_mem_usage=False,
@@ -458,7 +538,7 @@ def _train_official_lora(
         r=config.lora_rank,
         lora_alpha=config.lora_alpha,
         lora_dropout=config.lora_dropout,
-        target_modules=list(config.lora_target_modules),
+        target_modules=_lora_target_modules(config, qlora=False),
         bias="none",
         task_type="CAUSAL_LM",
     )
@@ -541,6 +621,8 @@ def _train_trl_qlora(
         raise TrainingError("qwen_bitsandbytes_config_missing")
     if PEFT_IMPORT_ERROR is not None or LoraConfig is None:
         raise TrainingError(f"qwen_peft_missing:{PEFT_IMPORT_ERROR}")
+    if prepare_model_for_kbit_training is None:
+        raise TrainingError(f"qwen_peft_kbit_missing:{PEFT_IMPORT_ERROR}")
     _seed_all(config.seed)
 
     dataset_root = Path(config.dataset_root)
@@ -562,12 +644,14 @@ def _train_trl_qlora(
         min_pixels=config.min_pixels,
         max_pixels=config.max_pixels,
     )
-    model = Qwen3VLForConditionalGeneration.from_pretrained(
+    model = _load_qwen_training_model(
         config.model_id,
         device_map="auto",
         quantization_config=quant_config,
         low_cpu_mem_usage=False,
     )
+    model = prepare_model_for_kbit_training(model)
+    model.config.use_cache = False
 
     train_dataset = QwenConversationDataset(
         dataset_root,
@@ -601,7 +685,7 @@ def _train_trl_qlora(
         r=config.lora_rank,
         lora_alpha=config.lora_alpha,
         lora_dropout=config.lora_dropout,
-        target_modules=list(config.lora_target_modules),
+        target_modules=_lora_target_modules(config, qlora=True),
         bias="none",
         task_type="CAUSAL_LM",
     )
@@ -630,6 +714,270 @@ def _train_trl_qlora(
     return result
 
 
+def _load_mlx_training_backend() -> Dict[str, Any]:
+    try:
+        import mlx.optimizers as mlx_optimizers
+        from mlx_vlm.trainer.datasets import VisionDataset as MlxVisionDataset
+        from mlx_vlm.trainer.sft_trainer import TrainingArgs as MlxTrainingArgs
+        from mlx_vlm.trainer.sft_trainer import train as mlx_train
+        from mlx_vlm.trainer.utils import (
+            find_all_linear_names as mlx_find_all_linear_names,
+            get_peft_model as mlx_get_peft_model,
+            not_supported_for_training as mlx_not_supported_for_training,
+            print_trainable_parameters as mlx_print_trainable_parameters,
+        )
+        from mlx_vlm.utils import load as mlx_load
+    except Exception as modern_exc:  # noqa: BLE001
+        try:
+            import mlx.core as mlx_core
+            import mlx.optimizers as mlx_optimizers
+            from mlx_vlm.trainer import Dataset as MlxVisionDataset
+            from mlx_vlm.trainer import Trainer as MlxTrainer
+            from mlx_vlm.trainer import save_adapter as mlx_save_adapter
+            from mlx_vlm.trainer.trainer import TrainingArgs as MlxTrainingArgs
+            from mlx_vlm.trainer.utils import (
+                find_all_linear_names as mlx_find_all_linear_names,
+                get_peft_model as mlx_get_peft_model,
+                print_trainable_parameters as mlx_print_trainable_parameters,
+            )
+            from mlx_vlm.utils import load as mlx_load
+            from mlx_vlm.utils import load_image_processor as mlx_load_image_processor
+        except Exception as legacy_exc:  # noqa: BLE001
+            raise TrainingError(
+                "qwen_mlx_training_unavailable:install mlx-vlm==0.3.9 in the macOS environment"
+            ) from legacy_exc
+        return {
+            "api": "legacy",
+            "modern_import_error": modern_exc,
+            "mx": mlx_core,
+            "optimizers": mlx_optimizers,
+            "VisionDataset": MlxVisionDataset,
+            "TrainingArgs": MlxTrainingArgs,
+            "Trainer": MlxTrainer,
+            "save_adapter": mlx_save_adapter,
+            "find_all_linear_names": mlx_find_all_linear_names,
+            "get_peft_model": mlx_get_peft_model,
+            "not_supported_for_training": {"gemma3n", "qwen3_omni"},
+            "print_trainable_parameters": mlx_print_trainable_parameters,
+            "load": mlx_load,
+            "load_image_processor": mlx_load_image_processor,
+        }
+    return {
+        "api": "modern",
+        "optimizers": mlx_optimizers,
+        "VisionDataset": MlxVisionDataset,
+        "TrainingArgs": MlxTrainingArgs,
+        "train": mlx_train,
+        "find_all_linear_names": mlx_find_all_linear_names,
+        "get_peft_model": mlx_get_peft_model,
+        "not_supported_for_training": mlx_not_supported_for_training,
+        "print_trainable_parameters": mlx_print_trainable_parameters,
+        "load": mlx_load,
+    }
+
+
+def _is_quantized_mlx_model_id(model_id: str) -> bool:
+    lowered = str(model_id or "").lower()
+    return any(
+        marker in lowered
+        for marker in ("3bit", "4bit", "5bit", "6bit", "8bit", "q2", "q3", "q4", "q6", "q8", "mxfp")
+    )
+
+
+def _mlx_training_flavor(model_id: str) -> str:
+    return "mlx_qlora" if _is_quantized_mlx_model_id(model_id) else "mlx_lora"
+
+
+def _float_loss_value(loss: Any) -> Optional[float]:
+    try:
+        if hasattr(loss, "item"):
+            return float(loss.item())
+        return float(loss)
+    except Exception:
+        return None
+
+
+def _train_mlx_lora(
+    config: QwenTrainingConfig,
+    progress_cb: Optional[ProgressCallback],
+    cancel_cb: Optional[CancelCallback],
+    metrics_cb: Optional[TelemetryCallback],
+) -> QwenTrainingResult:
+    backend = _load_mlx_training_backend()
+    _seed_all(config.seed)
+
+    dataset_root = Path(config.dataset_root)
+    result_path = Path(config.result_path)
+    latest_dir = result_path / "latest"
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    adapter_file = latest_dir / "adapters.safetensors"
+
+    batch_size = max(1, int(config.batch_size or 1))
+    train_raw = QwenConversationDataset(
+        dataset_root,
+        "train",
+        processor=None,
+        system_prompt=config.system_prompt,
+        max_items=config.train_limit,
+    )
+    val_raw = QwenConversationDataset(
+        dataset_root,
+        "val",
+        processor=None,
+        system_prompt=config.system_prompt,
+        max_items=config.val_limit,
+    )
+    batch_size = min(batch_size, max(1, len(train_raw)))
+    epochs = max(1, int(config.max_epochs or 1))
+    steps_per_epoch_estimate = (len(train_raw) + batch_size - 1) // batch_size
+    iters = max(1, steps_per_epoch_estimate * epochs)
+    if cancel_cb and cancel_cb():
+        raise TrainingError("qwen_training_cancelled")
+    if progress_cb:
+        progress_cb(0.03, "Loading MLX-VLM model for Qwen training")
+
+    model, processor = backend["load"](
+        config.model_id,
+        processor_config={"trust_remote_code": True},
+    )
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    if model_type in backend["not_supported_for_training"]:
+        raise TrainingError(f"qwen_mlx_model_training_unsupported:{model_type}")
+
+    if cancel_cb and cancel_cb():
+        raise TrainingError("qwen_training_cancelled")
+    if progress_cb:
+        progress_cb(0.12, "Preparing MLX LoRA adapters")
+
+    modules = backend["find_all_linear_names"](model.language_model)
+    mlx_lora_alpha = float(config.lora_alpha)
+    if backend.get("api") == "legacy":
+        mlx_lora_alpha = mlx_lora_alpha / max(1, int(config.lora_rank or 1))
+    model = backend["get_peft_model"](
+        model,
+        modules,
+        rank=config.lora_rank,
+        alpha=mlx_lora_alpha,
+        dropout=config.lora_dropout,
+        verbose=False,
+    )
+    backend["print_trainable_parameters"](model)
+    model_config = getattr(model, "config", None)
+    model_config_dict = dict(getattr(model_config, "__dict__", {}) or {})
+    train_source = _MlxConversationDatasetAdapter(train_raw)
+    val_source = _MlxConversationDatasetAdapter(val_raw)
+    vision_dataset_cls = backend["VisionDataset"]
+    dataset_extra_kwargs: Dict[str, Any] = {}
+    if backend.get("api") == "legacy":
+        dataset_extra_kwargs["image_processor"] = backend["load_image_processor"](config.model_id)
+    dataset_extra_kwargs = _filter_kwargs_for(vision_dataset_cls, dataset_extra_kwargs)
+    train_dataset = vision_dataset_cls(train_source, model_config_dict, processor, **dataset_extra_kwargs)
+    val_dataset = vision_dataset_cls(val_source, model_config_dict, processor, **dataset_extra_kwargs)
+    training_args_cls = backend["TrainingArgs"]
+    training_kwargs = {
+        "batch_size": batch_size,
+        "iters": iters,
+        "steps_per_report": max(1, int(config.log_every_n_steps or 10)),
+        "steps_per_eval": max(1, int(config.log_every_n_steps or 10) * 10),
+        "steps_per_save": max(1, int(config.log_every_n_steps or 10) * 10),
+        "val_batches": -1,
+        "max_seq_length": int(config.max_length or 2048),
+        "adapter_file": str(adapter_file),
+        "grad_checkpoint": True,
+        "learning_rate": float(config.lr),
+        "warmup_steps": int(config.warmup_steps or 0),
+        "gradient_accumulation_steps": max(1, int(config.accumulate_grad_batches or 1)),
+        "full_finetune": False,
+    }
+    training_kwargs = _filter_kwargs_for(training_args_cls, training_kwargs)
+    training_args = training_args_cls(**training_kwargs)
+    optimizer = backend["optimizers"].Adam(learning_rate=float(config.lr))
+
+    if progress_cb:
+        progress_cb(0.2, "Running MLX-VLM Qwen LoRA training")
+    if backend.get("api") == "legacy":
+        trainer_cls = backend["Trainer"]
+        trainer_kwargs = _filter_kwargs_for(trainer_cls, {"train_on_completions": True})
+        trainer = trainer_cls(model, optimizer, **trainer_kwargs)
+        if hasattr(model, "train"):
+            model.train()
+        steps_per_epoch = max(1, (len(train_dataset) + batch_size - 1) // batch_size)
+        total_steps = max(1, steps_per_epoch * epochs)
+        global_step = 0
+        for epoch in range(epochs):
+            for step in range(steps_per_epoch):
+                if cancel_cb and cancel_cb():
+                    backend["save_adapter"](model, str(adapter_file))
+                    raise TrainingError("qwen_training_cancelled")
+                start = step * batch_size
+                stop = min(len(train_dataset), start + batch_size)
+                loss = trainer.train_step(train_dataset[start:stop])
+                mx = backend.get("mx")
+                if mx is not None:
+                    try:
+                        mx.eval(loss, model.trainable_parameters(), optimizer.state)
+                    except Exception:
+                        mx.eval(loss)
+                global_step += 1
+                loss_value = _float_loss_value(loss)
+                progress = min(0.97, 0.2 + 0.76 * (global_step / total_steps))
+                if metrics_cb and (global_step == 1 or global_step % max(1, int(config.log_every_n_steps or 10)) == 0):
+                    payload: Dict[str, Any] = {
+                        "runtime_platform": QWEN_PLATFORM_MLX,
+                        "training_backend": "mlx_vlm",
+                        "training_backend_api": "legacy",
+                        "epoch": epoch + 1,
+                        "step": global_step,
+                        "progress": progress,
+                    }
+                    if loss_value is not None:
+                        payload["loss"] = loss_value
+                    metrics_cb(payload)
+                if progress_cb and (global_step == 1 or global_step % max(1, int(config.log_every_n_steps or 10)) == 0):
+                    if loss_value is None:
+                        progress_cb(progress, f"MLX step {global_step}/{total_steps}")
+                    else:
+                        progress_cb(progress, f"MLX step {global_step}/{total_steps} loss={loss_value:.4f}")
+        backend["save_adapter"](model, str(adapter_file))
+    else:
+        train_kwargs = {
+            "model": model,
+            "optimizer": optimizer,
+            "train_dataset": train_dataset,
+            "val_dataset": val_dataset,
+            "args": training_args,
+            "train_on_completions": True,
+        }
+        train_fn = backend["train"]
+        train_kwargs = _filter_kwargs_for(train_fn, train_kwargs)
+        train_fn(**train_kwargs)
+    if progress_cb:
+        progress_cb(0.98, "MLX-VLM Qwen adapter saved")
+    if metrics_cb:
+        metrics_cb(
+            {
+                "runtime_platform": QWEN_PLATFORM_MLX,
+                "training_backend": "mlx_vlm",
+                "training_backend_api": backend.get("api", "modern"),
+                "training_flavor": _mlx_training_flavor(config.model_id),
+                "progress": 0.98,
+            }
+        )
+    return QwenTrainingResult(
+        config=config,
+        checkpoints=[str(latest_dir)],
+        latest_checkpoint=str(latest_dir),
+        epochs_ran=epochs,
+        metadata={
+            "runtime_platform": QWEN_PLATFORM_MLX,
+            "training_backend": "mlx_vlm",
+            "training_backend_api": backend.get("api", "modern"),
+            "training_flavor": _mlx_training_flavor(config.model_id),
+            "adapter_file": str(adapter_file),
+        },
+    )
+
+
 def train_qwen_model(
     config: QwenTrainingConfig,
     *,
@@ -641,6 +989,8 @@ def train_qwen_model(
         cleaned = ",".join(part.strip() for part in str(config.devices).split(",") if part.strip())
         if cleaned:
             os.environ["CUDA_VISIBLE_DEVICES"] = cleaned
+    if config.runtime_platform == QWEN_PLATFORM_MLX:
+        return _train_mlx_lora(config, progress_cb, cancel_cb, metrics_cb)
     if config.training_mode == "trl_qlora":
         return _train_trl_qlora(config, progress_cb, cancel_cb, metrics_cb)
     return _train_official_lora(config, progress_cb, cancel_cb, metrics_cb)

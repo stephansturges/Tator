@@ -3243,6 +3243,7 @@ html.theme-dark #automationLockBanner {
 
 html.theme-pipboy {
     color-scheme: dark;
+    --pip-font: "Share Tech Mono", "OCR A Std", "OCR A Extended", "IBM Plex Mono", "JetBrains Mono", "Fira Code", "Cascadia Mono", "SFMono-Regular", "Roboto Mono", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     --pip-bg: #020703;
     --pip-panel: #071708;
     --pip-panel-2: #0b220d;
@@ -3251,21 +3252,62 @@ html.theme-pipboy {
     --pip-green-strong: #b7ff8a;
     --pip-green-muted: #58c84d;
     --pip-green-dim: #2f7d35;
-    --pip-border: rgba(132, 255, 91, 0.52);
-    --pip-border-strong: rgba(183, 255, 138, 0.82);
+    --pip-border: color-mix(in srgb, var(--pip-green) 52%, transparent);
+    --pip-border-strong: color-mix(in srgb, var(--pip-green-strong) 82%, transparent);
     --pip-amber: #ffd85e;
     --pip-red: #ff6848;
+    --pip-secondary-glow: rgba(255, 216, 94, 0.08);
+    --pip-focus-bg: #010501;
+    --pip-tab-bg: rgba(3, 14, 5, 0.96);
+    --pip-control-bg: rgba(9, 30, 10, 0.92);
+    --pip-control-hover-bg: rgba(18, 55, 22, 0.96);
+    --pip-sidebar-bg: rgba(1, 8, 2, 0.92);
+    --pip-input-bg: rgba(2, 12, 3, 0.96);
+    --pip-surface-bg: linear-gradient(180deg, rgba(9, 27, 10, 0.96), rgba(3, 12, 4, 0.98));
+    --pip-subsurface-bg: rgba(4, 18, 5, 0.86);
+    --pip-table-bg: rgba(11, 34, 13, 0.92);
+    --pip-disabled-bg: rgba(30, 49, 31, 0.82);
+    --pip-inline-bg: rgba(6, 21, 7, 0.92);
+}
+
+html.theme-pipboy.theme-pipboy-amber {
+    --pip-bg: #080501;
+    --pip-panel: #1b1002;
+    --pip-panel-2: #2b1a04;
+    --pip-panel-3: #3a2608;
+    --pip-green: #ffbf3d;
+    --pip-green-strong: #ffe28a;
+    --pip-green-muted: #d99424;
+    --pip-green-dim: #7e5818;
+    --pip-border: rgba(255, 191, 61, 0.52);
+    --pip-border-strong: rgba(255, 226, 138, 0.82);
+    --pip-amber: #fff2b0;
+    --pip-red: #ff775b;
+    --pip-secondary-glow: rgba(255, 121, 67, 0.08);
+    --pip-focus-bg: #090500;
+    --pip-tab-bg: rgba(22, 13, 1, 0.96);
+    --pip-control-bg: rgba(41, 24, 3, 0.92);
+    --pip-control-hover-bg: rgba(73, 44, 8, 0.96);
+    --pip-sidebar-bg: rgba(14, 8, 1, 0.92);
+    --pip-input-bg: rgba(22, 13, 1, 0.96);
+    --pip-surface-bg: linear-gradient(180deg, rgba(35, 21, 3, 0.96), rgba(16, 9, 1, 0.98));
+    --pip-subsurface-bg: rgba(28, 17, 2, 0.86);
+    --pip-table-bg: rgba(43, 26, 4, 0.92);
+    --pip-disabled-bg: rgba(54, 43, 23, 0.82);
+    --pip-inline-bg: rgba(31, 18, 2, 0.92);
 }
 
 html.theme-pipboy body,
 body.theme-pipboy {
     background:
-        radial-gradient(circle at 48% 18%, rgba(132, 255, 91, 0.12), transparent 38%),
-        radial-gradient(circle at 50% 92%, rgba(255, 216, 94, 0.08), transparent 32%),
+        radial-gradient(circle at 48% 18%, color-mix(in srgb, var(--pip-green) 12%, transparent), transparent 38%),
+        radial-gradient(circle at 50% 92%, var(--pip-secondary-glow), transparent 32%),
         var(--pip-bg);
     color: var(--pip-green);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    text-shadow: 0 0 7px rgba(132, 255, 91, 0.45);
+    font-family: var(--pip-font);
+    font-variant-ligatures: none;
+    font-feature-settings: "zero" 1;
+    text-shadow: 0 0 7px color-mix(in srgb, var(--pip-green) 45%, transparent);
 }
 
 body.theme-pipboy::before,
@@ -3281,12 +3323,12 @@ body.theme-pipboy::before {
     background:
         repeating-linear-gradient(
             0deg,
-            rgba(132, 255, 91, 0.08) 0,
-            rgba(132, 255, 91, 0.08) 1px,
+            color-mix(in srgb, var(--pip-green) 8%, transparent) 0,
+            color-mix(in srgb, var(--pip-green) 8%, transparent) 1px,
             transparent 1px,
             transparent 3px
         ),
-        linear-gradient(180deg, transparent, rgba(132, 255, 91, 0.10), transparent);
+        linear-gradient(180deg, transparent, color-mix(in srgb, var(--pip-green) 10%, transparent), transparent);
     background-size: 100% 3px, 100% 220px;
     opacity: 0.34;
     animation: pipboyScan 8s linear infinite;
@@ -3294,7 +3336,7 @@ body.theme-pipboy::before {
 
 body.theme-pipboy::after {
     box-shadow:
-        inset 0 0 70px rgba(132, 255, 91, 0.18),
+        inset 0 0 70px color-mix(in srgb, var(--pip-green) 18%, transparent),
         inset 0 0 190px rgba(0, 0, 0, 0.82);
     background: radial-gradient(ellipse at center, transparent 54%, rgba(0, 0, 0, 0.36) 100%);
     opacity: 0.86;
@@ -3309,45 +3351,45 @@ body.theme-pipboy.annotation-focus-mode::after {
 }
 
 html.theme-pipboy ::selection {
-    background: rgba(132, 255, 91, 0.28);
+    background: color-mix(in srgb, var(--pip-green) 28%, transparent);
     color: var(--pip-green-strong);
 }
 
 html.theme-pipboy .tab-bar {
-    background: rgba(3, 14, 5, 0.96);
+    background: var(--pip-tab-bg);
     border-bottom-color: var(--pip-border);
-    box-shadow: inset 0 -1px 0 rgba(132, 255, 91, 0.18), 0 0 28px rgba(132, 255, 91, 0.10);
+    box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--pip-green) 18%, transparent), 0 0 28px color-mix(in srgb, var(--pip-green) 10%, transparent);
 }
 
 html.theme-pipboy .tab-button {
-    background: rgba(9, 30, 10, 0.92);
-    border: 1px solid rgba(132, 255, 91, 0.32);
+    background: var(--pip-control-bg);
+    border: 1px solid color-mix(in srgb, var(--pip-green) 32%, transparent);
     color: var(--pip-green);
-    text-shadow: 0 0 6px rgba(132, 255, 91, 0.52);
+    text-shadow: 0 0 6px color-mix(in srgb, var(--pip-green) 52%, transparent);
 }
 
 html.theme-pipboy .tab-button:hover {
-    background: rgba(18, 55, 22, 0.96);
+    background: var(--pip-control-hover-bg);
     border-color: var(--pip-border);
 }
 
 html.theme-pipboy .tab-button.active {
-    background: rgba(132, 255, 91, 0.18);
+    background: color-mix(in srgb, var(--pip-green) 18%, transparent);
     border-color: var(--pip-border-strong);
-    box-shadow: inset 0 0 12px rgba(132, 255, 91, 0.20), 0 0 12px rgba(132, 255, 91, 0.14);
+    box-shadow: inset 0 0 12px color-mix(in srgb, var(--pip-green) 20%, transparent), 0 0 12px color-mix(in srgb, var(--pip-green) 14%, transparent);
     color: var(--pip-green-strong);
 }
 
 html.theme-pipboy .theme-toggle-button {
-    background: rgba(132, 255, 91, 0.18);
+    background: color-mix(in srgb, var(--pip-green) 18%, transparent);
     border-color: var(--pip-border-strong);
-    box-shadow: inset 0 0 14px rgba(132, 255, 91, 0.20), 0 0 18px rgba(132, 255, 91, 0.22);
+    box-shadow: inset 0 0 14px color-mix(in srgb, var(--pip-green) 20%, transparent), 0 0 18px color-mix(in srgb, var(--pip-green) 22%, transparent);
     color: var(--pip-green-strong);
-    text-shadow: 0 0 8px rgba(132, 255, 91, 0.65);
+    text-shadow: 0 0 8px color-mix(in srgb, var(--pip-green) 65%, transparent);
 }
 
 html.theme-pipboy .theme-toggle-button:hover {
-    background: rgba(132, 255, 91, 0.26);
+    background: color-mix(in srgb, var(--pip-green) 26%, transparent);
     border-color: var(--pip-green-strong);
 }
 
@@ -3358,13 +3400,13 @@ html.theme-pipboy .left {
 }
 
 html.theme-pipboy .right {
-    background: rgba(1, 8, 2, 0.92);
-    border-left-color: rgba(132, 255, 91, 0.42);
+    background: var(--pip-sidebar-bg);
+    border-left-color: color-mix(in srgb, var(--pip-green) 42%, transparent);
 }
 
 html.theme-pipboy #canvas {
-    background: #010501;
-    box-shadow: inset 0 0 28px rgba(132, 255, 91, 0.10);
+    background: var(--pip-focus-bg);
+    box-shadow: inset 0 0 28px color-mix(in srgb, var(--pip-green) 10%, transparent);
 }
 
 html.theme-pipboy body.annotation-focus-mode .tab-shell,
@@ -3372,17 +3414,17 @@ html.theme-pipboy body.annotation-focus-mode .tab-panels,
 html.theme-pipboy body.annotation-focus-mode #tabLabeling,
 html.theme-pipboy body.annotation-focus-mode #tabLabeling .container,
 html.theme-pipboy body.annotation-focus-mode #tabLabeling .right {
-    background: #010501;
+    background: var(--pip-focus-bg);
 }
 
 html.theme-pipboy input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
 html.theme-pipboy textarea,
 html.theme-pipboy select {
-    background: rgba(2, 12, 3, 0.96);
-    border-color: rgba(132, 255, 91, 0.42);
+    background: var(--pip-input-bg);
+    border-color: color-mix(in srgb, var(--pip-green) 42%, transparent);
     color: var(--pip-green-strong);
     caret-color: var(--pip-green-strong);
-    box-shadow: inset 0 0 12px rgba(132, 255, 91, 0.08);
+    box-shadow: inset 0 0 12px color-mix(in srgb, var(--pip-green) 8%, transparent);
 }
 
 html.theme-pipboy input[type="checkbox"],
@@ -3392,7 +3434,7 @@ html.theme-pipboy input[type="radio"] {
 
 html.theme-pipboy input::placeholder,
 html.theme-pipboy textarea::placeholder {
-    color: rgba(132, 255, 91, 0.55);
+    color: color-mix(in srgb, var(--pip-green) 55%, transparent);
 }
 
 html.theme-pipboy .modal__dialog,
@@ -3413,9 +3455,9 @@ html.theme-pipboy .metric-chart,
 html.theme-pipboy .metric-glossary,
 html.theme-pipboy .active-controls,
 html.theme-pipboy .storage-item {
-    background: linear-gradient(180deg, rgba(9, 27, 10, 0.96), rgba(3, 12, 4, 0.98));
+    background: var(--pip-surface-bg);
     border-color: var(--pip-border);
-    box-shadow: inset 0 0 18px rgba(132, 255, 91, 0.09), 0 0 18px rgba(132, 255, 91, 0.08);
+    box-shadow: inset 0 0 18px color-mix(in srgb, var(--pip-green) 9%, transparent), 0 0 18px color-mix(in srgb, var(--pip-green) 8%, transparent);
     color: var(--pip-green);
 }
 
@@ -3433,15 +3475,15 @@ html.theme-pipboy .qwen-train-callouts,
 html.theme-pipboy .qwen-radio-group,
 html.theme-pipboy .training-summary,
 html.theme-pipboy .qwen-sample-canvas {
-    background: rgba(4, 18, 5, 0.86);
-    border-color: rgba(132, 255, 91, 0.34);
+    background: var(--pip-subsurface-bg);
+    border-color: color-mix(in srgb, var(--pip-green) 34%, transparent);
     color: var(--pip-green);
 }
 
 html.theme-pipboy .qwen-model-card.active,
 html.theme-pipboy .metrics-table tr.highlight,
 html.theme-pipboy .metric-table__highlight {
-    background: rgba(132, 255, 91, 0.14);
+    background: color-mix(in srgb, var(--pip-green) 14%, transparent);
     border-color: var(--pip-border-strong);
 }
 
@@ -3511,7 +3553,7 @@ html.theme-pipboy .metric-chart-class,
 html.theme-pipboy .metric-chart-legend,
 html.theme-pipboy .active-help,
 html.theme-pipboy .storage-meta {
-    color: rgba(132, 255, 91, 0.76);
+    color: color-mix(in srgb, var(--pip-green) 76%, transparent);
 }
 
 html.theme-pipboy .metrics-table,
@@ -3529,7 +3571,7 @@ html.theme-pipboy .training-table th,
 html.theme-pipboy .training-table td,
 html.theme-pipboy .training-convergence th,
 html.theme-pipboy .training-convergence td {
-    border-color: rgba(132, 255, 91, 0.32);
+    border-color: color-mix(in srgb, var(--pip-green) 32%, transparent);
 }
 
 html.theme-pipboy .metrics-table th,
@@ -3539,7 +3581,7 @@ html.theme-pipboy .metric-table tr:nth-child(even),
 html.theme-pipboy .training-table th,
 html.theme-pipboy .training-table tr:nth-child(even),
 html.theme-pipboy .training-convergence th {
-    background: rgba(11, 34, 13, 0.92);
+    background: var(--pip-table-bg);
 }
 
 html.theme-pipboy .training-button,
@@ -3549,11 +3591,11 @@ html.theme-pipboy #applyActiveModelBtn,
 html.theme-pipboy #refreshActiveModelBtn,
 html.theme-pipboy .button,
 html.theme-pipboy button.secondary {
-    background: rgba(8, 31, 9, 0.92);
+    background: var(--pip-control-bg);
     border: 1px solid var(--pip-border);
     color: var(--pip-green-strong);
-    text-shadow: 0 0 7px rgba(132, 255, 91, 0.52);
-    box-shadow: inset 0 0 12px rgba(132, 255, 91, 0.10);
+    text-shadow: 0 0 7px color-mix(in srgb, var(--pip-green) 52%, transparent);
+    box-shadow: inset 0 0 12px color-mix(in srgb, var(--pip-green) 10%, transparent);
 }
 
 html.theme-pipboy .training-button:hover,
@@ -3563,7 +3605,7 @@ html.theme-pipboy #applyActiveModelBtn:hover,
 html.theme-pipboy #refreshActiveModelBtn:hover,
 html.theme-pipboy .button:hover,
 html.theme-pipboy button.secondary:hover {
-    background: rgba(132, 255, 91, 0.18);
+    background: color-mix(in srgb, var(--pip-green) 18%, transparent);
     border-color: var(--pip-border-strong);
 }
 
@@ -3579,15 +3621,15 @@ html.theme-pipboy .training-button[aria-disabled="true"],
 html.theme-pipboy #startTrainingBtn:disabled,
 html.theme-pipboy #activateLatestModelBtn:disabled,
 html.theme-pipboy #applyActiveModelBtn:disabled {
-    background: rgba(30, 49, 31, 0.82);
-    color: rgba(132, 255, 91, 0.44);
+    background: var(--pip-disabled-bg);
+    color: color-mix(in srgb, var(--pip-green) 44%, transparent);
 }
 
 html.theme-pipboy .badge,
 html.theme-pipboy .storage-badge,
 html.theme-pipboy .metric-tag {
-    background: rgba(132, 255, 91, 0.14);
-    border: 1px solid rgba(132, 255, 91, 0.24);
+    background: color-mix(in srgb, var(--pip-green) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--pip-green) 24%, transparent);
     color: var(--pip-green-strong);
 }
 
@@ -3635,7 +3677,7 @@ html.theme-pipboy .qwen-calibration-progress__bar,
 html.theme-pipboy .metric-bar-track,
 html.theme-pipboy .metric-chart-bar,
 html.theme-pipboy .metric-chart-bar.empty {
-    background: rgba(132, 255, 91, 0.12);
+    background: color-mix(in srgb, var(--pip-green) 12%, transparent);
 }
 
 html.theme-pipboy .training-progress-fill,
@@ -3651,21 +3693,21 @@ html.theme-pipboy .training-log,
 html.theme-pipboy .qwen-model-details__body pre,
 html.theme-pipboy .qwen-sample-details pre,
 html.theme-pipboy .training-logs pre {
-    background: #010501;
-    border: 1px solid rgba(132, 255, 91, 0.28);
+    background: var(--pip-focus-bg);
+    border: 1px solid color-mix(in srgb, var(--pip-green) 28%, transparent);
     color: var(--pip-green);
-    text-shadow: 0 0 7px rgba(132, 255, 91, 0.45);
+    text-shadow: 0 0 7px color-mix(in srgb, var(--pip-green) 45%, transparent);
 }
 
 html.theme-pipboy .modal__btn {
-    background: rgba(8, 31, 9, 0.92);
+    background: var(--pip-control-bg);
     border: 1px solid var(--pip-border);
     color: var(--pip-green-strong);
 }
 
 html.theme-pipboy .modal__btn--primary,
 html.theme-pipboy .qwen-advanced-toggle {
-    background: rgba(132, 255, 91, 0.18);
+    background: color-mix(in srgb, var(--pip-green) 18%, transparent);
     border-color: var(--pip-border-strong);
     color: var(--pip-green-strong);
 }
@@ -3687,14 +3729,14 @@ html.theme-pipboy [style*="background: #ffffff"],
 html.theme-pipboy [style*="background:#ffffff"],
 html.theme-pipboy [style*="background: #fff"],
 html.theme-pipboy [style*="background:#fff"] {
-    background: rgba(6, 21, 7, 0.92) !important;
+    background: var(--pip-inline-bg) !important;
 }
 
 html.theme-pipboy [style*="border: 1px solid #e2e8f0"],
 html.theme-pipboy [style*="border:1px solid #e2e8f0"],
 html.theme-pipboy [style*="border-top: 1px solid #e2e8f0"],
 html.theme-pipboy [style*="border-top:1px solid #e2e8f0"] {
-    border-color: rgba(132, 255, 91, 0.34) !important;
+    border-color: color-mix(in srgb, var(--pip-green) 34%, transparent) !important;
 }
 
 html.theme-pipboy [style*="color: #0f172a"],
@@ -3705,7 +3747,7 @@ html.theme-pipboy [style*="color: #475569"],
 html.theme-pipboy [style*="color:#475569"],
 html.theme-pipboy [style*="color: #64748b"],
 html.theme-pipboy [style*="color:#64748b"] {
-    color: rgba(132, 255, 91, 0.78) !important;
+    color: color-mix(in srgb, var(--pip-green) 78%, transparent) !important;
 }
 
 @keyframes pipboyScan {

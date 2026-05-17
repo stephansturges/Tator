@@ -147,8 +147,9 @@ The output remains an annotation draft. The UI is built around fast accept,
 correct, and reject loops.
 
 The top-right `Dark` button toggles the standard dark theme. Double-click the
-same button to switch into the hidden Pip-Boy-inspired terminal skin; single
-click again returns to the previous light/dark theme.
+same button to switch into the hidden Pip-Boy-inspired terminal skin. In Pip-Boy
+mode, single-click the `Pip` button to switch between green and amber; double-click
+it to return to the previous light/dark theme.
 
 ## Qwen
 
@@ -177,16 +178,14 @@ sent as that exact model rather than being rewritten by the Instruct/Thinking
 variant dropdown.
 
 The Qwen Models tab also includes CUDA/Transformers presets for official
-Qwen3-VL checkpoints, curated AWQ/GPTQ 4-bit checkpoints, and Huihui
-abliterated checkpoints. AWQ/GPTQ presets are inference checkpoints; when they
-are selected for Qwen training, Tator records the requested quantized model but
-trains LoRA/QLoRA adapters from the matching full Transformers checkpoint. QLoRA
-then applies bitsandbytes NF4 4-bit quantization at training load time.
-
-FP8 Qwen3-VL checkpoints are not exposed as first-class PyTorch presets because
-the current Qwen model cards recommend vLLM/SGLang for those weights rather than
-direct Transformers loading. Use AWQ/GPTQ or the full BF16/FP16 checkpoints for
-the built-in backend path.
+Qwen3-VL checkpoints, curated FP8/AWQ/GPTQ checkpoints, and current compatible
+abliterated Qwen3-VL checkpoints. Quantized presets are inference checkpoints;
+dense and MoE entries can be selected for LoRA/QLoRA training, and quantized
+CUDA selections resolve to the matching full Transformers checkpoint before
+training starts. QLoRA then applies bitsandbytes NF4 4-bit quantization at
+training load time. MLX model presets are also trainable on Apple Silicon
+through the MLX-VLM trainer; quantized MLX checkpoints use the same LoRA adapter
+path as QLoRA-style training.
 
 Model access, memory requirements, and device support still depend on your
 machine and Hugging Face cache/authentication. Large Thinking and MoE models can
@@ -273,6 +272,42 @@ For a longer operator explanation, see
 
 </details>
 
+## Environment Setup
+
+Use Poetry as the setup front door, then choose the profile that matches the
+machine. Poetry only installs the lightweight `tator-setup` command; the actual
+runtime dependencies still come from the profile-specific requirement files so
+macOS, Linux, and Falcon CUDA do not fight over one incompatible lockfile.
+
+```bash
+poetry install --only-root
+
+# Apple Silicon inference + Qwen MLX adapter training
+poetry run tator-setup macos
+
+# General Linux backend/training stack
+poetry run tator-setup linux
+
+# Pinned Falcon CUDA 11.8 stack
+poetry run tator-setup falcon-cu118
+```
+
+Useful checks and variants:
+
+```bash
+poetry run tator-setup macos --dry-run
+poetry run tator-setup linux --dev
+poetry run tator-setup falcon-cu118 --venv-dir .venv-falcon
+```
+
+The direct shell setup scripts remain available and delegate to the same setup
+implementation:
+
+```bash
+tools/setup_venv_macos_inference.sh
+bash tools/setup_venv_falcon_cu118.sh
+```
+
 ## Linux Setup
 
 Use Linux for full training workflows, CUDA acceleration, Falcon automatic
@@ -281,10 +316,9 @@ labeling, and the broadest package compatibility.
 ### General Linux Backend
 
 ```bash
-python3.11 -m venv .venv
+poetry install --only-root
+poetry run tator-setup linux
 source .venv/bin/activate
-python -m pip install --upgrade pip wheel "setuptools<81"
-python -m pip install -r requirements.txt
 cp .env.example .env
 python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
@@ -336,7 +370,7 @@ Falcon automatic labeling is the most version-sensitive path. Use the pinned
 CUDA 11.8 wheel setup before changing system CUDA or drivers:
 
 ```bash
-bash tools/setup_venv_falcon_cu118.sh
+poetry run tator-setup falcon-cu118
 ```
 
 See [docs/environment_setup.md](docs/environment_setup.md) for the exact stack
@@ -344,18 +378,23 @@ and driver notes.
 
 ## macOS Apple Silicon Setup
 
-The macOS path is inference-focused. It targets interactive annotation
-assistance with PyTorch MPS for CLIP/SAM/SAM3/detectors and MLX-VLM for Qwen
-when available. Training remains a Linux-first workflow.
+The macOS path targets interactive annotation assistance with PyTorch MPS for
+CLIP/SAM/SAM3/detectors and MLX-VLM for Qwen when available. Full detector/SAM
+training remains Linux/CUDA-first, but Qwen MLX LoRA adapter jobs are available
+for small enough local Apple Silicon models.
 
 ```bash
-tools/setup_venv_macos_inference.sh
+poetry install --only-root
+poetry run tator-setup macos
 cp .env.macos.example .env.macos
 tools/run_macos_backend.sh
 ```
 
 The macOS venv installs CLIP, SAM1, SAM3, YOLO, RF-DETR, Qwen Transformers,
-MLX, MLX-VLM, and the local MPS compatibility path. The runner defaults to:
+MLX, MLX-VLM, and the local MPS compatibility path. The setup script installs
+MLX-VLM with `--no-deps` after the main requirements so Qwen3 MLX support does
+not force a Transformers 5 or OpenCV 4.12 stack over the rest of the backend.
+The runner defaults to:
 
 ```bash
 TATOR_INFERENCE_DEVICE=auto

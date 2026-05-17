@@ -1,14 +1,14 @@
 # macOS Inference Runtime
 
-This path is for running the annotation-assistance backend on Apple Silicon. It targets interactive inference only:
+This path is for running the annotation-assistance backend on Apple Silicon. It targets interactive inference plus Qwen MLX adapter jobs:
 
 - CLIP classifier assistance
 - SAM/SAM3 prompt assistance
 - YOLO inference
 - RF-DETR inference
-- Qwen captions, structured VLM inference, and prepass context
+- Qwen captions, structured VLM inference, prepass context, and MLX LoRA adapter training
 
-Training is intentionally out of scope for this Mac path.
+Full detector/SAM training remains Linux/CUDA-first. The Mac path supports Qwen MLX adapter training for small enough local models.
 
 ## Current Architecture
 
@@ -33,8 +33,8 @@ The Mac backend uses two acceleration families:
 Reason:
 
 - CLIP, SAM, YOLO, and RF-DETR are already loaded as PyTorch models in this codebase, so MPS is the shortest path for the existing annotation flow.
-- Qwen3-VL has maintained quantized MLX community builds, so Apple Silicon VLM inference can use native MLX without porting detector/SAM weights.
-- Adapter checkpoints still use the Transformers path because they are tied to Hugging Face/PyTorch loading.
+- Qwen3-VL has maintained quantized MLX community builds, so Apple Silicon VLM inference and Qwen adapter training can use native MLX without porting detector/SAM weights.
+- Adapter checkpoints preserve their runtime family: Transformers adapters load through PEFT, while MLX adapters load through MLX-VLM.
 
 New environment controls:
 
@@ -59,6 +59,17 @@ active; otherwise it falls back to `transformers`.
 ## Setup
 
 Use Python 3.11. Do not use the existing `.venv` if it was created with Python 3.13+.
+
+Recommended Poetry front door:
+
+```bash
+poetry install --only-root
+poetry run tator-setup macos
+cp .env.macos.example .env.macos
+tools/run_macos_backend.sh
+```
+
+Equivalent direct wrapper, for machines without Poetry:
 
 ```bash
 tools/setup_venv_macos_inference.sh
@@ -110,7 +121,10 @@ On a working Apple Silicon MLX setup, `/qwen/status` should report
 
 ## Qwen MLX-VLM
 
-The macOS requirements install `mlx` and `mlx-vlm` by default. The backend
+The setup script installs `mlx`, the direct MLX-VLM runtime dependencies, and
+then `mlx-vlm==0.3.9` from `requirements-macos-vlm.txt` with `--no-deps`. This
+keeps the main macOS environment on Transformers 4.57 and the SAHI-compatible
+OpenCV line while using the newest Qwen3-capable MLX-VLM 0.3.x release. The backend
 exposes MLX model options through `/qwen/settings` and the browser UI under
 **Backend Config -> Qwen Runtime (advanced)**.
 
@@ -131,16 +145,23 @@ Runtime selection rules:
 
 The UI lists the quantized Qwen3-VL options from the `mlx-community/qwen3-vl`
 collection, including 2B, 4B, 8B, 30B-A3B, 32B, and available 235B-A22B
-variants. It also includes discovered EZCon Huihui abliterated MLX builds for
-2B/4B Instruct and Thinking. Choose a model that fits local RAM/VRAM; the list
-is capability surface, not a guarantee that every model is practical on every
-Mac.
+variants. It also includes compatible abliterated MLX builds from EZCon,
+alexgusevski, nightmedia, introvoyz041, veeceey, and Goekdeniz-Guelmez where
+those repos expose MLX-format safetensors. Choose a model that fits local
+RAM/VRAM; the list is capability surface, not a guarantee that every model is
+practical on every Mac.
 
 CUDA machines should use the Transformers model registry in **Qwen Models**.
-That registry exposes curated Qwen3-VL AWQ/GPTQ 4-bit checkpoints and Huihui
-abliterated Transformer checkpoints. AWQ/GPTQ activation uses the selected
-quantized checkpoint for inference; Qwen training resolves those selections to
-the matching full checkpoint and applies LoRA or bitsandbytes QLoRA there.
+That registry exposes the official full and FP8 Qwen3-VL checkpoints, curated
+compressed-tensors/AWQ-style and GPTQ 4-bit checkpoints, and compatible
+abliterated Transformer checkpoints from Huihui, Prithiv, and quantized
+community conversions. Quantized activation uses the selected checkpoint for
+inference when the CUDA dependency stack supports it. Dense and MoE
+Transformers entries can be used for LoRA/QLoRA training; quantized CUDA
+selections resolve to the matching full checkpoint before training and apply
+bitsandbytes QLoRA there. MLX entries train through MLX-VLM on Apple Silicon,
+including quantized checkpoints for QLoRA-style adapter training. FP8 requires
+compatible NVIDIA hardware.
 
 ## SAM3 Notes
 
@@ -155,5 +176,6 @@ Upstream SAM3 currently imports a few CUDA/Triton helper modules even when the r
 - SAM3 visual prompts have been smoke-tested on MPS. Some internal ops still fall back to CPU; set `SAM3_DEVICE=cpu` when debugging SAM3-specific runtime issues.
 - RF-DETR receives `device=mps`, but package-level MPS coverage must be verified with real weights. If it fails on unsupported ops, set `RFDETR_INFER_DEVICE=cpu` while keeping YOLO/SAM/CLIP on MPS.
 - Qwen MLX-VLM does not stream tokens yet; streaming endpoints return the final generated text once the MLX call completes.
-- Qwen adapter checkpoints use Transformers/PyTorch, not MLX-VLM.
-- Qwen FP8 checkpoints are not enabled as direct PyTorch presets because current Qwen model cards point those weights at vLLM/SGLang instead of direct Transformers loading.
+- Qwen adapter checkpoints preserve their training runtime. Transformers adapters load through PEFT; MLX adapters load through MLX-VLM with their base model.
+- Qwen3-VL MoE adapter training is wired through Transformers `Qwen3VLMoeForConditionalGeneration`, but practical runs need very large CUDA memory or QLoRA/distributed setups.
+- `pip check` will report the intentional `mlx-vlm==0.3.9` OpenCV metadata mismatch in `.venv-macos`; SAHI requires OpenCV <=4.11, and MLX-VLM works here with the SAHI-compatible OpenCV installed by the setup script.

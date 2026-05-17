@@ -4,20 +4,27 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${VENV_DIR:-${ROOT_DIR}/.venv-macos}"
 PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+ARGS=(macos --python "${PYTHON_BIN}" --venv-dir "${VENV_DIR}")
+DRY_RUN=0
+for arg in "$@"; do
+  if [[ "$arg" == "--dry-run" ]]; then
+    DRY_RUN=1
+  fi
+done
 
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   echo "Python ${PYTHON_BIN} not found. Install Python 3.11 first, for example: brew install python@3.11" >&2
   exit 1
 fi
 
+if [[ "${INSTALL_LOCAL_CLIP:-0}" == "1" ]]; then
+  ARGS+=(--install-local-clip)
+fi
+
 cd "${ROOT_DIR}"
-
-"${PYTHON_BIN}" -m venv "${VENV_DIR}"
-"${VENV_DIR}/bin/python" -m pip install --upgrade pip wheel "setuptools<81"
-"${VENV_DIR}/bin/python" -m pip install -r requirements-macos-inference.txt
-
-if [[ "${INSTALL_LOCAL_CLIP:-0}" == "1" && -d "${ROOT_DIR}/CLIP" && -f "${ROOT_DIR}/CLIP/setup.py" ]]; then
-  "${VENV_DIR}/bin/python" -m pip install --no-build-isolation -e "${ROOT_DIR}/CLIP"
+"${PYTHON_BIN}" "${ROOT_DIR}/tools/setup_env.py" "${ARGS[@]}" "$@"
+if [[ "$DRY_RUN" == "1" ]]; then
+  exit 0
 fi
 
 "${VENV_DIR}/bin/python" - <<'PY'

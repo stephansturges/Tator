@@ -3349,6 +3349,8 @@ def _resolve_qwen_runtime_platform(
 ) -> str:
     meta_platform = normalize_qwen_platform((metadata or {}).get("runtime_platform"))
     meta_id = str((metadata or {}).get("id") or "")
+    if meta_platform == QWEN_PLATFORM_MLX and meta_id and meta_id != "default":
+        return QWEN_PLATFORM_MLX
     if meta_platform == QWEN_PLATFORM_TRANSFORMERS and meta_id and meta_id != "default":
         return QWEN_PLATFORM_TRANSFORMERS
     raw_model_id = str(model_id or "").strip()
@@ -3383,13 +3385,16 @@ def _effective_qwen_model_id_for_platform(model_id: Optional[str], platform_name
     return raw
 
 
-def _load_qwen_mlx_runtime(model_id: str) -> QwenRuntime:
+def _load_qwen_mlx_runtime(model_id: str, adapter_path: Optional[Path] = None) -> QwenRuntime:
     if MLX_VLM_LOAD is None or MLX_VLM_GENERATE is None:
         detail = _qwen_mlx_dependency_error() or "mlx_vlm_unavailable"
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_mlx_missing:{detail}")
     resolved_model_id = _effective_qwen_model_id_for_platform(model_id, QWEN_PLATFORM_MLX)
     try:
-        model_local, processor_local = MLX_VLM_LOAD(str(resolved_model_id))
+        load_kwargs = {}
+        if adapter_path:
+            load_kwargs["adapter_path"] = str(adapter_path)
+        model_local, processor_local = MLX_VLM_LOAD(str(resolved_model_id), **load_kwargs)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=HTTP_503_SERVICE_UNAVAILABLE,
@@ -3412,14 +3417,15 @@ def _load_qwen_mlx_runtime(model_id: str) -> QwenRuntime:
     )
 
 
-def _ensure_qwen_mlx_ready(model_id: Optional[str] = None) -> QwenRuntime:
+def _ensure_qwen_mlx_ready(model_id: Optional[str] = None, adapter_path: Optional[Path] = None) -> QwenRuntime:
     global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
     global qwen_runtime_platform, qwen_loaded_effective_model_id, qwen_runtime_config
     requested_model_id = _effective_qwen_model_id_for_platform(
         model_id or (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,
         QWEN_PLATFORM_MLX,
     )
-    runtime_key = f"{active_qwen_model_id}:{QWEN_PLATFORM_MLX}:{requested_model_id}"
+    adapter_key = str(adapter_path or "")
+    runtime_key = f"{active_qwen_model_id}:{QWEN_PLATFORM_MLX}:{requested_model_id}:{adapter_key}"
     if (
         qwen_model is not None
         and qwen_processor is not None
@@ -3450,7 +3456,7 @@ def _ensure_qwen_mlx_ready(model_id: Optional[str] = None) -> QwenRuntime:
                 config=qwen_runtime_config,
             )
         try:
-            runtime = _load_qwen_mlx_runtime(requested_model_id)
+            runtime = _load_qwen_mlx_runtime(requested_model_id, adapter_path=adapter_path)
         except HTTPException as exc:
             qwen_last_error = str(exc.detail)
             raise
@@ -3541,7 +3547,7 @@ def _ensure_qwen_ready():
         metadata=metadata,
     )
     if platform_name == QWEN_PLATFORM_MLX:
-        return _ensure_qwen_mlx_ready(str(base_model_id))
+        return _ensure_qwen_mlx_ready(str(base_model_id), adapter_path=adapter_path)
     if (
         QWEN_IMPORT_ERROR is not None
         or Qwen3VLForConditionalGeneration is None
@@ -15637,6 +15643,7 @@ def _persist_qwen_run_metadata(
         "model_id": getattr(config, "model_id", None),
         "requested_model_id": getattr(config, "requested_model_id", None),
         "training_model_id": getattr(config, "model_id", None),
+        "runtime_platform": getattr(config, "runtime_platform", QWEN_PLATFORM_TRANSFORMERS),
         "path": str(result_path),
         "latest_checkpoint": getattr(result, "latest_checkpoint", None),
         "checkpoints": checkpoints,
@@ -15645,6 +15652,9 @@ def _persist_qwen_run_metadata(
         "training_mode": getattr(config, "training_mode", None),
         "dataset_root": getattr(config, "dataset_root", None),
     }
+    result_metadata = getattr(result, "metadata", None)
+    if isinstance(result_metadata, dict):
+        metadata.update(result_metadata)
     try:
         result_path.mkdir(parents=True, exist_ok=True)
         (result_path / QWEN_METADATA_FILENAME).write_text(
@@ -15696,14 +15706,34 @@ def _build_qwen_config(
         or QWEN_MODEL_NAME
     )
     requested_model_id = str(requested_model_id or "").strip() or QWEN_MODEL_NAME
-    if is_qwen_mlx_model_id(requested_model_id):
+    requested_runtime_platform = (
+        QWEN_PLATFORM_MLX if is_qwen_mlx_model_id(requested_model_id) else QWEN_PLATFORM_TRANSFORMERS
+    )
+    requested_model_metadata = (
+        qwen_mlx_metadata_for_model(requested_model_id)
+        if requested_runtime_platform == QWEN_PLATFORM_MLX
+        else qwen_transformers_metadata_for_model(requested_model_id)
+    )
+    if requested_model_metadata.get("training_supported") is False:
+        training_note = str(
+            requested_model_metadata.get("training_note")
+            or "Select a dense Transformers Qwen3-VL checkpoint for Qwen training."
+        )
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST,
-            detail="qwen_mlx_training_unsupported:select_a_transformers_cuda_model",
+            detail=f"qwen_model_training_unsupported:{training_note}",
         )
-    training_model_id = resolve_qwen_training_model_id(requested_model_id)
+    if requested_runtime_platform == QWEN_PLATFORM_MLX:
+        training_model_id = resolve_mlx_model_id(
+            requested_model_id,
+            default_mlx_model_id=QWEN_MLX_MODEL_NAME,
+            default_quantization=QWEN_MLX_DEFAULT_QUANTIZATION,
+        )
+    else:
+        training_model_id = resolve_qwen_training_model_id(requested_model_id)
     if prep_logs is not None:
         prep_logs.append(f"Requested Qwen model: {requested_model_id}")
+        prep_logs.append(f"Training backend: {requested_runtime_platform}")
         if training_model_id != requested_model_id:
             prep_logs.append(
                 f"Adapter training base: {training_model_id} (resolved from quantized inference model)"
@@ -15713,6 +15743,7 @@ def _build_qwen_config(
         "result_path": str(result_path),
         "model_id": training_model_id,
         "requested_model_id": requested_model_id,
+        "runtime_platform": requested_runtime_platform,
         "training_mode": payload.training_mode or "official_lora",
         "system_prompt": payload.system_prompt or DEFAULT_SYSTEM_PROMPT,
         "run_name": run_name,
@@ -24017,6 +24048,7 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
     transformers_entries: List[Dict[str, Any]] = []
     for entry in QWEN_TRANSFORMERS_MODEL_OPTIONS:
         model_id = str(entry.get("id") or entry.get("model_id") or "")
+        training_supported = bool(entry.get("training_supported", True))
         metadata = {
             "id": model_id,
             "label": str(entry.get("label") or model_id),
@@ -24033,8 +24065,11 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
             "abliterated": bool(entry.get("abliterated")),
             "variant": entry.get("variant"),
             "size": entry.get("size"),
-            "training_supported": bool(entry.get("training_supported", True)),
-            "training_modes": list(entry.get("training_modes") or ["official_lora", "trl_qlora"]),
+            "training_supported": training_supported,
+            "training_modes": list(
+                entry.get("training_modes")
+                or (["official_lora", "trl_qlora"] if training_supported else [])
+            ),
             "training_model_id": entry.get("training_model_id") or model_id,
             "training_note": entry.get("training_note"),
             "min_pixels": QWEN_MIN_PIXELS,
@@ -24067,8 +24102,13 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
             "abliterated": bool(entry.get("abliterated")),
             "variant": entry.get("variant"),
             "size": entry.get("size"),
-            "training_supported": False,
-            "training_note": "MLX-VLM adapters are not loaded by the current PyTorch training backend.",
+            "training_supported": True,
+            "training_modes": ["official_lora", "trl_qlora"],
+            "training_model_id": model_id,
+            "training_note": (
+                "MLX-VLM trains LoRA adapters directly on Apple Silicon. Quantized MLX checkpoints use "
+                "the same adapter path as QLoRA-style training."
+            ),
             "min_pixels": QWEN_MIN_PIXELS,
             "max_pixels": QWEN_MAX_PIXELS,
         }

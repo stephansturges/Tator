@@ -27,6 +27,10 @@ torchvision>=0.18,<1.0
 ftfy
 regex
 tqdm
+requests>=2.31,<3.0
+datasets>=2.19,<5.0
+soundfile>=0.13,<0.14
+opencv-python>=4.10,<4.12
 git+https://github.com/openai/CLIP.git
 git+https://github.com/facebookresearch/segment-anything.git
 git+https://github.com/facebookresearch/sam3.git
@@ -38,8 +42,12 @@ xgboost>=2.0,<3.0
 
 # Qwen VLM paths. Transformers remains the portable fallback; MLX-VLM is the
 # first-class Apple Silicon inference backend for quantized mlx-community models.
+# The setup script installs mlx-vlm from requirements-macos-vlm.txt with
+# --no-deps. Qwen3-capable mlx-vlm 0.3.x declares opencv-python>=4.12, while
+# SAHI 0.11.x requires opencv-python<=4.11; the runtime works with the
+# SAHI-compatible OpenCV already installed here.
 mlx>=0.31,<1.0
-mlx-vlm>=0.3,<1.0
+mlx-lm>=0.23,<0.30
 transformers>=4.57,<5.0
 accelerate>=1.0,<2.0
 qwen-vl-utils>=0.0.8

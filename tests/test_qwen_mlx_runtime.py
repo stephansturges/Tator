@@ -1,8 +1,23 @@
 from types import SimpleNamespace
 
+import pytest
 from PIL import Image
 
 import localinferenceapi as api
+
+
+def _make_qwen_train_dataset(tmp_path, monkeypatch):
+    qwen_root = tmp_path / "qwen"
+    dataset_root = qwen_root / "demo"
+    (dataset_root / "train").mkdir(parents=True)
+    (dataset_root / "val").mkdir(parents=True)
+    (dataset_root / "train" / "annotations.jsonl").write_text("{}\n", encoding="utf-8")
+    (dataset_root / "val" / "annotations.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", qwen_root)
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "sam3")
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", tmp_path / "registry")
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", tmp_path / "jobs")
+    return dataset_root
 
 
 def test_qwen_model_registry_exposes_mlx_quantized_models():
@@ -21,26 +36,112 @@ def test_qwen_model_registry_exposes_cuda_quantized_and_abliterated_models():
     models = api.list_qwen_models()["models"]
     by_id = {entry["id"]: entry for entry in models}
 
+    fp8_entry = by_id["Qwen/Qwen3-VL-235B-A22B-Thinking-FP8"]
+    assert fp8_entry["type"] == "builtin_transformers"
+    assert fp8_entry["metadata"]["runtime_platform"] == "transformers"
+    assert fp8_entry["metadata"]["quantization_backend"] == "fp8"
+    assert fp8_entry["metadata"]["training_supported"] is True
+    assert fp8_entry["metadata"]["training_modes"] == ["official_lora", "trl_qlora"]
+    assert fp8_entry["metadata"]["training_model_id"] == "Qwen/Qwen3-VL-235B-A22B-Thinking"
+
     awq_entry = by_id["cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit"]
     assert awq_entry["type"] == "builtin_transformers"
     assert awq_entry["metadata"]["runtime_platform"] == "transformers"
     assert awq_entry["metadata"]["quantization_backend"] == "awq"
+    assert awq_entry["metadata"]["training_supported"] is True
     assert awq_entry["metadata"]["training_model_id"] == "Qwen/Qwen3-VL-4B-Instruct"
 
     abliterated_entry = by_id["huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated"]
     assert abliterated_entry["metadata"]["abliterated"] is True
+    assert abliterated_entry["metadata"]["training_supported"] is True
     assert abliterated_entry["metadata"]["training_model_id"] == abliterated_entry["metadata"]["model_id"]
+
+    moe_entry = by_id["huihui-ai/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated"]
+    assert moe_entry["metadata"]["training_supported"] is True
+    assert moe_entry["metadata"]["training_modes"] == ["official_lora", "trl_qlora"]
 
 
 def test_qwen_model_registry_exposes_abliterated_mlx_models():
     models = api.list_qwen_models()["models"]
     by_id = {entry["id"]: entry for entry in models}
-    model_id = "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx"
+    expected_ids = {
+        "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-mlx",
+        "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx",
+        "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-g32-mxfp4-mixed_4_8-mlx",
+        "EZCon/Huihui-Qwen3-VL-2B-Thinking-abliterated-8bit-mlx",
+        "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx",
+        "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx",
+        "introvoyz041/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx-mlx-4Bit",
+        "veeceey/Huihui-Qwen3-VL-8B-Instruct-abliterated-mlx-4bit",
+        "Goekdeniz-Guelmez/Josiefied-Qwen3-VL-4B-Instruct-abliterated-beta-v1",
+    }
 
-    assert by_id[model_id]["type"] == "builtin_mlx"
-    assert by_id[model_id]["metadata"]["runtime_platform"] == "mlx_vlm"
-    assert by_id[model_id]["metadata"]["abliterated"] is True
-    assert by_id[model_id]["metadata"]["training_supported"] is False
+    assert expected_ids <= set(by_id)
+    for model_id in expected_ids:
+        assert by_id[model_id]["type"] == "builtin_mlx"
+        assert by_id[model_id]["metadata"]["runtime_platform"] == "mlx_vlm"
+        assert by_id[model_id]["metadata"]["abliterated"] is True
+        assert by_id[model_id]["metadata"]["training_supported"] is True
+        assert by_id[model_id]["metadata"]["training_modes"] == ["official_lora", "trl_qlora"]
+
+
+def test_qwen_training_config_accepts_moe_transformers_model(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_dataset(tmp_path, monkeypatch)
+
+    payload = api.QwenTrainRequest(
+        dataset_id="demo",
+        model_id="huihui-ai/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated",
+    )
+    config = api._build_qwen_config(payload, "job-moe")
+
+    assert config.runtime_platform == api.QWEN_PLATFORM_TRANSFORMERS
+    assert config.model_id == "huihui-ai/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated"
+
+
+def test_qwen_training_config_accepts_mlx_model(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_dataset(tmp_path, monkeypatch)
+
+    payload = api.QwenTrainRequest(
+        dataset_id="demo",
+        model_id="mlx-community/Qwen3-VL-4B-Instruct-4bit",
+        training_mode="trl_qlora",
+    )
+    config = api._build_qwen_config(payload, "job-mlx")
+
+    assert config.runtime_platform == api.QWEN_PLATFORM_MLX
+    assert config.model_id == "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+    assert config.training_mode == "trl_qlora"
+
+
+def test_qwen_mlx_runtime_loads_adapter_path(monkeypatch, tmp_path):
+    calls = {}
+    adapter_dir = tmp_path / "adapter"
+    adapter_dir.mkdir()
+
+    def fake_load(model_id, **kwargs):
+        calls["model_id"] = model_id
+        calls["kwargs"] = kwargs
+        return object(), object()
+
+    monkeypatch.setattr(api, "MLX_VLM_LOAD", fake_load)
+    monkeypatch.setattr(api, "MLX_VLM_GENERATE", object())
+    monkeypatch.setattr(api, "MLX_VLM_IMPORT_ERROR", None)
+    monkeypatch.setattr(api, "MLX_LOAD_CONFIG", None)
+
+    runtime = api._load_qwen_mlx_runtime(
+        "mlx-community/Qwen3-VL-4B-Instruct-4bit",
+        adapter_path=adapter_dir,
+    )
+
+    assert runtime.platform == api.QWEN_PLATFORM_MLX
+    assert calls["model_id"] == "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+    assert calls["kwargs"]["adapter_path"] == str(adapter_dir)
 
 
 def test_qwen_mlx_model_id_resolution_maps_hf_to_quantized_default():

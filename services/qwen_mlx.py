@@ -42,7 +42,11 @@ def is_mlx_model_id(model_id: Optional[str]) -> bool:
     except NameError:
         pass
     lowered = raw.lower()
-    return lowered.endswith("-mlx") or "-mlx-" in lowered
+    return (
+        lowered.endswith("-mlx")
+        or "-mlx-" in lowered
+        or lowered.startswith("goekdeniz-guelmez/josiefied-qwen3-vl-")
+    )
 
 
 def _model_entry(size: str, variant: str, quant: str, *, moe: bool = False) -> Dict[str, Any]:
@@ -145,8 +149,14 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
     )
     for size in ("2B", "4B"):
         for variant in ("Instruct", "Thinking"):
-            for quant in ("4bit", "8bit"):
-                model_id = f"EZCon/Huihui-Qwen3-VL-{size}-{variant}-abliterated-{quant}-mlx"
+            base = f"EZCon/Huihui-Qwen3-VL-{size}-{variant}-abliterated"
+            for quant, suffix in (
+                ("mlx", "mlx"),
+                ("4bit", "4bit-mlx"),
+                ("8bit", "8bit-mlx"),
+                ("mixed 4/8-bit MXFP4", "4bit-g32-mxfp4-mixed_4_8-mlx"),
+            ):
+                model_id = f"{base}-{suffix}"
                 entries.append(
                     _external_mlx_entry(
                         model_id,
@@ -158,6 +168,86 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
                         abliterated=True,
                     )
                 )
+    for size in ("4B", "8B"):
+        for quant, suffix in (
+            ("mlx", "mlx"),
+            ("q2", "q2-mlx"),
+            ("q3", "q3-mlx"),
+            ("q4", "q4-mlx"),
+            ("q6", "q6-mlx"),
+            ("q8", "q8-mlx"),
+        ):
+            model_id = f"alexgusevski/Huihui-Qwen3-VL-{size}-Instruct-abliterated-{suffix}"
+            entries.append(
+                _external_mlx_entry(
+                    model_id,
+                    label=f"MLX Huihui Qwen3-VL {size} Instruct abliterated {quant}",
+                    size=size,
+                    variant="Instruct",
+                    quantization=quant,
+                    source="alexgusevski",
+                    abliterated=True,
+                )
+            )
+    for model_id, size, variant, quantization, source in (
+        (
+            "nightmedia/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx",
+            "30B-A3B",
+            "Thinking",
+            "qx86-hi",
+            "nightmedia",
+        ),
+        (
+            "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx",
+            "32B",
+            "Thinking",
+            "qx65-hi",
+            "nightmedia",
+        ),
+        (
+            "introvoyz041/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx-mlx-4Bit",
+            "30B-A3B",
+            "Thinking",
+            "qx86-hi 4bit repack",
+            "introvoyz041",
+        ),
+        (
+            "introvoyz041/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx-mlx-4Bit",
+            "32B",
+            "Thinking",
+            "qx65-hi 4bit repack",
+            "introvoyz041",
+        ),
+        (
+            "veeceey/Huihui-Qwen3-VL-8B-Instruct-abliterated-mlx-4bit",
+            "8B",
+            "Instruct",
+            "4bit",
+            "veeceey",
+        ),
+        (
+            "Goekdeniz-Guelmez/Josiefied-Qwen3-VL-4B-Instruct-abliterated-beta-v1",
+            "4B",
+            "Instruct",
+            "beta v1",
+            "Goekdeniz-Guelmez",
+        ),
+    ):
+        entries.append(
+            _external_mlx_entry(
+                model_id,
+                label=(
+                    f"MLX Josiefied Qwen3-VL {size} {variant} abliterated {quantization}"
+                    if source == "Goekdeniz-Guelmez"
+                    else f"MLX Huihui Qwen3-VL {size} {variant} abliterated {quantization}"
+                ),
+                size=size,
+                variant=variant,
+                quantization=quantization,
+                source=source,
+                abliterated=True,
+            )
+        )
     preferred = {
         "mlx-community/Qwen3-VL-4B-Instruct-4bit": 0,
         "mlx-community/Qwen3-VL-2B-Instruct-4bit": 1,
@@ -166,6 +256,8 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
         "mlx-community/Qwen3-VL-8B-Thinking-4bit": 4,
         "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx": 5,
         "EZCon/Huihui-Qwen3-VL-2B-Instruct-abliterated-4bit-mlx": 6,
+        "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx": 7,
+        "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx": 8,
     }
     entries.sort(
         key=lambda entry: (
@@ -199,6 +291,8 @@ def select_qwen_platform(
     if configured == QWEN_PLATFORM_TRANSFORMERS:
         return QWEN_PLATFORM_TRANSFORMERS
     if configured == QWEN_PLATFORM_MLX:
+        return QWEN_PLATFORM_MLX
+    if adapter_path and is_mlx_model_id(model_id):
         return QWEN_PLATFORM_MLX
     if adapter_path:
         return QWEN_PLATFORM_TRANSFORMERS

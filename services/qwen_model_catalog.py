@@ -10,14 +10,27 @@ QWEN_PLATFORM_TRANSFORMERS = "transformers"
 _QWEN_VARIANTS = ("Instruct", "Thinking")
 _QWEN_DENSE_SIZES = ("2B", "4B", "8B", "32B")
 _QWEN_MOE_SIZES = ("30B-A3B", "235B-A22B")
+_QWEN_TRAINING_MODES = ["official_lora", "trl_qlora"]
+_QWEN_MOE_TRAINING_NOTE = (
+    "Qwen3-VL MoE adapter training uses the Transformers Qwen3VLMoe trainer path. "
+    "Expect very large GPU memory requirements, especially without QLoRA or distributed training."
+)
 
 
 def _official_model_id(size: str, variant: str) -> str:
     return f"Qwen/Qwen3-VL-{size}-{variant}"
 
 
+def _huihui_abliterated_model_id(size: str, variant: str) -> str:
+    return f"huihui-ai/Huihui-Qwen3-VL-{size}-{variant}-abliterated"
+
+
+def _supports_current_trainer(size: str) -> bool:
+    return size in (*_QWEN_DENSE_SIZES, *_QWEN_MOE_SIZES)
+
+
 def _model_sort_key(entry: Dict[str, Any]) -> tuple:
-    preferred_quant = {"none": 0, "awq": 1, "gptq": 2}
+    preferred_quant = {"none": 0, "fp8": 1, "awq": 2, "gptq": 3}
     size_order = {
         "2B": 0,
         "4B": 1,
@@ -47,9 +60,30 @@ def _entry(
     abliterated: bool = False,
     training_model_id: Optional[str] = None,
     training_note: Optional[str] = None,
+    training_supported: bool = True,
 ) -> Dict[str, Any]:
     train_base = str(training_model_id or model_id)
     quantized = quantization_backend != "none"
+    if not training_supported and not training_note:
+        training_note = _QWEN_MOE_TRAINING_NOTE
+    if training_supported and not training_note:
+        if size in _QWEN_MOE_SIZES:
+            training_note = _QWEN_MOE_TRAINING_NOTE
+        elif quantized:
+            training_note = (
+                "Training starts from the matching full Transformers checkpoint; QLoRA applies bitsandbytes 4-bit at load time."
+            )
+    dataset_context = (
+        "Abliterated Qwen3-VL Transformer checkpoint for CUDA/CPU inference and adapter training."
+        if abliterated
+        else "Qwen3-VL Transformer checkpoint for CUDA/CPU inference and adapter training."
+    )
+    if not training_supported:
+        dataset_context = (
+            "Abliterated Qwen3-VL Transformer checkpoint for CUDA/CPU inference. Adapter training is not wired for this model."
+            if abliterated
+            else "Qwen3-VL Transformer checkpoint for CUDA/CPU inference. Adapter training is not wired for this model."
+        )
     return {
         "id": model_id,
         "label": label,
@@ -62,26 +96,18 @@ def _entry(
         "quantization_backend": quantization_backend,
         "quantized": quantized,
         "abliterated": abliterated,
-        "training_supported": True,
-        "training_modes": ["official_lora", "trl_qlora"],
+        "training_supported": training_supported,
+        "training_modes": list(_QWEN_TRAINING_MODES) if training_supported else [],
         "training_model_id": train_base,
-        "training_note": training_note
-        or (
-            "Training starts from the matching full Transformers checkpoint; QLoRA applies bitsandbytes 4-bit at load time."
-            if quantized
-            else None
-        ),
-        "dataset_context": (
-            "Abliterated Qwen3-VL Transformer checkpoint for CUDA/CPU inference and adapter training."
-            if abliterated
-            else "Qwen3-VL Transformer checkpoint for CUDA/CPU inference and adapter training."
-        ),
+        "training_note": training_note,
+        "dataset_context": dataset_context,
     }
 
 
 def _build_transformers_model_options() -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
     for size in (*_QWEN_DENSE_SIZES, *_QWEN_MOE_SIZES):
+        training_supported = _supports_current_trainer(size)
         for variant in _QWEN_VARIANTS:
             model_id = _official_model_id(size, variant)
             entries.append(
@@ -91,6 +117,27 @@ def _build_transformers_model_options() -> List[Dict[str, Any]]:
                     size=size,
                     variant=variant,
                     source="Qwen",
+                    training_supported=training_supported,
+                )
+            )
+            fp8_model_id = f"{model_id}-FP8"
+            entries.append(
+                _entry(
+                    fp8_model_id,
+                    f"CUDA Qwen3-VL {size} {variant} FP8",
+                    size=size,
+                    variant=variant,
+                    source="Qwen",
+                    quantization="FP8",
+                    quantization_backend="fp8",
+                    training_model_id=model_id,
+                    training_note=(
+                        "FP8 is for CUDA inference on compatible NVIDIA GPUs; adapter training starts "
+                        "from the matching full Transformers checkpoint."
+                        if training_supported
+                        else _QWEN_MOE_TRAINING_NOTE
+                    ),
+                    training_supported=training_supported,
                 )
             )
 
@@ -118,6 +165,7 @@ def _build_transformers_model_options() -> List[Dict[str, Any]]:
                 quantization="AWQ 4-bit",
                 quantization_backend="awq",
                 training_model_id=_official_model_id(size, variant),
+                training_supported=_supports_current_trainer(size),
             )
         )
 
@@ -140,13 +188,12 @@ def _build_transformers_model_options() -> List[Dict[str, Any]]:
             )
         )
 
-    abliterated_specs = [
-        ("huihui-ai/Huihui-Qwen3-VL-2B-Instruct-abliterated", "2B", "Instruct"),
-        ("huihui-ai/Huihui-Qwen3-VL-4B-Instruct-abliterated", "4B", "Instruct"),
-        ("huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated", "8B", "Instruct"),
-        ("huihui-ai/Huihui-Qwen3-VL-30B-A3B-Instruct-abliterated", "30B-A3B", "Instruct"),
+    huihui_abliterated_specs = [
+        (_huihui_abliterated_model_id(size, variant), size, variant)
+        for size in ("2B", "4B", "8B", "32B", "30B-A3B")
+        for variant in _QWEN_VARIANTS
     ]
-    for model_id, size, variant in abliterated_specs:
+    for model_id, size, variant in huihui_abliterated_specs:
         entries.append(
             _entry(
                 model_id,
@@ -155,22 +202,126 @@ def _build_transformers_model_options() -> List[Dict[str, Any]]:
                 variant=variant,
                 source="huihui-ai",
                 abliterated=True,
+                training_supported=_supports_current_trainer(size),
             )
         )
 
-    entries.append(
-        _entry(
-            "JinRiYao2001/Huihui-Qwen3-VL-30B-A3B-Instruct-abliterated-AWQ",
-            "CUDA Huihui Qwen3-VL 30B-A3B Instruct abliterated AWQ",
-            size="30B-A3B",
-            variant="Instruct",
-            source="JinRiYao2001",
-            quantization="AWQ 4-bit",
-            quantization_backend="awq",
-            abliterated=True,
-            training_model_id="huihui-ai/Huihui-Qwen3-VL-30B-A3B-Instruct-abliterated",
-        )
+    prithiv_abliterated_specs = [
+        (f"prithivMLmods/Qwen3-VL-{size}-{variant}-abliterated-v1", size, variant, "v1")
+        for size in ("2B", "4B", "8B", "32B", "30B-A3B")
+        for variant in _QWEN_VARIANTS
+    ]
+    prithiv_abliterated_specs.append(
+        ("prithivMLmods/Qwen3-VL-8B-Instruct-abliterated-v2", "8B", "Instruct", "v2")
     )
+    for model_id, size, variant, version in prithiv_abliterated_specs:
+        entries.append(
+            _entry(
+                model_id,
+                f"CUDA Prithiv Qwen3-VL {size} {variant} abliterated {version}",
+                size=size,
+                variant=variant,
+                source="prithivMLmods",
+                abliterated=True,
+                training_supported=_supports_current_trainer(size),
+            )
+        )
+
+    community_abliterated_specs = [
+        ("Feiouex/Huihui-Qwen3-VL-8B-Instruct-abliterated", "8B", "Instruct", "Feiouex"),
+        (
+            "sonicrules1234/Huihui-Qwen3-VL-30B-A3B-Instruct-abliterated",
+            "30B-A3B",
+            "Instruct",
+            "sonicrules1234",
+        ),
+        ("trithemius/Huihui-Qwen3-VL-2B-Instruct-abliterated", "2B", "Instruct", "trithemius"),
+        ("Freesol/Huihui-Qwen3-VL-8B-Instruct-abliterated-merged", "8B", "Instruct", "Freesol"),
+    ]
+    for model_id, size, variant, source in community_abliterated_specs:
+        entries.append(
+            _entry(
+                model_id,
+                f"CUDA {source} Qwen3-VL {size} {variant} abliterated",
+                size=size,
+                variant=variant,
+                source=source,
+                abliterated=True,
+                training_supported=_supports_current_trainer(size),
+            )
+        )
+
+    quantized_abliterated_specs = [
+        (
+            "JinRiYao2001/Huihui-Qwen3-VL-30B-A3B-Instruct-abliterated-AWQ",
+            "30B-A3B",
+            "Instruct",
+            "AWQ 4-bit",
+            "awq",
+            "JinRiYao2001",
+            _huihui_abliterated_model_id("30B-A3B", "Instruct"),
+        ),
+        (
+            "nicklas373/Huihui-Qwen3-VL-8B-Thinking-abliterated-AWQ",
+            "8B",
+            "Thinking",
+            "AWQ 4-bit",
+            "awq",
+            "nicklas373",
+            _huihui_abliterated_model_id("8B", "Thinking"),
+        ),
+        (
+            "nicklas373/Huihui-Qwen3-VL-8B-Thinking-abliterated-AWQ-8-bit",
+            "8B",
+            "Thinking",
+            "AWQ 8-bit",
+            "awq",
+            "nicklas373",
+            _huihui_abliterated_model_id("8B", "Thinking"),
+        ),
+        (
+            "huihui-ai/Huihui-Qwen3-VL-4B-Instruct-abliterated-FP8",
+            "4B",
+            "Instruct",
+            "FP8",
+            "fp8",
+            "huihui-ai",
+            _huihui_abliterated_model_id("4B", "Instruct"),
+        ),
+        (
+            "Heouzen/Huihui-Qwen3-VL-8B-Instruct-FP8-abliterated",
+            "8B",
+            "Instruct",
+            "FP8",
+            "fp8",
+            "Heouzen",
+            _huihui_abliterated_model_id("8B", "Instruct"),
+        ),
+        (
+            "Heouzen/Huihui-Qwen3-VL-32B-Instruct-FP8-abliterated",
+            "32B",
+            "Instruct",
+            "FP8",
+            "fp8",
+            "Heouzen",
+            _huihui_abliterated_model_id("32B", "Instruct"),
+        ),
+    ]
+    for model_id, size, variant, quantization, quantization_backend, source, training_model_id in quantized_abliterated_specs:
+        entries.append(
+            _entry(
+                model_id,
+                f"CUDA Huihui Qwen3-VL {size} {variant} abliterated {quantization}",
+                size=size,
+                variant=variant,
+                source=source,
+                quantization=quantization,
+                quantization_backend=quantization_backend,
+                abliterated=True,
+                training_model_id=training_model_id,
+                training_supported=_supports_current_trainer(size),
+            )
+        )
 
     entries.sort(key=_model_sort_key)
     return entries
@@ -213,7 +364,12 @@ def infer_qwen_quantization_backend(model_id: Optional[str]) -> str:
 def is_qwen_mlx_model_id(model_id: Optional[str]) -> bool:
     raw = str(model_id or "").strip()
     lowered = raw.lower()
-    return raw.startswith("mlx-community/") or lowered.endswith("-mlx") or "-mlx-" in lowered
+    return (
+        raw.startswith("mlx-community/")
+        or lowered.endswith("-mlx")
+        or "-mlx-" in lowered
+        or lowered.startswith("goekdeniz-guelmez/josiefied-qwen3-vl-")
+    )
 
 
 def _strip_known_training_quant_suffix(model_id: str) -> Optional[str]:
@@ -262,7 +418,7 @@ def qwen_transformers_load_kwargs(
     quant_backend = infer_qwen_quantization_backend(model_id)
     cuda_available = bool(torch_module.cuda.is_available())
     on_cuda = device_text.startswith("cuda") and cuda_available
-    if on_cuda and quant_backend in {"awq", "gptq"}:
+    if on_cuda and quant_backend in {"awq", "gptq", "fp8"}:
         if pref == "auto" or device_text == "cuda":
             return {"torch_dtype": "auto", "device_map": "auto"}
         return {"torch_dtype": "auto", "device_map": {"": device_text}}

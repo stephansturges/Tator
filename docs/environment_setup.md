@@ -1,5 +1,55 @@
 # Environment Setup
 
+Tator uses profile-specific Python environments. A single locked Poetry
+environment is not a good fit for every path because the macOS MLX runtime,
+general Linux training stack, and Falcon CUDA stack have intentionally different
+constraints. Poetry is therefore used as the command front door, while the
+profile installs still land in the virtualenvs that the backend launch scripts
+expect.
+
+## Recommended Setup Front Door
+
+Install Poetry once, then install only the repo setup command:
+
+```bash
+poetry install --only-root
+```
+
+Then choose the profile that matches the machine:
+
+```bash
+# Apple Silicon inference + Qwen MLX adapter training
+poetry run tator-setup macos
+
+# General Linux backend/training stack
+poetry run tator-setup linux
+
+# Pinned Falcon CUDA 11.8 stack
+poetry run tator-setup falcon-cu118
+```
+
+Useful options:
+
+```bash
+poetry run tator-setup macos --dry-run
+poetry run tator-setup linux --dev
+poetry run tator-setup falcon-cu118 --venv-dir .venv-falcon
+poetry run tator-setup macos --recreate
+```
+
+The generated environments are:
+
+- `.venv-macos` for the Apple Silicon profile.
+- `.venv` for the default Linux and Falcon profiles, unless `--venv-dir` is provided.
+
+The older shell commands remain available and now delegate to the same setup
+implementation:
+
+```bash
+tools/setup_venv_macos_inference.sh
+bash tools/setup_venv_falcon_cu118.sh
+```
+
 This repo supports a broad dependency range, but the Falcon automatic-labeling
 path is more sensitive than the rest of the stack. This document defines the
 recommended GPU setup for Falcon work and explains when a CUDA or driver update
@@ -36,14 +86,17 @@ This is the first stack to try for Falcon automatic-labeling on Linux x86_64:
 The repo includes a reproducible setup script for this stack:
 
 ```bash
-bash tools/setup_venv_falcon_cu118.sh
+poetry run tator-setup falcon-cu118
 ```
 
 To include dev tools too:
 
 ```bash
-INSTALL_DEV=1 bash tools/setup_venv_falcon_cu118.sh
+poetry run tator-setup falcon-cu118 --dev
 ```
+
+Without Poetry, `bash tools/setup_venv_falcon_cu118.sh` and
+`INSTALL_DEV=1 bash tools/setup_venv_falcon_cu118.sh` perform the same setup.
 
 ## Why `cu118`
 

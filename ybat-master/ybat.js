@@ -3,16 +3,21 @@
 
     const DARK_THEME_CLASS = "theme-dark";
     const PIPBOY_THEME_CLASS = "theme-pipboy";
+    const PIPBOY_AMBER_CLASS = "theme-pipboy-amber";
     const DARK_THEME_STORAGE_KEY = "tator.darkMode";
     const THEME_MODE_STORAGE_KEY = "tator.themeMode";
     const THEME_CLASSIC_MODE_STORAGE_KEY = "tator.classicThemeMode";
+    const PIPBOY_ACCENT_STORAGE_KEY = "tator.pipboyAccent";
     const THEME_LIGHT = "light";
     const THEME_DARK = "dark";
     const THEME_PIPBOY = "pipboy";
+    const PIPBOY_GREEN = "green";
+    const PIPBOY_AMBER = "amber";
     const THEME_CLICK_DELAY_MS = 320;
     let themeToggleButton = null;
     let themeToggleClickTimer = null;
     let previousClassicThemeMode = THEME_LIGHT;
+    let pipboyAccentMode = PIPBOY_GREEN;
 
     function normalizeThemeMode(value) {
         if (value === THEME_DARK || value === THEME_PIPBOY) {
@@ -53,6 +58,18 @@
         return getSavedDarkModePreference() ? THEME_DARK : THEME_LIGHT;
     }
 
+    function normalizePipboyAccent(value) {
+        return value === PIPBOY_AMBER ? PIPBOY_AMBER : PIPBOY_GREEN;
+    }
+
+    function getSavedPipboyAccent() {
+        try {
+            return normalizePipboyAccent(window.localStorage?.getItem(PIPBOY_ACCENT_STORAGE_KEY));
+        } catch {
+            return PIPBOY_GREEN;
+        }
+    }
+
     function saveThemeMode(mode) {
         try {
             window.localStorage?.setItem(THEME_MODE_STORAGE_KEY, mode);
@@ -65,12 +82,24 @@
         }
     }
 
+    function savePipboyAccent(accent) {
+        try {
+            window.localStorage?.setItem(PIPBOY_ACCENT_STORAGE_KEY, normalizePipboyAccent(accent));
+        } catch {
+            // Accent persistence is best-effort.
+        }
+    }
+
     function isDarkModeEnabled() {
         return document.documentElement.classList.contains(DARK_THEME_CLASS);
     }
 
     function isPipboyThemeEnabled() {
         return document.documentElement.classList.contains(PIPBOY_THEME_CLASS);
+    }
+
+    function getPipboyCanvasTextColor() {
+        return pipboyAccentMode === PIPBOY_AMBER ? "#ffbf3d" : "#84ff5b";
     }
 
     function getActiveThemeMode() {
@@ -88,15 +117,38 @@
             return;
         }
         if (mode === THEME_PIPBOY) {
-            themeToggleButton.textContent = "Pip";
+            const nextAccent = pipboyAccentMode === PIPBOY_AMBER ? "green" : "amber";
+            const labelAccent = pipboyAccentMode === PIPBOY_AMBER ? "Amber" : "Green";
+            themeToggleButton.textContent = `Pip ${labelAccent}`;
             themeToggleButton.setAttribute("aria-pressed", "true");
-            themeToggleButton.title = "Switch to the standard theme";
+            themeToggleButton.title = `Switch Pip-Boy color to ${nextAccent}; double-click to exit Pip-Boy`;
             return;
         }
         const enabled = mode === THEME_DARK;
         themeToggleButton.textContent = enabled ? "Light" : "Dark";
         themeToggleButton.setAttribute("aria-pressed", enabled ? "true" : "false");
         themeToggleButton.title = enabled ? "Switch to light mode" : "Switch to dark mode";
+    }
+
+    function setPipboyAccent(accent, options = {}) {
+        pipboyAccentMode = normalizePipboyAccent(accent);
+        const amber = pipboyAccentMode === PIPBOY_AMBER;
+        document.documentElement.classList.toggle(PIPBOY_AMBER_CLASS, amber);
+        document.documentElement.dataset.pipboyAccent = pipboyAccentMode;
+        if (document.body) {
+            document.body.classList.toggle(PIPBOY_AMBER_CLASS, amber);
+            document.body.dataset.pipboyAccent = pipboyAccentMode;
+        }
+        if (options.persist !== false) {
+            savePipboyAccent(pipboyAccentMode);
+        }
+        if (getActiveThemeMode() === THEME_PIPBOY) {
+            updateThemeToggleButton(THEME_PIPBOY);
+        }
+    }
+
+    function cyclePipboyAccent() {
+        setPipboyAccent(pipboyAccentMode === PIPBOY_AMBER ? PIPBOY_GREEN : PIPBOY_AMBER);
     }
 
     function setThemeMode(mode, options = {}) {
@@ -107,6 +159,14 @@
         if (document.body) {
             document.body.classList.toggle(DARK_THEME_CLASS, isDarkSurface);
             document.body.classList.toggle(PIPBOY_THEME_CLASS, normalized === THEME_PIPBOY);
+        }
+        if (normalized === THEME_PIPBOY) {
+            setPipboyAccent(pipboyAccentMode, { persist: options.persist });
+        } else {
+            document.documentElement.classList.remove(PIPBOY_AMBER_CLASS);
+            if (document.body) {
+                document.body.classList.remove(PIPBOY_AMBER_CLASS);
+            }
         }
         if (normalized === THEME_LIGHT || normalized === THEME_DARK) {
             previousClassicThemeMode = normalized;
@@ -123,7 +183,7 @@
             themeToggleClickTimer = null;
             const activeMode = getActiveThemeMode();
             if (activeMode === THEME_PIPBOY) {
-                setThemeMode(previousClassicThemeMode);
+                cyclePipboyAccent();
                 return;
             }
             setThemeMode(activeMode === THEME_DARK ? THEME_LIGHT : THEME_DARK);
@@ -145,6 +205,7 @@
     function initializeThemeToggle() {
         themeToggleButton = document.getElementById("themeToggleButton");
         previousClassicThemeMode = getSavedClassicThemeMode();
+        pipboyAccentMode = getSavedPipboyAccent();
         setThemeMode(getSavedThemeMode(), { persist: false });
         if (!themeToggleButton) {
             return;
@@ -154,6 +215,7 @@
     }
 
     previousClassicThemeMode = getSavedClassicThemeMode();
+    pipboyAccentMode = getSavedPipboyAccent();
     setThemeMode(getSavedThemeMode(), { persist: false });
 
     // -----------------------------------------
@@ -10032,9 +10094,6 @@ function normalizeQwenTrainingModelOptions(models) {
     source.forEach((entry) => {
         const metadata = entry?.metadata || entry || {};
         const runtime = metadata.runtime_platform || entry?.runtime_platform || "transformers";
-        if (runtime === "mlx_vlm") {
-            return;
-        }
         if (entry?.type === "finetune") {
             return;
         }
@@ -10048,15 +10107,17 @@ function normalizeQwenTrainingModelOptions(models) {
         seen.add(modelId);
         const label = String(metadata.label || entry?.label || modelId);
         const quant = metadata.quantization ? ` (${metadata.quantization})` : "";
+        const runtimePrefix = runtime === "mlx_vlm" ? "MLX " : "";
         const trainBase = metadata.training_model_id && metadata.training_model_id !== modelId
             ? ` -> trains ${metadata.training_model_id}`
             : "";
         options.push({
             id: modelId,
-            label: `${label}${quant}`,
-            title: `${modelId}${trainBase}`,
+            label: `${runtimePrefix}${label}${quant}`,
+            title: `${modelId}${trainBase}${runtime === "mlx_vlm" ? " -> trains with MLX-VLM LoRA" : ""}`,
             quantized: Boolean(metadata.quantized),
             abliterated: Boolean(metadata.abliterated),
+            runtimePlatform: runtime,
         });
     });
     return options;
@@ -10082,6 +10143,7 @@ function populateQwenTrainingModelSelect(models) {
         option.title = entry.title || entry.id;
         if (entry.quantized) option.dataset.quantized = "true";
         if (entry.abliterated) option.dataset.abliterated = "true";
+        if (entry.runtimePlatform) option.dataset.runtimePlatform = entry.runtimePlatform;
         select.appendChild(option);
     });
     if (selected && Array.from(select.options).some((option) => option.value === selected)) {
@@ -34257,7 +34319,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     const setFontStyles = (context, marked) => {
         if (marked === false) {
-            context.fillStyle = isPipboyThemeEnabled() ? "#84ff5b" : isDarkModeEnabled() ? "#d9e6df" : fontColor;
+            context.fillStyle = isPipboyThemeEnabled() ? getPipboyCanvasTextColor() : isDarkModeEnabled() ? "#d9e6df" : fontColor;
         } else {
             context.fillStyle = markedFontColor;
         }

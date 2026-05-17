@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from PIL import Image
@@ -27,6 +28,21 @@ def test_qwen_training_model_class_routes_moe_models(monkeypatch):
     assert (
         training._qwen_training_model_class("Qwen/Qwen3-VL-4B-Instruct")
         is DenseModel
+    )
+
+
+def test_qwen_mlx_training_flavor_detects_qx_quantized_models():
+    assert (
+        training._mlx_training_flavor(
+            "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx"
+        )
+        == "mlx_qlora"
+    )
+    assert (
+        training._mlx_training_flavor(
+            "introvoyz041/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx-mlx-4Bit"
+        )
+        == "mlx_qlora"
     )
 
 
@@ -100,6 +116,9 @@ def test_qwen_mlx_lora_training_uses_mlx_backend(monkeypatch, tmp_path):
     assert Path(result.latest_checkpoint).name == "latest"
     assert calls["train"]["args"].kwargs["adapter_file"].endswith("adapters.safetensors")
     assert calls["train"]["train_on_completions"] is True
+    adapter_config = json.loads((Path(result.latest_checkpoint) / "adapter_config.json").read_text())
+    assert adapter_config["rank"] == 8
+    assert adapter_config["alpha"] == 16.0
 
 
 def test_qwen_mlx_legacy_backend_scales_lora_alpha(monkeypatch, tmp_path):
@@ -210,4 +229,6 @@ def test_qwen_mlx_legacy_backend_scales_lora_alpha(monkeypatch, tmp_path):
     assert calls["train_on_completions"] is True
     assert calls["mx_eval"] is True
     assert calls["adapter_file"].endswith("adapters.safetensors")
+    adapter_config = json.loads((Path(calls["adapter_file"]).parent / "adapter_config.json").read_text())
+    assert adapter_config == {"rank": 8, "alpha": 2.0, "dropout": 0.05}
     assert result.metadata["training_backend_api"] == "legacy"

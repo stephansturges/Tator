@@ -317,6 +317,7 @@ from services.qwen_runtime import (
 from services.qwen_mlx import (
     QWEN_MLX_DEFAULT_MODEL,
     QWEN_MLX_MODEL_OPTIONS,
+    QWEN_PLATFORM_AUTO,
     QWEN_PLATFORM_MLX,
     QWEN_PLATFORM_TRANSFORMERS,
     normalize_qwen_platform,
@@ -1221,6 +1222,20 @@ def _set_active_qwen_model_custom(model_id: str, ckpt_path: Path, metadata: Dict
     _reset_qwen_runtime()
 
 
+def _qwen_checkpoint_is_usable(checkpoint_path: Path, metadata: Dict[str, Any]) -> bool:
+    platform_name = normalize_qwen_platform((metadata or {}).get("runtime_platform"))
+    if platform_name == QWEN_PLATFORM_AUTO and is_qwen_mlx_model_id(
+        (metadata or {}).get("model_id") or (metadata or {}).get("requested_model_id")
+    ):
+        platform_name = QWEN_PLATFORM_MLX
+    if platform_name == QWEN_PLATFORM_MLX:
+        return (
+            (checkpoint_path / "adapters.safetensors").exists()
+            and (checkpoint_path / "adapter_config.json").exists()
+        )
+    return True
+
+
 def _list_qwen_model_entries() -> List[Dict[str, Any]]:
     """Return registry entries for custom Qwen fine-tunes (if any)."""
     runs_root = (QWEN_JOB_ROOT / "runs").resolve()
@@ -1257,6 +1272,8 @@ def _list_qwen_model_entries() -> List[Dict[str, Any]]:
                     break
         if not latest_path.exists():
             # Skip incomplete/corrupt runs that don't expose a usable checkpoint.
+            continue
+        if not _qwen_checkpoint_is_usable(latest_path, metadata):
             continue
         created_at = metadata.get("created_at")
         if not isinstance(created_at, (int, float)):
@@ -15738,6 +15755,15 @@ def _build_qwen_config(
             prep_logs.append(
                 f"Adapter training base: {training_model_id} (resolved from quantized inference model)"
             )
+        if requested_runtime_platform == QWEN_PLATFORM_MLX:
+            prep_logs.append("MLX-VLM path uses existing dataset splits and disables CUDA-only knobs")
+    accumulate_grad_batches = (
+        int(payload.accumulate_grad_batches)
+        if payload.accumulate_grad_batches is not None
+        else 8
+    )
+    if requested_runtime_platform == QWEN_PLATFORM_MLX:
+        accumulate_grad_batches = 1
     kwargs = {
         "dataset_root": str(dataset_root),
         "result_path": str(result_path),
@@ -15751,11 +15777,7 @@ def _build_qwen_config(
         "batch_size": int(payload.batch_size) if payload.batch_size is not None else 1,
         "max_epochs": int(payload.max_epochs) if payload.max_epochs is not None else 3,
         "lr": float(payload.lr) if payload.lr is not None else 2e-4,
-        "accumulate_grad_batches": (
-            int(payload.accumulate_grad_batches)
-            if payload.accumulate_grad_batches is not None
-            else 8
-        ),
+        "accumulate_grad_batches": accumulate_grad_batches,
         "warmup_steps": int(payload.warmup_steps) if payload.warmup_steps is not None else 50,
         "num_workers": int(payload.num_workers) if payload.num_workers is not None else 0,
         "lora_rank": int(payload.lora_rank) if payload.lora_rank is not None else 8,

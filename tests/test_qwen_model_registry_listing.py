@@ -77,3 +77,59 @@ def test_list_qwen_model_entries_uses_latest_dir_without_metadata(tmp_path: Path
     assert len(entries) == 1
     assert entries[0]["id"] == "run_no_meta"
     assert entries[0]["path"] == str(latest.resolve())
+
+
+def test_list_qwen_model_entries_skips_mlx_adapters_without_loader_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "qwen_runs"
+    runs = root / "runs"
+    good = runs / "good_mlx"
+    good_latest = good / "latest"
+    good_latest.mkdir(parents=True)
+    (good_latest / "adapters.safetensors").write_bytes(b"stub")
+    (good_latest / "adapter_config.json").write_text(
+        '{"rank": 8, "alpha": 2.0, "dropout": 0.05}',
+        encoding="utf-8",
+    )
+    _write_meta(
+        good,
+        {
+            "id": "good_mlx",
+            "latest_checkpoint": str(good_latest),
+            "runtime_platform": api.QWEN_PLATFORM_MLX,
+            "created_at": 200.0,
+        },
+    )
+
+    broken = runs / "broken_mlx"
+    broken_latest = broken / "latest"
+    broken_latest.mkdir(parents=True)
+    (broken_latest / "adapters.safetensors").write_bytes(b"stub")
+    _write_meta(
+        broken,
+        {
+            "id": "broken_mlx",
+            "latest_checkpoint": str(broken_latest),
+            "runtime_platform": api.QWEN_PLATFORM_MLX,
+            "created_at": 300.0,
+        },
+    )
+    broken_inferred = runs / "broken_inferred_mlx"
+    broken_inferred_latest = broken_inferred / "latest"
+    broken_inferred_latest.mkdir(parents=True)
+    (broken_inferred_latest / "adapters.safetensors").write_bytes(b"stub")
+    _write_meta(
+        broken_inferred,
+        {
+            "id": "broken_inferred_mlx",
+            "model_id": "mlx-community/Qwen3-VL-4B-Instruct-4bit",
+            "latest_checkpoint": str(broken_inferred_latest),
+            "created_at": 250.0,
+        },
+    )
+
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", root)
+
+    entries = api._list_qwen_model_entries()
+    assert [entry["id"] for entry in entries] == ["good_mlx"]

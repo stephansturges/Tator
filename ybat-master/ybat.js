@@ -14,10 +14,21 @@
     const PIPBOY_GREEN = "green";
     const PIPBOY_AMBER = "amber";
     const THEME_CLICK_DELAY_MS = 320;
+    const TOP_TAB_BASE_METRICS = Object.freeze({
+        fontSize: 12,
+        paddingX: 14,
+        paddingY: 6,
+        gap: 6,
+        minHeight: 30,
+        themeMinWidth: 96,
+    });
     let themeToggleButton = null;
     let themeToggleClickTimer = null;
     let previousClassicThemeMode = THEME_LIGHT;
     let pipboyAccentMode = PIPBOY_GREEN;
+    let adaptiveTopTabsRaf = 0;
+    let adaptiveTopTabsResizeObserver = null;
+    let adaptiveTopTabsMutationObserver = null;
 
     function normalizeThemeMode(value) {
         if (value === THEME_DARK || value === THEME_PIPBOY) {
@@ -112,6 +123,82 @@
         return THEME_LIGHT;
     }
 
+    function setAdaptiveTopTabsScale(bar, scale) {
+        const nextScale = Number.isFinite(scale) ? Math.max(0.08, Math.min(1, scale)) : 1;
+        const metrics = TOP_TAB_BASE_METRICS;
+        bar.style.setProperty("--top-tab-font-size", `${Math.max(1, metrics.fontSize * nextScale).toFixed(2)}px`);
+        bar.style.setProperty("--top-tab-padding-x", `${Math.max(1, metrics.paddingX * nextScale).toFixed(2)}px`);
+        bar.style.setProperty("--top-tab-padding-y", `${Math.max(1, metrics.paddingY * nextScale).toFixed(2)}px`);
+        bar.style.setProperty("--top-tab-gap", `${Math.max(1, metrics.gap * nextScale).toFixed(2)}px`);
+        bar.style.setProperty("--top-tab-min-height", `${Math.max(14, metrics.minHeight * nextScale).toFixed(2)}px`);
+        bar.style.setProperty("--top-theme-min-width", `${Math.max(0, metrics.themeMinWidth * nextScale).toFixed(2)}px`);
+    }
+
+    function measureAdaptiveTopTabsWidth(bar) {
+        const children = Array.from(bar.children).filter((element) => element && element.nodeType === 1);
+        if (!children.length) {
+            return 0;
+        }
+        const style = window.getComputedStyle(bar);
+        const gap = parseFloat(style.columnGap || style.gap) || 0;
+        const childWidth = children.reduce((total, element) => total + element.getBoundingClientRect().width, 0);
+        return childWidth + gap * Math.max(0, children.length - 1);
+    }
+
+    function updateAdaptiveTopTabs() {
+        adaptiveTopTabsRaf = 0;
+        const bar = document.querySelector(".tab-bar");
+        if (!bar) {
+            return;
+        }
+        setAdaptiveTopTabsScale(bar, 1);
+        const style = window.getComputedStyle(bar);
+        const paddingX = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+        const availableWidth = Math.max(1, bar.clientWidth - paddingX - 1);
+        const naturalWidth = measureAdaptiveTopTabsWidth(bar);
+        if (!naturalWidth || naturalWidth <= availableWidth) {
+            return;
+        }
+        let scale = availableWidth / naturalWidth;
+        setAdaptiveTopTabsScale(bar, scale);
+        const scaledWidth = measureAdaptiveTopTabsWidth(bar);
+        if (scaledWidth > availableWidth) {
+            scale *= (availableWidth / scaledWidth) * 0.995;
+            setAdaptiveTopTabsScale(bar, scale);
+        }
+    }
+
+    function scheduleAdaptiveTopTabsUpdate() {
+        if (adaptiveTopTabsRaf) {
+            return;
+        }
+        adaptiveTopTabsRaf = window.requestAnimationFrame(updateAdaptiveTopTabs);
+    }
+
+    function initializeAdaptiveTopTabs() {
+        const bar = document.querySelector(".tab-bar");
+        if (!bar) {
+            return;
+        }
+        if (!adaptiveTopTabsResizeObserver && "ResizeObserver" in window) {
+            adaptiveTopTabsResizeObserver = new ResizeObserver(scheduleAdaptiveTopTabsUpdate);
+            adaptiveTopTabsResizeObserver.observe(bar);
+        }
+        if (!adaptiveTopTabsMutationObserver && "MutationObserver" in window) {
+            adaptiveTopTabsMutationObserver = new MutationObserver(scheduleAdaptiveTopTabsUpdate);
+            adaptiveTopTabsMutationObserver.observe(bar, {
+                childList: true,
+                characterData: true,
+                subtree: true,
+            });
+        }
+        window.addEventListener("resize", scheduleAdaptiveTopTabsUpdate, { passive: true });
+        if (document.fonts?.ready) {
+            document.fonts.ready.then(scheduleAdaptiveTopTabsUpdate).catch(() => {});
+        }
+        scheduleAdaptiveTopTabsUpdate();
+    }
+
     function updateThemeToggleButton(mode) {
         if (!themeToggleButton) {
             return;
@@ -122,12 +209,14 @@
             themeToggleButton.textContent = `Pip ${labelAccent}`;
             themeToggleButton.setAttribute("aria-pressed", "true");
             themeToggleButton.title = `Switch Pip-Boy color to ${nextAccent}; double-click to exit Pip-Boy`;
+            scheduleAdaptiveTopTabsUpdate();
             return;
         }
         const enabled = mode === THEME_DARK;
         themeToggleButton.textContent = enabled ? "Light" : "Dark";
         themeToggleButton.setAttribute("aria-pressed", enabled ? "true" : "false");
         themeToggleButton.title = enabled ? "Switch to light mode" : "Switch to dark mode";
+        scheduleAdaptiveTopTabsUpdate();
     }
 
     function setPipboyAccent(accent, options = {}) {
@@ -1089,52 +1178,6 @@
         }
     }
 
-    async function refreshQwenSplitCache() {
-        if (!qwenTrainElements.cacheInfo) return;
-        try {
-            const resp = await fetch(`${API_ROOT}/qwen/train/cache_size`);
-            if (!resp.ok) throw new Error(await resp.text());
-            const data = await resp.json();
-            const bytes = Number(data?.bytes) || 0;
-            qwenTrainElements.cacheInfo.textContent = `Split cache: ${formatBytesLabel(bytes)}`;
-        } catch (err) {
-            console.warn("Qwen cache size check failed", err);
-            qwenTrainElements.cacheInfo.textContent = "Split cache: n/a";
-        }
-    }
-
-    async function purgeQwenSplitCache() {
-        if (qwenCachePurgeInProgress) {
-            return;
-        }
-        if (!confirm("Purge cached train/val splits for Qwen training?")) return;
-        qwenCachePurgeInProgress = true;
-        const purgeBtn = qwenTrainElements.cachePurge;
-        const restoreDisabled = purgeBtn ? purgeBtn.disabled : null;
-        if (purgeBtn) {
-            // Lock purge button during in-flight request to prevent duplicate purge calls.
-            purgeBtn.disabled = true;
-        }
-        try {
-            const resp = await fetch(`${API_ROOT}/qwen/train/cache/purge`, { method: "POST" });
-            if (!resp.ok) throw new Error(await resp.text());
-            const data = await resp.json();
-            const freedMb = formatBytesLabel(Number(data?.deleted_bytes) || 0);
-            setQwenTrainMessage(`Split cache purged (${freedMb}).`, "success");
-            refreshQwenSplitCache().catch((error) => {
-                console.warn("Qwen split-cache refresh failed after purge", error);
-            });
-        } catch (err) {
-            console.error("Qwen cache purge failed", err);
-            setQwenTrainMessage(`Split cache purge failed: ${err.message || err}`, "error");
-        } finally {
-            qwenCachePurgeInProgress = false;
-            if (purgeBtn) {
-                purgeBtn.disabled = !!restoreDisabled;
-            }
-        }
-    }
-
     async function refreshSam3SplitCache() {
         if (!sam3TrainElements.cacheInfo) return;
         try {
@@ -1758,7 +1801,6 @@
     let bboxImportInProgress = false;
     let bboxExportInProgress = false;
     let agentCachePurgeInProgress = false;
-    let qwenCachePurgeInProgress = false;
     let sam3CachePurgeInProgress = false;
     const DOUBLE_TAP_WINDOW_MS = 260;
     let xHotkeyTimeoutId = null;
@@ -2473,8 +2515,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         modelIdPreview: null,
         vramEstimate: null,
         vramBreakdown: null,
-		systemPromptInput: null,
+        systemPromptInput: null,
         trainModeRadios: null,
+        trainModeHelp: null,
         batchSizeInput: null,
         epochsInput: null,
         lrInput: null,
@@ -2483,6 +2526,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         loraAlphaInput: null,
         loraDropoutInput: null,
         loraTargetsInput: null,
+        loraTargetsHelp: null,
         logStepsInput: null,
         minPixelsInput: null,
         maxPixelsInput: null,
@@ -2511,11 +2555,6 @@ const AUTOMATION_LOCKED_TABS = new Set([
         lossCanvas: null,
         chartStatus: null,
         chartSmoothing: null,
-        randomSplit: null,
-        valPercent: null,
-        splitSeed: null,
-        cacheInfo: null,
-        cachePurge: null,
     };
 
     const yoloTrainElements = {
@@ -4574,7 +4613,6 @@ const sam3TrainState = {
             yoloDatasetSelect: "input.yolo_train.dataset_select",
             yoloAcceptTos: "input.yolo_train.accept_tos",
             sam3CachePurge: "action.sam3_train.purge_cache",
-            qwenCachePurge: "action.qwen_train.purge_cache",
         };
         Object.entries(selectorMap).forEach(([id, testid]) => {
             const el = document.getElementById(id);
@@ -10009,6 +10047,7 @@ const QWEN_VRAM_THINKING_SCALE = 1.08;
 const QWEN_VRAM_PIXEL_BASE = 451584;
 const QWEN_VRAM_PIXEL_SCALE_MIN = 0.6;
 const QWEN_VRAM_PIXEL_SCALE_MAX = 1.6;
+const QWEN_MLX_MEMORY_ESTIMATE_GB = { "2B": 5.5, "4B": 8.0, "8B": 14.0, "30B": 42.0, "32B": 46.0, "235B": 180.0 };
 const QWEN_TRAINING_MODEL_FALLBACKS = [
     { id: "Qwen/Qwen3-VL-2B-Instruct", label: "CUDA Qwen3-VL 2B Instruct" },
     { id: "Qwen/Qwen3-VL-4B-Instruct", label: "CUDA Qwen3-VL 4B Instruct" },
@@ -10029,11 +10068,41 @@ function inferQwenModelSize(modelId) {
     return null;
 }
 
-function estimateQwenVram({ modelId, trainingMode, maxPixels, batchSize }) {
+function getSelectedQwenModelOption(modelId = resolveQwenModelId()) {
+    return (qwenTrainState.modelOptions || []).find((entry) => entry.id === modelId) || null;
+}
+
+function inferQwenRuntimePlatform(modelId) {
+    const option = getSelectedQwenModelOption(modelId);
+    if (option?.runtimePlatform) {
+        return option.runtimePlatform;
+    }
+    const lowered = String(modelId || "").trim().toLowerCase();
+    if (
+        lowered.startsWith("mlx-community/")
+        || lowered.endsWith("-mlx")
+        || lowered.includes("-mlx-")
+        || lowered.startsWith("goekdeniz-guelmez/josiefied-qwen3-vl-")
+    ) {
+        return "mlx_vlm";
+    }
+    return "transformers";
+}
+
+function isQwenMlxSelection(modelId = resolveQwenModelId()) {
+    return inferQwenRuntimePlatform(modelId) === "mlx_vlm";
+}
+
+function isQwenQuantizedModelId(modelId) {
+    return /(3bit|4bit|5bit|6bit|8bit|q2|q3|q4|q6|q8|qx\d*|mxfp|awq|gptq|fp8)/i.test(String(modelId || ""));
+}
+
+function estimateQwenVram({ modelId, trainingMode, maxPixels, batchSize, runtimePlatform }) {
     const size = inferQwenModelSize(modelId || "");
     if (!size) return { estimateMb: null, note: null };
-    const mode = QWEN_VRAM_ESTIMATE_GB[trainingMode] ? trainingMode : "official_lora";
-    const baseGb = QWEN_VRAM_ESTIMATE_GB[mode]?.[size];
+    const isMlx = runtimePlatform === "mlx_vlm";
+    const mode = isMlx ? "mlx_vlm" : (QWEN_VRAM_ESTIMATE_GB[trainingMode] ? trainingMode : "official_lora");
+    const baseGb = isMlx ? QWEN_MLX_MEMORY_ESTIMATE_GB[size] : QWEN_VRAM_ESTIMATE_GB[mode]?.[size];
     if (!baseGb) return { estimateMb: null, note: null };
     let scale = 1.0;
     let pixelScale = 1.0;
@@ -10050,9 +10119,17 @@ function estimateQwenVram({ modelId, trainingMode, maxPixels, batchSize }) {
         batchScale = batchSize;
         scale *= batchSize;
     }
-    const estimateMb = baseGb * 1024 * scale;
     let note = null;
-    if (mode === "official_lora" && (size === "8B" || size === "32B")) {
+    if (isMlx && /bf16/i.test(modelId || "")) {
+        scale *= 1.8;
+    } else if (isMlx && /(8bit|q8)/i.test(modelId || "")) {
+        scale *= 1.35;
+    } else if (isMlx && /(3bit|q2|q3)/i.test(modelId || "")) {
+        scale *= 0.8;
+    }
+    if (isMlx) {
+        note = "MLX uses Apple unified memory and ignores CUDA device IDs.";
+    } else if (mode === "official_lora" && (size === "8B" || size === "32B")) {
         note = "Official LoRA is very VRAM-hungry; 8B/32B often exceed 48GB even at smaller pixel budgets.";
     }
     if (mode === "trl_qlora" && size === "32B" && modelId.includes("Thinking")) {
@@ -10061,6 +10138,7 @@ function estimateQwenVram({ modelId, trainingMode, maxPixels, batchSize }) {
     if (mode === "trl_qlora" && size === "8B" && maxPixels === QWEN_VRAM_PIXEL_BASE) {
         note = "Verified: 8B QLoRA fits on a 48GB GPU at default pixel budget.";
     }
+    const estimateMb = baseGb * 1024 * scale;
     return {
         estimateMb,
         note,
@@ -10072,10 +10150,17 @@ function estimateQwenVram({ modelId, trainingMode, maxPixels, batchSize }) {
 }
 
 function maybeAutoSelectQwenTrainMode() {
-    if (qwenTrainState.trainModeTouched) return;
     const modelId = resolveQwenModelId();
     const size = inferQwenModelSize(modelId || "");
     if (!qwenTrainElements.trainModeRadios) return;
+    if (isQwenMlxSelection(modelId)) {
+        const targetMode = isQwenQuantizedModelId(modelId) ? "trl_qlora" : "official_lora";
+        qwenTrainElements.trainModeRadios.forEach((radio) => {
+            if (radio.value === targetMode) radio.checked = true;
+        });
+        return;
+    }
+    if (qwenTrainState.trainModeTouched) return;
     if (size === "8B" || size === "32B") {
         qwenTrainElements.trainModeRadios.forEach((radio) => {
             if (radio.value === "trl_qlora") radio.checked = true;
@@ -10107,7 +10192,7 @@ function normalizeQwenTrainingModelOptions(models) {
         seen.add(modelId);
         const label = String(metadata.label || entry?.label || modelId);
         const quant = metadata.quantization ? ` (${metadata.quantization})` : "";
-        const runtimePrefix = runtime === "mlx_vlm" ? "MLX " : "";
+        const runtimePrefix = runtime === "mlx_vlm" && !/^mlx\b/i.test(label) ? "MLX " : "";
         const trainBase = metadata.training_model_id && metadata.training_model_id !== modelId
             ? ` -> trains ${metadata.training_model_id}`
             : "";
@@ -10171,6 +10256,7 @@ function updateQwenVramEstimate() {
     if (!qwenTrainElements.vramEstimate) return;
     const modelId = resolveQwenModelId();
     const trainingMode = getSelectedQwenTrainMode();
+    const runtimePlatform = inferQwenRuntimePlatform(modelId);
     const maxPixels = readNumberInput(qwenTrainElements.maxPixelsInput, { integer: true });
     const batchSize = readNumberInput(qwenTrainElements.batchSizeInput, { integer: true });
     const { estimateMb, note, baseGb, pixelScale, batchScale, totalGb } = estimateQwenVram({
@@ -10178,17 +10264,24 @@ function updateQwenVramEstimate() {
         trainingMode,
         maxPixels,
         batchSize,
+        runtimePlatform,
     });
     if (!estimateMb) {
-        qwenTrainElements.vramEstimate.textContent = "Estimated VRAM: --";
+        qwenTrainElements.vramEstimate.textContent = runtimePlatform === "mlx_vlm"
+            ? "Estimated unified memory: --"
+            : "Estimated VRAM: --";
         if (qwenTrainElements.vramBreakdown) {
-            qwenTrainElements.vramBreakdown.textContent = "VRAM budget: --";
+            qwenTrainElements.vramBreakdown.textContent = runtimePlatform === "mlx_vlm"
+                ? "Memory budget: --"
+                : "VRAM budget: --";
         }
         qwenTrainElements.vramEstimate.classList.remove("warn");
         return;
     }
-    let text = `Estimated VRAM: ~${totalGb.toFixed(1)} GB`;
-    if (qwenTrainState.gpuTotalMb) {
+    let text = runtimePlatform === "mlx_vlm"
+        ? `Estimated unified memory: ~${totalGb.toFixed(1)} GB`
+        : `Estimated VRAM: ~${totalGb.toFixed(1)} GB`;
+    if (runtimePlatform !== "mlx_vlm" && qwenTrainState.gpuTotalMb) {
         const gpuGb = qwenTrainState.gpuTotalMb / 1024;
         const fits = estimateMb <= qwenTrainState.gpuTotalMb;
         text += ` • GPU: ${gpuGb.toFixed(1)} GB (${fits ? "likely fits" : "likely OOM"})`;
@@ -10202,7 +10295,7 @@ function updateQwenVramEstimate() {
     qwenTrainElements.vramEstimate.textContent = text;
     if (qwenTrainElements.vramBreakdown && baseGb) {
         const parts = [
-            `VRAM budget: base ${baseGb.toFixed(1)} GB`,
+            `${runtimePlatform === "mlx_vlm" ? "Memory" : "VRAM"} budget: base ${baseGb.toFixed(1)} GB`,
             `pixel ×${pixelScale.toFixed(2)}`,
         ];
         if (batchScale > 1.0) {
@@ -10223,6 +10316,49 @@ function resolveQwenModelId() {
     return `Qwen/Qwen3-VL-${size}-${variant}`;
 }
 
+function updateQwenPlatformControlState() {
+    const modelId = resolveQwenModelId();
+    const isMlx = isQwenMlxSelection(modelId);
+    if (qwenTrainElements.trainModeRadios && qwenTrainElements.trainModeRadios.forEach) {
+        qwenTrainElements.trainModeRadios.forEach((radio) => {
+            radio.disabled = isMlx;
+        });
+    }
+    if (qwenTrainElements.trainModeHelp) {
+        qwenTrainElements.trainModeHelp.textContent = isMlx
+            ? "MLX-VLM chooses the adapter path from the selected checkpoint; quantized MLX presets train LoRA adapters directly."
+            : "";
+    }
+    if (qwenTrainElements.devicesInput) {
+        qwenTrainElements.devicesInput.disabled = isMlx;
+        if (isMlx) {
+            qwenTrainElements.devicesInput.value = "";
+        }
+    }
+    if (qwenTrainElements.devicesHelp) {
+        if (isMlx) {
+            qwenTrainElements.devicesHelp.textContent = "MLX training uses Apple Metal automatically; CUDA device IDs are ignored.";
+            qwenTrainElements.devicesHelp.style.color = "";
+        } else {
+            validateQwenDeviceIds(false);
+        }
+    }
+    if (qwenTrainElements.accumulateInput) {
+        qwenTrainElements.accumulateInput.disabled = isMlx;
+        qwenTrainElements.accumulateInput.title = isMlx
+            ? "MLX-VLM 0.3.9 does not expose gradient accumulation through this backend path."
+            : "";
+    }
+    if (qwenTrainElements.loraTargetsInput) {
+        qwenTrainElements.loraTargetsInput.disabled = isMlx;
+    }
+    if (qwenTrainElements.loraTargetsHelp) {
+        qwenTrainElements.loraTargetsHelp.textContent = isMlx
+            ? "MLX-VLM discovers trainable linear layers from the loaded model."
+            : "Comma-separated module names for the CUDA PEFT path. Use all-linear for broad QLoRA targeting.";
+    }
+}
+
 function updateQwenModelPreview() {
     maybeAutoSelectQwenTrainMode();
     const usingPreset = Boolean(qwenTrainElements.modelPresetSelect?.value);
@@ -10235,6 +10371,7 @@ function updateQwenModelPreview() {
     if (qwenTrainElements.modelIdPreview) {
         qwenTrainElements.modelIdPreview.textContent = resolveQwenModelId();
     }
+    updateQwenPlatformControlState();
     updateQwenVramEstimate();
 }
 
@@ -10256,8 +10393,8 @@ async function refreshQwenGpuInfo() {
         qwenTrainState.gpuDeviceCount = null;
         trainingGpuInfo.deviceCount = null;
     } finally {
+        updateQwenPlatformControlState();
         updateQwenVramEstimate();
-        validateQwenDeviceIds(false);
     }
 }
 
@@ -13581,26 +13718,15 @@ async function initSam3TrainUi() {
     await refreshRunStorage();
 }
 
-    function buildQwenTrainingPayload(datasetId, datasetRunName) {
-        const payload = { dataset_id: datasetId };
-        const runName = qwenTrainElements.runNameInput?.value?.trim() || datasetRunName;
-        if (runName) {
-            payload.run_name = runName;
-	    }
-    if (qwenTrainElements.randomSplit) {
-        payload.random_split = !!qwenTrainElements.randomSplit.checked;
-    }
-    const valPct = readNumberInput(qwenTrainElements.valPercent, { integer: true });
-    if (valPct !== undefined) {
-        const clampedPct = Math.max(1, Math.min(valPct, 90));
-        payload.val_percent = clampedPct / 100;
-    }
-    const splitSeed = readNumberInput(qwenTrainElements.splitSeed, { integer: true });
-    if (splitSeed !== undefined) {
-        payload.split_seed = splitSeed;
+function buildQwenTrainingPayload(datasetId, datasetRunName) {
+    const payload = { dataset_id: datasetId };
+    const runName = qwenTrainElements.runNameInput?.value?.trim() || datasetRunName;
+    if (runName) {
+        payload.run_name = runName;
     }
     payload.model_id = resolveQwenModelId();
     payload.training_mode = getSelectedQwenTrainMode();
+    const isMlxTraining = isQwenMlxSelection(payload.model_id);
     const systemPrompt = qwenTrainElements.systemPromptInput?.value?.trim();
     if (systemPrompt) {
         payload.system_prompt = systemPrompt;
@@ -13619,19 +13745,26 @@ async function initSam3TrainUi() {
         ["max_length", qwenTrainElements.maxLengthInput, { integer: true }],
     ];
     numericMap.forEach(([key, input, opts]) => {
+        if (input?.disabled) {
+            return;
+        }
         const value = readNumberInput(input, opts || {});
         if (value !== undefined) {
             payload[key] = value;
         }
     });
-    const deviceCheck = validateQwenDeviceIds(true);
-    if (deviceCheck.error) {
-        throw new Error(deviceCheck.error);
+    if (!isMlxTraining) {
+        const deviceCheck = validateQwenDeviceIds(true);
+        if (deviceCheck.error) {
+            throw new Error(deviceCheck.error);
+        }
+        if (deviceCheck.value) {
+            payload.devices = deviceCheck.value;
+        }
     }
-    if (deviceCheck.value) {
-        payload.devices = deviceCheck.value;
-    }
-    const rawTargets = qwenTrainElements.loraTargetsInput?.value?.trim();
+    const rawTargets = qwenTrainElements.loraTargetsInput?.disabled
+        ? ""
+        : qwenTrainElements.loraTargetsInput?.value?.trim();
     if (rawTargets) {
         payload.lora_target_modules = rawTargets.split(",").map((value) => value.trim()).filter(Boolean);
     }
@@ -14579,152 +14712,130 @@ async function pollQwenTrainingJob(jobId, { force = false } = {}) {
 }
 
 function initQwenTrainingTab() {
-	        if (qwenTrainElements.runNameInput) {
-	            return;
-	        }
-	        qwenTrainElements.runNameInput = document.getElementById("qwenTrainRunName");
-		        qwenTrainElements.modelPresetSelect = document.getElementById("qwenTrainModelPreset");
-		        qwenTrainElements.modelSizeSelect = document.getElementById("qwenTrainModelSize");
-	        qwenTrainElements.modelVariantSelect = document.getElementById("qwenTrainModelVariant");
-        qwenTrainElements.modelIdPreview = document.getElementById("qwenTrainModelIdPreview");
-        qwenTrainElements.vramEstimate = document.getElementById("qwenTrainVramEstimate");
-        qwenTrainElements.vramBreakdown = document.getElementById("qwenTrainVramBreakdown");
-	        qwenTrainElements.systemPromptInput = document.getElementById("qwenTrainSystemPrompt");
-        qwenTrainElements.batchSizeInput = document.getElementById("qwenTrainBatchSize");
-        qwenTrainElements.epochsInput = document.getElementById("qwenTrainEpochs");
-        qwenTrainElements.lrInput = document.getElementById("qwenTrainLR");
-        qwenTrainElements.accumulateInput = document.getElementById("qwenTrainAccumulate");
-        qwenTrainElements.loraRankInput = document.getElementById("qwenTrainLoraRank");
-        qwenTrainElements.loraAlphaInput = document.getElementById("qwenTrainLoraAlpha");
-	        qwenTrainElements.loraDropoutInput = document.getElementById("qwenTrainLoraDropout");
-	        qwenTrainElements.loraTargetsInput = document.getElementById("qwenTrainLoraTargets");
-        qwenTrainElements.logStepsInput = document.getElementById("qwenTrainLogSteps");
-        qwenTrainElements.minPixelsInput = document.getElementById("qwenTrainMinPixels");
-        qwenTrainElements.maxPixelsInput = document.getElementById("qwenTrainMaxPixels");
-        qwenTrainElements.maxLengthInput = document.getElementById("qwenTrainMaxLength");
-        qwenTrainElements.devicesInput = document.getElementById("qwenTrainDevices");
-        qwenTrainElements.devicesHelp = document.getElementById("qwenTrainDevicesHelp");
-        qwenTrainElements.datasetSelect = document.getElementById("qwenDatasetSelect");
-        qwenTrainElements.datasetRefresh = document.getElementById("qwenDatasetRefresh");
-        qwenTrainElements.datasetSummary = document.getElementById("qwenDatasetSummary");
-        qwenTrainElements.datasetWarning = document.getElementById("qwenDatasetWarning");
-        qwenTrainElements.randomSplit = document.getElementById("qwenTrainRandomSplit");
-        qwenTrainElements.valPercent = document.getElementById("qwenTrainValPercent");
-        qwenTrainElements.splitSeed = document.getElementById("qwenTrainSplitSeed");
-        qwenTrainElements.cacheInfo = document.getElementById("qwenCacheInfo");
-        qwenTrainElements.cachePurge = document.getElementById("qwenCachePurge");
-        qwenTrainElements.trainModeRadios = document.querySelectorAll('input[name="qwenTrainMode"]');
-        qwenTrainElements.sampleButton = document.getElementById("qwenSampleBtn");
-        qwenTrainElements.sampleCanvas = document.getElementById("qwenSampleCanvas");
-        qwenTrainElements.samplePrompt = document.getElementById("qwenSamplePrompt");
-        qwenTrainElements.sampleExpected = document.getElementById("qwenSampleExpected");
-        qwenTrainElements.sampleMessage = document.getElementById("qwenSampleMessage");
-        qwenTrainElements.sampleMeta = document.getElementById("qwenSampleMeta");
-        qwenTrainElements.startButton = document.getElementById("qwenTrainStartBtn");
-        qwenTrainElements.cancelButton = document.getElementById("qwenTrainCancelBtn");
-        qwenTrainElements.progressFill = document.getElementById("qwenTrainProgressFill");
-        qwenTrainElements.statusText = document.getElementById("qwenTrainStatusText");
-        qwenTrainElements.epochDetail = document.getElementById("qwenTrainEpochDetail");
-        qwenTrainElements.lossCanvas = document.getElementById("qwenTrainLossCanvas");
-        qwenTrainElements.chartStatus = document.getElementById("qwenTrainChartStatus");
-        qwenTrainElements.chartSmoothing = document.getElementById("qwenTrainChartSmoothing");
-        qwenTrainElements.message = document.getElementById("qwenTrainMessage");
-        qwenTrainElements.summary = document.getElementById("qwenTrainSummary");
-        qwenTrainElements.log = document.getElementById("qwenTrainLog");
-        qwenTrainElements.historyContainer = document.getElementById("qwenTrainHistory");
-        if (qwenTrainElements.startButton) {
-            qwenTrainElements.startButton.addEventListener("click", () => {
-                handleStartQwenTraining().catch((error) => console.error("Qwen training start failed", error));
-            });
-        }
-        if (qwenTrainElements.cancelButton) {
-            qwenTrainElements.cancelButton.addEventListener("click", () => {
-                cancelQwenTrainingJobRequest().catch((error) => console.error("Qwen cancel failed", error));
-            });
-            qwenTrainElements.cancelButton.disabled = true;
-        }
-        if (qwenTrainElements.sampleButton) {
-            qwenTrainElements.sampleButton.addEventListener("click", () => {
-                generateRandomQwenSample().catch((error) => console.error("Random Qwen sample failed", error));
-            });
-        }
-	        if (qwenTrainElements.modelSizeSelect) {
-	            qwenTrainElements.modelSizeSelect.addEventListener("change", updateQwenModelPreview);
-	        }
-	        if (qwenTrainElements.modelVariantSelect) {
-	            qwenTrainElements.modelVariantSelect.addEventListener("change", updateQwenModelPreview);
-	        }
-	        if (qwenTrainElements.modelPresetSelect) {
-	            qwenTrainElements.modelPresetSelect.addEventListener("change", updateQwenModelPreview);
-	        }
-        if (qwenTrainElements.trainModeRadios && qwenTrainElements.trainModeRadios.forEach) {
-            qwenTrainElements.trainModeRadios.forEach((radio) => {
-                radio.addEventListener("change", () => {
-                    qwenTrainState.trainModeTouched = true;
-                    updateQwenVramEstimate();
-                });
-            });
-        }
-        if (qwenTrainElements.batchSizeInput) {
-            qwenTrainElements.batchSizeInput.addEventListener("input", updateQwenVramEstimate);
-        }
-        if (qwenTrainElements.maxPixelsInput) {
-            qwenTrainElements.maxPixelsInput.addEventListener("input", updateQwenVramEstimate);
-        }
-        if (qwenTrainElements.devicesInput) {
-            qwenTrainElements.devicesInput.addEventListener("input", () => {
-                validateQwenDeviceIds(false);
-            });
-        }
-	        populateQwenTrainingModelSelect(QWEN_TRAINING_MODEL_FALLBACKS);
-	        updateQwenModelPreview();
-	        loadQwenTrainingModelOptions().catch((error) => {
-	            console.debug("Failed to initialize Qwen training model options", error);
-	        });
-        validateQwenDeviceIds(false);
-        refreshQwenGpuInfo().catch((error) => console.debug("Failed to refresh Qwen GPU info", error));
-        if (qwenTrainElements.datasetSelect) {
-            qwenTrainElements.datasetSelect.addEventListener("change", () => {
-                qwenDatasetState.selectedId = qwenTrainElements.datasetSelect.value || null;
-                updateQwenDatasetSummary();
-            });
-        }
-        if (qwenTrainElements.randomSplit && qwenTrainElements.valPercent && qwenTrainElements.splitSeed) {
-            const syncSplitInputs = () => {
-                const enabled = !!qwenTrainElements.randomSplit.checked;
-                qwenTrainElements.valPercent.disabled = !enabled;
-                qwenTrainElements.splitSeed.disabled = !enabled;
-            };
-            qwenTrainElements.randomSplit.addEventListener("change", syncSplitInputs);
-            syncSplitInputs();
-        }
-        if (qwenTrainElements.cachePurge) {
-            qwenTrainElements.cachePurge.addEventListener("click", () => {
-                purgeQwenSplitCache().catch((error) => {
-                    console.error("Failed to purge Qwen split cache", error);
-                });
-            });
-        }
-        refreshQwenSplitCache().catch((error) => {
-            console.error("Failed to refresh Qwen split cache", error);
-        });
-	        if (qwenTrainElements.datasetRefresh) {
-	            qwenTrainElements.datasetRefresh.addEventListener("click", () => {
-	                loadQwenDatasetList(true).catch((error) => console.error("Failed to refresh datasets", error));
-	            });
-	        }
-	        if (qwenTrainElements.chartSmoothing) {
-	            const initial = parseInt(qwenTrainElements.chartSmoothing.value, 10);
-	            qwenTrainState.chartSmoothing = Number.isFinite(initial) && initial > 0 ? initial : 1;
-            qwenTrainElements.chartSmoothing.addEventListener("change", () => {
-                const nextValue = parseInt(qwenTrainElements.chartSmoothing.value, 10);
-                qwenTrainState.chartSmoothing = Number.isFinite(nextValue) && nextValue > 0 ? nextValue : 1;
-                updateQwenLossChart(qwenTrainState.lastJobSnapshot);
-            });
-        }
-        loadQwenDatasetList().catch((error) => console.error("Failed to load datasets", error));
-        setQwenDatasetModeState();
+    if (qwenTrainElements.runNameInput) {
+        return;
     }
+    qwenTrainElements.runNameInput = document.getElementById("qwenTrainRunName");
+    qwenTrainElements.modelPresetSelect = document.getElementById("qwenTrainModelPreset");
+    qwenTrainElements.modelSizeSelect = document.getElementById("qwenTrainModelSize");
+    qwenTrainElements.modelVariantSelect = document.getElementById("qwenTrainModelVariant");
+    qwenTrainElements.modelIdPreview = document.getElementById("qwenTrainModelIdPreview");
+    qwenTrainElements.vramEstimate = document.getElementById("qwenTrainVramEstimate");
+    qwenTrainElements.vramBreakdown = document.getElementById("qwenTrainVramBreakdown");
+    qwenTrainElements.systemPromptInput = document.getElementById("qwenTrainSystemPrompt");
+    qwenTrainElements.batchSizeInput = document.getElementById("qwenTrainBatchSize");
+    qwenTrainElements.epochsInput = document.getElementById("qwenTrainEpochs");
+    qwenTrainElements.lrInput = document.getElementById("qwenTrainLR");
+    qwenTrainElements.accumulateInput = document.getElementById("qwenTrainAccumulate");
+    qwenTrainElements.loraRankInput = document.getElementById("qwenTrainLoraRank");
+    qwenTrainElements.loraAlphaInput = document.getElementById("qwenTrainLoraAlpha");
+    qwenTrainElements.loraDropoutInput = document.getElementById("qwenTrainLoraDropout");
+    qwenTrainElements.loraTargetsInput = document.getElementById("qwenTrainLoraTargets");
+    qwenTrainElements.loraTargetsHelp = document.getElementById("qwenTrainLoraTargetsHelp");
+    qwenTrainElements.logStepsInput = document.getElementById("qwenTrainLogSteps");
+    qwenTrainElements.minPixelsInput = document.getElementById("qwenTrainMinPixels");
+    qwenTrainElements.maxPixelsInput = document.getElementById("qwenTrainMaxPixels");
+    qwenTrainElements.maxLengthInput = document.getElementById("qwenTrainMaxLength");
+    qwenTrainElements.devicesInput = document.getElementById("qwenTrainDevices");
+    qwenTrainElements.devicesHelp = document.getElementById("qwenTrainDevicesHelp");
+    qwenTrainElements.datasetSelect = document.getElementById("qwenDatasetSelect");
+    qwenTrainElements.datasetRefresh = document.getElementById("qwenDatasetRefresh");
+    qwenTrainElements.datasetSummary = document.getElementById("qwenDatasetSummary");
+    qwenTrainElements.datasetWarning = document.getElementById("qwenDatasetWarning");
+    qwenTrainElements.trainModeRadios = document.querySelectorAll('input[name="qwenTrainMode"]');
+    qwenTrainElements.trainModeHelp = document.getElementById("qwenTrainModeHelp");
+    qwenTrainElements.sampleButton = document.getElementById("qwenSampleBtn");
+    qwenTrainElements.sampleCanvas = document.getElementById("qwenSampleCanvas");
+    qwenTrainElements.samplePrompt = document.getElementById("qwenSamplePrompt");
+    qwenTrainElements.sampleExpected = document.getElementById("qwenSampleExpected");
+    qwenTrainElements.sampleMessage = document.getElementById("qwenSampleMessage");
+    qwenTrainElements.sampleMeta = document.getElementById("qwenSampleMeta");
+    qwenTrainElements.startButton = document.getElementById("qwenTrainStartBtn");
+    qwenTrainElements.cancelButton = document.getElementById("qwenTrainCancelBtn");
+    qwenTrainElements.progressFill = document.getElementById("qwenTrainProgressFill");
+    qwenTrainElements.statusText = document.getElementById("qwenTrainStatusText");
+    qwenTrainElements.epochDetail = document.getElementById("qwenTrainEpochDetail");
+    qwenTrainElements.lossCanvas = document.getElementById("qwenTrainLossCanvas");
+    qwenTrainElements.chartStatus = document.getElementById("qwenTrainChartStatus");
+    qwenTrainElements.chartSmoothing = document.getElementById("qwenTrainChartSmoothing");
+    qwenTrainElements.message = document.getElementById("qwenTrainMessage");
+    qwenTrainElements.summary = document.getElementById("qwenTrainSummary");
+    qwenTrainElements.log = document.getElementById("qwenTrainLog");
+    qwenTrainElements.historyContainer = document.getElementById("qwenTrainHistory");
+    if (qwenTrainElements.startButton) {
+        qwenTrainElements.startButton.addEventListener("click", () => {
+            handleStartQwenTraining().catch((error) => console.error("Qwen training start failed", error));
+        });
+    }
+    if (qwenTrainElements.cancelButton) {
+        qwenTrainElements.cancelButton.addEventListener("click", () => {
+            cancelQwenTrainingJobRequest().catch((error) => console.error("Qwen cancel failed", error));
+        });
+        qwenTrainElements.cancelButton.disabled = true;
+    }
+    if (qwenTrainElements.sampleButton) {
+        qwenTrainElements.sampleButton.addEventListener("click", () => {
+            generateRandomQwenSample().catch((error) => console.error("Random Qwen sample failed", error));
+        });
+    }
+    if (qwenTrainElements.modelSizeSelect) {
+        qwenTrainElements.modelSizeSelect.addEventListener("change", updateQwenModelPreview);
+    }
+    if (qwenTrainElements.modelVariantSelect) {
+        qwenTrainElements.modelVariantSelect.addEventListener("change", updateQwenModelPreview);
+    }
+    if (qwenTrainElements.modelPresetSelect) {
+        qwenTrainElements.modelPresetSelect.addEventListener("change", updateQwenModelPreview);
+    }
+    if (qwenTrainElements.trainModeRadios && qwenTrainElements.trainModeRadios.forEach) {
+        qwenTrainElements.trainModeRadios.forEach((radio) => {
+            radio.addEventListener("change", () => {
+                qwenTrainState.trainModeTouched = true;
+                updateQwenVramEstimate();
+            });
+        });
+    }
+    if (qwenTrainElements.batchSizeInput) {
+        qwenTrainElements.batchSizeInput.addEventListener("input", updateQwenVramEstimate);
+    }
+    if (qwenTrainElements.maxPixelsInput) {
+        qwenTrainElements.maxPixelsInput.addEventListener("input", updateQwenVramEstimate);
+    }
+    if (qwenTrainElements.devicesInput) {
+        qwenTrainElements.devicesInput.addEventListener("input", () => {
+            validateQwenDeviceIds(false);
+        });
+    }
+    populateQwenTrainingModelSelect(QWEN_TRAINING_MODEL_FALLBACKS);
+    updateQwenModelPreview();
+    loadQwenTrainingModelOptions().catch((error) => {
+        console.debug("Failed to initialize Qwen training model options", error);
+    });
+    validateQwenDeviceIds(false);
+    refreshQwenGpuInfo().catch((error) => console.debug("Failed to refresh Qwen GPU info", error));
+    if (qwenTrainElements.datasetSelect) {
+        qwenTrainElements.datasetSelect.addEventListener("change", () => {
+            qwenDatasetState.selectedId = qwenTrainElements.datasetSelect.value || null;
+            updateQwenDatasetSummary();
+        });
+    }
+    if (qwenTrainElements.datasetRefresh) {
+        qwenTrainElements.datasetRefresh.addEventListener("click", () => {
+            loadQwenDatasetList(true).catch((error) => console.error("Failed to refresh datasets", error));
+        });
+    }
+    if (qwenTrainElements.chartSmoothing) {
+        const initial = parseInt(qwenTrainElements.chartSmoothing.value, 10);
+        qwenTrainState.chartSmoothing = Number.isFinite(initial) && initial > 0 ? initial : 1;
+        qwenTrainElements.chartSmoothing.addEventListener("change", () => {
+            const nextValue = parseInt(qwenTrainElements.chartSmoothing.value, 10);
+            qwenTrainState.chartSmoothing = Number.isFinite(nextValue) && nextValue > 0 ? nextValue : 1;
+            updateQwenLossChart(qwenTrainState.lastJobSnapshot);
+        });
+    }
+    loadQwenDatasetList().catch((error) => console.error("Failed to load datasets", error));
+    setQwenDatasetModeState();
+}
 
     function renderYoloTrainingHistoryItem(container, job) {
         if (!container) {
@@ -31388,6 +31499,7 @@ async function cancelRfDetrTrainingJobRequest() {
     document.addEventListener("DOMContentLoaded", () => {
         initHelpTooltips();
         initializeThemeToggle();
+        initializeAdaptiveTopTabs();
         applyPlaywrightTestIds();
         autoModeCheckbox = document.getElementById("autoMode");
         autoClassMarginEnabledCheckbox = document.getElementById("autoClassMarginEnabled");

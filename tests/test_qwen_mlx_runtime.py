@@ -111,12 +111,14 @@ def test_qwen_training_config_accepts_mlx_model(tmp_path, monkeypatch):
         dataset_id="demo",
         model_id="mlx-community/Qwen3-VL-4B-Instruct-4bit",
         training_mode="trl_qlora",
+        accumulate_grad_batches=8,
     )
     config = api._build_qwen_config(payload, "job-mlx")
 
     assert config.runtime_platform == api.QWEN_PLATFORM_MLX
     assert config.model_id == "mlx-community/Qwen3-VL-4B-Instruct-4bit"
     assert config.training_mode == "trl_qlora"
+    assert config.accumulate_grad_batches == 1
 
 
 def test_qwen_mlx_runtime_loads_adapter_path(monkeypatch, tmp_path):

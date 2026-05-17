@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20260516k" rel="stylesheet">
+    <link href="ybat.css?v=20260517b" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
          before we call listenImageCrop().
@@ -11,7 +11,7 @@
     <script src="canvas.min.js?v=20260409a"></script>
     <script src="jszip.min.js?v=20260409a"></script>
     <script src="filesaver.min.js?v=20260409a"></script>
-    <script src="ybat.js?v=20260516k"></script>
+    <script src="ybat.js?v=20260517b"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -1487,26 +1487,7 @@
                                 Select a Qwen3-ready dataset to start training.
                             </div>
                         </div>
-                        <div class="training-grid">
-                            <div class="checkbox-row">
-                                <label><input type="checkbox" id="qwenTrainRandomSplit" checked /> Random split (ignore existing train/val)</label>
-                            </div>
-                            <div>
-                                <label for="qwenTrainValPercent">Val %</label>
-                                <input type="number" id="qwenTrainValPercent" min="1" max="90" value="30" />
-                            </div>
-                            <div>
-                                <label for="qwenTrainSplitSeed">Split seed</label>
-                                <input type="number" id="qwenTrainSplitSeed" value="42" />
-                            </div>
-                        </div>
-                        <div class="training-help">We rebuild the train/val split per job using this seed and percentage.</div>
-                        <div class="training-grid">
-                            <div class="training-help" id="qwenCacheInfo">Split cache: …</div>
-                            <div>
-                                <button id="qwenCachePurge" class="secondary">Purge split cache</button>
-                            </div>
-                        </div>
+                        <div class="training-help">Training uses the dataset's existing train/val JSONL splits.</div>
                         <div class="training-field">
                             <label>Base model</label>
                             <div>
@@ -1560,6 +1541,7 @@
                                     <small>CUDA uses bitsandbytes NF4 + TRL; MLX uses quantized MLX checkpoints with LoRA adapters.</small>
                                 </span>
                             </label>
+                            <div class="training-help" id="qwenTrainModeHelp"></div>
                         </fieldset>
                         <div class="training-advanced-grid">
                             <div>
@@ -1619,7 +1601,7 @@
                             <div>
                                 <label for="qwenTrainLoraTargets">LoRA target modules</label>
                                 <input type="text" id="qwenTrainLoraTargets" value="q_proj,k_proj,v_proj,o_proj" />
-                                <div class="training-help">Comma-separated module names for the CUDA PEFT path. Use all-linear for broad QLoRA targeting.</div>
+                                <div class="training-help" id="qwenTrainLoraTargetsHelp">Comma-separated module names for the CUDA PEFT path. Use all-linear for broad QLoRA targeting.</div>
                             </div>
                         </div>
                         <div class="training-actions">

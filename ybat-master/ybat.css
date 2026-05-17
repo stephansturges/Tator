@@ -322,26 +322,38 @@ body {
 }
 
 .tab-bar {
+    --top-tab-font-size: 12px;
+    --top-tab-padding-x: 14px;
+    --top-tab-padding-y: 6px;
+    --top-tab-gap: 6px;
+    --top-tab-min-height: 30px;
+    --top-theme-min-width: 96px;
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-    row-gap: 8px;
-    overflow: visible;
+    flex-wrap: nowrap;
+    gap: var(--top-tab-gap);
+    row-gap: 0;
+    overflow: hidden;
     padding: 10px 16px 6px;
     background: #ffffff;
     border-bottom: 1px solid #d8dee9;
 }
 
 .tab-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border: none;
     background: #e5ecfb;
     color: #1f2937;
-    padding: 6px 14px;
+    padding: var(--top-tab-padding-y) var(--top-tab-padding-x);
     border-radius: 6px;
-    font-size: 12px;
+    font-size: var(--top-tab-font-size);
     font-weight: 600;
-    flex: 0 1 auto;
+    line-height: 1.05;
+    min-height: var(--top-tab-min-height);
+    box-sizing: border-box;
+    flex: 0 0 auto;
     max-width: 100%;
     cursor: pointer;
     white-space: nowrap;
@@ -362,20 +374,26 @@ body {
     align-items: center;
     flex: 0 0 auto;
     flex-wrap: nowrap;
-    gap: 6px;
+    gap: var(--top-tab-gap);
     margin-left: auto;
 }
 
 .theme-toggle-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border: 1px solid #0f172a;
     background: #0f172a;
     color: #ffffff;
-    padding: 6px 12px;
+    padding: var(--top-tab-padding-y) var(--top-tab-padding-x);
     border-radius: 6px;
-    font-size: 12px;
+    font-size: var(--top-tab-font-size);
     font-weight: 700;
-    line-height: 1;
-    min-height: 28px;
+    line-height: 1.05;
+    min-width: var(--top-theme-min-width);
+    min-height: var(--top-tab-min-height);
+    box-sizing: border-box;
+    flex: 0 0 auto;
     cursor: pointer;
     white-space: nowrap;
     transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
@@ -384,36 +402,6 @@ body {
 @media (max-width: 980px) {
     .tab-bar {
         padding: 8px 10px 7px;
-    }
-
-    .tab-button,
-    .theme-toggle-button {
-        padding-left: 10px;
-        padding-right: 10px;
-    }
-
-    .tab-bar__utility {
-        width: 100%;
-        justify-content: flex-end;
-        margin-left: 0;
-    }
-}
-
-@media (max-width: 560px) {
-    .tab-button,
-    .theme-toggle-button {
-        font-size: 11px;
-        padding-left: 8px;
-        padding-right: 8px;
-    }
-
-    .tab-bar__utility {
-        justify-content: stretch;
-    }
-
-    .tab-bar__utility .tab-button,
-    .tab-bar__utility .theme-toggle-button {
-        flex: 1 1 0;
     }
 }
 
@@ -1259,12 +1247,14 @@ body.annotation-focus-mode .class-scroll-indicator {
     margin: 0;
     font-size: 15px;
     color: #0f172a;
+    overflow-wrap: anywhere;
 }
 
 .qwen-model-card p {
     margin: 0;
     font-size: 12px;
     color: #475569;
+    overflow-wrap: anywhere;
 }
 
 .qwen-model-details__body {

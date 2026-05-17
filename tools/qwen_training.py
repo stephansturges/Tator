@@ -780,7 +780,20 @@ def _is_quantized_mlx_model_id(model_id: str) -> bool:
     lowered = str(model_id or "").lower()
     return any(
         marker in lowered
-        for marker in ("3bit", "4bit", "5bit", "6bit", "8bit", "q2", "q3", "q4", "q6", "q8", "mxfp")
+        for marker in (
+            "3bit",
+            "4bit",
+            "5bit",
+            "6bit",
+            "8bit",
+            "q2",
+            "q3",
+            "q4",
+            "q6",
+            "q8",
+            "qx",
+            "mxfp",
+        )
     )
 
 
@@ -795,6 +808,30 @@ def _float_loss_value(loss: Any) -> Optional[float]:
         return float(loss)
     except Exception:
         return None
+
+
+def _write_mlx_adapter_config(
+    adapter_dir: Path,
+    *,
+    rank: int,
+    alpha: float,
+    dropout: float,
+) -> Path:
+    adapter_dir.mkdir(parents=True, exist_ok=True)
+    config_path = adapter_dir / "adapter_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "rank": int(rank),
+                "alpha": float(alpha),
+                "dropout": float(dropout),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return config_path
 
 
 def _train_mlx_lora(
@@ -907,6 +944,12 @@ def _train_mlx_lora(
         for epoch in range(epochs):
             for step in range(steps_per_epoch):
                 if cancel_cb and cancel_cb():
+                    _write_mlx_adapter_config(
+                        latest_dir,
+                        rank=config.lora_rank,
+                        alpha=mlx_lora_alpha,
+                        dropout=config.lora_dropout,
+                    )
                     backend["save_adapter"](model, str(adapter_file))
                     raise TrainingError("qwen_training_cancelled")
                 start = step * batch_size
@@ -938,6 +981,12 @@ def _train_mlx_lora(
                         progress_cb(progress, f"MLX step {global_step}/{total_steps}")
                     else:
                         progress_cb(progress, f"MLX step {global_step}/{total_steps} loss={loss_value:.4f}")
+        _write_mlx_adapter_config(
+            latest_dir,
+            rank=config.lora_rank,
+            alpha=mlx_lora_alpha,
+            dropout=config.lora_dropout,
+        )
         backend["save_adapter"](model, str(adapter_file))
     else:
         train_kwargs = {
@@ -951,6 +1000,12 @@ def _train_mlx_lora(
         train_fn = backend["train"]
         train_kwargs = _filter_kwargs_for(train_fn, train_kwargs)
         train_fn(**train_kwargs)
+        _write_mlx_adapter_config(
+            latest_dir,
+            rank=config.lora_rank,
+            alpha=mlx_lora_alpha,
+            dropout=config.lora_dropout,
+        )
     if progress_cb:
         progress_cb(0.98, "MLX-VLM Qwen adapter saved")
     if metrics_cb:

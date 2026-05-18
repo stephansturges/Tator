@@ -11,7 +11,7 @@
     <script src="canvas.min.js?v=20260409a"></script>
     <script src="jszip.min.js?v=20260409a"></script>
     <script src="filesaver.min.js?v=20260409a"></script>
-    <script src="ybat.js?v=20260517h"></script>
+    <script src="ybat.js?v=20260518f"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -317,12 +317,12 @@
                                     </details>
                                     <div class="qwen-caption-grid">
                                         <div>
-                                            <label for="qwenCaptionMode">Caption detail</label>
+                                            <label for="qwenCaptionMode">Caption detail<span class="help-icon" title="Full image uses one composition pass. Detailed/windowed captions overlapping tiles first, then runs a separate window merge pass to fold those sub-captions into the final caption.">?</span></label>
                                             <select id="qwenCaptionMode">
                                                 <option value="full">Full image</option>
                                                 <option value="windowed">Detailed (windowed)</option>
                                             </select>
-                                            <div class="training-help">Windowed splits the image into overlapping tiles for more detail.</div>
+                                            <div class="training-help">Windowed adds tile captions plus a separate merge pass after full-image composition.</div>
                                         </div>
                                         <div>
                                             <label for="qwenCaptionWindowSize" title="Windowed mode splits the image into overlapping tiles. This is the tile size in pixels.">Window size (px)</label>
@@ -357,18 +357,43 @@
                                             </select>
                                         </div>
                                         <div>
+                                            <label for="qwenCaptionRefinementModel">Editor model<span class="help-icon" title="Used for editor passes after the first caption: draft refinement when enabled, window merging in windowed mode, and cleanup/coverage/language guards when needed. Default uses the same model as captioning.">?</span></label>
+                                            <select id="qwenCaptionRefinementModel">
+                                                <option value="same" selected>Same as captioning</option>
+                                                <option value="active">Use active model</option>
+                                                <option value="Qwen/Qwen3-VL-2B-Instruct">Qwen3-VL 2B Instruct</option>
+                                                <option value="Qwen/Qwen3-VL-2B-Thinking">Qwen3-VL 2B Thinking</option>
+                                                <option value="Qwen/Qwen3-VL-4B-Instruct">Qwen3-VL 4B Instruct</option>
+                                                <option value="Qwen/Qwen3-VL-4B-Thinking">Qwen3-VL 4B Thinking</option>
+                                                <option value="Qwen/Qwen3-VL-8B-Instruct">Qwen3-VL 8B Instruct</option>
+                                                <option value="Qwen/Qwen3-VL-8B-Thinking">Qwen3-VL 8B Thinking</option>
+                                                <option value="Qwen/Qwen3-VL-32B-Instruct">Qwen3-VL 32B Instruct</option>
+                                                <option value="Qwen/Qwen3-VL-32B-Thinking">Qwen3-VL 32B Thinking</option>
+                                                <option value="Qwen/Qwen3-VL-30B-A3B-Instruct">Qwen3-VL 30B-A3B Instruct</option>
+                                                <option value="Qwen/Qwen3-VL-30B-A3B-Thinking">Qwen3-VL 30B-A3B Thinking</option>
+                                                <option value="Qwen/Qwen3-VL-8B-Instruct-FP8">Qwen3-VL 8B Instruct (FP8)</option>
+                                                <option value="Qwen/Qwen3-VL-8B-Thinking-FP8">Qwen3-VL 8B Thinking (FP8)</option>
+                                                <option value="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8">Qwen3-VL 30B-A3B Instruct (FP8)</option>
+                                                <option value="Qwen/Qwen3-VL-30B-A3B-Thinking-FP8">Qwen3-VL 30B-A3B Thinking (FP8)</option>
+                                            </select>
+                                        </div>
+                                        <div>
                                             <label for="qwenCaptionMaxTokens">Max tokens</label>
-                                            <input type="number" id="qwenCaptionMaxTokens" min="32" max="2000" value="256" />
+                                            <input type="number" id="qwenCaptionMaxTokens" min="32" max="2000" value="1000" />
+                                        </div>
+                                        <div>
+                                            <label for="qwenCaptionFinalSentences">Final sentences<span class="help-icon" title="Maximum sentence budget for the final caption. Auto uses 10 sentences by default; increase for huge images where detail matters.">?</span></label>
+                                            <input type="number" id="qwenCaptionFinalSentences" min="1" max="30" placeholder="Auto (10)" />
                                         </div>
                                         <div>
                                             <label for="qwenCaptionMaxBoxes">Max boxes (0 = all)<span class="help-icon" title="How many labeled boxes to include in the prompt. Use 0 to include all hints (can be long).">?</span></label>
                                             <input type="number" id="qwenCaptionMaxBoxes" min="0" max="200" value="0" />
                                         </div>
                                         <div>
-                                            <label for="qwenCaptionUseSampling">Sampling preset<span class="help-icon" title="Recommended uses Qwen’s suggested decoding for Instruct vs Thinking. Deterministic turns off sampling. Custom lets you set the knobs below.">?</span></label>
+                                            <label for="qwenCaptionUseSampling">Sampling preset<span class="help-icon" title="Recommended applies Qwen defaults: Instruct temp 0.7/top-p 0.8/top-k 20; Thinking temp 0.6/top-p 0.95/top-k 20. Deterministic is kept for non-Thinking models because greedy Thinking can repeat indefinitely.">?</span></label>
                                             <select id="qwenCaptionUseSampling">
-                                                <option value="recommended" selected>Recommended (per variant)</option>
-                                                <option value="deterministic">Deterministic (no sampling)</option>
+                                                <option value="recommended" selected>Recommended (Qwen defaults)</option>
+                                                <option value="deterministic">Deterministic (non-Thinking)</option>
                                                 <option value="custom">Custom</option>
                                             </select>
                                         </div>
@@ -392,12 +417,14 @@
                                     <div class="qwen-caption-options">
                                         <label><input type="checkbox" id="qwenCaptionIncludeCounts" checked /> Include counts by class</label>
                                         <label><input type="checkbox" id="qwenCaptionIncludeCoords" checked /> Include box coords</label>
-                                        <label><input type="checkbox" id="qwenCaptionFinalOnly" checked /> Final answer only (no reasoning)<span class="help-icon" title="For thinking models, trims internal reasoning and keeps only the final caption.">?</span></label>
-                                        <label><input type="checkbox" id="qwenCaptionTwoStage" /> Two-stage refine (Thinking)<span class="help-icon" title="Step 1 drafts a caption (thinking model). Step 2 refines it with the Instruct model to ensure all labeled classes are mentioned and the output is clean.">?</span></label>
+                                        <label><input type="checkbox" id="qwenCaptionFinalOnly" checked /> Final answer only (no reasoning)<span class="help-icon" title="For Thinking models, suppresses internal reasoning and keeps only the final caption text.">?</span></label>
+                                        <label><input type="checkbox" id="qwenCaptionTwoStage" /> Draft + refine (Thinking)<span class="help-icon" title="Only affects Thinking caption models. Pass 1 drafts the full image; pass 2 refines that draft with the editor model. In windowed mode, window merge is separate and still runs afterward.">?</span></label>
                                         <label><input type="checkbox" id="qwenCaptionHighVram" /> Fast mode (keep Qwen loaded)<span class="help-icon" title="Keeps Qwen models loaded between caption requests to avoid reload thrash. Faster, but uses more VRAM.">?</span></label>
                                         <label><input type="checkbox" id="qwenCaptionSaveText" checked /> Auto-save to text labels</label>
                                     </div>
+                                    <div id="qwenCaptionWorkflow" class="qwen-caption-workflow" aria-live="polite"></div>
                                     <button type="button" id="qwenCaptionRunButton" class="training-button secondary">Caption image</button>
+                                    <button type="button" id="qwenCaptionCancelButton" class="training-button training-button-danger" disabled>Cancel caption</button>
                                     <div id="qwenCaptionProgress" class="qwen-caption-progress" aria-live="polite" hidden>
                                         <div class="qwen-caption-progress__topline">
                                             <span id="qwenCaptionProgressPhase">Queued</span>
@@ -406,6 +433,7 @@
                                         <div id="qwenCaptionProgressBar" class="qwen-caption-progress__bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
                                             <div id="qwenCaptionProgressFill" class="qwen-caption-progress__fill"></div>
                                         </div>
+                                        <div id="qwenCaptionStepPlan" class="qwen-caption-step-plan" hidden></div>
                                         <div id="qwenCaptionProgressDetail" class="qwen-caption-progress__detail"></div>
                                         <pre id="qwenCaptionProgressPreview" class="qwen-caption-progress__preview"></pre>
                                     </div>

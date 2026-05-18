@@ -27,4 +27,15 @@ export PYTORCH_ENABLE_MPS_FALLBACK="${PYTORCH_ENABLE_MPS_FALLBACK:-1}"
 export SAM3_DEVICE="${SAM3_DEVICE:-auto}"
 export QWEN_DEVICE="${QWEN_DEVICE:-auto}"
 
-exec "${VENV_DIR}/bin/python" -m uvicorn app:app --host "${HOST}" --port "${PORT}"
+while true; do
+  set +e
+  "${VENV_DIR}/bin/python" -m uvicorn app:app --host "${HOST}" --port "${PORT}"
+  status=$?
+  set -e
+  if [[ "${status}" == "${TATOR_QWEN_CANCEL_RESTART_EXIT_CODE:-75}" ]]; then
+    echo "Backend exited after Qwen caption cancellation; restarting..." >&2
+    sleep "${TATOR_BACKEND_RESTART_DELAY:-1}"
+    continue
+  fi
+  exit "${status}"
+done

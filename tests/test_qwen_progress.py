@@ -5,6 +5,7 @@ import localinferenceapi as api
 
 
 def _reset_qwen_progress() -> None:
+    api.qwen_cancel_event.clear()
     with api.qwen_progress_lock:
         api.qwen_progress_state.clear()
         api.qwen_progress_state.update(
@@ -31,6 +32,17 @@ def _reset_qwen_progress() -> None:
                 "updated_at": None,
                 "completed_at": None,
                 "error": None,
+                "cancel_requested": False,
+                "cancel_force": False,
+                "step_id": None,
+                "step_index": None,
+                "step_total": None,
+                "step_label": None,
+                "step_detail": None,
+                "step_region": None,
+                "step_plan": [],
+                "live_output": "",
+                "log_lines": [],
             }
         )
 
@@ -85,3 +97,93 @@ def test_qwen_progress_token_updates_preview_and_count():
     assert progress["phase"] == "generate"
     assert progress["generated_tokens"] == 2
     assert progress["token_preview"] == "A caption"
+    assert progress["live_output"] == "A caption"
+
+
+def test_qwen_progress_step_plan_metadata_and_region():
+    _reset_qwen_progress()
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+    plan = [
+        {"id": "prepare", "label": "Prepare"},
+        {"id": "load_model", "label": "Load model"},
+        {"id": "window_1", "label": "Caption window 1/1"},
+    ]
+    api._qwen_progress_update(
+        step_plan=plan,
+        step_id="window_1",
+        step_region={
+            "x": 10,
+            "y": 20,
+            "width": 100,
+            "height": 120,
+            "image_name": "sample.jpg",
+        },
+        message="Captioning window",
+    )
+
+    progress = api.qwen_progress()
+    assert progress["step_id"] == "window_1"
+    assert progress["step_index"] == 3
+    assert progress["step_total"] == 3
+    assert progress["step_label"] == "Caption window 1/1"
+    assert len(progress["step_plan"]) == 3
+    assert progress["step_region"]["x"] == 10.0
+    assert progress["step_region"]["image_name"] == "sample.jpg"
+
+
+def test_qwen_caption_step_plan_describes_windowed_two_stage_flow():
+    plan = api._build_qwen_caption_step_plan(
+        caption_mode="windowed",
+        total_windows=4,
+        two_stage=True,
+        is_thinking=True,
+        force_unload=True,
+        caption_model_id="caption-model",
+        refinement_model_id="refine-model",
+    )
+    ids = [entry["id"] for entry in plan]
+    assert ids[:2] == ["prepare", "load_model"]
+    assert "window_4" in ids
+    assert "draft_caption" in ids
+    assert "refine_draft" in ids
+    assert ids[-2:] == ["unload_model", "finalize"]
+
+
+def test_qwen_caption_cancel_marks_progress_and_new_run_clears_event():
+    _reset_qwen_progress()
+    first_run = api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    result = api.cancel_qwen_caption(force=False)
+
+    assert result["cancelled"] is True
+    assert result["run_id"] == first_run
+    assert api.qwen_cancel_event.is_set()
+    progress = api.qwen_progress()
+    assert progress["active"] is True
+    assert progress["phase"] == "cancelling"
+    assert progress["cancel_requested"] is True
+    assert progress["cancel_force"] is False
+
+    second_run = api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="next",
+        max_new_tokens=10,
+    )
+
+    assert second_run != first_run
+    assert not api.qwen_cancel_event.is_set()
+    assert api.qwen_progress()["cancel_requested"] is False

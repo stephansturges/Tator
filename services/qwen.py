@@ -101,6 +101,59 @@ def _caption_preferred_label(label: str, glossary_map: Optional[Dict[str, List[s
     return label
 
 
+_SHORT_CAPTION_REQUEST_RE = re.compile(
+    r"(?:"
+    r"\b(?:short|brief|concise|compact)\b|"
+    r"\b(?:single|one|1)\s+(?:complete\s+)?sentence\b|"
+    r"\b(?:1|one)\s*(?:-|to|or)\s*(?:2|two)\s+(?:complete\s+)?sentences?\b|"
+    r"\b(?:at most|no more than|maximum of|max)\s+(?:1|2|one|two)\s+(?:complete\s+)?sentences?\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _caption_requested_sentence_limit(
+    user_prompt: Optional[str],
+    max_sentences: Optional[int] = None,
+) -> Optional[int]:
+    try:
+        explicit = int(max_sentences) if max_sentences is not None else None
+    except (TypeError, ValueError):
+        explicit = None
+    cleaned = str(user_prompt or "")
+    lowered = cleaned.lower()
+    prompt_limit: Optional[int] = None
+    if re.search(r"\b(?:single|one|1)\s+(?:complete\s+)?sentence\b", lowered):
+        prompt_limit = 1
+    elif re.search(r"\b(?:1|one)\s*(?:-|to|or)\s*(?:2|two)\s+(?:complete\s+)?sentences?\b", lowered):
+        prompt_limit = 2
+    else:
+        match = re.search(
+            r"\b(?:at most|no more than|maximum of|max)\s+(1|2|one|two)\s+(?:complete\s+)?sentences?\b",
+            lowered,
+        )
+        if match:
+            val = match.group(1)
+            prompt_limit = 1 if val in {"1", "one"} else 2
+    if explicit is not None and explicit > 0 and prompt_limit is not None:
+        return min(explicit, prompt_limit)
+    if prompt_limit is not None:
+        return prompt_limit
+    if explicit is not None and explicit > 0:
+        return explicit
+    return None
+
+
+def _caption_user_requested_short(
+    user_prompt: Optional[str],
+    max_sentences: Optional[int] = None,
+) -> bool:
+    limit = _caption_requested_sentence_limit(user_prompt, max_sentences)
+    if limit is not None and limit <= 2:
+        return True
+    return _SHORT_CAPTION_REQUEST_RE.search(str(user_prompt or "")) is not None
+
+
 def _build_qwen_caption_prompt(
     user_prompt: str,
     label_hints: Sequence[Any],
@@ -112,9 +165,12 @@ def _build_qwen_caption_prompt(
     detailed_mode: bool,
     restrict_to_labels: bool = True,
     labelmap_glossary: Optional[str] = None,
+    max_sentences: Optional[int] = None,
 ) -> Tuple[str, Dict[str, int], int, bool]:
     safe_width = max(1, int(image_width))
     safe_height = max(1, int(image_height))
+    short_requested = _caption_user_requested_short(user_prompt, max_sentences)
+    sentence_limit = _caption_requested_sentence_limit(user_prompt, max_sentences)
     counts: Dict[str, int] = dict(Counter([getattr(hint, "label", "") for hint in label_hints if getattr(hint, "label", "")]))
 
     def _bbox_to_qwen_2d(bbox: Sequence[float]) -> List[int]:
@@ -176,7 +232,13 @@ def _build_qwen_caption_prompt(
         truncated = len(sorted_hints) > len(selected)
     lines: List[str] = []
     if user_prompt:
-        lines.append(f"User hint: {user_prompt}")
+        lines.append(f"User caption request: {user_prompt}")
+        lines.append(
+            "Treat the user caption request as required guidance. If it asks a question "
+            "or asks for an inference such as likely location, scene type, event, or time, "
+            "answer it when the image supports a grounded answer; otherwise state uncertainty briefly. "
+            "Do not mention that a request or hint was provided."
+        )
         if "style inspirations" in user_prompt.lower():
             lines.append(
                 "Style guidance: use inspirations for tone/angle only. Rephrase, do not copy wording."
@@ -241,16 +303,36 @@ def _build_qwen_caption_prompt(
         lines.append("Labels provided but box details omitted.")
     if truncated:
         lines.append("Note: Only a subset of boxes is shown; counts reflect all hints.")
-    lines.append(
-        "Write a detailed caption. Use the image as truth and incorporate the label hints; "
-        "if hints conflict with the image, mention the uncertainty briefly."
-    )
-    lines.append("Describe what the main objects are doing or how they are arranged when it is visible.")
-    lines.append(
-        "Be maximally descriptive: longer captions are acceptable when there is a lot to see. "
-        "The labeled boxes are especially important and should be mentioned explicitly unless counts are overwhelming "
-        "(e.g., summarize many cars as a parking lot)."
-    )
+    if short_requested:
+        if sentence_limit == 1:
+            lines.append(
+                "Write a concise caption in exactly one complete sentence. Use the image as truth and mention the main visible scene and objects."
+            )
+        else:
+            limit = sentence_limit or 2
+            lines.append(
+                f"Write a concise caption in no more than {limit} complete sentences. "
+                "Use the image as truth and mention the main visible scene and objects."
+            )
+        lines.append(
+            "Do not enumerate every small detail; only include label hints that are central to the visible scene."
+        )
+    else:
+        caption_kind = "detailed caption" if detailed_mode else "caption"
+        lines.append(
+            f"Write a {caption_kind}. Use the image as truth and incorporate the label hints; "
+            "if hints conflict with the image, mention the uncertainty briefly."
+        )
+        lines.append("Describe what the main objects are doing or how they are arranged when it is visible.")
+        if detailed_mode:
+            lines.append(
+                "Be descriptive when there is a lot to see. The labeled boxes are especially important and should be mentioned explicitly unless counts are overwhelming "
+                "(e.g., summarize many cars as a parking lot)."
+            )
+        else:
+            lines.append(
+                "Mention the most important concrete details without adding unsupported objects or actions."
+            )
     return "\n".join(lines), counts, len(selected), truncated
 
 
@@ -261,13 +343,21 @@ def _collapse_whitespace(text: str) -> str:
 def _extract_caption_from_text(text: str, marker: Optional[str] = None) -> Tuple[str, bool]:
     cleaned = text.strip()
     marker_found = False
+    final_match = re.search(r"<final>(.*?)</final>", cleaned, re.IGNORECASE | re.DOTALL)
+    if final_match:
+        cleaned = final_match.group(1)
+        marker_found = True
     if marker:
-        match = re.search(rf"{marker}\\s*:?\\s*(.+)", cleaned, re.IGNORECASE | re.DOTALL)
+        match = re.search(rf"{marker}\s*:?\s*(.+)", cleaned, re.IGNORECASE | re.DOTALL)
         if match:
             cleaned = match.group(1)
             marker_found = True
     if not marker_found:
-        match = re.search(r"FINAL\\s*:?\\s*(.+)", cleaned, re.IGNORECASE | re.DOTALL)
+        match = re.search(
+            r"(?:^|\n)\s*FINAL(?:\s+(?:ANSWER|CAPTION))?\s*:?\s*(.+)",
+            cleaned,
+            re.IGNORECASE | re.DOTALL,
+        )
         if match:
             cleaned = match.group(1)
             marker_found = True
@@ -279,10 +369,81 @@ def _caption_sentence_key(sentence: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", sentence.lower()).strip()
 
 
+def _caption_sentence_units(text: str) -> List[str]:
+    if not text:
+        return []
+    units = re.findall(r"[^.!?]+[.!?]+(?:[\"')\]]+)?|[^.!?]+$", text)
+    return [unit.strip() for unit in units if unit and unit.strip()]
+
+
+def _caption_repetition_loop_detected(text: str) -> bool:
+    if not text:
+        return False
+    compact = re.sub(r"\s+", "", text)
+    if re.search(r"([A-Za-z0-9])\1{30,}", compact):
+        return True
+    units = _caption_sentence_units(text)
+    keys = []
+    for unit in units:
+        key = _caption_sentence_key(unit)
+        if len(key.split()) >= 3:
+            keys.append(key)
+    if len(keys) >= 3:
+        counts = Counter(keys)
+        if any(count >= 3 for count in counts.values()):
+            return True
+    if len(keys) >= 4:
+        for width in range(1, min(4, len(keys) // 2) + 1):
+            if keys[-width:] == keys[-2 * width : -width]:
+                if len(keys) >= 3 * width and keys[-width:] == keys[-3 * width : -2 * width]:
+                    return True
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    if len(words) >= 24:
+        for size in (4, 5, 6, 8):
+            if len(words) < size * 3:
+                continue
+            ngrams = [tuple(words[idx : idx + size]) for idx in range(0, len(words) - size + 1)]
+            if any(count >= 4 for count in Counter(ngrams).values()):
+                return True
+    return False
+
+
+def _truncate_repeated_caption_loop(text: str) -> str:
+    if not text:
+        return text
+    char_loop = re.search(r"([A-Za-z0-9])\1{30,}", text)
+    if char_loop:
+        return text[: max(0, char_loop.start() + 1)].strip()
+    units = _caption_sentence_units(text)
+    if len(units) < 3:
+        return text
+    kept: List[str] = []
+    keys: List[str] = []
+    counts: Counter[str] = Counter()
+    for unit in units:
+        key = _caption_sentence_key(unit)
+        if len(key.split()) >= 3:
+            counts[key] += 1
+            if counts[key] >= 3:
+                break
+        kept.append(unit.strip())
+        if len(key.split()) >= 3:
+            keys.append(key)
+            for width in range(1, min(4, len(keys) // 2) + 1):
+                if keys[-width:] == keys[-2 * width : -width]:
+                    # Keep the first cycle and drop the duplicated cycle that revealed the loop.
+                    del kept[-width:]
+                    del keys[-width:]
+                    return _collapse_whitespace(" ".join(kept))
+    if not kept:
+        return ""
+    return _collapse_whitespace(" ".join(kept))
+
+
 def _trim_repeated_caption_sentences(text: str) -> str:
     if not text:
         return text
-    units = re.findall(r"[^.!?]+[.!?]+(?:[\"')\]]+)?|[^.!?]+$", text)
+    units = _caption_sentence_units(text)
     if len(units) < 2:
         return text
     seen: set[str] = set()
@@ -382,16 +543,39 @@ def _sanitize_qwen_caption(text: str) -> str:
     cleaned = cleaned.strip()
     if cleaned.startswith(":"):
         cleaned = cleaned.lstrip(":").strip()
+    cleaned = _truncate_repeated_caption_loop(cleaned)
     cleaned = _trim_repeated_caption_sentences(cleaned)
     return cleaned
 
 
 _QWEN_THINKING_REASONING_RE = re.compile(
-    r"(?:\bgot it\b|\blet'?s\b|\bfirst\b|\bsecond\b|\bthird\b|\bstep\b|\bi need\b|\bnow\b|\bthe task\b)",
+    r"(?:"
+    r"\bgot it\b|\blet'?s\b|\bwait\b|\bactually\b|\bfirst\b|\bsecond\b|\bthird\b|\bstep\b|"
+    r"\bi need\b|\bwe need\b|\bwe should\b|\bso we need\b|\bnow\b|"
+    r"\bwe can mention\b|\bcan mention\b|\bwe can describe\b|\bwe can include\b|"
+    r"\bwe should mention\b|\bwe can say\b|\bwe'?ll produce\b|\bwe will produce\b|"
+    r"\bthe task\b|\bthe user wants\b|\bthe user says\b|\bthe user request\b|"
+    r"\bthe prompt asks\b|\bthe instruction(?:s)?(?: say| says)?\b|\bstyle guidance\b|"
+    r"\bpreferred opening\b|\bdraft caption\b|\bthe draft\b|"
+    r"\bwindow observations\b|\bwindow region\b|\bregion of interest\b|"
+    r"\bfinal answer only\b|\bwe need to produce\b|\bthis is ambiguous\b"
+    r")",
     re.IGNORECASE,
 )
 _QWEN_CAPTION_META_RE = re.compile(
-    r"(authoritative|as indicated|label hint|bounding box|bbox|coordinates|hinted|counts are provided)",
+    r"("
+    r"authoritative|as indicated|label hint|bounding box|bbox|coordinates|hinted|"
+    r"counts are provided|draft caption|window observations|window region|region of interest|"
+    r"user request|the user wants|the user says|instruction says|instructions say|"
+    r"style guidance|style inspiration|preferred opening|first-stage|raw output|"
+    r"we need to|we can mention|can mention|we can describe|we can include|"
+    r"we should mention|we can say|the prompt asks|final answer only|this is ambiguous"
+    r")",
+    re.IGNORECASE,
+)
+_QWEN_COORDINATE_CONTEXT_RE = re.compile(
+    r"(?:\[\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?(?:\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?)?\s*\]|"
+    r"\b(?:from|to)\s+\d+\s*,\s*\d+\b)",
     re.IGNORECASE,
 )
 
@@ -414,13 +598,106 @@ def _caption_needs_completion(caption: str) -> bool:
     trimmed = caption.strip()
     if not trimmed:
         return True
-    return trimmed[-1] not in ".!?"
+    if trimmed[-1] not in ".!?":
+        return True
+    return _caption_has_dangling_tail(trimmed)
+
+
+_CAPTION_DANGLING_TAIL_RE = re.compile(
+    r"\b(?:"
+    r"a|an|the|and|or|of|with|without|to|from|in|on|at|by|for|into|onto|"
+    r"over|under|through|between|beside|near|along|across|including|featuring|"
+    r"showing|shows|captures|contains|visible|surrounded|bordered"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+
+def _caption_has_dangling_tail(caption: str) -> bool:
+    trimmed = re.sub(r"[.!?\"')\]]+$", "", str(caption or "").strip()).strip()
+    if not trimmed:
+        return True
+    return _CAPTION_DANGLING_TAIL_RE.search(trimmed) is not None
+
+
+def _caption_complete_sentence_units(text: str) -> List[str]:
+    units = _caption_sentence_units(text)
+    complete: List[str] = []
+    for unit in units:
+        sentence = unit.strip()
+        if not sentence:
+            continue
+        if re.search(r"[.!?][\"')\]]*$", sentence) and not _caption_has_dangling_tail(sentence):
+            complete.append(sentence)
+    return complete
+
+
+def _caption_trim_to_complete_sentences(
+    caption: str,
+    max_sentences: Optional[int] = None,
+) -> Tuple[str, bool]:
+    cleaned = _sanitize_qwen_caption(str(caption or ""))
+    if not cleaned:
+        return "", bool(caption)
+    complete = _caption_complete_sentence_units(cleaned)
+    if not complete:
+        stripped = re.sub(r"[,;:]+$", "", cleaned).strip()
+        if stripped and not _caption_has_dangling_tail(stripped):
+            completed = f"{stripped}."
+            return completed, completed != cleaned
+        return "", True
+    try:
+        limit = int(max_sentences) if max_sentences is not None else None
+    except (TypeError, ValueError):
+        limit = None
+    if limit is not None and limit > 0:
+        complete = complete[:limit]
+    finalized = _collapse_whitespace(" ".join(complete))
+    return finalized, finalized != cleaned
 
 
 def _caption_has_meta(caption: str) -> bool:
     if not caption:
         return False
-    return _QWEN_CAPTION_META_RE.search(caption) is not None
+    return (
+        _QWEN_CAPTION_META_RE.search(caption) is not None
+        or _QWEN_THINKING_REASONING_RE.search(caption) is not None
+    )
+
+
+def _strip_caption_meta_sentences(text: str) -> str:
+    if not text:
+        return ""
+    kept: List[str] = []
+    for unit in _caption_sentence_units(text):
+        if _caption_has_meta(unit):
+            continue
+        kept.append(unit.strip())
+    if not kept:
+        return ""
+    return _collapse_whitespace(" ".join(kept))
+
+
+def _caption_source_context_has_meta(text: str) -> bool:
+    if not text:
+        return False
+    return (
+        _caption_has_meta(text)
+        or _QWEN_COORDINATE_CONTEXT_RE.search(text) is not None
+    )
+
+
+def _strip_caption_source_context_meta_sentences(text: str) -> str:
+    if not text:
+        return ""
+    kept: List[str] = []
+    for unit in _caption_sentence_units(text):
+        if _caption_source_context_has_meta(unit):
+            continue
+        kept.append(unit.strip())
+    if not kept:
+        return ""
+    return _collapse_whitespace(" ".join(kept))
 
 
 def _caption_needs_short_form(caption: str, max_words: int = 80, max_sentences: int = 2) -> bool:
@@ -452,6 +729,8 @@ def _caption_is_degenerate_impl(caption: str) -> bool:
     trimmed = caption.strip()
     if not trimmed:
         return True
+    if _caption_repetition_loop_detected(trimmed):
+        return True
     if _QWEN_THINKING_REASONING_RE.search(trimmed):
         return True
     compact = re.sub(r"\\s+", "", trimmed)
@@ -465,6 +744,8 @@ def _caption_is_degenerate_impl(caption: str) -> bool:
                 return True
         if re.fullmatch(r"[^A-Za-z0-9]+", compact):
             return True
+        if re.search(r"([A-Za-z0-9])\1{24,}", compact):
+            return True
         if re.search(r"([!?.<>\\-_=])\\1{20,}", compact):
             return True
     words = caption.split()
@@ -476,7 +757,7 @@ def _caption_is_degenerate_impl(caption: str) -> bool:
         most_common = counts.most_common(1)[0][1]
         if most_common >= 3:
             return True
-        if most_common / max(1, len(sentences)) > 0.45:
+        if len(sentences) >= 3 and most_common >= 2 and most_common / len(sentences) > 0.45:
             return True
     if len(words) > 40:
         tokens = [w.lower() for w in words]
@@ -491,6 +772,17 @@ def _caption_is_degenerate_impl(caption: str) -> bool:
 def _resolve_qwen_caption_decode(payload: Any, is_thinking: bool) -> Dict[str, Any]:
     use_sampling = payload.use_sampling if getattr(payload, "use_sampling", None) is not None else True
     if not use_sampling:
+        if is_thinking:
+            return {
+                "do_sample": True,
+                "temperature": 0.6,
+                "top_p": 0.95,
+                "top_k": 20,
+                "presence_penalty": 0.0,
+                "repetition_penalty": 1.0,
+                "repetition_context_size": 128,
+                "no_repeat_ngram_size": 8,
+            }
         return {
             "do_sample": False,
             "repetition_penalty": 1.08,
@@ -498,11 +790,11 @@ def _resolve_qwen_caption_decode(payload: Any, is_thinking: bool) -> Dict[str, A
             "no_repeat_ngram_size": 8,
         }
     defaults = {
-        "temperature": 1.0 if is_thinking else 0.7,
+        "temperature": 0.6 if is_thinking else 0.7,
         "top_p": 0.95 if is_thinking else 0.8,
         "top_k": 20,
         "presence_penalty": 0.0 if is_thinking else 1.5,
-        "repetition_penalty": 1.05 if is_thinking else 1.10,
+        "repetition_penalty": 1.0 if is_thinking else 1.10,
         "repetition_context_size": 128,
         "no_repeat_ngram_size": 8,
     }
@@ -525,11 +817,82 @@ def _resolve_qwen_caption_decode(payload: Any, is_thinking: bool) -> Dict[str, A
 
 
 def _adjust_prompt_for_thinking(prompt_text: str) -> str:
-    if not prompt_text:
-        return prompt_text
-    lines = prompt_text.splitlines()
-    filtered = [line for line in lines if not line.startswith("Write a concise caption")]
-    return "\n".join(filtered)
+    return prompt_text
+
+
+def _caption_length_instruction(max_sentences: Optional[int], *, final: bool = True) -> str:
+    if max_sentences is None:
+        return ""
+    try:
+        sentence_count = int(max_sentences)
+    except (TypeError, ValueError):
+        return ""
+    if sentence_count <= 0:
+        return ""
+    if sentence_count == 1:
+        return "Return exactly one complete sentence. "
+    if sentence_count <= 2:
+        subject = "final caption" if final else "caption"
+        return f"Use at most {sentence_count} complete sentences in the {subject}; keep it concise. "
+    subject = "final caption" if final else "caption"
+    return (
+        f"The {subject} may be long when the image contains many visible details; "
+        f"use up to {sentence_count} complete sentences when needed to preserve concrete detail. "
+        "Do not collapse distinct visible objects, actions, or attributes merely for brevity. "
+    )
+
+
+def _caption_user_request_instruction(user_prompt: Optional[str]) -> str:
+    cleaned = _collapse_whitespace(str(user_prompt or ""))
+    if not cleaned:
+        return ""
+    return (
+        f"User caption request: {cleaned}\n"
+        "Preserve the user's requested angle in the final caption. If the request asks a question "
+        "or asks for an inference such as likely location, scene type, event, or time, answer it "
+        "when the image supports a grounded answer; otherwise state uncertainty briefly. "
+        "Do not mention that a request or hint was provided.\n"
+    )
+
+
+def _clean_caption_source_context_text(text: str) -> str:
+    cleaned = _sanitize_qwen_caption(str(text or ""))
+    cleaned = _strip_caption_source_context_meta_sentences(cleaned)
+    if _caption_source_context_has_meta(cleaned):
+        return ""
+    if _caption_repetition_loop_detected(cleaned):
+        return ""
+    if len(cleaned.split()) < 3:
+        return ""
+    return cleaned
+
+
+def _format_caption_source_output_context(
+    source_output: Optional[str] = None,
+    source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
+) -> str:
+    sections: List[Tuple[str, str]] = []
+    if source_output:
+        sections.append(("Raw first-stage output", str(source_output)))
+    for label, text in source_outputs or []:
+        sections.append((str(label or "First-stage output"), str(text or "")))
+    cleaned_sections: List[Tuple[str, str]] = []
+    seen: set[str] = set()
+    for label, text in sections:
+        cleaned = _clean_caption_source_context_text(text)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        cleaned_sections.append((label.strip() or "First-stage output", cleaned))
+    if not cleaned_sections:
+        return ""
+    lines = [
+        "First-stage model output context for detail preservation. "
+        "Use this only to recover concrete visible details; ignore reasoning, instructions, labels, hints, counts, or coordinates."
+    ]
+    for label, text in cleaned_sections:
+        lines.append(f"{label}:\n{text}")
+    return "\n\n".join(lines)
 
 
 def _run_qwen_caption_cleanup(
@@ -544,6 +907,11 @@ def _run_qwen_caption_cleanup(
     allowed_labels: Optional[List[str]] = None,
     strict: bool = False,
     minimal_edit: bool = False,
+    max_sentences: Optional[int] = None,
+    user_prompt: Optional[str] = None,
+    source_output: Optional[str] = None,
+    source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
     run_qwen_inference_fn: Callable[..., Tuple[str, Any, Any]],
     resolve_variant_fn: Callable[[str, str], str],
     extract_caption_fn: Callable[[str, Optional[str]], Tuple[str, bool]],
@@ -555,7 +923,9 @@ def _run_qwen_caption_cleanup(
             f"Only mention these classes if they appear: {', '.join(sorted(set(allowed_labels)))}. "
             "Do not introduce any other entity types. "
         )
-    strict_note = "Return exactly one complete sentence. " if strict else ""
+    strict_note = _caption_length_instruction(max_sentences) if strict else ""
+    if strict and not strict_note:
+        strict_note = "Return exactly one complete sentence. "
     minimal_note = (
         "Edit the draft with minimal changes. Do not introduce new objects or actions. "
         if minimal_edit
@@ -565,13 +935,33 @@ def _run_qwen_caption_cleanup(
         "You are a captioning assistant. Respond in English only. "
         "Return only <final>...</final> and nothing else."
     )
+    user_request_note = _caption_user_request_instruction(user_prompt)
+    source_context = _format_caption_source_output_context(source_output, source_outputs)
     cleanup_prompt = (
         f"{strict_note}{allowed_note}{minimal_note}"
+        f"{user_request_note}"
         "Remove repetition, avoid coordinates, and remove any mention of labels, hints, or counts being provided. "
+        "Never copy planning phrases such as 'we can mention', 'we need to', or 'the user wants'. "
+        "If the draft is mostly reasoning or planning text, ignore that draft and write a fresh image-grounded caption. "
         "Keep the caption grounded in the image.\n"
         f"Draft caption: {prompt}"
     )
+    if source_context:
+        cleanup_prompt = f"{cleanup_prompt}\n\n{source_context}"
     cleanup_model = model_id_override or resolve_variant_fn(base_model_id, "Instruct")
+    cleanup_decode = (
+        {
+            "do_sample": True,
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "top_k": 20,
+            "repetition_penalty": 1.0,
+            "repetition_context_size": 128,
+            "no_repeat_ngram_size": 8,
+        }
+        if "thinking" in str(cleanup_model or "").lower()
+        else {"do_sample": False}
+    )
     qwen_text, _, _ = run_qwen_inference_fn(
         cleanup_prompt,
         pil_img,
@@ -579,7 +969,8 @@ def _run_qwen_caption_cleanup(
         system_prompt_override=cleanup_system,
         model_id_override=cleanup_model if use_caption_cache and runtime_override is None else None,
         runtime_override=runtime_override,
-        decode_override={"do_sample": False},
+        decode_override=cleanup_decode,
+        chat_template_kwargs=chat_template_kwargs,
     )
     caption_text, _ = extract_caption_fn(qwen_text, marker=None)
     return sanitize_caption_fn(caption_text)
@@ -594,6 +985,11 @@ def _run_qwen_caption_merge(
     runtime_resolver: Callable[[str], Tuple[Any, Any]],
     max_new_tokens: int,
     glossary_line: Optional[str] = None,
+    model_id_override: Optional[str] = None,
+    max_sentences: Optional[int] = None,
+    user_prompt: Optional[str] = None,
+    source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
     run_qwen_inference_fn: Callable[..., Tuple[str, Any, Any]],
     resolve_variant_fn: Callable[[str, str], str],
     extract_caption_fn: Callable[[str, Optional[str]], Tuple[str, bool]],
@@ -607,29 +1003,58 @@ def _run_qwen_caption_merge(
             window_lines.append(f"- {caption}")
     if len(window_lines) == 1:
         return draft_caption
+    length_note = _caption_length_instruction(max_sentences)
+    short_requested = _caption_user_requested_short(user_prompt, max_sentences)
+    user_request_note = _caption_user_request_instruction(user_prompt)
+    source_context = _format_caption_source_output_context(source_outputs=source_outputs)
+    detail_policy = (
+        "Keep the revised caption concise. Fold in only the most important missing visible details from the windows. "
+        if short_requested
+        else (
+            "Use multiple sentences if needed. Preserve specific counts, actions, and notable attributes from the windows; "
+            "do not drop any concrete window detail unless it clearly conflicts with the full image. "
+        )
+    )
     merge_prompt = (
+        f"{user_request_note}"
         "Revise the draft caption so it includes all distinct object details "
         "from the window observations that are missing in the draft. "
-        "Do not invent new objects. Use multiple sentences if needed. "
-        "Preserve specific counts, actions, and notable attributes from the windows; "
-        "do not drop any concrete window detail unless it clearly conflicts with the full image. "
+        "Do not invent new objects. "
+        f"{detail_policy}"
+        f"{length_note}"
         "Do not mention labels, hints, or coordinates.\n"
         f"Draft caption: {draft_caption}\n"
         + "\n".join(window_lines)
     )
+    if source_context:
+        merge_prompt = f"{merge_prompt}\n\n{source_context}"
     if glossary_line:
         merge_prompt = f"{merge_prompt}\n{glossary_line}"
     merge_system = (
         "You are a caption editor. Return only the revised caption in English."
     )
-    merge_model = resolve_variant_fn(base_model_id, "Instruct")
+    merge_model = model_id_override or resolve_variant_fn(base_model_id, "Instruct")
+    merge_decode = (
+        {
+            "do_sample": True,
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "top_k": 20,
+            "repetition_penalty": 1.0,
+            "repetition_context_size": 128,
+            "no_repeat_ngram_size": 8,
+        }
+        if "thinking" in str(merge_model or "").lower()
+        else {"do_sample": False}
+    )
     qwen_text, _, _ = run_qwen_inference_fn(
         merge_prompt,
         pil_img,
         max_new_tokens=max_new_tokens,
         system_prompt_override=merge_system,
         runtime_override=runtime_resolver(merge_model),
-        decode_override={"do_sample": False},
+        decode_override=merge_decode,
+        chat_template_kwargs=chat_template_kwargs,
     )
     merged, _ = extract_caption_fn(qwen_text, marker=None)
     merged = sanitize_caption_fn(merged)
@@ -648,7 +1073,8 @@ def _resolve_qwen_window_size(
     if requested is None:
         overlap_val = _resolve_qwen_window_overlap(overlap, default_overlap=default_overlap)
         base_dim = max(1, min(int(image_width), int(image_height)))
-        # 2x2 grid with overlap -> window = dim / (2 - overlap)
+        # Default to two overlapping windows on the shorter axis; the longer axis
+        # may need more positions to avoid corner-only coverage.
         base = base_dim / max(1.0, 2.0 - overlap_val)
     else:
         base = requested
@@ -871,8 +1297,6 @@ def _window_positions_impl(
 ) -> List[int]:
     if total <= window:
         return [0]
-    if force_two:
-        return [0, max(0, total - window)]
     step = max(1, int(round(window * (1.0 - overlap))))
     positions = list(range(0, max(1, total - window + 1), step))
     last = total - window

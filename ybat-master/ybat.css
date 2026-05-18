@@ -106,6 +106,66 @@ body {
     color: #e2e8f0;
 }
 
+.qwen-caption-live-toast {
+    position: fixed;
+    right: 18px;
+    top: 76px;
+    width: min(620px, calc(100vw - 36px));
+    max-height: min(52vh, 520px);
+    z-index: 90;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px 16px;
+    border: 1px solid rgba(37, 99, 235, 0.35);
+    border-radius: 10px;
+    background: rgba(248, 250, 252, 0.96);
+    color: #0f172a;
+    box-shadow: 0 18px 42px rgba(15, 23, 42, 0.26);
+    opacity: 0;
+    transform: translateY(-10px);
+    transition: opacity 0.16s ease, transform 0.16s ease;
+    pointer-events: none;
+}
+
+.qwen-caption-live-toast.visible {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+}
+
+.qwen-caption-live-toast.is-error {
+    border-color: rgba(239, 68, 68, 0.55);
+    background: rgba(255, 241, 242, 0.97);
+}
+
+.qwen-caption-live-toast__title {
+    font-size: 14px;
+    font-weight: 800;
+    line-height: 1.25;
+}
+
+.qwen-caption-live-toast__meta {
+    color: #475569;
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.qwen-caption-live-toast__body {
+    margin: 0;
+    max-height: 38vh;
+    overflow: auto;
+    overscroll-behavior: contain;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-radius: 8px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    background: #ffffff;
+    padding: 10px;
+    color: #0f172a;
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
 .class-scroll-indicator {
     position: fixed;
     left: 50%;
@@ -1093,6 +1153,112 @@ body.annotation-focus-mode .class-scroll-indicator {
 
 .qwen-caption-progress__preview:not(:empty) {
     display: block;
+}
+
+.qwen-caption-workflow {
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #f8fafc;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+
+.qwen-caption-workflow__title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #334155;
+}
+
+.qwen-caption-workflow__section {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.qwen-caption-workflow__section-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #64748b;
+    text-transform: uppercase;
+}
+
+.qwen-caption-workflow__path {
+    margin: 0;
+    padding-left: 24px;
+    display: grid;
+    gap: 5px;
+    list-style-position: outside;
+}
+
+.qwen-caption-workflow__settings,
+.qwen-caption-step-plan {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+.qwen-caption-workflow__path-item,
+.qwen-caption-workflow__setting,
+.qwen-caption-step-chip {
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #334155;
+    padding: 5px 7px;
+    font-size: 11px;
+    line-height: 1.25;
+}
+
+.qwen-caption-workflow__path-item {
+    padding-left: 4px;
+}
+
+.qwen-caption-workflow__setting {
+    flex: 1 1 150px;
+}
+
+.qwen-caption-workflow__path-item strong,
+.qwen-caption-workflow__setting strong {
+    display: block;
+    font-size: 11px;
+    color: #0f172a;
+    margin-bottom: 2px;
+}
+
+.qwen-caption-step-plan[hidden] {
+    display: none;
+}
+
+.qwen-caption-step-chip {
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.qwen-caption-step-chip.is-active {
+    border-color: #2563eb;
+    background: #eff6ff;
+    color: #1d4ed8;
+    font-weight: 700;
+}
+
+.qwen-caption-step-chip.is-complete {
+    border-color: #bbf7d0;
+    background: #f0fdf4;
+    color: #166534;
+}
+
+.qwen-caption-step-chip.is-conditional {
+    border-style: dashed;
+}
+
+.qwen-caption-step-chip.is-ellipsis {
+    border-color: transparent;
+    background: transparent;
+    color: #64748b;
 }
 
 .qwen-calibration-progress {
@@ -3213,6 +3379,7 @@ html.theme-dark .qwen-model-card.active {
 html.theme-dark .qwen-runtime-monitor,
 html.theme-dark .qwen-runtime-token-preview,
 html.theme-dark .qwen-caption-progress,
+html.theme-dark .qwen-caption-workflow,
 html.theme-dark .qwen-caption-progress__preview {
     background: #151a1e;
     border-color: #3a444b;
@@ -3234,6 +3401,40 @@ html.theme-dark .qwen-caption-progress__detail {
     color: #aeb8b2;
 }
 
+html.theme-dark .qwen-caption-workflow__title,
+html.theme-dark .qwen-caption-workflow__path-item strong,
+html.theme-dark .qwen-caption-workflow__setting strong {
+    color: #f5f7f5;
+}
+
+html.theme-dark .qwen-caption-workflow__section-title {
+    color: #aeb8b2;
+}
+
+html.theme-dark .qwen-caption-workflow__path-item,
+html.theme-dark .qwen-caption-workflow__setting,
+html.theme-dark .qwen-caption-step-chip {
+    background: #20262a;
+    border-color: #3a444b;
+    color: #dce5df;
+}
+
+html.theme-dark .qwen-caption-step-chip.is-active {
+    background: #1c3552;
+    border-color: #60a5fa;
+    color: #bfdbfe;
+}
+
+html.theme-dark .qwen-caption-step-chip.is-complete {
+    background: #12261d;
+    border-color: #166534;
+    color: #bbf7d0;
+}
+
+html.theme-dark .qwen-caption-step-chip.is-ellipsis {
+    color: #aeb8b2;
+}
+
 html.theme-dark .qwen-caption-progress.is-error {
     background: #2a171a;
     border-color: #7f1d1d;
@@ -3242,6 +3443,27 @@ html.theme-dark .qwen-caption-progress.is-error {
 html.theme-dark .qwen-caption-progress.is-complete {
     background: #12261d;
     border-color: #166534;
+}
+
+html.theme-dark .qwen-caption-live-toast {
+    background: rgba(21, 26, 30, 0.97);
+    border-color: #3a444b;
+    color: #f5f7f5;
+}
+
+html.theme-dark .qwen-caption-live-toast__meta {
+    color: #aeb8b2;
+}
+
+html.theme-dark .qwen-caption-live-toast__body {
+    background: #0f1418;
+    border-color: #3a444b;
+    color: #dce5df;
+}
+
+html.theme-dark .qwen-caption-live-toast.is-error {
+    background: rgba(42, 23, 26, 0.98);
+    border-color: #7f1d1d;
 }
 
 html.theme-dark .modal__title,
@@ -3754,6 +3976,7 @@ html.theme-pipboy .metric-table__highlight {
 html.theme-pipboy .qwen-runtime-monitor,
 html.theme-pipboy .qwen-runtime-token-preview,
 html.theme-pipboy .qwen-caption-progress,
+html.theme-pipboy .qwen-caption-workflow,
 html.theme-pipboy .qwen-caption-progress__preview {
     background: var(--pip-subsurface-bg);
     border-color: color-mix(in srgb, var(--pip-green) 34%, transparent);
@@ -3778,6 +4001,60 @@ html.theme-pipboy .qwen-caption-progress__fill {
 html.theme-pipboy .qwen-runtime-progress__text,
 html.theme-pipboy .qwen-caption-progress__detail {
     color: color-mix(in srgb, var(--pip-green) 82%, transparent);
+}
+
+html.theme-pipboy .qwen-caption-workflow__title,
+html.theme-pipboy .qwen-caption-workflow__path-item strong,
+html.theme-pipboy .qwen-caption-workflow__setting strong {
+    color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .qwen-caption-workflow__section-title {
+    color: color-mix(in srgb, var(--pip-green) 82%, transparent);
+}
+
+html.theme-pipboy .qwen-caption-workflow__path-item,
+html.theme-pipboy .qwen-caption-workflow__setting,
+html.theme-pipboy .qwen-caption-step-chip {
+    background: color-mix(in srgb, var(--pip-green) 7%, transparent);
+    border-color: color-mix(in srgb, var(--pip-green) 34%, transparent);
+    color: var(--pip-green);
+}
+
+html.theme-pipboy .qwen-caption-step-chip.is-active {
+    background: color-mix(in srgb, var(--pip-green) 16%, transparent);
+    border-color: var(--pip-border-strong);
+    color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .qwen-caption-step-chip.is-complete {
+    background: color-mix(in srgb, var(--pip-green) 10%, transparent);
+    border-color: color-mix(in srgb, var(--pip-green) 46%, transparent);
+}
+
+html.theme-pipboy .qwen-caption-step-chip.is-ellipsis {
+    color: color-mix(in srgb, var(--pip-green) 72%, transparent);
+}
+
+html.theme-pipboy .qwen-caption-live-toast {
+    background: var(--pip-subsurface-bg);
+    border-color: color-mix(in srgb, var(--pip-green) 44%, transparent);
+    color: var(--pip-green);
+    box-shadow: 0 0 18px color-mix(in srgb, var(--pip-green) 18%, transparent);
+}
+
+html.theme-pipboy .qwen-caption-live-toast__title {
+    color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .qwen-caption-live-toast__meta {
+    color: color-mix(in srgb, var(--pip-green) 82%, transparent);
+}
+
+html.theme-pipboy .qwen-caption-live-toast__body {
+    background: color-mix(in srgb, var(--pip-green) 7%, transparent);
+    border-color: color-mix(in srgb, var(--pip-green) 34%, transparent);
+    color: var(--pip-green);
 }
 
 html.theme-pipboy .modal__title,

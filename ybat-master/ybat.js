@@ -14,6 +14,7 @@
     const PIPBOY_GREEN = "green";
     const PIPBOY_AMBER = "amber";
     const THEME_CLICK_DELAY_MS = 320;
+    const QWEN_CAPTION_REGION_PULSE_MS = 1200;
     const TOP_TAB_BASE_METRICS = Object.freeze({
         fontSize: 12,
         paddingX: 14,
@@ -111,6 +112,10 @@
 
     function getPipboyCanvasTextColor() {
         return pipboyAccentMode === PIPBOY_AMBER ? "#ffbf3d" : "#84ff5b";
+    }
+
+    function getQwenCaptionRegionOverlayColor() {
+        return isDarkModeEnabled() || isPipboyThemeEnabled() ? "#38bdf8" : "#0284c7";
     }
 
     function getActiveThemeMode() {
@@ -2034,7 +2039,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionWindowOverlap: null,
         captionModel: null,
         captionVariant: null,
+        captionRefinementModel: null,
         captionMaxTokens: null,
+        captionFinalSentences: null,
         captionMaxBoxes: null,
         captionIncludeCounts: null,
         captionIncludeCoords: null,
@@ -2048,6 +2055,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionPresencePenalty: null,
         captionSaveText: null,
         captionRunButton: null,
+        captionCancelButton: null,
+        captionWorkflow: null,
+        captionStepPlan: null,
         captionOutput: null,
         captionCopyButton: null,
         captionMeta: null,
@@ -2288,6 +2298,10 @@ const AUTOMATION_LOCKED_TABS = new Set([
     let qwenProgressNoticeSignature = "";
     let qwenProgressLastSeenAt = 0;
     let qwenProgressActiveContext = null;
+    let qwenCaptionLiveToastEl = null;
+    let qwenCaptionLiveToastHideTimer = null;
+    let qwenCaptionLiveToastManualScrollUntil = 0;
+    let qwenCaptionRegionOverlay = null;
     let qwenAgentActive = false;
     let qwenAgentAbortController = null;
     let qwenAgentRunToken = 0;
@@ -2394,6 +2408,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     };
     const calibrationProgressCallbacks = new Set();
     const CAPTION_PRESETS = [
+        { id: "detailed", label: "Detailed scene caption", text: "Write a detailed caption describing the scene, setting, visible objects, spatial relationships, and notable details." },
         { id: "concise", label: "Concise scene caption", text: "Write a short caption (1-2 sentences) describing the scene and main objects." },
         { id: "context", label: "Context + setting", text: "Describe the scene, setting, and activity in one concise paragraph." },
         { id: "objects", label: "Objects only", text: "List the key objects and their relationships in one sentence." },
@@ -2428,6 +2443,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
     ].join(" ");
     const DEFAULT_CAPTION_WINDOW_SIZE = 672;
     const DEFAULT_CAPTION_WINDOW_OVERLAP = 0.1;
+    const DEFAULT_CAPTION_MAX_TOKENS = 1000;
+    const DEFAULT_CAPTION_AUTO_SENTENCES = 10;
     let sam3TextUiInitialized = false;
     let sam3PromptUiInitialized = false;
     let textLabels = {};
@@ -2437,6 +2454,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
     let qwenCaptionBatchCancel = false;
     let qwenCaptionBatchAbortController = null;
     let qwenCaptionBatchRunToken = 0;
+    let qwenCaptionAbortController = null;
+    let qwenCaptionCancelRequested = false;
     let qwenPanelInitialized = false;
     const captionAutoSaveState = {
         timerId: null,
@@ -18892,6 +18911,18 @@ async function cancelRfDetrTrainingJobRequest() {
         return isResolvedQwenModelId(value) ? "auto" : (variant || "auto");
     }
 
+    function resolveQwenCaptionModelSelection(modelPick, variant) {
+        const pick = String(modelPick || "active").trim();
+        if (!pick || pick === "active") {
+            return null;
+        }
+        if (pick.includes("/")) {
+            return pick;
+        }
+        const variantSuffix = variant === "Thinking" ? "Thinking" : "Instruct";
+        return `Qwen/Qwen3-VL-${pick}-${variantSuffix}`;
+    }
+
     function ensureQwenSelectOption(select, value, label = null) {
         if (!select) {
             return;
@@ -18916,6 +18947,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const items = normalizeQwenMlxModelOptions(models);
         [
             qwenElements.captionModel,
+            qwenElements.captionRefinementModel,
             qwenElements.agentModel,
             qwenElements.agentCaptionModel,
         ].forEach((select) => {
@@ -19501,7 +19533,9 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionWindowOverlap = document.getElementById("qwenCaptionWindowOverlap");
         qwenElements.captionModel = document.getElementById("qwenCaptionModel");
         qwenElements.captionVariant = document.getElementById("qwenCaptionVariant");
+        qwenElements.captionRefinementModel = document.getElementById("qwenCaptionRefinementModel");
         qwenElements.captionMaxTokens = document.getElementById("qwenCaptionMaxTokens");
+        qwenElements.captionFinalSentences = document.getElementById("qwenCaptionFinalSentences");
         qwenElements.captionMaxBoxes = document.getElementById("qwenCaptionMaxBoxes");
         qwenElements.captionIncludeCounts = document.getElementById("qwenCaptionIncludeCounts");
         qwenElements.captionIncludeCoords = document.getElementById("qwenCaptionIncludeCoords");
@@ -19515,11 +19549,14 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionPresencePenalty = document.getElementById("qwenCaptionPresencePenalty");
         qwenElements.captionSaveText = document.getElementById("qwenCaptionSaveText");
         qwenElements.captionRunButton = document.getElementById("qwenCaptionRunButton");
+        qwenElements.captionCancelButton = document.getElementById("qwenCaptionCancelButton");
+        qwenElements.captionWorkflow = document.getElementById("qwenCaptionWorkflow");
         qwenElements.captionProgress = document.getElementById("qwenCaptionProgress");
         qwenElements.captionProgressPhase = document.getElementById("qwenCaptionProgressPhase");
         qwenElements.captionProgressText = document.getElementById("qwenCaptionProgressText");
         qwenElements.captionProgressBar = document.getElementById("qwenCaptionProgressBar");
         qwenElements.captionProgressFill = document.getElementById("qwenCaptionProgressFill");
+        qwenElements.captionStepPlan = document.getElementById("qwenCaptionStepPlan");
         qwenElements.captionProgressDetail = document.getElementById("qwenCaptionProgressDetail");
         qwenElements.captionProgressPreview = document.getElementById("qwenCaptionProgressPreview");
         qwenElements.captionOutput = document.getElementById("qwenCaptionOutput");
@@ -19803,6 +19840,17 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (selected && selected !== "active") {
                     warnIfFp8Unsupported(selected);
                 }
+                applyCaptionDecodeDefaults();
+                updateQwenCaptionWorkflow();
+            });
+        }
+        if (qwenElements.captionRefinementModel) {
+            qwenElements.captionRefinementModel.addEventListener("change", () => {
+                const selected = qwenElements.captionRefinementModel.value;
+                if (selected && selected !== "same" && selected !== "active") {
+                    warnIfFp8Unsupported(resolveQwenCaptionModelSelection(selected, qwenElements.captionVariant?.value || "auto"));
+                }
+                updateQwenCaptionWorkflow();
             });
         }
         if (qwenElements.captionPreset) {
@@ -19835,6 +19883,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 updateCaptionWindowMode();
             });
             updateCaptionWindowMode();
+        }
+        if (qwenElements.captionTwoStage) {
+            qwenElements.captionTwoStage.addEventListener("change", updateQwenCaptionWorkflow);
         }
         if (qwenElements.captionPresetApply) {
             qwenElements.captionPresetApply.addEventListener("click", () => {
@@ -19875,6 +19926,13 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.captionRunButton.addEventListener("click", () => {
                 handleQwenCaption().catch((error) => {
                     console.error("Qwen caption request failed", error);
+                });
+            });
+        }
+        if (qwenElements.captionCancelButton) {
+            qwenElements.captionCancelButton.addEventListener("click", () => {
+                requestQwenCaptionCancel({ force: true }).catch((error) => {
+                    console.warn("Caption cancel request failed", error);
                 });
             });
         }
@@ -19976,13 +20034,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
                 qwenCaptionBatchCancel = true;
                 updateQwenCaptionButton();
-                if (qwenCaptionBatchAbortController) {
-                    try {
-                        qwenCaptionBatchAbortController.abort();
-                    } catch (error) {
-                        console.warn("Failed to abort caption batch request", error);
-                    }
-                }
+                requestQwenCaptionCancel({ force: true }).catch((error) => {
+                    console.warn("Caption batch cancel request failed", error);
+                });
                 setQwenCaptionStatus("Batch cancel requested");
             });
         }
@@ -21828,6 +21882,12 @@ async function cancelRfDetrTrainingJobRequest() {
         const busy = qwenCaptionActive || qwenCaptionBatchActive;
         qwenElements.captionRunButton.disabled = locked || !qwenAvailable || busy;
         qwenElements.captionRunButton.textContent = qwenCaptionActive ? "Captioning…" : "Caption image";
+        if (qwenElements.captionCancelButton) {
+            const cancelActive = qwenCaptionActive || qwenCaptionBatchActive;
+            const cancelRequested = qwenCaptionCancelRequested || qwenCaptionBatchCancel;
+            qwenElements.captionCancelButton.disabled = !cancelActive || cancelRequested;
+            qwenElements.captionCancelButton.textContent = cancelRequested ? "Cancelling…" : "Cancel caption";
+        }
         if (qwenElements.captionBatchRun) {
             qwenElements.captionBatchRun.disabled = locked || !qwenAvailable || busy;
         }
@@ -21916,21 +21976,36 @@ async function cancelRfDetrTrainingJobRequest() {
         return `Preferred opening phrases (choose one and rephrase if needed): ${joined}.`;
     }
 
+    function isQwenCaptionThinkingSelection() {
+        const variant = qwenElements.captionVariant?.value || "auto";
+        const modelPick = qwenElements.captionModel?.value || "active";
+        const modelText = getSelectDisplayText(qwenElements.captionModel, modelPick);
+        const resolvedVariant = variantForResolvedQwenModel(modelPick, variant);
+        const modelLooksThinking = /Thinking/i.test(`${modelPick} ${modelText}`);
+        return resolvedVariant === "Thinking" || (variant === "auto" && modelLooksThinking);
+    }
+
     function applyCaptionDecodeDefaults() {
         if (!qwenElements.captionSamplingPreset) {
             return;
         }
-        const preset = qwenElements.captionSamplingPreset.value || "recommended";
-        const variant = qwenElements.captionVariant?.value || "auto";
-        let isThinking = variant === "Thinking";
-        if (!isThinking && variant === "auto") {
-            const modelPick = qwenElements.captionModel?.value || "";
-            if (modelPick.includes("Thinking")) {
-                isThinking = true;
-            }
+        const isThinking = isQwenCaptionThinkingSelection();
+        const deterministicOption = Array.from(qwenElements.captionSamplingPreset.options || [])
+            .find((option) => option.value === "deterministic");
+        if (deterministicOption) {
+            deterministicOption.disabled = isThinking;
+            deterministicOption.title = isThinking
+                ? "Greedy decoding is avoided for Qwen Thinking models because it can lead to endless repetition."
+                : "Turns off sampling for non-Thinking models.";
+        }
+        let preset = qwenElements.captionSamplingPreset.value || "recommended";
+        if (isThinking && preset === "deterministic") {
+            qwenElements.captionSamplingPreset.value = "recommended";
+            preset = "recommended";
+            setQwenCaptionStatus("Thinking model: using Qwen sampling defaults");
         }
         const defaults = {
-            temperature: isThinking ? 1.0 : 0.7,
+            temperature: isThinking ? 0.6 : 0.7,
             topP: isThinking ? 0.95 : 0.8,
             topK: 20,
             presence: isThinking ? 0.0 : 1.5,
@@ -21967,13 +22042,156 @@ async function cancelRfDetrTrainingJobRequest() {
             control.disabled = !isWindowed;
             control.closest("div")?.classList.toggle("is-disabled", !isWindowed);
         });
+        updateQwenCaptionWorkflow();
+    }
+
+    function getSelectDisplayText(selectEl, fallback = "") {
+        if (!selectEl) {
+            return fallback;
+        }
+        const option = selectEl.selectedOptions && selectEl.selectedOptions[0];
+        return String(option?.textContent || selectEl.value || fallback || "").trim();
+    }
+
+    function getQwenCaptionWorkflowMode() {
+        const mode = qwenElements.captionMode?.value || "full";
+        const variant = qwenElements.captionVariant?.value || "auto";
+        const modelPick = qwenElements.captionModel?.value || "active";
+        const modelText = getSelectDisplayText(qwenElements.captionModel, modelPick);
+        return {
+            isWindowed: mode === "windowed",
+            twoStage: !!qwenElements.captionTwoStage?.checked,
+            isThinking: isQwenCaptionThinkingSelection(),
+            samplingPreset: qwenElements.captionSamplingPreset?.value || "recommended",
+            modelText,
+            editorText: getSelectDisplayText(qwenElements.captionRefinementModel, "Same as captioning"),
+        };
+    }
+
+    function updateQwenCaptionWorkflow() {
+        if (!qwenElements.captionWorkflow) {
+            return;
+        }
+        const mode = getQwenCaptionWorkflowMode();
+        const pathItems = [];
+        if (mode.isWindowed) {
+            pathItems.push({
+                title: "Window observations",
+                body: "Caption overlapping tiles first; these are source notes, not the final caption.",
+            });
+        }
+        if (mode.twoStage && mode.isThinking) {
+            pathItems.push(
+                {
+                    title: "Full-image draft",
+                    body: "Thinking-only draft pass with the caption model.",
+                },
+                {
+                    title: "Refine draft",
+                    body: `Editor model: ${mode.editorText}. This is separate from window merge.`,
+                },
+            );
+        } else {
+            pathItems.push({
+                title: mode.isWindowed ? "Full-image composition" : "Full-image caption",
+                body: mode.isWindowed
+                    ? "Compose the full image using the tile observations."
+                    : "Compose from the whole image in one caption pass.",
+            });
+        }
+        if (mode.isWindowed) {
+            pathItems.push({
+                title: "Merge window observations",
+                body: "Windowed-only editor pass that folds sub-captions into the final caption.",
+            });
+        }
+        const decodeBody = mode.samplingPreset === "custom"
+            ? "Custom decode knobs are active; Qwen defaults are not being auto-applied."
+            : mode.samplingPreset === "deterministic"
+                ? "Deterministic decoding is available only for non-Thinking models."
+                : mode.isThinking
+                    ? "Qwen sampling: temp 0.6, top-p 0.95, top-k 20; greedy decoding is avoided."
+                    : "Qwen sampling: temp 0.7, top-p 0.8, top-k 20.";
+        const settingsItems = [
+            {
+                title: mode.isThinking ? "Decode" : "Decode",
+                body: decodeBody,
+            },
+            {
+                title: "Editor model",
+                body: mode.editorText,
+            },
+            {
+                title: "Quality guards",
+                body: "Cleanup, coverage, and language checks run only when triggered.",
+            },
+        ];
+        if (mode.twoStage && !mode.isThinking) {
+            settingsItems.push({
+                title: "Draft + refine",
+                body: "Inactive because the resolved caption model is not Thinking.",
+            });
+        }
+
+        qwenElements.captionWorkflow.replaceChildren();
+        const title = document.createElement("div");
+        title.className = "qwen-caption-workflow__title";
+        title.textContent = "Caption workflow";
+        qwenElements.captionWorkflow.appendChild(title);
+        const pathSection = document.createElement("div");
+        pathSection.className = "qwen-caption-workflow__section";
+        const pathTitle = document.createElement("div");
+        pathTitle.className = "qwen-caption-workflow__section-title";
+        pathTitle.textContent = "Caption path";
+        const pathList = document.createElement("ol");
+        pathList.className = "qwen-caption-workflow__path";
+        pathItems.forEach((item) => {
+            const el = document.createElement("li");
+            el.className = "qwen-caption-workflow__path-item";
+            el.title = `${item.title}: ${item.body}`;
+            const strong = document.createElement("strong");
+            strong.textContent = item.title;
+            const body = document.createElement("span");
+            body.textContent = item.body;
+            el.append(strong, body);
+            pathList.appendChild(el);
+        });
+        pathSection.append(pathTitle, pathList);
+        qwenElements.captionWorkflow.appendChild(pathSection);
+
+        const settingsSection = document.createElement("div");
+        settingsSection.className = "qwen-caption-workflow__section";
+        const settingsTitle = document.createElement("div");
+        settingsTitle.className = "qwen-caption-workflow__section-title";
+        settingsTitle.textContent = "Settings and guards";
+        const settingsList = document.createElement("div");
+        settingsList.className = "qwen-caption-workflow__settings";
+        settingsItems.forEach((item) => {
+            const el = document.createElement("div");
+            el.className = "qwen-caption-workflow__setting";
+            el.title = `${item.title}: ${item.body}`;
+            const strong = document.createElement("strong");
+            strong.textContent = item.title;
+            const body = document.createElement("span");
+            body.textContent = item.body;
+            el.append(strong, body);
+            settingsList.appendChild(el);
+        });
+        settingsSection.append(settingsTitle, settingsList);
+        qwenElements.captionWorkflow.appendChild(settingsSection);
     }
 
     if (qwenElements.captionSamplingPreset) {
-        qwenElements.captionSamplingPreset.addEventListener("change", applyCaptionDecodeDefaults);
+        qwenElements.captionSamplingPreset.addEventListener("change", () => {
+            applyCaptionDecodeDefaults();
+            updateQwenCaptionWorkflow();
+        });
     }
     if (qwenElements.captionVariant) {
-        qwenElements.captionVariant.addEventListener("change", applyCaptionDecodeDefaults);
+        qwenElements.captionVariant.addEventListener("change", () => {
+            applyCaptionDecodeDefaults();
+            updateQwenCaptionWorkflow();
+        });
     }
     applyCaptionDecodeDefaults();
 
@@ -21988,13 +22206,317 @@ async function cancelRfDetrTrainingJobRequest() {
         return Math.max(0, Math.min(100, Math.round((Number(progress?.progress) || 0) * 100)));
     }
 
+    function getQwenStepInfo(progress) {
+        if (!progress || typeof progress !== "object") {
+            return null;
+        }
+        const index = Number(progress.step_index);
+        const total = Number(progress.step_total);
+        const label = String(progress.step_label || progress.step_id || "").trim();
+        const detail = String(progress.step_detail || "").trim();
+        if (!label && !Number.isFinite(index)) {
+            return null;
+        }
+        return {
+            index: Number.isFinite(index) && index > 0 ? Math.round(index) : null,
+            total: Number.isFinite(total) && total > 0 ? Math.round(total) : null,
+            label,
+            detail,
+        };
+    }
+
+    function formatQwenStepText(progress) {
+        const step = getQwenStepInfo(progress);
+        if (!step) {
+            return "";
+        }
+        const counter = step.index && step.total ? `Step ${step.index}/${step.total}` : "Step";
+        return step.label ? `${counter}: ${step.label}` : counter;
+    }
+
+    function formatQwenStepPlan(progress) {
+        const step = getQwenStepInfo(progress);
+        const plan = Array.isArray(progress?.step_plan) ? progress.step_plan : [];
+        if (!step && !plan.length) {
+            return "";
+        }
+        const parts = [];
+        if (plan.length) {
+            parts.push(`Plan: ${plan.length} step${plan.length === 1 ? "" : "s"}`);
+        }
+        const current = formatQwenStepText(progress);
+        if (current) {
+            parts.push(`Current: ${current}`);
+        }
+        if (step?.index && step?.total && step.index < step.total && plan.length >= step.index + 1) {
+            const next = plan[step.index];
+            const nextLabel = String(next?.label || next?.id || "").trim();
+            if (nextLabel) {
+                parts.push(`Next: ${nextLabel}`);
+            }
+        }
+        return parts.join(" • ");
+    }
+
+    function getVisibleQwenStepPlanEntries(plan, activeIndex) {
+        if (!Array.isArray(plan) || !plan.length) {
+            return [];
+        }
+        if (plan.length <= 12) {
+            return plan.map((entry, index) => ({ entry, index }));
+        }
+        const visible = new Set([0, 1, plan.length - 2, plan.length - 1]);
+        if (Number.isFinite(activeIndex) && activeIndex >= 0) {
+            for (let offset = -2; offset <= 2; offset += 1) {
+                const index = activeIndex + offset;
+                if (index >= 0 && index < plan.length) {
+                    visible.add(index);
+                }
+            }
+        }
+        const sorted = Array.from(visible).sort((a, b) => a - b);
+        const entries = [];
+        let previous = -1;
+        sorted.forEach((index) => {
+            if (previous >= 0 && index > previous + 1) {
+                entries.push({ ellipsis: true, index: previous + 1 });
+            }
+            entries.push({ entry: plan[index], index });
+            previous = index;
+        });
+        return entries;
+    }
+
+    function renderQwenCaptionStepPlan(progress) {
+        if (!qwenElements.captionStepPlan) {
+            return;
+        }
+        const plan = Array.isArray(progress?.step_plan) ? progress.step_plan : [];
+        qwenElements.captionStepPlan.replaceChildren();
+        if (!plan.length) {
+            qwenElements.captionStepPlan.hidden = true;
+            return;
+        }
+        const rawIndex = Number(progress?.step_index);
+        const activeIndex = Number.isFinite(rawIndex) && rawIndex > 0 ? Math.round(rawIndex) - 1 : -1;
+        const activeId = String(progress?.step_id || "").trim();
+        getVisibleQwenStepPlanEntries(plan, activeIndex).forEach((item) => {
+            const chip = document.createElement("span");
+            chip.className = "qwen-caption-step-chip";
+            if (item.ellipsis) {
+                chip.classList.add("is-ellipsis");
+                chip.textContent = "...";
+                qwenElements.captionStepPlan.appendChild(chip);
+                return;
+            }
+            const entry = item.entry || {};
+            const id = String(entry.id || "").trim();
+            const label = String(entry.label || id || `Step ${item.index + 1}`).trim();
+            const detail = String(entry.detail || "").trim();
+            const isActive = (activeIndex >= 0 && item.index === activeIndex) || (activeId && id === activeId);
+            chip.textContent = `${item.index + 1}. ${label}`;
+            chip.title = detail ? `${label}: ${detail}` : label;
+            chip.classList.toggle("is-active", isActive);
+            chip.classList.toggle("is-complete", activeIndex > item.index);
+            chip.classList.toggle("is-conditional", id === "postprocess");
+            qwenElements.captionStepPlan.appendChild(chip);
+        });
+        qwenElements.captionStepPlan.hidden = false;
+    }
+
+    function normalizeQwenStepRegion(progress) {
+        const region = progress?.step_region;
+        if (!region || typeof region !== "object" || region.full_image) {
+            return null;
+        }
+        const x = Number(region.x);
+        const y = Number(region.y);
+        const width = Number(region.width);
+        const height = Number(region.height);
+        if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+            return null;
+        }
+        const imageName = String(region.image_name || "").trim();
+        if (imageName && currentImage?.name && imageName !== currentImage.name) {
+            return null;
+        }
+        const imageWidth = Number(region.image_width);
+        const imageHeight = Number(region.image_height);
+        const maxWidth = Number.isFinite(imageWidth) && imageWidth > 0 ? imageWidth : (currentImage?.width || x + width);
+        const maxHeight = Number.isFinite(imageHeight) && imageHeight > 0 ? imageHeight : (currentImage?.height || y + height);
+        const left = Math.max(0, Math.min(maxWidth, x));
+        const top = Math.max(0, Math.min(maxHeight, y));
+        const right = Math.max(left + 1, Math.min(maxWidth, x + width));
+        const bottom = Math.max(top + 1, Math.min(maxHeight, y + height));
+        return {
+            x: left,
+            y: top,
+            width: right - left,
+            height: bottom - top,
+            label: String(region.label || progress.step_label || "").trim(),
+        };
+    }
+
+    function setQwenCaptionRegionOverlay(progress) {
+        const region = normalizeQwenStepRegion(progress);
+        qwenCaptionRegionOverlay = progress?.active ? region : null;
+    }
+
+    function ensureQwenCaptionLiveToast() {
+        if (qwenCaptionLiveToastEl) {
+            return qwenCaptionLiveToastEl;
+        }
+        const el = document.createElement("div");
+        el.className = "qwen-caption-live-toast";
+        el.setAttribute("role", "status");
+        el.setAttribute("aria-live", "polite");
+        el.innerHTML = `
+            <div class="qwen-caption-live-toast__title"></div>
+            <div class="qwen-caption-live-toast__meta"></div>
+            <pre class="qwen-caption-live-toast__body"></pre>
+        `;
+        el.addEventListener("wheel", handleQwenCaptionLiveToastWheel, { passive: false });
+        el.addEventListener("mouseleave", () => {
+            qwenCaptionLiveToastManualScrollUntil = 0;
+            scrollQwenCaptionOutputToBottom(el.querySelector(".qwen-caption-live-toast__body"), {
+                respectManualScroll: false,
+            });
+        });
+        document.body.appendChild(el);
+        qwenCaptionLiveToastEl = el;
+        return el;
+    }
+
+    function normalizeWheelDeltaY(event, fallbackEl) {
+        let delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX)
+            ? event.deltaY
+            : event.deltaX;
+        if (event.deltaMode === 1) {
+            delta *= 16;
+        } else if (event.deltaMode === 2) {
+            delta *= Math.max(1, fallbackEl?.clientHeight || 1);
+        }
+        return delta;
+    }
+
+    function isQwenCaptionOutputNearBottom(el) {
+        if (!el) {
+            return true;
+        }
+        return (el.scrollHeight - el.scrollTop - el.clientHeight) <= 8;
+    }
+
+    function handleQwenCaptionLiveToastWheel(event) {
+        const bodyEl = event.currentTarget?.querySelector(".qwen-caption-live-toast__body");
+        if (!bodyEl) {
+            event.stopPropagation();
+            event.preventDefault();
+            return;
+        }
+        event.stopPropagation();
+        event.preventDefault();
+        bodyEl.scrollTop += normalizeWheelDeltaY(event, bodyEl);
+        qwenCaptionLiveToastManualScrollUntil = isQwenCaptionOutputNearBottom(bodyEl)
+            ? 0
+            : Date.now() + 3500;
+    }
+
+    function scrollQwenCaptionOutputToBottom(el, { respectManualScroll = true } = {}) {
+        if (!el) {
+            return;
+        }
+        if (
+            respectManualScroll
+            && qwenCaptionLiveToastManualScrollUntil > Date.now()
+            && !isQwenCaptionOutputNearBottom(el)
+        ) {
+            return;
+        }
+        const scrollToBottom = () => {
+            el.scrollTop = el.scrollHeight;
+        };
+        scrollToBottom();
+        window.requestAnimationFrame(scrollToBottom);
+    }
+
+    function hideQwenCaptionLiveToast(delayMs = 0) {
+        if (qwenCaptionLiveToastHideTimer) {
+            clearTimeout(qwenCaptionLiveToastHideTimer);
+            qwenCaptionLiveToastHideTimer = null;
+        }
+        const hideNow = () => {
+            qwenCaptionLiveToastManualScrollUntil = 0;
+            if (qwenCaptionLiveToastEl) {
+                qwenCaptionLiveToastEl.classList.remove("visible", "is-error");
+            }
+        };
+        if (delayMs > 0) {
+            qwenCaptionLiveToastHideTimer = setTimeout(hideNow, delayMs);
+        } else {
+            hideNow();
+        }
+    }
+
+    function renderQwenCaptionLiveToast(progress, { force = false } = {}) {
+        const captionContext = progress?.kind === "caption" || qwenCaptionActive || qwenProgressActiveContext === "caption";
+        if (!force && !captionContext) {
+            return;
+        }
+        if (!progress || typeof progress !== "object") {
+            hideQwenCaptionLiveToast();
+            return;
+        }
+        const isDone = progress.phase === "complete" || progress.phase === "cancelled" || progress.phase === "error" || !!progress.error;
+        const liveText = String(progress.live_output || progress.token_preview || "").trim();
+        const shouldShow = progress.active || liveText;
+        if (!shouldShow) {
+            hideQwenCaptionLiveToast(isDone ? 1200 : 0);
+            return;
+        }
+        if (qwenCaptionLiveToastHideTimer) {
+            clearTimeout(qwenCaptionLiveToastHideTimer);
+            qwenCaptionLiveToastHideTimer = null;
+        }
+        const el = ensureQwenCaptionLiveToast();
+        const titleEl = el.querySelector(".qwen-caption-live-toast__title");
+        const metaEl = el.querySelector(".qwen-caption-live-toast__meta");
+        const bodyEl = el.querySelector(".qwen-caption-live-toast__body");
+        const percent = getQwenProgressPercent(progress);
+        const stepText = formatQwenStepText(progress);
+        const phase = progress.phase_label || progress.phase || (progress.active ? "Working" : "Idle");
+        const generated = Number(progress.generated_tokens);
+        const maxTokens = Number(progress.max_new_tokens);
+        const tokenText = Number.isFinite(generated) && generated > 0
+            ? `${generated}${Number.isFinite(maxTokens) && maxTokens > 0 ? `/${maxTokens}` : ""} tokens`
+            : "";
+        if (titleEl) {
+            titleEl.textContent = stepText || phase;
+        }
+        if (metaEl) {
+            metaEl.textContent = [phase, `${percent}%`, tokenText, String(progress.step_detail || progress.message || "").trim()]
+                .filter(Boolean)
+                .join(" • ");
+        }
+        if (bodyEl) {
+            bodyEl.textContent = liveText || "Waiting for model output...";
+            scrollQwenCaptionOutputToBottom(bodyEl);
+        }
+        el.classList.toggle("is-error", progress.phase === "error" || (!!progress.error && progress.error !== "cancelled"));
+        el.classList.add("visible");
+        if (isDone) {
+            hideQwenCaptionLiveToast(progress.phase === "error" ? 8000 : 4500);
+        }
+    }
+
     function describeQwenProgress(progress) {
         if (!progress || typeof progress !== "object") {
             return "Qwen status unavailable";
         }
         const phase = progress.phase_label || progress.phase || (progress.active ? "Working" : "Idle");
         const message = String(progress.message || progress.error || "").trim();
-        return message ? `${phase}: ${message}` : phase;
+        const stepText = formatQwenStepText(progress);
+        const base = message ? `${phase}: ${message}` : phase;
+        return stepText ? `${stepText} - ${base}` : base;
     }
 
     function announceQwenProgress(progress, { force = false, variant = "info" } = {}) {
@@ -22006,6 +22528,9 @@ async function cancelRfDetrTrainingJobRequest() {
             progress?.run_id || "local",
             progress?.phase || "",
             progress?.phase_label || "",
+            progress?.step_id || "",
+            progress?.step_index || "",
+            progress?.step_label || "",
             progress?.message || progress?.error || "",
             variant,
         ].join("|");
@@ -22036,12 +22561,17 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const percent = getQwenProgressPercent(progress);
         const phase = progress.phase_label || progress.phase || (progress.active ? "Working" : "Idle");
+        const stepText = formatQwenStepText(progress);
+        const stepInfo = getQwenStepInfo(progress);
         const detail = String(progress.message || progress.error || "").trim();
+        const isCancelled = progress.phase === "cancelled" || progress.error === "cancelled" || progress.cancel_requested;
+        setQwenCaptionRegionOverlay(progress);
+        renderQwenCaptionLiveToast(progress, { force });
         qwenElements.captionProgress.hidden = false;
-        qwenElements.captionProgress.classList.toggle("is-error", progress.phase === "error" || !!progress.error);
+        qwenElements.captionProgress.classList.toggle("is-error", !isCancelled && (progress.phase === "error" || !!progress.error));
         qwenElements.captionProgress.classList.toggle("is-complete", progress.phase === "complete");
         if (qwenElements.captionProgressPhase) {
-            qwenElements.captionProgressPhase.textContent = phase;
+            qwenElements.captionProgressPhase.textContent = stepText || phase;
         }
         if (qwenElements.captionProgressText) {
             const generated = Number(progress.generated_tokens);
@@ -22049,7 +22579,8 @@ async function cancelRfDetrTrainingJobRequest() {
             const tokenText = Number.isFinite(generated) && generated > 0
                 ? ` • ${generated}${Number.isFinite(maxTokens) && maxTokens > 0 ? `/${maxTokens}` : ""} tokens`
                 : "";
-            qwenElements.captionProgressText.textContent = `${percent}%${tokenText}`;
+            const stepCounter = stepInfo?.index && stepInfo?.total ? ` • step ${stepInfo.index}/${stepInfo.total}` : "";
+            qwenElements.captionProgressText.textContent = `${percent}%${stepCounter}${tokenText}`;
         }
         if (qwenElements.captionProgressFill) {
             qwenElements.captionProgressFill.style.width = `${percent}%`;
@@ -22057,18 +22588,27 @@ async function cancelRfDetrTrainingJobRequest() {
         if (qwenElements.captionProgressBar) {
             qwenElements.captionProgressBar.setAttribute("aria-valuenow", String(percent));
         }
+        renderQwenCaptionStepPlan(progress);
         if (qwenElements.captionProgressDetail) {
             const availability = formatQwenAvailability(progress);
             const model = progress.model_id ? ` • ${progress.model_id}` : "";
-            qwenElements.captionProgressDetail.textContent = [detail || "Waiting for Qwen", availability].filter(Boolean).join(" • ") + model;
+            const stepDetail = String(progress.step_detail || "").trim();
+            qwenElements.captionProgressDetail.textContent = [stepDetail, detail || "Waiting for Qwen", availability].filter(Boolean).join(" • ") + model;
         }
         if (qwenElements.captionProgressPreview) {
+            const planText = formatQwenStepPlan(progress);
             const logText = Array.isArray(progress.log_lines)
                 ? progress.log_lines.slice(-14).join("\n")
                 : "";
-            qwenElements.captionProgressPreview.textContent = progress.token_preview || logText || "";
+            qwenElements.captionProgressPreview.textContent = [
+                planText,
+                progress.live_output || progress.token_preview || logText || "",
+            ].filter(Boolean).join("\n\n");
+            scrollQwenCaptionOutputToBottom(qwenElements.captionProgressPreview);
         }
-        if (progress.phase === "error" || progress.error) {
+        if (isCancelled) {
+            setQwenCaptionStatus("Cancelled");
+        } else if (progress.phase === "error" || progress.error) {
             setQwenCaptionStatus("Error");
         } else if (progress.phase === "complete") {
             setQwenCaptionStatus("Ready");
@@ -22082,6 +22622,13 @@ async function cancelRfDetrTrainingJobRequest() {
         phaseLabel = "Queued",
         progress = 0.01,
         modelId = null,
+        stepId = null,
+        stepIndex = null,
+        stepTotal = null,
+        stepLabel = null,
+        stepDetail = null,
+        stepPlan = null,
+        stepRegion = null,
         force = true,
     } = {}) {
         const snapshot = {
@@ -22099,10 +22646,67 @@ async function cancelRfDetrTrainingJobRequest() {
             generated_tokens: 0,
             max_new_tokens: null,
             token_preview: "",
+            live_output: "",
+            step_id: stepId,
+            step_index: stepIndex,
+            step_total: stepTotal,
+            step_label: stepLabel,
+            step_detail: stepDetail,
+            step_plan: stepPlan || [],
+            step_region: stepRegion,
         };
         renderQwenProgressState(snapshot);
         renderQwenCaptionProgressState(snapshot, { force });
         announceQwenProgress(snapshot, { force: true });
+    }
+
+    function makeCaptionAbortError(message = "Caption cancelled") {
+        try {
+            return new DOMException(message, "AbortError");
+        } catch (_error) {
+            const err = new Error(message);
+            err.name = "AbortError";
+            return err;
+        }
+    }
+
+    async function requestQwenCaptionCancel({ force = true } = {}) {
+        if (!qwenCaptionActive && !qwenCaptionBatchActive) {
+            return;
+        }
+        qwenCaptionCancelRequested = true;
+        qwenCaptionBatchCancel = qwenCaptionBatchCancel || qwenCaptionBatchActive;
+        updateQwenCaptionButton();
+        const message = force
+            ? "Cancelling caption and restarting backend to stop active Qwen work"
+            : "Cancelling caption";
+        renderQwenCaptionLocalProgress(message, {
+            phase: "cancelling",
+            phaseLabel: "Cancelling",
+            progress: 0.99,
+        });
+        setQwenCaptionStatus("Cancellation requested");
+        setSamStatus(`${message}…`, { variant: "warn", duration: 0 });
+        try {
+            const url = `${API_ROOT}/qwen/caption/cancel?force=${force ? "1" : "0"}`;
+            await fetch(url, { method: "POST", keepalive: true });
+        } catch (error) {
+            console.warn("Backend caption cancel endpoint did not respond", error);
+        }
+        if (qwenCaptionAbortController) {
+            try {
+                qwenCaptionAbortController.abort();
+            } catch (error) {
+                console.warn("Failed to abort caption request", error);
+            }
+        }
+        if (qwenCaptionBatchAbortController) {
+            try {
+                qwenCaptionBatchAbortController.abort();
+            } catch (error) {
+                console.warn("Failed to abort caption batch request", error);
+            }
+        }
     }
 
     function formatQwenMemory(memory) {
@@ -22178,10 +22782,12 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!idleBeforeBackendRun) {
             renderQwenCaptionProgressState(progress);
         }
-        const shouldAnnounce = progress.active || progress.phase === "error" || progress.phase === "complete";
+        const shouldAnnounce = progress.active || progress.phase === "error" || progress.phase === "complete" || progress.phase === "cancelled";
         if (shouldAnnounce && (progress.kind === "caption" || qwenProgressActiveContext === "caption")) {
             announceQwenProgress(progress, {
-                variant: progress.phase === "error" || progress.error ? "error" : "info",
+                variant: progress.phase === "cancelled" || progress.error === "cancelled"
+                    ? "warn"
+                    : (progress.phase === "error" || progress.error ? "error" : "info"),
             });
         }
         if (!qwenElements.runtimeMonitor) {
@@ -22189,13 +22795,14 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const percent = getQwenProgressPercent(progress);
         const phase = progress.phase_label || progress.phase || (progress.active ? "Working" : "Idle");
+        const stepText = formatQwenStepText(progress);
         const model = progress.model_id || progress.effective_model_name || "Model pending";
         const availability = formatQwenAvailability(progress);
         const memory = formatQwenMemory(progress.memory || progress.vram);
         if (qwenElements.runtimePhase) {
             qwenElements.runtimePhase.textContent = progress.message
-                ? `${phase}: ${progress.message}`
-                : phase;
+                ? `${stepText ? `${stepText} - ` : ""}${phase}: ${progress.message}`
+                : (stepText || phase);
         }
         if (qwenElements.runtimeModel) {
             qwenElements.runtimeModel.textContent = model;
@@ -22224,7 +22831,7 @@ async function cancelRfDetrTrainingJobRequest() {
             const logText = Array.isArray(progress.log_lines)
                 ? progress.log_lines.slice(-14).join("\n")
                 : "";
-            qwenElements.runtimeTokenPreview.textContent = progress.token_preview || logText || "";
+            qwenElements.runtimeTokenPreview.textContent = progress.live_output || progress.token_preview || logText || "";
         }
     }
 
@@ -22858,7 +23465,7 @@ async function cancelRfDetrTrainingJobRequest() {
         return hints;
     }
 
-    async function invokeQwenCaption(requestFields) {
+    async function invokeQwenCaption(requestFields, options = {}) {
         if (!currentImage) {
             throw new Error("No active image");
         }
@@ -22879,6 +23486,9 @@ async function cancelRfDetrTrainingJobRequest() {
             payload.image_name = imageNameForRequest;
         }
         payload.sam_variant = variantForRequest;
+        if (options.signal?.aborted) {
+            throw makeCaptionAbortError();
+        }
         renderQwenCaptionLocalProgress("Caption request sent to backend; waiting for Qwen runtime", {
             phase: "request",
             phaseLabel: "Request Sent",
@@ -22888,8 +23498,12 @@ async function cancelRfDetrTrainingJobRequest() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ...requestFields, ...payload }),
+            signal: options.signal,
         });
         if (resp.status === 428 || resp.status === 404) {
+            if (options.signal?.aborted) {
+                throw makeCaptionAbortError();
+            }
             if (resp.status === 404 && imageNameForRequest) {
                 forgetSamToken(imageNameForRequest, variantForRequest);
             }
@@ -22912,6 +23526,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ ...requestFields, ...payload }),
+                signal: options.signal,
             });
         }
         if (!resp.ok) {
@@ -22922,11 +23537,18 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function buildQwenCaptionRequestFields(imageName) {
-        let maxTokens = parseInt(qwenElements.captionMaxTokens?.value || "256", 10);
+        let maxTokens = parseInt(qwenElements.captionMaxTokens?.value || `${DEFAULT_CAPTION_MAX_TOKENS}`, 10);
         if (Number.isNaN(maxTokens)) {
-            maxTokens = 256;
+            maxTokens = DEFAULT_CAPTION_MAX_TOKENS;
         }
         maxTokens = Math.min(Math.max(maxTokens, 32), 2000);
+        let finalSentences = parseInt(qwenElements.captionFinalSentences?.value || "", 10);
+        if (Number.isNaN(finalSentences) || finalSentences <= 0) {
+            finalSentences = DEFAULT_CAPTION_AUTO_SENTENCES;
+        } else {
+            finalSentences = Math.min(Math.max(finalSentences, 1), 30);
+        }
+        maxTokens = Math.max(maxTokens, Math.min(2000, Math.max(DEFAULT_CAPTION_MAX_TOKENS, finalSentences * 100)));
         let maxBoxes = parseInt(qwenElements.captionMaxBoxes?.value || "0", 10);
         if (Number.isNaN(maxBoxes)) {
             maxBoxes = 0;
@@ -22950,6 +23572,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const samplingPreset = qwenElements.captionSamplingPreset?.value || "recommended";
         const modelPick = qwenElements.captionModel?.value || "active";
         const requestVariant = variantForResolvedQwenModel(modelPick, variant);
+        const refinementPick = qwenElements.captionRefinementModel?.value || "same";
         const basePreset = getCaptionPresetText();
         const customHint = (qwenElements.captionHint?.value || "").trim();
         const stylePrompt = buildCaptionStylePrompt();
@@ -22969,28 +23592,27 @@ async function cancelRfDetrTrainingJobRequest() {
         if (openingPrompt) {
             combinedPrompt = combinedPrompt ? `${combinedPrompt} ${openingPrompt}` : openingPrompt;
         }
-        let modelOverride = null;
-        if (modelPick !== "active") {
-            if (modelPick.includes("/")) {
-                modelOverride = modelPick;
-            } else {
-                const variantSuffix = requestVariant === "Thinking" ? "Thinking" : "Instruct";
-                modelOverride = `Qwen/Qwen3-VL-${modelPick}-${variantSuffix}`;
-            }
+        const modelOverride = resolveQwenCaptionModelSelection(modelPick, requestVariant);
+        if (modelOverride) {
             warnIfFp8Unsupported(modelOverride);
         }
-        const hints = collectCaptionLabelHintsForImage(imageName);
-        if (requestVariant === "Thinking") {
-            maxTokens = Math.max(maxTokens, 2000);
-        } else if (captionMode === "windowed") {
-            maxTokens = Math.max(maxTokens, 2000);
+        let refinementModelOverride = null;
+        if (refinementPick && refinementPick !== "same") {
+            refinementModelOverride = refinementPick === "active"
+                ? "active"
+                : resolveQwenCaptionModelSelection(refinementPick, requestVariant);
+            if (refinementModelOverride && refinementModelOverride !== "active") {
+                warnIfFp8Unsupported(refinementModelOverride);
+            }
         }
+        const hints = collectCaptionLabelHintsForImage(imageName);
         const temperature = parseFloat(qwenElements.captionTemperature?.value || "");
         const topP = parseFloat(qwenElements.captionTopP?.value || "");
         const topK = parseInt(qwenElements.captionTopK?.value || "", 10);
         const presencePenalty = parseFloat(qwenElements.captionPresencePenalty?.value || "");
         const captionSystemPrompt = String(qwenElements.captionSystemPrompt?.value || "").trim();
         const requestFields = {
+            image_name: imageName,
             user_prompt: combinedPrompt,
             caption_system_prompt: captionSystemPrompt || null,
             label_hints: hints,
@@ -23000,7 +23622,9 @@ async function cancelRfDetrTrainingJobRequest() {
             max_new_tokens: maxTokens,
             model_variant: requestVariant,
             model_id: modelOverride,
+            refinement_model_id: refinementModelOverride,
             final_answer_only: finalOnly,
+            final_caption_max_sentences: finalSentences,
             two_stage_refine: twoStage,
             multi_model_cache: highVram,
             fast_mode: highVram,
@@ -23018,6 +23642,7 @@ async function cancelRfDetrTrainingJobRequest() {
             meta: {
                 imageName,
                 model: modelOverride || modelPick,
+                refinementModel: refinementModelOverride || "same",
                 variant,
                 captionMode,
                 windowSize,
@@ -23026,6 +23651,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 includeCoords,
                 maxBoxes,
                 maxTokens,
+                finalSentences,
                 captionSystemPrompt: captionSystemPrompt || null,
             },
             hints,
@@ -23919,6 +24545,7 @@ async function cancelRfDetrTrainingJobRequest() {
             caption: String(caption || "").trim(),
             dataset_id: datasetId || null,
             model_id: meta?.model || null,
+            refinement_model_id: meta?.refinementModel || null,
             variant: meta?.variant || null,
             caption_mode: meta?.captionMode || null,
             window_size: meta?.windowSize || null,
@@ -23927,6 +24554,7 @@ async function cancelRfDetrTrainingJobRequest() {
             include_coords: meta?.includeCoords ?? null,
             max_boxes: meta?.maxBoxes ?? null,
             max_new_tokens: meta?.maxTokens ?? null,
+            final_caption_max_sentences: meta?.finalSentences ?? null,
             caption_system_prompt: meta?.captionSystemPrompt || null,
             used_boxes: result?.used_boxes ?? null,
             counts: result?.used_counts ?? null,
@@ -23957,6 +24585,9 @@ async function cancelRfDetrTrainingJobRequest() {
         const requestImageName = currentImage.name;
         const requestImageWidth = currentImage.width;
         const requestImageHeight = currentImage.height;
+        const abortController = new AbortController();
+        qwenCaptionAbortController = abortController;
+        qwenCaptionCancelRequested = false;
         qwenCaptionActive = true;
         updateQwenCaptionButton();
         setQwenCaptionStatus("Queued…");
@@ -23996,6 +24627,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 ...requestFields,
                 image_width: requestImageWidth,
                 image_height: requestImageHeight,
+            }, {
+                signal: abortController.signal,
             });
             // Show the generated caption when the requested image is still active;
             // save labels against the requested image either way.
@@ -24056,6 +24689,23 @@ async function cancelRfDetrTrainingJobRequest() {
             setQwenCaptionStatus("Ready");
             setSamStatus("Caption ready.", { variant: "success", duration: 3500 });
         } catch (error) {
+            if (error?.name === "AbortError" || qwenCaptionCancelRequested || String(error?.message || error).includes("qwen_caption_cancelled")) {
+                const cancelledSnapshot = {
+                    active: false,
+                    kind: "caption",
+                    phase: "cancelled",
+                    phase_label: "Cancelled",
+                    progress: 1,
+                    message: "Caption cancelled",
+                    error: "cancelled",
+                    token_preview: "",
+                };
+                renderQwenCaptionProgressState(cancelledSnapshot, { force: true });
+                announceQwenProgress(cancelledSnapshot, { force: true, variant: "warn" });
+                setQwenCaptionStatus("Cancelled");
+                setSamStatus("Caption cancelled.", { variant: "warn", duration: 3500 });
+                return;
+            }
             const message = error?.message || error;
             const errorSnapshot = {
                 active: false,
@@ -24073,7 +24723,11 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus(`Caption error: ${message}`, { variant: "error", duration: 5000 });
             console.error("Qwen caption failed", error);
         } finally {
+            if (qwenCaptionAbortController === abortController) {
+                qwenCaptionAbortController = null;
+            }
             qwenCaptionActive = false;
+            qwenCaptionCancelRequested = false;
             updateQwenCaptionButton();
             stopQwenProgressPolling();
         }
@@ -24124,6 +24778,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const payload = {
             ...requestFields,
             image_base64: base64,
+            image_name: imageName,
             image_width: imageRecord.width,
             image_height: imageRecord.height,
         };
@@ -24169,6 +24824,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenCaptionBatchAbortController = abortController;
         qwenCaptionBatchActive = true;
         qwenCaptionBatchCancel = false;
+        qwenCaptionCancelRequested = false;
         updateQwenCaptionButton();
         startQwenProgressPolling("caption");
         const total = runnableImages.length;
@@ -24272,6 +24928,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (runToken === qwenCaptionBatchRunToken) {
                 qwenCaptionBatchAbortController = null;
                 qwenCaptionBatchCancel = false;
+                qwenCaptionCancelRequested = false;
             }
             qwenCaptionBatchActive = false;
             updateQwenCaptionButton();
@@ -34426,6 +35083,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 drawExistingBboxes(context);
                 drawPendingCornerResize(context);
                 drawAgentWindows(context);
+                drawQwenCaptionRegionOverlay(context);
                 drawSelectionRect(context);
                 drawYoloSelectionRect(context);
                 drawMultiPointMarkers(context);
@@ -34735,6 +35393,55 @@ async function cancelRfDetrTrainingJobRequest() {
                 context.fillStyle = "rgba(245, 158, 11, 0.08)";
             }
         });
+        context.restore();
+    };
+
+    const drawQwenCaptionRegionOverlay = (context) => {
+        const region = qwenCaptionRegionOverlay;
+        if (!region || !currentImage) {
+            return;
+        }
+        const left = Number(region.x);
+        const top = Number(region.y);
+        const width = Number(region.width);
+        const height = Number(region.height);
+        if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+            return;
+        }
+        const now = performance.now();
+        const pulseWave = (Math.sin((now / QWEN_CAPTION_REGION_PULSE_MS) * Math.PI * 2 - Math.PI / 2) + 1) / 2;
+        const overlayColor = getQwenCaptionRegionOverlayColor();
+        const x = zoomX(left);
+        const y = zoomY(top);
+        const w = zoom(width);
+        const h = zoom(height);
+        const glowPad = Math.max(5, 5 * scale) + pulseWave * Math.max(18, 18 * scale);
+        const lineWidth = Math.max(2.4, (2.6 + pulseWave * 2.7) * scale);
+        context.save();
+        context.setLineDash([]);
+        context.lineWidth = Math.max(2, 2 * scale);
+        context.strokeStyle = withAlpha(overlayColor, 0.24 + pulseWave * 0.36);
+        context.strokeRect(x - glowPad, y - glowPad, w + glowPad * 2, h + glowPad * 2);
+        context.fillStyle = withAlpha(overlayColor, 0.07 + pulseWave * 0.12);
+        context.fillRect(x, y, w, h);
+        context.setLineDash([10 * scale, 6 * scale]);
+        context.lineDashOffset = -(now / 36) % (16 * scale);
+        context.lineWidth = lineWidth;
+        context.strokeStyle = withAlpha(overlayColor, 0.68 + pulseWave * 0.32);
+        context.strokeRect(x, y, w, h);
+        context.setLineDash([]);
+        context.lineWidth = Math.max(1, 1.2 * scale);
+        context.strokeStyle = withAlpha("#ffffff", 0.16 + pulseWave * 0.24);
+        context.strokeRect(x, y, w, h);
+        if (region.label) {
+            context.setLineDash([]);
+            context.font = context.font.replace(/\d+px/, `${Math.max(10, zoom(fontBaseSize + 2))}px`);
+            context.fillStyle = isPipboyThemeEnabled() ? withAlpha(overlayColor, 0.95) : "rgba(8, 47, 73, 0.88)";
+            const label = String(region.label);
+            const labelX = x + 8;
+            const labelY = Math.max(16, y + 18);
+            context.fillText(label, labelX, labelY);
+        }
         context.restore();
     };
 
@@ -36305,6 +37012,9 @@ async function cancelRfDetrTrainingJobRequest() {
         textLabelRecords = [];
         qwenCaptionBatchActive = false;
         qwenCaptionBatchCancel = false;
+        qwenCaptionCancelRequested = false;
+        qwenCaptionAbortController = null;
+        qwenCaptionBatchAbortController = null;
         currentImage = null;
         if (typeof refreshSam3CascadeControls === "function") {
             refreshSam3CascadeControls();

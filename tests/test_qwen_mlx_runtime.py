@@ -362,6 +362,7 @@ def test_qwen_inference_uses_mlx_runtime(monkeypatch):
         max_new_tokens=64,
         runtime_override=runtime,
         decode_override={"do_sample": False},
+        chat_template_kwargs={"enable_thinking": False},
     )
 
     assert "car" in text
@@ -370,6 +371,7 @@ def test_qwen_inference_uses_mlx_runtime(monkeypatch):
     assert calls["image"] == [img]
     assert calls["kwargs"]["max_tokens"] == 64
     assert calls["kwargs"]["temperature"] == 0.0
+    assert calls["template_kwargs"]["enable_thinking"] is False
     assert calls["messages"][-1]["content"][0] == {"type": "image"}
 
 

@@ -632,10 +632,19 @@ from services.qwen import (
     _caption_missing_labels as _caption_missing_labels_impl,
     _caption_needs_refine as _caption_needs_refine_impl,
     _sanitize_qwen_caption as _sanitize_qwen_caption_impl,
+    _caption_repetition_loop_detected as _caption_repetition_loop_detected_impl,
+    _truncate_repeated_caption_loop as _truncate_repeated_caption_loop_impl,
     _thinking_caption_needs_cleanup as _thinking_caption_needs_cleanup_impl,
     _caption_needs_completion as _caption_needs_completion_impl,
     _caption_has_meta as _caption_has_meta_impl,
+    _caption_trim_to_complete_sentences as _caption_trim_to_complete_sentences_impl,
     _caption_needs_short_form as _caption_needs_short_form_impl,
+    _caption_length_instruction as _caption_length_instruction_impl,
+    _caption_user_request_instruction as _caption_user_request_instruction_impl,
+    _caption_user_requested_short as _caption_user_requested_short_impl,
+    _caption_requested_sentence_limit as _caption_requested_sentence_limit_impl,
+    _clean_caption_source_context_text as _clean_caption_source_context_text_impl,
+    _format_caption_source_output_context as _format_caption_source_output_context_impl,
     _allowed_caption_labels_impl as _allowed_caption_labels_impl,
     _caption_is_degenerate_impl as _caption_is_degenerate_impl,
     _resolve_qwen_caption_decode as _resolve_qwen_caption_decode_impl,
@@ -998,6 +1007,12 @@ qwen_lock = threading.RLock()
 qwen_config_lock = threading.RLock()
 qwen_progress_lock = threading.RLock()
 qwen_mlx_generation_lock = threading.RLock()
+qwen_cancel_event = threading.Event()
+qwen_llm_call_id_var: ContextVar[Optional[str]] = ContextVar(
+    "qwen_llm_call_id",
+    default=None,
+)
+QWEN_CANCEL_RESTART_EXIT_CODE = int(os.environ.get("TATOR_QWEN_CANCEL_RESTART_EXIT_CODE", "75"))
 qwen_progress_state: Dict[str, Any] = {
     "run_id": None,
     "active": False,
@@ -1021,6 +1036,16 @@ qwen_progress_state: Dict[str, Any] = {
     "updated_at": None,
     "completed_at": None,
     "error": None,
+    "cancel_requested": False,
+    "cancel_force": False,
+    "step_id": None,
+    "step_index": None,
+    "step_total": None,
+    "step_label": None,
+    "step_detail": None,
+    "step_region": None,
+    "step_plan": [],
+    "live_output": "",
     "log_lines": [],
 }
 qwen_caption_cache: Dict[str, Any] = {}
@@ -1632,6 +1657,7 @@ def _qwen_progress_start(
     now = time.time()
     availability = _qwen_model_local_state(model_id, platform)
     run_id = uuid.uuid4().hex
+    qwen_cancel_event.clear()
     with qwen_progress_lock:
         qwen_progress_state.clear()
         qwen_progress_state.update(
@@ -1658,12 +1684,120 @@ def _qwen_progress_start(
                 "updated_at": now,
                 "completed_at": None,
                 "error": None,
+                "cancel_requested": False,
+                "cancel_force": False,
+                "step_id": None,
+                "step_index": None,
+                "step_total": None,
+                "step_label": None,
+                "step_detail": None,
+                "step_region": None,
+                "step_plan": [],
+                "live_output": "",
                 "log_lines": [
                     f"{time.strftime('%H:%M:%S')} queued {kind} for {availability.get('effective_model_id') or model_id or 'Qwen'}",
                 ],
             }
         )
+    if kind == "caption":
+        _qwen_caption_io_reset_latest(run_id)
+        _qwen_caption_io_record(
+            {
+                "event": "run_start",
+                "source": "qwen_caption",
+                "model_id": availability.get("effective_model_id") or model_id,
+                "runtime_platform": availability.get("platform") or platform,
+                "max_new_tokens": max_new_tokens,
+                "message": message,
+            }
+        )
     return run_id
+
+
+class QwenCancellationRequested(RuntimeError):
+    """Raised when the active Qwen request has been cancelled."""
+
+
+def _qwen_cancel_requested() -> bool:
+    return qwen_cancel_event.is_set()
+
+
+def _raise_if_qwen_cancelled() -> None:
+    if _qwen_cancel_requested():
+        raise QwenCancellationRequested("qwen_cancelled")
+
+
+def _schedule_qwen_backend_restart_after_cancel(delay_seconds: float = 0.4) -> None:
+    def _restart() -> None:
+        time.sleep(max(0.05, float(delay_seconds)))
+        logger.warning("[qwen-cancel] exiting backend with restart code %s", QWEN_CANCEL_RESTART_EXIT_CODE)
+        os._exit(QWEN_CANCEL_RESTART_EXIT_CODE)
+
+    threading.Thread(target=_restart, name="qwen-cancel-backend-restart", daemon=True).start()
+
+
+def _qwen_progress_cancelled(message: str) -> None:
+    now = time.time()
+    with qwen_progress_lock:
+        qwen_progress_state.update(
+            {
+                "active": False,
+                "phase": "cancelled",
+                "phase_label": "Cancelled",
+                "progress": 1.0,
+                "message": message,
+                "updated_at": now,
+                "completed_at": now,
+                "error": "cancelled",
+                "cancel_requested": True,
+            }
+        )
+
+
+def cancel_qwen_caption(*, force: bool = False) -> Dict[str, Any]:
+    now = time.time()
+    with qwen_progress_lock:
+        active = bool(qwen_progress_state.get("active"))
+        kind = qwen_progress_state.get("kind")
+        run_id = qwen_progress_state.get("run_id")
+        if not active or kind != "caption":
+            return {
+                "cancelled": False,
+                "active": active,
+                "kind": kind,
+                "message": "No active Qwen caption request.",
+            }
+        qwen_cancel_event.set()
+        message = (
+            "Caption cancellation requested; restarting backend to stop the active Qwen process"
+            if force
+            else "Caption cancellation requested"
+        )
+        qwen_progress_state.update(
+            {
+                "phase": "cancelling",
+                "phase_label": "Cancelling",
+                "message": message,
+                "updated_at": now,
+                "cancel_requested": True,
+                "cancel_force": bool(force),
+            }
+        )
+        lines = qwen_progress_state.get("log_lines")
+        if not isinstance(lines, list):
+            lines = []
+        lines.append(f"{time.strftime('%H:%M:%S')} {message}")
+        qwen_progress_state["log_lines"] = lines[-80:]
+    if force:
+        _schedule_qwen_backend_restart_after_cancel()
+    return {
+        "cancelled": True,
+        "active": active,
+        "kind": kind,
+        "run_id": run_id,
+        "force": bool(force),
+        "message": message,
+    }
 
 
 def _qwen_progress_log(message: str) -> None:
@@ -1680,6 +1814,141 @@ def _qwen_progress_log(message: str) -> None:
         lines.append(line)
         qwen_progress_state["log_lines"] = lines[-80:]
         qwen_progress_state["updated_at"] = time.time()
+
+
+def _clean_qwen_step_plan(step_plan: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    cleaned: List[Dict[str, Any]] = []
+    for index, raw_entry in enumerate(step_plan):
+        if not isinstance(raw_entry, Mapping):
+            continue
+        raw_id = str(raw_entry.get("id") or "").strip()
+        step_id = raw_id or f"step_{index + 1}"
+        entry: Dict[str, Any] = {
+            "id": step_id,
+            "label": str(raw_entry.get("label") or step_id).strip() or step_id,
+        }
+        detail = str(raw_entry.get("detail") or "").strip()
+        if detail:
+            entry["detail"] = detail
+        region = raw_entry.get("region")
+        if isinstance(region, Mapping):
+            entry["region"] = _clean_qwen_step_region(region)
+        cleaned.append(entry)
+    return cleaned
+
+
+def _clean_qwen_step_region(region: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(region, Mapping):
+        return None
+    cleaned: Dict[str, Any] = {}
+    for key in ("x", "y", "width", "height", "image_width", "image_height"):
+        if key not in region:
+            continue
+        try:
+            cleaned[key] = float(region.get(key))
+        except (TypeError, ValueError):
+            continue
+    for key in ("image_name", "label", "kind"):
+        value = str(region.get(key) or "").strip()
+        if value:
+            cleaned[key] = value
+    if bool(region.get("full_image")):
+        cleaned["full_image"] = True
+    if not cleaned:
+        return None
+    return cleaned
+
+
+def _qwen_caption_step_entry(step_id: str, label: str, detail: str = "") -> Dict[str, str]:
+    entry = {"id": step_id, "label": label}
+    if detail:
+        entry["detail"] = detail
+    return entry
+
+
+def _build_qwen_caption_step_plan(
+    *,
+    caption_mode: str,
+    total_windows: int,
+    two_stage: bool,
+    is_thinking: bool,
+    force_unload: bool,
+    caption_model_id: str,
+    refinement_model_id: str,
+) -> List[Dict[str, str]]:
+    plan: List[Dict[str, str]] = [
+        _qwen_caption_step_entry("prepare", "Prepare image and prompts"),
+        _qwen_caption_step_entry(
+            "load_model",
+            "Load caption model",
+            (
+                f"Caption model: {caption_model_id}; refinement model: {refinement_model_id}"
+                if refinement_model_id and refinement_model_id != caption_model_id
+                else f"Caption model: {caption_model_id}"
+            ),
+        ),
+    ]
+    if caption_mode == "windowed":
+        for window_index in range(1, max(1, int(total_windows or 1)) + 1):
+            plan.append(
+                _qwen_caption_step_entry(
+                    f"window_{window_index}",
+                    f"Window observation {window_index}/{max(1, int(total_windows or 1))}",
+                    "Tile caption used as source material before final composition.",
+                )
+            )
+    if two_stage and is_thinking:
+        plan.extend(
+            [
+                _qwen_caption_step_entry(
+                    "draft_caption",
+                    "Two-stage 1/2: draft full image",
+                    "Thinking-only draft pass with the caption model.",
+                ),
+                _qwen_caption_step_entry(
+                    "refine_draft",
+                    "Two-stage 2/2: refine draft",
+                    "Editor pass over the draft and prompt context. Separate from window merge.",
+                ),
+            ]
+        )
+    else:
+        plan.append(
+            _qwen_caption_step_entry(
+                "generate_full",
+                "Compose full-image caption",
+                "Uses the full image and any window observations already collected.",
+            )
+        )
+    if caption_mode == "windowed":
+        plan.append(
+            _qwen_caption_step_entry(
+                "merge_windows",
+                "Window merge: fold in sub-captions",
+                "Windowed-only editor pass that runs after full-image composition.",
+            )
+        )
+    plan.append(
+        _qwen_caption_step_entry(
+            "postprocess",
+            "Quality guard checks",
+            "Cleanup, coverage refinement, and language checks run only if needed.",
+        )
+    )
+    if force_unload:
+        plan.append(_qwen_caption_step_entry("unload_model", "Unload caption model"))
+    plan.append(_qwen_caption_step_entry("finalize", "Finalize caption"))
+    return plan
+
+
+def _qwen_progress_begin_output_section(label: str) -> None:
+    text = str(label or "").strip()
+    if not text:
+        return
+    with qwen_progress_lock:
+        existing = str(qwen_progress_state.get("live_output") or "")
+    prefix = "\n\n" if existing else ""
+    _qwen_progress_update(token_preview="", generated_tokens=0, live_output_piece=f"{prefix}{text}\n")
 
 
 def _start_qwen_cache_monitor(
@@ -1754,11 +2023,70 @@ def _qwen_progress_update(
     max_new_tokens: Optional[int] = None,
     token_piece: Optional[str] = None,
     token_preview: Optional[str] = None,
+    step_id: Optional[str] = None,
+    step_index: Optional[int] = None,
+    step_total: Optional[int] = None,
+    step_label: Optional[str] = None,
+    step_detail: Optional[str] = None,
+    step_region: Optional[Mapping[str, Any]] = None,
+    step_plan: Optional[Sequence[Mapping[str, Any]]] = None,
+    live_output: Optional[str] = None,
+    live_output_piece: Optional[str] = None,
+    live_output_reset: bool = False,
+    append_token_preview_to_live_output: bool = False,
 ) -> None:
     now = time.time()
     with qwen_progress_lock:
         if not qwen_progress_state.get("active"):
             return
+        if qwen_progress_state.get("cancel_requested") and phase not in {"cancelling", "cancelled"}:
+            qwen_progress_state["updated_at"] = now
+            return
+        cleaned_plan: Optional[List[Dict[str, Any]]] = None
+        if step_plan is not None:
+            cleaned_plan = _clean_qwen_step_plan(step_plan)
+            qwen_progress_state["step_plan"] = cleaned_plan
+            if step_total is None:
+                step_total = len(cleaned_plan)
+        if step_id is not None:
+            current_step_id = str(step_id or "").strip() or None
+            qwen_progress_state["step_id"] = current_step_id
+            plan_for_lookup = cleaned_plan
+            if plan_for_lookup is None:
+                existing_plan = qwen_progress_state.get("step_plan")
+                plan_for_lookup = existing_plan if isinstance(existing_plan, list) else []
+            if current_step_id and plan_for_lookup:
+                for idx, entry in enumerate(plan_for_lookup):
+                    if not isinstance(entry, Mapping):
+                        continue
+                    if str(entry.get("id") or "") == current_step_id:
+                        if step_index is None:
+                            step_index = idx + 1
+                        if step_total is None:
+                            step_total = len(plan_for_lookup)
+                        if step_label is None:
+                            step_label = str(entry.get("label") or "")
+                        if step_detail is None and entry.get("detail"):
+                            step_detail = str(entry.get("detail") or "")
+                        if step_region is None and isinstance(entry.get("region"), Mapping):
+                            step_region = entry.get("region")  # type: ignore[assignment]
+                        break
+        if step_index is not None:
+            try:
+                qwen_progress_state["step_index"] = max(1, int(step_index))
+            except Exception:
+                pass
+        if step_total is not None:
+            try:
+                qwen_progress_state["step_total"] = max(1, int(step_total))
+            except Exception:
+                pass
+        if step_label is not None:
+            qwen_progress_state["step_label"] = str(step_label)
+        if step_detail is not None:
+            qwen_progress_state["step_detail"] = str(step_detail)
+        if step_region is not None:
+            qwen_progress_state["step_region"] = _clean_qwen_step_region(step_region)
         if phase is not None:
             qwen_progress_state["phase"] = phase
         if phase_label is not None:
@@ -1782,6 +2110,9 @@ def _qwen_progress_update(
             qwen_progress_state["max_new_tokens"] = max_new_tokens
         if token_preview is not None:
             qwen_progress_state["token_preview"] = str(token_preview)[-4000:]
+            if append_token_preview_to_live_output and token_preview:
+                current_live = str(qwen_progress_state.get("live_output") or "")
+                qwen_progress_state["live_output"] = f"{current_live}{token_preview}"[-16000:]
         if token_piece:
             current = str(qwen_progress_state.get("token_preview") or "")
             qwen_progress_state["token_preview"] = f"{current}{token_piece}"[-4000:]
@@ -1789,6 +2120,13 @@ def _qwen_progress_update(
                 qwen_progress_state["generated_tokens"] = int(
                     qwen_progress_state.get("generated_tokens") or 0
                 ) + 1
+        if live_output_reset:
+            qwen_progress_state["live_output"] = ""
+        if live_output is not None:
+            qwen_progress_state["live_output"] = str(live_output)[-16000:]
+        if live_output_piece:
+            current_live = str(qwen_progress_state.get("live_output") or "")
+            qwen_progress_state["live_output"] = f"{current_live}{live_output_piece}"[-16000:]
         qwen_progress_state["updated_at"] = now
 
 
@@ -1797,6 +2135,7 @@ def _qwen_progress_token(token_piece: str, *, generated_tokens: Optional[int], m
         return
     with qwen_progress_lock:
         current_generated = int(qwen_progress_state.get("generated_tokens") or 0)
+        is_caption_run = qwen_progress_state.get("kind") == "caption"
     generated = generated_tokens if generated_tokens is not None else current_generated + 1
     max_tokens = max_new_tokens
     if max_tokens is None:
@@ -1815,12 +2154,296 @@ def _qwen_progress_token(token_piece: str, *, generated_tokens: Optional[int], m
         generated_tokens=int(generated),
         max_new_tokens=max_tokens,
         token_piece=token_piece,
+        live_output_piece=token_piece if is_caption_run else None,
     )
+
+
+def _qwen_caption_io_logging_enabled() -> bool:
+    if os.environ.get("TATOR_QWEN_LOG_ALL_IO", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    with qwen_progress_lock:
+        return qwen_progress_state.get("kind") == "caption"
+
+
+def _qwen_caption_io_snapshot() -> Dict[str, Any]:
+    with qwen_progress_lock:
+        return {
+            "run_id": qwen_progress_state.get("run_id"),
+            "kind": qwen_progress_state.get("kind"),
+            "phase": qwen_progress_state.get("phase"),
+            "phase_label": qwen_progress_state.get("phase_label"),
+            "step_id": qwen_progress_state.get("step_id"),
+            "step_index": qwen_progress_state.get("step_index"),
+            "step_total": qwen_progress_state.get("step_total"),
+            "step_label": qwen_progress_state.get("step_label"),
+            "step_detail": qwen_progress_state.get("step_detail"),
+        }
+
+
+def _qwen_caption_io_jsonable(value: Any) -> Any:
+    if isinstance(value, Image.Image):
+        return {
+            "type": "image",
+            "mode": value.mode,
+            "width": int(value.width),
+            "height": int(value.height),
+        }
+    if isinstance(value, dict):
+        return {str(key): _qwen_caption_io_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_qwen_caption_io_jsonable(item) for item in value]
+    return _agent_trace_full_jsonable(value)
+
+
+def _qwen_caption_io_paths(run_id: Optional[str]) -> Tuple[Path, Path, Path, Path]:
+    log_root = Path("logs")
+    run_root = log_root / "qwen_caption_io"
+    safe_run_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(run_id or "manual"))[:80] or "manual"
+    return (
+        run_root / f"{safe_run_id}.jsonl",
+        run_root / f"{safe_run_id}.log",
+        log_root / "qwen_caption_io_latest.jsonl",
+        log_root / "qwen_caption_io_latest.log",
+    )
+
+
+def _qwen_caption_io_reset_latest(run_id: Optional[str]) -> None:
+    jsonl_path, text_path, latest_jsonl_path, latest_text_path = _qwen_caption_io_paths(run_id)
+    for path in (latest_jsonl_path, latest_text_path):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+        except Exception as exc:
+            logger.debug("[qwen-caption-io] failed to reset %s: %s", path, exc)
+    for path in (jsonl_path, text_path):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+
+def _qwen_caption_io_message_text(messages: Optional[Sequence[Mapping[str, Any]]]) -> str:
+    lines: List[str] = []
+    for message in messages or []:
+        role = str(message.get("role") or "message")
+        lines.append(f"[{role}]")
+        content = message.get("content")
+        if isinstance(content, str):
+            lines.append(content)
+            continue
+        if not isinstance(content, (list, tuple)):
+            lines.append(str(content))
+            continue
+        for item in content:
+            if not isinstance(item, Mapping):
+                lines.append(str(item))
+                continue
+            item_type = str(item.get("type") or "")
+            if item_type == "text":
+                lines.append(str(item.get("text") or ""))
+            elif item_type == "image":
+                image = item.get("image")
+                if isinstance(image, Image.Image):
+                    lines.append(f"<image {image.width}x{image.height} mode={image.mode}>")
+                else:
+                    lines.append("<image>")
+            else:
+                lines.append(str(_qwen_caption_io_jsonable(item)))
+    return "\n".join(lines).strip()
+
+
+def _qwen_caption_io_record(record: Mapping[str, Any]) -> None:
+    if not _qwen_caption_io_logging_enabled():
+        return
+    snapshot = _qwen_caption_io_snapshot()
+    run_id = snapshot.get("run_id")
+    payload = {
+        "ts": time.time(),
+        "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "event_id": uuid.uuid4().hex,
+        **snapshot,
+        **dict(record),
+    }
+    jsonl_path, text_path, latest_jsonl_path, latest_text_path = _qwen_caption_io_paths(run_id)
+    try:
+        jsonable = _qwen_caption_io_jsonable(payload)
+    except Exception:
+        jsonable = {"type": "qwen_caption_io_encode_failed", "record": str(payload)}
+    for path in (jsonl_path, latest_jsonl_path):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(jsonable, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.debug("[qwen-caption-io] failed to write %s: %s", path, exc)
+    readable = _qwen_caption_io_readable(payload)
+    if readable:
+        for path in (text_path, latest_text_path):
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, "a", encoding="utf-8") as handle:
+                    handle.write(readable)
+            except Exception as exc:
+                logger.debug("[qwen-caption-io] failed to write %s: %s", path, exc)
+
+
+def _qwen_caption_io_readable(record: Mapping[str, Any]) -> str:
+    event = str(record.get("event") or "event")
+    call_id = str(record.get("call_id") or "")
+    step = str(record.get("step_label") or record.get("step_id") or "")
+    title = f"===== {record.get('time')} {event}"
+    if call_id:
+        title = f"{title} call={call_id}"
+    if step:
+        title = f"{title} step={step}"
+    lines = [f"{title} ====="]
+    for key in (
+        "source",
+        "runtime_platform",
+        "model_id",
+        "max_new_tokens",
+        "decode_override",
+        "chat_template_kwargs",
+        "image_width",
+        "image_height",
+        "loop_detected",
+    ):
+        if key in record and record.get(key) is not None:
+            lines.append(f"{key}: {record.get(key)}")
+    messages = record.get("messages")
+    message_text = _qwen_caption_io_message_text(messages if isinstance(messages, (list, tuple)) else None)
+    if message_text:
+        lines.extend(["", "--- messages ---", message_text])
+    for key, heading in (
+        ("system_prompt", "system prompt"),
+        ("user_prompt", "user prompt"),
+        ("rendered_prompt", "rendered prompt"),
+        ("prompt_text", "prompt text"),
+        ("raw_output", "raw output"),
+        ("trimmed_output", "trimmed output"),
+        ("output_text", "output text"),
+    ):
+        value = record.get(key)
+        if value:
+            lines.extend(["", f"--- {heading} ---", str(value)])
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _qwen_caption_io_input(
+    *,
+    call_id: str,
+    source: str,
+    model_id: str,
+    runtime_platform: Optional[str] = None,
+    messages: Optional[Sequence[Mapping[str, Any]]] = None,
+    prompt_text: Optional[str] = None,
+    rendered_prompt: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    user_prompt: Optional[str] = None,
+    image_width: Optional[int] = None,
+    image_height: Optional[int] = None,
+    max_new_tokens: Optional[int] = None,
+    decode_override: Optional[Dict[str, Any]] = None,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
+) -> None:
+    _qwen_caption_io_record(
+        {
+            "event": "input",
+            "call_id": call_id,
+            "source": source,
+            "runtime_platform": runtime_platform,
+            "model_id": model_id,
+            "messages": messages,
+            "prompt_text": prompt_text,
+            "rendered_prompt": rendered_prompt,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "image_width": image_width,
+            "image_height": image_height,
+            "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else None,
+            "decode_override": decode_override,
+            "chat_template_kwargs": chat_template_kwargs,
+        }
+    )
+
+
+def _qwen_caption_io_output(
+    *,
+    call_id: Optional[str],
+    source: str,
+    model_id: str,
+    runtime_platform: Optional[str] = None,
+    output_text: str,
+    loop_detected: bool = False,
+) -> None:
+    _qwen_caption_io_record(
+        {
+            "event": "output",
+            "call_id": call_id,
+            "source": source,
+            "runtime_platform": runtime_platform,
+            "model_id": model_id,
+            "output_text": output_text,
+            "loop_detected": bool(loop_detected),
+        }
+    )
+
+
+def _qwen_maybe_trim_repetition_loop_output(
+    output_text: str,
+    *,
+    triggered: bool = False,
+    replace_live_output: bool = True,
+) -> str:
+    if not output_text:
+        return output_text
+    if not triggered and not _caption_repetition_loop_detected_impl(output_text):
+        return output_text
+    cleaned = _truncate_repeated_caption_loop_impl(output_text)
+    if not cleaned:
+        cleaned = output_text
+    _qwen_caption_io_record(
+        {
+            "event": "loop_trim",
+            "call_id": qwen_llm_call_id_var.get(),
+            "raw_output": output_text,
+            "trimmed_output": cleaned,
+            "loop_detected": True,
+        }
+    )
+    update_kwargs: Dict[str, Any] = {
+        "phase": "cleanup",
+        "phase_label": "Stopping Loop",
+        "progress": 0.90,
+        "message": "Stopped a repeated caption loop; cleaning generated text",
+        "token_preview": cleaned,
+    }
+    if replace_live_output:
+        update_kwargs["live_output"] = cleaned
+    _qwen_progress_update(**update_kwargs)
+    logger.warning("[qwen] stopped repeated caption loop after %s generated chars", len(output_text))
+    return cleaned
 
 
 def _qwen_progress_finish(message: str, *, token_preview: Optional[str] = None) -> None:
     now = time.time()
     with qwen_progress_lock:
+        if qwen_progress_state.get("cancel_requested") or qwen_cancel_event.is_set():
+            qwen_progress_state.update(
+                {
+                    "active": False,
+                    "phase": "cancelled",
+                    "phase_label": "Cancelled",
+                    "progress": 1.0,
+                    "message": "Qwen request cancelled",
+                    "updated_at": now,
+                    "completed_at": now,
+                    "error": "cancelled",
+                    "cancel_requested": True,
+                }
+            )
+            return
         if token_preview is not None:
             qwen_progress_state["token_preview"] = str(token_preview)[-4000:]
         qwen_progress_state.update(
@@ -1841,6 +2464,21 @@ def _qwen_progress_finish(message: str, *, token_preview: Optional[str] = None) 
 def _qwen_progress_error(message: str) -> None:
     now = time.time()
     with qwen_progress_lock:
+        if qwen_progress_state.get("cancel_requested") or qwen_cancel_event.is_set():
+            qwen_progress_state.update(
+                {
+                    "active": False,
+                    "phase": "cancelled",
+                    "phase_label": "Cancelled",
+                    "progress": 1.0,
+                    "message": "Qwen request cancelled",
+                    "updated_at": now,
+                    "completed_at": now,
+                    "error": "cancelled",
+                    "cancel_requested": True,
+                }
+            )
+            return
         qwen_progress_state.update(
             {
                 "active": False,
@@ -4125,6 +4763,7 @@ def _effective_qwen_model_id_for_platform(model_id: Optional[str], platform_name
 
 
 def _load_qwen_mlx_runtime(model_id: str, adapter_path: Optional[Path] = None) -> QwenRuntime:
+    _raise_if_qwen_cancelled()
     if MLX_VLM_LOAD is None or MLX_VLM_GENERATE is None:
         detail = _qwen_mlx_dependency_error() or "mlx_vlm_unavailable"
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=f"qwen_mlx_missing:{detail}")
@@ -4161,6 +4800,7 @@ def _load_qwen_mlx_runtime(model_id: str, adapter_path: Optional[Path] = None) -
         model_id=str(resolved_model_id),
         platform=QWEN_PLATFORM_MLX,
     )
+    _raise_if_qwen_cancelled()
     try:
         load_kwargs = {}
         if adapter_path:
@@ -4190,6 +4830,7 @@ def _load_qwen_mlx_runtime(model_id: str, adapter_path: Optional[Path] = None) -
             status_code=HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"qwen_mlx_load_failed:{detail}",
         ) from exc
+    _raise_if_qwen_cancelled()
     final_stats = _qwen_cache_tree_stats(
         [
             availability.get("cache_path") and Path(str(availability.get("cache_path"))),
@@ -4281,6 +4922,7 @@ def _ensure_qwen_mlx_ready(model_id: Optional[str] = None, adapter_path: Optiona
 
 
 def _ensure_qwen_mlx_ready_for_caption(model_id_override: str) -> QwenRuntime:
+    _raise_if_qwen_cancelled()
     global qwen_device, qwen_last_error, qwen_caption_cache, qwen_caption_order
     resolved_model_id = _effective_qwen_model_id_for_platform(
         model_id_override or QWEN_MLX_MODEL_NAME,
@@ -4332,6 +4974,7 @@ def _ensure_qwen_mlx_ready_for_caption(model_id_override: str) -> QwenRuntime:
         except HTTPException as exc:
             qwen_last_error = str(exc.detail)
             raise
+        _raise_if_qwen_cancelled()
         qwen_device = QWEN_PLATFORM_MLX
         qwen_last_error = None
         if cache_limit:
@@ -4555,6 +5198,7 @@ def _unload_qwen_runtime() -> None:
 
 
 def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
+    _raise_if_qwen_cancelled()
     global qwen_device, qwen_last_error
     global qwen_caption_cache, qwen_caption_order
     platform_name = _resolve_qwen_runtime_platform(str(model_id_override), adapter_path=None)
@@ -4615,6 +5259,7 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
         model_id=str(model_id_override),
         platform=QWEN_PLATFORM_TRANSFORMERS,
     )
+    _raise_if_qwen_cancelled()
     try:
         model, processor = _ensure_qwen_ready_for_caption_impl(
             model_id_override,
@@ -4649,6 +5294,7 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
     except RuntimeError as exc:  # noqa: BLE001
         detail = str(exc)
         raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=detail) from exc
+    _raise_if_qwen_cancelled()
     qwen_caption_cache = state["qwen_caption_cache"]
     qwen_caption_order = state["qwen_caption_order"]
     qwen_device = state["qwen_device"]
@@ -4807,6 +5453,110 @@ def _flatten_qwen_messages_for_mlx(messages: Sequence[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _qwen_model_id_is_thinking(model_id: Optional[str]) -> bool:
+    return "thinking" in str(model_id or "").lower()
+
+
+def _qwen_disable_thinking_requested(chat_template_kwargs: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(chat_template_kwargs, dict):
+        return False
+    return chat_template_kwargs.get("enable_thinking") is False
+
+
+def _qwen_messages_with_no_think(messages: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    copied: List[Dict[str, Any]] = []
+    last_user_idx: Optional[int] = None
+    for idx, message in enumerate(messages):
+        copied_message = dict(message)
+        role = str(copied_message.get("role") or "").lower()
+        content = copied_message.get("content")
+        if isinstance(content, list):
+            copied_message["content"] = [
+                dict(part) if isinstance(part, dict) else part for part in content
+            ]
+        copied.append(copied_message)
+        if role == "user":
+            last_user_idx = idx
+    if last_user_idx is None:
+        return copied
+    content = copied[last_user_idx].get("content")
+    if isinstance(content, str):
+        if "/no_think" not in content:
+            copied[last_user_idx]["content"] = f"{content.rstrip()}\n/no_think"
+        return copied
+    if isinstance(content, list):
+        last_text_idx: Optional[int] = None
+        for idx, part in enumerate(content):
+            if isinstance(part, dict) and part.get("type") == "text":
+                last_text_idx = idx
+        if last_text_idx is None:
+            content.append({"type": "text", "text": "/no_think"})
+        else:
+            part = content[last_text_idx]
+            text = str(part.get("text") or "")
+            if "/no_think" not in text:
+                part["text"] = f"{text.rstrip()}\n/no_think"
+        return copied
+    copied[last_user_idx]["content"] = [{"type": "text", "text": "/no_think"}]
+    return copied
+
+
+def _qwen_neutralize_thinking_prefill(
+    rendered_prompt: Any,
+    *,
+    disable_thinking: bool,
+    model_id: Optional[str],
+) -> Any:
+    if (
+        not disable_thinking
+        or not _qwen_model_id_is_thinking(model_id)
+        or not isinstance(rendered_prompt, str)
+    ):
+        return rendered_prompt
+    stripped = rendered_prompt.rstrip()
+    if stripped.endswith("<think>"):
+        return f"{stripped}\n\n</think>\n\n"
+    return rendered_prompt
+
+
+def _apply_qwen_chat_template(
+    processor: Any,
+    messages: Sequence[Dict[str, Any]],
+    *,
+    tokenize: bool,
+    add_generation_prompt: bool,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
+) -> Any:
+    base_kwargs: Dict[str, Any] = {
+        "tokenize": tokenize,
+        "add_generation_prompt": bool(add_generation_prompt),
+    }
+    if tools is not None:
+        base_kwargs["tools"] = tools
+    template_kwargs = {
+        key: value for key, value in (chat_template_kwargs or {}).items() if value is not None
+    }
+    attempts: List[Dict[str, Any]] = []
+    if template_kwargs:
+        attempts.append({**base_kwargs, **template_kwargs})
+        attempts.append({**base_kwargs, "chat_template_kwargs": template_kwargs})
+    attempts.append(dict(base_kwargs))
+    if tools is not None:
+        without_tools = dict(base_kwargs)
+        without_tools.pop("tools", None)
+        attempts.append(without_tools)
+    last_type_error: Optional[TypeError] = None
+    for kwargs in attempts:
+        try:
+            return processor.apply_chat_template(messages, **kwargs)
+        except TypeError as exc:
+            last_type_error = exc
+    if last_type_error is not None:
+        raise last_type_error
+    return processor.apply_chat_template(messages, **base_kwargs)
+
+
 def _mlx_chat_prompt(
     runtime: QwenRuntime,
     messages: Sequence[Dict[str, Any]],
@@ -4819,7 +5569,8 @@ def _mlx_chat_prompt(
     processor = runtime.processor
     try:
         return (
-            processor.apply_chat_template(
+            _apply_qwen_chat_template(
+                processor,
                 normalized,
                 tokenize=False,
                 add_generation_prompt=bool(add_generation_prompt),
@@ -4852,6 +5603,7 @@ def _mlx_chat_prompt(
                     prompt_text,
                     add_generation_prompt=bool(add_generation_prompt),
                     num_images=len(image_inputs),
+                    **(chat_template_kwargs or {}),
                 ),
                 image_inputs,
             )
@@ -4886,8 +5638,11 @@ def _mlx_generation_kwargs(
         kwargs["temperature"] = 0.0
         kwargs["top_p"] = 1.0
     if decode_override is not None:
+        top_k = decode_override.get("top_k")
         repetition_penalty = decode_override.get("repetition_penalty")
         repetition_context_size = decode_override.get("repetition_context_size")
+        if top_k is not None:
+            kwargs["top_k"] = int(top_k)
         if repetition_penalty is not None:
             kwargs["repetition_penalty"] = float(repetition_penalty)
         if repetition_context_size is not None:
@@ -4907,30 +5662,57 @@ def _run_qwen_chat_mlx(
     add_generation_prompt: bool = True,
     assistant_prefix: Optional[str] = None,
 ) -> str:
+    _raise_if_qwen_cancelled()
     if MLX_VLM_GENERATE is None:
         raise RuntimeError(_qwen_mlx_dependency_error() or "mlx_vlm_generate_unavailable")
+    disable_thinking = _qwen_disable_thinking_requested(chat_template_kwargs)
+    effective_messages = (
+        _qwen_messages_with_no_think(messages)
+        if disable_thinking and _qwen_model_id_is_thinking(runtime.model_id)
+        else messages
+    )
     prompt, image_inputs = _mlx_chat_prompt(
         runtime,
-        messages,
+        effective_messages,
         add_generation_prompt=add_generation_prompt,
         tools=tools,
         chat_template_kwargs=chat_template_kwargs,
     )
+    prompt = _qwen_neutralize_thinking_prefill(
+        prompt,
+        disable_thinking=disable_thinking,
+        model_id=runtime.model_id,
+    )
     if assistant_prefix:
         prompt = f"{prompt}{assistant_prefix}"
+    call_id = qwen_llm_call_id_var.get()
+    if call_id:
+        _qwen_caption_io_record(
+            {
+                "event": "rendered_prompt",
+                "call_id": call_id,
+                "source": "qwen_chat_mlx",
+                "runtime_platform": QWEN_PLATFORM_MLX,
+                "model_id": runtime.model_id,
+                "rendered_prompt": prompt,
+            }
+        )
     gen_kwargs = _mlx_generation_kwargs(max_new_tokens, decode_override)
     with qwen_mlx_generation_lock:
         _bind_mlx_generation_stream_for_current_thread()
         if MLX_VLM_STREAM_GENERATE is not None:
             try:
                 pieces: List[str] = []
-                for result in MLX_VLM_STREAM_GENERATE(
+                loop_guard_triggered = False
+                stream_iter = MLX_VLM_STREAM_GENERATE(
                     runtime.model,
                     runtime.processor,
                     prompt,
                     image=image_inputs or None,
                     **gen_kwargs,
-                ):
+                )
+                for result in stream_iter:
+                    _raise_if_qwen_cancelled()
                     piece = str(getattr(result, "text", result) or "")
                     if not piece:
                         continue
@@ -4943,12 +5725,30 @@ def _run_qwen_chat_mlx(
                         ),
                         max_new_tokens=max_new_tokens,
                     )
+                    if _caption_repetition_loop_detected_impl("".join(pieces)):
+                        loop_guard_triggered = True
+                        close_stream = getattr(stream_iter, "close", None)
+                        if callable(close_stream):
+                            try:
+                                close_stream()
+                            except Exception:
+                                pass
+                        break
                 output_text = "".join(pieces)
                 if output_text:
+                    _raise_if_qwen_cancelled()
+                    output_text = _qwen_maybe_trim_repetition_loop_output(
+                        output_text,
+                        triggered=loop_guard_triggered,
+                        replace_live_output=True,
+                    )
                     return output_text
             except Exception as exc:  # noqa: BLE001
+                if isinstance(exc, QwenCancellationRequested):
+                    raise
                 logger.warning("[qwen] mlx streaming failed; falling back to blocking generate: %s", exc)
                 _bind_mlx_generation_stream_for_current_thread()
+        _raise_if_qwen_cancelled()
         result = MLX_VLM_GENERATE(
             runtime.model,
             runtime.processor,
@@ -4957,12 +5757,18 @@ def _run_qwen_chat_mlx(
             **gen_kwargs,
         )
     output_text = str(getattr(result, "text", result) or "")
+    _raise_if_qwen_cancelled()
+    output_text = _qwen_maybe_trim_repetition_loop_output(
+        output_text,
+        replace_live_output=False,
+    )
     _qwen_progress_update(
         phase="generate",
         phase_label="Generated",
         progress=0.90,
         message="Qwen response generated",
         token_preview=output_text,
+        append_token_preview_to_live_output=True,
     )
     return output_text
 
@@ -4975,6 +5781,7 @@ def _run_qwen_inference_mlx(
     max_new_tokens: Optional[int] = None,
     system_prompt_override: Optional[str] = None,
     decode_override: Optional[Dict[str, Any]] = None,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, int, int]:
     messages: List[Dict[str, Any]] = []
     sys_prompt = (
@@ -4993,6 +5800,23 @@ def _run_qwen_inference_mlx(
             ],
         }
     )
+    llm_call_id = uuid.uuid4().hex[:12]
+    qwen_llm_call_id_var.set(llm_call_id)
+    _qwen_caption_io_input(
+        call_id=llm_call_id,
+        source="qwen_inference",
+        runtime_platform=QWEN_PLATFORM_MLX,
+        model_id=runtime.model_id,
+        messages=messages,
+        prompt_text=prompt,
+        system_prompt=str(sys_prompt or ""),
+        user_prompt=prompt,
+        image_width=int(pil_img.width),
+        image_height=int(pil_img.height),
+        max_new_tokens=max_new_tokens,
+        decode_override=decode_override,
+        chat_template_kwargs=chat_template_kwargs,
+    )
     _agent_full_trace_write(
         {
             "type": "llm_input",
@@ -5002,6 +5826,7 @@ def _run_qwen_inference_mlx(
             "messages": messages,
             "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else None,
             "decode_override": decode_override,
+            "chat_template_kwargs": chat_template_kwargs,
         }
     )
     output_text = _run_qwen_chat_mlx(
@@ -5009,6 +5834,7 @@ def _run_qwen_inference_mlx(
         messages,
         max_new_tokens=max_new_tokens,
         decode_override=decode_override,
+        chat_template_kwargs=chat_template_kwargs,
         add_generation_prompt=True,
     )
     _agent_full_trace_write(
@@ -5019,6 +5845,14 @@ def _run_qwen_inference_mlx(
             "model_id": runtime.model_id,
             "output_text": output_text,
         }
+    )
+    _qwen_caption_io_output(
+        call_id=llm_call_id,
+        source="qwen_inference",
+        runtime_platform=QWEN_PLATFORM_MLX,
+        model_id=runtime.model_id,
+        output_text=output_text,
+        loop_detected=_caption_repetition_loop_detected_impl(output_text),
     )
     # mlx-vlm does not expose the processed vision grid that Transformers returns here.
     # Qwen prompts in this app use the standard 0-1000 coordinate space.
@@ -5033,14 +5867,17 @@ def _run_qwen_inference(
     model_id_override: Optional[str] = None,
     runtime_override: Optional[Tuple[Any, Any]] = None,
     decode_override: Optional[Dict[str, Any]] = None,
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, int, int]:
     """Execute a Qwen 3 VL inference following the reference recipe."""
+    _raise_if_qwen_cancelled()
     if runtime_override is not None:
         runtime = runtime_override
     elif model_id_override:
         runtime = _ensure_qwen_ready_for_caption(model_id_override)
     else:
         runtime = _ensure_qwen_ready()
+    _raise_if_qwen_cancelled()
     if isinstance(runtime, QwenRuntime) and runtime.platform == QWEN_PLATFORM_MLX:
         return _run_qwen_inference_mlx(
             runtime,
@@ -5049,8 +5886,14 @@ def _run_qwen_inference(
             max_new_tokens=max_new_tokens,
             system_prompt_override=system_prompt_override,
             decode_override=decode_override,
+            chat_template_kwargs=chat_template_kwargs,
         )
     model, processor = runtime
+    resolved_model_id = (
+        model_id_override
+        or (active_qwen_metadata or {}).get("model_id")
+        or QWEN_MODEL_NAME
+    )
     messages: List[Dict[str, Any]] = []
     sys_prompt = (
         system_prompt_override
@@ -5073,18 +5916,48 @@ def _run_qwen_inference(
             ],
         }
     )
-    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    disable_thinking = _qwen_disable_thinking_requested(chat_template_kwargs)
+    if disable_thinking and _qwen_model_id_is_thinking(resolved_model_id):
+        messages = _qwen_messages_with_no_think(messages)
+    text = _apply_qwen_chat_template(
+        processor,
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        chat_template_kwargs=chat_template_kwargs,
+    )
+    text = _qwen_neutralize_thinking_prefill(
+        text,
+        disable_thinking=disable_thinking,
+        model_id=resolved_model_id,
+    )
+    llm_call_id = uuid.uuid4().hex[:12]
+    qwen_llm_call_id_var.set(llm_call_id)
+    _qwen_caption_io_input(
+        call_id=llm_call_id,
+        source="qwen_inference",
+        model_id=resolved_model_id,
+        messages=messages,
+        prompt_text=prompt,
+        rendered_prompt=text,
+        system_prompt=str(sys_prompt or ""),
+        user_prompt=prompt,
+        image_width=int(pil_img.width),
+        image_height=int(pil_img.height),
+        max_new_tokens=max_new_tokens,
+        decode_override=decode_override,
+        chat_template_kwargs=chat_template_kwargs,
+    )
     _agent_full_trace_write(
         {
             "type": "llm_input",
             "source": "qwen_inference",
-            "model_id": model_id_override
-            or (active_qwen_metadata or {}).get("model_id")
-            or QWEN_MODEL_NAME,
+            "model_id": resolved_model_id,
             "messages": messages,
             "prompt_text": text,
             "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else None,
             "decode_override": decode_override,
+            "chat_template_kwargs": chat_template_kwargs,
         }
     )
     image_inputs, video_inputs = process_vision_info(messages)
@@ -5238,6 +6111,60 @@ def _run_qwen_inference(
         gen_kwargs["repetition_penalty"] = float(repetition_penalty)
     if no_repeat_ngram_size is not None:
         gen_kwargs["no_repeat_ngram_size"] = int(no_repeat_ngram_size)
+    tokenizer = getattr(processor, "tokenizer", None)
+    try:
+        input_prompt_len = int(inputs.input_ids.shape[1])
+    except Exception:
+        try:
+            input_prompt_len = int(inputs["input_ids"].shape[1])
+        except Exception:
+            input_prompt_len = 0
+    loop_guard_state: Dict[str, Any] = {"triggered": False}
+    try:
+        from transformers import StoppingCriteria, StoppingCriteriaList
+
+        class _QwenCancelStoppingCriteria(StoppingCriteria):
+            def __call__(self, input_ids, scores, **kwargs):  # type: ignore[no-untyped-def]
+                return _qwen_cancel_requested()
+
+        class _QwenRepetitionStoppingCriteria(StoppingCriteria):
+            def __init__(self) -> None:
+                self._last_check_len = 0
+
+            def __call__(self, input_ids, scores, **kwargs):  # type: ignore[no-untyped-def]
+                if tokenizer is None or _qwen_cancel_requested():
+                    return False
+                try:
+                    generated_len = int(input_ids.shape[-1]) - input_prompt_len
+                    if generated_len < 32 or generated_len - self._last_check_len < 8:
+                        return False
+                    self._last_check_len = generated_len
+                    generated_ids = input_ids[0][input_prompt_len:]
+                    if hasattr(generated_ids, "detach"):
+                        generated_ids = generated_ids.detach().cpu().tolist()
+                    text = tokenizer.decode(
+                        generated_ids,
+                        skip_special_tokens=True,
+                        clean_up_tokenization_spaces=False,
+                    )
+                    if _caption_repetition_loop_detected_impl(str(text or "")):
+                        loop_guard_state["triggered"] = True
+                        return True
+                except Exception:
+                    return False
+                return False
+
+        criteria = [_QwenCancelStoppingCriteria()]
+        if tokenizer is not None and input_prompt_len > 0:
+            criteria.append(_QwenRepetitionStoppingCriteria())
+        existing_criteria = gen_kwargs.get("stopping_criteria")
+        if existing_criteria is None:
+            gen_kwargs["stopping_criteria"] = StoppingCriteriaList(criteria)
+        elif hasattr(existing_criteria, "append"):
+            for criterion in criteria:
+                existing_criteria.append(criterion)
+    except Exception:
+        pass
     _qwen_progress_update(
         phase="generate",
         phase_label="Generating",
@@ -5245,8 +6172,9 @@ def _run_qwen_inference(
         message="Starting Qwen generation",
         max_new_tokens=int(max_new_tokens) if max_new_tokens is not None else QWEN_MAX_NEW_TOKENS,
     )
+    _raise_if_qwen_cancelled()
     output_text: Optional[str] = None
-    tokenizer = getattr(processor, "tokenizer", None)
+    streamed_output = False
     if tokenizer is not None:
         try:
             from transformers import TextIteratorStreamer
@@ -5265,6 +6193,7 @@ def _run_qwen_inference(
 
             def _generate_stream() -> None:
                 try:
+                    _raise_if_qwen_cancelled()
                     with torch.inference_mode():
                         try:
                             model.generate(**inputs, **stream_kwargs)
@@ -5295,6 +6224,9 @@ def _run_qwen_inference(
                 except queue.Empty:
                     if generation_errors:
                         break
+                    if _qwen_cancel_requested():
+                        generation_errors.append(QwenCancellationRequested("qwen_cancelled"))
+                        break
                     if thread.is_alive():
                         _qwen_progress_update(
                             phase="generate",
@@ -5305,6 +6237,8 @@ def _run_qwen_inference(
                     break
                 if not new_text:
                     continue
+                _raise_if_qwen_cancelled()
+                streamed_output = True
                 generated_parts.append(new_text)
                 _qwen_progress_token(
                     new_text,
@@ -5316,11 +6250,15 @@ def _run_qwen_inference(
             thread.join()
             if generation_errors:
                 raise generation_errors[0]
+            _raise_if_qwen_cancelled()
             output_text = "".join(generated_parts)
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, QwenCancellationRequested):
+                raise
             logger.warning("[qwen] token streaming failed; falling back to blocking generate: %s", exc)
             output_text = None
     if output_text is None:
+        _raise_if_qwen_cancelled()
         with torch.inference_mode():
             try:
                 generated_ids = model.generate(**inputs, **gen_kwargs)
@@ -5333,6 +6271,7 @@ def _run_qwen_inference(
                     generated_ids = model.generate(**inputs, **fallback_kwargs)
                 else:
                     raise
+        _raise_if_qwen_cancelled()
         generated_ids_trimmed = [
             out_ids[len(in_ids) :]
             for in_ids, out_ids in zip(inputs.input_ids, generated_ids, strict=False)
@@ -5342,30 +6281,47 @@ def _run_qwen_inference(
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )[0]
+        output_text = _qwen_maybe_trim_repetition_loop_output(
+            output_text,
+            triggered=bool(loop_guard_state.get("triggered")),
+            replace_live_output=False,
+        )
         _qwen_progress_update(
             phase="generate",
             phase_label="Generated",
             progress=0.90,
             message="Qwen response generated",
             token_preview=output_text,
+            append_token_preview_to_live_output=not streamed_output,
         )
     else:
+        output_text = _qwen_maybe_trim_repetition_loop_output(
+            output_text,
+            triggered=bool(loop_guard_state.get("triggered")),
+            replace_live_output=True,
+        )
         _qwen_progress_update(
             phase="generate",
             phase_label="Generated",
             progress=0.90,
             message="Qwen response generated",
             token_preview=output_text,
+            append_token_preview_to_live_output=not streamed_output,
         )
     _agent_full_trace_write(
         {
             "type": "llm_output",
             "source": "qwen_inference",
-            "model_id": model_id_override
-            or (active_qwen_metadata or {}).get("model_id")
-            or QWEN_MODEL_NAME,
+            "model_id": resolved_model_id,
             "output_text": output_text,
         }
+    )
+    _qwen_caption_io_output(
+        call_id=llm_call_id,
+        source="qwen_inference",
+        model_id=resolved_model_id,
+        output_text=output_text,
+        loop_detected=_caption_repetition_loop_detected_impl(output_text),
     )
     grid = inputs.get("image_grid_thw")
     patch_size = 14
@@ -5437,7 +6393,8 @@ def _run_qwen_chat(
     model, processor = runtime
     if assistant_prefix:
         add_generation_prompt = True
-    text = processor.apply_chat_template(
+    text = _apply_qwen_chat_template(
+        processor,
         messages,
         tokenize=False,
         add_generation_prompt=bool(add_generation_prompt),
@@ -5642,7 +6599,8 @@ def _run_qwen_chat_stream(
     model, processor = runtime
     if assistant_prefix:
         add_generation_prompt = True
-    text = processor.apply_chat_template(
+    text = _apply_qwen_chat_template(
+        processor,
         messages,
         tokenize=False,
         add_generation_prompt=bool(add_generation_prompt),
@@ -26194,7 +27152,50 @@ def qwen_infer(payload: QwenInferenceRequest):
     )
 
 
+def _resolve_qwen_caption_refinement_model_id(
+    refinement_model_id: Optional[str],
+    *,
+    desired_model_id: str,
+    active_model_id: Optional[str],
+) -> str:
+    raw = str(refinement_model_id or "").strip()
+    if not raw or raw.lower() == "same":
+        return _qwen_caption_default_refinement_model_id(desired_model_id)
+    if raw.lower() == "active":
+        return str(active_model_id or "").strip() or QWEN_MODEL_NAME
+    return raw
+
+
+def _qwen_caption_known_model_ids(model_id: Optional[str]) -> Set[str]:
+    if is_qwen_mlx_model_id(model_id):
+        return {str(entry.get("id") or "") for entry in QWEN_MLX_VISION_MODEL_OPTIONS}
+    return {str(entry.get("id") or "") for entry in QWEN_TRANSFORMERS_MODEL_OPTIONS}
+
+
+def _qwen_caption_default_refinement_model_id(desired_model_id: Optional[str]) -> str:
+    desired = str(desired_model_id or "").strip() or QWEN_MODEL_NAME
+    if not _qwen_model_id_is_thinking(desired):
+        return desired
+    known_ids = _qwen_caption_known_model_ids(desired)
+    exact_instruct = desired.replace("Thinking", "Instruct")
+    platform = QWEN_PLATFORM_MLX if is_qwen_mlx_model_id(desired) else QWEN_PLATFORM_TRANSFORMERS
+    if exact_instruct in known_ids:
+        availability = _qwen_model_local_state(exact_instruct, platform)
+        if availability.get("local") and not availability.get("partial"):
+            return exact_instruct
+    if is_qwen_mlx_model_id(desired):
+        return QWEN_MLX_DEFAULT_MODEL
+    small_instruct = "Qwen/Qwen3-VL-4B-Instruct"
+    small_availability = _qwen_model_local_state(small_instruct, QWEN_PLATFORM_TRANSFORMERS)
+    if small_availability.get("local") and not small_availability.get("partial"):
+        return small_instruct
+    if exact_instruct in known_ids:
+        return exact_instruct
+    return small_instruct
+
+
 def qwen_caption(payload: QwenCaptionRequest):
+    request_image_name = str(getattr(payload, "image_name", "") or "").strip()
     fast_mode = bool(payload.fast_mode)
     force_unload = payload.force_unload
     if force_unload is None:
@@ -26217,7 +27218,7 @@ def qwen_caption(payload: QwenCaptionRequest):
         model_id=str(caption_model_hint),
         platform=caption_platform_hint,
         message="Preparing Qwen caption request",
-        max_new_tokens=payload.max_new_tokens if payload.max_new_tokens is not None else 256,
+        max_new_tokens=payload.max_new_tokens if payload.max_new_tokens is not None else 1000,
     )
 
     def get_runtime(model_id: Optional[str]) -> Tuple[Any, Any]:
@@ -26257,12 +27258,14 @@ def qwen_caption(payload: QwenCaptionRequest):
         return active_runtime
 
     try:
+        _raise_if_qwen_cancelled()
         if payload.unload_others and not fast_mode:
             _qwen_progress_update(
                 phase="unload",
                 phase_label="Freeing Memory",
                 progress=0.04,
                 message="Unloading other inference models before captioning",
+                step_id="prepare",
             )
             _unload_non_qwen_runtimes_impl(
                 predictor_manager=predictor_manager,
@@ -26278,13 +27281,16 @@ def qwen_caption(payload: QwenCaptionRequest):
             phase_label="Preparing Image",
             progress=0.06,
             message="Preparing image and caption hints",
+            step_id="prepare",
+            live_output_reset=True,
         )
+        _raise_if_qwen_cancelled()
         pil_img, _, _ = resolve_image_payload(payload.image_base64, payload.image_token, None)
         user_prompt = (payload.user_prompt or "").strip()
         include_counts = bool(payload.include_counts)
         include_coords = bool(payload.include_coords)
         max_boxes = payload.max_boxes if payload.max_boxes is not None else 0
-        max_new_tokens = payload.max_new_tokens if payload.max_new_tokens is not None else 128
+        max_new_tokens = payload.max_new_tokens if payload.max_new_tokens is not None else 1000
         label_hints = payload.label_hints or []
         allowed_labels = _allowed_caption_labels_impl(label_hints)
         image_width = payload.image_width or pil_img.width
@@ -26293,6 +27299,7 @@ def qwen_caption(payload: QwenCaptionRequest):
         restrict_to_labels = (
             payload.restrict_to_labels if payload.restrict_to_labels is not None else True
         )
+        final_caption_max_sentences = payload.final_caption_max_sentences
         caption_all_windows = (
             True if caption_mode == "windowed" else bool(payload.caption_all_windows)
         )
@@ -26317,6 +27324,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             detailed_mode,
             restrict_to_labels=restrict_to_labels,
             labelmap_glossary=payload.labelmap_glossary,
+            max_sentences=final_caption_max_sentences,
         )
         glossary_line = ""
         if payload.labelmap_glossary:
@@ -26342,9 +27350,29 @@ def qwen_caption(payload: QwenCaptionRequest):
                 active_qwen_model_id,
             )
         caption_base_model_id = desired_model_id if model_id_override else base_model_id
+        caption_refinement_model_id = _resolve_qwen_caption_refinement_model_id(
+            payload.refinement_model_id,
+            desired_model_id=desired_model_id,
+            active_model_id=base_model_id,
+        )
+        has_refinement_model_override = bool(payload.refinement_model_id)
         final_only = bool(payload.final_answer_only)
+        final_caption_length_instruction = _caption_length_instruction_impl(final_caption_max_sentences)
+        caption_user_request_note = _caption_user_request_instruction_impl(user_prompt)
+        short_caption_requested = _caption_user_requested_short_impl(
+            user_prompt,
+            final_caption_max_sentences,
+        )
+        requested_sentence_limit = _caption_requested_sentence_limit_impl(
+            user_prompt,
+            final_caption_max_sentences,
+        )
         two_stage = bool(payload.two_stage_refine)
         is_thinking = "Thinking" in desired_model_id or variant == "Thinking"
+        caption_chat_template_kwargs = (
+            {"enable_thinking": False} if final_only and is_thinking else None
+        )
+        postprocess_chat_template_kwargs = {"enable_thinking": False}
         decode_params = _resolve_qwen_caption_decode_impl(payload, is_thinking)
         deterministic_decode = {
             "do_sample": False,
@@ -26352,17 +27380,36 @@ def qwen_caption(payload: QwenCaptionRequest):
             "repetition_context_size": 128,
             "no_repeat_ngram_size": 8,
         }
+        postprocess_decode_params = (
+            _resolve_qwen_caption_decode_impl(payload, is_thinking=True)
+            if _qwen_model_id_is_thinking(caption_refinement_model_id)
+            else deterministic_decode
+        )
         if is_thinking:
             prompt_text = _adjust_prompt_for_thinking_impl(prompt_text)
+        if final_caption_length_instruction:
+            prompt_text = f"{prompt_text}\nFinal caption length: {final_caption_length_instruction}"
+            max_new_tokens = max(
+                max_new_tokens,
+                min(2000, max(1000, int(final_caption_max_sentences or 10) * 100)),
+            )
         # Keep caption max_new_tokens consistent across full/windowed/refine paths; cap at 2000.
         # Avoid per-path caps here (we previously caused repeated CUDA asserts by diverging).
         if is_thinking:
-            max_new_tokens = max(max_new_tokens, 2000)
+            max_new_tokens = max(max_new_tokens, 1000)
         max_new_tokens = min(max_new_tokens, 2000)
         refine_max_tokens = max_new_tokens
         default_system_prompt = (
-            "You are a detailed captioning assistant. Use the image as truth. "
-            "Provide a rich, multi-sentence caption when there is a lot to see. "
+            (
+                "You are a concise captioning assistant. Use the image as truth. "
+                "Prioritize the user's requested length over exhaustive detail. "
+            )
+            if short_caption_requested
+            else (
+                "You are a detailed captioning assistant. Use the image as truth. "
+                "Provide a rich, multi-sentence caption when there is a lot to see. "
+            )
+        ) + (
             "Do not mention labels, hints, bounding boxes, coordinates, or that counts were provided. "
             "Do not output labelmap tags (e.g., light_vehicle). Use natural words like car, van, SUV. "
             "Avoid any label tokens that contain underscores. "
@@ -26385,6 +27432,77 @@ def qwen_caption(payload: QwenCaptionRequest):
             and variant == "auto"
         ):
             use_caption_cache = False
+        overlap: Optional[float] = None
+        window_size: Optional[int] = None
+        x_positions: List[int] = []
+        y_positions: List[int] = []
+        grouped_hints: Dict[Tuple[int, int], List[QwenCaptionHint]] = {}
+        total_windows = 0
+        if caption_mode == "windowed":
+            overlap = _resolve_qwen_window_overlap_impl(
+                payload.window_overlap, default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP
+            )
+            window_size = _resolve_qwen_window_size_impl(
+                payload.window_size,
+                image_width,
+                image_height,
+                overlap=overlap,
+                default_size=QWEN_WINDOW_DEFAULT_SIZE,
+                default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP,
+            )
+            x_positions = _window_positions_impl(
+                image_width, window_size, overlap
+            )
+            y_positions = _window_positions_impl(
+                image_height, window_size, overlap
+            )
+            grouped_hints = _group_hints_by_window(
+                label_hints, x_positions, y_positions, window_size
+            )
+            total_windows = max(1, len(x_positions) * len(y_positions))
+            logger.info(
+                "[qwen-caption] window grid=%sx%s total=%s window=%s overlap=%.3f image=%sx%s",
+                len(x_positions),
+                len(y_positions),
+                total_windows,
+                window_size,
+                overlap or 0.0,
+                image_width,
+                image_height,
+            )
+        caption_step_plan = _build_qwen_caption_step_plan(
+            caption_mode=caption_mode,
+            total_windows=total_windows,
+            two_stage=two_stage,
+            is_thinking=is_thinking,
+            force_unload=bool(force_unload),
+            caption_model_id=desired_model_id,
+            refinement_model_id=caption_refinement_model_id,
+        )
+        full_step_region = {
+            "x": 0,
+            "y": 0,
+            "width": image_width,
+            "height": image_height,
+            "image_width": image_width,
+            "image_height": image_height,
+            "image_name": request_image_name,
+            "kind": "full_image",
+            "full_image": True,
+        }
+        _qwen_progress_update(
+            phase="plan",
+            phase_label="Planning",
+            progress=0.08,
+            message=(
+                f"Caption workflow planned: {len(caption_step_plan)} steps"
+                + (f", {total_windows} window pass{'es' if total_windows != 1 else ''}" if caption_mode == "windowed" else "")
+            ),
+            step_plan=caption_step_plan,
+            step_id="prepare",
+            step_region=full_step_region,
+            live_output_reset=True,
+        )
 
         def _caption_cleanup(
             prompt: str,
@@ -26398,6 +27516,9 @@ def qwen_caption(payload: QwenCaptionRequest):
             allowed_labels: Optional[List[str]] = None,
             strict: bool = False,
             minimal_edit: bool = False,
+            max_sentences: Optional[int] = None,
+            source_output: Optional[str] = None,
+            source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
         ) -> str:
             return _run_qwen_caption_cleanup_impl(
                 prompt,
@@ -26410,6 +27531,11 @@ def qwen_caption(payload: QwenCaptionRequest):
                 allowed_labels=allowed_labels,
                 strict=strict,
                 minimal_edit=minimal_edit,
+                max_sentences=max_sentences,
+                user_prompt=user_prompt,
+                source_output=source_output,
+                source_outputs=source_outputs,
+                chat_template_kwargs=postprocess_chat_template_kwargs,
                 run_qwen_inference_fn=_run_qwen_inference,
                 resolve_variant_fn=_resolve_qwen_variant_model_id_impl,
                 extract_caption_fn=_extract_caption_from_text_impl,
@@ -26425,6 +27551,9 @@ def qwen_caption(payload: QwenCaptionRequest):
             runtime_resolver: Callable[[str], Tuple[Any, Any]],
             max_new_tokens: int,
             glossary_line: Optional[str] = None,
+            model_id_override: Optional[str] = None,
+            max_sentences: Optional[int] = None,
+            source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
         ) -> str:
             return _run_qwen_caption_merge_impl(
                 draft,
@@ -26434,6 +27563,11 @@ def qwen_caption(payload: QwenCaptionRequest):
                 runtime_resolver=runtime_resolver,
                 max_new_tokens=max_new_tokens,
                 glossary_line=glossary_line,
+                model_id_override=model_id_override,
+                max_sentences=max_sentences,
+                user_prompt=user_prompt,
+                source_outputs=source_outputs,
+                chat_template_kwargs=postprocess_chat_template_kwargs,
                 run_qwen_inference_fn=_run_qwen_inference,
                 resolve_variant_fn=_resolve_qwen_variant_model_id_impl,
                 extract_caption_fn=_extract_caption_from_text_impl,
@@ -26447,48 +27581,77 @@ def qwen_caption(payload: QwenCaptionRequest):
                 return get_runtime(desired_model_id)
             return get_runtime(None)
 
+        def resolve_refinement_runtime() -> Tuple[Any, Any]:
+            if (
+                has_refinement_model_override
+                or str(caption_refinement_model_id or "") != str(desired_model_id or "")
+            ):
+                return get_runtime(caption_refinement_model_id)
+            return resolve_main_runtime()
+
         windowed_captions: List[Tuple[int, int, int, str]] = []
+        first_stage_output_sections: List[Tuple[str, str]] = []
         cleanup_count = 0
         refine_count = 0
         merge_count = 0
+
+        def _record_first_stage_output(label: str, text: Optional[str]) -> None:
+            cleaned = str(text or "").strip()
+            if cleaned:
+                first_stage_output_sections.append((label, cleaned))
+
+        _qwen_progress_update(
+            phase="load",
+            phase_label="Loading",
+            progress=0.12,
+            message=f"Ensuring Qwen caption model is ready: {desired_model_id}",
+            model_id=desired_model_id,
+            step_id="load_model",
+            step_region=full_step_region,
+        )
+        resolve_main_runtime()
+        _raise_if_qwen_cancelled()
         if caption_mode == "windowed":
-            overlap = _resolve_qwen_window_overlap_impl(
-                payload.window_overlap, default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP
-            )
-            window_size = _resolve_qwen_window_size_impl(
-                None,
-                image_width,
-                image_height,
-                overlap=overlap,
-                default_size=QWEN_WINDOW_DEFAULT_SIZE,
-                default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP,
-            )
-            force_two = True
-            x_positions = _window_positions_impl(
-                image_width, window_size, overlap, force_two=force_two
-            )
-            y_positions = _window_positions_impl(
-                image_height, window_size, overlap, force_two=force_two
-            )
-            grouped_hints = _group_hints_by_window(
-                label_hints, x_positions, y_positions, window_size
-            )
-            total_windows = max(1, len(x_positions) * len(y_positions))
+            assert window_size is not None
             window_index = 0
             window_model_id = desired_model_id
             window_base_model_id = window_model_id
             window_is_thinking = "Thinking" in window_model_id
             for y0 in y_positions:
                 for x0 in x_positions:
+                    _raise_if_qwen_cancelled()
                     window_index += 1
+                    window_hints = grouped_hints.get((x0, y0), [])
+                    window_region = {
+                        "x": x0,
+                        "y": y0,
+                        "width": min(window_size, max(1, image_width - x0)),
+                        "height": min(window_size, max(1, image_height - y0)),
+                        "image_width": image_width,
+                        "image_height": image_height,
+                        "image_name": request_image_name,
+                        "kind": "window",
+                        "label": f"Window {window_index}/{total_windows}",
+                    }
+                    window_detail = (
+                        f"Region [{x0}, {y0}] to "
+                        f"[{min(image_width, x0 + window_size)}, {min(image_height, y0 + window_size)}]; "
+                        f"{len(window_hints)} hint{'s' if len(window_hints) != 1 else ''}"
+                    )
                     _qwen_progress_update(
                         phase="window",
                         phase_label="Captioning Window",
                         progress=0.40 + (0.15 * (window_index - 1) / total_windows),
-                        message=f"Captioning window {window_index}/{total_windows}",
+                        message=(
+                            f"Captioning window {window_index}/{total_windows}"
+                            if window_hints or caption_all_windows
+                            else f"Skipping empty window {window_index}/{total_windows}"
+                        ),
                         model_id=window_model_id,
+                        step_id=f"window_{window_index}",
+                        step_detail=window_detail,
+                        step_region=window_region,
                     )
-                    window_hints = grouped_hints.get((x0, y0), [])
                     if not window_hints and not caption_all_windows:
                         continue
                     window_allowed = _allowed_caption_labels_impl(window_hints)
@@ -26515,11 +27678,25 @@ def qwen_caption(payload: QwenCaptionRequest):
                         detailed_mode=True,
                         restrict_to_labels=restrict_to_labels,
                         labelmap_glossary=payload.labelmap_glossary,
+                        max_sentences=final_caption_max_sentences,
                     )
+                    if short_caption_requested:
+                        if requested_sentence_limit == 1:
+                            window_caption_instruction = (
+                                "Write one concise sentence about this region only. "
+                            )
+                        else:
+                            window_caption_instruction = (
+                                "Write 1-2 concise sentences about this region only. "
+                            )
+                    else:
+                        window_caption_instruction = (
+                            "Write 1-3 concrete sentences about this region only. "
+                        )
                     window_prompt = (
-                        f"Window region in full image: [{x0}, {y0}] to [{x0 + window_size}, {y0 + window_size}].\n"
+                        "This crop is a subregion of the full image.\n"
                         "Focus only on this region.\n"
-                        "Write 1-3 detailed sentences about this region only. No reasoning or preamble. "
+                        f"{window_caption_instruction}No reasoning or preamble. "
                         "Do not mention labels, hints, counts, or coordinates. "
                         "Do not output labelmap tags (e.g., light_vehicle); use natural words like car or van. "
                         "Avoid any token with underscores.\n"
@@ -26536,6 +27713,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         window_prompt = _adjust_prompt_for_thinking_impl(window_prompt)
                     window_img = pil_img.crop((x0, y0, x0 + window_size, y0 + window_size))
                     window_max_tokens = max_new_tokens
+                    _qwen_progress_begin_output_section(f"Window {window_index}/{total_windows} output")
                     qwen_text, _, _ = _run_qwen_inference(
                         window_prompt,
                         window_img,
@@ -26543,15 +27721,29 @@ def qwen_caption(payload: QwenCaptionRequest):
                         system_prompt_override=system_prompt,
                         runtime_override=get_runtime(window_model_id),
                         decode_override=decode_params,
+                        chat_template_kwargs=caption_chat_template_kwargs,
+                    )
+                    _raise_if_qwen_cancelled()
+                    _record_first_stage_output(
+                        f"Window {window_index}/{total_windows} raw output", qwen_text
                     )
                     window_caption, _ = _extract_caption_from_text_impl(qwen_text, marker=None)
                     window_caption = _sanitize_qwen_caption_impl(window_caption)
                     if window_is_thinking and _thinking_caption_needs_cleanup_impl(
                         window_caption, qwen_text
                     ):
-                        cleanup_model = _resolve_qwen_variant_model_id_impl(
-                            window_base_model_id, "Instruct"
+                        cleanup_model = caption_refinement_model_id
+                        _qwen_progress_update(
+                            phase="cleanup",
+                            phase_label="Cleaning Window",
+                            progress=0.44 + (0.12 * window_index / total_windows),
+                            message=f"Cleaning thinking output for window {window_index}/{total_windows}",
+                            model_id=cleanup_model,
+                            step_id=f"window_{window_index}",
+                            step_detail=f"{window_detail}; cleaning thinking wrapper",
+                            step_region=window_region,
                         )
+                        _qwen_progress_begin_output_section(f"Window {window_index}/{total_windows} cleanup output")
                         window_caption = _caption_cleanup(
                             window_caption,
                             window_img,
@@ -26559,7 +27751,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             window_base_model_id,
                             use_caption_cache,
                             model_id_override=cleanup_model,
-                            runtime_override=get_runtime(cleanup_model),
+                            runtime_override=resolve_refinement_runtime(),
                             allowed_labels=(
                                 window_allowed_prompt
                                 if restrict_to_labels and window_allowed_prompt
@@ -26567,12 +27759,22 @@ def qwen_caption(payload: QwenCaptionRequest):
                             ),
                             strict=True,
                             minimal_edit=True,
+                            source_output=qwen_text,
                         )
                         cleanup_count += 1
                     if _caption_is_degenerate_impl(window_caption):
-                        cleanup_model = _resolve_qwen_variant_model_id_impl(
-                            window_base_model_id, "Instruct"
+                        cleanup_model = caption_refinement_model_id
+                        _qwen_progress_update(
+                            phase="cleanup",
+                            phase_label="Cleaning Window",
+                            progress=0.45 + (0.12 * window_index / total_windows),
+                            message=f"Cleaning repeated or incomplete window {window_index}/{total_windows} caption",
+                            model_id=cleanup_model,
+                            step_id=f"window_{window_index}",
+                            step_detail=f"{window_detail}; cleaning repeated or incomplete text",
+                            step_region=window_region,
                         )
+                        _qwen_progress_begin_output_section(f"Window {window_index}/{total_windows} cleanup output")
                         window_caption = _caption_cleanup(
                             window_caption,
                             window_img,
@@ -26580,7 +27782,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             window_base_model_id,
                             use_caption_cache,
                             model_id_override=cleanup_model,
-                            runtime_override=get_runtime(cleanup_model),
+                            runtime_override=resolve_refinement_runtime(),
                             allowed_labels=(
                                 window_allowed_prompt
                                 if restrict_to_labels and window_allowed_prompt
@@ -26588,14 +27790,24 @@ def qwen_caption(payload: QwenCaptionRequest):
                             ),
                             strict=True,
                             minimal_edit=True,
+                            source_output=qwen_text,
                         )
                         cleanup_count += 1
                     if _caption_needs_completion_impl(window_caption) or _caption_has_meta_impl(
                         window_caption
                     ):
-                        cleanup_model = _resolve_qwen_variant_model_id_impl(
-                            window_base_model_id, "Instruct"
+                        cleanup_model = caption_refinement_model_id
+                        _qwen_progress_update(
+                            phase="cleanup",
+                            phase_label="Cleaning Window",
+                            progress=0.46 + (0.12 * window_index / total_windows),
+                            message=f"Removing meta text from window {window_index}/{total_windows}",
+                            model_id=cleanup_model,
+                            step_id=f"window_{window_index}",
+                            step_detail=f"{window_detail}; removing meta text",
+                            step_region=window_region,
                         )
+                        _qwen_progress_begin_output_section(f"Window {window_index}/{total_windows} cleanup output")
                         window_caption = _caption_cleanup(
                             window_caption,
                             window_img,
@@ -26603,7 +27815,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             window_base_model_id,
                             use_caption_cache,
                             model_id_override=cleanup_model,
-                            runtime_override=get_runtime(cleanup_model),
+                            runtime_override=resolve_refinement_runtime(),
                             allowed_labels=(
                                 window_allowed_prompt
                                 if restrict_to_labels and window_allowed_prompt
@@ -26611,6 +27823,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             ),
                             strict=True,
                             minimal_edit=True,
+                            source_output=qwen_text,
                         )
                         cleanup_count += 1
                     needs_refine, missing = _caption_needs_refine_impl(
@@ -26621,8 +27834,19 @@ def qwen_caption(payload: QwenCaptionRequest):
                         glossary_map=window_glossary_map,
                     )
                     if needs_refine:
-                        refine_model = _resolve_qwen_variant_model_id_impl(
-                            window_base_model_id, "Instruct"
+                        refine_model = caption_refinement_model_id
+                        _qwen_progress_update(
+                            phase="refine",
+                            phase_label="Refining Window",
+                            progress=0.48 + (0.12 * window_index / total_windows),
+                            message=f"Refining window {window_index}/{total_windows} coverage",
+                            model_id=refine_model,
+                            step_id=f"window_{window_index}",
+                            step_detail=(
+                                f"{window_detail}; ensuring "
+                                f"{', '.join(missing) if missing else 'window class coverage'}"
+                            ),
+                            step_region=window_region,
                         )
                         allowed_note = ""
                         if restrict_to_labels and window_allowed_prompt:
@@ -26642,6 +27866,17 @@ def qwen_caption(payload: QwenCaptionRequest):
                         refine_prompt = (
                             f"{window_prompt}\nDraft caption: {window_caption}\n{missing_note}"
                         )
+                        if qwen_text:
+                            first_stage_context = _format_caption_source_output_context_impl(
+                                source_outputs=[
+                                    (
+                                        f"Window {window_index}/{total_windows} raw output",
+                                        qwen_text,
+                                    )
+                                ]
+                            )
+                            if first_stage_context:
+                                refine_prompt = f"{refine_prompt}\n\n{first_stage_context}"
                         if allowed_note:
                             refine_prompt = f"{refine_prompt}\n{allowed_note}"
                         refine_prompt = (
@@ -26650,22 +27885,27 @@ def qwen_caption(payload: QwenCaptionRequest):
                             "Return only a concise, complete caption (1-3 sentences) with no coordinates."
                         )
                         refine_system = "You are a concise captioning assistant. Return only the final caption in English."
+                        _qwen_progress_begin_output_section(f"Window {window_index}/{total_windows} refine output")
                         refine_text, _, _ = _run_qwen_inference(
                             refine_prompt,
                             window_img,
                             max_new_tokens=refine_max_tokens,
                             system_prompt_override=refine_system,
-                            runtime_override=get_runtime(refine_model),
-                            decode_override=deterministic_decode,
+                            runtime_override=resolve_refinement_runtime(),
+                            decode_override=postprocess_decode_params,
+                            chat_template_kwargs=postprocess_chat_template_kwargs,
                         )
+                        _raise_if_qwen_cancelled()
                         window_caption, _ = _extract_caption_from_text_impl(
                             refine_text, marker=None
                         )
                         window_caption = _sanitize_qwen_caption_impl(window_caption)
                         refine_count += 1
                     if window_caption:
-                        windowed_captions.append((x0, y0, window_size, window_caption))
-                        _emit_caption_window(x0, y0, window_size, window_caption)
+                        window_caption_for_merge = _clean_caption_source_context_text_impl(window_caption)
+                        if window_caption_for_merge:
+                            windowed_captions.append((x0, y0, window_size, window_caption_for_merge))
+                            _emit_caption_window(x0, y0, window_size, window_caption_for_merge)
             if windowed_captions:
                 window_lines = [
                     "Close-up observations from subregions (use these to enrich the final caption):"
@@ -26685,9 +27925,30 @@ def qwen_caption(payload: QwenCaptionRequest):
                     )
                     region = f"{vert}-{horiz}"
                     window_lines.append(
-                        f"- {region} ([{x0},{y0},{x0 + size},{y0 + size}]): {caption}"
+                        f"- {region}: {caption}"
                     )
-                if include_counts and restrict_to_labels:
+                if short_caption_requested:
+                    if include_counts and restrict_to_labels:
+                        window_lines.append(
+                            "Now write the full-image caption at the requested length. Use the close-up observations only for the most important visible details. "
+                            "Mention only central labeled object types, and summarize repetitive objects instead of listing them. "
+                            "Do not mention labels, hints, counts, or coordinates."
+                        )
+                        window_lines.append(
+                            "If window observations conflict, trust the full image and the authoritative counts. Avoid self-contradictions."
+                        )
+                    else:
+                        window_lines.append(
+                            "Now write the full-image caption at the requested length. Use the close-up observations only for the most important visible details. "
+                            "Do not mention labels, hints, or coordinates."
+                        )
+                        window_lines.append(
+                            "If window observations conflict, trust the full image. Avoid self-contradictions."
+                        )
+                    window_lines.append(
+                        "Do not expand beyond the requested caption length just because window observations are available."
+                    )
+                elif include_counts and restrict_to_labels:
                     window_lines.append(
                         "Now describe the full image in detail. Use all labeled object counts and the close-up observations. "
                         "Mention every class that appears in the hints, and summarize repetitive objects (e.g., many cars as a parking lot) "
@@ -26707,24 +27968,36 @@ def qwen_caption(payload: QwenCaptionRequest):
                         "If window observations conflict, trust the full image. Avoid self-contradictions."
                     )
                 window_lines.append(
-                    "In the final caption, preserve specific details from the windows "
-                    "(e.g., people counts, actions, and notable objects). "
-                    "Do not compress away window details; longer captions are preferred."
+                    (
+                        "In the final caption, include only the most important window details that fit the requested length."
+                        if short_caption_requested
+                        else (
+                            "In the final caption, preserve specific details from the windows "
+                            "(e.g., people counts, actions, and notable objects). "
+                            "Do not compress away window details; longer captions are preferred."
+                        )
+                    )
                 )
                 prompt_text = f"{prompt_text}\n" + "\n".join(window_lines)
         if two_stage and is_thinking:
+            _raise_if_qwen_cancelled()
             _qwen_progress_update(
                 phase="draft",
                 phase_label="Drafting",
                 progress=0.55,
-                message="Generating draft caption",
+                message="Generating full-image draft caption",
                 model_id=desired_model_id,
+                step_id="draft_caption",
+                step_region=full_step_region,
+                step_detail="Two-stage 1/2: full-image draft pass with the caption model",
             )
             draft_prompt = (
                 "Step 1: Look at the image and form a draft caption.\n"
+                f"{caption_user_request_note}"
                 "Respond with: DRAFT: <caption>"
             )
             draft_system = f"{system_prompt} Return only a line starting with 'DRAFT:'."
+            _qwen_progress_begin_output_section("Full-image draft output")
             draft_text, _, _ = _run_qwen_inference(
                 draft_prompt,
                 pil_img,
@@ -26732,7 +28005,10 @@ def qwen_caption(payload: QwenCaptionRequest):
                 system_prompt_override=draft_system,
                 runtime_override=resolve_main_runtime(),
                 decode_override=decode_params,
+                chat_template_kwargs=caption_chat_template_kwargs,
             )
+            _raise_if_qwen_cancelled()
+            _record_first_stage_output("Full-image draft raw output", draft_text)
             draft_caption, _ = _extract_caption_from_text_impl(draft_text, marker="DRAFT")
             draft_caption = _sanitize_qwen_caption_impl(draft_caption)
             allowed_note = ""
@@ -26740,44 +28016,73 @@ def qwen_caption(payload: QwenCaptionRequest):
                 allowed_note = f"Allowed classes: {', '.join(allowed_labels_prompt)}. Do not introduce any other entity types."
             elif not restrict_to_labels:
                 allowed_note = "You may mention additional visible objects beyond the hints."
+            first_stage_context = _format_caption_source_output_context_impl(
+                source_outputs=first_stage_output_sections
+            )
             refine_prompt = f"{prompt_text}\nDraft caption: {draft_caption}"
+            if first_stage_context:
+                refine_prompt = f"{refine_prompt}\n\n{first_stage_context}"
             if allowed_note:
                 refine_prompt = f"{refine_prompt}\n{allowed_note}"
             refine_prompt = (
                 f"{refine_prompt}\n"
                 "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+                f"{final_caption_length_instruction}"
                 "Return only the final caption."
             )
             refine_system = (
                 "You are a captioning assistant. Use the image as truth. "
                 "Return only the final caption. Respond in English only."
             )
-            refine_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+            refine_model = caption_refinement_model_id
             _qwen_progress_update(
                 phase="refine",
                 phase_label="Refining",
                 progress=0.78,
-                message="Refining caption with Qwen Instruct",
+                message="Refining draft caption",
                 model_id=refine_model,
+                step_id="refine_draft",
+                step_region=full_step_region,
+                step_detail=(
+                    f"Two-stage 2/2: editor pass with {refine_model}; "
+                    "separate from the window merge pass"
+                ),
             )
+            _qwen_progress_begin_output_section("Draft refinement output")
             qwen_text, _, _ = _run_qwen_inference(
                 refine_prompt,
                 pil_img,
                 max_new_tokens=refine_max_tokens,
                 system_prompt_override=refine_system,
-                runtime_override=get_runtime(refine_model),
-                decode_override=deterministic_decode,
+                runtime_override=resolve_refinement_runtime(),
+                decode_override=postprocess_decode_params,
+                chat_template_kwargs=postprocess_chat_template_kwargs,
             )
+            _raise_if_qwen_cancelled()
             caption_text, _ = _extract_caption_from_text_impl(qwen_text, marker=None)
             caption_text = _sanitize_qwen_caption_impl(caption_text)
         else:
+            _raise_if_qwen_cancelled()
             _qwen_progress_update(
                 phase="generate",
                 phase_label="Generating",
                 progress=0.50,
-                message="Generating caption",
+                message=(
+                    "Composing full-image caption from image and window observations"
+                    if caption_mode == "windowed" and windowed_captions
+                    else "Generating caption"
+                ),
                 model_id=desired_model_id,
+                step_id="generate_full",
+                step_region=full_step_region,
+                step_detail=(
+                    f"Full-image composition using {len(windowed_captions)} window observation"
+                    f"{'s' if len(windowed_captions) != 1 else ''}"
+                    if caption_mode == "windowed"
+                    else "Full-image composition pass"
+                ),
             )
+            _qwen_progress_begin_output_section("Full-image caption output")
             qwen_text, _, _ = _run_qwen_inference(
                 prompt_text,
                 pil_img,
@@ -26785,13 +28090,25 @@ def qwen_caption(payload: QwenCaptionRequest):
                 system_prompt_override=system_prompt,
                 runtime_override=resolve_main_runtime(),
                 decode_override=decode_params,
+                chat_template_kwargs=caption_chat_template_kwargs,
             )
+            _raise_if_qwen_cancelled()
+            _record_first_stage_output("Full-image caption raw output", qwen_text)
             caption_text, _ = _extract_caption_from_text_impl(qwen_text, marker=None)
             caption_text = _sanitize_qwen_caption_impl(caption_text)
             if is_thinking and _thinking_caption_needs_cleanup_impl(caption_text, qwen_text):
-                cleanup_model = _resolve_qwen_variant_model_id_impl(
-                    caption_base_model_id, "Instruct"
+                cleanup_model = caption_refinement_model_id
+                _qwen_progress_update(
+                    phase="cleanup",
+                    phase_label="Cleaning Up",
+                    progress=0.84,
+                    message="Cleaning thinking output from full-image caption",
+                    model_id=cleanup_model,
+                    step_id="postprocess",
+                    step_region=full_step_region,
+                    step_detail="Cleaning thinking-model wrapper or reasoning leakage",
                 )
+                _qwen_progress_begin_output_section("Full-image cleanup output")
                 caption_text = _caption_cleanup(
                     caption_text,
                     pil_img,
@@ -26799,7 +28116,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                     caption_base_model_id,
                     use_caption_cache,
                     model_id_override=cleanup_model,
-                    runtime_override=get_runtime(cleanup_model),
+                    runtime_override=resolve_refinement_runtime(),
                     allowed_labels=(
                         allowed_labels_prompt
                         if restrict_to_labels and allowed_labels_prompt
@@ -26807,36 +28124,67 @@ def qwen_caption(payload: QwenCaptionRequest):
                     ),
                     strict=True,
                     minimal_edit=True,
+                    max_sentences=final_caption_max_sentences,
+                    source_outputs=first_stage_output_sections,
                 )
                 cleanup_count += 1
         if caption_mode == "windowed" and windowed_captions and caption_text:
-            merge_tokens = min(refine_max_tokens, 256)
+            merge_tokens = min(
+                refine_max_tokens,
+                max(1000, int(final_caption_max_sentences or 10) * 100),
+            )
             _qwen_progress_update(
                 phase="merge",
                 phase_label="Merging",
                 progress=0.82,
-                message="Merging window captions",
+                message="Merging window captions into the full-image caption",
+                model_id=caption_refinement_model_id,
+                step_id="merge_windows",
+                step_region=full_step_region,
+                step_detail=(
+                    f"Windowed-only merge pass folding {len(windowed_captions)} window caption"
+                    f"{'s' if len(windowed_captions) != 1 else ''} into the full-image caption; "
+                    "separate from Draft + refine"
+                ),
             )
+            _qwen_progress_begin_output_section("Window merge output")
             caption_text = _caption_merge(
                 caption_text,
                 windowed_captions,
                 pil_img=pil_img,
                 base_model_id=caption_base_model_id,
-                runtime_resolver=get_runtime,
+                runtime_resolver=lambda _model_id: resolve_refinement_runtime(),
                 max_new_tokens=merge_tokens,
                 glossary_line=glossary_line or None,
+                model_id_override=caption_refinement_model_id,
+                max_sentences=final_caption_max_sentences,
+                source_outputs=first_stage_output_sections,
             )
+            _raise_if_qwen_cancelled()
             merge_count += 1
             caption_text = _sanitize_qwen_caption_impl(caption_text)
+        _qwen_progress_update(
+            phase="postprocess",
+            phase_label="Postprocessing",
+            progress=0.84,
+            message="Checking caption cleanup, coverage, and language",
+            step_id="postprocess",
+            step_region=full_step_region,
+            step_detail="Checking repetition, meta text, missing classes, and language.",
+        )
         if _caption_is_degenerate_impl(caption_text):
-            cleanup_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+            cleanup_model = caption_refinement_model_id
             _qwen_progress_update(
                 phase="cleanup",
                 phase_label="Cleaning Up",
                 progress=0.86,
                 message="Cleaning up generated caption",
                 model_id=cleanup_model,
+                step_id="postprocess",
+                step_region=full_step_region,
+                step_detail="Removing repeated or incomplete generated text",
             )
+            _qwen_progress_begin_output_section("Degenerate-caption cleanup output")
             caption_text = _caption_cleanup(
                 caption_text,
                 pil_img,
@@ -26844,23 +28192,30 @@ def qwen_caption(payload: QwenCaptionRequest):
                 caption_base_model_id,
                 use_caption_cache,
                 model_id_override=cleanup_model,
-                runtime_override=get_runtime(cleanup_model),
+                runtime_override=resolve_refinement_runtime(),
                 allowed_labels=(
                     allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None
                 ),
                 strict=True,
                 minimal_edit=True,
+                max_sentences=final_caption_max_sentences,
+                source_outputs=first_stage_output_sections,
             )
+            _raise_if_qwen_cancelled()
             cleanup_count += 1
         if _caption_needs_completion_impl(caption_text) or _caption_has_meta_impl(caption_text):
-            cleanup_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+            cleanup_model = caption_refinement_model_id
             _qwen_progress_update(
                 phase="cleanup",
                 phase_label="Cleaning Up",
                 progress=0.88,
                 message="Removing meta text from caption",
                 model_id=cleanup_model,
+                step_id="postprocess",
+                step_region=full_step_region,
+                step_detail="Removing meta text or completing an unfinished caption",
             )
+            _qwen_progress_begin_output_section("Meta-text cleanup output")
             caption_text = _caption_cleanup(
                 caption_text,
                 pil_img,
@@ -26868,20 +28223,38 @@ def qwen_caption(payload: QwenCaptionRequest):
                 caption_base_model_id,
                 use_caption_cache,
                 model_id_override=cleanup_model,
-                runtime_override=get_runtime(cleanup_model),
+                runtime_override=resolve_refinement_runtime(),
                 allowed_labels=(
                     allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None
                 ),
                 strict=True,
                 minimal_edit=True,
+                max_sentences=final_caption_max_sentences,
+                source_outputs=first_stage_output_sections,
             )
+            _raise_if_qwen_cancelled()
             cleanup_count += 1
         if (
             caption_mode == "windowed"
             and "4B" in desired_model_id
-            and _caption_needs_short_form_impl(caption_text)
+            and _caption_needs_short_form_impl(
+                caption_text,
+                max_words=max(80, int(final_caption_max_sentences or 2) * 80),
+                max_sentences=int(final_caption_max_sentences or 2),
+            )
         ):
-            cleanup_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+            cleanup_model = caption_refinement_model_id
+            _qwen_progress_update(
+                phase="cleanup",
+                phase_label="Cleaning Up",
+                progress=0.89,
+                message="Shortening oversized windowed caption",
+                model_id=cleanup_model,
+                step_id="postprocess",
+                step_region=full_step_region,
+                step_detail="Shortening a windowed 4B caption that grew too long",
+            )
+            _qwen_progress_begin_output_section("Short-form cleanup output")
             caption_text = _caption_cleanup(
                 caption_text,
                 pil_img,
@@ -26889,13 +28262,16 @@ def qwen_caption(payload: QwenCaptionRequest):
                 caption_base_model_id,
                 use_caption_cache,
                 model_id_override=cleanup_model,
-                runtime_override=get_runtime(cleanup_model),
+                runtime_override=resolve_refinement_runtime(),
                 allowed_labels=(
                     allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None
                 ),
                 strict=True,
                 minimal_edit=True,
+                max_sentences=final_caption_max_sentences,
+                source_outputs=first_stage_output_sections,
             )
+            _raise_if_qwen_cancelled()
             cleanup_count += 1
         needs_refine, missing = _caption_needs_refine_impl(
             caption_text,
@@ -26905,13 +28281,20 @@ def qwen_caption(payload: QwenCaptionRequest):
             glossary_map=glossary_map,
         )
         if needs_refine:
-            refine_model = _resolve_qwen_variant_model_id_impl(caption_base_model_id, "Instruct")
+            refine_model = caption_refinement_model_id
             _qwen_progress_update(
                 phase="refine",
                 phase_label="Refining",
                 progress=0.90,
                 message="Refining caption coverage",
                 model_id=refine_model,
+                step_id="postprocess",
+                step_region=full_step_region,
+                step_detail=(
+                    f"Ensuring mentioned classes: {', '.join(missing)}"
+                    if missing
+                    else "Ensuring all labeled classes are mentioned"
+                ),
             )
             allowed_note = ""
             if restrict_to_labels and allowed_labels_prompt:
@@ -26924,73 +28307,151 @@ def qwen_caption(payload: QwenCaptionRequest):
                 else "Ensure all labeled classes are mentioned."
             )
             refine_prompt = f"{prompt_text}\nDraft caption: {caption_text}\n{missing_note}"
+            if first_stage_output_sections:
+                first_stage_context = _format_caption_source_output_context_impl(
+                    source_outputs=first_stage_output_sections
+                )
+                if first_stage_context:
+                    refine_prompt = f"{refine_prompt}\n\n{first_stage_context}"
             if allowed_note:
                 refine_prompt = f"{refine_prompt}\n{allowed_note}"
             refine_prompt = (
                 f"{refine_prompt}\n"
                 "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+                f"{final_caption_length_instruction}"
                 "Return only the final caption with no coordinates."
             )
             refine_system = (
                 "You are a captioning assistant. Return only the final caption in English."
             )
+            _qwen_progress_begin_output_section("Coverage refinement output")
             refine_text, _, _ = _run_qwen_inference(
                 refine_prompt,
                 pil_img,
                 max_new_tokens=refine_max_tokens,
                 system_prompt_override=refine_system,
-                runtime_override=get_runtime(refine_model),
-                decode_override=deterministic_decode,
+                runtime_override=resolve_refinement_runtime(),
+                decode_override=postprocess_decode_params,
+                chat_template_kwargs=postprocess_chat_template_kwargs,
             )
+            _raise_if_qwen_cancelled()
             caption_text, _ = _extract_caption_from_text_impl(refine_text, marker=None)
             caption_text = _sanitize_qwen_caption_impl(caption_text)
             refine_count += 1
         if caption_text and _caption_needs_english_rewrite_impl(caption_text):
-            rewrite_model = _resolve_qwen_variant_model_id_impl(base_model_id, "Instruct")
+            rewrite_model = caption_refinement_model_id
             _qwen_progress_update(
                 phase="rewrite",
                 phase_label="Rewriting",
                 progress=0.92,
                 message="Rewriting caption in English",
                 model_id=rewrite_model,
+                step_id="postprocess",
+                step_region=full_step_region,
+                step_detail="Rewriting non-English output in English",
             )
             rewrite_prompt = (
-                "Rewrite the caption in English only, preserving meaning and brevity.\n"
+                "Rewrite the caption in English only, preserving meaning and concrete detail. "
+                f"{final_caption_length_instruction}\n"
                 f"Caption: {caption_text}"
             )
+            if first_stage_output_sections:
+                first_stage_context = _format_caption_source_output_context_impl(
+                    source_outputs=first_stage_output_sections
+                )
+                if first_stage_context:
+                    rewrite_prompt = f"{rewrite_prompt}\n\n{first_stage_context}"
             rewrite_system = "Return only the rewritten caption in English."
+            _qwen_progress_begin_output_section("English rewrite output")
             rewrite_text, _, _ = _run_qwen_inference(
                 rewrite_prompt,
                 pil_img,
                 max_new_tokens=refine_max_tokens,
                 system_prompt_override=rewrite_system,
-                runtime_override=get_runtime(rewrite_model),
-                decode_override=deterministic_decode,
+                runtime_override=resolve_refinement_runtime(),
+                decode_override=postprocess_decode_params,
+                chat_template_kwargs=postprocess_chat_template_kwargs,
             )
+            _raise_if_qwen_cancelled()
             caption_text, _ = _extract_caption_from_text_impl(rewrite_text, marker=None)
             caption_text = _sanitize_qwen_caption_impl(caption_text)
         caption_text = _sanitize_qwen_caption_impl(caption_text)
+        if _caption_needs_completion_impl(caption_text):
+            repair_model = caption_refinement_model_id
+            _qwen_progress_update(
+                phase="cleanup",
+                phase_label="Repairing",
+                progress=0.94,
+                message="Repairing truncated caption ending",
+                model_id=repair_model,
+                step_id="postprocess",
+                step_region=full_step_region,
+                step_detail=(
+                    "Rewriting the generated caption into complete sentences before finalization"
+                ),
+            )
+            _qwen_progress_begin_output_section("Truncated-caption repair output")
+            repaired_caption = _caption_cleanup(
+                caption_text,
+                pil_img,
+                min(refine_max_tokens, 2000),
+                caption_base_model_id,
+                use_caption_cache,
+                model_id_override=repair_model,
+                runtime_override=resolve_refinement_runtime(),
+                allowed_labels=(
+                    allowed_labels_prompt if restrict_to_labels and allowed_labels_prompt else None
+                ),
+                strict=True,
+                minimal_edit=False,
+                max_sentences=final_caption_max_sentences,
+            )
+            _raise_if_qwen_cancelled()
+            if repaired_caption:
+                caption_text = _sanitize_qwen_caption_impl(repaired_caption)
+            cleanup_count += 1
+        caption_text, trimmed_incomplete_tail = _caption_trim_to_complete_sentences_impl(
+            caption_text,
+            max_sentences=final_caption_max_sentences,
+        )
+        if trimmed_incomplete_tail:
+            _qwen_progress_update(
+                phase="postprocess",
+                phase_label="Finalizing",
+                progress=0.945,
+                message="Removed incomplete trailing caption text",
+                token_preview=caption_text,
+                step_id="postprocess",
+                step_region=full_step_region,
+                step_detail="Final guard trimmed a dangling partial sentence.",
+            )
         response = QwenCaptionResponse(
             caption=caption_text,
             used_counts=counts,
             used_boxes=used_boxes,
             truncated=truncated,
         )
+        _qwen_progress_begin_output_section("Final caption")
         _qwen_progress_update(
             phase="postprocess",
             phase_label="Finalizing",
             progress=0.95,
             message="Finalizing caption",
             token_preview=caption_text,
+            append_token_preview_to_live_output=True,
+            step_id="finalize",
+            step_region=full_step_region,
+            step_detail="Caption is being copied into the response",
         )
         word_count = len(caption_text.split()) if caption_text else 0
         logger.info(
-            "[qwen-caption] hints=%s used=%s truncated=%s variant=%s model=%s final_only=%s windows=%s cleanup=%s refine=%s merge=%s words=%s",
+            "[qwen-caption] hints=%s used=%s truncated=%s variant=%s model=%s refinement_model=%s final_only=%s windows=%s cleanup=%s refine=%s merge=%s words=%s",
             len(payload.label_hints or []),
             used_boxes,
             truncated,
             variant,
             desired_model_id,
+            caption_refinement_model_id,
             final_only,
             len(windowed_captions) if caption_mode == "windowed" else 0,
             cleanup_count,
@@ -26998,6 +28459,14 @@ def qwen_caption(payload: QwenCaptionRequest):
             merge_count,
             word_count,
         )
+    except QwenCancellationRequested as exc:
+        _qwen_progress_cancelled("Qwen caption cancelled")
+        if force_unload:
+            request_model_cache.clear()
+            _unload_qwen_runtime()
+            active_runtime = None
+            active_model_id = None
+        raise HTTPException(status_code=499, detail="qwen_caption_cancelled") from exc
     except HTTPException as exc:
         detail = _http_exception_detail_text(exc)
         _qwen_progress_error(
@@ -27027,11 +28496,24 @@ def qwen_caption(payload: QwenCaptionRequest):
             phase_label="Unloading",
             progress=0.98,
             message="Unloading Qwen runtime after caption",
+            step_id="unload_model",
+            step_region=full_step_region,
+            step_detail="Releasing Qwen model memory after captioning",
         )
         request_model_cache.clear()
         _unload_qwen_runtime()
         active_runtime = None
         active_model_id = None
+        _qwen_progress_update(
+            phase="postprocess",
+            phase_label="Finalizing",
+            progress=0.995,
+            message="Caption ready",
+            token_preview=response.caption,
+            step_id="finalize",
+            step_region=full_step_region,
+            step_detail="Caption response is ready",
+        )
     _qwen_progress_finish("Caption ready", token_preview=response.caption)
     return response
 
@@ -27047,6 +28529,7 @@ app.include_router(
 app.include_router(
     build_qwen_caption_router(
         caption_fn=qwen_caption,
+        cancel_fn=cancel_qwen_caption,
         request_cls=QwenCaptionRequest,
         response_cls=QwenCaptionResponse,
     )

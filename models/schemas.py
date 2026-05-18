@@ -343,6 +343,7 @@ class QwenCaptionHint(BaseModel):
 class QwenCaptionRequest(BaseModel):
     image_base64: Optional[str] = None
     image_token: Optional[str] = None
+    image_name: Optional[str] = None
     user_prompt: Optional[str] = None
     label_hints: Optional[List[QwenCaptionHint]] = None
     image_width: Optional[int] = None
@@ -350,10 +351,12 @@ class QwenCaptionRequest(BaseModel):
     include_counts: Optional[bool] = True
     include_coords: Optional[bool] = True
     max_boxes: Optional[int] = 0
-    max_new_tokens: Optional[int] = 256
+    max_new_tokens: Optional[int] = 1000
     model_variant: Optional[Literal["auto", "Instruct", "Thinking"]] = "auto"
     model_id: Optional[str] = None
+    refinement_model_id: Optional[str] = None
     final_answer_only: Optional[bool] = True
+    final_caption_max_sentences: Optional[int] = 10
     two_stage_refine: Optional[bool] = False
     caption_mode: Optional[Literal["full", "windowed"]] = "full"
     window_size: Optional[int] = None
@@ -394,10 +397,21 @@ class QwenCaptionRequest(BaseModel):
             try:
                 max_tokens_val = int(max_tokens)
             except (TypeError, ValueError):
-                max_tokens_val = 256
+                max_tokens_val = 1000
             values["max_new_tokens"] = max(32, min(max_tokens_val, 2000))
         else:
-            values["max_new_tokens"] = 256
+            values["max_new_tokens"] = 1000
+        max_sentences = values.get("final_caption_max_sentences")
+        if max_sentences is not None:
+            try:
+                max_sentences_val = int(max_sentences)
+            except (TypeError, ValueError):
+                max_sentences_val = 0
+            values["final_caption_max_sentences"] = (
+                max(1, min(max_sentences_val, 30)) if max_sentences_val > 0 else 10
+            )
+        else:
+            values["final_caption_max_sentences"] = 10
         temp = values.get("temperature")
         if temp is not None:
             try:
@@ -450,6 +464,12 @@ class QwenCaptionRequest(BaseModel):
                 values["window_overlap"] = None
         model_id = (values.get("model_id") or "").strip()
         values["model_id"] = model_id or None
+        refinement_model_id = (values.get("refinement_model_id") or "").strip()
+        values["refinement_model_id"] = (
+            None
+            if not refinement_model_id or refinement_model_id.lower() == "same"
+            else refinement_model_id
+        )
         glossary = values.get("labelmap_glossary")
         if glossary is not None:
             values["labelmap_glossary"] = str(glossary).strip() or None

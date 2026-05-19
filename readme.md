@@ -206,7 +206,8 @@ structured captioning context:
 - class names are normalized through the active dataset glossary so project
   labels become broad natural terms, such as "small vehicle" or "storage tank";
 - class counts can be supplied as authoritative inventory when the user wants
-  the caption to retain every detected class;
+  the caption to retain every detected class, and count-bearing captions are
+  checked for exact numeric counts rather than just generic class mentions;
 - box coordinates can be supplied when spatial grounding is useful, but the
   model is told not to mention coordinates or that hints were provided;
 - `max boxes` limits how many boxes are sent when the detection set is large;
@@ -233,12 +234,18 @@ The captioning workflow has several variants:
 - **Final length controls** let the operator choose whether the final caption
   should be short or allowed to preserve many sentences of detail for large,
   dense images.
+- **Prompt stack inspection** exposes the caption prompt families in closed UI
+  pop-downs: user request, system prompt, detection context, window prompts,
+  draft/refine, window merge, and cleanup/guard instructions. Runtime image
+  values such as boxes and counts are still filled at generation time, but the
+  policy stack is visible before a run.
 
 After generation, Tator checks and repairs the caption before returning it:
 
 - repeated loops, meta text, reasoning leakage, and incomplete endings are
   removed or sent through cleanup passes;
-- missing detected classes and count conflicts can trigger a coverage refine;
+- missing detected classes, missing numeric counts, and count conflicts can
+  trigger a coverage refine;
 - non-English rewrite is reserved for real non-Latin script output rather than
   harmless punctuation differences;
 - window observations are treated as supporting evidence, not a separate object
@@ -297,6 +304,14 @@ object claims.
   to auto-upgrade the previous default system prompt when the user has not
   customized it. Already-open browser tabs should be hard-reloaded once to pick
   up the new static JavaScript defaults.
+- Added a caption prompt-stack inspector to the Qwen caption UI. Operators can
+  expand the user-request, system, detection-context, window, draft/refine,
+  window-merge, and cleanup/guard prompt families to see which policy layer is
+  affecting the final caption.
+- Tightened authoritative count handling. Later cleanup, merge, and coverage
+  passes now receive the count inventory, old "do not mention counts" wording
+  was narrowed to "do not say counts were provided," and the guard now refines
+  outputs that mention a class without its required numeric count.
 - Validation for this checkpoint used:
   `python -m py_compile localinferenceapi.py services/qwen.py utils/glossary.py models/schemas.py api/qwen_caption.py`,
   `node --check ybat-master/ybat.js`, `git diff --check`, and

@@ -631,6 +631,7 @@ from services.qwen import (
     _caption_starts_generic as _caption_starts_generic_impl,
     _caption_missing_labels as _caption_missing_labels_impl,
     _caption_count_conflicts as _caption_count_conflicts_impl,
+    _caption_missing_exact_counts as _caption_missing_exact_counts_impl,
     _caption_needs_refine as _caption_needs_refine_impl,
     _sanitize_qwen_caption as _sanitize_qwen_caption_impl,
     _caption_repetition_loop_detected as _caption_repetition_loop_detected_impl,
@@ -27647,7 +27648,13 @@ def qwen_caption(payload: QwenCaptionRequest):
             max_sentences: Optional[int] = None,
             source_output: Optional[str] = None,
             source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
+            authoritative_counts_note_override: Optional[str] = None,
         ) -> str:
+            counts_note = (
+                authoritative_counts_note
+                if authoritative_counts_note_override is None
+                else authoritative_counts_note_override
+            )
             return _run_qwen_caption_cleanup_impl(
                 prompt,
                 img,
@@ -27663,6 +27670,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 user_prompt=user_prompt,
                 source_output=source_output,
                 source_outputs=source_outputs,
+                authoritative_counts_note=counts_note,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
                 run_qwen_inference_fn=_run_qwen_inference,
                 resolve_variant_fn=_resolve_qwen_variant_model_id_impl,
@@ -27697,6 +27705,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 user_prompt=user_prompt,
                 overlap_guidance=overlap_guidance,
                 source_outputs=source_outputs,
+                authoritative_counts_note=authoritative_counts_note,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
                 run_qwen_inference_fn=_run_qwen_inference,
                 resolve_variant_fn=_resolve_qwen_variant_model_id_impl,
@@ -27767,6 +27776,33 @@ def qwen_caption(payload: QwenCaptionRequest):
                 + ", ".join(pieces)
                 + ". Remove contradictory plural, group, or quantity wording."
             )
+
+        def _format_authoritative_counts_note(
+            counts_map: Dict[str, int],
+            glossary: Optional[Dict[str, List[str]]],
+        ) -> str:
+            if not include_counts or not restrict_to_labels or not counts_map:
+                return ""
+            pieces: List[str] = []
+            for label, count in counts_map.items():
+                try:
+                    count_int = int(count)
+                except (TypeError, ValueError):
+                    continue
+                if count_int <= 0:
+                    continue
+                preferred = _caption_preferred_label_impl(label, glossary).strip()
+                if preferred:
+                    pieces.append(f"{preferred}: {count_int}")
+            if not pieces:
+                return ""
+            return (
+                "Authoritative object counts that must appear in the caption as natural scene facts: "
+                + ", ".join(pieces)
+                + ". State counts with digits; do not say counts were provided."
+            )
+
+        authoritative_counts_note = _format_authoritative_counts_note(counts, glossary_map)
 
         def _caption_term_guard_sources() -> List[Tuple[str, str]]:
             sources = list(first_stage_output_sections)
@@ -27883,7 +27919,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         "This crop is a subregion of the full image.\n"
                         "Focus only on this region.\n"
                         f"{window_caption_instruction}No reasoning or preamble. "
-                        "Do not mention labels, hints, counts, or coordinates. "
+                        "Do not mention labels, hints, coordinates, or that counts were provided. "
                         "Do not output labelmap tags (e.g., light_vehicle); use broad natural class terms like small vehicle. "
                         "Use a subtype such as car, van, pickup truck, or delivery vehicle only when the crop clearly supports it. "
                         "Avoid any token with underscores.\n"
@@ -27953,6 +27989,10 @@ def qwen_caption(payload: QwenCaptionRequest):
                             strict=True,
                             minimal_edit=True,
                             source_output=qwen_text,
+                            authoritative_counts_note_override=_format_authoritative_counts_note(
+                                window_counts,
+                                window_glossary_map,
+                            ),
                         )
                         cleanup_count += 1
                     if _caption_is_degenerate_impl(window_caption):
@@ -27984,6 +28024,10 @@ def qwen_caption(payload: QwenCaptionRequest):
                             strict=True,
                             minimal_edit=True,
                             source_output=qwen_text,
+                            authoritative_counts_note_override=_format_authoritative_counts_note(
+                                window_counts,
+                                window_glossary_map,
+                            ),
                         )
                         cleanup_count += 1
                     if _caption_needs_completion_impl(window_caption) or _caption_has_meta_impl(
@@ -28017,6 +28061,10 @@ def qwen_caption(payload: QwenCaptionRequest):
                             strict=True,
                             minimal_edit=True,
                             source_output=qwen_text,
+                            authoritative_counts_note_override=_format_authoritative_counts_note(
+                                window_counts,
+                                window_glossary_map,
+                            ),
                         )
                         cleanup_count += 1
                     count_conflicts = (
@@ -28027,6 +28075,20 @@ def qwen_caption(payload: QwenCaptionRequest):
                         )
                         if include_counts
                         else []
+                    )
+                    count_issues = sorted(
+                        set(
+                            count_conflicts
+                            + (
+                                _caption_missing_exact_counts_impl(
+                                    window_caption,
+                                    window_counts,
+                                    window_glossary_map,
+                                )
+                                if include_counts
+                                else []
+                            )
+                        )
                     )
                     needs_refine, missing = _caption_needs_refine_impl(
                         window_caption,
@@ -28039,7 +28101,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         refine_model = caption_refinement_model_id
                         missing_display = _format_refine_labels(missing, window_glossary_map)
                         count_conflict_note = _format_count_conflict_note(
-                            count_conflicts,
+                            count_issues,
                             window_counts,
                             window_glossary_map,
                         )
@@ -28148,7 +28210,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         window_lines.append(
                             "Now write the full-image caption at the requested length. Use the close-up observations only for the most important visible details. "
                             "Mention only central labeled object types, and summarize repetitive objects instead of listing them. "
-                            "Do not mention labels, hints, counts, or coordinates."
+                            "Do not mention labels, hints, coordinates, or that counts were provided."
                         )
                         window_lines.append(
                             "If window observations conflict, trust the full image and the authoritative counts. Avoid self-contradictions."
@@ -28169,7 +28231,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         "Now describe the full image in detail. Use all labeled object counts and the close-up observations. "
                         "Mention every class that appears in the hints, and summarize repetitive objects (e.g., many cars as a parking lot) "
                         "unless only a few are present or a specific action stands out. "
-                        "Do not mention labels, hints, counts, or coordinates."
+                        "Do not mention labels, hints, coordinates, or that counts were provided."
                     )
                     window_lines.append(
                         "If window observations conflict, trust the full image and the authoritative counts. Avoid self-contradictions."
@@ -28211,7 +28273,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
             draft_prompt = (
                 "Step 1: Look at the image and form a draft caption.\n"
-                f"{caption_user_request_note}"
+                f"{prompt_text}\n"
                 "Respond with: DRAFT: <caption>"
             )
             draft_system = f"{system_prompt} Return only a line starting with 'DRAFT:'."
@@ -28498,6 +28560,16 @@ def qwen_caption(payload: QwenCaptionRequest):
             if include_counts
             else []
         )
+        count_issues = sorted(
+            set(
+                count_conflicts
+                + (
+                    _caption_missing_exact_counts_impl(caption_text, counts, glossary_map)
+                    if include_counts
+                    else []
+                )
+            )
+        )
         needs_refine, missing = _caption_needs_refine_impl(
             caption_text,
             counts,
@@ -28509,7 +28581,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             refine_model = caption_refinement_model_id
             missing_display = _format_refine_labels(missing, glossary_map)
             count_conflict_note = _format_count_conflict_note(
-                count_conflicts,
+                count_issues,
                 counts,
                 glossary_map,
             )

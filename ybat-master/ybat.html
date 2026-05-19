@@ -321,6 +321,39 @@
                                         <textarea id="qwenCaptionSystemPrompt" rows="5"></textarea>
                                         <div class="training-help">This instruction is sent as the system prompt for captioning. It controls output style and stopping behavior before the image-specific hint and label context are added.</div>
                                     </details>
+                                    <details class="qwen-caption-prompt qwen-caption-prompt-stack">
+                                        <summary>Caption prompt stack</summary>
+                                        <div class="qwen-caption-prompt-stack__list">
+                                            <details>
+                                                <summary>User request prompt</summary>
+                                                <pre id="qwenCaptionPromptPreviewUser"></pre>
+                                            </details>
+                                            <details>
+                                                <summary>System prompt</summary>
+                                                <pre id="qwenCaptionPromptPreviewSystem"></pre>
+                                            </details>
+                                            <details>
+                                                <summary>Detection context prompt</summary>
+                                                <pre id="qwenCaptionPromptPreviewContext"></pre>
+                                            </details>
+                                            <details>
+                                                <summary>Window prompt</summary>
+                                                <pre id="qwenCaptionPromptPreviewWindow"></pre>
+                                            </details>
+                                            <details>
+                                                <summary>Draft + refine prompts</summary>
+                                                <pre id="qwenCaptionPromptPreviewDraftRefine"></pre>
+                                            </details>
+                                            <details>
+                                                <summary>Window merge prompt</summary>
+                                                <pre id="qwenCaptionPromptPreviewMerge"></pre>
+                                            </details>
+                                            <details>
+                                                <summary>Cleanup + guard prompts</summary>
+                                                <pre id="qwenCaptionPromptPreviewCleanup"></pre>
+                                            </details>
+                                        </div>
+                                    </details>
                                     <div class="qwen-caption-grid">
                                         <div>
                                             <label for="qwenCaptionMode">Caption detail<span class="help-icon" title="Full image uses one composition pass. Detailed/windowed captions overlapping tiles first, then runs a separate window merge pass to fold those sub-captions into the final caption.">?</span></label>

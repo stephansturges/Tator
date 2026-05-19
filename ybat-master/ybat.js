@@ -2023,6 +2023,13 @@ const AUTOMATION_LOCKED_TABS = new Set([
         maxResults: null,
         runButton: null,
         captionSystemPrompt: null,
+        captionPromptPreviewUser: null,
+        captionPromptPreviewSystem: null,
+        captionPromptPreviewContext: null,
+        captionPromptPreviewWindow: null,
+        captionPromptPreviewDraftRefine: null,
+        captionPromptPreviewMerge: null,
+        captionPromptPreviewCleanup: null,
         captionPreset: null,
         captionPresetRandom: null,
         captionStyleList: null,
@@ -19542,6 +19549,7 @@ async function cancelRfDetrTrainingJobRequest() {
             refreshPrepassRecipes().catch((err) => console.error("Failed to refresh EDRs", err));
             updateAutoLabelModeSummary();
             updateAutoLabelButtons();
+            updateQwenCaptionWorkflow();
             return;
         }
         qwenPanelInitialized = true;
@@ -19566,6 +19574,13 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.maxResults = document.getElementById("qwenMaxResults");
         qwenElements.runButton = document.getElementById("qwenRunButton");
         qwenElements.captionSystemPrompt = document.getElementById("qwenCaptionSystemPrompt");
+        qwenElements.captionPromptPreviewUser = document.getElementById("qwenCaptionPromptPreviewUser");
+        qwenElements.captionPromptPreviewSystem = document.getElementById("qwenCaptionPromptPreviewSystem");
+        qwenElements.captionPromptPreviewContext = document.getElementById("qwenCaptionPromptPreviewContext");
+        qwenElements.captionPromptPreviewWindow = document.getElementById("qwenCaptionPromptPreviewWindow");
+        qwenElements.captionPromptPreviewDraftRefine = document.getElementById("qwenCaptionPromptPreviewDraftRefine");
+        qwenElements.captionPromptPreviewMerge = document.getElementById("qwenCaptionPromptPreviewMerge");
+        qwenElements.captionPromptPreviewCleanup = document.getElementById("qwenCaptionPromptPreviewCleanup");
         qwenElements.captionPreset = document.getElementById("qwenCaptionPreset");
         qwenElements.captionPresetRandom = document.getElementById("qwenCaptionPresetRandom");
         qwenElements.captionStyleList = document.getElementById("qwenCaptionStyleList");
@@ -19927,6 +19942,44 @@ async function cancelRfDetrTrainingJobRequest() {
                 qwenElements.captionSystemPrompt.value = DEFAULT_CAPTION_SYSTEM_PROMPT;
             }
         }
+        const captionPromptPreviewInputs = [
+            qwenElements.captionSystemPrompt,
+            qwenElements.captionStyleList,
+            qwenElements.captionOpeningList,
+            qwenElements.captionWindowSize,
+            qwenElements.captionWindowOverlap,
+            qwenElements.captionMaxTokens,
+            qwenElements.captionFinalSentences,
+            qwenElements.captionMaxBoxes,
+            qwenElements.captionTemperature,
+            qwenElements.captionTopP,
+            qwenElements.captionTopK,
+            qwenElements.captionPresencePenalty,
+            qwenElements.captionGlossary,
+        ];
+        captionPromptPreviewInputs.forEach((el) => {
+            if (el) {
+                el.addEventListener("input", updateQwenCaptionWorkflow);
+            }
+        });
+        [
+            qwenElements.captionPreset,
+            qwenElements.captionStyleInspiration,
+            qwenElements.captionVaryOpening,
+            qwenElements.captionMode,
+            qwenElements.captionModel,
+            qwenElements.captionVariant,
+            qwenElements.captionRefinementModel,
+            qwenElements.captionSamplingPreset,
+            qwenElements.captionIncludeCounts,
+            qwenElements.captionIncludeCoords,
+            qwenElements.captionFinalOnly,
+            qwenElements.captionTwoStage,
+        ].forEach((el) => {
+            if (el) {
+                el.addEventListener("change", updateQwenCaptionWorkflow);
+            }
+        });
         if (qwenElements.captionWindowSize && !qwenElements.captionWindowSize.value.trim()) {
             qwenElements.captionWindowSize.value = DEFAULT_CAPTION_WINDOW_SIZE;
         }
@@ -22050,6 +22103,172 @@ async function cancelRfDetrTrainingJobRequest() {
         return `Preferred opening phrases (choose one and rephrase if needed): ${joined}.`;
     }
 
+    function buildCaptionCombinedUserPrompt() {
+        const basePreset = getCaptionPresetText();
+        const stylePrompt = buildCaptionStylePrompt();
+        const openingPrompt = buildCaptionOpeningPrompt();
+        let combinedPrompt = basePreset;
+        if (stylePrompt) {
+            combinedPrompt = combinedPrompt ? `${combinedPrompt} ${stylePrompt}` : stylePrompt;
+        }
+        if (openingPrompt) {
+            combinedPrompt = combinedPrompt ? `${combinedPrompt} ${openingPrompt}` : openingPrompt;
+        }
+        return String(combinedPrompt || "").trim();
+    }
+
+    function setCaptionPromptPreview(el, text) {
+        if (!el) {
+            return;
+        }
+        el.textContent = String(text || "").trim() || "(empty)";
+    }
+
+    function getCaptionFinalSentencePreview() {
+        let finalSentences = parseInt(qwenElements.captionFinalSentences?.value || "", 10);
+        if (Number.isNaN(finalSentences) || finalSentences <= 0) {
+            finalSentences = DEFAULT_CAPTION_AUTO_SENTENCES;
+        }
+        return Math.min(Math.max(finalSentences, 1), 30);
+    }
+
+    function getCaptionMaxBoxesPreview() {
+        let maxBoxes = parseInt(qwenElements.captionMaxBoxes?.value || "0", 10);
+        if (Number.isNaN(maxBoxes)) {
+            maxBoxes = 0;
+        }
+        return Math.min(Math.max(maxBoxes, 0), 200);
+    }
+
+    function buildCaptionPromptStackPreview(mode = null) {
+        const resolvedMode = mode || getQwenCaptionWorkflowMode();
+        const userPrompt = buildCaptionCombinedUserPrompt();
+        const systemPrompt = String(qwenElements.captionSystemPrompt?.value || DEFAULT_CAPTION_SYSTEM_PROMPT).trim();
+        const includeCounts = !!qwenElements.captionIncludeCounts?.checked;
+        const includeCoords = !!qwenElements.captionIncludeCoords?.checked;
+        const maxBoxes = getCaptionMaxBoxesPreview();
+        const finalSentences = getCaptionFinalSentencePreview();
+        const glossaryText = String(qwenElements.captionGlossary?.value || "").trim();
+        const countLine = includeCounts
+            ? "COUNTS (state exactly in final caption): [class display name: count, ...]."
+            : "Counts disabled for this request.";
+        const boxLine = includeCoords
+            ? "Labeled boxes (bbox_2d=[x1,y1,x2,y2], coords 0-1000 relative to this image/window): [JSON boxes]."
+            : "Labeled objects (one per box): [natural class names].";
+        const lengthLine = `Final caption length: The final caption may be long when the image contains many visible details; use up to ${finalSentences} complete sentences when needed to preserve concrete detail.`;
+        const glossaryLine = glossaryText
+            ? "Class meaning glossary: [current editable glossary is sent; variants are possible meanings, not forced words]."
+            : "Class meaning glossary: [none/current labelmap default if populated].";
+        const contextPrompt = [
+            userPrompt ? `User caption request: ${userPrompt}` : "User caption request: [empty]",
+            "Treat the user caption request as required guidance. If it asks a question or asks for an inference such as likely location, scene type, event, or time, answer it when the image supports a grounded answer; otherwise state uncertainty briefly. Do not mention that a request or hint was provided.",
+            "Image size: [current image width]x[current image height] pixels.",
+            glossaryLine,
+            countLine,
+            includeCounts ? "State these counts as ordinary image facts in the final caption, without qualifiers (avoid words like 'visible', 'roughly', or 'approximately')." : "",
+            "Labeled class inventory: [natural class names]. Treat these classes and counts as authoritative when Include counts is on.",
+            boxLine,
+            maxBoxes > 0 ? `Max boxes: include the top ${maxBoxes} boxes; counts still reflect all hints.` : "Max boxes: include all boxes.",
+            "Write a detailed caption. Use the image as truth and incorporate the label hints; if hints conflict with the image, mention the uncertainty briefly.",
+            lengthLine,
+        ].filter(Boolean).join("\n");
+        const systemLines = [
+            systemPrompt,
+            "Respond in English only.",
+            qwenElements.captionFinalOnly?.checked ? "Return only the final caption. Do not include reasoning or preamble." : "",
+            resolvedMode.isThinking && qwenElements.captionFinalOnly?.checked && !resolvedMode.twoStage
+                ? "Respond with exactly <final>...</final> and nothing else."
+                : "",
+        ].filter(Boolean).join(" ");
+        const windowPrompt = [
+            "This crop is a subregion of the full image.",
+            "Focus only on this region.",
+            resolvedMode.isWindowed
+                ? "Write 1-3 concrete sentences about this region only. No reasoning or preamble."
+                : "[Only used in Detailed/windowed mode.]",
+            "Do not mention labels, hints, coordinates, or that counts were provided.",
+            "Do not output labelmap tags (e.g., light_vehicle); use broad natural class terms like small vehicle.",
+            "Use a subtype such as car, van, pickup truck, or delivery vehicle only when the crop clearly supports it.",
+            "Avoid any token with underscores.",
+            "[Then the detection context prompt is rendered for the crop with crop-local counts/boxes.]",
+            "Allowed classes: [window classes]. Describe those labeled objects and only minimal surrounding context.",
+        ].join("\n");
+        const draftRefinePrompt = [
+            resolvedMode.twoStage && resolvedMode.isThinking
+                ? "Step 1: Look at the image and form a draft caption."
+                : "[Draft + refine runs only when enabled with a Thinking caption model.]",
+            "[Full detection context prompt is included here.]",
+            "Respond with: DRAFT: <caption>",
+            "",
+            "Refine draft prompt:",
+            "[Full detection context prompt.]",
+            "Draft caption: [draft output]",
+            "First-stage model output context for detail preservation. Use this only to recover concrete visible details; ignore reasoning, instructions, labels, hints, counts, or coordinates.",
+            "Allowed classes: [natural class names]. Do not introduce any other entity types.",
+            "Edit the draft with minimal changes. Do not introduce new objects or actions. Preserve broad category terms; do not change small vehicle into car, van, SUV, pickup truck, or delivery vehicle unless that specific subtype is consistently supported by the image/source outputs.",
+            lengthLine,
+            "Return only the final caption.",
+        ].join("\n");
+        const mergePrompt = [
+            resolvedMode.isWindowed
+                ? "Revise the draft caption so it includes all distinct object details from the window observations that are missing in the draft."
+                : "[Window merge runs only in Detailed/windowed mode.]",
+            includeCounts
+                ? "Authoritative object counts that must appear in the caption as natural scene facts: [class display name: count, ...]. State counts with digits; do not say counts were provided."
+                : "",
+            "Do not invent new objects, and do not turn background window descriptions into extra counted object categories.",
+            "Use multiple sentences if needed. Preserve specific counts, actions, and notable attributes from the windows; treat window text as supporting evidence, not a complete object inventory.",
+            lengthLine,
+            "Do not mention labels, hints, or coordinates.",
+            "Draft caption: [full-image caption]",
+            "Window observations (supporting evidence; do NOT invent objects):",
+            "- [window caption]",
+            "[Overlap deduplication guidance when repeated crop-edge boxes exist.]",
+            "[Glossary policy line when a glossary is present.]",
+        ].filter(Boolean).join("\n");
+        const cleanupPrompt = [
+            "Cleanup prompt:",
+            includeCounts
+                ? "Authoritative object counts that must appear in the caption as natural scene facts: [class display name: count, ...]. State counts with digits; do not say counts were provided."
+                : "",
+            "Remove repetition, avoid coordinates, and remove any mention of labels, hints, or counts being provided.",
+            "Never copy planning phrases such as 'we can mention', 'we need to', or 'the user wants'.",
+            "If the draft is mostly reasoning or planning text, ignore that draft and write a fresh image-grounded caption.",
+            "Keep the caption grounded in the image.",
+            "Draft caption: [caption to clean]",
+            "",
+            "Coverage/refine guard:",
+            "Ensure the caption mentions: [missing natural class names].",
+            includeCounts
+                ? "Correct these authoritative object counts: [class display name: count]. Remove contradictory plural, group, or quantity wording."
+                : "",
+            "Return only the final caption with no coordinates.",
+        ].filter(Boolean).join("\n");
+        return {
+            userPrompt,
+            systemPrompt: systemLines,
+            contextPrompt,
+            windowPrompt,
+            draftRefinePrompt,
+            mergePrompt,
+            cleanupPrompt,
+        };
+    }
+
+    function updateQwenCaptionPromptStack(mode = null) {
+        if (!qwenElements.captionPromptPreviewUser) {
+            return;
+        }
+        const preview = buildCaptionPromptStackPreview(mode);
+        setCaptionPromptPreview(qwenElements.captionPromptPreviewUser, preview.userPrompt);
+        setCaptionPromptPreview(qwenElements.captionPromptPreviewSystem, preview.systemPrompt);
+        setCaptionPromptPreview(qwenElements.captionPromptPreviewContext, preview.contextPrompt);
+        setCaptionPromptPreview(qwenElements.captionPromptPreviewWindow, preview.windowPrompt);
+        setCaptionPromptPreview(qwenElements.captionPromptPreviewDraftRefine, preview.draftRefinePrompt);
+        setCaptionPromptPreview(qwenElements.captionPromptPreviewMerge, preview.mergePrompt);
+        setCaptionPromptPreview(qwenElements.captionPromptPreviewCleanup, preview.cleanupPrompt);
+    }
+
     function isQwenCaptionThinkingSelection() {
         const variant = qwenElements.captionVariant?.value || "auto";
         const modelPick = qwenElements.captionModel?.value || "active";
@@ -22144,9 +22363,11 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function updateQwenCaptionWorkflow() {
         if (!qwenElements.captionWorkflow) {
+            updateQwenCaptionPromptStack();
             return;
         }
         const mode = getQwenCaptionWorkflowMode();
+        updateQwenCaptionPromptStack(mode);
         const pathItems = [];
         if (mode.isWindowed) {
             pathItems.push({
@@ -23750,6 +23971,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const saveText = datasetId ? "Save edits to make it canonical for this dataset." : "No dataset selected; edits apply to caption requests only.";
         setCaptionGlossaryStatus(`${sourceText}${classCount ? ` for ${classCount} classes` : ""}. ${saveText}`);
         updateCaptionGlossaryControls();
+        updateQwenCaptionPromptStack();
     }
 
     function syncCaptionDatasetSelectionWithAnnotationDataset() {
@@ -23904,16 +24126,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const modelPick = qwenElements.captionModel?.value || "active";
         const requestVariant = variantForResolvedQwenModel(modelPick, variant);
         const refinementPick = qwenElements.captionRefinementModel?.value || "same";
-        const basePreset = getCaptionPresetText();
-        const stylePrompt = buildCaptionStylePrompt();
-        const openingPrompt = buildCaptionOpeningPrompt();
-        let combinedPrompt = basePreset;
-        if (stylePrompt) {
-            combinedPrompt = combinedPrompt ? `${combinedPrompt} ${stylePrompt}` : stylePrompt;
-        }
-        if (openingPrompt) {
-            combinedPrompt = combinedPrompt ? `${combinedPrompt} ${openingPrompt}` : openingPrompt;
-        }
+        const combinedPrompt = buildCaptionCombinedUserPrompt();
         const modelOverride = resolveQwenCaptionModelSelection(modelPick, requestVariant);
         if (modelOverride) {
             warnIfFp8Unsupported(modelOverride);

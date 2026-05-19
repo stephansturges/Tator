@@ -15,6 +15,7 @@ from services.qwen import (
     _caption_has_meta,
     _caption_needs_english_rewrite,
     _caption_needs_completion,
+    _caption_missing_exact_counts,
     _caption_needs_refine,
     _caption_repetition_loop_detected,
     _caption_trim_to_complete_sentences,
@@ -59,7 +60,7 @@ def test_build_qwen_caption_prompt_counts_and_truncation():
         detailed_mode=False,
         restrict_to_labels=True,
     )
-    assert "COUNTS (use exactly)" in prompt
+    assert "COUNTS (state exactly in final caption)" in prompt
     assert "User caption request: Test prompt" in prompt
     assert "Treat the user caption request as required guidance" in prompt
     assert "Labeled class inventory" in prompt
@@ -136,6 +137,30 @@ def test_caption_count_conflicts_catch_pluralized_singletons_with_glossary_terms
         )
         == []
     )
+
+
+def test_caption_missing_exact_counts_requires_numeric_count_for_multiple_objects():
+    glossary = {"LightVehicle": ["small vehicle", "car", "van", "SUV"]}
+
+    assert _caption_missing_exact_counts(
+        "Several small vehicles are parked along the street.",
+        {"LightVehicle": 251},
+        glossary,
+    ) == ["LightVehicle"]
+    assert _caption_missing_exact_counts(
+        "There are 251 small vehicles parked along the street.",
+        {"LightVehicle": 251},
+        glossary,
+    ) == []
+    needs_refine, missing = _caption_needs_refine(
+        "Several small vehicles are parked along the street.",
+        {"LightVehicle": 251},
+        detailed_mode=False,
+        include_counts=True,
+        glossary_map=glossary,
+    )
+    assert needs_refine is True
+    assert missing == ["LightVehicle"]
 
 
 def test_caption_english_rewrite_ignores_ascii_equivalent_punctuation():
@@ -276,7 +301,7 @@ def test_caption_prompt_uses_glossary_as_semantic_class_meaning():
     assert 'gas_tank: broad term "storage tank"' in prompt
     assert "Glossary variants are possible members of a class, not assertions" in prompt
     assert "Do not choose a subtype from the glossary unless the image clearly supports that subtype" in prompt
-    assert "COUNTS (use exactly): small vehicle: 1, storage tank: 1" in prompt
+    assert "COUNTS (state exactly in final caption): small vehicle: 1, storage tank: 1" in prompt
     assert '"label":"small vehicle"' in prompt
     assert '"label":"storage tank"' in prompt
 
@@ -687,6 +712,10 @@ def test_caption_merge_uses_refinement_model_override():
             "near the center should be merged into one object."
         ),
         source_outputs=[("Full-image raw output", "Smoke rises near scattered wreckage.")],
+        authoritative_counts_note=(
+            "Authoritative object counts that must appear in the caption as natural scene facts: "
+            "small vehicle: 251."
+        ),
         chat_template_kwargs={"enable_thinking": False},
         run_qwen_inference_fn=run_qwen_inference_fn,
         resolve_variant_fn=lambda _base, _variant: "Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -702,6 +731,7 @@ def test_caption_merge_uses_refinement_model_override():
     assert "User caption request: Can we infer the likely location of this scene?" in calls["prompt"]
     assert "repeated crop-edge descriptions of a car" in calls["prompt"]
     assert "Smoke rises near scattered wreckage." in calls["prompt"]
+    assert "small vehicle: 251" in calls["prompt"]
     assert "preserve broad category terms" in calls["prompt"]
     assert "do not change small vehicle into car" in calls["prompt"]
 
@@ -720,6 +750,10 @@ def test_caption_cleanup_forwards_no_thinking_template_kwargs():
         max_new_tokens=64,
         base_model_id="Qwen/Qwen3-VL-30B-A3B-Thinking",
         use_caption_cache=True,
+        authoritative_counts_note=(
+            "Authoritative object counts that must appear in the caption as natural scene facts: "
+            "person: 2."
+        ),
         chat_template_kwargs={"enable_thinking": False},
         run_qwen_inference_fn=run_qwen_inference_fn,
         resolve_variant_fn=lambda _base, _variant: "Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -729,6 +763,7 @@ def test_caption_cleanup_forwards_no_thinking_template_kwargs():
 
     assert caption == "A tank burns in a muddy field."
     assert calls["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "person: 2" in calls["prompt"]
     assert "preserve broad category terms" in calls["prompt"]
 
 

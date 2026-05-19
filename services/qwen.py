@@ -345,9 +345,10 @@ def _build_qwen_caption_prompt(
             f"{_caption_preferred_label(label, glossary_map)}: {count}" for label, count in counts.items()
         )
         if restrict_to_labels:
-            lines.append(f"COUNTS (use exactly): {counts_text}.")
+            lines.append(f"COUNTS (state exactly in final caption): {counts_text}.")
             lines.append(
-                "State these counts without qualifiers (avoid words like 'visible', 'roughly', or 'approximately')."
+                "State these counts as ordinary image facts in the final caption, without qualifiers "
+                "(avoid words like 'visible', 'roughly', or 'approximately')."
             )
         else:
             lines.append(f"COUNTS (use as hints; may be incomplete): {counts_text}.")
@@ -623,6 +624,10 @@ def _caption_term_pattern(term: str) -> str:
     return r"\s+".join(re.escape(part) for part in _collapse_whitespace(term).split())
 
 
+def _caption_count_number_pattern(count: int) -> str:
+    return re.escape(str(count))
+
+
 def _caption_term_present(text: str, term: str) -> bool:
     text = str(text or "")
     term = _collapse_whitespace(str(term or "").strip()).lower()
@@ -805,6 +810,55 @@ def _caption_count_conflicts(
     return conflicts
 
 
+def _caption_missing_exact_counts(
+    text: str,
+    counts: Dict[str, int],
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+) -> List[str]:
+    if not text or not counts:
+        return []
+    missing: List[str] = []
+    for label, count in counts.items():
+        try:
+            count_int = int(count)
+        except (TypeError, ValueError):
+            continue
+        if count_int <= 1:
+            continue
+        number_pattern = _caption_count_number_pattern(count_int)
+        if not number_pattern:
+            continue
+        exact_present = False
+        for term in _caption_label_terms(label, glossary_map):
+            term_patterns = [
+                _caption_term_pattern(variant)
+                for variant in _caption_plural_variants(term)
+                if variant
+            ]
+            if not term_patterns:
+                continue
+            term_pattern = "|".join(term_patterns)
+            if re.search(
+                rf"\b(?:a\s+total\s+of\s+|total\s+of\s+|exactly\s+)?(?:{number_pattern})\s+"
+                rf"(?:[\w'-]+\s+){{0,4}}(?:{term_pattern})\b",
+                text,
+                flags=re.IGNORECASE,
+            ):
+                exact_present = True
+                break
+            if re.search(
+                rf"\b(?:{term_pattern})\s+(?:[\w'-]+\s+){{0,6}}"
+                rf"(?:total|in\s+total|overall|altogether)\s+(?:is|are|of\s+)?(?:{number_pattern})\b",
+                text,
+                flags=re.IGNORECASE,
+            ):
+                exact_present = True
+                break
+        if not exact_present:
+            missing.append(label)
+    return missing
+
+
 def _caption_missing_labels(
     text: str,
     counts: Dict[str, int],
@@ -836,8 +890,11 @@ def _caption_needs_refine(
         return True, []
     missing = _caption_missing_labels(caption, counts, glossary_map) if include_counts else []
     count_conflicts = _caption_count_conflicts(caption, counts, glossary_map) if include_counts else []
-    if missing or count_conflicts:
-        return True, sorted(set(missing + count_conflicts))
+    missing_exact_counts = (
+        _caption_missing_exact_counts(caption, counts, glossary_map) if include_counts else []
+    )
+    if missing or count_conflicts or missing_exact_counts:
+        return True, sorted(set(missing + count_conflicts + missing_exact_counts))
     if _caption_starts_generic(caption) and detailed_mode:
         return True, []
     return False, []
@@ -1234,6 +1291,7 @@ def _run_qwen_caption_cleanup(
     user_prompt: Optional[str] = None,
     source_output: Optional[str] = None,
     source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
+    authoritative_counts_note: Optional[str] = None,
     chat_template_kwargs: Optional[Dict[str, Any]] = None,
     run_qwen_inference_fn: Callable[..., Tuple[str, Any, Any]],
     resolve_variant_fn: Callable[[str, str], str],
@@ -1263,6 +1321,7 @@ def _run_qwen_caption_cleanup(
     cleanup_prompt = (
         f"{strict_note}{allowed_note}{minimal_note}"
         f"{user_request_note}"
+        f"{_collapse_whitespace(authoritative_counts_note or '') + ' ' if authoritative_counts_note else ''}"
         "Remove repetition, avoid coordinates, and remove any mention of labels, hints, or counts being provided. "
         "Never copy planning phrases such as 'we can mention', 'we need to', or 'the user wants'. "
         f"{_CAPTION_EDITOR_PRESERVE_BROAD_TERMS} "
@@ -1314,6 +1373,7 @@ def _run_qwen_caption_merge(
     user_prompt: Optional[str] = None,
     overlap_guidance: Optional[str] = None,
     source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
+    authoritative_counts_note: Optional[str] = None,
     chat_template_kwargs: Optional[Dict[str, Any]] = None,
     run_qwen_inference_fn: Callable[..., Tuple[str, Any, Any]],
     resolve_variant_fn: Callable[[str, str], str],
@@ -1343,6 +1403,7 @@ def _run_qwen_caption_merge(
     )
     merge_prompt = (
         f"{user_request_note}"
+        f"{_collapse_whitespace(authoritative_counts_note or '') + ' ' if authoritative_counts_note else ''}"
         "Revise the draft caption so it includes all distinct object details "
         "from the window observations that are missing in the draft. "
         "Do not invent new objects, and do not turn background window descriptions into extra counted object categories. "

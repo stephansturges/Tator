@@ -191,6 +191,69 @@ Model access, memory requirements, and device support still depend on your
 machine and Hugging Face cache/authentication. Large Thinking and MoE models can
 be listed in the UI even when the local hardware cannot comfortably run them.
 
+<details>
+<summary>Detection-informed captioning</summary>
+
+Detection-informed captioning is Tator's captioning mode for dataset extension
+work. A normal VLM caption can be fluent while still missing the objects that
+matter to a specific dataset. Tator instead uses detector and annotation output
+as priors, then asks Qwen to describe the image while keeping those salient
+objects in view.
+
+The detections are not pasted in as final prose. They are converted into a
+structured captioning context:
+
+- class names are normalized through the active dataset glossary so project
+  labels become broad natural terms, such as "small vehicle" or "storage tank";
+- class counts can be supplied as authoritative inventory when the user wants
+  the caption to retain every detected class;
+- box coordinates can be supplied when spatial grounding is useful, but the
+  model is told not to mention coordinates or that hints were provided;
+- `max boxes` limits how many boxes are sent when the detection set is large;
+- overlapping window crops receive clipped local boxes, while backend source
+  identity is used only for deduplication guidance and is never exposed as bbox
+  IDs in prompts or final captions;
+- the labelmap glossary explains what a class can mean, without forcing the
+  model to pick an unsupported subtype from the glossary.
+
+The captioning workflow has several variants:
+
+- **Full-image captioning** sends the whole image plus optional detection
+  priors to Qwen and asks for a final caption in one pass.
+- **Windowed captioning** first looks at crop windows, then merges those local
+  observations into a full-image caption. When label hints are present, the
+  default is to focus on windows that intersect labeled objects; empty windows
+  are only used as broad scene context when explicitly enabled.
+- **Two-stage refine** lets Thinking models produce a draft and then uses an
+  editor pass to turn that draft into a cleaner final caption. This is separate
+  from the window merge pass.
+- **Refinement model selection** can use the same model as captioning or a
+  separate model, which is useful when a Thinking model sees details well but
+  an Instruct model is better at producing clean final prose.
+- **Final length controls** let the operator choose whether the final caption
+  should be short or allowed to preserve many sentences of detail for large,
+  dense images.
+
+After generation, Tator checks and repairs the caption before returning it:
+
+- repeated loops, meta text, reasoning leakage, and incomplete endings are
+  removed or sent through cleanup passes;
+- missing detected classes and count conflicts can trigger a coverage refine;
+- non-English rewrite is reserved for real non-Latin script output rather than
+  harmless punctuation differences;
+- window observations are treated as supporting evidence, not a separate object
+  inventory;
+- a final glossary stabilizer demotes unstable subtypes back to broad class
+  terms when windows, drafts, or cleanup passes disagree.
+
+The goal is a caption that remains grounded in the image while retaining the
+objects the dataset actually cares about. Detection gives Qwen a map of what is
+salient; Qwen then describes those objects in natural language, adds visual
+context where it can, and avoids drifting into generic captions that are fluent
+but unhelpful for the dataset.
+
+</details>
+
 ## Update Tracking
 
 ### 2026-05-19: Qwen captioning and glossary stabilization

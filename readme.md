@@ -191,6 +191,55 @@ Model access, memory requirements, and device support still depend on your
 machine and Hugging Face cache/authentication. Large Thinking and MoE models can
 be listed in the UI even when the local hardware cannot comfortably run them.
 
+## Update Tracking
+
+### 2026-05-19: Qwen captioning and glossary stabilization
+
+This checkpoint focuses on making Qwen captions more inspectable, more
+dataset-aware, and less likely to turn label glossary examples into unsupported
+object claims.
+
+- Added editable caption glossaries to the labeling flow. The frontend now
+  populates glossary defaults from the active dataset labelmap, keeps them
+  editable in the Qwen caption panel, and sends the normalized glossary with
+  caption requests.
+- Tightened glossary semantics in the caption prompts. Glossary entries are
+  now framed as broad class meanings plus possible variants, not as a list of
+  words the model should force into the caption. For example, `LightVehicle`
+  should normally become a broad term such as "small vehicle" unless the image
+  clearly supports a subtype.
+- Changed windowed captioning defaults so labeled runs focus on windows that
+  intersect label hints instead of captioning every crop by default. Empty
+  windows can still be enabled explicitly, but they are treated as broad scene
+  context rather than as an object inventory.
+- Added overlap and deduplication guidance for windowed captions. Boxes that
+  cross overlapping crops are clipped into each local crop, keep internal
+  source identity for backend grouping, and are described to the model without
+  exposing bbox IDs in prompts or outputs.
+- Split the caption workflow explanation in the UI so users can distinguish
+  full-image draft/refine passes, window observations, window merge, quality
+  guards, model selection, decode mode, and max-token behavior.
+- Improved progress visibility for Qwen generation. Caption runs report the
+  active step, model, token progress, live generated text, and active crop
+  overlay so long downloads or multi-window runs are not silent.
+- Added deterministic post-processing guards for repeated, incomplete,
+  meta-text, count-conflicting, and non-English outputs. The English rewrite
+  guard now only fires for non-Latin script text, not normal punctuation such
+  as non-breaking hyphens.
+- Added a final glossary subtype stabilizer. If the draft and windows disagree
+  between a broad term and a subtype, the final caption is demoted back to the
+  broad term instead of letting a later cleanup pass invent specificity such as
+  "pickup truck".
+- Updated the Qwen caption UI defaults to prefer broad natural class terms, and
+  to auto-upgrade the previous default system prompt when the user has not
+  customized it. Already-open browser tabs should be hard-reloaded once to pick
+  up the new static JavaScript defaults.
+- Validation for this checkpoint used:
+  `python -m py_compile localinferenceapi.py services/qwen.py utils/glossary.py models/schemas.py api/qwen_caption.py`,
+  `node --check ybat-master/ybat.js`, `git diff --check`, and
+  `pytest tests/test_qwen_caption_prompt.py tests/test_qwen_progress.py tests/test_qwen_mlx_runtime.py tests/test_dataset_linked_annotation_flows.py -q`
+  with 81 passing tests.
+
 ## Training and Model Management
 
 Tator keeps helper models close to the annotation workflow:

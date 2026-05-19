@@ -294,10 +294,18 @@
                                         <button type="button" id="qwenCaptionDatasetRefresh" class="training-button secondary">Refresh</button>
                                     </div>
                                     <div id="qwenCaptionDatasetSummary" class="training-help"></div>
+                                    <details class="qwen-caption-prompt qwen-caption-glossary" open>
+                                        <summary>Caption glossary<span class="help-icon" title="Maps labelmap class names to broad visual meanings for captioning. The model uses this to interpret labels, not as text to copy verbatim.">?</span></summary>
+                                        <div class="qwen-caption-row">
+                                            <button type="button" id="qwenCaptionGlossaryReset" class="training-button secondary">Reset from classes</button>
+                                            <button type="button" id="qwenCaptionGlossarySave" class="training-button secondary">Save to dataset</button>
+                                        </div>
+                                        <textarea id="qwenCaptionGlossary" rows="5" placeholder='{"light_vehicle": ["small vehicle", "car", "van", "pickup truck", "tuk-tuk"], "gas_tank": ["storage tank", "fuel tank", "water tank", "silo"]}'></textarea>
+                                        <div id="qwenCaptionGlossaryStatus" class="training-help"></div>
+                                    </details>
                                     <label for="qwenCaptionPreset">Caption style</label>
                                     <div class="qwen-caption-row">
                                         <select id="qwenCaptionPreset"></select>
-                                        <button type="button" id="qwenCaptionPresetApply" class="training-button secondary">Use</button>
                                         <button type="button" id="qwenCaptionPresetRandom" class="training-button secondary">Random</button>
                                     </div>
                                     <label for="qwenCaptionStyleList">Style prompts (one per line)</label>
@@ -308,8 +316,6 @@
                                         <label><input type="checkbox" id="qwenCaptionStyleInspiration" checked /> Use as inspiration (don’t force exact wording)</label>
                                         <label><input type="checkbox" id="qwenCaptionVaryOpening" checked /> Use opening inspirations</label>
                                     </div>
-                                    <label for="qwenCaptionHint">Caption hint (optional)</label>
-                                    <textarea id="qwenCaptionHint" rows="2" placeholder="e.g., drone footage at dusk"></textarea>
                                     <details class="qwen-caption-prompt">
                                         <summary>Caption system prompt</summary>
                                         <textarea id="qwenCaptionSystemPrompt" rows="5"></textarea>
@@ -378,7 +384,7 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label for="qwenCaptionMaxTokens">Max tokens</label>
+                                            <label for="qwenCaptionMaxTokens">Max output tokens<span class="help-icon" title="Upper cap on generated tokens for each Qwen captioning model call: full-image caption, window captions, draft/refine, merge, and cleanup passes. This does not limit prompt/input tokens, and it is separate from Final sentences. Increase it if a model response is being cut off.">?</span></label>
                                             <input type="number" id="qwenCaptionMaxTokens" min="32" max="2000" value="1000" />
                                         </div>
                                         <div>
@@ -386,7 +392,7 @@
                                             <input type="number" id="qwenCaptionFinalSentences" min="1" max="30" placeholder="Auto (10)" />
                                         </div>
                                         <div>
-                                            <label for="qwenCaptionMaxBoxes">Max boxes (0 = all)<span class="help-icon" title="How many labeled boxes to include in the prompt. Use 0 to include all hints (can be long).">?</span></label>
+                                            <label for="qwenCaptionMaxBoxes">Max boxes (0 = all)<span class="help-icon" title="How many labeled boxes to include in each caption prompt. In detailed/windowed mode this limit applies per crop after selecting boxes that overlap that crop; box coordinates are clipped and translated into crop-local coordinates. Use 0 to include all hints.">?</span></label>
                                             <input type="number" id="qwenCaptionMaxBoxes" min="0" max="200" value="0" />
                                         </div>
                                         <div>
@@ -808,7 +814,7 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label for="qwenAgentCaptionMaxTokens">Caption max tokens</label>
+                                            <label for="qwenAgentCaptionMaxTokens">Caption max tokens<span class="help-icon" title="Generated-token cap for each Qwen caption call inside the annotation assistant/prepass workflow. This does not limit prompt/input tokens or detector outputs.">?</span></label>
                                             <input type="number" id="qwenAgentCaptionMaxTokens" min="32" max="512" value="128" />
                                         </div>
                                     </div>

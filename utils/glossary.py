@@ -27,9 +27,14 @@ _DEFAULT_GLOSSARY_MAP: Dict[str, List[str]] = {
         "heavy machinery",
     ],
     "gastank": [
-        "silos",
-        "tank",
         "storage tank",
+        "fuel tank",
+        "water tank",
+        "industrial tank",
+        "gas tank",
+        "tank",
+        "silo",
+        "silos",
         "barrel",
         "pressure vessel",
         "oil silo",
@@ -37,13 +42,16 @@ _DEFAULT_GLOSSARY_MAP: Dict[str, List[str]] = {
         "oil tank",
     ],
     "light_vehicle": [
-        "car",
+        "small vehicle",
         "light vehicle",
-        "light_vehicle",
+        "car",
+        "van",
         "pickup truck",
+        "personal pickup truck",
+        "tuk-tuk",
         "sedan",
         "suv",
-        "van",
+        "jeep",
         "4x4",
         "family car",
         "passenger vehicle",
@@ -74,13 +82,13 @@ _DEFAULT_GLOSSARY_MAP: Dict[str, List[str]] = {
         "semi-trailer truck",
     ],
     "utility_pole": [
-        "antenna",
-        "pole",
         "utility pole",
+        "pole",
+        "streetlight",
+        "antenna",
         "utility_pole",
         "street fixture",
         "drying rack",
-        "streetlight",
         "street lamp",
         "electricity pylon",
         "power pylon",
@@ -95,6 +103,8 @@ _DEFAULT_GLOSSARY_MAP: Dict[str, List[str]] = {
         "light fixture",
     ],
 }
+_DEFAULT_GLOSSARY_MAP["lightvehicle"] = _DEFAULT_GLOSSARY_MAP["light_vehicle"]
+_DEFAULT_GLOSSARY_MAP["upole"] = _DEFAULT_GLOSSARY_MAP["utility_pole"]
 
 
 def _glossary_label_key(label: str) -> str:
@@ -289,12 +299,21 @@ def _dedupe_synonyms(terms: Sequence[str]) -> List[str]:
 def _default_agent_glossary_for_labelmap(labelmap: Sequence[str]) -> str:
     def _normalize(name: str) -> str:
         return "".join(ch for ch in name.lower().strip() if ch.isalnum() or ch == "_")
+
+    def _natural_label(name: str) -> str:
+        spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", str(name or "").strip())
+        return re.sub(r"[\s_-]+", " ", spaced).strip()
+
     mapped: Dict[str, List[str]] = {}
     for label in labelmap:
         norm = _normalize(label)
-        synonyms = _DEFAULT_GLOSSARY_MAP.get(norm)
+        compact_norm = _glossary_label_key(label)
+        synonyms = _DEFAULT_GLOSSARY_MAP.get(norm) or _DEFAULT_GLOSSARY_MAP.get(compact_norm)
+        natural = _natural_label(label)
         if synonyms:
-            mapped[label] = synonyms
+            mapped[label] = _dedupe_synonyms(synonyms)
+        elif natural:
+            mapped[label] = [natural]
     if not mapped:
         return ""
     return json.dumps(mapped, indent=2, ensure_ascii=True)

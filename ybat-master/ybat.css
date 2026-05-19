@@ -1071,6 +1071,12 @@ body.annotation-focus-mode .class-scroll-indicator {
     margin-top: 8px;
 }
 
+.qwen-caption-glossary textarea {
+    min-height: 110px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-size: 12px;
+}
+
 .qwen-caption-progress {
     border: 1px solid #bfdbfe;
     background: #f8fafc;

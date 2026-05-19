@@ -630,6 +630,7 @@ from services.qwen import (
     _caption_needs_english_rewrite as _caption_needs_english_rewrite_impl,
     _caption_starts_generic as _caption_starts_generic_impl,
     _caption_missing_labels as _caption_missing_labels_impl,
+    _caption_count_conflicts as _caption_count_conflicts_impl,
     _caption_needs_refine as _caption_needs_refine_impl,
     _sanitize_qwen_caption as _sanitize_qwen_caption_impl,
     _caption_repetition_loop_detected as _caption_repetition_loop_detected_impl,
@@ -654,10 +655,13 @@ from services.qwen import (
     _run_qwen_caption_merge as _run_qwen_caption_merge_impl,
     _resolve_qwen_window_size as _resolve_qwen_window_size_impl,
     _resolve_qwen_window_overlap as _resolve_qwen_window_overlap_impl,
+    _resolve_caption_all_windows as _resolve_caption_all_windows_impl,
     _resolve_qwen_variant_model_id_impl as _resolve_qwen_variant_model_id_impl,
     _strip_qwen_model_suffix_impl as _strip_qwen_model_suffix_impl,
     _format_qwen_load_error_impl as _format_qwen_load_error_impl,
     _get_qwen_prompt_config_impl as _get_qwen_prompt_config_impl,
+    _caption_editor_preserve_broad_terms_instruction as _caption_editor_preserve_broad_terms_instruction_impl,
+    _caption_demote_unstable_glossary_subtypes as _caption_demote_unstable_glossary_subtypes_impl,
     _render_qwen_prompt_impl as _render_qwen_prompt_impl,
     _extract_qwen_json_block_impl as _extract_qwen_json_block_impl,
     _sanitize_prompts_impl as _sanitize_prompts_impl,
@@ -5352,40 +5356,120 @@ def _group_hints_by_window(
     for hint in label_hints:
         if not hint.bbox or len(hint.bbox) != 4:
             continue
-        bx1, by1, bx2, by2 = hint.bbox
         try:
-            cx = (float(bx1) + float(bx2)) * 0.5
-            cy = (float(by1) + float(by2)) * 0.5
+            bx1, by1, bx2, by2 = [float(value) for value in hint.bbox[:4]]
         except (TypeError, ValueError):
             continue
-        x0_match = None
+        if bx2 <= bx1 or by2 <= by1:
+            continue
         for x0 in x_positions:
-            if x0 <= cx <= x0 + window:
-                x0_match = x0
-                break
-        if x0_match is None:
-            continue
-        y0_match = None
-        for y0 in y_positions:
-            if y0 <= cy <= y0 + window:
-                y0_match = y0
-                break
-        if y0_match is None:
-            continue
-        nx1 = max(0.0, min(float(bx1) - x0_match, window))
-        ny1 = max(0.0, min(float(by1) - y0_match, window))
-        nx2 = max(0.0, min(float(bx2) - x0_match, window))
-        ny2 = max(0.0, min(float(by2) - y0_match, window))
-        if nx2 <= nx1 or ny2 <= ny1:
-            continue
-        grouped[(x0_match, y0_match)].append(
-            QwenCaptionHint(
-                label=hint.label,
-                bbox=[nx1, ny1, nx2, ny2],
-                confidence=hint.confidence,
-            )
-        )
+            win_x1 = float(x0)
+            win_x2 = win_x1 + float(window)
+            ix1 = max(bx1, win_x1)
+            ix2 = min(bx2, win_x2)
+            if ix2 <= ix1:
+                continue
+            for y0 in y_positions:
+                win_y1 = float(y0)
+                win_y2 = win_y1 + float(window)
+                iy1 = max(by1, win_y1)
+                iy2 = min(by2, win_y2)
+                if iy2 <= iy1:
+                    continue
+                grouped[(x0, y0)].append(
+                    QwenCaptionHint(
+                        label=hint.label,
+                        bbox=[
+                            ix1 - win_x1,
+                            iy1 - win_y1,
+                            ix2 - win_x1,
+                            iy2 - win_y1,
+                        ],
+                        confidence=hint.confidence,
+                        source_id=getattr(hint, "source_id", None),
+                    )
+                )
     return grouped
+
+
+def _caption_position_phrase_for_bbox(
+    bbox: Sequence[float],
+    image_width: int,
+    image_height: int,
+) -> str:
+    try:
+        x1, y1, x2, y2 = [float(value) for value in bbox[:4]]
+    except (TypeError, ValueError):
+        return ""
+    safe_width = max(1.0, float(image_width or 1))
+    safe_height = max(1.0, float(image_height or 1))
+    cx = max(0.0, min(safe_width, (x1 + x2) * 0.5))
+    cy = max(0.0, min(safe_height, (y1 + y2) * 0.5))
+    horiz = "left" if cx < safe_width / 3.0 else "right" if cx > safe_width * 2.0 / 3.0 else "center"
+    vert = "upper" if cy < safe_height / 3.0 else "lower" if cy > safe_height * 2.0 / 3.0 else "middle"
+    if horiz == "center" and vert == "middle":
+        return "near the center"
+    if horiz == "center":
+        return f"in the {vert} center"
+    if vert == "middle":
+        return f"near the {horiz} side"
+    return f"in the {vert}-{horiz}"
+
+
+def _build_caption_overlap_guidance(
+    label_hints: Sequence[QwenCaptionHint],
+    grouped_hints: Mapping[Tuple[int, int], Sequence[QwenCaptionHint]],
+    image_width: int,
+    image_height: int,
+    *,
+    labelmap_glossary: Optional[str] = None,
+    max_examples: int = 12,
+) -> str:
+    originals: Dict[str, QwenCaptionHint] = {}
+    for hint in label_hints or []:
+        source_id = str(getattr(hint, "source_id", None) or "").strip()
+        if source_id and source_id not in originals:
+            originals[source_id] = hint
+    if not originals:
+        return ""
+    memberships: Dict[str, int] = {}
+    for hints in grouped_hints.values():
+        for hint in hints or []:
+            source_id = str(getattr(hint, "source_id", None) or "").strip()
+            if source_id:
+                memberships[source_id] = memberships.get(source_id, 0) + 1
+    glossary_map = _caption_glossary_map_impl(
+        labelmap_glossary,
+        [hint.label for hint in label_hints if getattr(hint, "label", None)],
+    )
+    examples: List[str] = []
+    for source_id, count in memberships.items():
+        if count <= 1:
+            continue
+        hint = originals.get(source_id)
+        if not hint:
+            continue
+        label = _caption_preferred_label_impl(hint.label, glossary_map)
+        position = _caption_position_phrase_for_bbox(
+            hint.bbox or [],
+            image_width,
+            image_height,
+        )
+        examples.append(f"{label} {position}".strip())
+        if len(examples) >= max_examples:
+            break
+    if not examples:
+        return ""
+    examples_text = "; ".join(examples)
+    if len(examples) < len([sid for sid, count in memberships.items() if count > 1]):
+        examples_text = f"{examples_text}; and other repeated crop-edge objects"
+    return (
+        "Overlap deduplication guidance: detailed/windowed captioning uses overlapping crops. "
+        "Some observations therefore describe the same physical object more than once. "
+        "Merge repeated crop-edge descriptions into one object in the final caption. "
+        "Do not mention crop overlap, labels, hints, boxes, or this guidance. "
+        f"Shared objects to describe once if visible: {examples_text}."
+    )
 
 
 def _qwen_message_text_parts(content: Any) -> List[str]:
@@ -13847,6 +13931,9 @@ def get_dataset_glossary(dataset_id: str):
     entry = _resolve_dataset_entry(dataset_id)
     dataset_root = _dataset_effective_root_from_entry(entry)
     storage_root = _dataset_meta_storage_root_from_entry(entry)
+    labelmap = [str(x).strip() for x in (entry.get("classes") or []) if str(x).strip()]
+    if not labelmap:
+        labelmap = _dataset_labelmap_from_root(dataset_root)
     glossary = _load_dataset_glossary(
         dataset_root,
         load_sam3_meta=lambda dataset_dir: _load_sam3_dataset_metadata_impl(
@@ -13873,7 +13960,13 @@ def get_dataset_glossary(dataset_id: str):
                     break
             if glossary:
                 break
-    return {"dataset_id": dataset_id, "glossary": glossary or ""}
+    default_glossary = _default_agent_glossary_for_labelmap(labelmap)
+    return {
+        "dataset_id": dataset_id,
+        "glossary": glossary or "",
+        "default_glossary": default_glossary,
+        "classes": labelmap,
+    }
 
 
 def set_dataset_glossary(dataset_id: str, glossary: str):
@@ -27300,8 +27393,11 @@ def qwen_caption(payload: QwenCaptionRequest):
             payload.restrict_to_labels if payload.restrict_to_labels is not None else True
         )
         final_caption_max_sentences = payload.final_caption_max_sentences
-        caption_all_windows = (
-            True if caption_mode == "windowed" else bool(payload.caption_all_windows)
+        caption_all_windows = _resolve_caption_all_windows_impl(
+            caption_mode,
+            payload.caption_all_windows,
+            has_label_hints=bool(label_hints),
+            restrict_to_labels=bool(restrict_to_labels),
         )
         detailed_mode = caption_mode == "windowed"
         glossary_map = _caption_glossary_map_impl(
@@ -27329,10 +27425,9 @@ def qwen_caption(payload: QwenCaptionRequest):
         glossary_line = ""
         if payload.labelmap_glossary:
             glossary_line = (
-                "Glossary (label synonyms): "
-                f"{payload.labelmap_glossary}. "
-                "Use glossary terms as optional synonym hints; do not copy the glossary verbatim. "
-                "Never output labelmap class names (especially tokens with underscores)."
+                "Use the class meaning glossary above to interpret label hints semantically. "
+                "Glossary terms describe what each class can mean; they are not exact words to force. "
+                "Never output labelmap class names, especially tokens with underscores."
             )
             prompt_text = f"{prompt_text}\n{glossary_line}"
         base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
@@ -27359,6 +27454,7 @@ def qwen_caption(payload: QwenCaptionRequest):
         final_only = bool(payload.final_answer_only)
         final_caption_length_instruction = _caption_length_instruction_impl(final_caption_max_sentences)
         caption_user_request_note = _caption_user_request_instruction_impl(user_prompt)
+        broad_term_editor_note = _caption_editor_preserve_broad_terms_instruction_impl()
         short_caption_requested = _caption_user_requested_short_impl(
             user_prompt,
             final_caption_max_sentences,
@@ -27411,7 +27507,8 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
         ) + (
             "Do not mention labels, hints, bounding boxes, coordinates, or that counts were provided. "
-            "Do not output labelmap tags (e.g., light_vehicle). Use natural words like car, van, SUV. "
+            "Do not output labelmap tags (e.g., light_vehicle). Use broad natural class terms like small vehicle or storage tank. "
+            "Use a subtype such as car, van, SUV, pickup truck, or delivery vehicle only when the image clearly supports it. "
             "Avoid any label tokens that contain underscores. "
             "If the hints conflict with the image, mention the uncertainty briefly. "
             "Stop when the caption is complete; never repeat a sentence or keep writing to fill the token budget."
@@ -27437,6 +27534,7 @@ def qwen_caption(payload: QwenCaptionRequest):
         x_positions: List[int] = []
         y_positions: List[int] = []
         grouped_hints: Dict[Tuple[int, int], List[QwenCaptionHint]] = {}
+        overlap_guidance = ""
         total_windows = 0
         if caption_mode == "windowed":
             overlap = _resolve_qwen_window_overlap_impl(
@@ -27458,6 +27556,13 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
             grouped_hints = _group_hints_by_window(
                 label_hints, x_positions, y_positions, window_size
+            )
+            overlap_guidance = _build_caption_overlap_guidance(
+                label_hints,
+                grouped_hints,
+                image_width,
+                image_height,
+                labelmap_glossary=payload.labelmap_glossary,
             )
             total_windows = max(1, len(x_positions) * len(y_positions))
             logger.info(
@@ -27553,6 +27658,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             glossary_line: Optional[str] = None,
             model_id_override: Optional[str] = None,
             max_sentences: Optional[int] = None,
+            overlap_guidance: Optional[str] = None,
             source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
         ) -> str:
             return _run_qwen_caption_merge_impl(
@@ -27566,6 +27672,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 model_id_override=model_id_override,
                 max_sentences=max_sentences,
                 user_prompt=user_prompt,
+                overlap_guidance=overlap_guidance,
                 source_outputs=source_outputs,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
                 run_qwen_inference_fn=_run_qwen_inference,
@@ -27599,6 +27706,62 @@ def qwen_caption(payload: QwenCaptionRequest):
             cleaned = str(text or "").strip()
             if cleaned:
                 first_stage_output_sections.append((label, cleaned))
+
+        def _format_refine_labels(
+            labels: Sequence[str],
+            glossary: Optional[Dict[str, List[str]]],
+        ) -> List[str]:
+            display: List[str] = []
+            seen: set[str] = set()
+            for label in labels or []:
+                preferred = _caption_preferred_label_impl(label, glossary).strip()
+                if not preferred or preferred in seen:
+                    continue
+                seen.add(preferred)
+                display.append(preferred)
+            return display
+
+        def _format_count_conflict_note(
+            labels: Sequence[str],
+            counts_map: Dict[str, int],
+            glossary: Optional[Dict[str, List[str]]],
+        ) -> str:
+            pieces: List[str] = []
+            for label in labels or []:
+                try:
+                    count = int(counts_map.get(label, 0))
+                except (TypeError, ValueError):
+                    continue
+                if count <= 0:
+                    continue
+                preferred = _caption_preferred_label_impl(label, glossary).strip()
+                if preferred:
+                    pieces.append(f"{preferred}: {count}")
+            if not pieces:
+                return ""
+            return (
+                "Correct these authoritative object counts: "
+                + ", ".join(pieces)
+                + ". Remove contradictory plural, group, or quantity wording."
+            )
+
+        def _caption_term_guard_sources() -> List[Tuple[str, str]]:
+            sources = list(first_stage_output_sections)
+            for idx, (_x0, _y0, _size, caption) in enumerate(windowed_captions, start=1):
+                if caption:
+                    sources.append((f"Window {idx} cleaned caption", caption))
+            return sources
+
+        def _stabilize_glossary_subtypes(caption: str) -> str:
+            guard_counts = counts or {label: 1 for label in glossary_map.keys()}
+            if not caption or not guard_counts or not glossary_map:
+                return caption
+            return _caption_demote_unstable_glossary_subtypes_impl(
+                caption,
+                guard_counts,
+                glossary_map,
+                source_outputs=_caption_term_guard_sources(),
+            )
 
         _qwen_progress_update(
             phase="load",
@@ -27698,7 +27861,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                         "Focus only on this region.\n"
                         f"{window_caption_instruction}No reasoning or preamble. "
                         "Do not mention labels, hints, counts, or coordinates. "
-                        "Do not output labelmap tags (e.g., light_vehicle); use natural words like car or van. "
+                        "Do not output labelmap tags (e.g., light_vehicle); use broad natural class terms like small vehicle. "
+                        "Use a subtype such as car, van, pickup truck, or delivery vehicle only when the crop clearly supports it. "
                         "Avoid any token with underscores.\n"
                         f"{window_prompt}"
                     )
@@ -27707,7 +27871,13 @@ def qwen_caption(payload: QwenCaptionRequest):
                     if restrict_to_labels and window_allowed_prompt:
                         window_prompt = (
                             f"{window_prompt}\nAllowed classes: {', '.join(window_allowed_prompt)}. "
-                            "Do not introduce any other entity types."
+                            "This window has labeled support boxes. Describe those labeled objects and only minimal surrounding context. "
+                            "Do not enumerate unrelated objects, and do not introduce any other entity types."
+                        )
+                    elif restrict_to_labels and label_hints and caption_all_windows:
+                        window_prompt = (
+                            f"{window_prompt}\nThis window has no labeled support boxes. "
+                            "Use it only for broad scene context; do not enumerate object categories, counts, or new object lists."
                         )
                     if window_is_thinking:
                         window_prompt = _adjust_prompt_for_thinking_impl(window_prompt)
@@ -27826,6 +27996,15 @@ def qwen_caption(payload: QwenCaptionRequest):
                             source_output=qwen_text,
                         )
                         cleanup_count += 1
+                    count_conflicts = (
+                        _caption_count_conflicts_impl(
+                            window_caption,
+                            window_counts,
+                            window_glossary_map,
+                        )
+                        if include_counts
+                        else []
+                    )
                     needs_refine, missing = _caption_needs_refine_impl(
                         window_caption,
                         window_counts,
@@ -27835,6 +28014,12 @@ def qwen_caption(payload: QwenCaptionRequest):
                     )
                     if needs_refine:
                         refine_model = caption_refinement_model_id
+                        missing_display = _format_refine_labels(missing, window_glossary_map)
+                        count_conflict_note = _format_count_conflict_note(
+                            count_conflicts,
+                            window_counts,
+                            window_glossary_map,
+                        )
                         _qwen_progress_update(
                             phase="refine",
                             phase_label="Refining Window",
@@ -27844,7 +28029,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             step_id=f"window_{window_index}",
                             step_detail=(
                                 f"{window_detail}; ensuring "
-                                f"{', '.join(missing) if missing else 'window class coverage'}"
+                                f"{', '.join(missing_display) if missing_display else 'window class coverage'}"
                             ),
                             step_region=window_region,
                         )
@@ -27858,11 +28043,16 @@ def qwen_caption(payload: QwenCaptionRequest):
                             allowed_note = (
                                 "You may mention additional visible objects beyond the hints."
                             )
-                        missing_note = (
-                            f"Ensure the caption mentions: {', '.join(missing)}."
-                            if missing
-                            else "Ensure all labeled classes in this window are mentioned."
-                        )
+                        refine_notes = []
+                        if missing_display:
+                            refine_notes.append(
+                                f"Ensure the caption mentions: {', '.join(missing_display)}."
+                            )
+                        if count_conflict_note:
+                            refine_notes.append(count_conflict_note)
+                        if not refine_notes:
+                            refine_notes.append("Ensure all labeled classes in this window are mentioned.")
+                        missing_note = " ".join(refine_notes)
                         refine_prompt = (
                             f"{window_prompt}\nDraft caption: {window_caption}\n{missing_note}"
                         )
@@ -27882,6 +28072,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                         refine_prompt = (
                             f"{refine_prompt}\n"
                             "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+                            f"{broad_term_editor_note} "
                             "Return only a concise, complete caption (1-3 sentences) with no coordinates."
                         )
                         refine_system = "You are a concise captioning assistant. Return only the final caption in English."
@@ -27908,7 +28099,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                             _emit_caption_window(x0, y0, window_size, window_caption_for_merge)
             if windowed_captions:
                 window_lines = [
-                    "Close-up observations from subregions (use these to enrich the final caption):"
+                    "Close-up observations from subregions (supporting evidence for the final caption, not a separate object inventory):"
                 ]
                 for x0, y0, size, caption in windowed_captions:
                     x_center = x0 + size / 2.0
@@ -27927,6 +28118,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                     window_lines.append(
                         f"- {region}: {caption}"
                     )
+                if overlap_guidance:
+                    window_lines.append(overlap_guidance)
                 if short_caption_requested:
                     if include_counts and restrict_to_labels:
                         window_lines.append(
@@ -27972,12 +28165,14 @@ def qwen_caption(payload: QwenCaptionRequest):
                         "In the final caption, include only the most important window details that fit the requested length."
                         if short_caption_requested
                         else (
-                            "In the final caption, preserve specific details from the windows "
-                            "(e.g., people counts, actions, and notable objects). "
-                            "Do not compress away window details; longer captions are preferred."
+                            "In the final caption, preserve specific details about labeled or clearly central objects from the windows "
+                            "(e.g., counts, actions, and notable attributes). "
+                            "Do not promote unlabeled background observations into extra counted objects; longer captions are acceptable when needed."
                         )
                     )
                 )
+                if broad_term_editor_note:
+                    window_lines.append(broad_term_editor_note)
                 prompt_text = f"{prompt_text}\n" + "\n".join(window_lines)
         if two_stage and is_thinking:
             _raise_if_qwen_cancelled()
@@ -28027,6 +28222,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             refine_prompt = (
                 f"{refine_prompt}\n"
                 "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+                f"{broad_term_editor_note} "
                 f"{final_caption_length_instruction}"
                 "Return only the final caption."
             )
@@ -28158,6 +28354,7 @@ def qwen_caption(payload: QwenCaptionRequest):
                 glossary_line=glossary_line or None,
                 model_id_override=caption_refinement_model_id,
                 max_sentences=final_caption_max_sentences,
+                overlap_guidance=overlap_guidance or None,
                 source_outputs=first_stage_output_sections,
             )
             _raise_if_qwen_cancelled()
@@ -28273,6 +28470,11 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
             _raise_if_qwen_cancelled()
             cleanup_count += 1
+        count_conflicts = (
+            _caption_count_conflicts_impl(caption_text, counts, glossary_map)
+            if include_counts
+            else []
+        )
         needs_refine, missing = _caption_needs_refine_impl(
             caption_text,
             counts,
@@ -28282,6 +28484,12 @@ def qwen_caption(payload: QwenCaptionRequest):
         )
         if needs_refine:
             refine_model = caption_refinement_model_id
+            missing_display = _format_refine_labels(missing, glossary_map)
+            count_conflict_note = _format_count_conflict_note(
+                count_conflicts,
+                counts,
+                glossary_map,
+            )
             _qwen_progress_update(
                 phase="refine",
                 phase_label="Refining",
@@ -28291,8 +28499,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                 step_id="postprocess",
                 step_region=full_step_region,
                 step_detail=(
-                    f"Ensuring mentioned classes: {', '.join(missing)}"
-                    if missing
+                    f"Ensuring mentioned classes: {', '.join(missing_display)}"
+                    if missing_display
                     else "Ensuring all labeled classes are mentioned"
                 ),
             )
@@ -28301,11 +28509,16 @@ def qwen_caption(payload: QwenCaptionRequest):
                 allowed_note = f"Allowed classes: {', '.join(allowed_labels_prompt)}. Do not introduce any other entity types."
             elif not restrict_to_labels:
                 allowed_note = "You may mention additional visible objects beyond the hints."
-            missing_note = (
-                f"Ensure the caption mentions: {', '.join(missing)}."
-                if missing
-                else "Ensure all labeled classes are mentioned."
-            )
+            refine_notes = []
+            if missing_display:
+                refine_notes.append(
+                    f"Ensure the caption mentions: {', '.join(missing_display)}."
+                )
+            if count_conflict_note:
+                refine_notes.append(count_conflict_note)
+            if not refine_notes:
+                refine_notes.append("Ensure all labeled classes are mentioned.")
+            missing_note = " ".join(refine_notes)
             refine_prompt = f"{prompt_text}\nDraft caption: {caption_text}\n{missing_note}"
             if first_stage_output_sections:
                 first_stage_context = _format_caption_source_output_context_impl(
@@ -28318,6 +28531,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             refine_prompt = (
                 f"{refine_prompt}\n"
                 "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+                f"{broad_term_editor_note} "
                 f"{final_caption_length_instruction}"
                 "Return only the final caption with no coordinates."
             )
@@ -28352,6 +28566,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
             rewrite_prompt = (
                 "Rewrite the caption in English only, preserving meaning and concrete detail. "
+                f"{broad_term_editor_note} "
                 f"{final_caption_length_instruction}\n"
                 f"Caption: {caption_text}"
             )
@@ -28410,6 +28625,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             if repaired_caption:
                 caption_text = _sanitize_qwen_caption_impl(repaired_caption)
             cleanup_count += 1
+        caption_text = _sanitize_qwen_caption_impl(_stabilize_glossary_subtypes(caption_text))
         caption_text, trimmed_incomplete_tail = _caption_trim_to_complete_sentences_impl(
             caption_text,
             max_sentences=final_caption_max_sentences,

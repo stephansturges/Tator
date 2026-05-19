@@ -101,6 +101,84 @@ def _caption_preferred_label(label: str, glossary_map: Optional[Dict[str, List[s
     return label
 
 
+def _resolve_caption_all_windows(
+    caption_mode: Optional[str],
+    caption_all_windows: Optional[bool],
+    *,
+    has_label_hints: bool,
+    restrict_to_labels: bool,
+) -> bool:
+    if str(caption_mode or "full") != "windowed":
+        return bool(caption_all_windows)
+    if caption_all_windows is not None:
+        return bool(caption_all_windows)
+    return not (bool(has_label_hints) and bool(restrict_to_labels))
+
+
+def _format_caption_glossary_instruction(
+    glossary_map: Dict[str, List[str]],
+    labels: Sequence[str],
+) -> str:
+    if not glossary_map:
+        return ""
+    pieces: List[str] = []
+    seen: set[str] = set()
+    for raw_label in labels:
+        label = str(raw_label or "").strip()
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        terms = [str(term).strip() for term in (glossary_map.get(label) or []) if str(term).strip()]
+        if not terms:
+            continue
+        natural_terms: List[str] = []
+        term_seen: set[str] = set()
+        for term in terms:
+            key = term.lower()
+            if key in term_seen:
+                continue
+            term_seen.add(key)
+            natural_terms.append(term)
+            if len(natural_terms) >= 6:
+                break
+        if natural_terms:
+            preferred = _caption_preferred_label(label, glossary_map)
+            variants = [term for term in natural_terms if term.lower() != preferred.lower()]
+            if variants:
+                pieces.append(
+                    f"{label}: broad term \"{preferred}\"; possible variants include "
+                    f"{', '.join(variants)}"
+                )
+            else:
+                pieces.append(f"{label}: broad term \"{preferred}\"")
+    if not pieces:
+        return ""
+    return (
+        "Class meaning glossary: "
+        + "; ".join(pieces)
+        + ". Use glossary entries only to understand the broad class meaning of label hints. "
+        "Glossary variants are possible members of a class, not assertions that those variants appear in this image. "
+        "Do not choose a subtype from the glossary unless the image clearly supports that subtype; "
+        "when uncertain, use the broad term."
+    )
+
+
+_CAPTION_EDITOR_PRESERVE_BROAD_TERMS = (
+    "Editor rule: preserve broad category terms from the draft and window observations. "
+    "Do not replace broad terms such as small vehicle, storage tank, building, or utility pole "
+    "with a more specific subtype from the glossary unless that exact subtype is used consistently "
+    "by the draft and relevant window/source observations. If observations disagree, or only one "
+    "crop uses a subtype while other observations use the broad term, keep the broad term. "
+    "In particular, do not change small vehicle into car, van, SUV, pickup truck, or delivery "
+    "vehicle during merge, cleanup, or refinement unless that specific subtype is consistently "
+    "supported upstream."
+)
+
+
+def _caption_editor_preserve_broad_terms_instruction() -> str:
+    return _CAPTION_EDITOR_PRESERVE_BROAD_TERMS
+
+
 _SHORT_CAPTION_REQUEST_RE = re.compile(
     r"(?:"
     r"\b(?:short|brief|concise|compact)\b|"
@@ -248,6 +326,12 @@ def _build_qwen_caption_prompt(
         labelmap_glossary,
         list(counts.keys()) or [entry["label"] for entry in hints_payload if entry.get("label")],
     )
+    glossary_instruction = _format_caption_glossary_instruction(
+        glossary_map,
+        list(counts.keys()) or [entry["label"] for entry in hints_payload if entry.get("label")],
+    )
+    if glossary_instruction:
+        lines.append(glossary_instruction)
 
     # Build a forbidden token list for labelmap tags that should not appear verbatim.
     forbidden_labels: List[str] = []
@@ -273,7 +357,9 @@ def _build_qwen_caption_prompt(
         allowed = ", ".join(sorted(_caption_preferred_label(lbl, glossary_map) for lbl in counts.keys()))
         if allowed:
             lines.append(
-                f"Only mention these classes if they appear: {allowed}. Do not invent other entity types."
+                f"Labeled class inventory: {allowed}. Treat these classes and counts as authoritative. "
+                "Mention other visible scene/background context only generically; do not add extra counted object lists "
+                "outside this inventory, and do not pluralize a class whose count is 1."
             )
     elif counts and not restrict_to_labels:
         lines.append("Label hints are suggestions; you may mention other visible objects too.")
@@ -283,7 +369,7 @@ def _build_qwen_caption_prompt(
                 "Labeled boxes (bbox_2d=[x1,y1,x2,y2], coords 0–1000 relative to this image/window):"
             )
             compact = [
-                {"label": entry["label"], "bbox_2d": entry["bbox_2d"]}
+                {"label": _caption_preferred_label(entry["label"], glossary_map), "bbox_2d": entry["bbox_2d"]}
                 for entry in selected
                 if entry["bbox_2d"] is not None
             ]
@@ -467,8 +553,14 @@ def _trim_repeated_caption_sentences(text: str) -> str:
     return _collapse_whitespace(" ".join(kept))
 
 
+_CAPTION_NON_ENGLISH_SCRIPT_RE = re.compile(
+    r"[\u0400-\u052F\u0590-\u05FF\u0600-\u06FF\u0900-\u097F"
+    r"\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]"
+)
+
+
 def _caption_needs_english_rewrite(text: str) -> bool:
-    return bool(re.search(r"[^\x00-\x7F]", text))
+    return bool(_CAPTION_NON_ENGLISH_SCRIPT_RE.search(str(text or "")))
 
 
 _CAPTION_GENERIC_OPENERS = (
@@ -486,6 +578,233 @@ def _caption_starts_generic(text: str) -> bool:
     return any(lowered.startswith(prefix) for prefix in _CAPTION_GENERIC_OPENERS)
 
 
+def _caption_label_terms(
+    label: str,
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+) -> List[str]:
+    terms = [str(label or "")]
+    if "_" in str(label or ""):
+        terms.append(str(label).replace("_", " "))
+    if glossary_map and glossary_map.get(label):
+        terms.extend(glossary_map[label])
+    preferred = _caption_preferred_label(label, glossary_map)
+    if preferred:
+        terms.append(preferred)
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        val = _collapse_whitespace(str(term or "").strip()).lower()
+        if not val or val in seen:
+            continue
+        seen.add(val)
+        cleaned.append(val)
+    return cleaned
+
+
+def _caption_plural_variants(term: str) -> List[str]:
+    term = _collapse_whitespace(str(term or "").strip()).lower()
+    if not term:
+        return []
+    words = term.split()
+    last = words[-1]
+    variants = {term}
+    if last.endswith(("s", "x", "ch", "sh")):
+        plural = f"{last}es"
+    elif last.endswith("y") and len(last) > 1 and last[-2] not in "aeiou":
+        plural = f"{last[:-1]}ies"
+    else:
+        plural = f"{last}s"
+    words[-1] = plural
+    variants.add(" ".join(words))
+    return sorted(variants, key=len, reverse=True)
+
+
+def _caption_term_pattern(term: str) -> str:
+    return r"\s+".join(re.escape(part) for part in _collapse_whitespace(term).split())
+
+
+def _caption_term_present(text: str, term: str) -> bool:
+    text = str(text or "")
+    term = _collapse_whitespace(str(term or "").strip()).lower()
+    if not text or not term:
+        return False
+    patterns = [
+        _caption_term_pattern(variant)
+        for variant in _caption_plural_variants(term)
+        if variant
+    ]
+    if not patterns:
+        return False
+    return bool(re.search(rf"\b(?:{'|'.join(patterns)})\b", text, flags=re.IGNORECASE))
+
+
+def _caption_plural_term(term: str) -> str:
+    base = _collapse_whitespace(str(term or "").strip()).lower()
+    for variant in _caption_plural_variants(base):
+        if variant != base:
+            return variant
+    return base
+
+
+def _caption_replace_term(text: str, term: str, replacement: str) -> str:
+    output = str(text or "")
+    term = _collapse_whitespace(str(term or "").strip()).lower()
+    replacement = _collapse_whitespace(str(replacement or "").strip()).lower()
+    if not output or not term or not replacement:
+        return output
+    replacement_plural = _caption_plural_term(replacement)
+    forms = []
+    for variant in _caption_plural_variants(term):
+        if variant:
+            forms.append((variant, variant != term))
+    forms.sort(key=lambda item: len(item[0]), reverse=True)
+    for form, is_plural in forms:
+        pattern = _caption_term_pattern(form)
+        repl_text = replacement_plural if is_plural else replacement
+
+        def _repl(match: re.Match[str]) -> str:
+            matched = match.group(0)
+            if matched[:1].isupper():
+                return repl_text[:1].upper() + repl_text[1:]
+            return repl_text
+
+        output = re.sub(rf"\b{pattern}\b", _repl, output, flags=re.IGNORECASE)
+    return output
+
+
+def _caption_is_broad_glossary_alias(term: str, preferred: str, label: str) -> bool:
+    val = _collapse_whitespace(str(term or "").strip()).lower()
+    pref = _collapse_whitespace(str(preferred or "").strip()).lower()
+    label_text = _collapse_whitespace(str(label or "").replace("_", " ").strip()).lower()
+    if not val:
+        return True
+    if val in {pref, label_text}:
+        return True
+    # "light vehicle" is a broad alias for "small vehicle"; "delivery vehicle" is not.
+    if pref.endswith(" vehicle") and val.endswith(" vehicle"):
+        subtype_words = {"car", "van", "truck", "pickup", "delivery", "suv", "personal"}
+        if not any(word in val.split() for word in subtype_words):
+            return True
+    return False
+
+
+def _caption_broad_source_terms(label: str, preferred: str) -> List[str]:
+    terms = [
+        preferred,
+        str(label or "").replace("_", " "),
+        str(label or ""),
+    ]
+    preferred_lc = _collapse_whitespace(str(preferred or "").strip()).lower()
+    if preferred_lc.endswith(" vehicle"):
+        terms.append("vehicle")
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        val = _collapse_whitespace(str(term or "").strip())
+        key = val.lower()
+        if not val or key in seen or "_" in val:
+            continue
+        seen.add(key)
+        cleaned.append(val)
+    return cleaned
+
+
+def _caption_demote_unstable_glossary_subtypes(
+    caption: str,
+    counts: Optional[Dict[str, int]],
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+    source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
+) -> str:
+    """Prefer broad class wording when subtype evidence is inconsistent."""
+
+    output = str(caption or "")
+    if not output or not glossary_map:
+        return output
+    labels = list((counts or {}).keys()) or list(glossary_map.keys())
+    source_texts = [str(text or "") for _label, text in (source_outputs or []) if str(text or "").strip()]
+    for label in labels:
+        raw_terms = glossary_map.get(label) or []
+        if not raw_terms:
+            continue
+        preferred = _caption_preferred_label(label, glossary_map)
+        if not preferred:
+            continue
+        replacement = "vehicle" if preferred.lower().endswith(" vehicle") else preferred
+        broad_terms = _caption_broad_source_terms(label, preferred)
+        variants: List[str] = []
+        seen_variants: set[str] = set()
+        for term in raw_terms:
+            val = _collapse_whitespace(str(term or "").strip())
+            key = val.lower()
+            if not val or key in seen_variants or "_" in val:
+                continue
+            if _caption_is_broad_glossary_alias(val, preferred, label):
+                continue
+            seen_variants.add(key)
+            variants.append(val)
+        variants.sort(key=len, reverse=True)
+        for variant in variants:
+            if not _caption_term_present(output, variant):
+                continue
+            variant_sources = {
+                idx for idx, text in enumerate(source_texts) if _caption_term_present(text, variant)
+            }
+            broad_sources = {
+                idx
+                for idx, text in enumerate(source_texts)
+                if any(_caption_term_present(text, broad) for broad in broad_terms)
+            }
+            broad_only_sources = broad_sources - variant_sources
+            if variant_sources and not broad_only_sources:
+                continue
+            output = _caption_replace_term(output, variant, replacement)
+    return _collapse_whitespace(output)
+
+
+def _caption_count_conflicts(
+    text: str,
+    counts: Dict[str, int],
+    glossary_map: Optional[Dict[str, List[str]]] = None,
+) -> List[str]:
+    if not text or not counts:
+        return []
+    lowered = text.lower()
+    conflicts: List[str] = []
+    quantified_many = r"(?:two|three|four|five|six|seven|eight|nine|ten|several|multiple|many|numerous|various|a\s+few|few)"
+    singular_quantifier = r"(?:single|only\s+one|just\s+one)"
+    for label, count in counts.items():
+        try:
+            count_int = int(count)
+        except (TypeError, ValueError):
+            continue
+        if count_int <= 0:
+            continue
+        label_conflict = False
+        for term in _caption_label_terms(label, glossary_map):
+            variants = _caption_plural_variants(term)
+            if not variants:
+                continue
+            singular_pattern = _caption_term_pattern(term)
+            plural_patterns = [_caption_term_pattern(variant) for variant in variants if variant != term]
+            plural_pattern = "|".join(plural_patterns) or singular_pattern
+            if count_int == 1:
+                if re.search(rf"\b{quantified_many}\s+(?:\w+\s+){{0,3}}(?:{plural_pattern})\b", lowered):
+                    label_conflict = True
+                if re.search(rf"\b(?:[2-9]|\d{{2,}})\s+(?:\w+\s+){{0,3}}(?:{plural_pattern})\b", lowered):
+                    label_conflict = True
+                if plural_patterns and re.search(rf"\b(?:{plural_pattern})\s+(?:are|were|stand|sit|rest|appear|line|cluster|lie)\b", lowered):
+                    label_conflict = True
+            else:
+                if re.search(rf"\b(?:{singular_quantifier})\s+(?:\w+\s+){{0,3}}{singular_pattern}\b", lowered):
+                    label_conflict = True
+                if re.search(rf"\b(?:only\s+)?1\s+(?:\w+\s+){{0,3}}{singular_pattern}\b", lowered):
+                    label_conflict = True
+            if label_conflict:
+                conflicts.append(label)
+                break
+    return conflicts
+
+
 def _caption_missing_labels(
     text: str,
     counts: Dict[str, int],
@@ -498,13 +817,8 @@ def _caption_missing_labels(
     for label, count in counts.items():
         if count <= 0:
             continue
-        label_terms = [str(label)]
-        if "_" in label:
-            label_terms.append(label.replace("_", " "))
-        if glossary_map and glossary_map.get(label):
-            label_terms.extend(glossary_map[label])
-        label_terms = [term.strip() for term in label_terms if term and term.strip()]
-        if not any(term.lower() in lowered for term in label_terms):
+        label_terms = _caption_label_terms(label, glossary_map)
+        if not any(term in lowered for term in label_terms):
             missing.append(label)
     return missing
 
@@ -521,8 +835,9 @@ def _caption_needs_refine(
     if len(words) < min_words:
         return True, []
     missing = _caption_missing_labels(caption, counts, glossary_map) if include_counts else []
-    if missing:
-        return True, missing
+    count_conflicts = _caption_count_conflicts(caption, counts, glossary_map) if include_counts else []
+    if missing or count_conflicts:
+        return True, sorted(set(missing + count_conflicts))
     if _caption_starts_generic(caption) and detailed_mode:
         return True, []
     return False, []
@@ -543,6 +858,8 @@ def _sanitize_qwen_caption(text: str) -> str:
     cleaned = cleaned.strip()
     if cleaned.startswith(":"):
         cleaned = cleaned.lstrip(":").strip()
+    cleaned = _QWEN_BBOX_ID_RE.sub("", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     cleaned = _truncate_repeated_caption_loop(cleaned)
     cleaned = _trim_repeated_caption_sentences(cleaned)
     return cleaned
@@ -568,6 +885,7 @@ _QWEN_CAPTION_META_RE = re.compile(
     r"counts are provided|draft caption|window observations|window region|region of interest|"
     r"user request|the user wants|the user says|instruction says|instructions say|"
     r"style guidance|style inspiration|preferred opening|first-stage|raw output|"
+    r"object id|object ids|bbox id|bbox ids|source id|source ids|"
     r"we need to|we can mention|can mention|we can describe|we can include|"
     r"we should mention|we can say|the prompt asks|final answer only|this is ambiguous"
     r")",
@@ -576,6 +894,11 @@ _QWEN_CAPTION_META_RE = re.compile(
 _QWEN_COORDINATE_CONTEXT_RE = re.compile(
     r"(?:\[\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?(?:\s*,\s*\d+(?:\.\d+)?\s*,\s*\d+(?:\.\d+)?)?\s*\]|"
     r"\b(?:from|to)\s+\d+\s*,\s*\d+\b)",
+    re.IGNORECASE,
+)
+_QWEN_BBOX_ID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b|"
+    r"\b[0-9a-f]{24,64}\b",
     re.IGNORECASE,
 )
 
@@ -942,6 +1265,7 @@ def _run_qwen_caption_cleanup(
         f"{user_request_note}"
         "Remove repetition, avoid coordinates, and remove any mention of labels, hints, or counts being provided. "
         "Never copy planning phrases such as 'we can mention', 'we need to', or 'the user wants'. "
+        f"{_CAPTION_EDITOR_PRESERVE_BROAD_TERMS} "
         "If the draft is mostly reasoning or planning text, ignore that draft and write a fresh image-grounded caption. "
         "Keep the caption grounded in the image.\n"
         f"Draft caption: {prompt}"
@@ -988,6 +1312,7 @@ def _run_qwen_caption_merge(
     model_id_override: Optional[str] = None,
     max_sentences: Optional[int] = None,
     user_prompt: Optional[str] = None,
+    overlap_guidance: Optional[str] = None,
     source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
     chat_template_kwargs: Optional[Dict[str, Any]] = None,
     run_qwen_inference_fn: Callable[..., Tuple[str, Any, Any]],
@@ -997,7 +1322,7 @@ def _run_qwen_caption_merge(
 ) -> str:
     if not draft_caption or not windowed_captions:
         return draft_caption
-    window_lines = ["Window observations (do NOT invent objects):"]
+    window_lines = ["Window observations (supporting evidence; do NOT invent objects):"]
     for _x0, _y0, _size, caption in windowed_captions:
         if caption:
             window_lines.append(f"- {caption}")
@@ -1012,20 +1337,24 @@ def _run_qwen_caption_merge(
         if short_requested
         else (
             "Use multiple sentences if needed. Preserve specific counts, actions, and notable attributes from the windows; "
-            "do not drop any concrete window detail unless it clearly conflicts with the full image. "
+            "treat window text as supporting evidence, not a complete object inventory. Ignore extra object lists "
+            "or quantities that conflict with the full image or authoritative counts. "
         )
     )
     merge_prompt = (
         f"{user_request_note}"
         "Revise the draft caption so it includes all distinct object details "
         "from the window observations that are missing in the draft. "
-        "Do not invent new objects. "
+        "Do not invent new objects, and do not turn background window descriptions into extra counted object categories. "
+        f"{_CAPTION_EDITOR_PRESERVE_BROAD_TERMS} "
         f"{detail_policy}"
         f"{length_note}"
         "Do not mention labels, hints, or coordinates.\n"
         f"Draft caption: {draft_caption}\n"
         + "\n".join(window_lines)
     )
+    if overlap_guidance:
+        merge_prompt = f"{merge_prompt}\n\n{overlap_guidance}"
     if source_context:
         merge_prompt = f"{merge_prompt}\n\n{source_context}"
     if glossary_line:

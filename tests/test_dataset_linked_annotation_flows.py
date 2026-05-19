@@ -176,8 +176,14 @@ def test_set_dataset_glossary_for_linked_dataset_writes_registry_meta(
             "registry_root": str(record_root),
             "storage_mode": "linked",
             "linked_root": str(source_root),
+            "classes": ["gas_tank"],
         },
     )
+
+    default = api.get_dataset_glossary("ds_linked")
+
+    assert default["classes"] == ["gas_tank"]
+    assert "storage tank" in default["default_glossary"]
 
     out = api.set_dataset_glossary("ds_linked", '{"car": ["vehicle"]}')
 

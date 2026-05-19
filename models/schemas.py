@@ -319,6 +319,7 @@ class QwenCaptionHint(BaseModel):
     label: str
     bbox: Optional[List[float]] = None
     confidence: Optional[float] = None
+    source_id: Optional[str] = None
 
     @root_validator(skip_on_failure=True)
     def _validate_hint(cls, values):  # noqa: N805
@@ -326,6 +327,8 @@ class QwenCaptionHint(BaseModel):
         if not label:
             raise ValueError("label_required")
         values["label"] = label
+        source_id = str(values.get("source_id") or "").strip()
+        values["source_id"] = source_id or None
         bbox = values.get("bbox")
         if bbox is not None:
             if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
@@ -362,7 +365,7 @@ class QwenCaptionRequest(BaseModel):
     window_size: Optional[int] = None
     window_overlap: Optional[float] = None
     restrict_to_labels: Optional[bool] = True
-    caption_all_windows: Optional[bool] = True
+    caption_all_windows: Optional[bool] = None
     unload_others: Optional[bool] = False
     force_unload: Optional[bool] = None
     multi_model_cache: Optional[bool] = False

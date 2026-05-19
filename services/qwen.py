@@ -165,13 +165,10 @@ def _format_caption_glossary_instruction(
 
 _CAPTION_EDITOR_PRESERVE_BROAD_TERMS = (
     "Editor rule: preserve broad category terms from the draft and window observations. "
-    "Do not replace broad terms such as small vehicle, storage tank, building, or utility pole "
-    "with a more specific subtype from the glossary unless that exact subtype is used consistently "
-    "by the draft and relevant window/source observations. If observations disagree, or only one "
-    "crop uses a subtype while other observations use the broad term, keep the broad term. "
-    "In particular, do not change small vehicle into car, van, SUV, pickup truck, or delivery "
-    "vehicle during merge, cleanup, or refinement unless that specific subtype is consistently "
-    "supported upstream."
+    "Do not replace a broad class term with a more specific subtype from the glossary unless that "
+    "exact subtype is used consistently by the draft and relevant window/source observations. "
+    "If observations disagree, or only one crop uses a subtype while other observations use the "
+    "broad term, keep the broad term during merge, cleanup, or refinement."
 )
 
 
@@ -244,6 +241,7 @@ def _build_qwen_caption_prompt(
     restrict_to_labels: bool = True,
     labelmap_glossary: Optional[str] = None,
     max_sentences: Optional[int] = None,
+    context_prompt: Optional[str] = None,
 ) -> Tuple[str, Dict[str, int], int, bool]:
     safe_width = max(1, int(image_width))
     safe_height = max(1, int(image_height))
@@ -308,16 +306,19 @@ def _build_qwen_caption_prompt(
         )
         selected = sorted_hints[:max_boxes]
         truncated = len(sorted_hints) > len(selected)
+    custom_context_prompt = _collapse_whitespace(context_prompt or "")
+    has_custom_context_prompt = bool(custom_context_prompt)
     lines: List[str] = []
     if user_prompt:
         lines.append(f"User caption request: {user_prompt}")
-        lines.append(
-            "Treat the user caption request as required guidance. If it asks a question "
-            "or asks for an inference such as likely location, scene type, event, or time, "
-            "answer it when the image supports a grounded answer; otherwise state uncertainty briefly. "
-            "Do not mention that a request or hint was provided."
-        )
-        if "style inspirations" in user_prompt.lower():
+        if not has_custom_context_prompt:
+            lines.append(
+                "Treat the user caption request as required guidance. If it asks a question "
+                "or asks for an inference such as likely location, scene type, event, or time, "
+                "answer it when the image supports a grounded answer; otherwise state uncertainty briefly. "
+                "Do not mention that a request or hint was provided."
+            )
+        if not has_custom_context_prompt and "style inspirations" in user_prompt.lower():
             lines.append(
                 "Style guidance: use inspirations for tone/angle only. Rephrase, do not copy wording."
             )
@@ -346,10 +347,11 @@ def _build_qwen_caption_prompt(
         )
         if restrict_to_labels:
             lines.append(f"COUNTS (state exactly in final caption): {counts_text}.")
-            lines.append(
-                "State these counts as ordinary image facts in the final caption, without qualifiers "
-                "(avoid words like 'visible', 'roughly', or 'approximately')."
-            )
+            if not has_custom_context_prompt:
+                lines.append(
+                    "State these counts as ordinary image facts in the final caption, without qualifiers "
+                    "(avoid words like 'visible', 'roughly', or 'approximately')."
+                )
         else:
             lines.append(f"COUNTS (use as hints; may be incomplete): {counts_text}.")
     elif counts:
@@ -357,11 +359,14 @@ def _build_qwen_caption_prompt(
     if counts and restrict_to_labels:
         allowed = ", ".join(sorted(_caption_preferred_label(lbl, glossary_map) for lbl in counts.keys()))
         if allowed:
-            lines.append(
-                f"Labeled class inventory: {allowed}. Treat these classes and counts as authoritative. "
-                "Mention other visible scene/background context only generically; do not add extra counted object lists "
-                "outside this inventory, and do not pluralize a class whose count is 1."
-            )
+            if has_custom_context_prompt:
+                lines.append(f"Labeled class inventory: {allowed}.")
+            else:
+                lines.append(
+                    f"Labeled class inventory: {allowed}. Treat these classes and counts as authoritative. "
+                    "Mention other visible scene/background context only generically; do not add extra counted object lists "
+                    "outside this inventory, and do not pluralize a class whose count is 1."
+                )
     elif counts and not restrict_to_labels:
         lines.append("Label hints are suggestions; you may mention other visible objects too.")
     if selected:
@@ -376,7 +381,8 @@ def _build_qwen_caption_prompt(
             ]
             if compact:
                 lines.append(json.dumps(compact, separators=(",", ":")))
-            lines.append("Use relative positions (e.g., top-left, center) when describing layout.")
+            if not has_custom_context_prompt:
+                lines.append("Use relative positions (e.g., top-left, center) when describing layout.")
         else:
             labels_only = ", ".join(_caption_preferred_label(entry["label"], glossary_map) for entry in selected)
             lines.append(f"Labeled objects (one per box): {labels_only}.")
@@ -390,7 +396,10 @@ def _build_qwen_caption_prompt(
         lines.append("Labels provided but box details omitted.")
     if truncated:
         lines.append("Note: Only a subset of boxes is shown; counts reflect all hints.")
-    if short_requested:
+    if has_custom_context_prompt:
+        lines.append("Caption policy:")
+        lines.append(custom_context_prompt)
+    elif short_requested:
         if sentence_limit == 1:
             lines.append(
                 "Write a concise caption in exactly one complete sentence. Use the image as truth and mention the main visible scene and objects."
@@ -1292,6 +1301,8 @@ def _run_qwen_caption_cleanup(
     source_output: Optional[str] = None,
     source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
     authoritative_counts_note: Optional[str] = None,
+    cleanup_prompt_override: Optional[str] = None,
+    cleanup_system_prompt_override: Optional[str] = None,
     chat_template_kwargs: Optional[Dict[str, Any]] = None,
     run_qwen_inference_fn: Callable[..., Tuple[str, Any, Any]],
     resolve_variant_fn: Callable[[str, str], str],
@@ -1313,20 +1324,29 @@ def _run_qwen_caption_cleanup(
         else ""
     )
     cleanup_system = (
-        "You are a captioning assistant. Respond in English only. "
-        "Return only <final>...</final> and nothing else."
+        _collapse_whitespace(cleanup_system_prompt_override or "")
+        or (
+            "You are a captioning assistant. Respond in English only. "
+            "Return only <final>...</final> and nothing else."
+        )
     )
     user_request_note = _caption_user_request_instruction(user_prompt)
     source_context = _format_caption_source_output_context(source_output, source_outputs)
+    cleanup_policy = (
+        _collapse_whitespace(cleanup_prompt_override or "")
+        or (
+            "Remove repetition, avoid coordinates, and remove any mention of labels, hints, or counts being provided. "
+            "Never copy planning phrases such as 'we can mention', 'we need to', or 'the user wants'. "
+            f"{_CAPTION_EDITOR_PRESERVE_BROAD_TERMS} "
+            "If the draft is mostly reasoning or planning text, ignore that draft and write a fresh image-grounded caption. "
+            "Keep the caption grounded in the image."
+        )
+    )
     cleanup_prompt = (
         f"{strict_note}{allowed_note}{minimal_note}"
         f"{user_request_note}"
         f"{_collapse_whitespace(authoritative_counts_note or '') + ' ' if authoritative_counts_note else ''}"
-        "Remove repetition, avoid coordinates, and remove any mention of labels, hints, or counts being provided. "
-        "Never copy planning phrases such as 'we can mention', 'we need to', or 'the user wants'. "
-        f"{_CAPTION_EDITOR_PRESERVE_BROAD_TERMS} "
-        "If the draft is mostly reasoning or planning text, ignore that draft and write a fresh image-grounded caption. "
-        "Keep the caption grounded in the image.\n"
+        f"{cleanup_policy}\n"
         f"Draft caption: {prompt}"
     )
     if source_context:
@@ -1374,6 +1394,8 @@ def _run_qwen_caption_merge(
     overlap_guidance: Optional[str] = None,
     source_outputs: Optional[Sequence[Tuple[str, str]]] = None,
     authoritative_counts_note: Optional[str] = None,
+    merge_prompt_override: Optional[str] = None,
+    merge_system_prompt_override: Optional[str] = None,
     chat_template_kwargs: Optional[Dict[str, Any]] = None,
     run_qwen_inference_fn: Callable[..., Tuple[str, Any, Any]],
     resolve_variant_fn: Callable[[str, str], str],
@@ -1401,16 +1423,22 @@ def _run_qwen_caption_merge(
             "or quantities that conflict with the full image or authoritative counts. "
         )
     )
+    merge_policy = (
+        _collapse_whitespace(merge_prompt_override or "")
+        or (
+            "Revise the draft caption so it includes all distinct object details "
+            "from the window observations that are missing in the draft. "
+            "Do not invent new objects, and do not turn background window descriptions into extra counted object categories. "
+            f"{_CAPTION_EDITOR_PRESERVE_BROAD_TERMS} "
+            f"{detail_policy}"
+            f"{length_note}"
+            "Do not mention labels, hints, or coordinates."
+        )
+    )
     merge_prompt = (
         f"{user_request_note}"
         f"{_collapse_whitespace(authoritative_counts_note or '') + ' ' if authoritative_counts_note else ''}"
-        "Revise the draft caption so it includes all distinct object details "
-        "from the window observations that are missing in the draft. "
-        "Do not invent new objects, and do not turn background window descriptions into extra counted object categories. "
-        f"{_CAPTION_EDITOR_PRESERVE_BROAD_TERMS} "
-        f"{detail_policy}"
-        f"{length_note}"
-        "Do not mention labels, hints, or coordinates.\n"
+        f"{merge_policy}\n"
         f"Draft caption: {draft_caption}\n"
         + "\n".join(window_lines)
     )
@@ -1421,7 +1449,8 @@ def _run_qwen_caption_merge(
     if glossary_line:
         merge_prompt = f"{merge_prompt}\n{glossary_line}"
     merge_system = (
-        "You are a caption editor. Return only the revised caption in English."
+        _collapse_whitespace(merge_system_prompt_override or "")
+        or "You are a caption editor. Return only the revised caption in English."
     )
     merge_model = model_id_override or resolve_variant_fn(base_model_id, "Instruct")
     merge_decode = (

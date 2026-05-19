@@ -71,6 +71,34 @@ def test_build_qwen_caption_prompt_counts_and_truncation():
     assert truncated is True
 
 
+def test_caption_prompt_accepts_frontend_context_policy():
+    hints = [
+        QwenCaptionHint(label="light_vehicle", bbox=[0, 0, 10, 10], confidence=0.9),
+    ]
+
+    prompt, counts, used, truncated = _build_qwen_caption_prompt(
+        "Test prompt",
+        hints,
+        image_width=100,
+        image_height=100,
+        include_counts=True,
+        include_coords=False,
+        max_boxes=0,
+        detailed_mode=False,
+        restrict_to_labels=True,
+        labelmap_glossary='{"light_vehicle":["small vehicle","delivery vehicle"]}',
+        context_prompt="Frontend policy: use the exact prompt stack from the browser.",
+    )
+
+    assert "Frontend policy: use the exact prompt stack from the browser." in prompt
+    assert "Caption policy:" in prompt
+    assert "COUNTS (state exactly in final caption): small vehicle: 1" in prompt
+    assert "Treat the user caption request as required guidance" not in prompt
+    assert counts == {"light_vehicle": 1}
+    assert used == 1
+    assert truncated is False
+
+
 def test_resolve_caption_all_windows_defaults_to_labeled_windows_only():
     assert (
         _resolve_caption_all_windows(
@@ -594,9 +622,19 @@ def test_caption_request_accepts_custom_system_prompt():
     payload = QwenCaptionRequest(
         image_base64="data:image/png;base64,AA==",
         caption_system_prompt="  Stop after a single paragraph.  ",
+        caption_detection_context_prompt="  Detection policy.  ",
+        caption_window_prompt="  Window policy.  ",
+        caption_draft_refine_prompt="  Draft policy.  ",
+        caption_merge_prompt="  Merge policy.  ",
+        caption_cleanup_prompt="  Cleanup policy.  ",
     )
 
     assert payload.caption_system_prompt == "Stop after a single paragraph."
+    assert payload.caption_detection_context_prompt == "Detection policy."
+    assert payload.caption_window_prompt == "Window policy."
+    assert payload.caption_draft_refine_prompt == "Draft policy."
+    assert payload.caption_merge_prompt == "Merge policy."
+    assert payload.caption_cleanup_prompt == "Cleanup policy."
 
 
 def test_caption_request_normalizes_refinement_model_id():
@@ -711,6 +749,10 @@ def test_caption_merge_uses_refinement_model_override():
             "Overlap deduplication guidance: repeated crop-edge descriptions of a car "
             "near the center should be merged into one object."
         ),
+        merge_prompt_override=(
+            "Frontend merge policy: preserve all window evidence. Use up to 10 complete sentences. "
+            "preserve broad category terms; do not replace broad class terms with narrower subtypes."
+        ),
         source_outputs=[("Full-image raw output", "Smoke rises near scattered wreckage.")],
         authoritative_counts_note=(
             "Authoritative object counts that must appear in the caption as natural scene facts: "
@@ -732,8 +774,9 @@ def test_caption_merge_uses_refinement_model_override():
     assert "repeated crop-edge descriptions of a car" in calls["prompt"]
     assert "Smoke rises near scattered wreckage." in calls["prompt"]
     assert "small vehicle: 251" in calls["prompt"]
+    assert "Frontend merge policy: preserve all window evidence." in calls["prompt"]
     assert "preserve broad category terms" in calls["prompt"]
-    assert "do not change small vehicle into car" in calls["prompt"]
+    assert "do not replace broad class terms with narrower subtypes" in calls["prompt"]
 
 
 def test_caption_cleanup_forwards_no_thinking_template_kwargs():
@@ -754,6 +797,7 @@ def test_caption_cleanup_forwards_no_thinking_template_kwargs():
             "Authoritative object counts that must appear in the caption as natural scene facts: "
             "person: 2."
         ),
+        cleanup_prompt_override="Frontend cleanup policy: remove loops and keep counts.",
         chat_template_kwargs={"enable_thinking": False},
         run_qwen_inference_fn=run_qwen_inference_fn,
         resolve_variant_fn=lambda _base, _variant: "Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -764,7 +808,7 @@ def test_caption_cleanup_forwards_no_thinking_template_kwargs():
     assert caption == "A tank burns in a muddy field."
     assert calls["chat_template_kwargs"] == {"enable_thinking": False}
     assert "person: 2" in calls["prompt"]
-    assert "preserve broad category terms" in calls["prompt"]
+    assert "Frontend cleanup policy: remove loops and keep counts." in calls["prompt"]
 
 
 def test_caption_cleanup_respects_long_final_caption_sentence_budget():

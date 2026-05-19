@@ -226,19 +226,21 @@ The captioning workflow has several variants:
   default is to focus on windows that intersect labeled objects; empty windows
   are only used as broad scene context when explicitly enabled.
 - **Two-stage refine** lets Thinking models produce a draft and then uses an
-  editor pass to turn that draft into a cleaner final caption. This is separate
-  from the window merge pass.
+  editor pass to turn that draft into a cleaner final caption. It runs once on
+  full-image composition after any window observations have been collected; it
+  does not run once per crop, and it is separate from the window merge pass.
 - **Refinement model selection** can use the same model as captioning or a
   separate model, which is useful when a Thinking model sees details well but
   an Instruct model is better at producing clean final prose.
 - **Final length controls** let the operator choose whether the final caption
   should be short or allowed to preserve many sentences of detail for large,
   dense images.
-- **Prompt stack inspection** exposes the caption prompt families in closed UI
+- **Prompt stack editing** exposes the caption prompt families in closed UI
   pop-downs: user request, system prompt, detection context, window prompts,
-  draft/refine, window merge, and cleanup/guard instructions. Runtime image
-  values such as boxes and counts are still filled at generation time, but the
-  policy stack is visible before a run.
+  draft/refine, window merge, and cleanup/guard instructions. These fields are
+  editable and are sent with caption requests; runtime image values such as boxes,
+  counts, crop windows, and model outputs are filled at generation time and are
+  summarized in the Caption workflow grid.
 
 After generation, Tator checks and repairs the caption before returning it:
 
@@ -304,14 +306,23 @@ object claims.
   to auto-upgrade the previous default system prompt when the user has not
   customized it. Already-open browser tabs should be hard-reloaded once to pick
   up the new static JavaScript defaults.
-- Added a caption prompt-stack inspector to the Qwen caption UI. Operators can
-  expand the user-request, system, detection-context, window, draft/refine,
-  window-merge, and cleanup/guard prompt families to see which policy layer is
-  affecting the final caption.
+- Added an editable caption prompt stack to the Qwen caption UI. Operators can
+  expand and edit the user-request, system, detection-context, window,
+  draft/refine, window-merge, and cleanup/guard prompt families; normal frontend
+  caption runs send those prompt pieces explicitly instead of relying on hidden
+  backend wording.
+- Aligned the Caption workflow grid with the backend execution path. Each card
+  now names the prompt layers, runtime inputs, previous model outputs, and next
+  output for that step, and clarifies that Draft + refine is one full-image
+  Thinking-model pair rather than a per-crop loop.
 - Tightened authoritative count handling. Later cleanup, merge, and coverage
   passes now receive the count inventory, old "do not mention counts" wording
   was narrowed to "do not say counts were provided," and the guard now refines
   outputs that mention a class without its required numeric count.
+- Latest editable prompt-stack validation used:
+  `python -m py_compile localinferenceapi.py services/qwen.py models/schemas.py`,
+  `node --check ybat-master/ybat.js`, `git diff --check`, and
+  `pytest tests/test_qwen_caption_prompt.py -q` with 42 passing tests.
 - Validation for this checkpoint used:
   `python -m py_compile localinferenceapi.py services/qwen.py utils/glossary.py models/schemas.py api/qwen_caption.py`,
   `node --check ybat-master/ybat.js`, `git diff --check`, and

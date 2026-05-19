@@ -1899,7 +1899,10 @@ def _build_qwen_caption_step_plan(
                 _qwen_caption_step_entry(
                     f"window_{window_index}",
                     f"Window observation {window_index}/{max(1, int(total_windows or 1))}",
-                    "Tile caption used as source material before final composition.",
+                    (
+                        "Crop caption used as source material before final composition; "
+                        "Draft + refine does not run per crop."
+                    ),
                 )
             )
     if two_stage and is_thinking:
@@ -1908,12 +1911,12 @@ def _build_qwen_caption_step_plan(
                 _qwen_caption_step_entry(
                     "draft_caption",
                     "Two-stage 1/2: draft full image",
-                    "Thinking-only draft pass with the caption model.",
+                    "Thinking-only full-image draft pass after any window observations are collected.",
                 ),
                 _qwen_caption_step_entry(
                     "refine_draft",
                     "Two-stage 2/2: refine draft",
-                    "Editor pass over the draft and prompt context. Separate from window merge.",
+                    "Editor pass over the draft, full prompt context, and raw first-stage outputs. Separate from window merge.",
                 ),
             ]
         )
@@ -1922,7 +1925,7 @@ def _build_qwen_caption_step_plan(
             _qwen_caption_step_entry(
                 "generate_full",
                 "Compose full-image caption",
-                "Uses the full image and any window observations already collected.",
+                "Uses the full image, generated detection context, and any window observations already collected.",
             )
         )
     if caption_mode == "windowed":
@@ -1930,7 +1933,7 @@ def _build_qwen_caption_step_plan(
             _qwen_caption_step_entry(
                 "merge_windows",
                 "Window merge: fold in sub-captions",
-                "Windowed-only editor pass that runs after full-image composition.",
+                "Windowed-only editor pass that runs after full-image composition when crop captions exist.",
             )
         )
     plan.append(
@@ -27445,6 +27448,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             restrict_to_labels=restrict_to_labels,
             labelmap_glossary=payload.labelmap_glossary,
             max_sentences=final_caption_max_sentences,
+            context_prompt=payload.caption_detection_context_prompt,
         )
         glossary_line = ""
         if payload.labelmap_glossary:
@@ -27530,21 +27534,23 @@ def qwen_caption(payload: QwenCaptionRequest):
                 "Provide a rich, multi-sentence caption when there is a lot to see. "
             )
         ) + (
-            "Do not mention labels, hints, bounding boxes, coordinates, or that counts were provided. "
-            "Do not output labelmap tags (e.g., light_vehicle). Use broad natural class terms like small vehicle or storage tank. "
-            "Use a subtype such as car, van, SUV, pickup truck, or delivery vehicle only when the image clearly supports it. "
-            "Avoid any label tokens that contain underscores. "
+            "Do not mention labels, hints, bounding boxes, coordinates, glossary text, or that counts were provided. "
+            "Do not output internal dataset class names or any token with underscores. "
+            "Use natural-language class terms from the provided context when available. "
+            "Use narrower subtypes only when the image clearly supports them. "
             "If the hints conflict with the image, mention the uncertainty briefly. "
             "Stop when the caption is complete; never repeat a sentence or keep writing to fill the token budget."
         )
+        custom_system_prompt = bool((payload.caption_system_prompt or "").strip())
         system_prompt = (payload.caption_system_prompt or "").strip() or default_system_prompt
-        system_prompt = f"{system_prompt} Respond in English only."
-        if final_only:
-            system_prompt = f"{system_prompt} Return only the final caption. Do not include reasoning or preamble."
-        if final_only and is_thinking and not two_stage:
-            system_prompt = (
-                f"{system_prompt} Respond with exactly <final>...</final> and nothing else."
-            )
+        if not custom_system_prompt:
+            system_prompt = f"{system_prompt} Respond in English only."
+            if final_only:
+                system_prompt = f"{system_prompt} Return only the final caption. Do not include reasoning or preamble."
+            if final_only and is_thinking and not two_stage:
+                system_prompt = (
+                    f"{system_prompt} Respond with exactly <final>...</final> and nothing else."
+                )
         use_caption_cache = True
         if (
             active_qwen_model_path
@@ -27671,6 +27677,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                 source_output=source_output,
                 source_outputs=source_outputs,
                 authoritative_counts_note=counts_note,
+                cleanup_prompt_override=payload.caption_cleanup_prompt,
+                cleanup_system_prompt_override=system_prompt,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
                 run_qwen_inference_fn=_run_qwen_inference,
                 resolve_variant_fn=_resolve_qwen_variant_model_id_impl,
@@ -27706,6 +27714,8 @@ def qwen_caption(payload: QwenCaptionRequest):
                 overlap_guidance=overlap_guidance,
                 source_outputs=source_outputs,
                 authoritative_counts_note=authoritative_counts_note,
+                merge_prompt_override=payload.caption_merge_prompt,
+                merge_system_prompt_override=system_prompt,
                 chat_template_kwargs=postprocess_chat_template_kwargs,
                 run_qwen_inference_fn=_run_qwen_inference,
                 resolve_variant_fn=_resolve_qwen_variant_model_id_impl,
@@ -27901,43 +27911,51 @@ def qwen_caption(payload: QwenCaptionRequest):
                         restrict_to_labels=restrict_to_labels,
                         labelmap_glossary=payload.labelmap_glossary,
                         max_sentences=final_caption_max_sentences,
+                        context_prompt=payload.caption_detection_context_prompt,
                     )
-                    if short_caption_requested:
-                        if requested_sentence_limit == 1:
-                            window_caption_instruction = (
-                                "Write one concise sentence about this region only. "
-                            )
+                    if payload.caption_window_prompt:
+                        window_task_prompt = payload.caption_window_prompt.strip()
+                    else:
+                        if short_caption_requested:
+                            if requested_sentence_limit == 1:
+                                window_caption_instruction = (
+                                    "Write one concise sentence about this region only. "
+                                )
+                            else:
+                                window_caption_instruction = (
+                                    "Write 1-2 concise sentences about this region only. "
+                                )
                         else:
                             window_caption_instruction = (
-                                "Write 1-2 concise sentences about this region only. "
+                                "Write 1-3 concrete sentences about this region only. "
                             )
-                    else:
-                        window_caption_instruction = (
-                            "Write 1-3 concrete sentences about this region only. "
+                        window_task_prompt = (
+                            "This crop is a subregion of the full image.\n"
+                            "Apply the crop caption context above to this crop only.\n"
+                            "Use the crop image as truth and treat the provided object context as priors, not as text to mention.\n"
+                            "Describe crop-local objects of interest with natural-language class meanings, visible attributes, counts, "
+                            "and spatial relations when available. Mention surrounding scene details only when they clarify those objects or the crop. "
+                            "Do not add unsupported object categories or treat background context as extra counted inventory.\n"
+                            f"{window_caption_instruction}No reasoning or preamble. "
+                            "Do not mention labels, hints, bounding boxes, coordinates, glossary text, or that counts were provided. "
+                            "Do not output internal dataset class names or any token with underscores. "
+                            "Use narrower subtypes only when the crop clearly supports them."
                         )
-                    window_prompt = (
-                        "This crop is a subregion of the full image.\n"
-                        "Focus only on this region.\n"
-                        f"{window_caption_instruction}No reasoning or preamble. "
-                        "Do not mention labels, hints, coordinates, or that counts were provided. "
-                        "Do not output labelmap tags (e.g., light_vehicle); use broad natural class terms like small vehicle. "
-                        "Use a subtype such as car, van, pickup truck, or delivery vehicle only when the crop clearly supports it. "
-                        "Avoid any token with underscores.\n"
-                        f"{window_prompt}"
-                    )
                     if glossary_line:
                         window_prompt = f"{window_prompt}\n{glossary_line}"
                     if restrict_to_labels and window_allowed_prompt:
                         window_prompt = (
                             f"{window_prompt}\nAllowed classes: {', '.join(window_allowed_prompt)}. "
-                            "This window has labeled support boxes. Describe those labeled objects and only minimal surrounding context. "
-                            "Do not enumerate unrelated objects, and do not introduce any other entity types."
+                            "This window has labeled support boxes. Use the crop detection context to describe those labeled objects, "
+                            "their visible attributes, and surrounding crop details that clarify them. "
+                            "Do not promote unrelated background objects into extra counted categories, and do not introduce unsupported entity types."
                         )
                     elif restrict_to_labels and label_hints and caption_all_windows:
                         window_prompt = (
                             f"{window_prompt}\nThis window has no labeled support boxes. "
                             "Use it only for broad scene context; do not enumerate object categories, counts, or new object lists."
                         )
+                    window_prompt = f"{window_prompt}\n\nCrop task:\n{window_task_prompt}"
                     if window_is_thinking:
                         window_prompt = _adjust_prompt_for_thinking_impl(window_prompt)
                     window_img = pil_img.crop((x0, y0, x0 + window_size, y0 + window_size))
@@ -28154,12 +28172,19 @@ def qwen_caption(payload: QwenCaptionRequest):
                                 refine_prompt = f"{refine_prompt}\n\n{first_stage_context}"
                         if allowed_note:
                             refine_prompt = f"{refine_prompt}\n{allowed_note}"
-                        refine_prompt = (
-                            f"{refine_prompt}\n"
-                            "Edit the draft with minimal changes. Do not introduce new objects or actions. "
-                            f"{broad_term_editor_note} "
-                            "Return only a concise, complete caption (1-3 sentences) with no coordinates."
-                        )
+                        if payload.caption_cleanup_prompt:
+                            refine_prompt = (
+                                f"{refine_prompt}\n"
+                                f"{payload.caption_cleanup_prompt.strip()} "
+                                "Return only a concise, complete caption (1-3 sentences) with no coordinates."
+                            )
+                        else:
+                            refine_prompt = (
+                                f"{refine_prompt}\n"
+                                "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+                                f"{broad_term_editor_note} "
+                                "Return only a concise, complete caption (1-3 sentences) with no coordinates."
+                            )
                         refine_system = "You are a concise captioning assistant. Return only the final caption in English."
                         _qwen_progress_begin_output_section(f"Window {window_index}/{total_windows} refine output")
                         refine_text, _, _ = _run_qwen_inference(
@@ -28271,11 +28296,18 @@ def qwen_caption(payload: QwenCaptionRequest):
                 step_region=full_step_region,
                 step_detail="Two-stage 1/2: full-image draft pass with the caption model",
             )
-            draft_prompt = (
-                "Step 1: Look at the image and form a draft caption.\n"
-                f"{prompt_text}\n"
-                "Respond with: DRAFT: <caption>"
-            )
+            if payload.caption_draft_refine_prompt:
+                draft_prompt = (
+                    f"{payload.caption_draft_refine_prompt.strip()}\n\n"
+                    f"{prompt_text}\n"
+                    "Respond with: DRAFT: <caption>"
+                )
+            else:
+                draft_prompt = (
+                    "Step 1: Look at the image and form a draft caption.\n"
+                    f"{prompt_text}\n"
+                    "Respond with: DRAFT: <caption>"
+                )
             draft_system = f"{system_prompt} Return only a line starting with 'DRAFT:'."
             _qwen_progress_begin_output_section("Full-image draft output")
             draft_text, _, _ = _run_qwen_inference(
@@ -28304,13 +28336,21 @@ def qwen_caption(payload: QwenCaptionRequest):
                 refine_prompt = f"{refine_prompt}\n\n{first_stage_context}"
             if allowed_note:
                 refine_prompt = f"{refine_prompt}\n{allowed_note}"
-            refine_prompt = (
-                f"{refine_prompt}\n"
-                "Edit the draft with minimal changes. Do not introduce new objects or actions. "
-                f"{broad_term_editor_note} "
-                f"{final_caption_length_instruction}"
-                "Return only the final caption."
-            )
+            if payload.caption_draft_refine_prompt:
+                refine_prompt = (
+                    f"{refine_prompt}\n"
+                    f"{payload.caption_draft_refine_prompt.strip()} "
+                    f"{final_caption_length_instruction}"
+                    "Return only the final caption."
+                )
+            else:
+                refine_prompt = (
+                    f"{refine_prompt}\n"
+                    "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+                    f"{broad_term_editor_note} "
+                    f"{final_caption_length_instruction}"
+                    "Return only the final caption."
+                )
             refine_system = (
                 "You are a captioning assistant. Use the image as truth. "
                 "Return only the final caption. Respond in English only."
@@ -28623,13 +28663,21 @@ def qwen_caption(payload: QwenCaptionRequest):
                     refine_prompt = f"{refine_prompt}\n\n{first_stage_context}"
             if allowed_note:
                 refine_prompt = f"{refine_prompt}\n{allowed_note}"
-            refine_prompt = (
-                f"{refine_prompt}\n"
-                "Edit the draft with minimal changes. Do not introduce new objects or actions. "
-                f"{broad_term_editor_note} "
-                f"{final_caption_length_instruction}"
-                "Return only the final caption with no coordinates."
-            )
+            if payload.caption_cleanup_prompt:
+                refine_prompt = (
+                    f"{refine_prompt}\n"
+                    f"{payload.caption_cleanup_prompt.strip()} "
+                    f"{final_caption_length_instruction}"
+                    "Return only the final caption with no coordinates."
+                )
+            else:
+                refine_prompt = (
+                    f"{refine_prompt}\n"
+                    "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+                    f"{broad_term_editor_note} "
+                    f"{final_caption_length_instruction}"
+                    "Return only the final caption with no coordinates."
+                )
             refine_system = (
                 "You are a captioning assistant. Return only the final caption in English."
             )
@@ -28661,7 +28709,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
             rewrite_prompt = (
                 "Rewrite the caption in English only, preserving meaning and concrete detail. "
-                f"{broad_term_editor_note} "
+                f"{(payload.caption_cleanup_prompt.strip() + ' ') if payload.caption_cleanup_prompt else broad_term_editor_note + ' '}"
                 f"{final_caption_length_instruction}\n"
                 f"Caption: {caption_text}"
             )

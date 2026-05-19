@@ -13998,6 +13998,29 @@ def get_text_label(dataset_id: str, image_name: str):
     return {"caption": caption}
 
 
+def get_text_labels(dataset_id: str, image_names: Sequence[str]):
+    entry = _resolve_dataset_entry(dataset_id)
+    captions: Dict[str, str] = {}
+    missing: List[str] = []
+    for raw_name in image_names or []:
+        image_name = str(raw_name or "").strip()
+        if not image_name:
+            continue
+        try:
+            image_relpath = _annotation_normalise_image_relpath(
+                image_name if "." in image_name else f"{image_name}.jpg"
+            )
+        except HTTPException:
+            missing.append(image_name)
+            continue
+        caption = _annotation_effective_text_label(entry, image_relpath)
+        if caption:
+            captions[image_name] = caption
+        else:
+            missing.append(image_name)
+    return {"captions": captions, "missing": missing}
+
+
 def set_text_label(dataset_id: str, image_name: str, caption: str):
     entry = _resolve_dataset_entry(dataset_id)
     image_relpath = _annotation_normalise_image_relpath(
@@ -29392,6 +29415,7 @@ app.include_router(
         get_glossary_fn=get_dataset_glossary,
         set_glossary_fn=set_dataset_glossary,
         get_text_label_fn=get_text_label,
+        get_text_labels_fn=get_text_labels,
         set_text_label_fn=set_text_label,
         register_path_fn=register_dataset_path,
         open_path_fn=open_dataset_path,

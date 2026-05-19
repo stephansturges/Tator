@@ -427,6 +427,35 @@ def test_effective_text_label_falls_back_to_legacy_flat_text_labels(tmp_path) ->
     assert value == "legacy"
 
 
+def test_get_text_labels_batch_reads_overlay_source_and_legacy(tmp_path, monkeypatch) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    dataset_root = Path(entry["dataset_root"])
+    source_text = dataset_root / "text_labels" / "sub_a"
+    source_text.mkdir(parents=True, exist_ok=True)
+    (source_text / "img.txt").write_text("source caption", encoding="utf-8")
+    legacy_text = dataset_root / "text_labels"
+    legacy_text.mkdir(parents=True, exist_ok=True)
+    (legacy_text / "legacy.txt").write_text("legacy caption", encoding="utf-8")
+    overlay_root = (
+        Path(entry["registry_root"]) / api.DATASET_ANNOTATION_OVERLAY_DIRNAME / "text_labels"
+    )
+    (overlay_root / "sub_b").mkdir(parents=True, exist_ok=True)
+    (overlay_root / "sub_b" / "img.txt").write_text("overlay caption", encoding="utf-8")
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+
+    result = api.get_text_labels(
+        "ds",
+        ["sub_a/img.jpg", "sub_b/img.png", "nested/legacy.jpg", "missing.jpg"],
+    )
+
+    assert result["captions"] == {
+        "sub_a/img.jpg": "source caption",
+        "sub_b/img.png": "overlay caption",
+        "nested/legacy.jpg": "legacy caption",
+    }
+    assert result["missing"] == ["missing.jpg"]
+
+
 def test_register_path_dedupes_existing_linked_entry(tmp_path, monkeypatch) -> None:
     dataset_root = tmp_path / "linked_ds"
     (dataset_root / "images").mkdir(parents=True, exist_ok=True)

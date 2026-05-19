@@ -16,6 +16,7 @@ def build_datasets_router(
     get_glossary_fn: Callable[[str], Any],
     set_glossary_fn: Callable[[str, str], Any],
     get_text_label_fn: Callable[[str, str], Any],
+    get_text_labels_fn: Callable[[str, list[str]], Any],
     set_text_label_fn: Callable[[str, str, str], Any],
     register_path_fn: Callable[
         [
@@ -88,6 +89,14 @@ def build_datasets_router(
     def set_dataset_glossary(dataset_id: str, payload: dict = Body(...)):  # noqa: B008
         glossary = str((payload or {}).get("glossary") or "")
         return set_glossary_fn(dataset_id, glossary)
+
+    @router.post("/datasets/{dataset_id}/text_labels/batch")
+    def get_text_labels(dataset_id: str, payload: dict = Body(...)):  # noqa: B008
+        raw_names = (payload or {}).get("image_names") or []
+        if not isinstance(raw_names, list):
+            raw_names = []
+        image_names = [str(name or "").strip() for name in raw_names if str(name or "").strip()]
+        return get_text_labels_fn(dataset_id, image_names)
 
     @router.get("/datasets/{dataset_id}/text_labels/{image_name}")
     def get_text_label(dataset_id: str, image_name: str):

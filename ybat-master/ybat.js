@@ -24649,6 +24649,49 @@ async function cancelRfDetrTrainingJobRequest() {
         return String(data?.caption || "").trim();
     }
 
+    async function loadCaptionsForImages(imageNames, datasetIdOverride = null) {
+        const names = Array.from(new Set((imageNames || [])
+            .map((name) => String(name || "").trim())
+            .filter(Boolean)));
+        if (!names.length) {
+            return {};
+        }
+        if (isAnnotationDatasetModeActive()) {
+            const captions = {};
+            names.forEach((imageName) => {
+                const caption = String(textLabels?.[imageName] || "").trim();
+                if (caption) {
+                    captions[imageName] = caption;
+                }
+            });
+            return captions;
+        }
+        const datasetId = datasetIdOverride || getCaptionDatasetId();
+        if (!datasetId) {
+            return {};
+        }
+        const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/text_labels/batch`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ image_names: names }),
+        });
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+        }
+        const data = await resp.json();
+        const captions = data?.captions && typeof data.captions === "object" ? data.captions : {};
+        const out = {};
+        Object.entries(captions).forEach(([imageName, caption]) => {
+            const key = String(imageName || "").trim();
+            const value = String(caption || "").trim();
+            if (key && value) {
+                out[key] = value;
+            }
+        });
+        return out;
+    }
+
     async function ensureCaptionsForExport() {
         const datasetId = getCaptionDatasetId();
         if (!datasetId) {
@@ -24662,11 +24705,24 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!textLabels) {
             textLabels = {};
         }
+        const missingImageNames = imageNames.filter((imageName) => !String(textLabels?.[imageName] || "").trim());
+        if (!missingImageNames.length) {
+            return;
+        }
+        try {
+            const captions = await loadCaptionsForImages(missingImageNames, datasetId);
+            Object.entries(captions).forEach(([imageName, caption]) => {
+                if (caption) {
+                    textLabels[imageName] = caption;
+                }
+            });
+            setSamStatus("Captions ready for export.", { variant: "success", duration: 2000 });
+            return;
+        } catch (error) {
+            console.warn("Batch caption export preload failed; falling back to per-image loads", error);
+        }
         let loaded = 0;
-        for (const imageName of imageNames) {
-            if (textLabels[imageName]) {
-                continue;
-            }
+        for (const imageName of missingImageNames) {
             try {
                 const caption = await loadCaptionForImage(imageName, datasetId);
                 if (caption) {
@@ -24677,7 +24733,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             loaded += 1;
             if (loaded % 50 === 0) {
-                setSamStatus(`Loading captions for export… (${loaded}/${imageNames.length})`, { variant: "info", duration: 0 });
+                setSamStatus(`Loading captions for export… (${loaded}/${missingImageNames.length})`, { variant: "info", duration: 0 });
             }
         }
         setSamStatus("Captions ready for export.", { variant: "success", duration: 2000 });

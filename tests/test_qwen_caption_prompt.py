@@ -22,6 +22,7 @@ from services.qwen import (
     _clean_caption_source_context_text,
     _extract_caption_from_text,
     _format_caption_source_output_context,
+    _format_caption_window_observation_lines,
     _format_qwen_load_error_impl,
     _resolve_qwen_caption_decode,
     _resolve_qwen_window_size,
@@ -285,6 +286,22 @@ def test_caption_overlap_guidance_never_exposes_bbox_ids():
     assert source_id not in guidance
     assert "object ID" not in guidance
     assert "bbox ID" not in guidance
+
+
+def test_window_observation_lines_ground_local_spatial_language_globally():
+    lines = _format_caption_window_observation_lines(
+        [(0, 0, 100, "A small object appears in the bottom-right corner of the crop.")],
+        image_width=400,
+        image_height=400,
+    )
+    text = "\n".join(lines)
+
+    assert "Spatial grounding" in text
+    assert "crop-relative" in text
+    assert "global region top-left" in text
+    assert "covers x 0-25% and y 0-25%" in text
+    assert "do not copy local spatial wording" in text
+    assert "bottom-right corner of the crop" in text
 
 
 def test_caption_prompt_never_includes_bbox_source_ids():
@@ -725,6 +742,10 @@ def test_no_think_is_added_to_last_user_message_and_prefill_is_neutralized():
 def test_caption_merge_uses_refinement_model_override():
     calls = {}
 
+    class ImageStub:
+        width = 512
+        height = 512
+
     def runtime_resolver(model_id):
         calls["model_id"] = model_id
         return ("runtime", None)
@@ -737,8 +758,8 @@ def test_caption_merge_uses_refinement_model_override():
 
     merged = _run_qwen_caption_merge(
         "Draft caption.",
-        [(0, 0, 128, "Window detail.")],
-        pil_img=object(),
+        [(0, 0, 128, "Window detail in the bottom-right of the crop.")],
+        pil_img=ImageStub(),
         base_model_id="Qwen/Qwen3-VL-30B-A3B-Thinking",
         runtime_resolver=runtime_resolver,
         max_new_tokens=64,
@@ -772,6 +793,10 @@ def test_caption_merge_uses_refinement_model_override():
     assert "up to 10 complete sentences" in calls["prompt"]
     assert "User caption request: Can we infer the likely location of this scene?" in calls["prompt"]
     assert "repeated crop-edge descriptions of a car" in calls["prompt"]
+    assert "Spatial grounding" in calls["prompt"]
+    assert "crop-relative" in calls["prompt"]
+    assert "global region top-left" in calls["prompt"]
+    assert "bottom-right of the crop" in calls["prompt"]
     assert "Smoke rises near scattered wreckage." in calls["prompt"]
     assert "small vehicle: 251" in calls["prompt"]
     assert "Frontend merge policy: preserve all window evidence." in calls["prompt"]

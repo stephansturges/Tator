@@ -940,6 +940,10 @@ class Sam3TextPrompt(BaseModel):
     image_name: Optional[str] = None
     max_results: Optional[int] = None
     min_size: Optional[int] = None
+    windowed: bool = False
+    window_size: Optional[int] = None
+    window_overlap: Optional[float] = None
+    merge_iou: Optional[float] = None
 
     @root_validator(skip_on_failure=True)
     def _ensure_text_payload(cls, values):  # noqa: N805
@@ -961,6 +965,19 @@ class Sam3TextPrompt(BaseModel):
             except (TypeError, ValueError):
                 eps_val = None
             values["simplify_epsilon"] = eps_val if eps_val is None or eps_val >= 0 else 0.0
+        window_size = values.get("window_size")
+        if window_size is not None:
+            try:
+                values["window_size"] = max(1, int(window_size))
+            except (TypeError, ValueError):
+                values["window_size"] = None
+        for key in ("window_overlap", "merge_iou"):
+            raw = values.get(key)
+            if raw is not None:
+                try:
+                    values[key] = float(raw)
+                except (TypeError, ValueError):
+                    values[key] = None
         return values
 
 

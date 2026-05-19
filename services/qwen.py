@@ -1284,6 +1284,66 @@ def _format_caption_source_output_context(
     return "\n\n".join(lines)
 
 
+def _caption_window_global_region(
+    x0: int,
+    y0: int,
+    size: int,
+    image_width: Optional[int],
+    image_height: Optional[int],
+) -> str:
+    try:
+        safe_width = max(1, int(image_width or 0))
+        safe_height = max(1, int(image_height or 0))
+    except (TypeError, ValueError):
+        safe_width = safe_height = 0
+    try:
+        left = max(0, int(round(float(x0))))
+        top = max(0, int(round(float(y0))))
+        crop_size = max(1, int(round(float(size))))
+    except (TypeError, ValueError):
+        return "global crop location unavailable"
+    if safe_width <= 0 or safe_height <= 0:
+        return "global crop location unavailable"
+    right = min(safe_width, left + crop_size)
+    bottom = min(safe_height, top + crop_size)
+    center_x = (left + right) / 2.0
+    center_y = (top + bottom) / 2.0
+    horiz = "left" if center_x < safe_width / 3.0 else "right" if center_x > safe_width * 2 / 3.0 else "center"
+    vert = "top" if center_y < safe_height / 3.0 else "bottom" if center_y > safe_height * 2 / 3.0 else "middle"
+    x0_pct = int(round((left / safe_width) * 100))
+    x1_pct = int(round((right / safe_width) * 100))
+    y0_pct = int(round((top / safe_height) * 100))
+    y1_pct = int(round((bottom / safe_height) * 100))
+    return (
+        f"global region {vert}-{horiz}; "
+        f"covers x {x0_pct}-{x1_pct}% and y {y0_pct}-{y1_pct}% of the full image"
+    )
+
+
+def _format_caption_window_observation_lines(
+    windowed_captions: Sequence[Tuple[int, int, int, str]],
+    *,
+    image_width: Optional[int] = None,
+    image_height: Optional[int] = None,
+) -> List[str]:
+    lines = [
+        "Window observations (supporting close-up evidence; do NOT invent objects):",
+        (
+            "Spatial grounding: each observation is only one crop of the full image. "
+            "Absolute local words in a crop caption such as top, bottom, left, right, center, or corner are crop-relative. "
+            "Use the crop global region and percent bounds below to restate positions in full-image terms, and do not copy local spatial wording when it would be misleading globally. "
+            "The percent bounds are prompt-only layout aids; do not mention crop coordinates or percentages in the final caption."
+        ),
+    ]
+    for index, (x0, y0, size, caption) in enumerate(windowed_captions, start=1):
+        text = _collapse_whitespace(str(caption or ""))
+        if not text:
+            continue
+        region = _caption_window_global_region(x0, y0, size, image_width, image_height)
+        lines.append(f"- Window {index} ({region}): {text}")
+    return lines
+
+
 def _run_qwen_caption_cleanup(
     prompt: str,
     pil_img: Any,
@@ -1404,11 +1464,14 @@ def _run_qwen_caption_merge(
 ) -> str:
     if not draft_caption or not windowed_captions:
         return draft_caption
-    window_lines = ["Window observations (supporting evidence; do NOT invent objects):"]
-    for _x0, _y0, _size, caption in windowed_captions:
-        if caption:
-            window_lines.append(f"- {caption}")
-    if len(window_lines) == 1:
+    image_width = getattr(pil_img, "width", None)
+    image_height = getattr(pil_img, "height", None)
+    window_lines = _format_caption_window_observation_lines(
+        windowed_captions,
+        image_width=image_width,
+        image_height=image_height,
+    )
+    if len(window_lines) <= 2:
         return draft_caption
     length_note = _caption_length_instruction(max_sentences)
     short_requested = _caption_user_requested_short(user_prompt, max_sentences)

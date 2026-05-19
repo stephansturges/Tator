@@ -731,7 +731,6 @@
 
     let imagesSelectButton = null;
     let classesSelectButton = null;
-    let bboxesFolderSelectButton = null;
     let annotationSourceModeEl = null;
     let annotationSourceSummaryEl = null;
     let annotationSourceLockEl = null;
@@ -2238,6 +2237,13 @@ const AUTOMATION_LOCKED_TABS = new Set([
         minSizeInput: null,
         maxPointsInput: null,
         epsilonInput: null,
+        windowedToggle: null,
+        windowSizeInput: null,
+        windowOverlapInput: null,
+        newClassInput: null,
+        addClassButton: null,
+        saveLabelmapButton: null,
+        labelmapStatus: null,
     };
     const sam3RecipeElements = {
         fileInput: null,
@@ -2516,6 +2522,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     ].join("\n");
     const DEFAULT_CAPTION_MERGE_PROMPT = [
         "Revise the draft caption so it includes all distinct object details from the window observations that are missing in the draft.",
+        "Translate crop-local spatial wording through each crop's global location before reusing it; do not copy phrases such as bottom-right or top-left from a crop unless they remain true in the full image.",
         "Do not invent new objects, and do not turn background window descriptions into extra counted object categories.",
         "Preserve broad category terms from the context; do not replace them with narrower subtypes unless that subtype is consistently supported.",
         "Use multiple sentences if needed. Preserve specific counts, actions, and notable attributes from the windows; treat window text as supporting evidence, not a complete object inventory.",
@@ -20472,7 +20479,14 @@ async function cancelRfDetrTrainingJobRequest() {
         sam3TextElements.minSizeInput = document.getElementById("sam3MinSize");
         sam3TextElements.maxPointsInput = document.getElementById("sam3MaxPoints");
         sam3TextElements.epsilonInput = document.getElementById("sam3SimplifyEpsilon");
+        sam3TextElements.windowedToggle = document.getElementById("sam3TextWindowed");
+        sam3TextElements.windowSizeInput = document.getElementById("sam3TextWindowSize");
+        sam3TextElements.windowOverlapInput = document.getElementById("sam3TextWindowOverlap");
         sam3TextElements.classSelect = document.getElementById("sam3ClassSelect");
+        sam3TextElements.newClassInput = document.getElementById("sam3NewClassName");
+        sam3TextElements.addClassButton = document.getElementById("sam3AddClassButton");
+        sam3TextElements.saveLabelmapButton = document.getElementById("sam3SaveLabelmapButton");
+        sam3TextElements.labelmapStatus = document.getElementById("sam3LabelmapStatus");
         sam3TextElements.runButton = document.getElementById("sam3RunButton");
         sam3TextElements.cascadeToggleButton = document.getElementById("sam3TextCascadeToggle");
         sam3TextElements.cascadePanel = document.getElementById("sam3TextCascadePanel");
@@ -20547,6 +20561,17 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (sam3TextElements.batchStopButton) {
             sam3TextElements.batchStopButton.addEventListener("click", () => stopSam3TextBatch());
+        }
+        if (sam3TextElements.addClassButton) {
+            sam3TextElements.addClassButton.addEventListener("click", () => addSam3LabelmapClassFromUi());
+        }
+        if (sam3TextElements.saveLabelmapButton) {
+            sam3TextElements.saveLabelmapButton.addEventListener("click", () => {
+                saveSam3LabelmapFromUi().catch((error) => {
+                    console.error("SAM3 labelmap save failed", error);
+                    setSam3LabelmapStatus(`Save failed: ${error.message || error}`, "error");
+                });
+            });
         }
         if (sam3TextElements.similarityButton) {
             sam3TextElements.similarityButton.addEventListener("click", () => {
@@ -22056,12 +22081,140 @@ async function cancelRfDetrTrainingJobRequest() {
         renderSam3CascadeSteps();
     }
 
+    function setSam3LabelmapStatus(message, variant = "info") {
+        if (!sam3TextElements.labelmapStatus) {
+            return;
+        }
+        sam3TextElements.labelmapStatus.textContent = message || "";
+        sam3TextElements.labelmapStatus.className = `training-help ${variant || ""}`;
+    }
+
+    function confirmSam3LabelmapExtension() {
+        const classifierPath = String(activeElements.classifierPath?.value || "").trim();
+        const classifierCount = Array.isArray(activeState.classifiers) ? activeState.classifiers.length : 0;
+        const classifierNote = classifierPath || classifierCount
+            ? "A trained class predictor appears to be available. "
+            : "";
+        return window.confirm(
+            `${classifierNote}Adding a class changes the labelmap. Any trained auto-class classifier was trained on the old class list and must be retrained before auto-class can be trusted with this new labelmap. Continue?`
+        );
+    }
+
+    function addSam3LabelmapClassFromUi() {
+        const className = String(sam3TextElements.newClassInput?.value || "").trim();
+        if (!className) {
+            setSam3LabelmapStatus("Enter a class name first.", "warn");
+            sam3TextElements.newClassInput?.focus();
+            return;
+        }
+        if (/[\r\n]/.test(className)) {
+            setSam3LabelmapStatus("Class names must be one line.", "warn");
+            return;
+        }
+        if (isAnnotationDatasetModeActive() && isAnnotationMutationBlocked()) {
+            setSam3LabelmapStatus(annotationMutationBlockedMessage("Extending labelmap"), "warn");
+            return;
+        }
+        const existing = orderedClassNames();
+        const duplicate = existing.find((name) => name.toLowerCase() === className.toLowerCase());
+        if (duplicate) {
+            if (sam3TextElements.classSelect) {
+                sam3TextElements.classSelect.value = duplicate;
+            }
+            setSam3LabelmapStatus(`Class "${duplicate}" already exists.`, "warn");
+            return;
+        }
+        if (!confirmSam3LabelmapExtension()) {
+            setSam3LabelmapStatus("Class add cancelled.", "info");
+            return;
+        }
+        const classList = document.getElementById("classList");
+        if (!classList) {
+            setSam3LabelmapStatus("Class list control is unavailable.", "error");
+            return;
+        }
+        if (!Array.isArray(loadedClassList) || loadedClassList.length !== existing.length) {
+            loadedClassList = existing.slice();
+        }
+        const nextIndex = loadedClassList.length;
+        classes[className] = nextIndex;
+        loadedClassList.push(className);
+        const option = document.createElement("option");
+        option.value = String(nextIndex);
+        option.textContent = className;
+        Array.from(classList.options || []).forEach((opt) => {
+            opt.selected = false;
+        });
+        option.selected = true;
+        classList.appendChild(option);
+        classList.selectedIndex = nextIndex;
+        classListIndex = nextIndex;
+        currentClass = className;
+        setCurrentClass();
+        updateQwenClassOptions({ preserveSelection: true });
+        updateSam3ClassOptions({ preserveSelection: true });
+        if (sam3TextElements.classSelect) {
+            sam3TextElements.classSelect.value = className;
+        }
+        if (qwenElements.classSelect && !qwenClassOverride) {
+            qwenElements.classSelect.value = className;
+        }
+        if (sam3TextElements.newClassInput) {
+            sam3TextElements.newClassInput.value = "";
+        }
+        if (annotationSourceState.manifest && Array.isArray(annotationSourceState.manifest.labelmap)) {
+            annotationSourceState.manifest.labelmap = orderedClassNames();
+        }
+        refreshCaptionGlossaryForCurrentContext({ force: true, silent: true }).catch((error) => {
+            console.warn("Failed to refresh caption glossary after labelmap extension", error);
+        });
+        setSam3LabelmapStatus(`Added "${className}". Save the new labelmap before retraining auto-class.`, "success");
+        enqueueTaskNotice(`Labelmap class added: ${className}`, { durationMs: 3500 });
+    }
+
+    async function saveSam3LabelmapFromUi() {
+        const labelmap = orderedClassNames();
+        if (!labelmap.length) {
+            setSam3LabelmapStatus("Load or create classes before saving.", "warn");
+            return;
+        }
+        if (isAnnotationDatasetModeActive()) {
+            if (isAnnotationMutationBlocked()) {
+                setSam3LabelmapStatus(annotationMutationBlockedMessage("Saving labelmap"), "warn");
+                return;
+            }
+            const base = getAnnotationBasePath();
+            if (!base) {
+                throw new Error("annotation API unavailable");
+            }
+            setSam3LabelmapStatus("Saving labelmap to dataset...", "info");
+            const resp = await fetch(`${base}/meta`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(annotationSessionPayload({ labelmap })),
+            });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            if (annotationSourceState.manifest) {
+                annotationSourceState.manifest.labelmap = labelmap.slice();
+            }
+            setSam3LabelmapStatus(`Saved ${labelmap.length} classes to the dataset labelmap. Retrain auto-class before using the new class.`, "success");
+            enqueueTaskNotice("Saved updated labelmap to dataset.", { durationMs: 4000 });
+            return;
+        }
+        const blob = new Blob([`${labelmap.join("\n")}\n`], { type: "text/plain;charset=utf-8" });
+        saveBlobToDisk(blob, "labelmap.txt");
+        setSam3LabelmapStatus(`Downloaded labelmap.txt with ${labelmap.length} classes.`, "success");
+    }
+
     function updateQwenRunButton() {
         if (!qwenElements.runButton) {
             return;
         }
         qwenElements.runButton.disabled = isGpuHeavyLockActive() || !qwenAvailable || qwenRequestActive;
-        qwenElements.runButton.textContent = qwenRequestActive ? "Running…" : "Run annotation assistant";
+        qwenElements.runButton.textContent = qwenRequestActive ? "Running…" : "Run detection engine";
     }
 
     function updateQwenCaptionButton() {
@@ -22458,7 +22611,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 title: "Merge window observations",
                 body: "Windowed-only editor pass that runs when crop captions exist.",
                 prompts: "System prompt; Window merge prompt; user request note; authoritative count note when counts are enabled",
-                uses: "Full image, current full-image caption, window observations, overlap/dedupe guidance, glossary policy, raw source outputs",
+                uses: "Full image, current full-image caption, crop observations with global layout bounds, overlap/dedupe guidance, glossary policy, raw source outputs",
                 previous: mode.twoStage && mode.isThinking
                     ? "Refined full-image caption plus window observations"
                     : "Full-image composition plus window observations",
@@ -23392,6 +23545,25 @@ async function cancelRfDetrTrainingJobRequest() {
         return currentClass;
     }
 
+    function readSam3TextWindowSettings() {
+        const windowed = !!sam3TextElements.windowedToggle?.checked;
+        let windowSize = parseInt(sam3TextElements.windowSizeInput?.value || "672", 10);
+        if (Number.isNaN(windowSize) || windowSize <= 0) {
+            windowSize = 672;
+        }
+        let windowOverlap = parseFloat(sam3TextElements.windowOverlapInput?.value || "0.1");
+        if (Number.isNaN(windowOverlap)) {
+            windowOverlap = 0.1;
+        }
+        windowOverlap = Math.min(Math.max(windowOverlap, 0), 0.9);
+        return {
+            windowed,
+            windowSize,
+            windowOverlap,
+            mergeIou: 0.5,
+        };
+    }
+
     function toggleQwenAdvanced(forceState = null) {
         if (!qwenElements.advancedToggle || !qwenElements.advancedPanel) {
             return;
@@ -23404,7 +23576,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const expanded = qwenAdvancedVisible;
         qwenElements.advancedToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
         qwenElements.advancedPanel.setAttribute("aria-hidden", expanded ? "false" : "true");
-        qwenElements.advancedToggle.textContent = expanded ? "Hide advanced overrides" : "Show advanced overrides";
+        qwenElements.advancedToggle.textContent = expanded ? "Hide detection prompt overrides" : "Show detection prompt overrides";
     }
 
     async function refreshQwenStatus({ silent = false } = {}) {
@@ -25574,6 +25746,28 @@ async function cancelRfDetrTrainingJobRequest() {
                     setSamStatus("Caption batch cancelled.", { variant: "warn", duration: 3000 });
                     break;
                 }
+                const record = images[imageName];
+                if (!record) {
+                    failed += 1;
+                    processed += 1;
+                    setQwenCaptionStatus(`Batch running (${processed}/${total})…`);
+                    continue;
+                }
+                await ensureImageRecordReady(record);
+                if (!currentImage || currentImage.name !== imageName) {
+                    setCurrentImage(record);
+                }
+                const ready = await waitForCurrentImageReady(imageName);
+                if (!ready) {
+                    failed += 1;
+                    processed += 1;
+                    setQwenCaptionStatus(`Batch running (${processed}/${total})…`);
+                    setSamStatus(
+                        `Caption batch warning: ${imageName} did not finish loading.`,
+                        { variant: "warn", duration: 3500 },
+                    );
+                    continue;
+                }
                 if (!overwrite) {
                     const exists = await captionExistsForImage(imageName, captionDatasetId || null);
                     if (exists) {
@@ -25584,12 +25778,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
                 const { requestFields, meta } = buildQwenCaptionRequestFields(imageName);
                 try {
+                    setQwenCaptionStatus(`Batch running (${processed}/${total}) • captioning ${imageName}`);
                     const result = await invokeQwenCaptionForImage(imageName, requestFields, {
                         signal: abortController.signal,
                     });
-                    if (currentImage?.name === imageName) {
-                        setGeneratedCaptionInUi(imageName, result?.caption || "");
-                    }
+                    setGeneratedCaptionInUi(imageName, result?.caption || "");
                     if (qwenElements.captionSaveText?.checked) {
                         storeCaptionRecord(
                             imageName,
@@ -25718,7 +25911,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (substepCurrent > 0 && substepTotal > 0) {
             const suffix = substepLabel ? ` (${substepLabel})` : "";
-            bits.push(`EDR discovery ${substepCurrent}/${substepTotal}${suffix}`);
+            bits.push(`EDR [wip] discovery ${substepCurrent}/${substepTotal}${suffix}`);
         }
         return bits.join(" • ");
     }
@@ -25775,7 +25968,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.calibrationReportStatus.textContent = message || "";
         if (!visible) {
             clearCalibrationReportUi();
-            qwenElements.calibrationReportSummary.textContent = "EDR report bundle";
+            qwenElements.calibrationReportSummary.textContent = "EDR [wip] report bundle";
         }
     }
 
@@ -26005,15 +26198,15 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function renderCalibrationReportBundle(bundle) {
         if (!qwenElements.calibrationReportWrap || !bundle || typeof bundle !== "object") {
-            setCalibrationReportStatus("No EDR report bundle available yet.", { visible: false });
+            setCalibrationReportStatus("No EDR [wip] report bundle available yet.", { visible: false });
             return;
         }
         const selection = bundle.selection_summary || {};
         const overall = bundle.overall_metrics || {};
         const winner = selection.selected_policy_variant || selection.winner || selection.winner_lane || "result";
         qwenElements.calibrationReportWrap.hidden = false;
-        qwenElements.calibrationReportSummary.textContent = `EDR report bundle • ${winner} • F1 ${formatCalibrationMetric(overall.f1)}`;
-        qwenElements.calibrationReportStatus.textContent = "Loaded from completed EDR build.";
+        qwenElements.calibrationReportSummary.textContent = `EDR [wip] report bundle • ${winner} • F1 ${formatCalibrationMetric(overall.f1)}`;
+        qwenElements.calibrationReportStatus.textContent = "Loaded from completed EDR [wip] build.";
         renderCalibrationReportOverview(bundle);
         renderCalibrationPerClassTable(bundle.per_class);
         renderCalibrationPerSourceTable(bundle.per_class_per_source);
@@ -26024,10 +26217,10 @@ async function cancelRfDetrTrainingJobRequest() {
 
     async function fetchCalibrationReportBundle(jobId) {
         if (!jobId) {
-            setCalibrationReportStatus("No EDR report bundle available yet.", { visible: false });
+            setCalibrationReportStatus("No EDR [wip] report bundle available yet.", { visible: false });
             return;
         }
-        setCalibrationReportStatus("Loading EDR report bundle…", { visible: true });
+        setCalibrationReportStatus("Loading EDR [wip] report bundle…", { visible: true });
         clearCalibrationReportUi();
         try {
             const resp = await fetch(`${API_ROOT}/calibration/jobs/${encodeURIComponent(jobId)}/artifacts/report_bundle`);
@@ -26038,7 +26231,7 @@ async function cancelRfDetrTrainingJobRequest() {
             renderCalibrationReportBundle(bundle);
         } catch (error) {
             console.debug("EDR report bundle unavailable", error);
-            setCalibrationReportStatus("No EDR report bundle available for this build.", { visible: false });
+            setCalibrationReportStatus("No EDR [wip] report bundle available for this build.", { visible: false });
         }
     }
 
@@ -27157,12 +27350,12 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         setCalibrationStatus("Starting…");
-        setCalibrationRecipeInfo(`EDR mode: ${String(payload.recipe_mode || "auto").replaceAll("_", " ")} • lane ${String(payload.lane_selection || "window").replaceAll("_", " ")}. Preparing EDR build…`);
-        setCalibrationReportStatus("No EDR report bundle available yet.", { visible: false });
+        setCalibrationRecipeInfo(`EDR [wip] mode: ${String(payload.recipe_mode || "auto").replaceAll("_", " ")} • lane ${String(payload.lane_selection || "window").replaceAll("_", " ")}. Preparing EDR [wip] build…`);
+        setCalibrationReportStatus("No EDR [wip] report bundle available yet.", { visible: false });
         updateCalibrationProgressUi({
             progress: 0,
             phase: "queue",
-            message: "Submitting EDR build",
+            message: "Submitting EDR [wip] build",
             processed: 0,
             total: Number.isFinite(payload.max_images) ? payload.max_images : 0,
         });
@@ -27182,19 +27375,19 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenCalibrationState.jobId = job.job_id;
             qwenCalibrationState.pollRequestId += 1;
             qwenCalibrationState.pollInFlight = false;
-            qwenCalibrationState.overlay = showProgressModal("EDR build starting…");
+            qwenCalibrationState.overlay = showProgressModal("EDR [wip] build starting…");
             refreshAutomationLockStatus().catch((error) => {
                 console.debug("Automation-lock refresh failed after calibration start", error);
             });
             emitCalibrationProgress({
                 progress: 0,
                 phase: "queue",
-                message: "EDR build queued",
+                message: "EDR [wip] build queued",
                 processed: 0,
                 total: Number.isFinite(payload.max_images) ? payload.max_images : 0,
             });
             setCalibrationStatus("Running");
-            setCalibrationRecipeInfo(`EDR mode: ${String(payload.recipe_mode || "auto").replaceAll("_", " ")} • lane ${String(payload.lane_selection || "window").replaceAll("_", " ")}. Build queued.`);
+            setCalibrationRecipeInfo(`EDR [wip] mode: ${String(payload.recipe_mode || "auto").replaceAll("_", " ")} • lane ${String(payload.lane_selection || "window").replaceAll("_", " ")}. Build queued.`);
             updateCalibrationButtons();
             pollCalibrationJob().catch((error) => {
                 console.error("Calibration poll start failed", error);
@@ -27203,7 +27396,7 @@ async function cancelRfDetrTrainingJobRequest() {
             setCalibrationStatus("Error");
             emitCalibrationProgress(null);
             updateCalibrationButtons();
-            setSamStatus(`EDR build error: ${error.message || error}`, { variant: "error", duration: 5000 });
+            setSamStatus(`EDR [wip] build error: ${error.message || error}`, { variant: "error", duration: 5000 });
         } finally {
             qwenCalibrationState.startInFlight = false;
             updateCalibrationButtons();
@@ -27234,12 +27427,12 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const recipeId = String(qwenElements.canonicalRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            qwenElements.canonicalRecipeSummary.textContent = "No canonical EDR selected.";
+            qwenElements.canonicalRecipeSummary.textContent = "No canonical EDR [wip] selected.";
             return;
         }
         const item = canonicalPrepassRecipes.find((entry) => String(entry?.id || "").trim() === recipeId);
         if (!item) {
-            qwenElements.canonicalRecipeSummary.textContent = "Canonical EDR metadata unavailable.";
+            qwenElements.canonicalRecipeSummary.textContent = "Canonical EDR [wip] metadata unavailable.";
             return;
         }
         const datasetId = String(item?.dataset_id || "").trim();
@@ -27261,7 +27454,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         qwenElements.canonicalRecipeSummary.textContent = parts.length
             ? parts.join(" • ")
-            : "Canonical EDR selected.";
+            : "Canonical EDR [wip] selected.";
     }
 
     function applyLoadedRecipeToBuilder(data, recipeId) {
@@ -27281,19 +27474,19 @@ async function cancelRfDetrTrainingJobRequest() {
     async function loadCanonicalRecipeIntoBuilder() {
         const recipeId = String(qwenElements.canonicalRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select a canonical EDR to load.", { variant: "warn", duration: 2500 });
+            setSamStatus("Select a canonical EDR [wip] to load.", { variant: "warn", duration: 2500 });
             return;
         }
         syncCanonicalRecipeSelect(recipeId);
         const data = await fetchPrepassRecipe(recipeId);
         applyLoadedRecipeToBuilder(data, recipeId);
-        setSamStatus("Canonical EDR loaded into builder.", { variant: "info", duration: 2500 });
+        setSamStatus("Canonical EDR [wip] loaded into builder.", { variant: "info", duration: 2500 });
     }
 
     async function useCanonicalRecipeForInference() {
         const recipeId = String(qwenElements.canonicalRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select a canonical EDR to use.", { variant: "warn", duration: 2500 });
+            setSamStatus("Select a canonical EDR [wip] to use.", { variant: "warn", duration: 2500 });
             return;
         }
         if (qwenElements.prepassRecipeSelect) {
@@ -27304,7 +27497,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!loaded) {
             return;
         }
-        setSamStatus("Canonical EDR is now active for Label Images.", { variant: "info", duration: 2500 });
+        setSamStatus("Canonical EDR [wip] is now active for Label Images.", { variant: "info", duration: 2500 });
     }
 
     async function refreshPrepassRecipes() {
@@ -27341,7 +27534,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (requestId !== prepassRecipeRefreshRequestId) {
                 return;
             }
-            const populate = (select, previousValue, entries, placeholderText = "Select EDR") => {
+            const populate = (select, previousValue, entries, placeholderText = "Select EDR [wip]") => {
                 if (!select) return;
                 select.innerHTML = "";
                 const placeholder = document.createElement("option");
@@ -27364,7 +27557,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 qwenElements.canonicalRecipeSelect,
                 previousCanonical,
                 canonicalPrepassRecipes,
-                "Select Canonical EDR",
+                "Select Canonical EDR [wip]",
             );
             updateCanonicalRecipeSummary();
         } catch (error) {
@@ -27570,7 +27763,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const name = (qwenElements.agentRecipeName?.value || "").trim();
         if (!name) {
-            setSamStatus("EDR name required.", { variant: "warn", duration: 3000 });
+            setSamStatus("EDR [wip] name required.", { variant: "warn", duration: 3000 });
             return;
         }
         const description = (qwenElements.agentRecipeDescription?.value || "").trim();
@@ -27589,7 +27782,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 throw new Error(await resp.text());
             }
             await refreshPrepassRecipes();
-            setSamStatus("EDR saved.", { variant: "info", duration: 2500 });
+            setSamStatus("EDR [wip] saved.", { variant: "info", duration: 2500 });
         } catch (error) {
             setSamStatus(`Save failed: ${error.message || error}`, { variant: "error", duration: 4000 });
         } finally {
@@ -27612,7 +27805,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const recipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select an EDR to load.", { variant: "warn", duration: 2500 });
+            setSamStatus("Select an EDR [wip] to load.", { variant: "warn", duration: 2500 });
             return;
         }
         const requestId = prepassRecipeEditorLoadRequestId + 1;
@@ -27630,7 +27823,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 return;
             }
             applyLoadedRecipeToBuilder(data, recipeId);
-            setSamStatus("EDR loaded.", { variant: "info", duration: 2500 });
+            setSamStatus("EDR [wip] loaded.", { variant: "info", duration: 2500 });
         } catch (error) {
             if (requestId !== prepassRecipeEditorLoadRequestId) {
                 return;
@@ -27654,7 +27847,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenActiveInferenceRecipe = null;
             qwenAgentSelectedEdrPackageId = "";
             if (!suppressMissingWarning) {
-                setSamStatus("Select an EDR before running inference.", { variant: "warn", duration: 2500 });
+                setSamStatus("Select an EDR [wip] before running inference.", { variant: "warn", duration: 2500 });
             }
             return null;
         }
@@ -27685,7 +27878,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             qwenActiveInferenceRecipe = null;
             qwenAgentSelectedEdrPackageId = "";
-            setSamStatus(`EDR load failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+            setSamStatus(`EDR [wip] load failed: ${error.message || error}`, { variant: "error", duration: 4000 });
             return null;
         }
     }
@@ -27696,10 +27889,10 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const recipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select an EDR to delete.", { variant: "warn", duration: 2500 });
+            setSamStatus("Select an EDR [wip] to delete.", { variant: "warn", duration: 2500 });
             return;
         }
-        if (!confirm("Delete this EDR? This cannot be undone.")) {
+        if (!confirm("Delete this EDR [wip]? This cannot be undone.")) {
             return;
         }
         prepassRecipeDeleteInFlight = true;
@@ -27710,7 +27903,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 throw new Error(await resp.text());
             }
             await refreshPrepassRecipes();
-            setSamStatus("EDR deleted.", { variant: "info", duration: 2500 });
+            setSamStatus("EDR [wip] deleted.", { variant: "info", duration: 2500 });
         } catch (error) {
             setSamStatus(`Delete failed: ${error.message || error}`, { variant: "error", duration: 4000 });
         } finally {
@@ -27725,7 +27918,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const recipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select an EDR to export.", { variant: "warn", duration: 2500 });
+            setSamStatus("Select an EDR [wip] to export.", { variant: "warn", duration: 2500 });
             return;
         }
         prepassRecipeExportInFlight = true;
@@ -27749,7 +27942,7 @@ async function cancelRfDetrTrainingJobRequest() {
             link.click();
             link.remove();
             window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
-            setSamStatus("EDR exported.", { variant: "info", duration: 2500 });
+            setSamStatus("EDR [wip] exported.", { variant: "info", duration: 2500 });
         } catch (error) {
             setSamStatus(`Export failed: ${error.message || error}`, { variant: "error", duration: 4000 });
         } finally {
@@ -27776,7 +27969,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             const payload = await resp.json();
             await refreshPrepassRecipes();
-            const notice = payload?.notice || "EDR imported.";
+            const notice = payload?.notice || "EDR [wip] imported.";
             setSamStatus(notice, { variant: "info", duration: 4000 });
         } catch (error) {
             setSamStatus(`Import failed: ${error.message || error}`, { variant: "error", duration: 4000 });
@@ -27823,16 +28016,16 @@ async function cancelRfDetrTrainingJobRequest() {
                 const laneSelection = String(job?.result?.lane_selection || job?.request?.lane_selection || qwenElements.calibrationLaneSelection?.value || "window");
                 const recipeFingerprint = String(job?.result?.recipe_fingerprint || job?.request?.recipe_fingerprint || "").trim();
                 const recipeState = job?.result?.recipe_discovered
-                    ? "EDR discovered"
-                    : (job?.result?.recipe_reused ? "EDR reused" : "EDR pending");
+                    ? "EDR [wip] discovered"
+                    : (job?.result?.recipe_reused ? "EDR [wip] reused" : "EDR [wip] pending");
                 const fingerprintSuffix = recipeFingerprint ? ` • ${recipeFingerprint.slice(0, 10)}` : "";
                 setCalibrationRecipeInfo(`${recipeState} • mode ${recipeMode.replaceAll("_", " ")} • lane ${laneSelection.replaceAll("_", " ")}${fingerprintSuffix}`);
                 emitCalibrationProgress(job);
                 if (qwenCalibrationState.overlay) {
                     const stepSummary = formatCalibrationStepSummary(job);
                     const detail = total > 0
-                        ? `${stepSummary ? `${stepSummary} • ` : ""}EDR build ${phase}: ${message} (${processed}/${total})`
-                        : `${stepSummary ? `${stepSummary} • ` : ""}EDR build ${phase}: ${message}`;
+                        ? `${stepSummary ? `${stepSummary} • ` : ""}EDR [wip] build ${phase}: ${message} (${processed}/${total})`
+                        : `${stepSummary ? `${stepSummary} • ` : ""}EDR [wip] build ${phase}: ${message}`;
                     qwenCalibrationState.overlay.update(detail, (Number.isFinite(job.progress) ? job.progress : 0));
                 }
                 if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
@@ -27855,11 +28048,11 @@ async function cancelRfDetrTrainingJobRequest() {
                         const selectedPolicy = job?.result?.policy_layer_summary?.selected_variant;
                         const suffix = selectedPolicy ? ` Selected policy: ${selectedPolicy}.` : "";
                         const recipeSummary = job?.result?.recipe_discovered
-                            ? " EDR discovered and promoted."
-                            : (job?.result?.recipe_reused ? " Promoted EDR reused." : "");
+                            ? " EDR [wip] discovered and promoted."
+                            : (job?.result?.recipe_reused ? " Promoted EDR [wip] reused." : "");
                         const savedRecipeId = String(job?.result?.saved_prepass_recipe_id || "").trim();
-                        enqueueTaskNotice(`EDR build completed.${suffix}`, { durationMs: 5000 });
-                        setCalibrationRecipeInfo(`${job?.result?.recipe_discovered ? "EDR discovered" : (job?.result?.recipe_reused ? "EDR reused" : "EDR applied")} • lane ${laneSelection.replaceAll("_", " ")}${recipeFingerprint ? ` • ${recipeFingerprint.slice(0, 10)}` : ""}.${recipeSummary}`.trim());
+                        enqueueTaskNotice(`EDR [wip] build completed.${suffix}`, { durationMs: 5000 });
+                        setCalibrationRecipeInfo(`${job?.result?.recipe_discovered ? "EDR [wip] discovered" : (job?.result?.recipe_reused ? "EDR [wip] reused" : "EDR [wip] applied")} • lane ${laneSelection.replaceAll("_", " ")}${recipeFingerprint ? ` • ${recipeFingerprint.slice(0, 10)}` : ""}.${recipeSummary}`.trim());
                         if (savedRecipeId) {
                             refreshPrepassRecipes().then(() => {
                                 const genericHasSavedRecipe = Array.from(qwenElements.agentRecipeSelect?.options || []).some(
@@ -27876,17 +28069,17 @@ async function cancelRfDetrTrainingJobRequest() {
                                 }
                                 syncCanonicalRecipeSelect(savedRecipeId);
                             }).catch((error) => {
-                                console.debug("Failed to refresh Saved EDRs after calibration completion", error);
+                                console.debug("Failed to refresh Saved EDR [wip] recipes after calibration completion", error);
                             });
                         }
                         fetchCalibrationReportBundle(job.job_id).catch((error) => {
                             console.debug("EDR report fetch failed", error);
                         });
                     } else {
-                        setCalibrationRecipeInfo("EDR flow did not complete.");
-                        setCalibrationReportStatus("No EDR report bundle available for this build.", { visible: false });
+                        setCalibrationRecipeInfo("EDR [wip] flow did not complete.");
+                        setCalibrationReportStatus("No EDR [wip] report bundle available for this build.", { visible: false });
                         if (job.error) {
-                            setSamStatus(`EDR build error: ${job.error}`, { variant: "error", duration: 5000 });
+                            setSamStatus(`EDR [wip] build error: ${job.error}`, { variant: "error", duration: 5000 });
                         }
                     }
                 }
@@ -27897,12 +28090,12 @@ async function cancelRfDetrTrainingJobRequest() {
                 emitCalibrationProgress({
                     progress: 0,
                     phase: "error",
-                    message: `EDR status error: ${error.message || error}`,
+                    message: `EDR [wip] status error: ${error.message || error}`,
                     processed: 0,
                     total: 0,
                 });
                 if (qwenCalibrationState.overlay) {
-                    qwenCalibrationState.overlay.update(`EDR status error: ${error.message || error}`, 0);
+                    qwenCalibrationState.overlay.update(`EDR [wip] status error: ${error.message || error}`, 0);
                 }
             } finally {
                 qwenCalibrationState.pollInFlight = false;
@@ -28349,6 +28542,7 @@ async function cancelRfDetrTrainingJobRequest() {
             simplifyEps = 1.0;
         }
         const targetClass = getSam3TargetClass();
+        const windowSettings = readSam3TextWindowSettings();
         return {
             prompt,
             threshold,
@@ -28357,11 +28551,24 @@ async function cancelRfDetrTrainingJobRequest() {
             maxResults,
             simplifyEps,
             targetClass,
+            ...windowSettings,
         };
     }
 
     async function runSam3TextPromptSnapshot(snapshot, { requestImageName = null } = {}) {
-        const { prompt, threshold, maskThreshold, minSize, maxResults, simplifyEps, targetClass } = snapshot;
+        const {
+            prompt,
+            threshold,
+            maskThreshold,
+            minSize,
+            maxResults,
+            simplifyEps,
+            targetClass,
+            windowed,
+            windowSize,
+            windowOverlap,
+            mergeIou,
+        } = snapshot;
         const targetImageName = requestImageName || currentImage?.name || null;
         if (!ensureAutomationAvailable("SAM3 text")) {
             return { added: 0, detections: 0, warnings: ["automation_locked"] };
@@ -28373,6 +28580,10 @@ async function cancelRfDetrTrainingJobRequest() {
             min_size: minSize,
             simplify_epsilon: simplifyEps,
             max_results: maxResults,
+            windowed: !!windowed,
+            window_size: windowSize,
+            window_overlap: windowOverlap,
+            merge_iou: mergeIou,
         });
         if (targetImageName && result?.image_token) {
             rememberSamToken(targetImageName, samVariant, result.image_token);
@@ -28580,6 +28791,7 @@ async function cancelRfDetrTrainingJobRequest() {
         let simplifyEps = parseFloat(step.querySelector(".sam3-text-cascade__epsilon")?.value || "1.0");
         if (Number.isNaN(simplifyEps) || simplifyEps < 0) simplifyEps = 1.0;
         const targetClass = step.querySelector(".sam3-text-cascade__class")?.value || "";
+        const windowSettings = readSam3TextWindowSettings();
         return {
             prompt,
             threshold,
@@ -28588,6 +28800,7 @@ async function cancelRfDetrTrainingJobRequest() {
             maxResults,
             simplifyEps,
             targetClass,
+            ...windowSettings,
         };
     }
 
@@ -28819,9 +29032,6 @@ async function cancelRfDetrTrainingJobRequest() {
             sam3TextBatchActive = false;
             updateSam3TextButtons();
             completeTask(batchTaskId);
-            if (originalName && images[originalName] && (!currentImage || currentImage.name !== originalName)) {
-                setCurrentImage(images[originalName]);
-            }
             const doneMessage = sam3TextBatchCancel
                 ? "Batch cancelled."
                 : `Batch complete: added ${totalAdded} ${datasetType === "seg" ? "polygons" : "boxes"}.`;
@@ -33480,7 +33690,6 @@ async function cancelRfDetrTrainingJobRequest() {
         automationElements.labelingGpuNotice = document.getElementById("labelingGpuLockNotice");
         imagesSelectButton = document.getElementById("imagesSelect");
         classesSelectButton = document.getElementById("classesSelect");
-        bboxesFolderSelectButton = document.getElementById("bboxesSelectFolder");
         annotationSourceModeEl = document.getElementById("annotationSourceMode");
         annotationSourceSummaryEl = document.getElementById("annotationSourceSummary");
         annotationSourceLockEl = document.getElementById("annotationSourceLock");
@@ -33507,7 +33716,6 @@ async function cancelRfDetrTrainingJobRequest() {
 
         registerFileLabel(imagesSelectButton, document.getElementById("images"));
         registerFileLabel(classesSelectButton, document.getElementById("classes"));
-        registerFileLabel(bboxesFolderSelectButton, document.getElementById("bboxesFolder"));
         if (annotationTakeoverButton) {
             annotationTakeoverButton.addEventListener("click", () => {
                 forceTakeoverAnnotationLock().catch((error) => {

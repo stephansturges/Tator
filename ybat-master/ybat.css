@@ -847,6 +847,53 @@ body.annotation-focus-mode .class-scroll-indicator {
     width: 100%;
 }
 
+.annotation-source-actions--files {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.annotation-source-actions--files .training-button {
+    width: auto;
+    flex: 1 1 130px;
+}
+
+.tool-panel-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.tool-panel {
+    border: 1px solid #dbeafe;
+    border-radius: 10px;
+    background: #ffffff;
+}
+
+.tool-panel > summary {
+    cursor: pointer;
+    list-style-position: inside;
+    padding: 9px 11px;
+    font-weight: 700;
+    color: #0f172a;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.tool-panel > summary::-webkit-details-marker {
+    margin-right: 6px;
+}
+
+.tool-panel[open] > summary {
+    border-bottom: 1px solid #dbeafe;
+    background: #f8fbff;
+}
+
 .qwen-panel {
     border: 1px solid #dbeafe;
     background: #f8fbff;
@@ -1412,11 +1459,13 @@ body.annotation-focus-mode .class-scroll-indicator {
 }
 
 .sam3-text-panel {
-    margin-top: 12px;
-    padding: 12px;
+    padding: 0;
     border: 1px solid #dbeafe;
-    border-radius: 10px;
     background: #ffffff;
+}
+
+.sam3-text-panel__body {
+    padding: 12px;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -1548,6 +1597,19 @@ body.annotation-focus-mode .class-scroll-indicator {
     display: flex;
     align-items: center;
     justify-content: space-between;
+}
+
+.sam3-labelmap-extension {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: #f8fafc;
+}
+
+.sam3-labelmap-extension summary {
+    cursor: pointer;
+    font-weight: 700;
+    color: #334155;
 }
 
 .sam3-text-status {
@@ -3385,6 +3447,7 @@ html.theme-dark textarea:disabled {
 
 html.theme-dark .modal__dialog,
 html.theme-dark .settings-panel,
+html.theme-dark .tool-panel,
 html.theme-dark .qwen-panel,
 html.theme-dark .sam3-text-panel,
 html.theme-dark .qwen-models-list,
@@ -3534,6 +3597,7 @@ html.theme-dark .qwen-caption-live-toast.is-error {
 
 html.theme-dark .modal__title,
 html.theme-dark #batchTweakClass,
+html.theme-dark .tool-panel > summary,
 html.theme-dark .qwen-panel__header,
 html.theme-dark .sam3-text-cascade__step-header,
 html.theme-dark .training-card__title,
@@ -3989,6 +4053,7 @@ html.theme-pipboy textarea::placeholder {
 
 html.theme-pipboy .modal__dialog,
 html.theme-pipboy .settings-panel,
+html.theme-pipboy .tool-panel,
 html.theme-pipboy .qwen-panel,
 html.theme-pipboy .sam3-text-panel,
 html.theme-pipboy .qwen-models-list,
@@ -4131,6 +4196,7 @@ html.theme-pipboy .qwen-caption-live-toast__body {
 
 html.theme-pipboy .modal__title,
 html.theme-pipboy #batchTweakClass,
+html.theme-pipboy .tool-panel > summary,
 html.theme-pipboy .qwen-panel__header,
 html.theme-pipboy .sam3-text-cascade__step-header,
 html.theme-pipboy .training-card__title,

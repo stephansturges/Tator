@@ -225,6 +225,10 @@ The captioning workflow has several variants:
   observations into a full-image caption. When label hints are present, the
   default is to focus on windows that intersect labeled objects; empty windows
   are only used as broad scene context when explicitly enabled.
+- **Spatial grounding for windows** carries each crop's approximate full-image
+  region and percent bounds into later full-image and merge prompts. Local crop
+  phrases such as "bottom-right" are treated as crop-relative and must be
+  rewritten in full-image terms before they reach the final caption.
 - **Two-stage refine** lets Thinking models produce a draft and then uses an
   editor pass to turn that draft into a cleaner final caption. It runs once on
   full-image composition after any window observations have been collected; it
@@ -288,6 +292,10 @@ object claims.
   cross overlapping crops are clipped into each local crop, keep internal
   source identity for backend grouping, and are described to the model without
   exposing bbox IDs in prompts or outputs.
+- Added spatial grounding for windowed caption observations. Full-image
+  composition and the window merge pass now receive each crop's approximate
+  full-image region, percent bounds, and explicit guidance to translate
+  crop-local spatial language into global image language.
 - Split the caption workflow explanation in the UI so users can distinguish
   full-image draft/refine passes, window observations, window merge, quality
   guards, model selection, decode mode, and max-token behavior.
@@ -328,6 +336,41 @@ object claims.
   `node --check ybat-master/ybat.js`, `git diff --check`, and
   `pytest tests/test_qwen_caption_prompt.py tests/test_qwen_progress.py tests/test_qwen_mlx_runtime.py tests/test_dataset_linked_annotation_flows.py -q`
   with 81 passing tests.
+
+### 2026-05-19: SAM3 text windowing and labeling-panel cleanup
+
+This checkpoint turns the SAM3 text prompt engine into a stronger batch tool
+for large images and makes labelmap extension explicit from the labeling UI.
+
+- Added SAM3 text windowed mode. The backend slices large images into
+  overlapping windows, runs SAM3 text prompting per crop, reprojects boxes and
+  masks into full-image coordinates, and fuses duplicates before returning
+  detections to the labeling canvas.
+- Added SAM3 text window settings to the UI: windowed mode, window size, and
+  overlap. Cascade steps and "next N images" batch runs inherit the same
+  windowing settings so the behavior is consistent across single-image and
+  batch usage.
+- Added labelmap extension from the SAM3 text prompt panel. Operators can add a
+  new class, select it for SAM3 output, save the new labelmap, and see the
+  retraining warning when an auto-class predictor may have been trained against
+  the old class list.
+- Persisted saved labelmaps through linked and transient annotation metadata
+  endpoints. Backend validation rejects empty, duplicate, or multiline class
+  names before writing `labelmap.txt`.
+- Collapsed Qwen 3 detection, Qwen 3 captioning, EDR [wip], and SAM3 text
+  prompt into separate closed panels by default. YOLO bbox import and "Save
+  YOLO + captions" controls now live in the main annotation source panel.
+- Fixed batch navigation for SAM3 text/cascade runs across next N images and
+  removed a duplicate bbox-folder file-label registration introduced by the UI
+  move.
+- Review validation used:
+  `node --check ybat-master/ybat.js`,
+  `./.venv-macos/bin/python -m py_compile localinferenceapi.py models/schemas.py services/qwen.py`,
+  `git diff --check`,
+  `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_prompt.py tests/test_sam3_text_windowed_prompt.py -q`
+  with 48 passing tests, and
+  `./.venv-macos/bin/python -m pytest tests/test_dataset_linked_annotation_flows.py -q`
+  with 16 passing tests.
 
 ## Training and Model Management
 

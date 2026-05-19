@@ -647,6 +647,7 @@ from services.qwen import (
     _caption_requested_sentence_limit as _caption_requested_sentence_limit_impl,
     _clean_caption_source_context_text as _clean_caption_source_context_text_impl,
     _format_caption_source_output_context as _format_caption_source_output_context_impl,
+    _format_caption_window_observation_lines as _format_caption_window_observation_lines_impl,
     _allowed_caption_labels_impl as _allowed_caption_labels_impl,
     _caption_is_degenerate_impl as _caption_is_degenerate_impl,
     _resolve_qwen_caption_decode as _resolve_qwen_caption_decode_impl,
@@ -4070,6 +4071,205 @@ def _run_sam3_text_inference(
     else:
         aligned_masks = collected_masks
     return (preds, aligned_masks) if return_masks else preds
+
+
+def _sam3_window_mask_to_full(
+    crop_mask: Optional[np.ndarray],
+    *,
+    full_w: int,
+    full_h: int,
+    crop_w: int,
+    crop_h: int,
+    offset_x: int,
+    offset_y: int,
+) -> Optional[np.ndarray]:
+    if crop_mask is None:
+        return None
+    try:
+        mask_arr = np.asarray(crop_mask)
+        if mask_arr.ndim > 2:
+            mask_arr = np.squeeze(mask_arr)
+        mask_arr = (mask_arr > 0).astype(np.uint8)
+        if mask_arr.shape != (crop_h, crop_w):
+            mask_img = Image.fromarray((mask_arr * 255).astype(np.uint8))
+            resampling = getattr(Image, "Resampling", Image).NEAREST
+            mask_img = mask_img.resize((crop_w, crop_h), resampling)
+            mask_arr = (np.asarray(mask_img) > 0).astype(np.uint8)
+    except Exception:
+        return None
+    if full_w <= 0 or full_h <= 0 or crop_w <= 0 or crop_h <= 0:
+        return None
+    offset_x_int = int(offset_x)
+    offset_y_int = int(offset_y)
+    dest_left = max(0, min(full_w, offset_x_int))
+    dest_top = max(0, min(full_h, offset_y_int))
+    src_left = max(0, -offset_x_int)
+    src_top = max(0, -offset_y_int)
+    copy_w = min(crop_w - src_left, full_w - dest_left)
+    copy_h = min(crop_h - src_top, full_h - dest_top)
+    if copy_w <= 0 or copy_h <= 0:
+        return None
+    full_mask = np.zeros((full_h, full_w), dtype=np.uint8)
+    full_mask[dest_top : dest_top + copy_h, dest_left : dest_left + copy_w] = mask_arr[
+        src_top : src_top + copy_h,
+        src_left : src_left + copy_w,
+    ]
+    return full_mask
+
+
+def _sam3_detection_iou_xyxy(
+    a_xyxy: Tuple[float, float, float, float],
+    b_xyxy: Tuple[float, float, float, float],
+) -> float:
+    ax1, ay1, ax2, ay2 = a_xyxy
+    bx1, by1, bx2, by2 = b_xyxy
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    a_area = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    b_area = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    denom = a_area + b_area - inter
+    return inter / denom if denom > 0 else 0.0
+
+
+def _fuse_sam3_windowed_detections(
+    pairs: List[Tuple[QwenDetection, Optional[np.ndarray]]],
+    *,
+    img_w: int,
+    img_h: int,
+    merge_iou: float,
+    limit: Optional[int],
+) -> Tuple[List[QwenDetection], List[Optional[np.ndarray]]]:
+    if not pairs:
+        return [], []
+    prepared: List[Tuple[QwenDetection, Optional[np.ndarray], Tuple[float, float, float, float], float]] = []
+    for det, mask in pairs:
+        xyxy = _yolo_to_xyxy(img_w, img_h, det.bbox)
+        x1, y1, x2, y2 = xyxy
+        if x2 <= x1 or y2 <= y1:
+            continue
+        try:
+            score = float(det.score) if det.score is not None else 0.0
+        except (TypeError, ValueError):
+            score = 0.0
+        prepared.append((det, mask, xyxy, score))
+    prepared.sort(key=lambda item: item[3], reverse=True)
+    kept: List[Tuple[QwenDetection, Optional[np.ndarray], Tuple[float, float, float, float]]] = []
+    for det, mask, xyxy, _score in prepared:
+        duplicate = any(
+            _sam3_detection_iou_xyxy(xyxy, kept_xyxy) > merge_iou
+            for _kept_det, _kept_mask, kept_xyxy in kept
+        )
+        if duplicate:
+            continue
+        kept.append((det, mask, xyxy))
+        if limit is not None and len(kept) >= limit:
+            break
+    detections = [item[0] for item in kept]
+    masks = [item[1] for item in kept]
+    return detections, masks
+
+
+def _run_sam3_text_windowed_inference(
+    pil_img: Image.Image,
+    text_prompt: str,
+    threshold: float,
+    mask_threshold: float,
+    limit: Optional[int],
+    *,
+    window_size: Optional[int],
+    window_overlap: Optional[float],
+    merge_iou: Optional[float],
+    min_size: Optional[float] = None,
+    simplify_epsilon: Optional[float] = None,
+) -> Tuple[List[QwenDetection], List[Optional[np.ndarray]], List[str]]:
+    img_w, img_h = pil_img.size
+    warnings: List[str] = []
+    raw_slice_size = int(window_size) if window_size is not None else 672
+    raw_overlap = float(window_overlap) if window_overlap is not None else 0.1
+    raw_merge_iou = float(merge_iou) if merge_iou is not None else 0.5
+    slice_size, overlap, resolved_merge_iou = _clamp_slice_params_impl(
+        raw_slice_size,
+        raw_overlap,
+        raw_merge_iou,
+        img_w,
+        img_h,
+        warnings,
+    )
+    try:
+        slices, starts = _slice_image_sahi(pil_img, slice_size, overlap)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"sam3_window_slice_failed:{exc}",
+        ) from exc
+    if not slices:
+        return [], [], [*warnings, "no_windows"]
+    per_window_limit = None
+    if limit is not None:
+        try:
+            per_window_limit = max(1, int(limit))
+        except (TypeError, ValueError):
+            per_window_limit = None
+    _, processor, _ = _ensure_sam3_text_runtime()
+    pairs: List[Tuple[QwenDetection, Optional[np.ndarray]]] = []
+    for tile, start in zip(slices, starts, strict=False):
+        offset_x, offset_y = int(start[0]), int(start[1])
+        crop = Image.fromarray(tile).convert("RGB")
+        crop_w, crop_h = crop.size
+        crop_detections, crop_masks = _run_sam3_text_inference(
+            crop,
+            text_prompt,
+            threshold,
+            mask_threshold,
+            per_window_limit,
+            return_masks=True,
+            min_size=min_size,
+            simplify_epsilon=simplify_epsilon,
+            processor_override=processor,
+        )
+        for idx, det in enumerate(crop_detections):
+            x1, y1, x2, y2 = _yolo_to_xyxy(crop_w, crop_h, det.bbox)
+            full_x1 = max(0.0, min(float(img_w), float(offset_x) + x1))
+            full_y1 = max(0.0, min(float(img_h), float(offset_y) + y1))
+            full_x2 = max(full_x1, min(float(img_w), float(offset_x) + x2))
+            full_y2 = max(full_y1, min(float(img_h), float(offset_y) + y2))
+            if full_x2 <= full_x1 or full_y2 <= full_y1:
+                continue
+            crop_mask = crop_masks[idx] if crop_masks is not None and idx < len(crop_masks) else None
+            full_mask = _sam3_window_mask_to_full(
+                crop_mask,
+                full_w=img_w,
+                full_h=img_h,
+                crop_w=crop_w,
+                crop_h=crop_h,
+                offset_x=offset_x,
+                offset_y=offset_y,
+            )
+            full_bbox = _xyxy_to_yolo_norm_list(img_w, img_h, full_x1, full_y1, full_x2, full_y2)
+            det.bbox = full_bbox
+            det.source = "sam3_text"
+            if full_mask is not None:
+                det.mask = _encode_binary_mask_impl(full_mask, max_bytes=MASK_ENCODE_MAX_BYTES)
+            pairs.append((det, full_mask))
+    detections, fused_masks = _fuse_sam3_windowed_detections(
+        pairs,
+        img_w=img_w,
+        img_h=img_h,
+        merge_iou=resolved_merge_iou,
+        limit=per_window_limit,
+    )
+    warnings.append(f"windowed_tiles:{len(slices)}")
+    warnings.append(f"windowed_merge_iou:{resolved_merge_iou:.2f}")
+    return detections, fused_masks, warnings
 
 
 def _run_sam3_visual_inference(
@@ -9783,7 +9983,7 @@ def _agent_tool_qwen_infer(
         )
     payloads: List[Dict[str, Any]] = []
     for det in boxes:
-        x1, y1, x2, y2 = _yolo_to_xyxy_int(det.bbox, crop_img.width, crop_img.height)
+        x1, y1, x2, y2 = _yolo_to_xyxy_int(crop_img.width, crop_img.height, det.bbox)
         x1 += offset_x
         y1 += offset_y
         x2 += offset_x
@@ -12984,6 +13184,27 @@ def _dataset_effective_root_from_entry(entry: Dict[str, Any]) -> Path:
     return root
 
 
+def _normalize_labelmap_payload(raw_labelmap: Any) -> List[str]:
+    if not isinstance(raw_labelmap, list):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_list_required")
+    labels: List[str] = []
+    seen: Set[str] = set()
+    for item in raw_labelmap:
+        label = str(item or "").strip()
+        if not label:
+            continue
+        if "\n" in label or "\r" in label:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_invalid_class")
+        key = label.lower()
+        if key in seen:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_duplicate_class")
+        seen.add(key)
+        labels.append(label)
+    if not labels:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_empty")
+    return labels
+
+
 def _validate_linked_dataset_path(path_str: str) -> Path:
     raw = str(path_str or "").strip()
     if not raw:
@@ -14372,6 +14593,27 @@ def patch_dataset_annotation_meta(dataset_id: str, payload: Dict[str, Any]):
     entry = _resolve_dataset_entry(dataset_id)
     _meta_path, meta = _annotation_load_or_create_meta(entry)
     _require_annotation_lock_owner(meta, payload or {})
+    saved_labelmap: Optional[List[str]] = None
+    if "labelmap" in payload:
+        saved_labelmap = _normalize_labelmap_payload(payload.get("labelmap"))
+        dataset_root = _dataset_effective_root_from_entry(entry)
+        labelmap_path = Path(str(entry.get("yolo_labelmap_path") or dataset_root / "labelmap.txt")).resolve()
+        try:
+            labelmap_path.parent.mkdir(parents=True, exist_ok=True)
+            labelmap_path.write_text("\n".join(saved_labelmap) + "\n", encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"labelmap_save_failed:{exc}",
+            ) from exc
+        storage_root = _dataset_meta_storage_root_from_entry(entry)
+        dataset_meta = _load_json_metadata(_dataset_meta_path_for_entry(entry)) or dict(entry)
+        dataset_meta["classes"] = list(saved_labelmap)
+        dataset_meta["yolo_labelmap_path"] = str(labelmap_path)
+        dataset_meta["signature"] = _compute_dir_signature_impl(dataset_root)
+        _persist_dataset_metadata_impl(
+            storage_root, dataset_meta, meta_name=DATASET_META_NAME, logger=logger
+        )
     if "status" in payload:
         status_value = str(payload.get("status") or "").strip().lower()
         if status_value and status_value not in DATASET_ANNOTATION_STATUSES:
@@ -14391,6 +14633,7 @@ def patch_dataset_annotation_meta(dataset_id: str, payload: Dict[str, Any]):
         "annotation_status": meta.get("annotation_status") or "new",
         "annotation_notes": str(meta.get("annotation_notes") or ""),
         "annotation_cursor": meta.get("annotation_cursor"),
+        "labelmap": saved_labelmap,
     }
 
 
@@ -14557,6 +14800,25 @@ def save_transient_annotation_snapshot(session_id: str, payload: Dict[str, Any])
 def patch_transient_annotation_meta(session_id: str, payload: Dict[str, Any]):
     session = _resolve_transient_session(session_id)
     _require_annotation_lock_owner(session, payload or {})
+    saved_labelmap: Optional[List[str]] = None
+    if "labelmap" in payload:
+        saved_labelmap = _normalize_labelmap_payload(payload.get("labelmap"))
+        session["classes"] = list(saved_labelmap)
+        dataset_root_raw = str(session.get("dataset_root") or "").strip()
+        if dataset_root_raw:
+            dataset_root = Path(dataset_root_raw).resolve()
+        else:
+            dataset_root = None
+        if dataset_root is not None and dataset_root.exists():
+            try:
+                (dataset_root / "labelmap.txt").write_text(
+                    "\n".join(saved_labelmap) + "\n", encoding="utf-8"
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"labelmap_save_failed:{exc}",
+                ) from exc
     if "status" in payload:
         status_value = str(payload.get("status") or "").strip().lower()
         if status_value and status_value not in DATASET_ANNOTATION_STATUSES:
@@ -14577,6 +14839,7 @@ def patch_transient_annotation_meta(session_id: str, payload: Dict[str, Any]):
         "annotation_status": session.get("annotation_status") or "new",
         "annotation_notes": str(session.get("annotation_notes") or ""),
         "annotation_cursor": session.get("annotation_cursor"),
+        "labelmap": saved_labelmap,
     }
 
 
@@ -28208,26 +28471,14 @@ def qwen_caption(payload: QwenCaptionRequest):
                             windowed_captions.append((x0, y0, window_size, window_caption_for_merge))
                             _emit_caption_window(x0, y0, window_size, window_caption_for_merge)
             if windowed_captions:
-                window_lines = [
-                    "Close-up observations from subregions (supporting evidence for the final caption, not a separate object inventory):"
-                ]
-                for x0, y0, size, caption in windowed_captions:
-                    x_center = x0 + size / 2.0
-                    y_center = y0 + size / 2.0
-                    horiz = (
-                        "left"
-                        if x_center < image_width / 3.0
-                        else "right" if x_center > image_width * 2 / 3.0 else "center"
-                    )
-                    vert = (
-                        "top"
-                        if y_center < image_height / 3.0
-                        else "bottom" if y_center > image_height * 2 / 3.0 else "middle"
-                    )
-                    region = f"{vert}-{horiz}"
-                    window_lines.append(
-                        f"- {region}: {caption}"
-                    )
+                window_lines = _format_caption_window_observation_lines_impl(
+                    windowed_captions,
+                    image_width=image_width,
+                    image_height=image_height,
+                )
+                window_lines.append(
+                    "Treat these observations as close-up source notes, not a separate object inventory."
+                )
                 if overlap_guidance:
                     window_lines.append(overlap_guidance)
                 if short_caption_requested:
@@ -29595,37 +29846,52 @@ def sam3_text_prompt(payload: Sam3TextPrompt):
         payload.image_base64, payload.image_token, variant
     )
     effective_limit = payload.max_results
-    detections, masks_arr = _run_sam3_text_inference(
-        pil_img,
-        payload.text_prompt,
-        payload.threshold,
-        payload.mask_threshold,
-        effective_limit,
-        return_masks=True,
-        min_size=payload.min_size,
-        simplify_epsilon=payload.simplify_epsilon,
-    )
     warnings: List[str] = []
+    if payload.windowed:
+        detections, masks_arr, window_warnings = _run_sam3_text_windowed_inference(
+            pil_img,
+            payload.text_prompt,
+            payload.threshold,
+            payload.mask_threshold,
+            effective_limit,
+            window_size=payload.window_size,
+            window_overlap=payload.window_overlap,
+            merge_iou=payload.merge_iou,
+            min_size=payload.min_size,
+            simplify_epsilon=payload.simplify_epsilon,
+        )
+        warnings.extend(window_warnings)
+    else:
+        detections, masks_arr = _run_sam3_text_inference(
+            pil_img,
+            payload.text_prompt,
+            payload.threshold,
+            payload.mask_threshold,
+            effective_limit,
+            return_masks=True,
+            min_size=payload.min_size,
+            simplify_epsilon=payload.simplify_epsilon,
+        )
     if not detections:
         warnings.append("no_results")
     encoded_masks = None
     if detections:
         encoded_masks = []
         for idx, det in enumerate(detections):
-            payload = det.mask if isinstance(det, QwenDetection) else None
+            mask_payload = det.mask if isinstance(det, QwenDetection) else None
             if (
-                payload is None
+                mask_payload is None
                 and masks_arr is not None
                 and idx < len(masks_arr)
                 and masks_arr[idx] is not None
             ):
                 try:
-                    payload = _encode_binary_mask_impl(
+                    mask_payload = _encode_binary_mask_impl(
                         masks_arr[idx], max_bytes=MASK_ENCODE_MAX_BYTES
                     )
                 except Exception:
-                    payload = None
-            encoded_masks.append(payload)
+                    mask_payload = None
+            encoded_masks.append(mask_payload)
         if all(m is None for m in encoded_masks):
             encoded_masks = None
     return Sam3TextPromptResponse(
@@ -29650,19 +29916,33 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
         payload.image_base64, payload.image_token, variant
     )
     effective_limit = payload.max_results
-    detections, masks_arr = _run_sam3_text_inference(
-        pil_img,
-        payload.text_prompt,
-        payload.threshold,
-        payload.mask_threshold,
-        effective_limit,
-        return_masks=True,
-        min_size=payload.min_size,
-        simplify_epsilon=payload.simplify_epsilon,
-    )
-    # TODO: enrich with masks for polygon mode consumers.
     responses: List[SamPointAutoResponse] = []
     warnings: List[str] = []
+    if payload.windowed:
+        detections, masks_arr, window_warnings = _run_sam3_text_windowed_inference(
+            pil_img,
+            payload.text_prompt,
+            payload.threshold,
+            payload.mask_threshold,
+            effective_limit,
+            window_size=payload.window_size,
+            window_overlap=payload.window_overlap,
+            merge_iou=payload.merge_iou,
+            min_size=payload.min_size,
+            simplify_epsilon=payload.simplify_epsilon,
+        )
+        warnings.extend(window_warnings)
+    else:
+        detections, masks_arr = _run_sam3_text_inference(
+            pil_img,
+            payload.text_prompt,
+            payload.threshold,
+            payload.mask_threshold,
+            effective_limit,
+            return_masks=True,
+            min_size=payload.min_size,
+            simplify_epsilon=payload.simplify_epsilon,
+        )
     if not detections:
         warnings.append("no_results")
     for idx, det in enumerate(detections):
@@ -29675,10 +29955,10 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
                 x_min, y_min, x_max, y_max = _mask_to_bounding_box(mask)
             except Exception:
                 x_min, y_min, x_max, y_max = _yolo_to_xyxy_int(
-                    det.bbox, pil_img.width, pil_img.height
+                    pil_img.width, pil_img.height, det.bbox
                 )
         else:
-            x_min, y_min, x_max, y_max = _yolo_to_xyxy_int(det.bbox, pil_img.width, pil_img.height)
+            x_min, y_min, x_max, y_max = _yolo_to_xyxy_int(pil_img.width, pil_img.height, det.bbox)
         li = max(0, int(x_min))
         ti = max(0, int(y_min))
         ri = min(pil_img.width, int(x_max))

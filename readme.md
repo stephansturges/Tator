@@ -383,6 +383,26 @@ for large images and makes labelmap extension explicit from the labeling UI.
   and `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_prompt.py tests/test_sam3_text_windowed_prompt.py tests/test_coords_window_normalization.py tests/test_qwen_agentic_coords.py tests/test_dataset_linked_annotation_flows.py tests/test_labeling_panel_layout_contract.py tests/ui/e2e/test_control_manifest_contract.py -q`
   with 78 passing tests.
 
+### 2026-05-20: Caption panel usability and image navigation
+
+This checkpoint tightens the Qwen captioning panel ergonomics and adds a
+workspace-focused image navigation shortcut.
+
+- Moved the generated-caption label above the caption output box and made that
+  output area three times taller by default.
+- Added tooltips to the caption style selector, random style button, style and
+  opening prompt editors, inspiration toggles, and caption prompt stack.
+- Made caption style/opening prompt boxes and prompt-stack textareas full width,
+  and doubled their default vertical space so long prompts are inspectable.
+- Added `Space` for next image and `Shift + Space` for previous image when
+  focus is on the labeling workspace. The shortcut is ignored for text fields,
+  selects, buttons, labels, summaries, and editable/menu controls.
+- Extended the labeling-panel layout contract test to cover the caption output
+  layout, caption prompt controls, and guarded spacebar shortcut.
+- Validation used `node --check ybat-master/ybat.js`,
+  `./.venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py -q`,
+  and `git diff --check`, with 5 passing layout-contract tests.
+
 ## Training and Model Management
 
 Tator keeps helper models close to the annotation workflow:

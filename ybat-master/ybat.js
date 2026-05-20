@@ -39161,6 +39161,17 @@ async function cancelRfDetrTrainingJobRequest() {
                 return;
             }
             const key = event.keyCode || event.charCode;
+            const targetElement = event.target instanceof Element ? event.target : null;
+            const isInteractiveShortcutTarget = !!targetElement?.closest?.(
+                "input, textarea, select, button, a, label, summary, [contenteditable='true'], [role='button'], [role='menuitem']"
+            );
+            const isSpaceKey = key === 32 || event.key === " " || event.key === "Spacebar" || event.code === "Space";
+
+            if (!event.repeat && isSpaceKey && !event.ctrlKey && !event.metaKey && !event.altKey && !isInteractiveShortcutTarget) {
+                navigateImage(event.shiftKey ? -1 : 1);
+                event.preventDefault();
+                return;
+            }
 
             if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 86 || event.key === "v" || event.key === "V")) {
                 toggleAnnotationFocusMode();

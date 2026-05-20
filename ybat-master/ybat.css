@@ -1115,7 +1115,15 @@ body.annotation-focus-mode .class-scroll-indicator {
 }
 
 .qwen-caption-prompt textarea {
+    width: 100%;
+    box-sizing: border-box;
     margin-top: 8px;
+}
+
+#qwenCaptionStyleList,
+#qwenCaptionOpeningList {
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .qwen-caption-glossary textarea {
@@ -1142,9 +1150,11 @@ body.annotation-focus-mode .class-scroll-indicator {
 }
 
 .qwen-caption-prompt-stack__list textarea {
+    width: 100%;
+    box-sizing: border-box;
     margin: 7px 0 0;
-    min-height: 120px;
-    max-height: 260px;
+    min-height: 240px;
+    max-height: 520px;
     overflow: auto;
     white-space: pre-wrap;
     word-break: break-word;
@@ -1454,8 +1464,18 @@ body.annotation-focus-mode .class-scroll-indicator {
     color: #1f2937;
 }
 
+.qwen-caption-output {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.qwen-caption-output label {
+    display: block;
+}
+
 .qwen-caption-output textarea {
-    min-height: 70px;
+    min-height: 210px;
 }
 
 .sam3-text-panel {

@@ -95,8 +95,11 @@ def test_keyboard_image_navigation_shortcuts_are_documented_and_guarded():
     html = _html()
     js = _js()
 
-    assert "Space — next image" in html
-    assert "Tab — previous image" in html
+    assert "<strong>Images:</strong> Space = next image; Tab = previous image" in html
+    assert "<strong>Focus:</strong> V toggles image-only focus mode" in html
+    assert "<strong>Classes:</strong> ↓ / R = next class; ↑ / E = previous class" in html
+    assert "Shift + R + drag runs YOLO/RF-DETR region detect" in html
+    assert "Shift + Y requests Save YOLO + captions" in html
     assert "const imageNavigationKey = (event) =>" in js
     assert "eventKey === 32" in js
     assert "eventKey === 9" in js

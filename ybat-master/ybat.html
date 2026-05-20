@@ -628,30 +628,15 @@
                             <div id="description">
                                 SHORTCUTS:
                                 <ul>
-                                    <li><strong>X</strong> — press with a bbox selected to run the SAM tweak</li>
-                                    <li><strong>X</strong> twice — batch tweak all bboxes in the class currently selected in the list</li>
-                                    <li>Shift + click — add/remove selection (green)</li>
-                                    <li>Shift + drag — selection box (green)</li>
-                                    <li>Shift + Alt + click/drag — select negatives for SAM3 similarity (red)</li>
-                                    <li>Hold R + drag — Region detect (YOLO/RF-DETR; keeps detections whose center is inside; zoom in for more detail)</li>
-                                    <li>Mouse wheel — zoom</li>
-                                    <li>Shift + wheel — pan</li>
-                                    <li>Right-click drag — pan</li>
-                                    <li>← / → — cycle images</li>
-                                    <li>Tab — previous image</li>
-                                    <li>Space — next image</li>
-                                    <li>↑ / ↓ — cycle classes</li>
-                                    <li>Delete / Backspace / W — remove selected bbox</li>
-                                    <li>Q — delete the most recently created bbox</li>
-                                    <li>Enter — submit multi-point mask</li>
-                                    <li>Hold Z — temporarily disable Auto Class and all SAM modes so you can select or delete the active bbox</li>
-                                    <li>A — toggle auto class</li>
-                                    <li><strong>1</strong> — SAM3 similarity prompt using selected boxes (pos/neg)</li>
-                                    <li>S — toggle SAM</li>
-                                    <li>D — toggle SAM point mode</li>
-                                    <li>M — toggle SAM multi-point</li>
-                                    <li>F — add positive point</li>
-                                    <li>G — add negative point</li>
+                                    <li><strong>Images:</strong> Space = next image; Tab = previous image; ← / → = previous / next image.</li>
+                                    <li><strong>Focus:</strong> V toggles image-only focus mode; Esc exits focus mode or clears a polygon draft.</li>
+                                    <li><strong>Classes:</strong> ↓ / R = next class; ↑ / E = previous class.</li>
+                                    <li><strong>Selection:</strong> Shift + click adds/removes positive selections; Shift + drag draws a positive selection box; Shift + Alt + click/drag marks SAM3 similarity negatives.</li>
+                                    <li><strong>Box edits:</strong> Delete / Backspace / W removes selected or current bboxes; Q deletes the latest bbox.</li>
+                                    <li><strong>SAM:</strong> X runs magic tweak; double X runs complete-class magic tweak; S toggles SAM; D toggles point mode; M toggles multi-point; F/G add positive/negative points; Enter submits multi-point masks.</li>
+                                    <li><strong>Detection/export:</strong> Shift + R + drag runs YOLO/RF-DETR region detect; 1 runs SAM3 similarity; Shift + Y requests Save YOLO + captions.</li>
+                                    <li><strong>Canvas:</strong> Mouse wheel zooms; Shift + wheel pans; right-click drag pans.</li>
+                                    <li><strong>Modes:</strong> A toggles auto-class; P switches to seg mode or toggles polygon drawing; hold Z temporarily pauses Auto Class and SAM modes for selection/deletion.</li>
                                 </ul>
                             </div>
                         </form>

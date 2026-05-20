@@ -397,9 +397,12 @@ workspace-focused image navigation shortcut.
 - Added broad Label Images tab keyboard navigation: `Tab` moves to the previous
   image and `Space` moves to the next image. Text-editing fields are still
   protected so prompt/caption editing keeps normal typing behavior.
+- Cleaned up the in-app Label Images shortcut list so current shortcuts are
+  grouped by image navigation, focus mode, class cycling, selection, box
+  editing, SAM, region detect/export, canvas controls, and mode toggles.
 - Extended the labeling-panel layout contract test to cover the caption output
-  layout, caption prompt controls, and guarded keyboard image-navigation
-  shortcuts.
+  layout, caption prompt controls, guarded keyboard image-navigation shortcuts,
+  and the grouped shortcut documentation shown in the UI.
 - Validation used `node --check ybat-master/ybat.js`,
   `./.venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py -q`,
   and `git diff --check`, with 5 passing layout-contract tests.

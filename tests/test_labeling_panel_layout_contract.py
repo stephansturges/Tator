@@ -91,12 +91,24 @@ def test_caption_prompt_controls_have_tooltips_and_roomy_textareas():
     assert "max-height: 520px;" in css
 
 
-def test_spacebar_image_navigation_shortcut_is_documented_and_guarded():
+def test_keyboard_image_navigation_shortcuts_are_documented_and_guarded():
     html = _html()
     js = _js()
 
-    assert "Space / Shift + Space" in html
-    assert 'const isSpaceKey = key === 32' in js
-    assert "event.shiftKey ? -1 : 1" in js
-    assert "isInteractiveShortcutTarget" in js
-    assert "input, textarea, select, button" in js
+    assert "Space — next image" in html
+    assert "Tab — previous image" in html
+    assert "const imageNavigationKey = (event) =>" in js
+    assert "eventKey === 32" in js
+    assert "eventKey === 9" in js
+    assert 'event.key === "Tab"' in js
+    assert "return 1;" in js
+    assert "return -1;" in js
+    assert "navigateImage(direction)" in js
+    assert 'window.addEventListener("keydown"' in js
+    assert '}, true);' in js
+    assert "annotationWorkspaceHotkeysActive" in js
+    assert "__tatorImageNavigationHandled" in js
+    assert "canvas.element.focus({ preventScroll: true })" in js
+    assert "canvas.element.focus();" in js
+    assert "const isTextEditingTarget = (target) =>" in js
+    assert 'targetTag === "textarea"' in js

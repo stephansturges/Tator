@@ -394,11 +394,12 @@ workspace-focused image navigation shortcut.
   opening prompt editors, inspiration toggles, and caption prompt stack.
 - Made caption style/opening prompt boxes and prompt-stack textareas full width,
   and doubled their default vertical space so long prompts are inspectable.
-- Added `Space` for next image and `Shift + Space` for previous image when
-  focus is on the labeling workspace. The shortcut is ignored for text fields,
-  selects, buttons, labels, summaries, and editable/menu controls.
+- Added broad Label Images tab keyboard navigation: `Tab` moves to the previous
+  image and `Space` moves to the next image. Text-editing fields are still
+  protected so prompt/caption editing keeps normal typing behavior.
 - Extended the labeling-panel layout contract test to cover the caption output
-  layout, caption prompt controls, and guarded spacebar shortcut.
+  layout, caption prompt controls, and guarded keyboard image-navigation
+  shortcuts.
 - Validation used `node --check ybat-master/ybat.js`,
   `./.venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py -q`,
   and `git diff --check`, with 5 passing layout-contract tests.

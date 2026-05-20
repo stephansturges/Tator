@@ -758,6 +758,7 @@
     let bboxLoadListenersBound = false;
     let bboxSaveListenerBound = false;
     let keyboardListenersBound = false;
+    let annotationWorkspaceHotkeysActive = false;
     let imageSearchListenerBound = false;
     let imageCropListenerBound = false;
     const tweakPreserveSet = new Set();
@@ -36651,6 +36652,35 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         canvasMouseListenersBound = true;
+        canvas.element.tabIndex = 0;
+        const activateAnnotationWorkspaceHotkeys = ({ focusCanvas = false } = {}) => {
+            annotationWorkspaceHotkeysActive = true;
+            if (!focusCanvas || !canvas.element || typeof canvas.element.focus !== "function") {
+                return;
+            }
+            try {
+                canvas.element.focus({ preventScroll: true });
+            } catch (_error) {
+                canvas.element.focus();
+            }
+        };
+        const deactivateAnnotationWorkspaceHotkeys = (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (!target) {
+                return;
+            }
+            if (target.closest("#canvas, #right")) {
+                return;
+            }
+            if (target.closest("#tabLabeling .left")) {
+                annotationWorkspaceHotkeysActive = false;
+            }
+        };
+        canvas.element.addEventListener("mouseenter", () => activateAnnotationWorkspaceHotkeys());
+        canvas.element.addEventListener("mousemove", () => activateAnnotationWorkspaceHotkeys());
+        canvas.element.addEventListener("mousedown", () => activateAnnotationWorkspaceHotkeys({ focusCanvas: true }), { capture: true });
+        document.addEventListener("focusin", deactivateAnnotationWorkspaceHotkeys);
+        document.addEventListener("mousedown", deactivateAnnotationWorkspaceHotkeys, true);
         canvas.element.addEventListener("wheel", trackWheel, { passive: false });
         const trackPointerSafely = (event) => {
             trackPointer(event).catch((error) => {
@@ -39147,29 +39177,87 @@ async function cancelRfDetrTrainingJobRequest() {
             });
             return true;
         };
+        const isLabelingTabActive = () => {
+            const labelingPanel = document.getElementById("tabLabeling");
+            return activeTab === TAB_LABELING || !!labelingPanel?.classList.contains("active");
+        };
+        const imageNavigationKey = (event) => {
+            const eventKey = event.keyCode || event.charCode;
+            if (eventKey === 32 || event.key === " " || event.key === "Spacebar" || event.code === "Space") {
+                return 1;
+            }
+            if (eventKey === 9 || event.key === "Tab" || event.code === "Tab") {
+                return -1;
+            }
+            return null;
+        };
+        const isTextEditingTarget = (target) => {
+            const targetElement = target instanceof Element ? target : null;
+            if (!targetElement) {
+                return false;
+            }
+            const targetTag = (targetElement.tagName || "").toLowerCase();
+            const inputType = targetElement.getAttribute("type")
+                ? targetElement.getAttribute("type").toLowerCase()
+                : "";
+            return targetTag === "textarea"
+                || (targetTag === "input" && !["checkbox", "radio", "button", "range", "color"].includes(inputType))
+                || !!targetElement.isContentEditable;
+        };
+        const shouldHandleKeyboardImageNavigation = (event) => {
+            if (
+                !isLabelingTabActive()
+                || event.repeat
+                || event.ctrlKey
+                || event.metaKey
+                || event.altKey
+                || !imageNavigationKey(event)
+            ) {
+                return false;
+            }
+            if (annotationFocusMode) {
+                return true;
+            }
+            if (isTextEditingTarget(event.target)) {
+                return false;
+            }
+            return true;
+        };
+        const handleKeyboardImageNavigation = (event) => {
+            if (event.__tatorImageNavigationHandled) {
+                return false;
+            }
+            const direction = imageNavigationKey(event);
+            if (!shouldHandleKeyboardImageNavigation(event) || !direction) {
+                return false;
+            }
+            event.__tatorImageNavigationHandled = true;
+            navigateImage(direction);
+            event.preventDefault();
+            if (typeof event.stopImmediatePropagation === "function") {
+                event.stopImmediatePropagation();
+            } else {
+                event.stopPropagation();
+            }
+            return true;
+        };
 
         keyboardListenersBound = true;
+        window.addEventListener("keydown", (event) => {
+            handleKeyboardImageNavigation(event);
+        }, true);
         document.addEventListener("keydown", (event) => {
-            if (activeTab !== TAB_LABELING) {
+            handleKeyboardImageNavigation(event);
+        }, true);
+        document.addEventListener("keydown", (event) => {
+            if (!isLabelingTabActive()) {
                 return;
             }
-            const targetTag = (event.target?.tagName || "").toLowerCase();
-            const inputType = (event.target?.getAttribute && event.target.getAttribute("type")) ? event.target.getAttribute("type").toLowerCase() : "";
-            const isTextualInput = targetTag === "textarea"
-                || (targetTag === "input" && !["checkbox", "radio", "button", "range", "color"].includes(inputType));
-            if (isTextualInput || event.target?.isContentEditable) {
+            if (isTextEditingTarget(event.target)) {
                 return;
             }
             const key = event.keyCode || event.charCode;
-            const targetElement = event.target instanceof Element ? event.target : null;
-            const isInteractiveShortcutTarget = !!targetElement?.closest?.(
-                "input, textarea, select, button, a, label, summary, [contenteditable='true'], [role='button'], [role='menuitem']"
-            );
-            const isSpaceKey = key === 32 || event.key === " " || event.key === "Spacebar" || event.code === "Space";
-
-            if (!event.repeat && isSpaceKey && !event.ctrlKey && !event.metaKey && !event.altKey && !isInteractiveShortcutTarget) {
-                navigateImage(event.shiftKey ? -1 : 1);
-                event.preventDefault();
+            if (handleKeyboardImageNavigation(event)) {
                 return;
             }
 

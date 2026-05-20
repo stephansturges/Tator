@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20260517h" rel="stylesheet">
+    <link href="ybat.css?v=20260520a" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
          before we call listenImageCrop().
@@ -11,7 +11,8 @@
     <script src="canvas.min.js?v=20260409a"></script>
     <script src="jszip.min.js?v=20260409a"></script>
     <script src="filesaver.min.js?v=20260409a"></script>
-    <script src="ybat.js?v=20260518f"></script>
+    <script src="plotly-2.35.2.min.js?v=20260520a"></script>
+    <script src="ybat.js?v=20260520a"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -50,6 +51,7 @@
     <div class="tab-shell">
 		        <div class="tab-bar">
 	            <button class="tab-button active" data-tab="labeling" data-testid="tab.labeling.open" id="tabLabelingButton" type="button">Label Images</button>
+            <button class="tab-button" data-tab="class-split" data-testid="tab.class_split.open" id="tabClassSplitButton" type="button">Class Split Explorer</button>
             <button class="tab-button" data-tab="prepass-builder" data-testid="tab.prepass_builder.open" id="tabPrepassBuilderButton" type="button">EDR [wip] Builder</button>
             <button class="tab-button" data-tab="training" data-testid="tab.training.open" id="tabTrainingButton" type="button">Train Class Predictor</button>
             <button class="tab-button" data-tab="qwen-train" data-testid="tab.qwen_train.open" id="tabQwenTrainButton" type="button">Train Qwen 3</button>
@@ -547,33 +549,56 @@
                                 </summary>
                                 <div class="sam3-text-panel__body">
                                     <p class="sam3-text-hint">Runs text-driven segmentation with SAM3. Can be used alongside the bbox tools.</p>
-                                    <label for="sam3TextPrompt">Prompt (describe what to segment)</label>
-                                    <input type="text" id="sam3TextPrompt" placeholder="e.g., red helmet" />
-                                    <div class="sam3-text-grid">
-                                        <label for="sam3Threshold">Score threshold</label>
-                                        <input type="number" id="sam3Threshold" step="0.05" min="0" max="1" value="0.5" />
-                                        <label for="sam3MaskThreshold">Mask threshold</label>
-                                        <input type="number" id="sam3MaskThreshold" step="0.05" min="0" max="1" value="0.5" />
-                                        <label for="sam3MaxResults">Max results</label>
-                                        <input type="number" id="sam3MaxResults" min="1" max="100" value="20" />
-                                        <label for="sam3MinSize">Min size (px²)</label>
-                                        <input type="number" id="sam3MinSize" min="0" value="0" title="Ignore detections smaller than this pixel area. 0 keeps all." />
-                                        <label for="sam3MaxPoints">Max points/polygon</label>
-                                        <input type="number" id="sam3MaxPoints" min="10" max="5000" value="500" title="Simplification cap per polygon. Lower for smoother shapes; higher preserves detail." />
-                                        <label for="sam3SimplifyEpsilon">Simplify epsilon (px)</label>
-                                        <input type="number" id="sam3SimplifyEpsilon" min="0" step="0.1" value="1.0" title="Douglas–Peucker epsilon in pixels on the downsampled mask: higher = smoother polygons, lower = more detail." />
-                                        <label for="sam3TextWindowed">Windowed mode<span class="help-icon" title="Splits the image into overlapping tiles before SAM3 text prompting, then reprojects and fuses duplicate detections back into full-image coordinates.">?</span></label>
-                                        <input type="checkbox" id="sam3TextWindowed" />
-                                        <label for="sam3TextWindowSize">Window size (px)</label>
-                                        <input type="number" id="sam3TextWindowSize" min="64" step="32" value="672" />
-                                        <label for="sam3TextWindowOverlap">Window overlap</label>
-                                        <input type="number" id="sam3TextWindowOverlap" min="0" max="0.9" step="0.05" value="0.1" />
+                                    <div class="sam3-text-field sam3-text-field--wide">
+                                        <label for="sam3TextPrompt">Prompt (describe what to segment)</label>
+                                        <input type="text" id="sam3TextPrompt" placeholder="e.g., red helmet" />
                                     </div>
-                                    <label for="sam3ClassSelect">Assign detections to class</label>
-                                    <select id="sam3ClassSelect"></select>
+                                    <div class="sam3-text-grid">
+                                        <div class="sam3-text-field">
+                                            <label for="sam3Threshold">Score threshold</label>
+                                            <input type="number" id="sam3Threshold" step="0.05" min="0" max="1" value="0.5" />
+                                        </div>
+                                        <div class="sam3-text-field">
+                                            <label for="sam3MaskThreshold">Mask threshold</label>
+                                            <input type="number" id="sam3MaskThreshold" step="0.05" min="0" max="1" value="0.5" />
+                                        </div>
+                                        <div class="sam3-text-field">
+                                            <label for="sam3MaxResults">Max results<span class="help-icon" title="Full-image mode returns at most this many detections. Windowed mode searches each tile broadly, fuses duplicates, then applies this as the final full-image cap.">?</span></label>
+                                            <input type="number" id="sam3MaxResults" min="1" max="100" value="20" title="Windowed SAM3 uses this as the final full-image cap after tile fusion." />
+                                        </div>
+                                        <div class="sam3-text-field">
+                                            <label for="sam3MinSize">Min size (px²)</label>
+                                            <input type="number" id="sam3MinSize" min="0" value="0" title="Ignore detections smaller than this pixel area. 0 keeps all." />
+                                        </div>
+                                        <div class="sam3-text-field">
+                                            <label for="sam3MaxPoints">Max points/polygon</label>
+                                            <input type="number" id="sam3MaxPoints" min="10" max="5000" value="500" title="Simplification cap per polygon. Lower for smoother shapes; higher preserves detail." />
+                                        </div>
+                                        <div class="sam3-text-field">
+                                            <label for="sam3SimplifyEpsilon">Simplify epsilon (px)</label>
+                                            <input type="number" id="sam3SimplifyEpsilon" min="0" step="0.1" value="1.0" title="Douglas–Peucker epsilon in pixels on the downsampled mask: higher = smoother polygons, lower = more detail." />
+                                        </div>
+                                        <div class="sam3-text-field sam3-text-field--checkbox">
+                                            <label for="sam3TextWindowed">Windowed mode<span class="help-icon" title="Splits the image into overlapping tiles before SAM3 text prompting, then reprojects and fuses duplicate detections back into full-image coordinates.">?</span></label>
+                                            <input type="checkbox" id="sam3TextWindowed" />
+                                        </div>
+                                        <div class="sam3-text-field">
+                                            <label for="sam3TextWindowSize">Window size (px)</label>
+                                            <input type="number" id="sam3TextWindowSize" min="64" step="32" value="672" />
+                                        </div>
+                                        <div class="sam3-text-field">
+                                            <label for="sam3TextWindowOverlap">Window overlap</label>
+                                            <input type="number" id="sam3TextWindowOverlap" min="0" max="0.9" step="0.05" value="0.1" />
+                                        </div>
+                                    </div>
+                                    <div class="sam3-text-field sam3-text-field--wide">
+                                        <label for="sam3ClassSelect">Assign detections to class</label>
+                                        <select id="sam3ClassSelect"></select>
+                                    </div>
+                                    <div id="sam3TextWorkflow" class="qwen-caption-workflow sam3-text-workflow" aria-live="polite"></div>
                                     <details class="sam3-labelmap-extension">
                                         <summary>Extend labelmap</summary>
-                                        <div class="sam3-text-grid">
+                                        <div class="sam3-text-field sam3-text-field--wide">
                                             <label for="sam3NewClassName">New class name</label>
                                             <input type="text" id="sam3NewClassName" placeholder="new_class" />
                                         </div>
@@ -600,27 +625,51 @@
                                         <p class="training-help" style="margin-top: 4px;">
                                             Chain multiple SAM3 text prompts with their own thresholds and target classes. Steps run in order on the current image.
                                         </p>
+                                        <div class="sam3-text-cascade__dedupe">
+                                            <label class="sam3-text-cascade__option" for="sam3TextCascadeDedupeAssigned">
+                                                <input type="checkbox" id="sam3TextCascadeDedupeAssigned" />
+                                                Dedupe assigned classes after cascade
+                                                <span class="help-icon" title="After all cascade steps finish on an image, compare only the classes assigned by the cascade and remove duplicate new SAM3 objects within each class. Existing annotations are kept as anchors.">?</span>
+                                            </label>
+                                            <div class="sam3-text-field">
+                                                <label for="sam3TextCascadeDedupeIou">Dedupe IoU<span class="help-icon" title="Overlap threshold for post-cascade per-class cleanup. Lower values merge more aggressively; higher values keep near-overlapping objects separate.">?</span></label>
+                                                <input type="number" id="sam3TextCascadeDedupeIou" min="0" max="1" step="0.05" value="0.65" title="Overlap threshold for post-cascade cleanup within each assigned class." />
+                                            </div>
+                                        </div>
                                         <div id="sam3TextCascadeSteps" class="sam3-text-cascade__steps"></div>
                                     </div>
-                                    <div class="sam3-text-batch" style="margin-top: 10px;">
-                                        <div class="sam3-text-batch__count">
-                                            <label for="sam3BatchCount">Apply to next N images</label>
-                                            <input type="number" id="sam3BatchCount" min="1" max="999" value="5" />
-	                                        </div>
-	                                        <div class="sam3-text-batch__options">
-	                                            <label class="sam3-text-batch__option" for="sam3BatchIncludeCurrent">
-	                                                <input type="checkbox" id="sam3BatchIncludeCurrent" checked />
-	                                                Include current image
-	                                            </label>
-	                                        </div>
-	                                        <div class="sam3-text-batch__actions">
-	                                            <button type="button" id="sam3BatchRunButton" class="training-button secondary">Run batch</button>
-	                                            <button type="button" id="sam3BatchStopButton" class="training-button danger" disabled>Stop batch</button>
-	                                        </div>
-                                    </div>
-                                    <p class="training-help" style="margin-top: 6px;">
-                                        Runs the current prompt sequentially across the next N images. If cascade is enabled, runs every cascade step per image.
-                                    </p>
+                                    <details class="sam3-text-batch" id="sam3TextBatchPanel">
+                                        <summary>Apply to next N images</summary>
+                                        <div class="sam3-text-batch__body">
+                                            <div class="sam3-text-batch__mode" role="radiogroup" aria-label="SAM3 batch mode">
+                                                <label class="sam3-text-batch__option" for="sam3BatchModeSingle">
+                                                    <input type="radio" id="sam3BatchModeSingle" name="sam3BatchMode" value="single" checked />
+                                                    Current single prompt
+                                                </label>
+                                                <label class="sam3-text-batch__option" for="sam3BatchModeCascade">
+                                                    <input type="radio" id="sam3BatchModeCascade" name="sam3BatchMode" value="cascade" />
+                                                    Text prompt cascade
+                                                </label>
+                                            </div>
+                                            <div class="sam3-text-batch__count sam3-text-field">
+                                                <label for="sam3BatchCount">Images to process</label>
+                                                <input type="number" id="sam3BatchCount" min="1" max="999" value="5" />
+                                            </div>
+                                            <div class="sam3-text-batch__options">
+                                                <label class="sam3-text-batch__option" for="sam3BatchIncludeCurrent">
+                                                    <input type="checkbox" id="sam3BatchIncludeCurrent" checked />
+                                                    Include current image
+                                                </label>
+                                            </div>
+                                            <div class="sam3-text-batch__actions">
+                                                <button type="button" id="sam3BatchRunButton" class="training-button secondary">Run batch</button>
+                                                <button type="button" id="sam3BatchStopButton" class="training-button danger" disabled>Stop batch</button>
+                                            </div>
+                                            <p class="training-help">
+                                                Runs the selected SAM3 mode sequentially across the next N images.
+                                            </p>
+                                        </div>
+                                    </details>
                                 </div>
                             </details>
                             </div>
@@ -632,8 +681,8 @@
                                     <li><strong>Focus:</strong> V toggles image-only focus mode; Esc exits focus mode or clears a polygon draft.</li>
                                     <li><strong>Classes:</strong> ↓ / R = next class; ↑ / E = previous class.</li>
                                     <li><strong>Selection:</strong> Shift + click adds/removes positive selections; Shift + drag draws a positive selection box; Shift + Alt + click/drag marks SAM3 similarity negatives.</li>
-                                    <li><strong>Box edits:</strong> Delete / Backspace / W removes selected or current bboxes; Q deletes the latest bbox.</li>
-                                    <li><strong>SAM:</strong> X runs magic tweak; double X runs complete-class magic tweak; S toggles SAM; D toggles point mode; M toggles multi-point; F/G add positive/negative points; Enter submits multi-point masks.</li>
+                                    <li><strong>Box edits:</strong> Delete / Backspace / X removes selected or current bboxes; Q deletes the latest bbox.</li>
+                                    <li><strong>SAM:</strong> W runs magic tweak; double W tweaks selected boxes first, otherwise the carousel class; S toggles SAM; D toggles point mode; M toggles multi-point; F/G add positive/negative points; Enter submits multi-point masks.</li>
                                     <li><strong>Detection/export:</strong> Shift + R + drag runs YOLO/RF-DETR region detect; 1 runs SAM3 similarity; Shift + Y requests Save YOLO + captions.</li>
                                     <li><strong>Canvas:</strong> Mouse wheel zooms; Shift + wheel pans; right-click drag pans.</li>
                                     <li><strong>Modes:</strong> A toggles auto-class; P switches to seg mode or toggles polygon drawing; hold Z temporarily pauses Auto Class and SAM modes for selection/deletion.</li>
@@ -647,6 +696,156 @@
                         <canvas id="hiddenCanvas"></canvas>
                         <div id="annotationFocusHud" class="annotation-focus-hud" aria-live="polite" aria-atomic="true"></div>
                     </div>
+                </div>
+            </div>
+            <div class="tab-panel" id="tabClassSplit" data-tab-panel="class-split">
+                <div class="class-split-workspace">
+                    <header class="class-split-workspace__header">
+                        <div>
+                            <h2>Class Split Explorer</h2>
+                            <div id="classSplitDatasetStatus" class="training-help">Open a dataset in Label Images to run analysis.</div>
+                        </div>
+                        <span id="classSplitJobStatus" class="qwen-caption-status"></span>
+                    </header>
+                    <section class="class-split-panel class-split-panel--workspace" aria-labelledby="classSplitTitle">
+                        <div class="class-split-panel__header">
+                            <div>
+                                <strong id="classSplitTitle">Embedding cluster audit</strong>
+                                <div class="training-help">Embed labeled object crops, inspect clusters, and jump back to source images for review.</div>
+                            </div>
+                        </div>
+                        <div class="class-split-grid">
+                            <div class="class-split-field">
+                                <label>Scope</label>
+                                <div class="class-split-radio">
+                                    <label><input type="radio" name="classSplitScope" id="classSplitScopeSelected" value="selected_class" checked /> Selected class</label>
+                                    <label><input type="radio" name="classSplitScope" id="classSplitScopeAll" value="all_classes" /> All classes</label>
+                                </div>
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitRecipePreset">Quality preset<span class="help-icon" title="Fast uses a smaller canonical crop for quicker coarse audits. Balanced is the measured default. Precise adds multi-view object/context embeddings and is slower. Custom keeps your advanced settings.">?</span></label>
+                                <select id="classSplitRecipePreset">
+                                    <option value="balanced" selected>Balanced default</option>
+                                    <option value="fast">Fast coarse</option>
+                                    <option value="precise">Precise slow</option>
+                                    <option value="custom">Custom advanced</option>
+                                </select>
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitClassSelect">Class</label>
+                                <select id="classSplitClassSelect"></select>
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitEncoderType">Encoder</label>
+                                <select id="classSplitEncoderType">
+                                    <option value="dinov3" selected>DINOv3</option>
+                                    <option value="clip">CLIP</option>
+                                </select>
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitBackbone">Backbone</label>
+                                <select id="classSplitBackbone"></select>
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitProjection">Projection<span class="help-icon" title="Controls only the 2D graph layout, not the embeddings or crop analysis. PCA is deterministic, fast, and good for a first audit. UMAP can show curved or separated neighborhoods more clearly when installed, but is slower and may move points between runs.">?</span></label>
+                                <select id="classSplitProjection">
+                                    <option value="pca" selected>PCA</option>
+                                    <option value="umap">UMAP if available</option>
+                                </select>
+                            </div>
+                        </div>
+                        <details class="class-split-advanced">
+                            <summary>Advanced embedding controls</summary>
+                            <div class="class-split-grid">
+                            <div class="class-split-field">
+                                <label for="classSplitProjectionNeighborK">Projection neighbors<span class="help-icon" title="UMAP-only layout setting. Higher values make UMAP preserve broader/global structure; lower values emphasize tight local islands. PCA does not use neighbors, so this is reported as not applicable for PCA runs. Use 0 for all available neighbors.">?</span></label>
+                                <input type="number" id="classSplitProjectionNeighborK" min="0" max="5000" value="15" />
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitSampleCap">Sample cap<span class="help-icon" title="Optional. Leave blank to analyze every object in the selected scope. Use a positive number only when you want a faster sampled audit.">?</span></label>
+                                <input type="number" id="classSplitSampleCap" min="0" max="50000" placeholder="All objects" />
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitPadding">Crop padding<span class="help-icon" title="Extra context around each bbox before embedding. 0.08 means 8% of the box size is added on each side, then the crop is made square. More padding helps context-heavy classes; less padding focuses tightly on the object.">?</span></label>
+                                <input type="number" id="classSplitPadding" min="0" max="1" step="0.01" value="0.08" />
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitCanonicalSize">Canonical size<span class="help-icon" title="Pixel size of the fixed square crop sent to the encoder when crop normalization is canonical. Smaller is faster; larger preserves more detail.">?</span></label>
+                                <input type="number" id="classSplitCanonicalSize" min="64" max="1024" step="16" value="336" />
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitDinov3Pooling">DINOv3 pooling<span class="help-icon" title="DINOv3-only readout. Pooler is the current measured default. CLS, patch mean, and concat are advanced comparison modes. CLIP ignores this setting.">?</span></label>
+                                <select id="classSplitDinov3Pooling">
+                                    <option value="pooler" selected>Pooler</option>
+                                    <option value="cls">CLS token</option>
+                                    <option value="patch_mean">Patch mean</option>
+                                    <option value="cls_patch_concat">CLS + patch mean</option>
+                                </select>
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitBackgroundMode">Background<span class="help-icon" title="Controls pixels outside the bbox inside padded crops. Full crop keeps context; fill/blur/darken suppress background when scene context overwhelms small objects.">?</span></label>
+                                <select id="classSplitBackgroundMode">
+                                    <option value="full_crop" selected>Full crop</option>
+                                    <option value="mean_fill_outside_box">Mean fill outside box</option>
+                                    <option value="blur_outside_box">Blur outside box</option>
+                                    <option value="darken_outside_box">Darken outside box</option>
+                                </select>
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitViewMode">Embedding views<span class="help-icon" title="Single is fastest. Multi-view modes encode two crops and concatenate them: object-focused, context-focused, or both. These are slower and mainly for precise audits.">?</span></label>
+                                <select id="classSplitViewMode">
+                                    <option value="single" selected>Single crop</option>
+                                    <option value="tight_standard">Tight + standard</option>
+                                    <option value="standard_context">Standard + context</option>
+                                    <option value="tight_context">Tight + context</option>
+                                </select>
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitNeighborK">Scoring neighbors<span class="help-icon" title="How many nearest embedded crops are used for local scoring. In all-classes mode this drives likely-wrong-class flags by comparing each object to nearby classes. Higher values are smoother; lower values are more sensitive to small local clusters.">?</span></label>
+                                <input type="number" id="classSplitNeighborK" min="3" max="100" value="15" />
+                            </div>
+                            </div>
+                        </details>
+                        <div class="class-split-actions">
+                            <button type="button" id="classSplitRunButton" class="training-button">Run analysis</button>
+                            <button type="button" id="classSplitCancelButton" class="training-button danger" disabled>Cancel</button>
+                            <button type="button" id="classSplitRerunButton" class="training-button secondary" disabled>Rerun</button>
+                        </div>
+                        <div class="class-split-progress" id="classSplitProgress" hidden>
+                            <div class="class-split-progress__bar"><div id="classSplitProgressFill"></div></div>
+                            <div id="classSplitProgressText" class="training-help"></div>
+                        </div>
+                        <div class="class-split-results" id="classSplitResults" hidden>
+                            <div class="class-split-toolbar">
+                                <label for="classSplitColorMode">Color</label>
+                                <select id="classSplitColorMode">
+                                    <option value="class">Class</option>
+                                    <option value="cluster">Cluster</option>
+                                    <option value="wrong">Wrong-class suspicion</option>
+                                    <option value="outlier">Outlier score</option>
+                                    <option value="area">Box area</option>
+                                </select>
+                                <label for="classSplitFilterClass">Filter</label>
+                                <select id="classSplitFilterClass"></select>
+                            </div>
+                            <div id="classSplitGraph" class="class-split-graph"></div>
+                            <div class="class-split-review">
+                                <div>
+                                    <strong>Graph report</strong>
+                                    <div id="classSplitReport" class="class-split-report">
+                                        <div class="training-help">Run analysis to summarize graph shape and settings.</div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <strong>Likely wrong class</strong>
+                                    <div id="classSplitWrongList" class="class-split-wrong-list"></div>
+                                </div>
+                                <div id="classSplitInspector" class="class-split-inspector">
+                                    <div class="training-help">Select a point to inspect its crop.</div>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
                 </div>
             </div>
             <div class="tab-panel" id="tabPrepassBuilder" data-tab-panel="prepass-builder">
@@ -1268,6 +1467,65 @@
                                 <label for="trainBatchSize">Batch Size</label>
                                 <input type="number" id="trainBatchSize" value="64" min="1" />
                                 <div class="training-help">Images encoded per CLIP forward pass.</div>
+                            </div>
+                            <div>
+                                <label for="trainEmbeddingRecipePreset">Embedding preset</label>
+                                <select id="trainEmbeddingRecipePreset">
+                                    <option value="balanced" selected>Balanced default</option>
+                                    <option value="fast">Fast coarse</option>
+                                    <option value="precise">Precise slow</option>
+                                    <option value="custom">Custom advanced</option>
+                                </select>
+                                <div class="training-help">Applies the same fast/balanced/precise recipe family as Class Split. Custom keeps the fields below.</div>
+                            </div>
+                            <div>
+                                <label for="trainCanonicalSize">Canonical size</label>
+                                <input type="number" id="trainCanonicalSize" min="64" max="1024" step="16" value="336" />
+                                <div class="training-help">Input square size used when canonical crop normalization is enabled.</div>
+                            </div>
+                            <div>
+                                <label for="trainEmbeddingCropMode">Crop geometry</label>
+                                <select id="trainEmbeddingCropMode">
+                                    <option value="padded_square" selected>Padded square</option>
+                                    <option value="padded">Padded bbox</option>
+                                    <option value="tight">Tight bbox</option>
+                                </select>
+                                <div class="training-help">Saved into the classifier and reused during auto-class inference.</div>
+                            </div>
+                            <div>
+                                <label for="trainEmbeddingCropPadding">Crop padding</label>
+                                <input type="number" id="trainEmbeddingCropPadding" min="0" max="1" step="0.01" value="0.08" />
+                                <div class="training-help">Extra context around each bbox before embedding; 0.08 mirrors the Class Split default.</div>
+                            </div>
+                            <div>
+                                <label for="trainBackgroundMode">Background</label>
+                                <select id="trainBackgroundMode">
+                                    <option value="full_crop" selected>Full crop</option>
+                                    <option value="mean_fill_outside_box">Mean fill outside box</option>
+                                    <option value="blur_outside_box">Blur outside box</option>
+                                    <option value="darken_outside_box">Darken outside box</option>
+                                </select>
+                                <div class="training-help">How pixels outside the bbox are handled inside padded crops.</div>
+                            </div>
+                            <div>
+                                <label for="trainEmbeddingViewMode">Embedding views</label>
+                                <select id="trainEmbeddingViewMode">
+                                    <option value="single" selected>Single crop</option>
+                                    <option value="tight_standard">Tight + standard</option>
+                                    <option value="standard_context">Standard + context</option>
+                                    <option value="tight_context">Tight + context</option>
+                                </select>
+                                <div class="training-help">Multi-view modes encode two crops per object and concatenate them; slower but sometimes better for subtype review.</div>
+                            </div>
+                            <div>
+                                <label for="trainDinov3Pooling">DINOv3 pooling</label>
+                                <select id="trainDinov3Pooling">
+                                    <option value="pooler" selected>Pooler / default</option>
+                                    <option value="cls">CLS token</option>
+                                    <option value="patch_mean">Patch mean</option>
+                                    <option value="cls_patch_concat">CLS + patch mean concat</option>
+                                </select>
+                                <div class="training-help">DINOv3-only embedding readout. CLIP ignores this setting.</div>
                             </div>
                             <div class="logreg-only">
                                 <label for="trainMaxIter">Max Iter</label>

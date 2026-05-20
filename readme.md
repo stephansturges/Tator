@@ -57,6 +57,8 @@ loop instead of living in separate scripts.
 - Use a dataset glossary so text-prompted systems speak in the same labels and synonyms as the project.
 - Generate first-pass labels with detectors, SAM3 text/similarity, Qwen context, and optional Falcon proposals.
 - Train and select local helper models from the same interface.
+- Audit class purity with CLIP/DINOv3 embedding maps so outliers and likely
+  wrong-class objects can be inspected and corrected.
 - Package reusable prelabeling recipes so the next batch starts from stronger suggestions.
 
 Tator is not meant to remove review. It is meant to automate the repetitive
@@ -72,6 +74,7 @@ for the final labels.
 | Dataset library | Dataset Management | `/datasets/*`, `/glossaries/*`, `/qwen/dataset/*`, `/sam3/datasets/*`, `/segmentation/build/*` | `api/datasets.py`, `services/datasets.py`, `services/segmentation.py`, `utils/coco.py`, `utils/glossary.py` |
 | Qwen captions and VLM inference | Qwen Models, Label Images | `/qwen/status`, `/qwen/settings`, `/qwen/caption`, `/qwen/infer`, `/qwen/prepass` | `services/qwen*.py`, `qwen_agent_llm.py`, `qwen_agent_tools.py` |
 | Class predictor training | Train Class Predictor | `/clip/train`, `/clip/classifiers/*`, `/clip/active_model` | `services/classifier*.py`, `services/clip_runtime.py`, `services/dinov3_runtime.py` |
+| Class split and outlier audit | Class Split Explorer | `/class_analysis/*`, `/clip/backbones` | `api/class_analysis.py`, `localinferenceapi.py`, `ybat-master/plotly-2.35.2.min.js`, `ybat-master/ybat.js` |
 | Detector training and inference | Train YOLO, Train RF-DETR, Detector Selection | `/yolo/*`, `/rfdetr/*`, `/detectors/default` | `services/detectors.py`, `services/detector_jobs.py` |
 | SAM3 model workflows | Train SAM3, SAM Model Selection | `/sam3/models/*`, `/sam3/train/*`, `/sam3/storage/*` | `services/sam3_*.py`, `sam3_local/` |
 | SAM3 vocabulary and recipes | SAM3 Vocabulary Explorer, SAM3 Recipe Mining | `/sam3/prompt_helper/*`, `/agent_mining/*`, `/prepass/recipes/*` | `services/prompt_helper*.py`, `services/agent_cascades.py`, `services/prepass_recipes.py` |
@@ -141,6 +144,9 @@ The Label Images tab is the everyday workspace.
 - Apply saved SAM3 recipes, cascades, prepass recipes, or EDR packages to the
   active image.
 - Use Qwen captions as visual context while keeping final labels editable.
+- Use Class Split Explorer to embed one class or all classes in the current
+  annotation dataset, inspect cluster structure, and jump from suspicious
+  points back to the source bbox for correction.
 - Export selected crops through the chunked crop ZIP endpoints.
 
 The output remains an annotation draft. The UI is built around fast accept,
@@ -406,6 +412,82 @@ workspace-focused image navigation shortcut.
 - Validation used `node --check ybat-master/ybat.js`,
   `./.venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py -q`,
   and `git diff --check`, with 5 passing layout-contract tests.
+
+### 2026-05-20: Class Split Explorer MVP
+
+This checkpoint adds the first pass of per-class and all-class embedding
+analysis for open annotation datasets.
+
+- Added a top-level **Class Split Explorer** tab so the embedding graph has a
+  full workspace instead of living in the Label Images sidebar. It runs against
+  the dataset currently open in the labeling workspace.
+- Added `/class_analysis/*` backend jobs. The backend crops current annotation
+  objects, embeds them with CLIP or DINOv3, projects the embedding space with
+  PCA or optional UMAP, clusters objects, and writes thumbnails plus result
+  metadata under `uploads/class_analysis/`.
+- Added a local vendored Plotly bundle for the interactive graph. The graph
+  supports zoom, pan, hover, lasso/select, class/cluster/outlier/suspicion
+  coloring, and class filtering.
+- Added all-classes wrong-class review scoring. Objects whose nearest neighbors
+  mostly belong to a different class are listed as likely wrong-class
+  candidates for inspection.
+- Added source-image jump and single-object relabel. Selecting a point shows
+  the crop; **See instance** switches back to Label Images, opens the source
+  image, and selects the matching bbox. The inspector can also change that
+  object to an existing class, save the annotation snapshot, and rerun the same
+  analysis.
+- Removed the default sample cap. Blank or missing sample cap now means analyze
+  every object in scope; entering a positive cap still enables faster sampled
+  audits.
+- Added review hardening so analysis and relabel reruns refuse to proceed if
+  the current annotation snapshot cannot be saved, preventing stale backend
+  labels from being embedded after local edits.
+- Added a WALDO v4 embedding experiment harness and first benchmark report
+  under `docs/waldo_embedding_experiment_plan.md` and
+  `uploads/class_analysis/experiments/waldo_v4/`. The minimum matrix showed
+  that canonical fixed-size crops alone still leaked object size, while
+  canonical `336x336` padded-square crops plus size-bias residualization cut
+  the all-class PCA size-axis correlation from about `0.83` to `0.03` without
+  materially changing nearest-neighbor class purity.
+- Added the remaining-lever and finalist preset experiment matrices under
+  `uploads/class_analysis/experiments/waldo_v4_remaining_smoke/` and
+  `uploads/class_analysis/experiments/waldo_v4_finalists/`. The screen rejected
+  raw/native embeddings and whitening, kept PCA as the diagnostic projection,
+  and confirmed three user-facing quality presets: **Fast** (`224px`, padding
+  `0.04`), **Balanced** (`336px`, padding `0.08`), and **Precise** (Balanced
+  plus tight/context multi-view embeddings).
+- Added shared embedding recipe helpers for background suppression and
+  multi-view crop composition. Class Split Explorer and auto-class training now
+  use the same canonical crop/view metadata, and sampled Class Split runs defer
+  expensive crop materialization until after the sampled records are selected.
+- The shared recipe is intentionally narrow in the normal UI: object crops are
+  padded to a square, resized to a canonical input size, optionally rendered as
+  tight/context views, embedded with the selected CLIP or DINOv3 backbone, and
+  then passed through the same size-bias residualizer used by the trained
+  auto-class head. Raw/native embeddings and no-adjustment variants stay in the
+  experiment harness so normal audits and auto-class inference use the proven
+  path.
+- Added Class Split quality presets plus an advanced disclosure for crop
+  padding, canonical size, DINO pooling, background mode, embedding views, and
+  UMAP neighbors. Raw/native embeddings, whitening, and image-bias removal
+  remain experiment-harness levers rather than normal UI controls.
+- Aligned trained auto-class predictors with the Class Split recipe. Training
+  now saves crop mode, crop padding, canonical size, DINO pooling, and the
+  fitted size-bias residualizer; inference reloads those settings and applies
+  the same crop/preprocess/embedding adjustment before scoring. SAM-generated
+  boxes now use the same full-image bbox crop path instead of classifying raw
+  mask crops directly.
+- Hardened the embedding cache and training loop. Class Split cache keys include
+  the image hash, bbox, crop recipe, encoder, and pooling mode; cached embedding
+  files are now validated for one-dimensional finite vectors before a crop can
+  be treated as reusable, so corrupt cache entries force real crop
+  rematerialization instead of placeholder encoding. Auto-class training also
+  closes source images and generated crop views on both success and failure, and
+  DINOv3 training metadata now records the actual encoder model used by the run.
+- Validation used `node --check ybat-master/ybat.js`,
+  `NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m py_compile api/class_analysis.py tools/run_class_split_experiments.py localinferenceapi.py tools/clip_training.py services/classifier.py utils/embedding_recipe.py tests/test_class_analysis.py tests/test_labeling_panel_layout_contract.py tests/test_sam3_text_windowed_prompt.py`,
+  `NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest tests/test_class_analysis.py tests/test_labeling_panel_layout_contract.py tests/test_sam3_text_windowed_prompt.py -q`
+  (39 passing tests), and `git diff --check`.
 
 ## Training and Model Management
 

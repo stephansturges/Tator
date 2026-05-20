@@ -28,6 +28,7 @@ from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException,
 logger = logging.getLogger("localinferenceapi")
 from api.detectors_default import build_detectors_default_router
 from api.datasets import build_datasets_router
+from api.class_analysis import build_class_analysis_router
 from api.glossaries import build_glossaries_router
 from api.predictor_settings import build_predictor_settings_router
 from api.runtime import build_runtime_router
@@ -741,6 +742,25 @@ import itertools
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
+from sklearn.cluster import MiniBatchKMeans
+from sklearn.decomposition import PCA
+from sklearn.metrics import silhouette_score
+from sklearn.neighbors import NearestNeighbors
+from utils.embedding_recipe import (
+    apply_size_bias_residualizer,
+    covariate_row as _embedding_covariate_row,
+    covariates_from_records as _embedding_covariates_from_records,
+    crop_bounds as _embedding_crop_bounds,
+    embedding_view_specs as _embedding_view_specs,
+    make_embedding_crop_views as _embedding_make_crop_views,
+    normalize_background_mode as _embedding_normalize_background_mode,
+    normalize_dinov3_pooling as _embedding_normalize_dinov3_pooling,
+    normalize_embedding_adjustment as _embedding_normalize_adjustment,
+    normalize_embedding_view_mode as _embedding_normalize_view_mode,
+    normalize_preprocess_mode as _embedding_normalize_preprocess,
+    normalize_rows as _embedding_normalize_rows,
+    preprocess_crop as _embedding_preprocess_crop,
+)
 
 # Ensure we import the bundled SAM3 package (sam3/sam3) rather than shadowing it
 # with the repo root folder name (sam3/). Without this, sam3 becomes a namespace
@@ -4190,6 +4210,73 @@ def _fuse_sam3_windowed_detections(
     return detections, masks
 
 
+def _positive_int_or_none(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _sam3_window_limit_pair(limit: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
+    final_limit = _positive_int_or_none(limit)
+    if final_limit is None:
+        return None, None
+    # In windowed mode a small final cap should not also starve each tile. Search
+    # each crop more broadly, then apply the requested cap after full-image fusion.
+    return max(final_limit, 50), final_limit
+
+
+def _sam3_window_coverage_warnings(
+    *,
+    img_w: int,
+    img_h: int,
+    slices: List[np.ndarray],
+    starts: List[Tuple[int, int]],
+) -> List[str]:
+    warnings: List[str] = [f"windowed_image_size:{img_w}x{img_h}"]
+    if img_w <= 0 or img_h <= 0 or not slices:
+        warnings.append("windowed_coverage_fraction:0.0000")
+        warnings.append("windowed_uncovered_pixels:0")
+        return warnings
+    min_x, min_y = img_w, img_h
+    max_x, max_y = 0, 0
+    coverage = np.zeros((img_h, img_w), dtype=np.bool_)
+    for tile, start in zip(slices, starts, strict=False):
+        try:
+            offset_x, offset_y = int(start[0]), int(start[1])
+        except Exception:
+            continue
+        tile_h = int(getattr(tile, "shape", [0, 0])[0] or 0)
+        tile_w = int(getattr(tile, "shape", [0, 0])[1] or 0)
+        if tile_w <= 0 or tile_h <= 0:
+            continue
+        left = max(0, min(img_w, offset_x))
+        top = max(0, min(img_h, offset_y))
+        right = max(left, min(img_w, offset_x + tile_w))
+        bottom = max(top, min(img_h, offset_y + tile_h))
+        if right <= left or bottom <= top:
+            continue
+        coverage[top:bottom, left:right] = True
+        min_x = min(min_x, left)
+        min_y = min(min_y, top)
+        max_x = max(max_x, right)
+        max_y = max(max_y, bottom)
+    covered = int(np.count_nonzero(coverage))
+    total = max(1, img_w * img_h)
+    uncovered = max(0, total - covered)
+    if covered <= 0:
+        min_x = min_y = max_x = max_y = 0
+    warnings.append(f"windowed_coverage_bounds:{min_x},{min_y},{max_x},{max_y}")
+    warnings.append(f"windowed_coverage_fraction:{covered / total:.4f}")
+    warnings.append(f"windowed_uncovered_pixels:{uncovered}")
+    if uncovered:
+        warnings.append("windowed_incomplete_coverage")
+    return warnings
+
+
 def _run_sam3_text_windowed_inference(
     pil_img: Image.Image,
     text_prompt: str,
@@ -4227,14 +4314,15 @@ def _run_sam3_text_windowed_inference(
         ) from exc
     if not slices:
         return [], [], [*warnings, "no_windows"]
-    per_window_limit = None
-    if limit is not None:
-        try:
-            numeric_limit = int(limit)
-        except (TypeError, ValueError):
-            per_window_limit = None
-        else:
-            per_window_limit = numeric_limit if numeric_limit > 0 else None
+    warnings.extend(
+        _sam3_window_coverage_warnings(
+            img_w=img_w,
+            img_h=img_h,
+            slices=slices,
+            starts=starts,
+        )
+    )
+    per_window_limit, final_limit = _sam3_window_limit_pair(limit)
     _, processor, _ = _ensure_sam3_text_runtime()
     pairs: List[Tuple[QwenDetection, Optional[np.ndarray]]] = []
     for tile, start in zip(slices, starts, strict=False):
@@ -4281,9 +4369,18 @@ def _run_sam3_text_windowed_inference(
         img_w=img_w,
         img_h=img_h,
         merge_iou=resolved_merge_iou,
-        limit=per_window_limit,
+        limit=final_limit,
     )
+    raw_detection_count = len(pairs)
+    final_detection_count = len(detections)
     warnings.append(f"windowed_tiles:{len(slices)}")
+    warnings.append(f"windowed_slice_size:{slice_size}")
+    warnings.append(f"windowed_overlap:{overlap:.2f}")
+    warnings.append(f"windowed_per_window_limit:{per_window_limit if per_window_limit is not None else 'unlimited'}")
+    warnings.append(f"windowed_final_limit:{final_limit if final_limit is not None else 'unlimited'}")
+    warnings.append(f"windowed_raw_detections:{raw_detection_count}")
+    warnings.append(f"windowed_final_detections:{final_detection_count}")
+    warnings.append(f"windowed_fused_detections:{max(0, raw_detection_count - final_detection_count)}")
     warnings.append(f"windowed_merge_iou:{resolved_merge_iou:.2f}")
     return detections, fused_masks, warnings
 
@@ -8089,12 +8186,47 @@ def _calibration_run_job(job: CalibrationJob, request: CalibrationRequest) -> No
     )
 
 
+def _postprocess_features_for_head(
+    feats_np: np.ndarray,
+    *,
+    head: Dict[str, Any],
+    geometry_records: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> np.ndarray:
+    feats_np = np.asarray(feats_np, dtype=np.float32)
+    transform = head.get("embedding_adjustment_transform")
+    if transform and geometry_records is not None:
+        covariates, _names = _embedding_covariates_from_records(geometry_records)
+        feats_np = apply_size_bias_residualizer(
+            feats_np,
+            covariates,
+            transform,
+            normalize=bool(head.get("normalize_embeddings", True)),
+        )
+    center_vals = head.get("embedding_center_values")
+    std_vals = head.get("embedding_std_values")
+    if center_vals is not None:
+        center_arr = np.asarray(center_vals, dtype=np.float32).reshape(1, -1)
+        if center_arr.shape[1] == feats_np.shape[1]:
+            feats_np = feats_np - center_arr
+    if std_vals is not None:
+        std_arr = np.asarray(std_vals, dtype=np.float32).reshape(1, -1)
+        if std_arr.shape[1] == feats_np.shape[1]:
+            std_arr = np.where(std_arr == 0, 1.0, std_arr)
+            feats_np = feats_np / std_arr
+    if head.get("normalize_embeddings"):
+        denom = np.linalg.norm(feats_np, axis=1, keepdims=True)
+        denom = np.where(denom == 0, 1.0, denom)
+        feats_np = feats_np / denom
+    return feats_np.astype(np.float32, copy=False)
+
+
 def _encode_pil_batch_for_head(
     images: Sequence[Image.Image],
     *,
     head: Dict[str, Any],
     batch_size_override: Optional[int] = None,
     device_override: Optional[str] = None,
+    geometry_records: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> Optional[np.ndarray]:
     if not images:
         return None
@@ -8143,10 +8275,20 @@ def _encode_pil_batch_for_head(
             inputs = {k: v.to(device_name) for k, v in inputs.items()}
             with torch.no_grad():
                 outputs = dinov3_model(**inputs)
-            if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+            pooling = _embedding_normalize_dinov3_pooling(head.get("dinov3_pooling"))
+            last_hidden = getattr(outputs, "last_hidden_state", None)
+            if pooling == "pooler" and hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
                 feats = outputs.pooler_output
-            elif hasattr(outputs, "last_hidden_state") and outputs.last_hidden_state is not None:
-                feats = outputs.last_hidden_state.mean(dim=1)
+            elif pooling == "patch_mean" and last_hidden is not None and last_hidden.ndim == 3 and last_hidden.shape[1] > 1:
+                feats = last_hidden[:, 1:, :].mean(dim=1)
+            elif pooling == "cls_patch_concat" and last_hidden is not None and last_hidden.ndim == 3 and last_hidden.shape[1] > 1:
+                cls_feats = last_hidden[:, 0, :]
+                patch_feats = last_hidden[:, 1:, :].mean(dim=1)
+                cls_feats = torch.nn.functional.normalize(cls_feats, dim=-1)
+                patch_feats = torch.nn.functional.normalize(patch_feats, dim=-1)
+                feats = torch.cat([cls_feats, patch_feats], dim=-1)
+            elif last_hidden is not None:
+                feats = last_hidden[:, 0, :]
             else:
                 feats = outputs[0]
             feats_np = feats.detach().float().cpu().numpy()
@@ -8167,22 +8309,114 @@ def _encode_pil_batch_for_head(
     if not features:
         return None
     feats_np = np.concatenate(features, axis=0)
-    center_vals = head.get("embedding_center_values")
-    std_vals = head.get("embedding_std_values")
-    if center_vals is not None:
-        center_arr = np.asarray(center_vals, dtype=np.float32).reshape(1, -1)
-        if center_arr.shape[1] == feats_np.shape[1]:
-            feats_np = feats_np - center_arr
-    if std_vals is not None:
-        std_arr = np.asarray(std_vals, dtype=np.float32).reshape(1, -1)
-        if std_arr.shape[1] == feats_np.shape[1]:
-            std_arr = np.where(std_arr == 0, 1.0, std_arr)
-            feats_np = feats_np / std_arr
-    if head.get("normalize_embeddings"):
-        denom = np.linalg.norm(feats_np, axis=1, keepdims=True)
-        denom = np.where(denom == 0, 1.0, denom)
-        feats_np = feats_np / denom
-    return feats_np.astype(np.float32, copy=False)
+    return _postprocess_features_for_head(feats_np, head=head, geometry_records=geometry_records)
+
+
+def _crop_item_views(item: Any) -> List[Image.Image]:
+    if isinstance(item, (list, tuple)):
+        return [view for view in item if isinstance(view, Image.Image)]
+    if isinstance(item, Image.Image):
+        return [item]
+    return []
+
+
+def _close_crop_item(item: Any) -> None:
+    for view in _crop_item_views(item):
+        try:
+            view.close()
+        except Exception:
+            pass
+
+
+def _encode_embedding_items_for_head(
+    items: Sequence[Any],
+    *,
+    head: Dict[str, Any],
+    batch_size_override: Optional[int] = None,
+    device_override: Optional[str] = None,
+    geometry_records: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Optional[np.ndarray]:
+    if not items:
+        return None
+    view_counts = [len(_crop_item_views(item)) for item in items]
+    if all(count == 1 for count in view_counts):
+        return _encode_pil_batch_for_head(
+            [_crop_item_views(item)[0] for item in items],
+            head=head,
+            batch_size_override=batch_size_override,
+            device_override=device_override,
+            geometry_records=geometry_records,
+        )
+    if any(count <= 0 for count in view_counts):
+        return None
+    flat_images: List[Image.Image] = []
+    for item in items:
+        flat_images.extend(_crop_item_views(item))
+    raw_head = dict(head)
+    raw_head.pop("embedding_adjustment_transform", None)
+    raw_head.pop("embedding_center_values", None)
+    raw_head.pop("embedding_std_values", None)
+    raw_features = _encode_pil_batch_for_head(
+        flat_images,
+        head=raw_head,
+        batch_size_override=batch_size_override,
+        device_override=device_override,
+        geometry_records=None,
+    )
+    if raw_features is None or raw_features.shape[0] != len(flat_images):
+        return None
+    composed: List[np.ndarray] = []
+    cursor = 0
+    for count in view_counts:
+        chunk = np.asarray(raw_features[cursor : cursor + count], dtype=np.float32)
+        cursor += count
+        chunk = _embedding_normalize_rows(chunk)
+        composed.append(_embedding_normalize_rows(chunk.reshape(1, -1))[0])
+    feats_np = np.stack(composed, axis=0).astype(np.float32, copy=False)
+    return _postprocess_features_for_head(feats_np, head=head, geometry_records=geometry_records)
+
+
+def _classifier_crop_for_head(
+    pil_img: Image.Image,
+    xyxy: Sequence[float],
+    head: Optional[Mapping[str, Any]],
+) -> Tuple[Any, Dict[str, Any]]:
+    """Crop and preprocess an object using the classifier's saved embedding recipe."""
+    img_w, img_h = pil_img.size
+    x1, y1, x2, y2 = [float(v) for v in xyxy[:4]]
+    crop_mode = str((head or {}).get("embedding_crop_mode") or (head or {}).get("crop_mode") or "padded_square")
+    padding = _coerce_float(
+        (head or {}).get("embedding_crop_padding_ratio")
+        if (head or {}).get("embedding_crop_padding_ratio") is not None
+        else (head or {}).get("crop_padding_ratio"),
+        0.08,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    preprocess_mode = _embedding_normalize_preprocess((head or {}).get("preprocess_mode"))
+    canonical_size = min(1024, _coerce_int((head or {}).get("canonical_size"), 336, minimum=64))
+    background_mode = _embedding_normalize_background_mode((head or {}).get("background_mode"))
+    view_mode = _embedding_normalize_view_mode((head or {}).get("embedding_view_mode"))
+    views, crop_xyxy, view_metadata = _embedding_make_crop_views(
+        pil_img,
+        [x1, y1, x2, y2],
+        crop_mode=crop_mode,
+        padding_ratio=padding,
+        preprocess_mode=preprocess_mode,
+        canonical_size=canonical_size,
+        background_mode=background_mode,
+        view_mode=view_mode,
+    )
+    record = {
+        "bbox_xyxy": [float(x1), float(y1), float(x2), float(y2)],
+        "crop_xyxy": [int(v) for v in crop_xyxy],
+        "width": int(round(max(1.0, x2 - x1))),
+        "height": int(round(max(1.0, y2 - y1))),
+        "background_mode": background_mode,
+        "embedding_view_mode": view_mode,
+        "embedding_views": view_metadata,
+    }
+    return (tuple(views) if len(views) > 1 else views[0]), record
 
 
 def _encode_pil_batch_for_active(images: Sequence[Image.Image]) -> Optional[np.ndarray]:
@@ -8197,6 +8431,27 @@ def _encode_pil_batch_for_active(images: Sequence[Image.Image]) -> Optional[np.n
             "embedding_std_values": (active_classifier_meta or {}).get("embedding_std_values"),
         }
     return _encode_pil_batch_for_head(images, head=head)
+
+
+def _encode_classifier_xyxy_for_active(
+    pil_img: Image.Image,
+    xyxy: Sequence[float],
+) -> Optional[np.ndarray]:
+    head = _active_classifier_head_for_inference()
+    if not isinstance(head, dict):
+        head = {
+            "encoder_type": active_encoder_type or "clip",
+            "normalize_embeddings": active_head_normalize_embeddings,
+            "embedding_center_values": (active_classifier_meta or {}).get(
+                "embedding_center_values"
+            ),
+            "embedding_std_values": (active_classifier_meta or {}).get("embedding_std_values"),
+        }
+    crop, record = _classifier_crop_for_head(pil_img, xyxy, head)
+    try:
+        return _encode_embedding_items_for_head([crop], head=head, geometry_records=[record])
+    finally:
+        _close_crop_item(crop)
 
 
 def _active_classifier_head_for_inference() -> Optional[Dict[str, Any]]:
@@ -8456,8 +8711,9 @@ def _score_detections_with_clip_head(
         return None
     img_w, img_h = pil_img.size
     crops: List[Image.Image] = []
+    crop_records: List[Dict[str, Any]] = []
     det_refs: List[Any] = []
-    target_indices: List[Optional[int]] = []
+    target_indices: List[int] = []
     classes = [str(c) for c in list(clip_head.get("classes") or [])]
     for det in detections:
         label = None
@@ -8467,12 +8723,10 @@ def _score_detections_with_clip_head(
             label = getattr(det, "label", None) or getattr(det, "class_name", None)
         target_idx = _find_clip_head_target_index(classes, label)
         if target_idx is None:
-            target_indices.append(None)
             continue
         ann = det if isinstance(det, dict) else det.__dict__
         xyxy = _resolve_agent_bbox_xyxy(ann, img_w, img_h, window_bbox_2d=ann.get("window_bbox_2d"))
         if xyxy is None:
-            target_indices.append(None)
             continue
         x1, y1, x2, y2 = xyxy
         x1 = max(0.0, min(float(img_w), x1))
@@ -8480,14 +8734,15 @@ def _score_detections_with_clip_head(
         x2 = max(0.0, min(float(img_w), x2))
         y2 = max(0.0, min(float(img_h), y2))
         if x2 <= x1 or y2 <= y1:
-            target_indices.append(None)
             continue
-        crops.append(pil_img.crop((x1, y1, x2, y2)))
+        crop, crop_record = _classifier_crop_for_head(pil_img, (x1, y1, x2, y2), clip_head)
+        crops.append(crop)
+        crop_records.append(crop_record)
         det_refs.append(det)
         target_indices.append(target_idx)
     if not crops:
         return None
-    feats = _encode_pil_batch_for_head(crops, head=clip_head)
+    feats = _encode_pil_batch_for_head(crops, head=clip_head, geometry_records=crop_records)
     if feats is None:
         return None
     proba = _clip_head_predict_proba(feats, clip_head)
@@ -8496,8 +8751,6 @@ def _score_detections_with_clip_head(
     scores: Dict[int, float] = {}
     for idx, det in enumerate(det_refs):
         target_idx = target_indices[idx]
-        if target_idx is None:
-            continue
         row = proba[idx]
         target_prob = float(row[target_idx])
         if score_mode == "clip_head_margin":
@@ -8531,6 +8784,7 @@ def _agent_classifier_review(
     background_margin = float(classifier_head.get("background_margin") or 0.0)
     pending: List[Dict[str, Any]] = []
     pending_crops: List[Image.Image] = []
+    pending_crop_records: List[Dict[str, Any]] = []
     reviewed: List[Dict[str, Any]] = []
     for det in detections:
         if not isinstance(det, dict):
@@ -8556,8 +8810,10 @@ def _agent_classifier_review(
             det["classifier_accept"] = False
             counts["classifier_rejected"] += 1
             continue
+        crop, crop_record = _classifier_crop_for_head(pil_img, (x1, y1, x2, y2), classifier_head)
         pending.append({"entry": det, "target_idx": target_idx})
-        pending_crops.append(pil_img.crop((x1, y1, x2, y2)))
+        pending_crops.append(crop)
+        pending_crop_records.append(crop_record)
     if not pending:
         return reviewed, counts
     empty_cache_fn = torch.cuda.empty_cache if torch.cuda.is_available() else None
@@ -8566,7 +8822,7 @@ def _agent_classifier_review(
         classifier_head,
         batch_size=_resolve_classifier_batch(),
         encode_batch_fn=lambda items, head_obj, bs: _encode_pil_batch_for_head(
-            items, head=head_obj, batch_size_override=bs
+            items, head=head_obj, batch_size_override=bs, geometry_records=pending_crop_records
         ),
         predict_proba_fn=_clip_head_predict_proba,
         empty_cache_fn=empty_cache_fn,
@@ -8991,6 +9247,7 @@ def _agent_sanitize_detection_items(
     rejected = 0
     pending: List[Dict[str, Any]] = []
     pending_crops: List[Image.Image] = []
+    pending_crop_records: List[Dict[str, Any]] = []
     for ann in items:
         label = str(ann.get("label") or ann.get("class_name") or "").strip()
         aligned = _agent_fuzzy_align_label(label, labelmap)
@@ -9099,7 +9356,9 @@ def _agent_sanitize_detection_items(
                     "background_margin": background_margin,
                 }
             )
-            pending_crops.append(pil_img.crop((x1, y1, x2, y2)))
+            crop, crop_record = _classifier_crop_for_head(pil_img, (x1, y1, x2, y2), classifier_head)
+            pending_crops.append(crop)
+            pending_crop_records.append(crop_record)
         else:
             cleaned.append(base_entry)
 
@@ -9110,7 +9369,7 @@ def _agent_sanitize_detection_items(
             classifier_head,
             batch_size=_resolve_classifier_batch(),
             encode_batch_fn=lambda items, head_obj, bs: _encode_pil_batch_for_head(
-                items, head=head_obj, batch_size_override=bs
+                items, head=head_obj, batch_size_override=bs, geometry_records=pending_crop_records
             ),
             predict_proba_fn=_clip_head_predict_proba,
             empty_cache_fn=empty_cache_fn,
@@ -10108,7 +10367,6 @@ def _agent_tool_classify_crop(
     y2 = max(0.0, min(float(img_h), y2))
     if x2 <= x1 or y2 <= y1:
         raise HTTPException(status_code=HTTP_422_UNPROCESSABLE_CONTENT, detail="invalid_bbox")
-    crop = pil_img.crop((x1, y1, x2, y2))
     head: Optional[Dict[str, Any]] = None
     if classifier_id:
         classifier_path = _resolve_agent_clip_classifier_path_impl(
@@ -10146,7 +10404,8 @@ def _agent_tool_classify_crop(
         raise HTTPException(
             status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_unavailable"
         )
-    feats = _encode_pil_batch_for_head([crop], head=head)
+    crop, crop_record = _classifier_crop_for_head(pil_img, (x1, y1, x2, y2), head)
+    feats = _encode_pil_batch_for_head([crop], head=head, geometry_records=[crop_record])
     if feats is None or not isinstance(feats, np.ndarray) or feats.size == 0:
         raise HTTPException(
             status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_encode_failed"
@@ -12573,6 +12832,17 @@ def _parse_dataset_link_roots() -> List[Path]:
 DATASET_LINK_ROOTS = _parse_dataset_link_roots()
 DATASET_TRANSIENT_SESSIONS: Dict[str, Dict[str, Any]] = {}
 DATASET_TRANSIENT_LOCK = threading.Lock()
+CLASS_ANALYSIS_ROOT = Path(os.environ.get("CLASS_ANALYSIS_ROOT", "./uploads/class_analysis"))
+CLASS_ANALYSIS_ROOT.mkdir(parents=True, exist_ok=True)
+CLASS_ANALYSIS_CACHE_ROOT = Path(
+    os.environ.get("CLASS_ANALYSIS_CACHE_ROOT", str(CLASS_ANALYSIS_ROOT / "cache"))
+)
+CLASS_ANALYSIS_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+CLASS_ANALYSIS_CACHE_VERSION = "class-analysis-v2"
+CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL = os.environ.get(
+    "CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL",
+    "facebook/dinov3-vitb16-pretrain-lvd1689m",
+)
 PROMPT_HELPER_JOB_ROOT = Path(
     os.environ.get("SAM3_PROMPT_HELPER_ROOT", "./uploads/prompt_helper_jobs")
 )
@@ -12771,6 +13041,23 @@ class AutoLabelJob:
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
+@dataclass
+class ClassAnalysisJob:
+    job_id: str
+    status: str = "queued"
+    progress: float = 0.0
+    message: str = "Queued"
+    request: Dict[str, Any] = field(default_factory=dict)
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    result: Optional[Dict[str, Any]] = None
+    result_path: Optional[str] = None
+    thumbnail_dir: Optional[str] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
 QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
@@ -12789,6 +13076,8 @@ AGENT_MINING_JOBS: Dict[str, AgentMiningJob] = {}
 AGENT_MINING_JOBS_LOCK = threading.Lock()
 AUTO_LABEL_JOBS: Dict[str, AutoLabelJob] = {}
 AUTO_LABEL_JOBS_LOCK = threading.Lock()
+CLASS_ANALYSIS_JOBS: Dict[str, ClassAnalysisJob] = {}
+CLASS_ANALYSIS_JOBS_LOCK = threading.Lock()
 CALIBRATION_JOBS: Dict[str, CalibrationJob] = {}
 CALIBRATION_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
@@ -14857,6 +15146,1574 @@ def patch_transient_annotation_meta(session_id: str, payload: Dict[str, Any]):
         "annotation_cursor": session.get("annotation_cursor"),
         "labelmap": saved_labelmap,
     }
+
+
+def _class_analysis_capabilities() -> Dict[str, Any]:
+    projection_methods = ["pca"]
+    try:
+        import umap  # noqa: F401
+
+        projection_methods.append("umap")
+    except Exception:
+        pass
+    return {
+        "encoders": ["dinov3", "clip"],
+        "default_encoder_type": "dinov3",
+        "default_dinov3_model": CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL,
+        "default_clip_model": DEFAULT_CLIP_MODEL,
+        "projection_methods": projection_methods,
+        "default_projection": "pca",
+        "preprocess_modes": ["canonical"],
+        "expert_preprocess_modes": ["native", "canonical"],
+        "default_preprocess_mode": "canonical",
+        "dinov3_pooling_modes": ["pooler", "cls", "patch_mean", "cls_patch_concat"],
+        "default_dinov3_pooling": "pooler",
+        "background_modes": ["full_crop", "mean_fill_outside_box", "blur_outside_box", "darken_outside_box"],
+        "default_background_mode": "full_crop",
+        "embedding_view_modes": ["single", "tight_standard", "standard_context", "tight_context"],
+        "default_embedding_view_mode": "single",
+        "embedding_adjustments": ["remove_size_bias"],
+        "expert_embedding_adjustments": ["none", "remove_size_bias"],
+        "default_embedding_adjustment": "remove_size_bias",
+        "default_projection_neighbor_k": 15,
+        "wrong_class": {
+            "neighbor_k": 15,
+            "top_other_threshold": 0.65,
+            "same_class_max": 0.35,
+        },
+    }
+
+
+def _class_analysis_log(job: ClassAnalysisJob, message: str) -> None:
+    entry = {"timestamp": time.time(), "message": str(message or "")}
+    job.logs.append(entry)
+    if len(job.logs) > MAX_JOB_LOGS:
+        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+    job.message = str(message or "")
+    job.updated_at = time.time()
+    try:
+        logger.info("[class-analysis %s] %s", job.job_id[:8], message)
+    except Exception:
+        pass
+
+
+def _class_analysis_update(
+    job: ClassAnalysisJob,
+    *,
+    status: Optional[str] = None,
+    progress: Optional[float] = None,
+    message: Optional[str] = None,
+    error: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+) -> None:
+    if status is not None:
+        job.status = status
+    if progress is not None:
+        job.progress = max(0.0, min(1.0, float(progress)))
+    if message is not None:
+        if str(message or "") != str(job.message or ""):
+            _class_analysis_log(job, str(message or ""))
+        else:
+            job.message = str(message or "")
+            job.updated_at = time.time()
+    if error is not None:
+        job.error = error
+    if result is not None:
+        job.result = result
+        job.updated_at = time.time()
+
+
+def _serialize_class_analysis_job(job: ClassAnalysisJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "request": job.request,
+        "logs": job.logs,
+        "summary": (job.result or {}).get("summary") if isinstance(job.result, dict) else None,
+        "error": job.error,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
+def _class_analysis_json_safe(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return [_class_analysis_json_safe(v) for v in value.tolist()]
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _class_analysis_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_class_analysis_json_safe(v) for v in value]
+    return value
+
+
+def _class_analysis_safe_slug(value: str, fallback: str = "source") -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value or "")).strip("._-")
+    return cleaned or fallback
+
+
+def _class_analysis_safe_relpath(value: str, fallback: str = "image.jpg") -> Path:
+    parts = []
+    for raw_part in Path(str(value or "")).parts:
+        if raw_part in {"", ".", ".."}:
+            continue
+        safe = _class_analysis_safe_slug(raw_part, "")
+        if safe:
+            parts.append(safe)
+    if not parts:
+        parts = [fallback]
+    return Path(*parts)
+
+
+def _class_analysis_source(payload: Dict[str, Any]) -> Dict[str, Any]:
+    source_mode = str(payload.get("source_mode") or payload.get("mode") or "linked").strip().lower()
+    if source_mode in {"active_workspace", "workspace"}:
+        workspace_dir = Path(str(payload.get("workspace_dir") or "")).expanduser().resolve()
+        manifest_path_raw = str(payload.get("workspace_manifest_path") or "").strip()
+        manifest = payload.get("workspace_manifest") if isinstance(payload.get("workspace_manifest"), dict) else None
+        if manifest is None and manifest_path_raw:
+            manifest = _load_json_metadata(Path(manifest_path_raw).expanduser().resolve()) or {}
+        if not workspace_dir.exists() or not workspace_dir.is_dir():
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="active_workspace_missing")
+        if not isinstance(manifest, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_manifest_invalid")
+        labelmap = [str(x) for x in manifest.get("labelmap") or payload.get("labelmap") or []]
+        return {
+            "source_mode": "active_workspace",
+            "source_id": str(payload.get("workspace_id") or payload.get("job_id") or "active"),
+            "source_key": f"active:{payload.get('workspace_id') or payload.get('job_id') or 'workspace'}",
+            "dataset_root": workspace_dir,
+            "yolo_layout": str(payload.get("yolo_layout") or manifest.get("yolo_layout") or "flat"),
+            "manifest": manifest,
+            "labelmap": labelmap,
+        }
+    if source_mode in {"dataset", "linked"}:
+        dataset_id = str(payload.get("dataset_id") or "").strip()
+        if not dataset_id:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_id_required")
+        entry = _resolve_dataset_entry(dataset_id)
+        dataset_root = _dataset_effective_root_from_entry(entry)
+        manifest = _annotation_manifest_for_entry(entry)
+        return {
+            "source_mode": "linked",
+            "source_id": dataset_id,
+            "source_key": f"linked:{dataset_id}",
+            "dataset_root": dataset_root,
+            "yolo_layout": str(entry.get("yolo_layout") or "flat"),
+            "manifest": manifest,
+            "labelmap": list(manifest.get("labelmap") or entry.get("classes") or []),
+        }
+    if source_mode in {"transient", "open_path"}:
+        session_id = str(payload.get("session_id") or "").strip()
+        if not session_id:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="session_id_required")
+        session = _resolve_transient_session(session_id)
+        dataset_root = _validate_linked_dataset_path(str(session.get("dataset_root") or ""))
+        manifest = get_transient_annotation_manifest(session_id)
+        return {
+            "source_mode": "transient",
+            "source_id": session_id,
+            "source_key": f"transient:{session_id}",
+            "dataset_root": dataset_root,
+            "yolo_layout": str(session.get("yolo_layout") or "flat"),
+            "manifest": manifest,
+            "labelmap": list(manifest.get("labelmap") or session.get("classes") or []),
+        }
+    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="class_analysis_source_invalid")
+
+
+def _class_analysis_parse_yolo_geometry(
+    line: str,
+    *,
+    image_width: int,
+    image_height: int,
+) -> Optional[Dict[str, Any]]:
+    parts = str(line or "").strip().split()
+    if len(parts) < 5:
+        return None
+    try:
+        class_id = int(float(parts[0]))
+    except Exception:
+        return None
+    if len(parts) >= 7:
+        points: List[Tuple[float, float]] = []
+        for idx in range(1, len(parts) - 1, 2):
+            try:
+                nx = float(parts[idx])
+                ny = float(parts[idx + 1])
+            except Exception:
+                continue
+            points.append(
+                (
+                    max(0.0, min(float(image_width), nx * float(image_width))),
+                    max(0.0, min(float(image_height), ny * float(image_height))),
+                )
+            )
+        if len(points) < 3:
+            return None
+        xs = [pt[0] for pt in points]
+        ys = [pt[1] for pt in points]
+        x1, x2 = max(0.0, min(xs)), min(float(image_width), max(xs))
+        y1, y2 = max(0.0, min(ys)), min(float(image_height), max(ys))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return {
+            "class_id": class_id,
+            "kind": "polygon",
+            "bbox_xyxy": [x1, y1, x2, y2],
+            "points": [[float(x), float(y)] for x, y in points],
+        }
+    try:
+        cx = float(parts[1]) * float(image_width)
+        cy = float(parts[2]) * float(image_height)
+        bw = float(parts[3]) * float(image_width)
+        bh = float(parts[4]) * float(image_height)
+    except Exception:
+        return None
+    if bw <= 0 or bh <= 0:
+        return None
+    x1 = max(0.0, min(float(image_width), cx - (bw / 2.0)))
+    y1 = max(0.0, min(float(image_height), cy - (bh / 2.0)))
+    x2 = max(0.0, min(float(image_width), cx + (bw / 2.0)))
+    y2 = max(0.0, min(float(image_height), cy + (bh / 2.0)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return {"class_id": class_id, "kind": "bbox", "bbox_xyxy": [x1, y1, x2, y2]}
+
+
+def _class_analysis_crop_bounds(
+    bbox_xyxy: Sequence[float],
+    *,
+    image_width: int,
+    image_height: int,
+    crop_mode: str,
+    padding_ratio: float,
+) -> Tuple[int, int, int, int]:
+    return _embedding_crop_bounds(
+        bbox_xyxy,
+        image_width=image_width,
+        image_height=image_height,
+        crop_mode=crop_mode,
+        padding_ratio=padding_ratio,
+    )
+
+
+def _class_analysis_cache_digest(value: Any) -> str:
+    payload = json.dumps(_class_analysis_json_safe(value), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _class_analysis_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _class_analysis_embedding_cache_path(cache_key: str) -> Path:
+    safe_key = re.sub(r"[^a-fA-F0-9]", "", str(cache_key or ""))[:64]
+    if not safe_key:
+        safe_key = hashlib.sha256(str(cache_key or "empty").encode("utf-8")).hexdigest()
+    return CLASS_ANALYSIS_CACHE_ROOT / "embeddings" / safe_key[:2] / f"{safe_key}.npy"
+
+
+def _class_analysis_thumbnail_cache_path(crop_cache_key: str) -> Path:
+    safe_key = re.sub(r"[^a-fA-F0-9]", "", str(crop_cache_key or ""))[:64]
+    if not safe_key:
+        safe_key = hashlib.sha256(str(crop_cache_key or "empty").encode("utf-8")).hexdigest()
+    return CLASS_ANALYSIS_CACHE_ROOT / "thumbnails" / safe_key[:2] / f"{safe_key}.jpg"
+
+
+def _class_analysis_embedding_cache_key(crop_cache_key: str, head: Dict[str, Any]) -> str:
+    encoder_type = str(head.get("encoder_type") or "dinov3").strip().lower()
+    encoder_model = str(head.get("encoder_model") or head.get("clip_model") or "").strip()
+    return _class_analysis_cache_digest(
+        {
+            "version": CLASS_ANALYSIS_CACHE_VERSION,
+            "crop_key": str(crop_cache_key or ""),
+            "encoder_type": encoder_type,
+            "encoder_model": encoder_model,
+            "normalize_embeddings": bool(head.get("normalize_embeddings")),
+            "dinov3_pooling": _embedding_normalize_dinov3_pooling(head.get("dinov3_pooling")),
+        }
+    )
+
+
+def _class_analysis_load_cached_embedding(cache_path: Path) -> Optional[np.ndarray]:
+    try:
+        cached = np.load(cache_path)
+        arr = np.asarray(cached, dtype=np.float32)
+    except Exception:
+        return None
+    if arr.ndim != 1 or arr.size <= 0:
+        return None
+    if not np.all(np.isfinite(arr)):
+        return None
+    return arr.astype(np.float32, copy=False)
+
+
+def _class_analysis_cached_embedding_valid(crop_cache_key: str, head: Dict[str, Any]) -> bool:
+    crop_key = str(crop_cache_key or "").strip()
+    if not crop_key:
+        return False
+    cache_key = _class_analysis_embedding_cache_key(crop_key, head)
+    cache_path = _class_analysis_embedding_cache_path(cache_key)
+    if not cache_path.exists():
+        return False
+    return _class_analysis_load_cached_embedding(cache_path) is not None
+
+
+def _class_analysis_normalize_preprocess_mode(value: Any) -> str:
+    return _embedding_normalize_preprocess(value)
+
+
+def _class_analysis_normalize_embedding_adjustment(value: Any) -> str:
+    return _embedding_normalize_adjustment(value)
+
+
+def _class_analysis_preprocess_crop(
+    crop: Image.Image,
+    *,
+    mode: str,
+    canonical_size: int,
+) -> Image.Image:
+    return _embedding_preprocess_crop(crop, mode=mode, canonical_size=canonical_size)
+
+
+def _class_analysis_stratified_indices(
+    records: Sequence[Dict[str, Any]],
+    *,
+    cap: int,
+    seed: int,
+) -> List[int]:
+    total = len(records)
+    if cap <= 0 or total <= cap:
+        return list(range(total))
+    rng = random.Random(int(seed))
+    by_class: Dict[str, List[int]] = {}
+    for idx, record in enumerate(records):
+        by_class.setdefault(str(record.get("class_name") or ""), []).append(idx)
+    selected: Set[int] = set()
+    class_names = sorted(by_class)
+    base = max(1, cap // max(1, len(class_names)))
+    for class_name in class_names:
+        choices = list(by_class[class_name])
+        rng.shuffle(choices)
+        selected.update(choices[: min(base, len(choices))])
+    remaining_slots = max(0, cap - len(selected))
+    if remaining_slots > 0:
+        rest = [idx for idx in range(total) if idx not in selected]
+        rng.shuffle(rest)
+        selected.update(rest[:remaining_slots])
+    return sorted(selected)
+
+
+def _class_analysis_sample_cap(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, str) and not value.strip():
+        return 0
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
+
+
+def _class_analysis_record_covariates(records: Sequence[Dict[str, Any]]) -> Tuple[np.ndarray, List[str]]:
+    return _embedding_covariates_from_records(records)
+
+
+def _class_analysis_normalize_rows(values: np.ndarray) -> np.ndarray:
+    return _embedding_normalize_rows(values)
+
+
+def _class_analysis_apply_embedding_adjustment(
+    embeddings: np.ndarray,
+    records: Sequence[Dict[str, Any]],
+    *,
+    mode: str,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    mode_norm = _class_analysis_normalize_embedding_adjustment(mode)
+    info: Dict[str, Any] = {"mode": mode_norm, "applied": False}
+    embeddings = np.asarray(embeddings, dtype=np.float32)
+    if mode_norm == "none":
+        return _class_analysis_normalize_rows(embeddings), info
+    covariates, names = _class_analysis_record_covariates(records)
+    if embeddings.ndim != 2 or covariates.shape[0] != embeddings.shape[0] or embeddings.shape[0] < 6:
+        info["skipped_reason"] = "not_enough_points"
+        return _class_analysis_normalize_rows(embeddings), info
+    std = covariates.std(axis=0)
+    keep = std > 1e-6
+    if not np.any(keep):
+        info["skipped_reason"] = "constant_covariates"
+        return _class_analysis_normalize_rows(embeddings), info
+    selected = covariates[:, keep]
+    selected_names = [name for name, use in zip(names, keep.tolist()) if use]
+    selected = (selected - selected.mean(axis=0, keepdims=True)) / selected.std(axis=0, keepdims=True)
+    design = np.concatenate(
+        [np.ones((selected.shape[0], 1), dtype=np.float32), selected.astype(np.float32)],
+        axis=1,
+    )
+    try:
+        beta, *_ = np.linalg.lstsq(design, embeddings, rcond=None)
+        adjusted = embeddings - design @ beta
+    except Exception as exc:
+        info["skipped_reason"] = f"residualization_failed:{exc}"
+        return _class_analysis_normalize_rows(embeddings), info
+    info.update(
+        {
+            "applied": True,
+            "covariates": selected_names,
+            "point_count": int(embeddings.shape[0]),
+        }
+    )
+    return _class_analysis_normalize_rows(adjusted.astype(np.float32, copy=False)), info
+
+
+def _class_analysis_pearson(x: np.ndarray, y: np.ndarray) -> float:
+    if x.size < 3 or y.size != x.size:
+        return 0.0
+    x_std = float(x.std())
+    y_std = float(y.std())
+    if x_std <= 1e-12 or y_std <= 1e-12:
+        return 0.0
+    return float(np.mean((x - x.mean()) * (y - y.mean())) / (x_std * y_std))
+
+
+def _class_analysis_projection_diagnostics(
+    records: Sequence[Dict[str, Any]],
+    coords: np.ndarray,
+) -> Dict[str, Any]:
+    coords = np.asarray(coords, dtype=np.float32)
+    if coords.ndim != 2 or coords.shape[0] != len(records) or coords.shape[0] < 3:
+        return {
+            "axis_correlations": {},
+            "strongest_size_axis": {"axis": "", "metric": "", "correlation": 0.0},
+        }
+    covariates, names = _class_analysis_record_covariates(records)
+    axes = {"x": coords[:, 0], "y": coords[:, 1] if coords.shape[1] > 1 else np.zeros(coords.shape[0])}
+    axis_correlations: Dict[str, Dict[str, float]] = {}
+    strongest = {"axis": "", "metric": "", "correlation": 0.0}
+    for axis_name, values in axes.items():
+        axis_correlations[axis_name] = {}
+        for idx, metric in enumerate(names):
+            corr = _class_analysis_pearson(values, covariates[:, idx])
+            axis_correlations[axis_name][metric] = corr
+            if abs(corr) > abs(float(strongest["correlation"])):
+                strongest = {"axis": axis_name, "metric": metric, "correlation": corr}
+    return {
+        "axis_correlations": axis_correlations,
+        "strongest_size_axis": strongest,
+    }
+
+
+def _class_analysis_encoder_display_name(encoder_type: str, encoder_model: str = "") -> str:
+    encoder_norm = str(encoder_type or "").strip().lower()
+    if encoder_norm == "dinov3":
+        return "DINOv3"
+    if encoder_norm == "clip":
+        return f"CLIP {encoder_model}".strip()
+    return encoder_norm.upper() or "encoder"
+
+
+def _class_analysis_progress_message(
+    *,
+    done: int,
+    total: int,
+    started_at: float,
+) -> str:
+    if done <= 0 or total <= 0:
+        return ""
+    elapsed = max(0.001, time.time() - started_at)
+    rate = done / elapsed
+    if rate <= 0:
+        return ""
+    remaining = max(0, total - done)
+    eta_seconds = int(round(remaining / rate))
+    if eta_seconds >= 90:
+        eta = f"{max(1, eta_seconds // 60)}m left"
+    elif eta_seconds > 0:
+        eta = f"{eta_seconds}s left"
+    else:
+        eta = "finishing"
+    return f"{rate:.1f}/s, {eta}"
+
+
+def _class_analysis_encode_crops(
+    crops: Sequence[Any],
+    *,
+    job: ClassAnalysisJob,
+    head: Dict[str, Any],
+    batch_size: int,
+    progress_start: float = 0.18,
+    progress_end: float = 0.70,
+    records: Optional[Sequence[Dict[str, Any]]] = None,
+    cache_stats: Optional[Dict[str, int]] = None,
+) -> Optional[np.ndarray]:
+    total = len(crops)
+    if total <= 0:
+        return None
+    resolved_batch = max(1, min(int(batch_size or 64), total))
+    encoder_type = str(head.get("encoder_type") or "dinov3").strip().lower()
+    encoder_model = str(head.get("encoder_model") or head.get("clip_model") or "").strip()
+    encoder_label = _class_analysis_encoder_display_name(encoder_type, encoder_model)
+    feature_slots: List[Optional[np.ndarray]] = [None] * total
+    missing_indices: List[int] = []
+    cache_hits = 0
+    cache_misses = 0
+    cache_errors = 0
+    cache_keys: List[str] = [""] * total
+    if records and len(records) == total:
+        for idx, record in enumerate(records):
+            crop_key = str(record.get("crop_cache_key") or "").strip()
+            if not crop_key:
+                cache_misses += 1
+                missing_indices.append(idx)
+                continue
+            cache_key = _class_analysis_embedding_cache_key(crop_key, head)
+            cache_keys[idx] = cache_key
+            cache_path = _class_analysis_embedding_cache_path(cache_key)
+            if cache_path.exists():
+                cached = _class_analysis_load_cached_embedding(cache_path)
+                if cached is not None:
+                    feature_slots[idx] = cached
+                    cache_hits += 1
+                    _close_crop_item(crops[idx])
+                    continue
+                else:
+                    cache_errors += 1
+            cache_misses += 1
+            missing_indices.append(idx)
+    else:
+        missing_indices = list(range(total))
+        cache_misses = total
+    batch_count = int(math.ceil(len(missing_indices) / resolved_batch)) if missing_indices else 0
+    started_at = time.time()
+    if cache_stats is not None:
+        cache_stats.update(
+            {
+                "hits": int(cache_hits),
+                "misses": int(cache_misses),
+                "errors": int(cache_errors),
+                "total": int(total),
+            }
+        )
+    with CLASS_ANALYSIS_JOBS_LOCK:
+        _class_analysis_update(
+            job,
+            progress=progress_start,
+            message=(
+                f"Preparing {encoder_label} for {total} crops "
+                f"({cache_hits} cache hits, {len(missing_indices)} to encode) ..."
+            ),
+        )
+    if not missing_indices:
+        with CLASS_ANALYSIS_JOBS_LOCK:
+            _class_analysis_update(
+                job,
+                progress=progress_end,
+                message=f"Loaded {total}/{total} cached embeddings for {encoder_label}.",
+            )
+        stacked = np.stack([np.asarray(item, dtype=np.float32) for item in feature_slots if item is not None], axis=0)
+        return stacked.astype(np.float32, copy=False)
+    done_encoded = 0
+    for batch_index, start in enumerate(range(0, len(missing_indices), resolved_batch), start=1):
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        end = min(len(missing_indices), start + resolved_batch)
+        batch_indices = missing_indices[start:end]
+        batch_progress = progress_start + (progress_end - progress_start) * ((cache_hits + done_encoded) / max(1, total))
+        with CLASS_ANALYSIS_JOBS_LOCK:
+            _class_analysis_update(
+                job,
+                progress=batch_progress,
+                message=(
+                    f"Encoding crops with {encoder_label}: batch {batch_index}/{batch_count} "
+                    f"({cache_hits + done_encoded}-{cache_hits + done_encoded + len(batch_indices)} of {total}, "
+                    f"{cache_hits} cached) ..."
+                ),
+            )
+        batch_features = _encode_embedding_items_for_head(
+            [crops[idx] for idx in batch_indices],
+            head=head,
+            batch_size_override=resolved_batch,
+        )
+        if batch_features is None or batch_features.size == 0:
+            return None
+        batch_arr = np.asarray(batch_features, dtype=np.float32)
+        if batch_arr.shape[0] != len(batch_indices):
+            return None
+        for local_idx, record_idx in enumerate(batch_indices):
+            feature = batch_arr[local_idx].astype(np.float32, copy=False)
+            feature_slots[record_idx] = feature
+            cache_key = cache_keys[record_idx]
+            if cache_key:
+                cache_path = _class_analysis_embedding_cache_path(cache_key)
+                try:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    tmp_path = cache_path.with_suffix(".tmp.npy")
+                    np.save(tmp_path, feature)
+                    tmp_path.replace(cache_path)
+                except Exception:
+                    cache_errors += 1
+        for crop in [crops[idx] for idx in batch_indices]:
+            _close_crop_item(crop)
+        done_encoded += len(batch_indices)
+        done = cache_hits + done_encoded
+        progress = progress_start + (progress_end - progress_start) * (done / max(1, total))
+        speed = _class_analysis_progress_message(done=done, total=total, started_at=started_at)
+        speed_text = f" • {speed}" if speed else ""
+        with CLASS_ANALYSIS_JOBS_LOCK:
+            _class_analysis_update(
+                job,
+                progress=progress,
+                message=f"Encoded {done}/{total} crops with {encoder_label}{speed_text}.",
+            )
+    if cache_stats is not None:
+        cache_stats.update(
+            {
+                "hits": int(cache_hits),
+                "misses": int(cache_misses),
+                "errors": int(cache_errors),
+                "total": int(total),
+            }
+        )
+    if any(item is None for item in feature_slots):
+        return None
+    return np.stack([np.asarray(item, dtype=np.float32) for item in feature_slots], axis=0).astype(np.float32, copy=False)
+
+
+def _class_analysis_collect_records(
+    payload: Dict[str, Any],
+    *,
+    job: ClassAnalysisJob,
+    out_dir: Path,
+) -> Tuple[List[Dict[str, Any]], List[Any], Dict[str, Any]]:
+    source = _class_analysis_source(payload)
+    manifest = source["manifest"]
+    labelmap = [str(x) for x in source.get("labelmap") or []]
+    scope = str(payload.get("analysis_scope") or "selected_class").strip().lower()
+    if scope not in {"selected_class", "all_classes"}:
+        scope = "selected_class"
+    selected_class = str(payload.get("class_name") or "").strip()
+    if scope == "selected_class" and not selected_class:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="class_name_required")
+    crop_mode = str(payload.get("crop_mode") or "padded_square").strip().lower()
+    padding_ratio = _coerce_float(payload.get("padding_ratio"), 0.08, minimum=0.0, maximum=1.0)
+    preprocess_mode = _class_analysis_normalize_preprocess_mode(payload.get("preprocess_mode"))
+    canonical_size = min(1024, _coerce_int(payload.get("canonical_size"), 336, minimum=64))
+    background_mode = _embedding_normalize_background_mode(payload.get("background_mode"))
+    embedding_view_mode = _embedding_normalize_view_mode(payload.get("embedding_view_mode"))
+    encoder_type_for_cache = str(payload.get("encoder_type") or "dinov3").strip().lower()
+    if encoder_type_for_cache not in {"clip", "dinov3"}:
+        encoder_type_for_cache = "dinov3"
+    encoder_model_for_cache = str(payload.get("encoder_model") or "").strip()
+    if not encoder_model_for_cache:
+        encoder_model_for_cache = DEFAULT_CLIP_MODEL if encoder_type_for_cache == "clip" else CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL
+    embedding_head_for_cache = {
+        "encoder_type": encoder_type_for_cache,
+        "encoder_model": encoder_model_for_cache,
+        "clip_model": encoder_model_for_cache,
+        "normalize_embeddings": True,
+        "dinov3_pooling": _embedding_normalize_dinov3_pooling(payload.get("dinov3_pooling")),
+    }
+    seed = _coerce_int(payload.get("seed"), 42)
+    sample_cap = _class_analysis_sample_cap(payload.get("sample_cap"))
+    defer_crop_materialization = sample_cap > 0
+    rows = list(manifest.get("images") or [])
+    raw_records: List[Dict[str, Any]] = []
+    raw_crops: List[Any] = []
+    thumb_dir = out_dir / "thumbnails"
+    thumb_dir.mkdir(parents=True, exist_ok=True)
+    total_candidate_objects = 0
+    source_key = str(source.get("source_key") or "source")
+    row_count = max(1, len(rows))
+    progress_started_at = time.time()
+    last_progress_at = 0.0
+    image_hashes: Dict[str, str] = {}
+
+    def materialize_crop_for_record(record: Dict[str, Any]) -> Tuple[Any, List[Dict[str, Any]], bool]:
+        crop_cache_key = str(record.get("crop_cache_key") or "").strip()
+        point_id = str(record.get("point_id") or "").strip()
+        thumb_path = thumb_dir / f"{point_id}.jpg"
+        cached_thumb = _class_analysis_thumbnail_cache_path(crop_cache_key)
+        can_reuse = bool(
+            crop_cache_key
+            and point_id
+            and cached_thumb.exists()
+            and _class_analysis_cached_embedding_valid(crop_cache_key, embedding_head_for_cache)
+        )
+        if can_reuse:
+            try:
+                thumb_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(cached_thumb, thumb_path)
+                return Image.new("RGB", (1, 1), (0, 0, 0)), [], True
+            except Exception:
+                can_reuse = False
+        image_path_value = str(record.get("_image_path") or "").strip()
+        if not image_path_value:
+            split_value = _annotation_normalise_split(record.get("split"))
+            rel_value = _annotation_normalise_image_relpath(record.get("image_relpath"))
+            image_path = _resolve_annotation_image_path(
+                Path(source["dataset_root"]),
+                str(source.get("yolo_layout") or "flat"),
+                split_value,
+                rel_value,
+            )
+        else:
+            image_path = Path(image_path_value)
+        with Image.open(image_path) as loaded_img:
+            pil_for_crop = loaded_img.convert("RGB")
+        try:
+            views, selected_crop_bounds, selected_view_metadata = _embedding_make_crop_views(
+                pil_for_crop,
+                record.get("bbox_xyxy") or [0, 0, 1, 1],
+                crop_mode=crop_mode,
+                padding_ratio=padding_ratio,
+                preprocess_mode=preprocess_mode,
+                canonical_size=canonical_size,
+                background_mode=background_mode,
+                view_mode=embedding_view_mode,
+            )
+            embedding_crop_item = tuple(views) if len(views) > 1 else views[0]
+            record["crop_xyxy"] = [int(v) for v in selected_crop_bounds]
+            thumb = pil_for_crop.crop(selected_crop_bounds).copy()
+            thumb.thumbnail((256, 256))
+            try:
+                thumb.save(thumb_path, format="JPEG", quality=86)
+                if crop_cache_key:
+                    cached_thumb.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(thumb_path, cached_thumb)
+            finally:
+                try:
+                    thumb.close()
+                except Exception:
+                    pass
+            return embedding_crop_item, selected_view_metadata, False
+        finally:
+            try:
+                pil_for_crop.close()
+            except Exception:
+                pass
+
+    for row_idx, row in enumerate(rows):
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        split = _annotation_normalise_split(row.get("split"))
+        rel = _annotation_normalise_image_relpath(row.get("image_relpath") or row.get("image_name"))
+        label_lines = [str(line).strip() for line in (row.get("label_lines") or []) if str(line).strip()]
+        if not label_lines:
+            continue
+        try:
+            image_path = _resolve_annotation_image_path(
+                Path(source["dataset_root"]),
+                str(source.get("yolo_layout") or "flat"),
+                split,
+                rel,
+            )
+            image_hash_key = str(image_path)
+            if image_hash_key not in image_hashes:
+                image_hashes[image_hash_key] = _class_analysis_file_sha256(image_path)
+            with Image.open(image_path) as loaded_img:
+                pil_img = loaded_img.convert("RGB")
+        except Exception as exc:
+            _class_analysis_log(job, f"Skipped {split}/{rel.as_posix()}: {exc}")
+            continue
+        try:
+            image_width, image_height = pil_img.size
+            for line_idx, line in enumerate(label_lines):
+                now = time.time()
+                if now - last_progress_at >= 1.0:
+                    progress = 0.02 + 0.14 * (row_idx / row_count)
+                    speed = _class_analysis_progress_message(
+                        done=max(1, row_idx),
+                        total=row_count,
+                        started_at=progress_started_at,
+                    )
+                    speed_text = f" • {speed}" if speed else ""
+                    with CLASS_ANALYSIS_JOBS_LOCK:
+                        _class_analysis_update(
+                            job,
+                            progress=progress,
+                            message=(
+                                f"Collecting crops: image {row_idx + 1}/{len(rows)}, "
+                                f"{len(raw_records)} objects queued{speed_text}."
+                            ),
+                        )
+                    last_progress_at = now
+                parsed = _class_analysis_parse_yolo_geometry(
+                    line, image_width=image_width, image_height=image_height
+                )
+                if not parsed:
+                    continue
+                class_id = int(parsed["class_id"])
+                class_name = labelmap[class_id] if 0 <= class_id < len(labelmap) else f"class_{class_id}"
+                if scope == "selected_class" and class_name != selected_class:
+                    continue
+                total_candidate_objects += 1
+                primary_crop_mode, primary_padding_ratio, _primary_view = _embedding_view_specs(
+                    crop_mode=crop_mode,
+                    padding_ratio=padding_ratio,
+                    view_mode=embedding_view_mode,
+                )[0]
+                crop_bounds = _class_analysis_crop_bounds(
+                    parsed["bbox_xyxy"],
+                    image_width=image_width,
+                    image_height=image_height,
+                    crop_mode=primary_crop_mode,
+                    padding_ratio=primary_padding_ratio,
+                )
+                crop_cache_key = _class_analysis_cache_digest(
+                    {
+                        "version": CLASS_ANALYSIS_CACHE_VERSION,
+                        "image_sha256": image_hashes.get(str(image_path), ""),
+                        "bbox_xyxy": [round(float(v), 4) for v in parsed["bbox_xyxy"]],
+                        "crop_xyxy": [int(v) for v in crop_bounds],
+                        "crop_mode": crop_mode,
+                        "padding_ratio": round(float(padding_ratio), 6),
+                        "preprocess_mode": preprocess_mode,
+                        "canonical_size": int(canonical_size),
+                        "background_mode": background_mode,
+                        "embedding_view_mode": embedding_view_mode,
+                    }
+                )
+                cached_thumb = _class_analysis_thumbnail_cache_path(crop_cache_key)
+                point_seed = "|".join(
+                    [
+                        source_key,
+                        split,
+                        rel.as_posix(),
+                        str(line_idx),
+                        str(class_id),
+                        ",".join(str(round(float(v), 2)) for v in parsed["bbox_xyxy"]),
+                    ]
+                )
+                point_id = hashlib.sha1(point_seed.encode("utf-8")).hexdigest()[:20]
+                thumb_path = thumb_dir / f"{point_id}.jpg"
+                can_reuse_crop = cached_thumb.exists() and _class_analysis_cached_embedding_valid(
+                    crop_cache_key,
+                    embedding_head_for_cache,
+                )
+                if defer_crop_materialization:
+                    embedding_crop = None
+                    view_metadata = []
+                elif can_reuse_crop:
+                    try:
+                        thumb_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(cached_thumb, thumb_path)
+                    except Exception:
+                        can_reuse_crop = False
+                if can_reuse_crop:
+                    embedding_crop = Image.new("RGB", (1, 1), (0, 0, 0))
+                    view_metadata = []
+                else:
+                    views, crop_bounds, view_metadata = _embedding_make_crop_views(
+                        pil_img,
+                        parsed["bbox_xyxy"],
+                        crop_mode=crop_mode,
+                        padding_ratio=padding_ratio,
+                        preprocess_mode=preprocess_mode,
+                        canonical_size=canonical_size,
+                        background_mode=background_mode,
+                        view_mode=embedding_view_mode,
+                    )
+                    embedding_crop = tuple(views) if len(views) > 1 else views[0]
+                    thumb = pil_img.crop(crop_bounds).copy()
+                    thumb.thumbnail((256, 256))
+                    try:
+                        thumb.save(thumb_path, format="JPEG", quality=86)
+                        cached_thumb.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(thumb_path, cached_thumb)
+                    except Exception:
+                        pass
+                    try:
+                        thumb.close()
+                    except Exception:
+                        pass
+                raw_records.append(
+                    {
+                        "point_id": point_id,
+                        "source_mode": source.get("source_mode"),
+                        "source_id": source.get("source_id"),
+                        "source_key": source_key,
+                        "split": split,
+                        "image_relpath": rel.as_posix(),
+                        "frontend_image_key": str(row.get("frontend_image_key") or row.get("image_key") or ""),
+                        "image_name": row.get("image_name") or rel.name,
+                        "image_row_index": row_idx,
+                        "label_line_index": line_idx,
+                        "label_line": line,
+                        "class_id": class_id,
+                        "class_name": class_name,
+                        "kind": parsed.get("kind") or "bbox",
+                        "bbox_xyxy": [round(float(v), 3) for v in parsed["bbox_xyxy"]],
+                        "crop_xyxy": [int(v) for v in crop_bounds],
+                        "width": int(round(float(parsed["bbox_xyxy"][2]) - float(parsed["bbox_xyxy"][0]))),
+                        "height": int(round(float(parsed["bbox_xyxy"][3]) - float(parsed["bbox_xyxy"][1]))),
+                        "background_mode": background_mode,
+                        "embedding_view_mode": embedding_view_mode,
+                        "embedding_views": view_metadata,
+                        "crop_cache_key": crop_cache_key,
+                        "crop_cache_reused": bool(can_reuse_crop),
+                        "thumbnail_url": f"/class_analysis/jobs/{job.job_id}/thumbnail/{point_id}",
+                        "_image_path": str(image_path) if defer_crop_materialization else "",
+                    }
+                )
+                raw_crops.append(embedding_crop)
+        finally:
+            try:
+                pil_img.close()
+            except Exception:
+                pass
+        if time.time() - last_progress_at >= 0.75 or row_idx == len(rows) - 1:
+            progress = 0.02 + 0.14 * ((row_idx + 1) / row_count)
+            speed = _class_analysis_progress_message(
+                done=row_idx + 1,
+                total=row_count,
+                started_at=progress_started_at,
+            )
+            speed_text = f" • {speed}" if speed else ""
+            with CLASS_ANALYSIS_JOBS_LOCK:
+                _class_analysis_update(
+                    job,
+                    progress=progress,
+                    message=(
+                        f"Collected crops from {row_idx + 1}/{len(rows)} images, "
+                        f"{len(raw_records)} objects queued{speed_text}."
+                    ),
+                )
+            last_progress_at = time.time()
+    selected_indices = _class_analysis_stratified_indices(raw_records, cap=sample_cap, seed=seed)
+    records = [raw_records[idx] for idx in selected_indices]
+    if defer_crop_materialization:
+        crops = []
+        materialized_records: List[Dict[str, Any]] = []
+        materialize_started_at = time.time()
+        for idx, record in enumerate(records):
+            if job.cancel_event.is_set():
+                raise RuntimeError("cancelled")
+            if idx == 0 or idx % 25 == 0 or idx == len(records) - 1:
+                progress = 0.16 + 0.02 * (idx / max(1, len(records)))
+                speed = _class_analysis_progress_message(
+                    done=max(1, idx),
+                    total=max(1, len(records)),
+                    started_at=materialize_started_at,
+                )
+                speed_text = f" • {speed}" if speed else ""
+                with CLASS_ANALYSIS_JOBS_LOCK:
+                    _class_analysis_update(
+                        job,
+                        progress=progress,
+                        message=f"Preparing selected crops: {idx + 1}/{len(records)}{speed_text}.",
+                    )
+            try:
+                crop_item, view_metadata, reused_crop = materialize_crop_for_record(record)
+            except Exception as exc:
+                _class_analysis_log(job, f"Skipped sampled crop {record.get('image_name') or record.get('image_relpath')}: {exc}")
+                continue
+            record["embedding_views"] = view_metadata
+            record["crop_cache_reused"] = bool(reused_crop)
+            record.pop("_image_path", None)
+            materialized_records.append(record)
+            crops.append(crop_item)
+        records = materialized_records
+    else:
+        selected_index_set = set(selected_indices)
+        for idx, crop_item in enumerate(raw_crops):
+            if idx not in selected_index_set:
+                _close_crop_item(crop_item)
+        crops = [raw_crops[idx] for idx in selected_indices]
+        for record in records:
+            record.pop("_image_path", None)
+    summary = {
+        "source_mode": source.get("source_mode"),
+        "source_id": source.get("source_id"),
+        "source_key": source_key,
+        "dataset_label": manifest.get("dataset_label"),
+        "analysis_scope": scope,
+        "selected_class": selected_class if scope == "selected_class" else "",
+        "labelmap": labelmap,
+        "image_count": len(rows),
+        "total_candidate_objects": total_candidate_objects,
+        "sampled": len(records) < len(raw_records),
+        "object_count": len(records),
+        "raw_object_count": len(raw_records),
+        "sample_cap": sample_cap,
+        "crop_mode": crop_mode,
+        "padding_ratio": padding_ratio,
+        "preprocess_mode": preprocess_mode,
+        "canonical_size": canonical_size,
+        "background_mode": background_mode,
+        "embedding_view_mode": embedding_view_mode,
+        "dinov3_pooling": _embedding_normalize_dinov3_pooling(payload.get("dinov3_pooling")),
+        "crop_cache": {
+            "reused": sum(1 for record in records if record.get("crop_cache_reused")),
+            "total": len(records),
+        },
+    }
+    return records, crops, summary
+
+
+def _class_analysis_project_embeddings(
+    embeddings: np.ndarray,
+    *,
+    projection: str,
+    projection_neighbor_k: int,
+    seed: int,
+    warnings: List[str],
+) -> Tuple[np.ndarray, str]:
+    n_samples = int(embeddings.shape[0])
+    if n_samples <= 1:
+        return np.zeros((n_samples, 2), dtype=np.float32), "single"
+    projection_norm = str(projection or "pca").strip().lower()
+    if projection_norm == "umap":
+        try:
+            import umap
+            resolved_neighbors = int(projection_neighbor_k or 15)
+            if resolved_neighbors <= 0:
+                resolved_neighbors = n_samples - 1
+            resolved_neighbors = max(2, min(resolved_neighbors, n_samples - 1))
+
+            reducer = umap.UMAP(
+                n_components=2,
+                n_neighbors=resolved_neighbors,
+                min_dist=0.08,
+                metric="cosine",
+                random_state=int(seed),
+            )
+            return reducer.fit_transform(embeddings).astype(np.float32), "umap"
+        except Exception as exc:
+            warnings.append(f"UMAP unavailable; used PCA fallback ({exc}).")
+    n_components = 2 if min(embeddings.shape) >= 2 else 1
+    coords = PCA(n_components=n_components, random_state=int(seed)).fit_transform(embeddings)
+    if coords.shape[1] == 1:
+        coords = np.concatenate([coords, np.zeros((coords.shape[0], 1), dtype=coords.dtype)], axis=1)
+    return coords.astype(np.float32), "pca"
+
+
+def _class_analysis_cluster_embeddings(
+    embeddings: np.ndarray,
+    *,
+    seed: int,
+    max_k: int,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    n_samples = int(embeddings.shape[0])
+    if n_samples < 4:
+        return np.zeros(n_samples, dtype=int), {
+            "method": "none",
+            "best_k": 1 if n_samples else 0,
+            "candidates": [],
+            "clusters": [],
+        }
+    best_labels: Optional[np.ndarray] = None
+    best_score = -999.0
+    candidates: List[Dict[str, Any]] = []
+    upper_k = max(2, min(int(max_k or 8), 8, n_samples - 1))
+    for k in range(2, upper_k + 1):
+        try:
+            model = MiniBatchKMeans(
+                n_clusters=k,
+                random_state=int(seed),
+                batch_size=max(64, k * 16),
+                n_init=5,
+            )
+            labels = model.fit_predict(embeddings)
+            if len(set(labels.tolist())) < 2:
+                continue
+            sample_size = min(2000, n_samples) if n_samples > 2000 else None
+            score = float(
+                silhouette_score(
+                    embeddings,
+                    labels,
+                    metric="cosine",
+                    sample_size=sample_size,
+                    random_state=int(seed) if sample_size else None,
+                )
+            )
+            candidates.append({"k": k, "silhouette": score})
+            if best_labels is None or score > best_score:
+                best_score = score
+                best_labels = labels
+        except Exception as exc:
+            candidates.append({"k": k, "error": str(exc)})
+    if best_labels is None:
+        return np.zeros(n_samples, dtype=int), {"method": "kmeans", "best_k": 1, "candidates": candidates, "clusters": []}
+    valid_scores = [c for c in candidates if "silhouette" in c]
+    best_candidate = max(valid_scores, key=lambda c: float(c["silhouette"])) if valid_scores else {"k": 1}
+    return best_labels.astype(int), {
+        "method": "kmeans",
+        "best_k": int(best_candidate.get("k") or 1),
+        "candidates": candidates,
+        "clusters": [],
+    }
+
+
+def _class_analysis_build_result(
+    records: List[Dict[str, Any]],
+    embeddings: np.ndarray,
+    *,
+    summary: Dict[str, Any],
+    projection: str,
+    projection_neighbor_k: int,
+    neighbor_k: int,
+    seed: int,
+) -> Dict[str, Any]:
+    warnings: List[str] = []
+    n_samples = len(records)
+    coords, projection_used = _class_analysis_project_embeddings(
+        embeddings,
+        projection=projection,
+        projection_neighbor_k=projection_neighbor_k,
+        seed=seed,
+        warnings=warnings,
+    )
+    diagnostics = _class_analysis_projection_diagnostics(records, coords)
+    labels, cluster_summary = _class_analysis_cluster_embeddings(
+        embeddings, seed=seed, max_k=8
+    )
+    neighbor_count = min(max(1, int(neighbor_k or 15)) + 1, max(1, n_samples))
+    neighbor_ids_by_idx: List[List[int]] = [[] for _ in records]
+    neighbor_dist_by_idx: List[List[float]] = [[] for _ in records]
+    if n_samples >= 2:
+        nn = NearestNeighbors(n_neighbors=neighbor_count, metric="cosine")
+        nn.fit(embeddings)
+        distances, indices = nn.kneighbors(embeddings, return_distance=True)
+        for idx in range(n_samples):
+            pairs = [
+                (int(j), float(d))
+                for j, d in zip(indices[idx].tolist(), distances[idx].tolist())
+                if int(j) != idx
+            ][: max(1, int(neighbor_k or 15))]
+            neighbor_ids_by_idx[idx] = [p[0] for p in pairs]
+            neighbor_dist_by_idx[idx] = [p[1] for p in pairs]
+    cluster_centroids: Dict[int, np.ndarray] = {}
+    for cluster_id in sorted(set(labels.tolist())):
+        idxs = np.flatnonzero(labels == cluster_id)
+        if idxs.size:
+            cluster_centroids[int(cluster_id)] = embeddings[idxs].mean(axis=0)
+    raw_outlier = np.zeros(n_samples, dtype=np.float32)
+    for idx in range(n_samples):
+        centroid = cluster_centroids.get(int(labels[idx]))
+        if centroid is not None:
+            raw_outlier[idx] = float(np.linalg.norm(embeddings[idx] - centroid))
+    outlier_scores = np.zeros(n_samples, dtype=np.float32)
+    for cluster_id in sorted(set(labels.tolist())):
+        idxs = np.flatnonzero(labels == cluster_id)
+        vals = raw_outlier[idxs]
+        if vals.size <= 1:
+            continue
+        lo = float(vals.min())
+        hi = float(vals.max())
+        if hi > lo:
+            outlier_scores[idxs] = (vals - lo) / (hi - lo)
+    scope = str(summary.get("analysis_scope") or "")
+    points: List[Dict[str, Any]] = []
+    wrong_class_candidates: List[Dict[str, Any]] = []
+    for idx, record in enumerate(records):
+        neighbor_indices = neighbor_ids_by_idx[idx]
+        neighbor_classes = [str(records[n].get("class_name") or "") for n in neighbor_indices]
+        counts = Counter(neighbor_classes)
+        current_class = str(record.get("class_name") or "")
+        total_neighbors = max(1, len(neighbor_classes))
+        same_ratio = float(counts.get(current_class, 0) / total_neighbors)
+        other_counts = {cls: count for cls, count in counts.items() if cls and cls != current_class}
+        suggested_class = ""
+        top_other_ratio = 0.0
+        if other_counts:
+            suggested_class, top_count = max(other_counts.items(), key=lambda item: item[1])
+            top_other_ratio = float(top_count / total_neighbors)
+        suspicion_score = max(0.0, top_other_ratio - same_ratio)
+        is_suspicious = bool(
+            scope == "all_classes" and top_other_ratio >= 0.65 and same_ratio <= 0.35
+        )
+        point = {
+            **record,
+            "projection": [float(coords[idx, 0]), float(coords[idx, 1])],
+            "cluster_id": int(labels[idx]) if n_samples else 0,
+            "outlier_score": float(outlier_scores[idx]),
+            "neighbor_ids": [records[n]["point_id"] for n in neighbor_indices],
+            "neighbor_distances": neighbor_dist_by_idx[idx],
+            "neighbor_class_counts": dict(counts),
+            "same_class_neighbor_ratio": same_ratio,
+            "top_other_neighbor_ratio": top_other_ratio,
+            "suggested_neighbor_class": suggested_class,
+            "wrong_class_suspicion": suspicion_score,
+            "is_wrong_class_candidate": is_suspicious,
+        }
+        points.append(point)
+        if is_suspicious:
+            wrong_class_candidates.append(
+                {
+                    "point_id": point["point_id"],
+                    "class_name": current_class,
+                    "suggested_neighbor_class": suggested_class,
+                    "wrong_class_suspicion": suspicion_score,
+                    "top_other_neighbor_ratio": top_other_ratio,
+                    "same_class_neighbor_ratio": same_ratio,
+                    "image_relpath": point["image_relpath"],
+                }
+            )
+    clusters: List[Dict[str, Any]] = []
+    for cluster_id in sorted(set(labels.tolist())) if n_samples else []:
+        idxs = np.flatnonzero(labels == cluster_id)
+        if idxs.size == 0:
+            continue
+        centroid = embeddings[idxs].mean(axis=0)
+        distances = np.linalg.norm(embeddings[idxs] - centroid, axis=1)
+        medoid_idx = int(idxs[int(np.argmin(distances))])
+        clusters.append(
+            {
+                "cluster_id": int(cluster_id),
+                "size": int(idxs.size),
+                "class_counts": dict(Counter(str(records[i].get("class_name") or "") for i in idxs)),
+                "medoid_point_id": records[medoid_idx]["point_id"],
+                "mean_outlier_score": float(outlier_scores[idxs].mean()) if idxs.size else 0.0,
+            }
+        )
+    class_counts = Counter(str(point.get("class_name") or "") for point in points)
+    projection_neighbor_raw = int(projection_neighbor_k if projection_neighbor_k is not None else 15)
+    if projection_used == "umap":
+        projection_neighbor_resolved = n_samples - 1 if projection_neighbor_raw <= 0 else projection_neighbor_raw
+        projection_neighbor_resolved = max(2, min(projection_neighbor_resolved, max(1, n_samples - 1)))
+    else:
+        projection_neighbor_resolved = None
+    summary = {
+        **summary,
+        "projection": projection_used,
+        "projection_neighbor_k": projection_neighbor_raw,
+        "projection_neighbor_k_resolved": projection_neighbor_resolved,
+        "neighbor_k": int(neighbor_k or 15),
+        "class_counts": dict(class_counts),
+        "cluster_count": len(clusters),
+        "wrong_class_candidate_count": len(wrong_class_candidates),
+        "warnings": warnings,
+    }
+    cluster_summary["clusters"] = clusters
+    return {
+        "summary": summary,
+        "points": points,
+        "clusters": cluster_summary,
+        "diagnostics": diagnostics,
+        "wrong_class_candidates": sorted(
+            wrong_class_candidates,
+            key=lambda item: float(item.get("wrong_class_suspicion") or 0.0),
+            reverse=True,
+        ),
+    }
+
+
+def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
+    out_dir = CLASS_ANALYSIS_ROOT / _class_analysis_safe_slug(job.job_id, "job")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    job.thumbnail_dir = str(out_dir / "thumbnails")
+    try:
+        with CLASS_ANALYSIS_JOBS_LOCK:
+            _class_analysis_update(job, status="running", progress=0.02, message="Collecting crops ...")
+        records, crops, summary = _class_analysis_collect_records(job.request, job=job, out_dir=out_dir)
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        if len(records) < 2:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="not_enough_objects_for_analysis")
+        with CLASS_ANALYSIS_JOBS_LOCK:
+            _class_analysis_update(
+                job,
+                progress=0.18,
+                message=f"Encoding {len(records)} crops with {job.request.get('encoder_type') or 'dinov3'} ...",
+            )
+        encoder_type = str(job.request.get("encoder_type") or "dinov3").strip().lower()
+        if encoder_type not in {"clip", "dinov3"}:
+            encoder_type = "dinov3"
+        encoder_model = str(job.request.get("encoder_model") or "").strip()
+        if encoder_type == "clip":
+            encoder_model = encoder_model or DEFAULT_CLIP_MODEL
+        else:
+            encoder_model = encoder_model or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL
+        batch_size = _coerce_int(job.request.get("batch_size"), 64, minimum=1)
+        cache_stats: Dict[str, int] = {}
+        feats = _class_analysis_encode_crops(
+            crops,
+            job=job,
+            head={
+                "encoder_type": encoder_type,
+                "encoder_model": encoder_model,
+                "clip_model": encoder_model,
+                "normalize_embeddings": True,
+                "dinov3_pooling": _embedding_normalize_dinov3_pooling(job.request.get("dinov3_pooling")),
+            },
+            batch_size=batch_size,
+            records=records,
+            cache_stats=cache_stats,
+        )
+        if feats is None or feats.size == 0:
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="embedding_failed")
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        embeddings = np.asarray(feats, dtype=np.float32)
+        raw_embeddings = _class_analysis_normalize_rows(embeddings)
+        embedding_adjustment = _class_analysis_normalize_embedding_adjustment(job.request.get("embedding_adjustment"))
+        embeddings, adjustment_info = _class_analysis_apply_embedding_adjustment(
+            raw_embeddings,
+            records,
+            mode=embedding_adjustment,
+        )
+        np.savez_compressed(out_dir / "embeddings.npz", embeddings=embeddings, raw_embeddings=raw_embeddings)
+        with (out_dir / "metadata.jsonl").open("w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(_class_analysis_json_safe(record), ensure_ascii=False) + "\n")
+        with CLASS_ANALYSIS_JOBS_LOCK:
+            _class_analysis_update(job, progress=0.72, message="Projecting and scoring graph ...")
+        result = _class_analysis_build_result(
+            records,
+            embeddings,
+            summary={
+                **summary,
+                "encoder_type": encoder_type,
+                "encoder_model": encoder_model,
+                "embedding_adjustment": embedding_adjustment,
+                "embedding_adjustment_info": adjustment_info,
+                "embedding_cache": cache_stats,
+            },
+            projection=str(job.request.get("projection") or "pca"),
+            projection_neighbor_k=_coerce_int(job.request.get("projection_neighbor_k"), 15, minimum=0),
+            neighbor_k=_coerce_int(job.request.get("neighbor_k"), 15, minimum=1),
+            seed=_coerce_int(job.request.get("seed"), 42),
+        )
+        result_path = out_dir / "result.json"
+        result_path.write_text(
+            json.dumps(_class_analysis_json_safe(result), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (out_dir / "config.json").write_text(
+            json.dumps(_class_analysis_json_safe(job.request), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        with CLASS_ANALYSIS_JOBS_LOCK:
+            job.result_path = str(result_path)
+            _class_analysis_update(
+                job,
+                status="completed",
+                progress=1.0,
+                message="Class analysis completed.",
+                result=result,
+            )
+    except RuntimeError as exc:
+        with CLASS_ANALYSIS_JOBS_LOCK:
+            if str(exc) == "cancelled":
+                _class_analysis_update(job, status="cancelled", progress=job.progress, message="Class analysis cancelled.")
+            else:
+                _class_analysis_update(job, status="failed", message=str(exc), error=str(exc))
+    except HTTPException as exc:
+        with CLASS_ANALYSIS_JOBS_LOCK:
+            _class_analysis_update(job, status="failed", message=str(exc.detail), error=str(exc.detail))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[class-analysis %s] job crashed", job.job_id[:8])
+        with CLASS_ANALYSIS_JOBS_LOCK:
+            _class_analysis_update(job, status="failed", message="Class analysis crashed.", error=str(exc))
+
+
+def _normalize_class_analysis_request(payload: Dict[str, Any]) -> Dict[str, Any]:
+    request_payload = dict(payload or {})
+    request_payload.setdefault("analysis_scope", "selected_class")
+    request_payload.setdefault("encoder_type", "dinov3")
+    request_payload.setdefault("encoder_model", CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL)
+    request_payload.setdefault("projection", "pca")
+    request_payload.setdefault("projection_neighbor_k", 15)
+    request_payload.setdefault("crop_mode", "padded_square")
+    request_payload.setdefault("padding_ratio", 0.08)
+    request_payload.setdefault("preprocess_mode", "canonical")
+    request_payload.setdefault("canonical_size", 336)
+    request_payload.setdefault("dinov3_pooling", "pooler")
+    request_payload.setdefault("background_mode", "full_crop")
+    request_payload.setdefault("embedding_view_mode", "single")
+    request_payload.setdefault("embedding_adjustment", "remove_size_bias")
+    request_payload.setdefault("sample_cap", 0)
+    request_payload.setdefault("neighbor_k", 15)
+    return request_payload
+
+
+def _enqueue_class_analysis_job(request_payload: Dict[str, Any], *, job_id: Optional[str] = None) -> Dict[str, Any]:
+    _prune_job_registry(CLASS_ANALYSIS_JOBS, CLASS_ANALYSIS_JOBS_LOCK)
+    resolved_job_id = job_id or f"ca_{uuid.uuid4().hex[:10]}"
+    job = ClassAnalysisJob(job_id=resolved_job_id, request=request_payload)
+    with CLASS_ANALYSIS_JOBS_LOCK:
+        CLASS_ANALYSIS_JOBS[resolved_job_id] = job
+        _class_analysis_log(job, "Class analysis queued.")
+    thread = threading.Thread(target=_run_class_analysis_job, args=(job,), daemon=True, name=f"class-analysis-{resolved_job_id[:8]}")
+    thread.start()
+    return {"job_id": resolved_job_id}
+
+
+def create_class_analysis_job(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _enqueue_class_analysis_job(_normalize_class_analysis_request(payload))
+
+
+async def create_class_analysis_active_workspace_job(manifest_json: str, files: List[UploadFile]) -> Dict[str, Any]:
+    try:
+        manifest_payload = json.loads(str(manifest_json or "{}"))
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_manifest_json_invalid") from exc
+    if not isinstance(manifest_payload, dict):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_manifest_invalid")
+
+    labelmap = [
+        str(name or "").strip()
+        for name in (manifest_payload.get("labelmap") or [])
+        if str(name or "").strip()
+    ]
+    input_rows = list(manifest_payload.get("images") or [])
+    if not labelmap:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_labelmap_required")
+    if not input_rows:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_images_required")
+
+    job_id = f"ca_{uuid.uuid4().hex[:10]}"
+    out_dir = CLASS_ANALYSIS_ROOT / _class_analysis_safe_slug(job_id, "job")
+    workspace_dir = out_dir / "active_workspace"
+    images_dir = workspace_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_uploads: Dict[str, str] = {}
+    for upload in files or []:
+        original_name = str(upload.filename or "").strip()
+        if not original_name:
+            continue
+        safe_rel = _class_analysis_safe_relpath(original_name)
+        safe_name = safe_rel.as_posix()
+        if safe_name in saved_uploads:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_duplicate_upload")
+        target = images_dir / safe_rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        size = 0
+        with target.open("wb") as handle:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                handle.write(chunk)
+        if size <= 0:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_empty_upload")
+        saved_uploads[original_name] = safe_name
+        saved_uploads[safe_name] = safe_name
+
+    rows: List[Dict[str, Any]] = []
+    for row in input_rows:
+        if not isinstance(row, dict):
+            continue
+        source_rel = str(row.get("upload_name") or row.get("image_relpath") or row.get("image_name") or "").strip()
+        if not source_rel:
+            continue
+        safe_rel = _class_analysis_safe_relpath(saved_uploads.get(source_rel) or source_rel)
+        safe_name = safe_rel.as_posix()
+        if safe_name not in set(saved_uploads.values()):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_image_upload_missing")
+        label_lines = [
+            str(line or "").strip()
+            for line in (row.get("label_lines") or [])
+            if str(line or "").strip()
+        ]
+        if not label_lines:
+            continue
+        rows.append(
+            {
+                "split": _annotation_normalise_split(row.get("split") or "train"),
+                "image_relpath": safe_name,
+                "image_name": str(row.get("image_name") or row.get("frontend_image_key") or safe_name),
+                "frontend_image_key": str(row.get("frontend_image_key") or row.get("image_key") or row.get("image_name") or ""),
+                "label_lines": label_lines,
+                "text_label": str(row.get("text_label") or ""),
+            }
+        )
+    if not rows:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_no_labeled_rows")
+
+    manifest_out = {
+        "dataset_label": str(manifest_payload.get("dataset_label") or "Active Label Images workspace"),
+        "labelmap": labelmap,
+        "images": rows,
+        "yolo_layout": "flat",
+        "source_mode": "active_workspace",
+    }
+    manifest_path = workspace_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(_class_analysis_json_safe(manifest_out), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    request_options = manifest_payload.get("request") if isinstance(manifest_payload.get("request"), dict) else {}
+    request_payload = _normalize_class_analysis_request(
+        {
+            **request_options,
+            "source_mode": "active_workspace",
+            "workspace_id": job_id,
+            "workspace_dir": str(workspace_dir),
+            "workspace_manifest_path": str(manifest_path),
+            "yolo_layout": "flat",
+            "labelmap": labelmap,
+        }
+    )
+    result = _enqueue_class_analysis_job(request_payload, job_id=job_id)
+    job = CLASS_ANALYSIS_JOBS.get(job_id)
+    if job:
+        _class_analysis_log(job, f"Active workspace snapshot queued with {len(rows)} images.")
+    return result
+
+
+def _get_class_analysis_job(job_id: str) -> ClassAnalysisJob:
+    with CLASS_ANALYSIS_JOBS_LOCK:
+        job = CLASS_ANALYSIS_JOBS.get(str(job_id or ""))
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="job_not_found")
+    return job
+
+
+def get_class_analysis_job(job_id: str) -> Dict[str, Any]:
+    return _serialize_class_analysis_job(_get_class_analysis_job(job_id))
+
+
+def get_class_analysis_result(job_id: str) -> Dict[str, Any]:
+    job = _get_class_analysis_job(job_id)
+    if isinstance(job.result, dict):
+        return job.result
+    if job.result_path and Path(job.result_path).exists():
+        return _load_json_metadata(Path(job.result_path)) or {}
+    if job.status in {"queued", "running", "cancelling"}:
+        raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_finished")
+    raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="result_not_found")
+
+
+def get_class_analysis_thumbnail(job_id: str, point_id: str):
+    job = _get_class_analysis_job(job_id)
+    point_clean = _class_analysis_safe_slug(point_id, "")
+    if not point_clean:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="thumbnail_not_found")
+    thumb_dir = Path(job.thumbnail_dir or "")
+    thumb_path = thumb_dir / f"{point_clean}.jpg"
+    if not thumb_path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="thumbnail_not_found")
+    return FileResponse(str(thumb_path), media_type="image/jpeg")
+
+
+def cancel_class_analysis_job(job_id: str) -> Dict[str, Any]:
+    job = _get_class_analysis_job(job_id)
+    with CLASS_ANALYSIS_JOBS_LOCK:
+        if job.status in {"completed", "failed", "cancelled"}:
+            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+        job.cancel_event.set()
+        _class_analysis_update(job, status="cancelling", message="Cancellation requested ...")
+    return {"status": job.status}
 
 
 def list_glossary_library():
@@ -24047,6 +25904,14 @@ def _start_training_worker(
     supcon_projection_hidden: int,
     embedding_center: bool,
     embedding_standardize: bool,
+    preprocess_mode: str,
+    canonical_size: int,
+    embedding_crop_mode: str,
+    embedding_crop_padding_ratio: float,
+    background_mode: str,
+    embedding_view_mode: str,
+    embedding_adjustment: str,
+    dinov3_pooling: str,
     calibration_mode: str,
     calibration_max_iters: int,
     calibration_min_temp: float,
@@ -24152,6 +26017,14 @@ def _start_training_worker(
                 supcon_projection_hidden=supcon_projection_hidden,
                 embedding_center=embedding_center,
                 embedding_standardize=embedding_standardize,
+                preprocess_mode=preprocess_mode,
+                canonical_size=canonical_size,
+                embedding_crop_mode=embedding_crop_mode,
+                embedding_crop_padding_ratio=embedding_crop_padding_ratio,
+                background_mode=background_mode,
+                embedding_view_mode=embedding_view_mode,
+                embedding_adjustment=embedding_adjustment,
+                dinov3_pooling=dinov3_pooling,
                 calibration_mode=calibration_mode,
                 calibration_max_iters=calibration_max_iters,
                 calibration_min_temp=calibration_min_temp,
@@ -24252,6 +26125,14 @@ async def start_clip_training(
     supcon_projection_hidden: int = Form(0),
     embedding_center: Optional[str] = Form("false"),
     embedding_standardize: Optional[str] = Form("false"),
+    preprocess_mode: str = Form("canonical"),
+    canonical_size: int = Form(336),
+    embedding_crop_mode: str = Form("padded_square"),
+    embedding_crop_padding_ratio: float = Form(0.08),
+    background_mode: str = Form("full_crop"),
+    embedding_view_mode: str = Form("single"),
+    embedding_adjustment: str = Form("remove_size_bias"),
+    dinov3_pooling: str = Form("pooler"),
     calibration_mode: str = Form("none"),
     calibration_max_iters: int = Form(50),
     calibration_min_temp: float = Form(0.5),
@@ -24442,6 +26323,18 @@ async def start_clip_training(
     supcon_projection_hidden_i = _coerce_int(supcon_projection_hidden, 0, minimum=0)
     embedding_center_flag = _parse_bool(embedding_center)
     embedding_standardize_flag = _parse_bool(embedding_standardize)
+    preprocess_mode_norm = _embedding_normalize_preprocess(preprocess_mode)
+    canonical_size_i = min(1024, _coerce_int(canonical_size, 336, minimum=64))
+    embedding_crop_mode_norm = str(embedding_crop_mode or "padded_square").strip().lower()
+    if embedding_crop_mode_norm not in {"tight", "padded", "padded_square"}:
+        embedding_crop_mode_norm = "padded_square"
+    embedding_crop_padding_ratio_f = _coerce_float(
+        embedding_crop_padding_ratio, 0.08, minimum=0.0, maximum=1.0
+    )
+    background_mode_norm = _embedding_normalize_background_mode(background_mode)
+    embedding_view_mode_norm = _embedding_normalize_view_mode(embedding_view_mode)
+    embedding_adjustment_norm = _embedding_normalize_adjustment(embedding_adjustment)
+    dinov3_pooling_norm = _embedding_normalize_dinov3_pooling(dinov3_pooling)
     calibration_mode_norm = (calibration_mode or "none").strip().lower()
     if calibration_mode_norm not in {"none", "temperature"}:
         calibration_mode_norm = "none"
@@ -24478,6 +26371,7 @@ async def start_clip_training(
     if hard_example_flag:
         extras.append(f"hard({hard_mis_weight_f:.1f}/{hard_low_conf_weight_f:.1f})")
     extras.append(f"bg={bg_class_count_i}")
+    extras.append(f"embed={preprocess_mode_norm}/{embedding_adjustment_norm}")
     job_message += f" [{', '.join(extras)}]"
     _job_log(job, job_message)
 
@@ -24534,6 +26428,14 @@ async def start_clip_training(
         supcon_projection_hidden=supcon_projection_hidden_i,
         embedding_center=embedding_center_flag,
         embedding_standardize=embedding_standardize_flag,
+        preprocess_mode=preprocess_mode_norm,
+        canonical_size=canonical_size_i,
+        embedding_crop_mode=embedding_crop_mode_norm,
+        embedding_crop_padding_ratio=embedding_crop_padding_ratio_f,
+        background_mode=background_mode_norm,
+        embedding_view_mode=embedding_view_mode_norm,
+        embedding_adjustment=embedding_adjustment_norm,
+        dinov3_pooling=dinov3_pooling_norm,
         calibration_mode=calibration_mode_norm,
         calibration_max_iters=calibration_max_iters_i,
         calibration_min_temp=calibration_min_temp_f,
@@ -29826,6 +31728,18 @@ app.include_router(
 )
 
 app.include_router(
+    build_class_analysis_router(
+        capabilities_fn=_class_analysis_capabilities,
+        create_job_fn=create_class_analysis_job,
+        create_active_workspace_job_fn=create_class_analysis_active_workspace_job,
+        get_job_fn=get_class_analysis_job,
+        get_result_fn=get_class_analysis_result,
+        get_thumbnail_fn=get_class_analysis_thumbnail,
+        cancel_job_fn=cancel_class_analysis_job,
+    )
+)
+
+app.include_router(
     build_glossaries_router(
         list_fn=list_glossary_library,
         get_fn=get_glossary_entry,
@@ -29993,9 +31907,7 @@ def sam3_text_prompt_auto(payload: Sam3TextPrompt):
                 )
             )
             continue
-        subarr = np_img[ti:bi, li:ri, :]
-        final_pil = Image.fromarray(subarr)
-        feats_np = _encode_pil_batch_for_active([final_pil])
+        feats_np = _encode_classifier_xyxy_for_active(pil_img, [x_min, y_min, x_max, y_max])
         if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
             responses.append(
                 SamPointAutoResponse(
@@ -30191,9 +32103,7 @@ def sam_bbox_auto(prompt: BboxPrompt):
             error="empty_mask",
             image_token=token,
         )
-    subarr = np_img[gy_min_i:gy_max_i, gx_min_i:gx_max_i, :]
-    final_pil = Image.fromarray(subarr)
-    feats_np = _encode_pil_batch_for_active([final_pil])
+    feats_np = _encode_classifier_xyxy_for_active(pil_img, [x_min, y_min, x_max, y_max])
     if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
         return SamPointAutoResponse(
             prediction="unknown",
@@ -30258,9 +32168,7 @@ def sam_point_auto(prompt: PointPrompt):
             mask=_encode_binary_mask_impl(mask_arr, max_bytes=MASK_ENCODE_MAX_BYTES),
             simplify_epsilon=None,
         )
-    subarr = np_img[ti:bi, li:ri, :]
-    final_pil = Image.fromarray(subarr)
-    feats_np = _encode_pil_batch_for_active([final_pil])
+    feats_np = _encode_classifier_xyxy_for_active(pil_img, [left, top, right, bottom])
     if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
         return SamPointAutoResponse(
             prediction="unknown",
@@ -30372,9 +32280,7 @@ def sam_point_multi_auto(prompt: MultiPointPrompt):
             error="empty_mask",
             image_token=token,
         )
-    subarr = np_img[ti:bi, li:ri, :]
-    final_pil = Image.fromarray(subarr)
-    feats_np = _encode_pil_batch_for_active([final_pil])
+    feats_np = _encode_classifier_xyxy_for_active(pil_img, [left, top, right, bottom])
     if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
         return SamPointAutoResponse(
             prediction="unknown",

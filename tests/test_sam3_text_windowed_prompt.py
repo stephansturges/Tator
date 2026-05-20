@@ -127,6 +127,102 @@ def test_sam3_windowed_fusion_treats_nonpositive_limit_as_unlimited():
     assert detections == [first, second]
 
 
+def test_sam3_window_coverage_warnings_report_full_irregular_grid():
+    slices = [
+        np.zeros((100, 100, 3), dtype=np.uint8),
+        np.zeros((100, 45, 3), dtype=np.uint8),
+        np.zeros((37, 100, 3), dtype=np.uint8),
+        np.zeros((37, 45, 3), dtype=np.uint8),
+    ]
+    starts = [(0, 0), (100, 0), (0, 100), (100, 100)]
+
+    warnings = api._sam3_window_coverage_warnings(
+        img_w=145,
+        img_h=137,
+        slices=slices,
+        starts=starts,
+    )
+
+    assert "windowed_image_size:145x137" in warnings
+    assert "windowed_coverage_bounds:0,0,145,137" in warnings
+    assert "windowed_coverage_fraction:1.0000" in warnings
+    assert "windowed_uncovered_pixels:0" in warnings
+    assert "windowed_incomplete_coverage" not in warnings
+
+
+def test_sam3_window_coverage_warnings_flag_incomplete_coverage():
+    warnings = api._sam3_window_coverage_warnings(
+        img_w=100,
+        img_h=100,
+        slices=[np.zeros((50, 50, 3), dtype=np.uint8)],
+        starts=[(0, 0)],
+    )
+
+    assert "windowed_coverage_bounds:0,0,50,50" in warnings
+    assert "windowed_coverage_fraction:0.2500" in warnings
+    assert "windowed_uncovered_pixels:7500" in warnings
+    assert "windowed_incomplete_coverage" in warnings
+
+
+def test_sam3_windowed_limits_keep_per_window_search_broader_than_final_cap():
+    assert api._sam3_window_limit_pair(4) == (50, 4)
+    assert api._sam3_window_limit_pair(80) == (80, 80)
+    assert api._sam3_window_limit_pair(0) == (None, None)
+    assert api._sam3_window_limit_pair(None) == (None, None)
+
+
+def test_sam3_windowed_inference_reports_fusion_diagnostics(monkeypatch):
+    image = Image.new("RGB", (100, 100), "white")
+    same_box = _xyxy_to_yolo_norm_list(100, 100, 10, 10, 30, 30)
+    requested_limits = []
+
+    monkeypatch.setattr(api, "_ensure_sam3_text_runtime", lambda: (None, object(), None))
+    monkeypatch.setattr(
+        api,
+        "_slice_image_sahi",
+        lambda _pil_img, _slice_size, _overlap: (
+            [np.zeros((100, 100, 3), dtype=np.uint8), np.zeros((100, 100, 3), dtype=np.uint8)],
+            [(0, 0), (0, 0)],
+        ),
+    )
+
+    def fake_infer(*args, **_kwargs):
+        requested_limits.append(args[4])
+        return [
+            QwenDetection(
+                bbox=same_box,
+                qwen_label="vehicle",
+                source="sam3_text",
+                score=0.9,
+            )
+        ], [np.ones((100, 100), dtype=np.uint8)]
+
+    monkeypatch.setattr(api, "_run_sam3_text_inference", fake_infer)
+
+    detections, masks, warnings = api._run_sam3_text_windowed_inference(
+        image,
+        "vehicle",
+        0.5,
+        0.5,
+        10,
+        window_size=100,
+        window_overlap=0.1,
+        merge_iou=0.5,
+    )
+
+    assert len(detections) == 1
+    assert len(masks) == 1
+    assert requested_limits == [50, 50]
+    assert "windowed_image_size:100x100" in warnings
+    assert "windowed_coverage_fraction:1.0000" in warnings
+    assert "windowed_tiles:2" in warnings
+    assert "windowed_per_window_limit:50" in warnings
+    assert "windowed_final_limit:10" in warnings
+    assert "windowed_raw_detections:2" in warnings
+    assert "windowed_final_detections:1" in warnings
+    assert "windowed_fused_detections:1" in warnings
+
+
 def test_sam3_direct_text_inference_treats_nonpositive_limit_as_unlimited():
     class FakeProcessor:
         def set_confidence_threshold(self, _threshold):

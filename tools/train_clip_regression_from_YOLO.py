@@ -263,6 +263,60 @@ def parse_args() -> argparse.Namespace:
         help="Standardize embeddings before training (true/false).",
     )
     parser.add_argument(
+        "--preprocess-mode",
+        type=str,
+        default="canonical",
+        choices=["native", "canonical"],
+        help="Object crop normalization mode before encoder preprocessing.",
+    )
+    parser.add_argument(
+        "--canonical-size",
+        type=int,
+        default=336,
+        help="Square pixel size for canonical object crops.",
+    )
+    parser.add_argument(
+        "--embedding-crop-mode",
+        type=str,
+        default="padded_square",
+        choices=["tight", "padded", "padded_square"],
+        help="Object crop geometry before preprocessing.",
+    )
+    parser.add_argument(
+        "--embedding-crop-padding-ratio",
+        type=float,
+        default=0.08,
+        help="Padding ratio around each bbox when crop mode uses padding.",
+    )
+    parser.add_argument(
+        "--background-mode",
+        type=str,
+        default="full_crop",
+        choices=["full_crop", "mean_fill_outside_box", "blur_outside_box", "darken_outside_box"],
+        help="How to treat pixels outside the bbox inside padded crops.",
+    )
+    parser.add_argument(
+        "--embedding-view-mode",
+        type=str,
+        default="single",
+        choices=["single", "tight_standard", "standard_context", "tight_context"],
+        help="Single-view or multi-view embedding composition.",
+    )
+    parser.add_argument(
+        "--embedding-adjustment",
+        type=str,
+        default="remove_size_bias",
+        choices=["none", "remove_size_bias"],
+        help="Embedding post-processing transform saved into classifier metadata.",
+    )
+    parser.add_argument(
+        "--dinov3-pooling",
+        type=str,
+        default="pooler",
+        choices=["pooler", "cls", "patch_mean", "cls_patch_concat"],
+        help="DINOv3 embedding pooling mode.",
+    )
+    parser.add_argument(
         "--calibration_mode",
         type=str,
         default="none",
@@ -402,6 +456,14 @@ def main() -> None:
             supcon_projection_hidden=args.supcon_projection_hidden,
             embedding_center=args.embedding_center,
             embedding_standardize=args.embedding_standardize,
+            preprocess_mode=args.preprocess_mode,
+            canonical_size=args.canonical_size,
+            embedding_crop_mode=args.embedding_crop_mode,
+            embedding_crop_padding_ratio=args.embedding_crop_padding_ratio,
+            background_mode=args.background_mode,
+            embedding_view_mode=args.embedding_view_mode,
+            embedding_adjustment=args.embedding_adjustment,
+            dinov3_pooling=args.dinov3_pooling,
             calibration_mode=args.calibration_mode,
             calibration_max_iters=args.calibration_max_iters,
             calibration_min_temp=args.calibration_min_temp,
@@ -435,6 +497,10 @@ def main() -> None:
     print(f"Iterations run      : {artifacts.iterations_run}")
     print(f"Converged           : {artifacts.converged}")
     print(f"Hard example mining : {'yes' if artifacts.hard_example_mining else 'no'}")
+    print(f"Embedding recipe    : {artifacts.preprocess_mode}/{artifacts.embedding_crop_mode}/{artifacts.embedding_adjustment}")
+    print(f"Crop pad / size     : {artifacts.embedding_crop_padding_ratio} / {artifacts.canonical_size}")
+    print(f"Background / views  : {artifacts.background_mode} / {artifacts.embedding_view_mode}")
+    print(f"DINOv3 pooling      : {artifacts.dinov3_pooling}")
     print(f"Accuracy            : {artifacts.accuracy:.4f}")
     if artifacts.classifier_type == "mlp":
         hidden_sizes = artifacts.mlp_hidden_sizes

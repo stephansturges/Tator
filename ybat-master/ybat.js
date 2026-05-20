@@ -15,6 +15,7 @@
     const PIPBOY_AMBER = "amber";
     const THEME_CLICK_DELAY_MS = 320;
     const QWEN_CAPTION_REGION_PULSE_MS = 1200;
+    const SAM3_TEXT_WINDOW_PULSE_MS = 950;
     const TOP_TAB_BASE_METRICS = Object.freeze({
         fontSize: 12,
         paddingX: 14,
@@ -404,6 +405,12 @@
         return 0.2126 * channel(rgb.r) + 0.7152 * channel(rgb.g) + 0.0722 * channel(rgb.b);
     }
 
+    function getTextColorForClassToastBackground(backgroundHex) {
+        // Keep saturated reds/oranges readable as white text; only very light class
+        // colors should flip to dark text.
+        return relativeLuminance(backgroundHex) > 0.7 ? "#111827" : "#f8fafc";
+    }
+
     function colorWithAlpha(color, alpha) {
         const alphaNumber = Number(alpha);
         const normalizedAlpha = Number.isFinite(alphaNumber) ? clamp(alphaNumber, 0, 1) : 1;
@@ -497,7 +504,7 @@
         const strongBg = strokeLuminance > 0.42
             ? mixHexColors(stroke, "#0f172a", 0.34)
             : mixHexColors(stroke, "#ffffff", 0.1);
-        const textOnStrongBg = relativeLuminance(strongBg) > 0.42 ? "#111827" : "#f8fafc";
+        const textOnStrongBg = getTextColorForClassToastBackground(strongBg);
         const tokens = {
             stroke,
             fill: colorWithAlpha(stroke, 0.2),
@@ -784,6 +791,7 @@
     let yoloExportDirectoryHandleLoaded = false;
     let yoloExportDirectoryHandleLoadPromise = null;
     const TAB_LABELING = "labeling";
+    const TAB_CLASS_SPLIT = "class-split";
     const TAB_PREPASS_BUILDER = "prepass-builder";
     const TAB_TRAINING = "training";
     const TAB_QWEN_TRAIN = "qwen-train";
@@ -1432,16 +1440,39 @@
                     return null;
                 }
                 const offset = Number.isFinite(item?.offset) ? item.offset : 0;
-                const distance = Math.min(3, Math.abs(offset));
+                const distance = Math.abs(offset);
+                const maxDistance = Math.max(1, Number(item?.maxDistance) || 3);
+                const distanceRatio = Math.min(1, distance / maxDistance);
                 const opacity = Number.isFinite(item?.opacity)
-                    ? Math.max(0.5, Math.min(1, item.opacity))
-                    : Math.max(0.5, 1 - (distance / 3) * 0.5);
+                    ? Math.max(0.32, Math.min(1, item.opacity))
+                    : Math.max(0.36, 1 - distanceRatio * 0.58);
+                const fontSize = offset === 0
+                    ? 23.8
+                    : Math.max(13, 18 - distanceRatio * 5);
+                const minWidth = offset === 0
+                    ? 356
+                    : Math.max(168, 270 - distanceRatio * 92);
+                const paddingY = offset === 0
+                    ? 15
+                    : Math.max(6, 12 - distanceRatio * 5);
+                const paddingX = offset === 0
+                    ? 24
+                    : Math.max(10, 18 - distanceRatio * 7);
+                const scaleValue = offset === 0
+                    ? 1
+                    : Math.max(0.62, 0.96 - distanceRatio * 0.28);
                 const tokens = getClassColorTokens(label);
                 const classColor = item?.color || tokens.stroke || "#334155";
                 return {
                     label,
                     offset,
                     opacity,
+                    fontSize,
+                    minWidth,
+                    paddingY,
+                    paddingX,
+                    scale: scaleValue,
+                    enterScale: Math.max(0.52, scaleValue * 0.94),
                     color: classColor,
                     background: item?.background || tokens.strongBg || colorWithAlpha(classColor, 0.96),
                     textColor: item?.textColor || tokens.textOnStrongBg || "#f8fafc",
@@ -1469,7 +1500,7 @@
             return [
                 `<div class="class-scroll-indicator__bubble ${roleClass}"`,
                 ` title="${escapeHtml(title)}"`,
-                ` style="--class-color: ${item.color}; --class-bg: ${item.background}; --class-text: ${item.textColor}; --bubble-opacity: ${item.opacity.toFixed(3)}; --row-delay: ${rowDelay};">`,
+                ` style="--class-color: ${item.color}; --class-bg: ${item.background}; --class-text: ${item.textColor}; --bubble-opacity: ${item.opacity.toFixed(3)}; --bubble-font-size: ${item.fontSize.toFixed(1)}px; --bubble-min-width: ${Math.round(item.minWidth)}px; --bubble-padding-y: ${item.paddingY.toFixed(1)}px; --bubble-padding-x: ${item.paddingX.toFixed(1)}px; --bubble-scale: ${item.scale.toFixed(3)}; --bubble-enter-scale: ${item.enterScale.toFixed(3)}; --row-delay: ${rowDelay};">`,
                 `${escapeHtml(item.label)}</div>`,
             ].join("");
         }).join("");
@@ -1502,16 +1533,20 @@
         if (!currentName) {
             return;
         }
-        const visibleRadius = 3;
+        const aboveCount = Math.floor((total - 1) / 2);
+        const belowCount = total - 1 - aboveCount;
+        const maxDistance = Math.max(1, aboveCount, belowCount);
         const items = [];
-        for (let offset = -visibleRadius; offset <= visibleRadius; offset++) {
+        for (let offset = -aboveCount; offset <= belowCount; offset++) {
             const itemIndex = (safeIndex + offset + total) % total;
             const label = getClassListOptionName(classListEl.options[itemIndex]) || currentName;
             const distance = Math.abs(offset);
+            const distanceRatio = distance / maxDistance;
             items.push({
                 label,
                 offset,
-                opacity: Math.max(0.5, 1 - (distance / visibleRadius) * 0.5),
+                maxDistance,
+                opacity: Math.max(0.36, 1 - distanceRatio * 0.58),
             });
         }
         showClassScrollIndicator({ items }, options);
@@ -1752,6 +1787,42 @@
         batchTweakElements.modal.setAttribute("aria-hidden", "false");
     }
 
+    function getBatchTweakSelectionTarget() {
+        if (!currentImage || !currentImage.name) {
+            return null;
+        }
+        const selectedRecords = getSelectedBboxRecords({ negative: false });
+        const candidates = [];
+        const seenUuids = new Set();
+        const seenObjects = new Set();
+        const addCandidate = (bboxRecord) => {
+            if (!bboxRecord || seenObjects.has(bboxRecord)) {
+                return;
+            }
+            if (bboxRecord.uuid && seenUuids.has(bboxRecord.uuid)) {
+                return;
+            }
+            candidates.push(bboxRecord);
+            seenObjects.add(bboxRecord);
+            if (bboxRecord.uuid) {
+                seenUuids.add(bboxRecord.uuid);
+            }
+        };
+        const currentUuid = currentBbox && currentBbox.bbox ? currentBbox.bbox.uuid : null;
+        const currentIsNegative = currentUuid ? negativeBboxes.has(currentUuid) : false;
+        if (currentBbox && currentBbox.bbox && !currentIsNegative) {
+            addCandidate(currentBbox.bbox);
+        }
+        selectedRecords.forEach(addCandidate);
+        const primary = candidates[0] || null;
+        const targetClass = String(primary?.class || "").trim();
+        if (!targetClass) {
+            return null;
+        }
+        const records = candidates.filter((bboxRecord) => bboxRecord && bboxRecord.class === targetClass);
+        return records.length ? { className: targetClass, records } : null;
+    }
+
     function closeBatchTweakModal() {
         if (!batchTweakElements.modal) {
             return;
@@ -1762,6 +1833,16 @@
     }
 
     function requestBatchTweakModal() {
+        const selectionTarget = getBatchTweakSelectionTarget();
+        if (selectionTarget && selectionTarget.records.length) {
+            runBatchTweakForRecords(selectionTarget.records, selectionTarget.className, {
+                scopeLabel: "selected",
+            }).catch((err) => {
+                console.error("Selected batch tweak failed", err);
+                setSamStatus(`Selected tweak failed: ${err.message || err}`, { variant: "error", duration: 5000 });
+            });
+            return;
+        }
         if (!currentClass) {
             setSamStatus("Select a class in the list before batch tweaking", { variant: "warn", duration: 3000 });
             return;
@@ -1776,15 +1857,15 @@
         openBatchTweakModal();
     }
 
-    function handleXHotkeyPress() {
-        if (xHotkeyTimeoutId) {
-            clearTimeout(xHotkeyTimeoutId);
-            xHotkeyTimeoutId = null;
+    function handleMagicTweakTapHotkey() {
+        if (magicTweakHotkeyTimeoutId) {
+            clearTimeout(magicTweakHotkeyTimeoutId);
+            magicTweakHotkeyTimeoutId = null;
             requestBatchTweakModal();
             return;
         }
-        xHotkeyTimeoutId = window.setTimeout(() => {
-            xHotkeyTimeoutId = null;
+        magicTweakHotkeyTimeoutId = window.setTimeout(() => {
+            magicTweakHotkeyTimeoutId = null;
             handleMagicTweakHotkey().catch((err) => {
                 console.debug("Magic tweak hotkey failed", err);
             });
@@ -1808,7 +1889,7 @@
     let agentCachePurgeInProgress = false;
     let sam3CachePurgeInProgress = false;
     const DOUBLE_TAP_WINDOW_MS = 260;
-    let xHotkeyTimeoutId = null;
+    let magicTweakHotkeyTimeoutId = null;
     let batchTweakRunning = false;
 	    const batchTweakElements = {
 	        modal: null,
@@ -1866,6 +1947,7 @@
 
     const tabElements = {
         labelingButton: null,
+        classSplitButton: null,
         prepassBuilderButton: null,
         trainingButton: null,
         qwenTrainButton: null,
@@ -1882,6 +1964,7 @@
         predictorsButton: null,
         settingsButton: null,
         labelingPanel: null,
+        classSplitPanel: null,
         prepassBuilderPanel: null,
         trainingPanel: null,
         qwenTrainPanel: null,
@@ -2226,6 +2309,10 @@ const AUTOMATION_LOCKED_TABS = new Set([
         cascadeRunButton: null,
         cascadeStopButton: null,
         cascadeClearButton: null,
+        cascadeDedupeToggle: null,
+        cascadeDedupeIouInput: null,
+        batchModeSingleRadio: null,
+        batchModeCascadeRadio: null,
         batchCountInput: null,
         batchIncludeCurrentToggle: null,
         batchRunButton: null,
@@ -2245,6 +2332,41 @@ const AUTOMATION_LOCKED_TABS = new Set([
         addClassButton: null,
         saveLabelmapButton: null,
         labelmapStatus: null,
+        workflow: null,
+    };
+    const classSplitElements = {
+        datasetStatus: null,
+        jobStatus: null,
+        scopeSelected: null,
+        scopeAll: null,
+        recipePreset: null,
+        classSelect: null,
+        encoderType: null,
+        backbone: null,
+        projection: null,
+        projectionNeighborK: null,
+        sampleCap: null,
+        padding: null,
+        canonicalSize: null,
+        preprocessMode: null,
+        sizeBiasMode: null,
+        dinov3Pooling: null,
+        backgroundMode: null,
+        viewMode: null,
+        neighborK: null,
+        runButton: null,
+        cancelButton: null,
+        rerunButton: null,
+        progress: null,
+        progressFill: null,
+        progressText: null,
+        results: null,
+        colorMode: null,
+        filterClass: null,
+        graph: null,
+        report: null,
+        wrongList: null,
+        inspector: null,
     };
     const sam3RecipeElements = {
         fileInput: null,
@@ -2374,6 +2496,27 @@ const AUTOMATION_LOCKED_TABS = new Set([
     let sam3TextCascadeCancel = false;
     let sam3AgentApplyActive = false;
     let sam3TextCascadeEnabled = false;
+    let sam3TextRegionOverlay = null;
+    let sam3TextWindowAnimationTimer = null;
+    let sam3TextWindowAnimationRunId = 0;
+    let sam3TextLiveToastEl = null;
+    let sam3TextLiveToastHideTimer = null;
+    let sam3TextLiveToastManualScrollUntil = 0;
+    const classSplitState = {
+        initialized: false,
+        capabilities: null,
+        clipBackbones: [],
+        currentJobId: "",
+        pollTimer: null,
+        pollRequestId: 0,
+        active: false,
+        lastRequest: null,
+        result: null,
+        pointsById: new Map(),
+        selectedPointId: "",
+        relabelInFlight: false,
+        shiftPanActive: false,
+    };
     let qwenClassOverride = false;
     let qwenAdvancedVisible = false;
     let qwenStatusRefreshRequestId = 0;
@@ -2619,8 +2762,17 @@ const AUTOMATION_LOCKED_TABS = new Set([
         deviceOverrideInput: null,
         deviceOverrideHelp: null,
         calibrationModeSelect: null,
+        embeddingRecipePresetSelect: null,
         embeddingCenterCheckbox: null,
         embeddingStandardizeCheckbox: null,
+        preprocessModeSelect: null,
+        canonicalSizeInput: null,
+        embeddingCropModeSelect: null,
+        embeddingCropPaddingInput: null,
+        backgroundModeSelect: null,
+        embeddingViewModeSelect: null,
+        embeddingAdjustmentSelect: null,
+        dinov3PoolingSelect: null,
         bgClassCountInput: null,
         startButton: null,
         cancelButton: null,
@@ -3746,6 +3898,9 @@ const sam3TrainState = {
             qwenElements.captionOutput.disabled = datasetMode && readOnly;
         }
         updateAnnotationSourceUi();
+        if (classSplitState.initialized) {
+            refreshClassSplitControls();
+        }
     }
 
     function annotationImageKey(split, imageRelpath) {
@@ -3871,6 +4026,7 @@ const sam3TrainState = {
         setCurrentClass();
         updateQwenClassOptions({ resetOverride: true });
         updateSam3ClassOptions({ resetOverride: true });
+        populateClassSplitClasses({ preserveSelection: false });
         refreshCaptionGlossaryForCurrentContext({ silent: true }).catch((error) => {
             console.warn("Failed to refresh caption glossary from labelmap", error);
         });
@@ -9190,6 +9346,7 @@ function ensureAutomationAvailable(actionLabel) {
         if (trainingElements.dinov3BackboneRow) trainingElements.dinov3BackboneRow.hidden = useClip;
         if (trainingElements.clipBackboneSelect) trainingElements.clipBackboneSelect.disabled = !useClip;
         if (trainingElements.dinov3BackboneSelect) trainingElements.dinov3BackboneSelect.disabled = useClip;
+        if (trainingElements.dinov3PoolingSelect) trainingElements.dinov3PoolingSelect.disabled = useClip;
     }
 
     function updateTrainingClassifierControls() {
@@ -16099,6 +16256,9 @@ async function cancelRfDetrTrainingJobRequest() {
                     ...(bgCount !== null ? [`Background classes: ${escapeHtml(String(bgCount))} (hidden negatives)`] : []),
                     `Augmentations: ${escapeHtml(augInfo)}`,
                     `Classifier head: ${escapeHtml(classifierType)}`,
+                    `Embedding recipe: ${escapeHtml(art.preprocess_mode || "canonical")} / ${escapeHtml(art.embedding_crop_mode || "padded_square")} / ${escapeHtml(art.embedding_adjustment || "remove_size_bias")}`,
+                    `Crop padding: ${escapeHtml(formatNumber(art.embedding_crop_padding_ratio, 3))}; canonical size: ${escapeHtml(String(art.canonical_size || 336))}`,
+                    ...(art.encoder_type === "dinov3" ? [`DINOv3 pooling: ${escapeHtml(art.dinov3_pooling || "pooler")}`] : []),
                     `Class weight: ${escapeHtml(art.class_weight || 'none')}`,
                     ...(art.logit_adjustment_mode && String(art.logit_adjustment_mode).toLowerCase() !== "none"
                         ? [`Logit adjustment: ${escapeHtml(String(art.logit_adjustment_mode))}${art.logit_adjustment_inference ? " (infer on)" : ""}`]
@@ -16344,6 +16504,30 @@ async function cancelRfDetrTrainingJobRequest() {
                 "embedding_standardize",
                 trainingElements.embeddingStandardizeCheckbox.checked ? "true" : "false",
             );
+        }
+        if (trainingElements.preprocessModeSelect) {
+            formData.append("preprocess_mode", trainingElements.preprocessModeSelect.value || "canonical");
+        }
+        if (trainingElements.canonicalSizeInput) {
+            formData.append("canonical_size", trainingElements.canonicalSizeInput.value || "336");
+        }
+        if (trainingElements.embeddingCropModeSelect) {
+            formData.append("embedding_crop_mode", trainingElements.embeddingCropModeSelect.value || "padded_square");
+        }
+        if (trainingElements.embeddingCropPaddingInput) {
+            formData.append("embedding_crop_padding_ratio", trainingElements.embeddingCropPaddingInput.value || "0.08");
+        }
+        if (trainingElements.backgroundModeSelect) {
+            formData.append("background_mode", trainingElements.backgroundModeSelect.value || "full_crop");
+        }
+        if (trainingElements.embeddingViewModeSelect) {
+            formData.append("embedding_view_mode", trainingElements.embeddingViewModeSelect.value || "single");
+        }
+        if (trainingElements.embeddingAdjustmentSelect) {
+            formData.append("embedding_adjustment", trainingElements.embeddingAdjustmentSelect.value || "remove_size_bias");
+        }
+        if (trainingElements.dinov3PoolingSelect) {
+            formData.append("dinov3_pooling", trainingElements.dinov3PoolingSelect.value || "pooler");
         }
         if (trainingElements.mlpPatienceInput) {
             formData.append("mlp_patience", trainingElements.mlpPatienceInput.value || "6");
@@ -16706,6 +16890,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function setupTabNavigation() {
         tabElements.labelingButton = document.getElementById("tabLabelingButton");
+        tabElements.classSplitButton = document.getElementById("tabClassSplitButton");
         tabElements.prepassBuilderButton = document.getElementById("tabPrepassBuilderButton");
         tabElements.trainingButton = document.getElementById("tabTrainingButton");
         tabElements.qwenTrainButton = document.getElementById("tabQwenTrainButton");
@@ -16722,6 +16907,7 @@ async function cancelRfDetrTrainingJobRequest() {
         tabElements.predictorsButton = document.getElementById("tabPredictorsButton");
         tabElements.settingsButton = document.getElementById("tabSettingsButton");
         tabElements.labelingPanel = document.getElementById("tabLabeling");
+        tabElements.classSplitPanel = document.getElementById("tabClassSplit");
         tabElements.prepassBuilderPanel = document.getElementById("tabPrepassBuilder");
         tabElements.trainingPanel = document.getElementById("tabTraining");
         tabElements.qwenTrainPanel = document.getElementById("tabQwenTrain");
@@ -16739,6 +16925,9 @@ async function cancelRfDetrTrainingJobRequest() {
         tabElements.settingsPanel = document.getElementById("tabSettings");
         if (tabElements.labelingButton) {
             tabElements.labelingButton.addEventListener("click", () => setActiveTab(TAB_LABELING));
+        }
+        if (tabElements.classSplitButton) {
+            tabElements.classSplitButton.addEventListener("click", () => setActiveTab(TAB_CLASS_SPLIT));
         }
         if (tabElements.prepassBuilderButton) {
             tabElements.prepassBuilderButton.addEventListener("click", () => setActiveTab(TAB_PREPASS_BUILDER));
@@ -16797,6 +16986,9 @@ async function cancelRfDetrTrainingJobRequest() {
         if (tabElements.labelingButton) {
             tabElements.labelingButton.classList.toggle("active", tabName === TAB_LABELING);
         }
+        if (tabElements.classSplitButton) {
+            tabElements.classSplitButton.classList.toggle("active", tabName === TAB_CLASS_SPLIT);
+        }
         if (tabElements.prepassBuilderButton) {
             tabElements.prepassBuilderButton.classList.toggle("active", tabName === TAB_PREPASS_BUILDER);
         }
@@ -16844,6 +17036,9 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (tabElements.labelingPanel) {
             tabElements.labelingPanel.classList.toggle("active", tabName === TAB_LABELING);
+        }
+        if (tabElements.classSplitPanel) {
+            tabElements.classSplitPanel.classList.toggle("active", tabName === TAB_CLASS_SPLIT);
         }
         if (tabElements.prepassBuilderPanel) {
             tabElements.prepassBuilderPanel.classList.toggle("active", tabName === TAB_PREPASS_BUILDER);
@@ -16903,6 +17098,11 @@ async function cancelRfDetrTrainingJobRequest() {
                     console.error("Failed to load active training job", error);
                 });
             }
+        }
+        if (tabName === TAB_CLASS_SPLIT) {
+            initClassSplitExplorer();
+            refreshClassSplitControls();
+            window.setTimeout(() => renderClassSplitPlot(), 80);
         }
         if (tabName === TAB_DETECTORS && previous !== TAB_DETECTORS) {
             refreshDetectorStatus()
@@ -17034,8 +17234,17 @@ async function cancelRfDetrTrainingJobRequest() {
         trainingElements.deviceOverrideInput = document.getElementById("trainDeviceOverride");
         trainingElements.deviceOverrideHelp = document.getElementById("trainDeviceOverrideHelp");
         trainingElements.calibrationModeSelect = document.getElementById("trainCalibrationMode");
+        trainingElements.embeddingRecipePresetSelect = document.getElementById("trainEmbeddingRecipePreset");
         trainingElements.embeddingCenterCheckbox = document.getElementById("trainEmbeddingCenter");
         trainingElements.embeddingStandardizeCheckbox = document.getElementById("trainEmbeddingStandardize");
+        trainingElements.preprocessModeSelect = document.getElementById("trainPreprocessMode");
+        trainingElements.canonicalSizeInput = document.getElementById("trainCanonicalSize");
+        trainingElements.embeddingCropModeSelect = document.getElementById("trainEmbeddingCropMode");
+        trainingElements.embeddingCropPaddingInput = document.getElementById("trainEmbeddingCropPadding");
+        trainingElements.backgroundModeSelect = document.getElementById("trainBackgroundMode");
+        trainingElements.embeddingViewModeSelect = document.getElementById("trainEmbeddingViewMode");
+        trainingElements.embeddingAdjustmentSelect = document.getElementById("trainEmbeddingAdjustment");
+        trainingElements.dinov3PoolingSelect = document.getElementById("trainDinov3Pooling");
         trainingElements.hardMisWeightInput = document.getElementById("trainHardMisWeight");
         trainingElements.hardLowConfWeightInput = document.getElementById("trainHardLowConfWeight");
         trainingElements.hardLowConfThresholdInput = document.getElementById("trainHardLowConfThreshold");
@@ -17078,6 +17287,25 @@ async function cancelRfDetrTrainingJobRequest() {
         if (trainingElements.embeddingCenterCheckbox) {
             trainingElements.embeddingCenterCheckbox.addEventListener("change", updateEmbeddingStandardizeControls);
         }
+        if (trainingElements.embeddingRecipePresetSelect) {
+            trainingElements.embeddingRecipePresetSelect.addEventListener("change", () => {
+                applyEmbeddingRecipePresetToTraining(trainingElements.embeddingRecipePresetSelect.value || "balanced");
+            });
+        }
+        [
+            trainingElements.preprocessModeSelect,
+            trainingElements.canonicalSizeInput,
+            trainingElements.embeddingCropModeSelect,
+            trainingElements.embeddingCropPaddingInput,
+            trainingElements.backgroundModeSelect,
+            trainingElements.embeddingViewModeSelect,
+            trainingElements.embeddingAdjustmentSelect,
+            trainingElements.dinov3PoolingSelect,
+        ].forEach((control) => {
+            if (control) {
+                control.addEventListener("change", markTrainingEmbeddingRecipeCustom);
+            }
+        });
         if (trainingElements.deviceOverrideInput) {
             trainingElements.deviceOverrideInput.addEventListener("input", () => {
                 validateClipDeviceOverride();
@@ -17307,6 +17535,81 @@ async function cancelRfDetrTrainingJobRequest() {
             .catch((err) => console.warn("Dataset list init failed", err))
             .finally(() => updateTrainingStartAvailability());
         loadTrainingClipClassifiers().catch((err) => console.warn("Training classifier list load failed", err));
+    }
+
+    function embeddingRecipePresetValues(preset) {
+        const key = String(preset || "balanced").toLowerCase();
+        if (key === "fast") {
+            return {
+                preprocessMode: "canonical",
+                canonicalSize: "224",
+                cropMode: "padded_square",
+                padding: "0.04",
+                backgroundMode: "full_crop",
+                viewMode: "single",
+                adjustment: "remove_size_bias",
+                dinov3Pooling: "pooler",
+            };
+        }
+        if (key === "precise") {
+            return {
+                preprocessMode: "canonical",
+                canonicalSize: "336",
+                cropMode: "padded_square",
+                padding: "0.08",
+                backgroundMode: "full_crop",
+                viewMode: "tight_context",
+                adjustment: "remove_size_bias",
+                dinov3Pooling: "pooler",
+            };
+        }
+        return {
+            preprocessMode: "canonical",
+            canonicalSize: "336",
+            cropMode: "padded_square",
+            padding: "0.08",
+            backgroundMode: "full_crop",
+            viewMode: "single",
+            adjustment: "remove_size_bias",
+            dinov3Pooling: "pooler",
+        };
+    }
+
+    function setSelectValueIfPresent(element, value) {
+        if (!element) {
+            return;
+        }
+        const stringValue = String(value);
+        const options = Array.from(element.options || []).map((option) => option.value);
+        if (options.includes(stringValue)) {
+            element.value = stringValue;
+        }
+    }
+
+    function applyEmbeddingRecipePresetToTraining(preset) {
+        const key = String(preset || "balanced").toLowerCase();
+        if (key === "custom") {
+            return;
+        }
+        const values = embeddingRecipePresetValues(key);
+        setSelectValueIfPresent(trainingElements.preprocessModeSelect, values.preprocessMode);
+        if (trainingElements.canonicalSizeInput) {
+            trainingElements.canonicalSizeInput.value = values.canonicalSize;
+        }
+        setSelectValueIfPresent(trainingElements.embeddingCropModeSelect, values.cropMode);
+        if (trainingElements.embeddingCropPaddingInput) {
+            trainingElements.embeddingCropPaddingInput.value = values.padding;
+        }
+        setSelectValueIfPresent(trainingElements.backgroundModeSelect, values.backgroundMode);
+        setSelectValueIfPresent(trainingElements.embeddingViewModeSelect, values.viewMode);
+        setSelectValueIfPresent(trainingElements.embeddingAdjustmentSelect, values.adjustment);
+        setSelectValueIfPresent(trainingElements.dinov3PoolingSelect, values.dinov3Pooling);
+    }
+
+    function markTrainingEmbeddingRecipeCustom() {
+        if (trainingElements.embeddingRecipePresetSelect && trainingElements.embeddingRecipePresetSelect.value !== "custom") {
+            trainingElements.embeddingRecipePresetSelect.value = "custom";
+        }
     }
 
     function initializeActiveModelUi() {
@@ -20496,6 +20799,10 @@ async function cancelRfDetrTrainingJobRequest() {
         sam3TextElements.cascadeRunButton = document.getElementById("sam3TextCascadeRun");
         sam3TextElements.cascadeStopButton = document.getElementById("sam3TextCascadeStop");
         sam3TextElements.cascadeClearButton = document.getElementById("sam3TextCascadeClear");
+        sam3TextElements.cascadeDedupeToggle = document.getElementById("sam3TextCascadeDedupeAssigned");
+        sam3TextElements.cascadeDedupeIouInput = document.getElementById("sam3TextCascadeDedupeIou");
+        sam3TextElements.batchModeSingleRadio = document.getElementById("sam3BatchModeSingle");
+        sam3TextElements.batchModeCascadeRadio = document.getElementById("sam3BatchModeCascade");
         sam3TextElements.batchCountInput = document.getElementById("sam3BatchCount");
         sam3TextElements.batchIncludeCurrentToggle = document.getElementById("sam3BatchIncludeCurrent");
         sam3TextElements.batchRunButton = document.getElementById("sam3BatchRunButton");
@@ -20504,6 +20811,7 @@ async function cancelRfDetrTrainingJobRequest() {
         sam3TextElements.similarityRow = document.getElementById("sam3SimilarityRow");
         sam3TextElements.similarityThresholdInput = document.getElementById("sam3SimilarityThreshold");
         sam3TextElements.status = document.getElementById("sam3TextStatus");
+        sam3TextElements.workflow = document.getElementById("sam3TextWorkflow");
         // Legacy SAM3 recipe/cascade controls are not in the default HTML layout anymore.
         // Keep optional lookups for backward compatibility with custom/older injected layouts.
         const queryOptionalLegacy = (id) => document.querySelector(`#${id}`);
@@ -20581,6 +20889,34 @@ async function cancelRfDetrTrainingJobRequest() {
                 });
             });
         }
+        const workflowInputs = [
+            sam3TextElements.promptInput,
+            sam3TextElements.thresholdInput,
+            sam3TextElements.maskThresholdInput,
+            sam3TextElements.maxResultsInput,
+            sam3TextElements.minSizeInput,
+            sam3TextElements.maxPointsInput,
+            sam3TextElements.epsilonInput,
+            sam3TextElements.windowedToggle,
+            sam3TextElements.windowSizeInput,
+            sam3TextElements.windowOverlapInput,
+            sam3TextElements.classSelect,
+            sam3TextElements.cascadeDedupeToggle,
+            sam3TextElements.cascadeDedupeIouInput,
+            sam3TextElements.batchModeSingleRadio,
+            sam3TextElements.batchModeCascadeRadio,
+        ];
+        workflowInputs.forEach((el) => {
+            if (!el) {
+                return;
+            }
+            const refreshSam3TextWorkflowControls = () => {
+                updateSam3TextWorkflow();
+                updateSam3TextButtons();
+            };
+            el.addEventListener("input", refreshSam3TextWorkflowControls);
+            el.addEventListener("change", refreshSam3TextWorkflowControls);
+        });
         setSam3TextCascadeEnabled(false);
         if (sam3RecipeElements.fileInput) {
             sam3RecipeElements.fileInput.addEventListener("change", () => {
@@ -20680,6 +21016,7 @@ async function cancelRfDetrTrainingJobRequest() {
             loadSam3CascadePresets().catch((err) => console.error("Load cascades failed", err));
             loadSam3ClipClassifiers().catch((err) => console.error("Load CLIP classifiers failed", err));
         }
+        updateSam3TextWorkflow();
     }
 
     function setSam3TextStatus(message, variant = "info") {
@@ -21949,9 +22286,16 @@ async function cancelRfDetrTrainingJobRequest() {
         setButtonDisabled(sam3TextElements.cascadeAddButton, blocked);
         setButtonDisabled(sam3TextElements.cascadeRunButton, blocked);
         setButtonDisabled(sam3TextElements.cascadeClearButton, blocked);
+        setButtonDisabled(sam3TextElements.cascadeDedupeToggle, blocked);
+        setButtonDisabled(
+            sam3TextElements.cascadeDedupeIouInput,
+            blocked || !sam3TextElements.cascadeDedupeToggle?.checked,
+        );
         // Disable repeated stop clicks once cancellation is already requested.
         setButtonDisabled(sam3TextElements.cascadeStopButton, !sam3TextCascadeActive || sam3TextCascadeCancel);
         setButtonDisabled(sam3TextElements.batchRunButton, blocked);
+        setButtonDisabled(sam3TextElements.batchModeSingleRadio, blocked);
+        setButtonDisabled(sam3TextElements.batchModeCascadeRadio, blocked);
         setButtonDisabled(sam3TextElements.batchCountInput, blocked);
         setButtonDisabled(sam3TextElements.batchIncludeCurrentToggle, blocked);
         // Disable repeated stop clicks once cancellation is already requested.
@@ -21965,7 +22309,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 : (locked ? "SAM3 similarity (GPU locked)" : "SAM3 similarity prompt (use selected box(es))");
         }
         if (sam3TextElements.batchRunButton) {
-            sam3TextElements.batchRunButton.textContent = sam3TextBatchActive ? "Running batch…" : (locked ? "Run batch (GPU locked)" : "Run batch");
+            const batchModeLabel = getSam3TextBatchMode() === "cascade" ? "cascade batch" : "single-prompt batch";
+            sam3TextElements.batchRunButton.textContent = sam3TextBatchActive
+                ? "Running batch…"
+                : (locked ? `Run ${batchModeLabel} (GPU locked)` : `Run ${batchModeLabel}`);
         }
         if (sam3TextElements.cascadeRunButton) {
             sam3TextElements.cascadeRunButton.textContent = sam3TextCascadeActive ? "Running cascade…" : (locked ? "Run cascade (GPU locked)" : "Run cascade");
@@ -22080,6 +22427,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         refreshSam3TextCascadeClassOptions({ preserveSelection });
         renderSam3CascadeSteps();
+        updateSam3TextWorkflow();
     }
 
     function setSam3LabelmapStatus(message, variant = "info") {
@@ -23563,6 +23911,614 @@ async function cancelRfDetrTrainingJobRequest() {
             windowOverlap,
             mergeIou: 0.5,
         };
+    }
+
+    function getSam3TextCascadePostDedupeConfig() {
+        const enabled = !!sam3TextElements.cascadeDedupeToggle?.checked;
+        let iou = parseFloat(sam3TextElements.cascadeDedupeIouInput?.value || "0.65");
+        if (!Number.isFinite(iou)) {
+            iou = 0.65;
+        }
+        return {
+            enabled,
+            iou: Math.min(Math.max(iou, 0), 1),
+        };
+    }
+
+    function getSam3TextBatchMode() {
+        return sam3TextElements.batchModeCascadeRadio?.checked ? "cascade" : "single";
+    }
+
+    function setSam3TextBatchMode(mode) {
+        const normalized = mode === "cascade" ? "cascade" : "single";
+        if (sam3TextElements.batchModeSingleRadio) {
+            sam3TextElements.batchModeSingleRadio.checked = normalized === "single";
+        }
+        if (sam3TextElements.batchModeCascadeRadio) {
+            sam3TextElements.batchModeCascadeRadio.checked = normalized === "cascade";
+        }
+        updateSam3TextWorkflow();
+        updateSam3TextButtons();
+    }
+
+    function getSam3TextCascadeAssignedClasses(snapshots) {
+        const assigned = new Set();
+        (Array.isArray(snapshots) ? snapshots : []).forEach((snapshot) => {
+            const className = String(snapshot?.targetClass || "").trim();
+            if (className) {
+                assigned.add(className);
+            }
+        });
+        return Array.from(assigned);
+    }
+
+    function bboxRecordToPixelRect(record) {
+        if (!record) {
+            return null;
+        }
+        const { left, top, right, bottom } = getBboxBounds(record);
+        const width = right - left;
+        const height = bottom - top;
+        if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+            return null;
+        }
+        return { x: left, y: top, width, height };
+    }
+
+    function pixelRectIoU(a, b) {
+        if (!a || !b) {
+            return 0;
+        }
+        const ax2 = a.x + a.width;
+        const ay2 = a.y + a.height;
+        const bx2 = b.x + b.width;
+        const by2 = b.y + b.height;
+        const ix = Math.max(0, Math.min(ax2, bx2) - Math.max(a.x, b.x));
+        const iy = Math.max(0, Math.min(ay2, by2) - Math.max(a.y, b.y));
+        const inter = ix * iy;
+        if (inter <= 0) {
+            return 0;
+        }
+        const union = a.width * a.height + b.width * b.height - inter;
+        return union > 0 ? inter / union : 0;
+    }
+
+    function dedupeSam3AssignedClassesForCurrentImage(
+        classNames,
+        { iou = 0.65, minCreatedAtExclusive = null } = {},
+    ) {
+        if (!currentImage || !bboxes[currentImage.name] || !Array.isArray(classNames) || !classNames.length) {
+            return { removed: 0, byClass: {} };
+        }
+        const threshold = Math.min(Math.max(Number(iou) || 0, 0), 1);
+        const baseline = Number(minCreatedAtExclusive);
+        const hasBaseline = Number.isFinite(baseline);
+        const removedByClass = {};
+        let totalRemoved = 0;
+        classNames.forEach((className) => {
+            const bucket = bboxes[currentImage.name]?.[className];
+            if (!Array.isArray(bucket) || bucket.length < 2) {
+                return;
+            }
+            const entries = bucket
+                .map((bboxRecord, index) => {
+                    const rect = bboxRecordToPixelRect(bboxRecord);
+                    if (!rect) {
+                        return null;
+                    }
+                    const createdAt = Number(bboxRecord?.createdAt);
+                    const isNewCascadeOutput = hasBaseline && Number.isFinite(createdAt) && createdAt > baseline;
+                    const protectedAnchor = hasBaseline ? !isNewCascadeOutput : false;
+                    const score = Number(bboxRecord?.samScore);
+                    return {
+                        bboxRecord,
+                        index,
+                        rect,
+                        protectedAnchor,
+                        score: Number.isFinite(score) ? score : -Infinity,
+                    };
+                })
+                .filter(Boolean)
+                .sort((a, b) => {
+                    if (a.protectedAnchor !== b.protectedAnchor) {
+                        return a.protectedAnchor ? -1 : 1;
+                    }
+                    if (a.score !== b.score) {
+                        return b.score - a.score;
+                    }
+                    return a.index - b.index;
+                });
+            const kept = [];
+            const removeIndices = new Set();
+            entries.forEach((entry) => {
+                const overlapsKept = kept.some((keptEntry) => {
+                    const overlap = pixelRectIoU(entry.rect, keptEntry.rect);
+                    return threshold <= 0 ? overlap > 0 : overlap >= threshold;
+                });
+                if (overlapsKept && !entry.protectedAnchor) {
+                    removeIndices.add(entry.index);
+                    return;
+                }
+                kept.push(entry);
+            });
+            if (!removeIndices.size) {
+                return;
+            }
+            const removedRecords = bucket.filter((_, idx) => removeIndices.has(idx));
+            const removedUuids = new Set(removedRecords.map((record) => record?.uuid).filter(Boolean));
+            const remaining = bucket.filter((_, idx) => !removeIndices.has(idx));
+            if (remaining.length) {
+                bboxes[currentImage.name][className] = remaining;
+            } else {
+                delete bboxes[currentImage.name][className];
+            }
+            removedUuids.forEach((uuid) => {
+                selectedBboxes.delete(uuid);
+                negativeBboxes.delete(uuid);
+            });
+            if (currentBbox?.bbox?.uuid && removedUuids.has(currentBbox.bbox.uuid)) {
+                currentBbox = null;
+                setGlobalCursor("default");
+            }
+            removedByClass[className] = removeIndices.size;
+            totalRemoved += removeIndices.size;
+        });
+        if (totalRemoved > 0) {
+            captureCurrentAnnotationDirtyState();
+        }
+        return { removed: totalRemoved, byClass: removedByClass };
+    }
+
+    function clampSam3WindowSettingsForImage(snapshot, imageRecord = currentImage) {
+        const imageWidth = Math.max(1, Number(imageRecord?.width) || 1);
+        const imageHeight = Math.max(1, Number(imageRecord?.height) || 1);
+        const maxDim = Math.max(imageWidth, imageHeight, 1);
+        let windowSize = parseInt(snapshot?.windowSize || "672", 10);
+        if (Number.isNaN(windowSize)) {
+            windowSize = 672;
+        }
+        windowSize = Math.max(64, Math.min(maxDim, windowSize));
+        let overlap = parseFloat(snapshot?.windowOverlap ?? "0.1");
+        if (Number.isNaN(overlap)) {
+            overlap = 0.1;
+        }
+        overlap = Math.min(Math.max(overlap, 0), 0.9);
+        const mergeIou = Number.isFinite(Number(snapshot?.mergeIou)) ? Number(snapshot.mergeIou) : 0.5;
+        return { windowSize, overlap, mergeIou: Math.min(Math.max(mergeIou, 0), 1), imageWidth, imageHeight };
+    }
+
+    function computeSam3TextWindowPlan(snapshot, imageRecord = currentImage) {
+        if (!imageRecord || !snapshot?.windowed) {
+            return [];
+        }
+        const { windowSize, overlap, imageWidth, imageHeight } = clampSam3WindowSettingsForImage(snapshot, imageRecord);
+        const step = Math.max(1, Math.round(windowSize * (1 - overlap)));
+        const axisStarts = (length) => {
+            if (length <= windowSize) {
+                return [0];
+            }
+            const last = Math.max(0, length - windowSize);
+            const starts = [];
+            for (let pos = 0; pos <= last; pos += step) {
+                const clampedPos = Math.min(pos, last);
+                if (!starts.length || starts[starts.length - 1] !== clampedPos) {
+                    starts.push(clampedPos);
+                }
+                if (clampedPos === last) {
+                    break;
+                }
+            }
+            if (starts[starts.length - 1] !== last) {
+                starts.push(last);
+            }
+            return starts;
+        };
+        const xs = axisStarts(imageWidth);
+        const ys = axisStarts(imageHeight);
+        const windows = [];
+        ys.forEach((y) => {
+            xs.forEach((x) => {
+                windows.push({
+                    x,
+                    y,
+                    width: Math.min(windowSize, imageWidth - x),
+                    height: Math.min(windowSize, imageHeight - y),
+                });
+            });
+        });
+        return windows;
+    }
+
+    function parseSam3WindowWarnings(warnings) {
+        const result = {};
+        (Array.isArray(warnings) ? warnings : []).forEach((warning) => {
+            const text = String(warning || "");
+            const idx = text.indexOf(":");
+            if (idx <= 0) {
+                return;
+            }
+            const key = text.slice(0, idx);
+            const value = text.slice(idx + 1);
+            if (!key.startsWith("windowed_")) {
+                return;
+            }
+            const numeric = Number(value);
+            result[key] = Number.isFinite(numeric) ? numeric : value;
+        });
+        return result;
+    }
+
+    function formatSam3Number(value, digits = 2) {
+        const num = Number(value);
+        if (!Number.isFinite(num)) {
+            return "--";
+        }
+        return Number.isInteger(num) ? String(num) : num.toFixed(digits);
+    }
+
+    function describeSam3WorkflowStep(stepId) {
+        const labels = {
+            prepare: "Prepare image",
+            window_scan: "Window scan",
+            full_scan: "Full image scan",
+            fuse: "Fuse/dedupe",
+            apply: "Apply results",
+            complete: "Complete",
+        };
+        return labels[stepId] || labels.prepare;
+    }
+
+    function updateSam3TextWorkflow(progress = {}) {
+        const root = sam3TextElements.workflow;
+        if (!root) {
+            return;
+        }
+        const snapshot = progress.snapshot || buildSam3TextSnapshot();
+        const windows = computeSam3TextWindowPlan(snapshot);
+        const windowed = !!snapshot.windowed;
+        const cascadeDedupe = getSam3TextCascadePostDedupeConfig();
+        const activeStep = progress.stepId || "";
+        const pathItems = [
+            {
+                id: "prepare",
+                title: "Prepare image",
+                body: "Resolve the current image/token and SAM3 text prompt.",
+                detail: `Prompt "${snapshot.prompt || "(empty)"}" -> class "${snapshot.targetClass || "(none)"}".`,
+            },
+            windowed
+                ? {
+                    id: "window_scan",
+                    title: "Window scan",
+                    body: `Run SAM3 text over ${windows.length || "planned"} overlapping window${windows.length === 1 ? "" : "s"}.`,
+                    detail: `Window ${snapshot.windowSize}px, overlap ${formatSam3Number(snapshot.windowOverlap)}, score >= ${formatSam3Number(snapshot.threshold)}, mask >= ${formatSam3Number(snapshot.maskThreshold)}; each tile searches broadly before final fusion.`,
+                }
+                : {
+                    id: "full_scan",
+                    title: "Full image scan",
+                    body: "Run SAM3 text once on the whole image.",
+                    detail: `Score >= ${formatSam3Number(snapshot.threshold)}, mask >= ${formatSam3Number(snapshot.maskThreshold)}.`,
+                },
+        ];
+        if (windowed) {
+            pathItems.push({
+                id: "fuse",
+                title: "Fuse/dedupe",
+                body: "Reproject window detections to full-image coordinates and fuse duplicates.",
+                detail: `Merge IoU ${formatSam3Number(snapshot.mergeIou)}; final full-image cap ${snapshot.maxResults}.`,
+            });
+        }
+        pathItems.push(
+            {
+                id: "apply",
+                title: "Apply results",
+                body: `Write ${datasetType === "seg" ? "polygons" : "boxes"} to the selected class.`,
+                detail: `Min size ${snapshot.minSize}px^2; max polygon points ${snapshot.maxPoints || 500}; simplify epsilon ${formatSam3Number(snapshot.simplifyEps)}px.`,
+            },
+            {
+                id: "complete",
+                title: "Complete",
+                body: "Show detection and dedupe details in the SAM3 toast.",
+                detail: "Warnings and final counts are retained for debugging.",
+            },
+        );
+        const activeIndex = pathItems.findIndex((item) => item.id === activeStep);
+        const nextItem = activeIndex >= 0 ? pathItems[activeIndex + 1] : pathItems[0];
+        root.replaceChildren();
+        const title = document.createElement("div");
+        title.className = "qwen-caption-workflow__title";
+        title.textContent = "SAM3 text workflow";
+        root.appendChild(title);
+        const pathSection = document.createElement("div");
+        pathSection.className = "qwen-caption-workflow__section";
+        const pathTitle = document.createElement("div");
+        pathTitle.className = "qwen-caption-workflow__section-title";
+        const currentText = activeStep ? `Current: ${describeSam3WorkflowStep(activeStep)}` : "Ready";
+        const nextText = nextItem ? `Next: ${nextItem.title}` : "";
+        pathTitle.textContent = [currentText, nextText].filter(Boolean).join(" • ");
+        const pathList = document.createElement("ol");
+        pathList.className = "qwen-caption-workflow__path";
+        pathItems.forEach((item, index) => {
+            const el = document.createElement("li");
+            el.className = "qwen-caption-workflow__path-item";
+            el.classList.toggle("is-active", item.id === activeStep);
+            el.classList.toggle("is-complete", activeIndex >= 0 && index < activeIndex);
+            el.title = `${item.title}: ${item.body} ${item.detail}`;
+            const strong = document.createElement("strong");
+            strong.textContent = item.title;
+            const body = document.createElement("span");
+            body.textContent = item.body;
+            const details = document.createElement("div");
+            details.className = "qwen-caption-workflow__details";
+            const row = document.createElement("div");
+            row.className = "qwen-caption-workflow__detail";
+            const label = document.createElement("span");
+            label.className = "qwen-caption-workflow__detail-label";
+            label.textContent = "Uses";
+            const text = document.createElement("span");
+            text.className = "qwen-caption-workflow__detail-text";
+            text.textContent = item.detail;
+            row.append(label, text);
+            details.appendChild(row);
+            el.append(strong, body, details);
+            pathList.appendChild(el);
+        });
+        pathSection.append(pathTitle, pathList);
+        root.appendChild(pathSection);
+
+        const settingsSection = document.createElement("div");
+        settingsSection.className = "qwen-caption-workflow__section";
+        const settingsTitle = document.createElement("div");
+        settingsTitle.className = "qwen-caption-workflow__section-title";
+        settingsTitle.textContent = "Selected options";
+        const settingsList = document.createElement("div");
+        settingsList.className = "qwen-caption-workflow__settings";
+        [
+            ["Mode", windowed ? `Windowed (${windows.length || 0} windows planned)` : "Full image"],
+            ["Prompt", snapshot.prompt || "(empty)"],
+            ["Class", snapshot.targetClass || "(none)"],
+            ["Thresholds", `score ${formatSam3Number(snapshot.threshold)}, mask ${formatSam3Number(snapshot.maskThreshold)}`],
+            ["Filters", `max ${snapshot.maxResults}, min ${snapshot.minSize}px^2, max points ${snapshot.maxPoints || 500}, simplify ${formatSam3Number(snapshot.simplifyEps)}px`],
+            ["Cascade", sam3TextCascadeEnabled ? `On (${getSam3TextCascadeStepElements().length + 1} prompt steps including base)` : "Off"],
+            ["Batch mode", getSam3TextBatchMode() === "cascade" ? "Text prompt cascade" : "Current single prompt"],
+            ["Post-cascade dedupe", (sam3TextCascadeEnabled || getSam3TextBatchMode() === "cascade") && cascadeDedupe.enabled ? `Per assigned class at IoU ${formatSam3Number(cascadeDedupe.iou)}` : "Off"],
+        ].forEach(([labelText, value]) => {
+            const el = document.createElement("div");
+            el.className = "qwen-caption-workflow__setting";
+            const strong = document.createElement("strong");
+            strong.textContent = labelText;
+            const body = document.createElement("span");
+            body.textContent = value;
+            el.append(strong, body);
+            settingsList.appendChild(el);
+        });
+        settingsSection.append(settingsTitle, settingsList);
+        root.appendChild(settingsSection);
+    }
+
+    function ensureSam3TextLiveToast() {
+        if (sam3TextLiveToastEl) {
+            return sam3TextLiveToastEl;
+        }
+        const el = document.createElement("div");
+        el.className = "sam3-text-live-toast";
+        el.setAttribute("role", "status");
+        el.setAttribute("aria-live", "polite");
+        el.innerHTML = `
+            <div class="sam3-text-live-toast__title"></div>
+            <div class="sam3-text-live-toast__meta"></div>
+            <pre class="sam3-text-live-toast__body"></pre>
+        `;
+        el.addEventListener("wheel", (event) => {
+            const bodyEl = el.querySelector(".sam3-text-live-toast__body");
+            event.stopPropagation();
+            event.preventDefault();
+            if (bodyEl) {
+                bodyEl.scrollTop += normalizeWheelDeltaY(event, bodyEl);
+                sam3TextLiveToastManualScrollUntil = isQwenCaptionOutputNearBottom(bodyEl)
+                    ? 0
+                    : Date.now() + 3500;
+            }
+        }, { passive: false });
+        el.addEventListener("mouseleave", () => {
+            sam3TextLiveToastManualScrollUntil = 0;
+            scrollQwenCaptionOutputToBottom(el.querySelector(".sam3-text-live-toast__body"), {
+                respectManualScroll: false,
+            });
+        });
+        document.body.appendChild(el);
+        sam3TextLiveToastEl = el;
+        return el;
+    }
+
+    function hideSam3TextLiveToast(delayMs = 0) {
+        if (sam3TextLiveToastHideTimer) {
+            clearTimeout(sam3TextLiveToastHideTimer);
+            sam3TextLiveToastHideTimer = null;
+        }
+        const hideNow = () => {
+            sam3TextLiveToastManualScrollUntil = 0;
+            if (sam3TextLiveToastEl) {
+                sam3TextLiveToastEl.classList.remove("visible", "is-error");
+            }
+        };
+        if (delayMs > 0) {
+            sam3TextLiveToastHideTimer = setTimeout(hideNow, delayMs);
+        } else {
+            hideNow();
+        }
+    }
+
+    function renderSam3TextLiveToast({ title, meta = "", body = "", error = false, done = false } = {}) {
+        if (sam3TextLiveToastHideTimer) {
+            clearTimeout(sam3TextLiveToastHideTimer);
+            sam3TextLiveToastHideTimer = null;
+        }
+        const el = ensureSam3TextLiveToast();
+        const titleEl = el.querySelector(".sam3-text-live-toast__title");
+        const metaEl = el.querySelector(".sam3-text-live-toast__meta");
+        const bodyEl = el.querySelector(".sam3-text-live-toast__body");
+        if (titleEl) titleEl.textContent = title || "SAM3 text prompt";
+        if (metaEl) metaEl.textContent = meta || "";
+        if (bodyEl) {
+            bodyEl.textContent = body || "";
+            if (
+                sam3TextLiveToastManualScrollUntil <= Date.now()
+                || isQwenCaptionOutputNearBottom(bodyEl)
+            ) {
+                scrollQwenCaptionOutputToBottom(bodyEl);
+            }
+        }
+        el.classList.toggle("is-error", !!error);
+        el.classList.add("visible");
+        if (done) {
+            hideSam3TextLiveToast(error ? 9000 : 6500);
+        }
+    }
+
+    function sam3YoloBoxToPixelRect(yoloBox, imageRecord = currentImage) {
+        if (!imageRecord || !Array.isArray(yoloBox) || yoloBox.length < 4) {
+            return null;
+        }
+        const [cx, cy, wNorm, hNorm] = yoloBox.map(Number);
+        if ([cx, cy, wNorm, hNorm].some((value) => !Number.isFinite(value))) {
+            return null;
+        }
+        const width = wNorm * imageRecord.width;
+        const height = hNorm * imageRecord.height;
+        return {
+            x: cx * imageRecord.width - width / 2,
+            y: cy * imageRecord.height - height / 2,
+            width,
+            height,
+        };
+    }
+
+    function formatSam3DetectionDetails(detections, imageRecord = currentImage) {
+        const rows = (Array.isArray(detections) ? detections : []).slice(0, 40).map((det, idx) => {
+            const rect = sam3YoloBoxToPixelRect(det?.bbox, imageRecord);
+            const score = Number(det?.score);
+            const scoreText = Number.isFinite(score) ? score.toFixed(3) : "--";
+            const rectText = rect
+                ? `x=${Math.round(rect.x)}, y=${Math.round(rect.y)}, w=${Math.round(rect.width)}, h=${Math.round(rect.height)}`
+                : "bbox unavailable";
+            return `${idx + 1}. score=${scoreText}; ${rectText}`;
+        });
+        if (!rows.length) {
+            return "No detections returned.";
+        }
+        if (Array.isArray(detections) && detections.length > rows.length) {
+            rows.push(`... ${detections.length - rows.length} more detections omitted from toast.`);
+        }
+        return rows.join("\n");
+    }
+
+    function buildSam3TextToastBody(snapshot, result = null, { windows = [], added = 0, phase = "running", currentWindow = null } = {}) {
+        const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+        const diagnostics = parseSam3WindowWarnings(warnings);
+        const detections = Array.isArray(result?.detections) ? result.detections : [];
+        const lines = [
+            `Image: ${currentImage?.name || "(none)"}`,
+            `Prompt: ${snapshot.prompt || "(empty)"}`,
+            `Assign class: ${snapshot.targetClass || "(none)"}`,
+            `Mode: ${snapshot.windowed ? "windowed" : "full image"}`,
+            `Thresholds: score >= ${formatSam3Number(snapshot.threshold)}, mask >= ${formatSam3Number(snapshot.maskThreshold)}`,
+            `Filters: max results ${snapshot.maxResults}; min size ${snapshot.minSize}px^2; max polygon points ${snapshot.maxPoints || 500}; simplify epsilon ${formatSam3Number(snapshot.simplifyEps)}px`,
+        ];
+        if (snapshot.windowed) {
+            lines.push(
+                `Window plan: ${windows.length || diagnostics.windowed_tiles || 0} tile(s), size ${snapshot.windowSize}px, overlap ${formatSam3Number(snapshot.windowOverlap)}, merge IoU ${formatSam3Number(snapshot.mergeIou)}.`,
+                `Window limits: per tile ${diagnostics.windowed_per_window_limit ?? "broad"}; final cap ${diagnostics.windowed_final_limit ?? snapshot.maxResults}.`,
+            );
+            if (currentWindow) {
+                lines.push(`Current tile: ${currentWindow.index}/${currentWindow.total} at x=${currentWindow.x}, y=${currentWindow.y}, w=${currentWindow.width}, h=${currentWindow.height}.`);
+            }
+        }
+        if (phase === "running") {
+            lines.push("", "Running now. Results and fusion details will appear here when SAM3 returns.");
+            return lines.join("\n");
+        }
+        lines.push(
+            "",
+            "Backend result:",
+            `Returned detections: ${detections.length}`,
+            `Applied to canvas: ${added}`,
+        );
+        if (snapshot.windowed) {
+            const raw = diagnostics.windowed_raw_detections;
+            const finalCount = diagnostics.windowed_final_detections ?? detections.length;
+            const fused = diagnostics.windowed_fused_detections;
+            lines.push(
+                "",
+                "Window fusion/deduplication:",
+                `Backend image size: ${diagnostics.windowed_image_size ?? "--"}`,
+                `Coverage bounds: ${diagnostics.windowed_coverage_bounds ?? "--"}`,
+                `Coverage fraction: ${diagnostics.windowed_coverage_fraction ?? "--"}`,
+                `Uncovered pixels: ${diagnostics.windowed_uncovered_pixels ?? "--"}`,
+                `Per-window search limit: ${diagnostics.windowed_per_window_limit ?? "--"}`,
+                `Final full-image cap: ${diagnostics.windowed_final_limit ?? "--"}`,
+                `Tiles scanned: ${diagnostics.windowed_tiles ?? windows.length ?? "--"}`,
+                `Raw window detections before fusion: ${raw ?? "--"}`,
+                `Final detections after fusion: ${finalCount ?? "--"}`,
+                `Dropped/merged as duplicates: ${fused ?? (Number.isFinite(raw) ? Math.max(0, raw - detections.length) : "--")}`,
+                `Backend merge IoU: ${diagnostics.windowed_merge_iou ?? snapshot.mergeIou}`,
+            );
+        }
+        lines.push("", "Detections:", formatSam3DetectionDetails(detections));
+        if (warnings.length) {
+            lines.push("", "Warnings/diagnostics:", warnings.join("\n"));
+        }
+        return lines.join("\n");
+    }
+
+    function stopSam3TextWindowOverlay({ clear = true } = {}) {
+        sam3TextWindowAnimationRunId += 1;
+        if (sam3TextWindowAnimationTimer) {
+            clearTimeout(sam3TextWindowAnimationTimer);
+            sam3TextWindowAnimationTimer = null;
+        }
+        if (clear) {
+            sam3TextRegionOverlay = null;
+        }
+    }
+
+    function startSam3TextWindowOverlay(snapshot, { labelPrefix = "SAM3 window" } = {}) {
+        stopSam3TextWindowOverlay({ clear: true });
+        const windows = computeSam3TextWindowPlan(snapshot);
+        if (!snapshot?.windowed || !windows.length || !currentImage) {
+            return { windows };
+        }
+        const runId = sam3TextWindowAnimationRunId + 1;
+        sam3TextWindowAnimationRunId = runId;
+        let idx = 0;
+        const tick = () => {
+            if (sam3TextWindowAnimationRunId !== runId) {
+                return;
+            }
+            const win = windows[idx % windows.length];
+            const currentWindow = {
+                ...win,
+                index: (idx % windows.length) + 1,
+                total: windows.length,
+            };
+            sam3TextRegionOverlay = {
+                ...win,
+                label: `${labelPrefix} ${currentWindow.index}/${currentWindow.total}`,
+            };
+            updateSam3TextWorkflow({ stepId: "window_scan", snapshot, currentWindow });
+            renderSam3TextLiveToast({
+                title: `${labelPrefix} ${currentWindow.index}/${currentWindow.total}`,
+                meta: `Windowed SAM3 • prompt "${snapshot.prompt}" • class ${snapshot.targetClass}`,
+                body: buildSam3TextToastBody(snapshot, null, {
+                    windows,
+                    phase: "running",
+                    currentWindow,
+                }),
+            });
+            idx += 1;
+            sam3TextWindowAnimationTimer = setTimeout(tick, SAM3_TEXT_WINDOW_PULSE_MS);
+        };
+        tick();
+        return { windows };
     }
 
     function toggleQwenAdvanced(forceState = null) {
@@ -28538,6 +29494,11 @@ async function cancelRfDetrTrainingJobRequest() {
             maxResults = 20;
         }
         maxResults = Math.min(Math.max(maxResults, 1), 100);
+        let maxPoints = parseInt(sam3TextElements.maxPointsInput?.value || "500", 10);
+        if (!Number.isFinite(maxPoints) || maxPoints <= 3) {
+            maxPoints = 500;
+        }
+        maxPoints = Math.min(Math.max(maxPoints, 10), 5000);
         let simplifyEps = parseFloat(sam3TextElements.epsilonInput?.value || "1.0");
         if (Number.isNaN(simplifyEps) || simplifyEps < 0) {
             simplifyEps = 1.0;
@@ -28550,19 +29511,21 @@ async function cancelRfDetrTrainingJobRequest() {
             maskThreshold,
             minSize,
             maxResults,
+            maxPoints,
             simplifyEps,
             targetClass,
             ...windowSettings,
         };
     }
 
-    async function runSam3TextPromptSnapshot(snapshot, { requestImageName = null } = {}) {
+    async function runSam3TextPromptSnapshot(snapshot, { requestImageName = null, statusLabel = "SAM3 text" } = {}) {
         const {
             prompt,
             threshold,
             maskThreshold,
             minSize,
             maxResults,
+            maxPoints,
             simplifyEps,
             targetClass,
             windowed,
@@ -28574,23 +29537,81 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!ensureAutomationAvailable("SAM3 text")) {
             return { added: 0, detections: 0, warnings: ["automation_locked"] };
         }
-        const result = await invokeSam3TextPrompt({
-            text_prompt: prompt,
-            threshold,
-            mask_threshold: maskThreshold,
-            min_size: minSize,
-            simplify_epsilon: simplifyEps,
-            max_results: maxResults,
-            windowed: !!windowed,
-            window_size: windowSize,
-            window_overlap: windowOverlap,
-            merge_iou: mergeIou,
+        stopSam3TextWindowOverlay({ clear: true });
+        const plannedWindows = computeSam3TextWindowPlan(snapshot);
+        let overlayState = { windows: plannedWindows };
+        updateSam3TextWorkflow({ stepId: "prepare", snapshot });
+        renderSam3TextLiveToast({
+            title: statusLabel,
+            meta: snapshot.windowed
+                ? `Preparing ${plannedWindows.length} SAM3 window${plannedWindows.length === 1 ? "" : "s"}`
+                : "Preparing full-image SAM3 text prompt",
+            body: buildSam3TextToastBody(snapshot, null, {
+                windows: plannedWindows,
+                phase: "running",
+            }),
         });
+        if (snapshot.windowed) {
+            overlayState = startSam3TextWindowOverlay(snapshot, { labelPrefix: statusLabel });
+        } else {
+            updateSam3TextWorkflow({ stepId: "full_scan", snapshot });
+            renderSam3TextLiveToast({
+                title: statusLabel,
+                meta: "Full-image SAM3 text prompt",
+                body: buildSam3TextToastBody(snapshot, null, {
+                    windows: [],
+                    phase: "running",
+                }),
+            });
+        }
+        let result = null;
+        try {
+            result = await invokeSam3TextPrompt({
+                text_prompt: prompt,
+                threshold,
+                mask_threshold: maskThreshold,
+                min_size: minSize,
+                simplify_epsilon: simplifyEps,
+                max_results: maxResults,
+                windowed: !!windowed,
+                window_size: windowSize,
+                window_overlap: windowOverlap,
+                merge_iou: mergeIou,
+            });
+        } catch (error) {
+            stopSam3TextWindowOverlay({ clear: true });
+            updateSam3TextWorkflow({ stepId: "complete", snapshot });
+            renderSam3TextLiveToast({
+                title: `${statusLabel} failed`,
+                meta: "SAM3 text prompt error",
+                body: `${buildSam3TextToastBody(snapshot, null, {
+                    windows: overlayState.windows || plannedWindows,
+                    phase: "running",
+                })}\n\nError:\n${error.message || error}`,
+                error: true,
+                done: true,
+            });
+            throw error;
+        }
+        stopSam3TextWindowOverlay({ clear: false });
+        updateSam3TextWorkflow({ stepId: windowed ? "fuse" : "apply", snapshot });
         if (targetImageName && result?.image_token) {
             rememberSamToken(targetImageName, samVariant, result.image_token);
         }
         // Prevent cross-image writes when user navigates during async SAM calls.
         if (targetImageName && (!currentImage || currentImage.name !== targetImageName)) {
+            stopSam3TextWindowOverlay({ clear: true });
+            updateSam3TextWorkflow({ stepId: "complete", snapshot });
+            renderSam3TextLiveToast({
+                title: `${statusLabel} skipped`,
+                meta: "Image changed before SAM3 results could be applied",
+                body: `${buildSam3TextToastBody(snapshot, result, {
+                    windows: overlayState.windows || plannedWindows,
+                    added: 0,
+                    phase: "done",
+                })}\n\nSkipped: active image changed before results were applied.`,
+                done: true,
+            });
             return {
                 added: 0,
                 detections: Array.isArray(result?.detections) ? result.detections.length : 0,
@@ -28604,7 +29625,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
             });
         }
-        const applied = applySegAwareDetections(result?.detections || [], targetClass, "SAM3");
+        const applied = applySegAwareDetections(result?.detections || [], targetClass, "SAM3", {
+            simplifyEpsilon: simplifyEps,
+            maxPointsPerPolygon: maxPoints,
+            minArea: minSize,
+        });
         if (applied) {
             const shapeLabel = datasetType === "seg" ? "polygon" : "bbox";
             setSam3TextStatus(`SAM3 added ${applied} ${shapeLabel}${applied === 1 ? "" : "es"} to ${targetClass}.`, "success");
@@ -28616,6 +29641,22 @@ async function cancelRfDetrTrainingJobRequest() {
             setSam3TextStatus(warning, "warn");
             enqueueTaskNotice("SAM3 text: no detections added.", { durationMs: 3500 });
         }
+        stopSam3TextWindowOverlay({ clear: true });
+        updateSam3TextWorkflow({ stepId: "complete", snapshot });
+        renderSam3TextLiveToast({
+            title: applied ? `${statusLabel} complete` : `${statusLabel}: no usable detections`,
+            meta: [
+                windowed ? "Windowed SAM3" : "Full-image SAM3",
+                `${Array.isArray(result?.detections) ? result.detections.length : 0} returned`,
+                `${applied} applied`,
+            ].join(" • "),
+            body: buildSam3TextToastBody(snapshot, result, {
+                windows: overlayState.windows || plannedWindows,
+                added: applied,
+                phase: "done",
+            }),
+            done: true,
+        });
         return { added: applied, detections: Array.isArray(result?.detections) ? result.detections.length : 0, warnings: result?.warnings || [] };
     }
 
@@ -28672,13 +29713,32 @@ async function cancelRfDetrTrainingJobRequest() {
         });
     }
 
+    function updateSam3TextCascadeStepWindowControls(step) {
+        if (!step) {
+            return;
+        }
+        const enabled = !!step.querySelector(".sam3-text-cascade__windowed")?.checked;
+        [
+            step.querySelector(".sam3-text-cascade__window-size"),
+            step.querySelector(".sam3-text-cascade__window-overlap"),
+        ].forEach((control) => {
+            if (!control) {
+                return;
+            }
+            control.disabled = !enabled;
+            control.closest(".sam3-text-field")?.classList.toggle("is-disabled", !enabled);
+        });
+    }
+
     function createSam3TextCascadeStep({ useCurrentDefaults = false } = {}) {
         const promptDefault = useCurrentDefaults ? (sam3TextElements.promptInput?.value || "").trim() : "";
         const thresholdDefault = parseFloat(sam3TextElements.thresholdInput?.value || "0.5");
         const maskDefault = parseFloat(sam3TextElements.maskThresholdInput?.value || "0.5");
         const minSizeDefault = parseInt(sam3TextElements.minSizeInput?.value || "0", 10);
         const maxResultsDefault = parseInt(sam3TextElements.maxResultsInput?.value || "20", 10);
+        const maxPointsDefault = parseInt(sam3TextElements.maxPointsInput?.value || "500", 10);
         const epsilonDefault = parseFloat(sam3TextElements.epsilonInput?.value || "1.0");
+        const windowSettings = readSam3TextWindowSettings();
         const step = document.createElement("div");
         step.className = "sam3-text-cascade__step";
         step.innerHTML = `
@@ -28686,32 +29746,50 @@ async function cancelRfDetrTrainingJobRequest() {
                 <span class="sam3-text-cascade__step-title">Step</span>
                 <button type="button" class="training-button secondary sam3-text-cascade__remove">Remove</button>
             </div>
-            <label>Prompt</label>
-            <input type="text" class="sam3-text-cascade__prompt" placeholder="e.g., red helmet" />
+            <div class="sam3-text-field sam3-text-field--wide">
+                <label>Prompt</label>
+                <input type="text" class="sam3-text-cascade__prompt" placeholder="e.g., red helmet" />
+            </div>
             <div class="sam3-text-cascade__step-grid">
-                <div>
+                <div class="sam3-text-field">
                     <label>Assign class</label>
                     <select class="sam3-text-cascade__class"></select>
                 </div>
-                <div>
+                <div class="sam3-text-field">
                     <label>Score threshold</label>
                     <input type="number" class="sam3-text-cascade__threshold" step="0.05" min="0" max="1" />
                 </div>
-                <div>
+                <div class="sam3-text-field">
                     <label>Mask threshold</label>
                     <input type="number" class="sam3-text-cascade__mask" step="0.05" min="0" max="1" />
                 </div>
-                <div>
+                <div class="sam3-text-field">
                     <label>Max results</label>
                     <input type="number" class="sam3-text-cascade__max-results" min="1" max="100" />
                 </div>
-                <div>
+                <div class="sam3-text-field">
                     <label>Min size (px²)</label>
                     <input type="number" class="sam3-text-cascade__min-size" min="0" />
                 </div>
-                <div>
+                <div class="sam3-text-field">
+                    <label>Max points/polygon</label>
+                    <input type="number" class="sam3-text-cascade__max-points" min="10" max="5000" />
+                </div>
+                <div class="sam3-text-field">
                     <label>Simplify epsilon (px)</label>
                     <input type="number" class="sam3-text-cascade__epsilon" min="0" step="0.1" />
+                </div>
+                <div class="sam3-text-field sam3-text-field--checkbox">
+                    <label>Windowed mode</label>
+                    <input type="checkbox" class="sam3-text-cascade__windowed" />
+                </div>
+                <div class="sam3-text-field">
+                    <label>Window size (px)</label>
+                    <input type="number" class="sam3-text-cascade__window-size" min="64" step="32" />
+                </div>
+                <div class="sam3-text-field">
+                    <label>Window overlap</label>
+                    <input type="number" class="sam3-text-cascade__window-overlap" min="0" max="0.9" step="0.05" />
                 </div>
             </div>
         `;
@@ -28720,18 +29798,36 @@ async function cancelRfDetrTrainingJobRequest() {
         const maskInput = step.querySelector(".sam3-text-cascade__mask");
         const maxResultsInput = step.querySelector(".sam3-text-cascade__max-results");
         const minSizeInput = step.querySelector(".sam3-text-cascade__min-size");
+        const maxPointsInput = step.querySelector(".sam3-text-cascade__max-points");
         const epsilonInput = step.querySelector(".sam3-text-cascade__epsilon");
+        const windowedInput = step.querySelector(".sam3-text-cascade__windowed");
+        const windowSizeInput = step.querySelector(".sam3-text-cascade__window-size");
+        const windowOverlapInput = step.querySelector(".sam3-text-cascade__window-overlap");
         if (promptInput) promptInput.value = promptDefault;
         if (thresholdInput) thresholdInput.value = Number.isFinite(thresholdDefault) ? thresholdDefault : 0.5;
         if (maskInput) maskInput.value = Number.isFinite(maskDefault) ? maskDefault : 0.5;
         if (maxResultsInput) maxResultsInput.value = Number.isFinite(maxResultsDefault) ? maxResultsDefault : 20;
         if (minSizeInput) minSizeInput.value = Number.isFinite(minSizeDefault) ? minSizeDefault : 0;
+        if (maxPointsInput) maxPointsInput.value = Number.isFinite(maxPointsDefault) ? maxPointsDefault : 500;
         if (epsilonInput) epsilonInput.value = Number.isFinite(epsilonDefault) ? epsilonDefault : 1.0;
+        if (windowedInput) windowedInput.checked = !!windowSettings.windowed;
+        if (windowSizeInput) windowSizeInput.value = Number.isFinite(windowSettings.windowSize) ? windowSettings.windowSize : 672;
+        if (windowOverlapInput) windowOverlapInput.value = Number.isFinite(windowSettings.windowOverlap) ? windowSettings.windowOverlap : 0.1;
         const removeButton = step.querySelector(".sam3-text-cascade__remove");
+        step.querySelectorAll("input, select").forEach((el) => {
+            const refreshStep = () => {
+                updateSam3TextCascadeStepWindowControls(step);
+                updateSam3TextWorkflow();
+            };
+            el.addEventListener("input", refreshStep);
+            el.addEventListener("change", refreshStep);
+        });
+        updateSam3TextCascadeStepWindowControls(step);
         if (removeButton) {
             removeButton.addEventListener("click", () => {
                 step.remove();
                 refreshSam3TextCascadeStepTitles();
+                updateSam3TextWorkflow();
             });
         }
         return step;
@@ -28745,10 +29841,12 @@ async function cancelRfDetrTrainingJobRequest() {
         sam3TextElements.cascadeSteps.appendChild(step);
         refreshSam3TextCascadeClassOptions();
         refreshSam3TextCascadeStepTitles();
+        updateSam3TextWorkflow();
     }
 
     function setSam3TextCascadeEnabled(enabled) {
         sam3TextCascadeEnabled = !!enabled;
+        setSam3TextBatchMode(sam3TextCascadeEnabled ? "cascade" : "single");
         if (sam3TextElements.cascadePanel) {
             sam3TextElements.cascadePanel.hidden = !sam3TextCascadeEnabled;
         }
@@ -28759,6 +29857,7 @@ async function cancelRfDetrTrainingJobRequest() {
             addSam3TextCascadeStep({ useCurrentDefaults: true });
         }
         refreshSam3TextCascadeStepTitles();
+        updateSam3TextWorkflow();
         updateSam3TextButtons();
     }
 
@@ -28774,6 +29873,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (sam3TextCascadeEnabled) {
             addSam3TextCascadeStep({ useCurrentDefaults: true });
         }
+        updateSam3TextWorkflow();
     }
 
     function readSam3TextCascadeStep(step) {
@@ -28789,19 +29889,31 @@ async function cancelRfDetrTrainingJobRequest() {
         maxResults = Math.min(Math.max(maxResults, 1), 100);
         let minSize = parseInt(step.querySelector(".sam3-text-cascade__min-size")?.value || "0", 10);
         if (Number.isNaN(minSize) || minSize < 0) minSize = 0;
+        let maxPoints = parseInt(step.querySelector(".sam3-text-cascade__max-points")?.value || "500", 10);
+        if (!Number.isFinite(maxPoints) || maxPoints <= 3) maxPoints = 500;
+        maxPoints = Math.min(Math.max(maxPoints, 10), 5000);
         let simplifyEps = parseFloat(step.querySelector(".sam3-text-cascade__epsilon")?.value || "1.0");
         if (Number.isNaN(simplifyEps) || simplifyEps < 0) simplifyEps = 1.0;
         const targetClass = step.querySelector(".sam3-text-cascade__class")?.value || "";
-        const windowSettings = readSam3TextWindowSettings();
+        const windowed = !!step.querySelector(".sam3-text-cascade__windowed")?.checked;
+        let windowSize = parseInt(step.querySelector(".sam3-text-cascade__window-size")?.value || "672", 10);
+        if (Number.isNaN(windowSize) || windowSize <= 0) windowSize = 672;
+        let windowOverlap = parseFloat(step.querySelector(".sam3-text-cascade__window-overlap")?.value || "0.1");
+        if (!Number.isFinite(windowOverlap)) windowOverlap = 0.1;
+        windowOverlap = Math.min(Math.max(windowOverlap, 0), 0.9);
         return {
             prompt,
             threshold,
             maskThreshold,
             minSize,
             maxResults,
+            maxPoints,
             simplifyEps,
             targetClass,
-            ...windowSettings,
+            windowed,
+            windowSize,
+            windowOverlap,
+            mergeIou: 0.5,
         };
     }
 
@@ -28838,7 +29950,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 break;
             }
             setSam3TextStatus(`${statusPrefix} ${idx + 1}/${snapshots.length}…`, "info");
-            const result = await runSam3TextPromptSnapshot(snapshots[idx], { requestImageName: targetImageName });
+            const result = await runSam3TextPromptSnapshot(snapshots[idx], {
+                requestImageName: targetImageName,
+                statusLabel: `${statusPrefix} ${idx + 1}/${snapshots.length}`,
+            });
             totalAdded += Number(result?.added || 0);
         }
         return totalAdded;
@@ -28869,23 +29984,39 @@ async function cancelRfDetrTrainingJobRequest() {
         updateSam3TextButtons();
         const taskId = enqueueTask({ kind: "sam3-cascade", imageName: currentImage.name, detail: { count: total } });
         let totalAdded = 0;
+        let dedupeRemoved = 0;
+        let cascadeFailed = false;
+        const cascadeStartCreatedAt = bboxCreationCounter;
+        const cascadeDedupe = getSam3TextCascadePostDedupeConfig();
+        const assignedClasses = getSam3TextCascadeAssignedClasses(snapshots);
         try {
             totalAdded = await runSam3TextCascadeSnapshots(snapshots, {
                 shouldCancel: () => sam3TextCascadeCancel,
                 statusPrefix: "Cascade step",
                 targetImageName: currentImage.name,
             });
+            if (!sam3TextCascadeCancel && cascadeDedupe.enabled) {
+                const dedupeResult = dedupeSam3AssignedClassesForCurrentImage(assignedClasses, {
+                    iou: cascadeDedupe.iou,
+                    minCreatedAtExclusive: cascadeStartCreatedAt,
+                });
+                dedupeRemoved = Number(dedupeResult.removed || 0);
+            }
         } catch (error) {
+            cascadeFailed = true;
             console.error("SAM3 cascade failed", error);
             setSam3TextStatus(`Cascade error: ${error.message || error}`, "error");
         } finally {
             sam3TextCascadeActive = false;
             updateSam3TextButtons();
             completeTask(taskId);
-            const doneMessage = sam3TextCascadeCancel
-                ? "Cascade cancelled."
-                : `Cascade complete: added ${totalAdded} ${datasetType === "seg" ? "polygons" : "boxes"}.`;
-            setSam3TextStatus(doneMessage, sam3TextCascadeCancel ? "warn" : "success");
+            let doneMessage = `Cascade complete: added ${totalAdded} ${datasetType === "seg" ? "polygons" : "boxes"}${dedupeRemoved ? `, deduped ${dedupeRemoved}` : ""}.`;
+            if (sam3TextCascadeCancel) {
+                doneMessage = "Cascade cancelled.";
+            } else if (cascadeFailed) {
+                doneMessage = `Cascade failed after adding ${totalAdded} ${datasetType === "seg" ? "polygons" : "boxes"}.`;
+            }
+            setSam3TextStatus(doneMessage, sam3TextCascadeCancel || cascadeFailed ? "warn" : "success");
             enqueueTaskNotice(doneMessage, { durationMs: 4500 });
         }
     }
@@ -28955,13 +30086,24 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const { names } = batchConfig;
         const originalName = currentImage.name;
-        const batchTaskId = enqueueTask({ kind: sam3TextCascadeEnabled ? "sam3-cascade" : "sam3-batch", imageName: originalName, detail: { count: names.length } });
+        const batchMode = getSam3TextBatchMode();
+        const runCascadeBatch = batchMode === "cascade";
+        if (runCascadeBatch && !getSam3TextCascadeStepElements().length) {
+            setSam3TextStatus("Open the cascade editor and add at least one cascade step before running a cascade batch.", "warn");
+            return;
+        }
+        const batchTaskId = enqueueTask({ kind: runCascadeBatch ? "sam3-cascade" : "sam3-batch", imageName: originalName, detail: { count: names.length } });
         sam3TextBatchActive = true;
         sam3TextBatchCancel = false;
         updateSam3TextButtons();
         let totalAdded = 0;
-        const cascadeConfig = sam3TextCascadeEnabled ? collectSam3TextCascadeSnapshots({ includeBase: true }) : null;
-        if (sam3TextCascadeEnabled) {
+        let totalDedupeRemoved = 0;
+        const cascadeConfig = runCascadeBatch ? collectSam3TextCascadeSnapshots({ includeBase: true }) : null;
+        const cascadeDedupe = runCascadeBatch ? getSam3TextCascadePostDedupeConfig() : { enabled: false, iou: 0.65 };
+        const cascadeAssignedClasses = runCascadeBatch
+            ? getSam3TextCascadeAssignedClasses(cascadeConfig?.snapshots || [])
+            : [];
+        if (runCascadeBatch) {
             if (!cascadeConfig.snapshots.length) {
                 setSam3TextStatus("Add at least one valid cascade step first.", "warn");
                 sam3TextBatchActive = false;
@@ -28973,8 +30115,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 setSam3TextStatus(`Skipping ${cascadeConfig.skipped} empty step${cascadeConfig.skipped === 1 ? "" : "s"} in cascade.`, "warn");
             }
         }
-        const baseSnapshot = sam3TextCascadeEnabled ? null : buildSam3TextSnapshot();
-        if (!sam3TextCascadeEnabled) {
+        const baseSnapshot = runCascadeBatch ? null : buildSam3TextSnapshot();
+        if (!runCascadeBatch) {
             if (!baseSnapshot.prompt) {
                 setSam3TextStatus("Enter a prompt before running a batch.", "warn");
                 sam3TextElements.promptInput?.focus();
@@ -29013,15 +30155,26 @@ async function cancelRfDetrTrainingJobRequest() {
                     continue;
                 }
                 try {
-                    if (sam3TextCascadeEnabled) {
+                    if (runCascadeBatch) {
+                        const cascadeStartCreatedAt = bboxCreationCounter;
                         const added = await runSam3TextCascadeSnapshots(cascadeConfig.snapshots, {
                             shouldCancel: () => sam3TextBatchCancel,
                             statusPrefix: "Cascade step",
                             targetImageName: name,
                         });
                         totalAdded += Number(added || 0);
+                        if (!sam3TextBatchCancel && cascadeDedupe.enabled) {
+                            const dedupeResult = dedupeSam3AssignedClassesForCurrentImage(cascadeAssignedClasses, {
+                                iou: cascadeDedupe.iou,
+                                minCreatedAtExclusive: cascadeStartCreatedAt,
+                            });
+                            totalDedupeRemoved += Number(dedupeResult.removed || 0);
+                        }
                     } else {
-                        const result = await runSam3TextPromptSnapshot(baseSnapshot, { requestImageName: name });
+                        const result = await runSam3TextPromptSnapshot(baseSnapshot, {
+                            requestImageName: name,
+                            statusLabel: `Batch ${idx + 1}/${names.length}`,
+                        });
                         totalAdded += Number(result?.added || 0);
                     }
                 } catch (err) {
@@ -29035,7 +30188,7 @@ async function cancelRfDetrTrainingJobRequest() {
             completeTask(batchTaskId);
             const doneMessage = sam3TextBatchCancel
                 ? "Batch cancelled."
-                : `Batch complete: added ${totalAdded} ${datasetType === "seg" ? "polygons" : "boxes"}.`;
+                : `Batch complete: added ${totalAdded} ${datasetType === "seg" ? "polygons" : "boxes"}${totalDedupeRemoved ? `, deduped ${totalDedupeRemoved}` : ""}.`;
             setSam3TextStatus(doneMessage, sam3TextBatchCancel ? "warn" : "success");
             enqueueTaskNotice(doneMessage, { durationMs: 5000 });
         }
@@ -29081,7 +30234,7 @@ async function cancelRfDetrTrainingJobRequest() {
         setSamStatus("Running SAM3 text prompt…", { variant: "info", duration: 0 });
         try {
             const requestImageName = currentImage.name;
-            await runSam3TextPromptSnapshot(snapshot, { requestImageName });
+            await runSam3TextPromptSnapshot(snapshot, { requestImageName, statusLabel: "SAM3 text prompt" });
         } catch (error) {
             const detail = error?.message || error;
             setSam3TextStatus(`SAM3 error: ${detail}`, "error");
@@ -30143,12 +31296,14 @@ async function cancelRfDetrTrainingJobRequest() {
         return firstRecord;
     }
 
-    function addDetectionAnnotation(entry, className) {
+    function addDetectionAnnotation(entry, className, options = {}) {
         if (datasetType === "seg") {
             if (entry?.mask) {
                 const epsVal = Number(entry.simplify_epsilon);
                 const created = addPolygonFromMask(entry.mask, className, {
-                    simplifyEpsilon: Number.isFinite(epsVal) && epsVal >= 0 ? epsVal : null,
+                    simplifyEpsilon: Number.isFinite(epsVal) && epsVal >= 0 ? epsVal : options.simplifyEpsilon,
+                    maxPointsPerPolygon: options.maxPointsPerPolygon,
+                    minArea: options.minArea,
                 });
                 if (created) {
                     return created;
@@ -30163,7 +31318,7 @@ async function cancelRfDetrTrainingJobRequest() {
         return applySegAwareDetections(entries, className, sourceLabel);
     }
 
-    function applySegAwareDetections(entries, className, sourceLabel = "Detector") {
+    function applySegAwareDetections(entries, className, sourceLabel = "Detector", options = {}) {
         if (!currentImage || !className || !Array.isArray(entries) || entries.length === 0) {
             return 0;
         }
@@ -30172,7 +31327,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!entry || !entry.bbox) {
                 return;
             }
-            const created = addDetectionAnnotation(entry, className);
+            const created = addDetectionAnnotation(entry, className, options);
             if (!created) {
                 return;
             }
@@ -33657,6 +34812,1436 @@ async function cancelRfDetrTrainingJobRequest() {
 	            });
 	    }
 
+    function getClassSplitScope() {
+        return classSplitElements.scopeAll?.checked ? "all_classes" : "selected_class";
+    }
+
+    function getClassSplitImageKeys() {
+        const listEl = document.getElementById("imageList");
+        if (listEl && listEl.options?.length) {
+            return Array.from(listEl.options)
+                .map((option) => String(getOptionImageName(option) || "").trim())
+                .filter((key) => key && images?.[key]);
+        }
+        return Object.keys(images || {}).filter((key) => !!images[key]);
+    }
+
+    function getClassSplitLabelmapEntries() {
+        const ordered = [];
+        Object.entries(classes || {}).forEach(([className, idx]) => {
+            const classIndex = Number(idx);
+            if (!Number.isFinite(classIndex) || classIndex < 0) {
+                return;
+            }
+            ordered[classIndex] = String(className || "").trim();
+        });
+        if (!ordered.length && Array.isArray(loadedClassList)) {
+            loadedClassList.forEach((className, idx) => {
+                ordered[idx] = String(className || "").trim();
+            });
+        }
+        return ordered.map((className) => String(className || "").trim()).filter(Boolean);
+    }
+
+    function getClassSplitActiveLabelLines(imageKey) {
+        const key = String(imageKey || "");
+        if (!key) {
+            return [];
+        }
+        const row = annotationSourceState.imageRowsByKey?.get(key);
+        if (row) {
+            if (annotationSourceState.hydratedKeys.has(key)) {
+                return serializeDatasetBboxesForImage(key);
+            }
+            const rawLines = annotationSourceState.rawLabelLinesByKey.get(key);
+            return (Array.isArray(rawLines) ? rawLines : (Array.isArray(row.label_lines) ? row.label_lines : []))
+                .map((line) => String(line || "").trim())
+                .filter(Boolean);
+        }
+        return serializeDatasetBboxesForImage(key)
+            .map((line) => String(line || "").trim())
+            .filter(Boolean);
+    }
+
+    function getClassSplitLineClassName(line, labelmap = null) {
+        const cols = String(line || "").trim().split(/\s+/).filter(Boolean);
+        if (!cols.length) {
+            return "";
+        }
+        const classIdx = parseInt(cols[0], 10);
+        if (!Number.isFinite(classIdx)) {
+            return "";
+        }
+        const names = Array.isArray(labelmap) && labelmap.length ? labelmap : getClassSplitLabelmapEntries();
+        return String(names[classIdx] || getClassNameById(classIdx) || "").trim();
+    }
+
+    function classSplitLineMatchesScope(line, scope, className, labelmap = null) {
+        if (String(scope || "") !== "selected_class") {
+            return true;
+        }
+        return getClassSplitLineClassName(line, labelmap) === String(className || "").trim();
+    }
+
+    function getClassSplitActiveWorkspaceStats() {
+        const labelmap = getClassSplitLabelmapEntries();
+        const imageKeys = getClassSplitImageKeys();
+        const counts = new Map(labelmap.map((className) => [className, 0]));
+        let objectCount = 0;
+        let labeledImageCount = 0;
+        imageKeys.forEach((imageKey) => {
+            const lines = getClassSplitActiveLabelLines(imageKey);
+            if (lines.length) {
+                labeledImageCount += 1;
+            }
+            lines.forEach((line) => {
+                const className = getClassSplitLineClassName(line, labelmap);
+                if (!className) {
+                    return;
+                }
+                counts.set(className, (counts.get(className) || 0) + 1);
+                objectCount += 1;
+            });
+        });
+        return {
+            imageCount: imageKeys.length,
+            labeledImageCount,
+            classCount: labelmap.length,
+            objectCount,
+            counts,
+        };
+    }
+
+    function makeClassSplitUploadName(imageKey, usedNames) {
+        const rawLeaf = String(imageKey || "image.jpg").split(/[\\/]/).pop() || "image.jpg";
+        let cleaned = rawLeaf.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[_ .-]+|[_ .-]+$/g, "");
+        if (!cleaned) {
+            cleaned = "image.jpg";
+        }
+        if (!/\.(jpe?g|png|bmp|gif|webp|tif|tiff)$/i.test(cleaned)) {
+            cleaned = `${cleaned}.jpg`;
+        }
+        const dot = cleaned.lastIndexOf(".");
+        const stem = dot > 0 ? cleaned.slice(0, dot) : cleaned;
+        const ext = dot > 0 ? cleaned.slice(dot) : "";
+        let candidate = cleaned;
+        let idx = 1;
+        while (usedNames.has(candidate)) {
+            candidate = `${stem}_${idx}${ext}`;
+            idx += 1;
+        }
+        usedNames.add(candidate);
+        return candidate;
+    }
+
+    function classSplitDataUrlToBlob(dataUrl) {
+        const raw = String(dataUrl || "");
+        const match = raw.match(/^data:([^;,]+)?(;base64)?,(.*)$/);
+        if (!match) {
+            throw new Error("Image data URL is invalid.");
+        }
+        const mime = match[1] || "image/jpeg";
+        const isBase64 = !!match[2];
+        const body = isBase64 ? atob(match[3]) : decodeURIComponent(match[3]);
+        const bytes = new Uint8Array(body.length);
+        for (let idx = 0; idx < body.length; idx++) {
+            bytes[idx] = body.charCodeAt(idx);
+        }
+        return new Blob([bytes], { type: mime });
+    }
+
+    async function classSplitImageObjectToBlob(imageRecord) {
+        const imageObject = imageRecord?.object || (currentImage?.name === imageRecord?.name ? currentImage.object : null);
+        if (!imageObject) {
+            return null;
+        }
+        const width = imageObject.naturalWidth || imageObject.width || imageRecord.width || 0;
+        const height = imageObject.naturalHeight || imageObject.height || imageRecord.height || 0;
+        if (!width || !height) {
+            return null;
+        }
+        const canvasEl = document.createElement("canvas");
+        canvasEl.width = width;
+        canvasEl.height = height;
+        const ctx = canvasEl.getContext("2d");
+        if (!ctx) {
+            return null;
+        }
+        ctx.drawImage(imageObject, 0, 0, width, height);
+        return new Promise((resolve, reject) => {
+            canvasEl.toBlob((blob) => {
+                if (blob) {
+                    resolve(blob);
+                } else {
+                    reject(new Error("Failed to package image for Class Split Explorer."));
+                }
+            }, "image/jpeg", 0.95);
+        });
+    }
+
+    async function getClassSplitImageBlob(imageKey, imageRecord) {
+        if (imageRecord?.meta instanceof Blob) {
+            return imageRecord.meta;
+        }
+        if (imageRecord?.dataUrl) {
+            return classSplitDataUrlToBlob(imageRecord.dataUrl);
+        }
+        if (currentImage?.name === imageKey && currentImage?.dataUrl) {
+            return classSplitDataUrlToBlob(currentImage.dataUrl);
+        }
+        const imageUrl = annotationImageUrlForRecord(imageRecord);
+        if (imageUrl) {
+            const resp = await fetch(imageUrl);
+            const detail = resp.ok ? "" : await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            return resp.blob();
+        }
+        const renderedBlob = await classSplitImageObjectToBlob(imageRecord);
+        if (renderedBlob) {
+            return renderedBlob;
+        }
+        throw new Error(`Image data is not available in the active workspace: ${imageKey}`);
+    }
+
+    async function buildClassSplitActiveWorkspaceForm(request) {
+        captureCurrentAnnotationDirtyState();
+        const labelmap = getClassSplitLabelmapEntries();
+        if (!labelmap.length) {
+            throw new Error("Load a labelmap in Label Images before running Class Split Explorer.");
+        }
+        const scope = String(request.analysis_scope || "selected_class");
+        const className = String(request.class_name || "").trim();
+        const formData = new FormData();
+        const rows = [];
+        const usedNames = new Set();
+        let objectCount = 0;
+        for (const imageKey of getClassSplitImageKeys()) {
+            const imageRecord = images?.[imageKey];
+            if (!imageRecord) {
+                continue;
+            }
+            const labelLines = getClassSplitActiveLabelLines(imageKey)
+                .filter((line) => classSplitLineMatchesScope(line, scope, className, labelmap));
+            if (!labelLines.length) {
+                continue;
+            }
+            const uploadName = makeClassSplitUploadName(imageKey, usedNames);
+            const blob = await getClassSplitImageBlob(imageKey, imageRecord);
+            formData.append("files", blob, uploadName);
+            rows.push({
+                split: "train",
+                upload_name: uploadName,
+                image_relpath: uploadName,
+                image_name: String(imageRecord.displayName || imageRecord.meta?.name || imageKey),
+                frontend_image_key: imageKey,
+                label_lines: labelLines,
+                text_label: String(textLabels?.[imageKey] || ""),
+            });
+            objectCount += labelLines.length;
+        }
+        if (!rows.length || objectCount <= 0) {
+            throw new Error("No labeled objects in the active Label Images workspace match the selected scope.");
+        }
+        const manifest = {
+            dataset_label: annotationSourceState.datasetLabel || "Active Label Images workspace",
+            labelmap,
+            images: rows,
+            request,
+            yolo_layout: "flat",
+        };
+        formData.append("manifest", JSON.stringify(manifest));
+        return { formData, imageCount: rows.length, objectCount };
+    }
+
+    function getClassSplitClassCounts() {
+        return getClassSplitActiveWorkspaceStats().counts;
+    }
+
+    function getClassSplitSampleCap() {
+        const raw = String(classSplitElements.sampleCap?.value || "").trim();
+        if (!raw) {
+            return 0;
+        }
+        const parsed = parseInt(raw, 10);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+            return 0;
+        }
+        return Math.min(50000, parsed);
+    }
+
+    function markClassSplitRecipeCustom() {
+        if (classSplitElements.recipePreset && classSplitElements.recipePreset.value !== "custom") {
+            classSplitElements.recipePreset.value = "custom";
+        }
+    }
+
+    function applyEmbeddingRecipePresetToClassSplit(preset) {
+        const key = String(preset || "balanced").toLowerCase();
+        if (key === "custom") {
+            return;
+        }
+        const values = embeddingRecipePresetValues(key);
+        if (classSplitElements.canonicalSize) {
+            classSplitElements.canonicalSize.value = values.canonicalSize;
+        }
+        if (classSplitElements.padding) {
+            classSplitElements.padding.value = values.padding;
+        }
+        setSelectValueIfPresent(classSplitElements.preprocessMode, values.preprocessMode);
+        setSelectValueIfPresent(classSplitElements.sizeBiasMode, values.adjustment);
+        setSelectValueIfPresent(classSplitElements.dinov3Pooling, values.dinov3Pooling);
+        setSelectValueIfPresent(classSplitElements.backgroundMode, values.backgroundMode);
+        setSelectValueIfPresent(classSplitElements.viewMode, values.viewMode);
+    }
+
+    function populateClassSplitClasses({ preserveSelection = true } = {}) {
+        const selectEl = classSplitElements.classSelect;
+        if (!selectEl) {
+            return;
+        }
+        const previous = preserveSelection ? selectEl.value : "";
+        const classesAvailable = Array.isArray(loadedClassList)
+            ? loadedClassList.map((name) => String(name || "").trim()).filter(Boolean)
+            : [];
+        const counts = getClassSplitClassCounts();
+        selectEl.innerHTML = "";
+        classesAvailable.forEach((className) => {
+            const option = document.createElement("option");
+            option.value = className;
+            const count = counts.get(className) || 0;
+            option.textContent = count > 0 ? `${className} (${count})` : className;
+            selectEl.appendChild(option);
+        });
+        const desired = previous || currentClass || (classesAvailable.length ? classesAvailable[0] : "");
+        if (desired && classesAvailable.includes(desired)) {
+            selectEl.value = desired;
+        }
+        selectEl.disabled = !classesAvailable.length || getClassSplitScope() !== "selected_class";
+    }
+
+    function syncClassSplitCurrentClassSelection() {
+        const selectEl = classSplitElements.classSelect;
+        if (!selectEl || getClassSplitScope() !== "selected_class" || !currentClass) {
+            return;
+        }
+        const values = Array.from(selectEl.options || []).map((option) => option.value);
+        if (values.includes(currentClass)) {
+            selectEl.value = currentClass;
+        }
+    }
+
+    async function loadClassSplitClipBackbones() {
+        try {
+            const resp = await fetch(`${API_ROOT}/clip/backbones`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            classSplitState.clipBackbones = Array.isArray(data.available)
+                ? data.available.map((entry) => String(entry || "").trim()).filter(Boolean)
+                : [];
+        } catch (error) {
+            console.warn("Failed to load Class Split CLIP backbones", error);
+            classSplitState.clipBackbones = [];
+        }
+    }
+
+    async function loadClassSplitCapabilities() {
+        try {
+            const resp = await fetch(`${API_ROOT}/class_analysis/capabilities`);
+            if (!resp.ok) {
+                throw new Error(`HTTP ${resp.status}`);
+            }
+            classSplitState.capabilities = await resp.json();
+        } catch (error) {
+            console.warn("Failed to load Class Split capabilities", error);
+            classSplitState.capabilities = {
+                default_encoder_type: "dinov3",
+                default_dinov3_model: "facebook/dinov3-vitb16-pretrain-lvd1689m",
+                default_clip_model: "",
+                projection_methods: ["pca"],
+            };
+        }
+        updateClassSplitBackboneOptions();
+        updateClassSplitProjectionOptions();
+        refreshClassSplitControls();
+    }
+
+    function updateClassSplitProjectionOptions() {
+        if (!classSplitElements.projection) {
+            return;
+        }
+        const available = Array.isArray(classSplitState.capabilities?.projection_methods)
+            ? classSplitState.capabilities.projection_methods
+            : ["pca"];
+        const options = [
+            { value: "pca", label: "PCA" },
+            { value: "umap", label: available.includes("umap") ? "UMAP" : "UMAP if available" },
+        ];
+        fillSelectOptions(classSplitElements.projection, options, classSplitElements.projection.value || "pca");
+    }
+
+    function updateClassSplitBackboneOptions() {
+        const selectEl = classSplitElements.backbone;
+        if (!selectEl) {
+            return;
+        }
+        const encoder = String(classSplitElements.encoderType?.value || classSplitState.capabilities?.default_encoder_type || "dinov3").toLowerCase();
+        if (encoder === "clip") {
+            const clipOptions = classSplitState.clipBackbones.length
+                ? classSplitState.clipBackbones
+                : [classSplitState.capabilities?.default_clip_model || "ViT-B/32"];
+            fillSelectOptions(selectEl, clipOptions, classSplitState.capabilities?.default_clip_model || "");
+            return;
+        }
+        fillSelectOptions(
+            selectEl,
+            DINOV3_BACKBONES,
+            classSplitState.capabilities?.default_dinov3_model || "facebook/dinov3-vitb16-pretrain-lvd1689m"
+        );
+    }
+
+    function setClassSplitJobStatus(message, variant = "") {
+        if (!classSplitElements.jobStatus) {
+            return;
+        }
+        classSplitElements.jobStatus.textContent = message || "";
+        classSplitElements.jobStatus.classList.remove("warn", "error", "success");
+        if (variant) {
+            classSplitElements.jobStatus.classList.add(variant);
+        }
+    }
+
+    function renderClassSplitProgress(job = null) {
+        if (!classSplitElements.progress) {
+            return;
+        }
+        const active = classSplitState.active || (job && !["completed", "failed", "cancelled"].includes(String(job.status || "")));
+        classSplitElements.progress.hidden = !active && !job;
+        const progress = Math.max(0, Math.min(1, Number(job?.progress) || 0));
+        if (classSplitElements.progressFill) {
+            classSplitElements.progressFill.style.width = `${Math.round(progress * 100)}%`;
+        }
+        if (classSplitElements.progressText) {
+            const pct = `${Math.round(progress * 100)}%`;
+            const message = String(job?.message || "").trim();
+            const logTail = Array.isArray(job?.logs) && job.logs.length
+                ? String(job.logs[job.logs.length - 1]?.message || "").trim()
+                : "";
+            classSplitElements.progressText.textContent = [pct, message || logTail].filter(Boolean).join(" • ");
+        }
+    }
+
+    function refreshClassSplitControls() {
+        const stats = getClassSplitActiveWorkspaceStats();
+        const available = stats.imageCount > 0 && stats.classCount > 0 && stats.objectCount > 0;
+        populateClassSplitClasses({ preserveSelection: true });
+        const scope = getClassSplitScope();
+        const classSelected = !!String(classSplitElements.classSelect?.value || "").trim();
+        const selectedClassCount = stats.counts.get(String(classSplitElements.classSelect?.value || "").trim()) || 0;
+        if (classSplitElements.datasetStatus) {
+            if (!stats.imageCount) {
+                classSplitElements.datasetStatus.textContent = "Open images in Label Images to run analysis.";
+            } else if (!stats.classCount) {
+                classSplitElements.datasetStatus.textContent = "Load a labelmap in Label Images to run analysis.";
+            } else if (!stats.objectCount) {
+                classSplitElements.datasetStatus.textContent = "Draw or load labels in Label Images to run analysis.";
+            } else {
+                classSplitElements.datasetStatus.textContent =
+                    `Active Label Images workspace • ${stats.imageCount} images • ${stats.labeledImageCount} labeled • ${stats.objectCount} objects`;
+            }
+        }
+        if (classSplitElements.classSelect) {
+            classSplitElements.classSelect.disabled = !available || scope !== "selected_class" || classSplitState.active;
+        }
+        [
+            classSplitElements.scopeSelected,
+            classSplitElements.scopeAll,
+            classSplitElements.recipePreset,
+            classSplitElements.encoderType,
+            classSplitElements.backbone,
+            classSplitElements.projection,
+            classSplitElements.projectionNeighborK,
+            classSplitElements.sampleCap,
+            classSplitElements.padding,
+            classSplitElements.canonicalSize,
+            classSplitElements.preprocessMode,
+            classSplitElements.sizeBiasMode,
+            classSplitElements.dinov3Pooling,
+            classSplitElements.backgroundMode,
+            classSplitElements.viewMode,
+            classSplitElements.neighborK,
+        ].forEach((control) => {
+            if (control) {
+                control.disabled = !available || classSplitState.active;
+            }
+        });
+        const canRun = available
+            && !classSplitState.active
+            && (scope !== "selected_class" || (classSelected && selectedClassCount > 0));
+        setButtonDisabled(classSplitElements.runButton, !canRun);
+        setButtonDisabled(classSplitElements.cancelButton, !classSplitState.active || !classSplitState.currentJobId);
+        setButtonDisabled(classSplitElements.rerunButton, classSplitState.active || !classSplitState.lastRequest);
+    }
+
+    function buildClassSplitRequest() {
+        const stats = getClassSplitActiveWorkspaceStats();
+        if (!stats.imageCount) {
+            throw new Error("Open images in Label Images before running Class Split Explorer.");
+        }
+        if (!stats.classCount) {
+            throw new Error("Load a labelmap in Label Images before running Class Split Explorer.");
+        }
+        if (!stats.objectCount) {
+            throw new Error("Draw or load labels in Label Images before running Class Split Explorer.");
+        }
+        const scope = getClassSplitScope();
+        const className = String(classSplitElements.classSelect?.value || currentClass || "").trim();
+        if (scope === "selected_class" && !className) {
+            throw new Error("Choose a class to analyze.");
+        }
+        if (scope === "selected_class" && !(stats.counts.get(className) > 0)) {
+            throw new Error(`No active labels are assigned to ${className}.`);
+        }
+        const encoderType = String(classSplitElements.encoderType?.value || "dinov3").toLowerCase();
+        const sampleCap = getClassSplitSampleCap();
+        const padding = Math.max(0, Math.min(1, parseFloat(classSplitElements.padding?.value || "0.08") || 0));
+        const canonicalSizeRaw = parseInt(classSplitElements.canonicalSize?.value || "336", 10);
+        const canonicalSize = Number.isFinite(canonicalSizeRaw)
+            ? Math.max(64, Math.min(1024, canonicalSizeRaw))
+            : 336;
+        const projectionNeighborRaw = parseInt(classSplitElements.projectionNeighborK?.value || "15", 10);
+        const projectionNeighborK = Number.isFinite(projectionNeighborRaw)
+            ? Math.max(0, Math.min(5000, projectionNeighborRaw))
+            : 15;
+        const neighborK = Math.max(3, Math.min(100, parseInt(classSplitElements.neighborK?.value || "15", 10) || 15));
+        const request = {
+            analysis_scope: scope,
+            class_name: scope === "selected_class" ? className : "",
+            encoder_type: encoderType,
+            encoder_model: String(classSplitElements.backbone?.value || "").trim(),
+            projection: String(classSplitElements.projection?.value || "pca").trim().toLowerCase() || "pca",
+            projection_neighbor_k: projectionNeighborK,
+            crop_mode: "padded_square",
+            padding_ratio: padding,
+            preprocess_mode: String(classSplitElements.preprocessMode?.value || "canonical").trim().toLowerCase() || "canonical",
+            canonical_size: canonicalSize,
+            embedding_adjustment: String(classSplitElements.sizeBiasMode?.value || "remove_size_bias").trim().toLowerCase() || "remove_size_bias",
+            dinov3_pooling: String(classSplitElements.dinov3Pooling?.value || "pooler").trim().toLowerCase() || "pooler",
+            background_mode: String(classSplitElements.backgroundMode?.value || "full_crop").trim().toLowerCase() || "full_crop",
+            embedding_view_mode: String(classSplitElements.viewMode?.value || "single").trim().toLowerCase() || "single",
+            neighbor_k: neighborK,
+            batch_size: 64,
+            seed: 42,
+        };
+        if (sampleCap > 0) {
+            request.sample_cap = sampleCap;
+        }
+        return request;
+    }
+
+    async function ensureClassSplitSnapshotClean(actionLabel = "Class analysis") {
+        if (!isAnnotationDatasetModeActive()) {
+            return;
+        }
+        captureCurrentAnnotationDirtyState();
+        if (!annotationSourceState.dirtyRecordsByKey.size) {
+            return;
+        }
+        await flushAnnotationSnapshot({ manual: false });
+        if (annotationSourceState.dirtyRecordsByKey.size) {
+            throw new Error(`${actionLabel} needs the current annotation edits saved first.`);
+        }
+    }
+
+    async function startClassSplitAnalysis({ reuseLast = false } = {}) {
+        if (classSplitState.active) {
+            return;
+        }
+        try {
+            const request = reuseLast && classSplitState.lastRequest
+                ? { ...classSplitState.lastRequest }
+                : buildClassSplitRequest();
+            classSplitState.active = true;
+            classSplitState.currentJobId = "";
+            classSplitState.selectedPointId = "";
+            setClassSplitJobStatus("Packaging active workspace ...", "");
+            renderClassSplitProgress({ progress: 0, message: "Packaging active labels and images ..." });
+            refreshClassSplitControls();
+            const workspace = await buildClassSplitActiveWorkspaceForm(request);
+            classSplitState.lastRequest = { ...request };
+            renderClassSplitProgress({
+                progress: 0.01,
+                message: `Uploading ${workspace.objectCount} objects from ${workspace.imageCount} active images ...`,
+            });
+            const resp = await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace`, {
+                method: "POST",
+                body: workspace.formData,
+            });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            const payload = parseJsonObjectSafe(detail, {});
+            const jobId = String(payload.job_id || "").trim();
+            if (!jobId) {
+                throw new Error("Class analysis did not return a job id.");
+            }
+            classSplitState.currentJobId = jobId;
+            setClassSplitJobStatus("Queued active workspace", "");
+            pollClassSplitJob(jobId);
+        } catch (error) {
+            console.error("Class Split analysis failed to start", error);
+            classSplitState.active = false;
+            setClassSplitJobStatus(`Failed: ${error.message || error}`, "error");
+            renderClassSplitProgress({ progress: 1, message: `Failed: ${error.message || error}` });
+            refreshClassSplitControls();
+        }
+    }
+
+    function stopClassSplitPoll() {
+        if (classSplitState.pollTimer) {
+            clearTimeout(classSplitState.pollTimer);
+            classSplitState.pollTimer = null;
+        }
+    }
+
+    function pollClassSplitJob(jobId) {
+        stopClassSplitPoll();
+        const requestId = ++classSplitState.pollRequestId;
+        const run = async () => {
+            try {
+                const resp = await fetch(`${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}`);
+                const detail = await resp.text();
+                if (!resp.ok) {
+                    throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+                }
+                if (requestId !== classSplitState.pollRequestId) {
+                    return;
+                }
+                const job = parseJsonObjectSafe(detail, {});
+                renderClassSplitProgress(job);
+                const status = String(job.status || "").toLowerCase();
+                if (status === "completed") {
+                    classSplitState.active = false;
+                    setClassSplitJobStatus("Completed", "success");
+                    await loadClassSplitResult(jobId);
+                    refreshClassSplitControls();
+                    return;
+                }
+                if (status === "failed") {
+                    classSplitState.active = false;
+                    setClassSplitJobStatus(`Failed: ${job.error || job.message || "unknown error"}`, "error");
+                    refreshClassSplitControls();
+                    return;
+                }
+                if (status === "cancelled") {
+                    classSplitState.active = false;
+                    setClassSplitJobStatus("Cancelled", "warn");
+                    refreshClassSplitControls();
+                    return;
+                }
+                setClassSplitJobStatus(status || "Running", "");
+                classSplitState.pollTimer = window.setTimeout(run, 1200);
+            } catch (error) {
+                console.error("Class Split poll failed", error);
+                if (requestId !== classSplitState.pollRequestId) {
+                    return;
+                }
+                classSplitState.active = false;
+                setClassSplitJobStatus(`Poll failed: ${error.message || error}`, "error");
+                refreshClassSplitControls();
+            }
+        };
+        run();
+    }
+
+    async function cancelClassSplitJob() {
+        const jobId = classSplitState.currentJobId;
+        if (!jobId) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/cancel`, {
+                method: "POST",
+            });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            setClassSplitJobStatus("Cancelling ...", "warn");
+        } catch (error) {
+            console.error("Class Split cancel failed", error);
+            setClassSplitJobStatus(`Cancel failed: ${error.message || error}`, "error");
+        }
+    }
+
+    async function loadClassSplitResult(jobId) {
+        const resp = await fetch(`${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/result`);
+        const detail = await resp.text();
+        if (!resp.ok) {
+            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+        }
+        const result = parseJsonObjectSafe(detail, {});
+        classSplitState.result = result;
+        classSplitState.pointsById = new Map();
+        (Array.isArray(result.points) ? result.points : []).forEach((point) => {
+            if (point?.point_id) {
+                classSplitState.pointsById.set(String(point.point_id), point);
+            }
+        });
+        renderClassSplitResult();
+    }
+
+    function getClassSplitFilteredPoints() {
+        const result = classSplitState.result;
+        const points = Array.isArray(result?.points) ? result.points : [];
+        const filter = String(classSplitElements.filterClass?.value || "").trim();
+        if (!filter) {
+            return points;
+        }
+        return points.filter((point) => String(point.class_name || "") === filter);
+    }
+
+    function classSplitScoreColor(score, low = "#dbeafe", high = "#ef4444") {
+        const safeScore = Math.max(0, Math.min(1, Number(score) || 0));
+        return mixHexColors(high, low, 1 - safeScore);
+    }
+
+    function classSplitClusterColor(clusterId) {
+        const palette = [
+            "#2563eb", "#dc2626", "#16a34a", "#f59e0b", "#9333ea", "#0891b2",
+            "#db2777", "#65a30d", "#7c3aed", "#ea580c", "#0f766e", "#4f46e5",
+        ];
+        const idx = Math.abs(parseInt(clusterId, 10) || 0) % palette.length;
+        return palette[idx];
+    }
+
+    function getClassSplitPointColor(point) {
+        const mode = String(classSplitElements.colorMode?.value || "class");
+        if (mode === "cluster") {
+            return classSplitClusterColor(point.cluster_id);
+        }
+        if (mode === "wrong") {
+            return classSplitScoreColor(point.wrong_class_suspicion, "#e0f2fe", "#ef4444");
+        }
+        if (mode === "outlier") {
+            return classSplitScoreColor(point.outlier_score, "#dcfce7", "#f97316");
+        }
+        if (mode === "area") {
+            const area = Math.max(0, (Number(point.width) || 0) * (Number(point.height) || 0));
+            const score = Math.min(1, Math.log10(area + 1) / 6);
+            return classSplitScoreColor(score, "#f1f5f9", "#7c3aed");
+        }
+        return getClassColorTokens(point.class_name || "").stroke || "#2563eb";
+    }
+
+    function getClassSplitPlotTheme() {
+        const mode = typeof getActiveThemeMode === "function" ? getActiveThemeMode() : THEME_LIGHT;
+        if (mode === THEME_PIPBOY) {
+            return {
+                paper: "rgba(2, 14, 5, 0.96)",
+                plot: "rgba(1, 8, 3, 0.84)",
+                grid: "rgba(118, 255, 92, 0.22)",
+                text: "rgb(170, 255, 140)",
+            };
+        }
+        if (mode === THEME_DARK) {
+            return {
+                paper: "#0f172a",
+                plot: "#111827",
+                grid: "rgba(148, 163, 184, 0.28)",
+                text: "#dbeafe",
+            };
+        }
+        return {
+            paper: "#ffffff",
+            plot: "#ffffff",
+            grid: "rgba(148, 163, 184, 0.35)",
+            text: "#0f172a",
+        };
+    }
+
+    function buildClassSplitTrace(points, name, suspiciousOnly = false) {
+        const filtered = points.filter((point) => !!point.is_wrong_class_candidate === suspiciousOnly);
+        return {
+            type: "scattergl",
+            mode: "markers",
+            name,
+            x: filtered.map((point) => Number(point.projection?.[0]) || 0),
+            y: filtered.map((point) => Number(point.projection?.[1]) || 0),
+            customdata: filtered.map((point) => String(point.point_id || "")),
+            text: filtered.map((point) => {
+                const neighbor = point.suggested_neighbor_class
+                    ? `Suggested by neighbors: ${point.suggested_neighbor_class}<br>`
+                    : "";
+                return [
+                    `<b>${escapeHtml(point.class_name || "")}</b>`,
+                    `${escapeHtml(point.image_relpath || "")}`,
+                    `Cluster ${escapeHtml(point.cluster_id ?? "")}`,
+                    `${neighbor}Suspicion ${(Number(point.wrong_class_suspicion) || 0).toFixed(2)}`,
+                ].join("<br>");
+            }),
+            hovertemplate: "%{text}<extra></extra>",
+            marker: {
+                size: filtered.map((point) => {
+                    if (String(point.point_id || "") === classSplitState.selectedPointId) {
+                        return suspiciousOnly ? 17 : 15;
+                    }
+                    return suspiciousOnly ? 12 : 8;
+                }),
+                color: filtered.map((point) => getClassSplitPointColor(point)),
+                opacity: suspiciousOnly ? 0.95 : 0.78,
+                line: {
+                    color: suspiciousOnly ? "#ef4444" : "rgba(15, 23, 42, 0.35)",
+                    width: suspiciousOnly ? 2 : 0.5,
+                },
+            },
+        };
+    }
+
+    function setClassSplitGraphPanMode(active) {
+        const graphEl = classSplitElements.graph;
+        const nextActive = !!active;
+        if (classSplitState.shiftPanActive === nextActive) {
+            return;
+        }
+        classSplitState.shiftPanActive = nextActive;
+        if (graphEl) {
+            graphEl.classList.toggle("class-split-graph--pan", nextActive);
+        }
+        if (graphEl && window.Plotly && graphEl.data) {
+            window.Plotly.relayout(graphEl, { dragmode: nextActive ? "pan" : "lasso" })
+                .catch((error) => console.debug("Class Split dragmode update failed", error));
+        }
+    }
+
+    function handleClassSplitShiftPanEvent(event, active) {
+        if (activeTab !== TAB_CLASS_SPLIT) {
+            if (classSplitState.shiftPanActive) {
+                setClassSplitGraphPanMode(false);
+            }
+            return;
+        }
+        if (isTextEditingTarget(event.target)) {
+            return;
+        }
+        if (event.key !== "Shift") {
+            return;
+        }
+        setClassSplitGraphPanMode(active);
+    }
+
+    function renderClassSplitPlot() {
+        const graphEl = classSplitElements.graph;
+        if (!graphEl) {
+            return;
+        }
+        if (!window.Plotly) {
+            graphEl.innerHTML = `<div class="training-help">Plotly did not load; cannot render the cluster graph.</div>`;
+            return;
+        }
+        const points = getClassSplitFilteredPoints();
+        if (!points.length) {
+            graphEl.innerHTML = `<div class="training-help">No points match the current filter.</div>`;
+            return;
+        }
+        const theme = getClassSplitPlotTheme();
+        const traces = [
+            buildClassSplitTrace(points, "Objects", false),
+            buildClassSplitTrace(points, "Likely wrong class", true),
+        ].filter((trace) => trace.x.length > 0);
+        const layout = {
+            paper_bgcolor: theme.paper,
+            plot_bgcolor: theme.plot,
+            font: { color: theme.text, family: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif" },
+            margin: { l: 42, r: 16, t: 18, b: 42 },
+            xaxis: {
+                title: "embedding x",
+                zeroline: false,
+                gridcolor: theme.grid,
+                linecolor: theme.grid,
+            },
+            yaxis: {
+                title: "embedding y",
+                zeroline: false,
+                gridcolor: theme.grid,
+                linecolor: theme.grid,
+                scaleanchor: "x",
+                scaleratio: 1,
+            },
+            legend: {
+                orientation: "h",
+                y: 1.08,
+                x: 0,
+                bgcolor: "rgba(0,0,0,0)",
+            },
+            dragmode: classSplitState.shiftPanActive ? "pan" : "lasso",
+        };
+        const config = {
+            responsive: true,
+            displaylogo: false,
+            scrollZoom: true,
+            modeBarButtonsToRemove: ["toImage"],
+        };
+        window.Plotly.react(graphEl, traces, layout, config).then(() => {
+            if (typeof graphEl.removeAllListeners === "function") {
+                graphEl.removeAllListeners("plotly_click");
+                graphEl.removeAllListeners("plotly_selected");
+            }
+            graphEl.on("plotly_click", (event) => {
+                const point = event?.points?.[0];
+                const pointId = String(point?.customdata || "");
+                if (pointId) {
+                    selectClassSplitPoint(pointId, { jump: false });
+                }
+            });
+            graphEl.on("plotly_selected", (event) => {
+                const point = event?.points?.[0];
+                const pointId = String(point?.customdata || "");
+                if (pointId) {
+                    selectClassSplitPoint(pointId, { jump: false });
+                }
+            });
+        }).catch((error) => {
+            console.warn("Class Split plot render failed", error);
+            graphEl.innerHTML = `<div class="training-help error">Graph render failed: ${escapeHtml(error.message || error)}</div>`;
+        });
+    }
+
+    function getClassSplitSuspicionStatus() {
+        const summary = classSplitState.result?.summary || {};
+        const classCounts = summary.class_counts || {};
+        const classCount = Object.keys(classCounts).filter((className) => Number(classCounts[className]) > 0).length;
+        const scope = String(summary.analysis_scope || "");
+        if (scope !== "all_classes") {
+            return {
+                enabled: false,
+                text: "Wrong-class suspicion is expected to stay at 0 in selected-class runs. Run all classes to compare each object against neighboring classes.",
+            };
+        }
+        if (classCount < 2) {
+            return {
+                enabled: false,
+                text: "Wrong-class suspicion needs at least two represented classes. With one class in the graph, scores are expected to stay at 0.",
+            };
+        }
+        return {
+            enabled: true,
+            text: "Wrong-class flags compare each point with its nearest embedded neighbors. A flag appears when nearby crops are mostly from another class.",
+        };
+    }
+
+    function renderClassSplitReport() {
+        const reportEl = classSplitElements.report;
+        if (!reportEl) {
+            return;
+        }
+        const result = classSplitState.result || {};
+        const summary = result.summary || {};
+        const clusters = Array.isArray(result.clusters?.clusters) ? result.clusters.clusters : [];
+        const clusterShape = clusters.length
+            ? clusters
+                .slice()
+                .sort((a, b) => (Number(b.size) || 0) - (Number(a.size) || 0))
+                .slice(0, 3)
+                .map((cluster) => `#${cluster.cluster_id}: ${cluster.size}`)
+                .join(", ")
+            : "No clusters";
+        const classCounts = summary.class_counts || {};
+        const classCount = Object.keys(classCounts).filter((className) => Number(classCounts[className]) > 0).length;
+        const request = classSplitState.lastRequest || {};
+        const sampleCap = Number(summary.sample_cap || request.sample_cap || 0) || 0;
+        const suspicion = getClassSplitSuspicionStatus();
+        const cache = summary.embedding_cache || {};
+        const cropCache = summary.crop_cache || {};
+        const diagnostics = classSplitState.result?.diagnostics || {};
+        const strongest = diagnostics.strongest_size_axis || {};
+        const projectionNeighbors = String(summary.projection || request.projection || "pca") === "umap"
+            ? (summary.projection_neighbor_k_resolved || summary.projection_neighbor_k || request.projection_neighbor_k || 15)
+            : "n/a for PCA";
+        const sizeCorr = strongest.metric
+            ? `${strongest.axis || "axis"} vs ${strongest.metric}: ${Math.abs(Number(strongest.correlation) || 0).toFixed(2)}`
+            : "n/a";
+        const settings = [
+            ["Objects", `${summary.object_count || 0}${summary.sampled ? ` sampled from ${summary.raw_object_count || 0}` : ""}`],
+            ["Classes", `${classCount}`],
+            ["Encoder", `${summary.encoder_type || request.encoder_type || "encoder"}`],
+            ["Projection", `${summary.projection || request.projection || "pca"}`],
+            ["Projection neighbors", `${projectionNeighbors}`],
+            ["Clusters", `${summary.cluster_count || 0} (${clusterShape})`],
+            ["Scoring neighbors", `${summary.neighbor_k || request.neighbor_k || 15}`],
+            ["Crop padding", `${summary.padding_ratio ?? request.padding_ratio ?? 0.08}`],
+            ["Canonical size", `${summary.canonical_size || request.canonical_size || 336}`],
+            ["Crop normalization", `${summary.preprocess_mode || request.preprocess_mode || "canonical"}`],
+            ["Size-bias control", `${summary.embedding_adjustment || request.embedding_adjustment || "remove_size_bias"}`],
+            ["DINOv3 pooling", `${summary.dinov3_pooling || request.dinov3_pooling || "pooler"}`],
+            ["Background", `${summary.background_mode || request.background_mode || "full_crop"}`],
+            ["Embedding views", `${summary.embedding_view_mode || request.embedding_view_mode || "single"}`],
+            ["Crop cache", `${cropCache.reused || 0} reused / ${cropCache.total || 0} objects`],
+            ["Embedding cache", `${cache.hits || 0} hits / ${cache.misses || 0} misses`],
+            ["Size-axis check", sizeCorr],
+            ["Sample cap", sampleCap > 0 ? `${sampleCap}` : "All objects"],
+        ];
+        reportEl.innerHTML = [
+            `<div class="class-split-report__grid">`,
+            settings.map(([label, value]) => (
+                `<div class="class-split-report__item"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`
+            )).join(""),
+            `</div>`,
+            `<div class="class-split-report__note">${escapeHtml(suspicion.text)}</div>`,
+            `<div class="class-split-report__note">Hold Shift over this tab to switch the graph from lasso selection to pan mode; release Shift to return to lasso.</div>`,
+        ].join("");
+    }
+
+    function renderClassSplitFilterOptions() {
+        const filterEl = classSplitElements.filterClass;
+        if (!filterEl) {
+            return;
+        }
+        const result = classSplitState.result || {};
+        const classCounts = result.summary?.class_counts || {};
+        const previous = filterEl.value;
+        filterEl.innerHTML = "";
+        const allOption = document.createElement("option");
+        allOption.value = "";
+        allOption.textContent = "All classes";
+        filterEl.appendChild(allOption);
+        Object.keys(classCounts).sort().forEach((className) => {
+            const option = document.createElement("option");
+            option.value = className;
+            option.textContent = `${className} (${classCounts[className]})`;
+            filterEl.appendChild(option);
+        });
+        const values = Array.from(filterEl.options).map((option) => option.value);
+        if (values.includes(previous)) {
+            filterEl.value = previous;
+        }
+    }
+
+    function renderClassSplitWrongList() {
+        const listEl = classSplitElements.wrongList;
+        if (!listEl) {
+            return;
+        }
+        const candidates = Array.isArray(classSplitState.result?.wrong_class_candidates)
+            ? classSplitState.result.wrong_class_candidates
+            : [];
+        if (!candidates.length) {
+            const suspicion = getClassSplitSuspicionStatus();
+            listEl.innerHTML = `<div class="training-help">${escapeHtml(suspicion.enabled ? "No likely wrong-class objects were flagged." : suspicion.text)}</div>`;
+            return;
+        }
+        listEl.innerHTML = candidates.slice(0, 60).map((item) => {
+            const score = Number(item.wrong_class_suspicion) || 0;
+            return [
+                `<div class="class-split-wrong-item" data-point-id="${escapeHtml(item.point_id || "")}">`,
+                `<strong>${escapeHtml(item.class_name || "")}</strong> → ${escapeHtml(item.suggested_neighbor_class || "neighbor class")}`,
+                `<br><span>${Math.round(score * 100)}% suspicion • ${escapeHtml(item.image_relpath || "")}</span>`,
+                `</div>`,
+            ].join("");
+        }).join("");
+        listEl.querySelectorAll("[data-point-id]").forEach((node) => {
+            node.addEventListener("click", () => {
+                selectClassSplitPoint(node.getAttribute("data-point-id") || "", { jump: false });
+            });
+        });
+    }
+
+    function renderClassSplitInspector() {
+        const inspector = classSplitElements.inspector;
+        if (!inspector) {
+            return;
+        }
+        const point = classSplitState.pointsById.get(classSplitState.selectedPointId);
+        if (!point) {
+            inspector.innerHTML = `<div class="training-help">Select a point to inspect its crop.</div>`;
+            return;
+        }
+        const thumbPath = point.thumbnail_url || `/class_analysis/jobs/${encodeURIComponent(classSplitState.currentJobId)}/thumbnail/${encodeURIComponent(point.point_id)}`;
+        const thumbUrl = `${API_ROOT}${thumbPath}`;
+        const classOptions = (Array.isArray(loadedClassList) ? loadedClassList : [])
+            .map((className) => String(className || "").trim())
+            .filter(Boolean)
+            .map((className) => `<option value="${escapeHtml(className)}"${className === point.class_name ? " selected" : ""}>${escapeHtml(className)}</option>`)
+            .join("");
+        inspector.innerHTML = [
+            `<div class="class-split-inspector__crop-shell">`,
+            `<img class="class-split-inspector__crop" src="${escapeHtml(thumbUrl)}" alt="Object crop" data-crop-preview />`,
+            `<div class="class-split-inspector__crop-status" data-crop-status hidden>Crop preview unavailable.</div>`,
+            `</div>`,
+            `<div class="class-split-inspector__meta">`,
+            `<strong>${escapeHtml(point.class_name || "")}</strong><br>`,
+            `${escapeHtml(point.split || "train")}/${escapeHtml(point.image_relpath || "")}<br>`,
+            `Cluster ${escapeHtml(point.cluster_id ?? "")} • outlier ${(Number(point.outlier_score) || 0).toFixed(2)}<br>`,
+            `Neighbor mix: same ${Math.round((Number(point.same_class_neighbor_ratio) || 0) * 100)}%`,
+            point.suggested_neighbor_class
+                ? ` • top other ${escapeHtml(point.suggested_neighbor_class)} ${Math.round((Number(point.top_other_neighbor_ratio) || 0) * 100)}%`
+                : "",
+            `</div>`,
+            `<div class="class-split-inspector__actions">`,
+            `<button type="button" class="training-button secondary" data-action="jump">See instance</button>`,
+            `<select data-action="class">${classOptions}</select>`,
+            `<button type="button" class="training-button" data-action="change">Change class</button>`,
+            `</div>`,
+        ].join("");
+        const jumpButton = inspector.querySelector('[data-action="jump"]');
+        const changeButton = inspector.querySelector('[data-action="change"]');
+        const classSelect = inspector.querySelector('[data-action="class"]');
+        const cropPreview = inspector.querySelector("[data-crop-preview]");
+        const cropStatus = inspector.querySelector("[data-crop-status]");
+        if (cropPreview && cropStatus) {
+            cropPreview.addEventListener("error", () => {
+                cropPreview.hidden = true;
+                cropStatus.hidden = false;
+                cropStatus.textContent = "Crop preview failed to load. Rerun analysis if this job was from an older backend session.";
+            });
+            cropPreview.addEventListener("load", () => {
+                cropPreview.hidden = false;
+                cropStatus.hidden = true;
+            });
+        }
+        if (jumpButton) {
+            jumpButton.addEventListener("click", () => {
+                jumpToClassSplitPoint(point).catch((error) => {
+                    console.error("Class Split jump failed", error);
+                    setSamStatus(`Jump failed: ${error.message || error}`, { variant: "error", duration: 5000 });
+                });
+            });
+        }
+        if (changeButton && classSelect) {
+            changeButton.addEventListener("click", () => {
+                changeClassSplitPointClass(point, classSelect.value).catch((error) => {
+                    console.error("Class Split relabel failed", error);
+                    setSamStatus(`Class change failed: ${error.message || error}`, { variant: "error", duration: 5000 });
+                });
+            });
+        }
+    }
+
+    function renderClassSplitResult() {
+        if (classSplitElements.results) {
+            classSplitElements.results.hidden = false;
+        }
+        const summary = classSplitState.result?.summary || {};
+        const warnings = Array.isArray(summary.warnings) && summary.warnings.length
+            ? ` • ${summary.warnings[0]}`
+            : "";
+        setClassSplitJobStatus(
+            `${summary.object_count || 0} objects • ${summary.cluster_count || 0} clusters • ${summary.wrong_class_candidate_count || 0} flags${warnings}`,
+            summary.warnings?.length ? "warn" : "success"
+        );
+        renderClassSplitFilterOptions();
+        renderClassSplitReport();
+        renderClassSplitWrongList();
+        renderClassSplitInspector();
+        renderClassSplitPlot();
+    }
+
+    function selectClassSplitPoint(pointId, { jump = false } = {}) {
+        const safeId = String(pointId || "");
+        if (!safeId || !classSplitState.pointsById.has(safeId)) {
+            return;
+        }
+        classSplitState.selectedPointId = safeId;
+        renderClassSplitInspector();
+        renderClassSplitPlot();
+        if (jump) {
+            const point = classSplitState.pointsById.get(safeId);
+            jumpToClassSplitPoint(point).catch((error) => {
+                console.error("Class Split jump failed", error);
+            });
+        }
+    }
+
+    function getClassSplitPointImageKey(point) {
+        const frontendKey = String(point?.frontend_image_key || "").trim();
+        if (frontendKey) {
+            return frontendKey;
+        }
+        return annotationImageKey(point?.split || "train", point?.image_relpath || "");
+    }
+
+    function findClassSplitBboxMatch(point) {
+        if (!point) {
+            return null;
+        }
+        const imageKey = getClassSplitPointImageKey(point);
+        const buckets = bboxes[imageKey];
+        if (!buckets) {
+            return null;
+        }
+        const target = Array.isArray(point.bbox_xyxy) ? point.bbox_xyxy.map((value) => Number(value) || 0) : null;
+        if (!target || target.length < 4) {
+            return null;
+        }
+        const targetClass = String(point.class_name || "");
+        const searchClasses = [
+            targetClass,
+            ...Object.keys(buckets).filter((className) => className !== targetClass),
+        ].filter(Boolean);
+        let best = null;
+        searchClasses.forEach((className) => {
+            const list = Array.isArray(buckets[className]) ? buckets[className] : [];
+            list.forEach((bboxRecord, index) => {
+                if (!bboxRecord) {
+                    return;
+                }
+                const bounds = getBboxBounds(bboxRecord);
+                const diff =
+                    Math.abs(bounds.left - target[0])
+                    + Math.abs(bounds.top - target[1])
+                    + Math.abs(bounds.right - target[2])
+                    + Math.abs(bounds.bottom - target[3]);
+                const scaleRef = Math.max(1, Math.abs(target[2] - target[0]) + Math.abs(target[3] - target[1]));
+                const score = diff / scaleRef;
+                if (!best || score < best.score) {
+                    best = { bbox: bboxRecord, className, index, score };
+                }
+            });
+        });
+        return best && best.score <= 0.08 ? best : null;
+    }
+
+    async function waitForClassSplitBbox(point, timeoutMs = 5000) {
+        const imageKey = getClassSplitPointImageKey(point);
+        const started = Date.now();
+        while (Date.now() - started < timeoutMs) {
+            const sourceReady = annotationSourceState.hydratedKeys.has(imageKey) || !isDatasetBackedImageRecord(images?.[imageKey]);
+            if (currentImage?.name === imageKey && sourceReady) {
+                const match = findClassSplitBboxMatch(point);
+                if (match) {
+                    return match;
+                }
+            }
+            await new Promise((resolve) => window.setTimeout(resolve, 100));
+        }
+        return null;
+    }
+
+    function selectClassSplitSourceBbox(match) {
+        if (!match || !match.bbox) {
+            return;
+        }
+        currentBbox = {
+            bbox: match.bbox,
+            index: match.index,
+            originalX: match.bbox.x,
+            originalY: match.bbox.y,
+            originalWidth: match.bbox.width,
+            originalHeight: match.bbox.height,
+            moving: false,
+            resizing: null,
+        };
+        currentClass = match.className;
+        selectClassListOptionByName(match.className);
+        syncQwenClassToCurrent();
+        updateSam3ClassOptions({ preserveSelection: true });
+        syncClassSplitCurrentClassSelection();
+        markOnlyBboxRecord(match.bbox);
+        showAnnotationFocusHud({ durationMs: 2400 });
+    }
+
+    function selectClassListOptionByName(className) {
+        const classList = document.getElementById("classList");
+        if (!classList) {
+            return;
+        }
+        Array.from(classList.options || []).forEach((option, index) => {
+            if (option.text === className || option.textContent === className) {
+                classList.selectedIndex = index;
+                classListIndex = index;
+            }
+        });
+    }
+
+    async function jumpToClassSplitPoint(point) {
+        if (!point) {
+            throw new Error("No point selected.");
+        }
+        const imageKey = getClassSplitPointImageKey(point);
+        const imageRecord = images[imageKey];
+        if (!imageRecord) {
+            throw new Error(`Image is not loaded in this session: ${imageKey}`);
+        }
+        if (activeTab !== TAB_LABELING) {
+            setActiveTab(TAB_LABELING);
+            await new Promise((resolve) => window.requestAnimationFrame(resolve));
+        }
+        if (!currentImage || currentImage.name !== imageKey) {
+            setCurrentImage(imageRecord);
+        }
+        const match = await waitForClassSplitBbox(point);
+        if (!match) {
+            throw new Error("Could not find the matching bbox after opening the image.");
+        }
+        selectClassSplitSourceBbox(match);
+        startClassSplitInstancePulse(match.bbox, { durationMs: 2800 });
+        setSamStatus(`Selected ${match.className} from Class Split Explorer.`, { variant: "success", duration: 3000 });
+        return match;
+    }
+
+    async function changeClassSplitPointClass(point, newClass) {
+        const targetClass = String(newClass || "").trim();
+        if (!targetClass) {
+            throw new Error("Choose a target class.");
+        }
+        if (targetClass === String(point?.class_name || "")) {
+            return;
+        }
+        if (!annotationEditableGuard("Changing class")) {
+            return;
+        }
+        if (classSplitState.relabelInFlight) {
+            return;
+        }
+        classSplitState.relabelInFlight = true;
+        try {
+            const match = await jumpToClassSplitPoint(point);
+            const imageKey = currentImage?.name;
+            if (!imageKey || !match?.bbox) {
+                throw new Error("No matching bbox is active.");
+            }
+            const buckets = bboxes[imageKey] || {};
+            const sourceBucket = Array.isArray(buckets[match.className]) ? buckets[match.className] : [];
+            const sourceIndex = sourceBucket.indexOf(match.bbox);
+            if (sourceIndex !== -1) {
+                sourceBucket.splice(sourceIndex, 1);
+            }
+            if (!buckets[targetClass]) {
+                buckets[targetClass] = [];
+            }
+            match.bbox.class = targetClass;
+            buckets[targetClass].push(match.bbox);
+            currentBbox = {
+                bbox: match.bbox,
+                index: buckets[targetClass].length - 1,
+                originalX: match.bbox.x,
+                originalY: match.bbox.y,
+                originalWidth: match.bbox.width,
+                originalHeight: match.bbox.height,
+                moving: false,
+                resizing: null,
+            };
+            currentClass = targetClass;
+            selectClassListOptionByName(targetClass);
+            syncQwenClassToCurrent();
+            updateSam3ClassOptions({ preserveSelection: true });
+            syncClassSplitCurrentClassSelection();
+            markOnlyBboxRecord(match.bbox);
+            captureAnnotationDirtyStateForImage(imageKey);
+            setSamStatus(`Changed class to ${targetClass}; rerunning analysis.`, { variant: "success", duration: 3500 });
+            await startClassSplitAnalysis({ reuseLast: true });
+        } finally {
+            classSplitState.relabelInFlight = false;
+        }
+    }
+
+    function initClassSplitExplorer() {
+        if (classSplitState.initialized) {
+            return;
+        }
+        classSplitState.initialized = true;
+        classSplitElements.datasetStatus = document.getElementById("classSplitDatasetStatus");
+        classSplitElements.jobStatus = document.getElementById("classSplitJobStatus");
+        classSplitElements.scopeSelected = document.getElementById("classSplitScopeSelected");
+        classSplitElements.scopeAll = document.getElementById("classSplitScopeAll");
+        classSplitElements.recipePreset = document.getElementById("classSplitRecipePreset");
+        classSplitElements.classSelect = document.getElementById("classSplitClassSelect");
+        classSplitElements.encoderType = document.getElementById("classSplitEncoderType");
+        classSplitElements.backbone = document.getElementById("classSplitBackbone");
+        classSplitElements.projection = document.getElementById("classSplitProjection");
+        classSplitElements.projectionNeighborK = document.getElementById("classSplitProjectionNeighborK");
+        classSplitElements.sampleCap = document.getElementById("classSplitSampleCap");
+        classSplitElements.padding = document.getElementById("classSplitPadding");
+        classSplitElements.canonicalSize = document.getElementById("classSplitCanonicalSize");
+        classSplitElements.preprocessMode = document.getElementById("classSplitPreprocessMode");
+        classSplitElements.sizeBiasMode = document.getElementById("classSplitSizeBiasMode");
+        classSplitElements.dinov3Pooling = document.getElementById("classSplitDinov3Pooling");
+        classSplitElements.backgroundMode = document.getElementById("classSplitBackgroundMode");
+        classSplitElements.viewMode = document.getElementById("classSplitViewMode");
+        classSplitElements.neighborK = document.getElementById("classSplitNeighborK");
+        classSplitElements.runButton = document.getElementById("classSplitRunButton");
+        classSplitElements.cancelButton = document.getElementById("classSplitCancelButton");
+        classSplitElements.rerunButton = document.getElementById("classSplitRerunButton");
+        classSplitElements.progress = document.getElementById("classSplitProgress");
+        classSplitElements.progressFill = document.getElementById("classSplitProgressFill");
+        classSplitElements.progressText = document.getElementById("classSplitProgressText");
+        classSplitElements.results = document.getElementById("classSplitResults");
+        classSplitElements.colorMode = document.getElementById("classSplitColorMode");
+        classSplitElements.filterClass = document.getElementById("classSplitFilterClass");
+        classSplitElements.graph = document.getElementById("classSplitGraph");
+        classSplitElements.report = document.getElementById("classSplitReport");
+        classSplitElements.wrongList = document.getElementById("classSplitWrongList");
+        classSplitElements.inspector = document.getElementById("classSplitInspector");
+        if (classSplitElements.scopeSelected) {
+            classSplitElements.scopeSelected.addEventListener("change", refreshClassSplitControls);
+        }
+        if (classSplitElements.scopeAll) {
+            classSplitElements.scopeAll.addEventListener("change", refreshClassSplitControls);
+        }
+        if (classSplitElements.recipePreset) {
+            classSplitElements.recipePreset.addEventListener("change", () => {
+                applyEmbeddingRecipePresetToClassSplit(classSplitElements.recipePreset.value || "balanced");
+                refreshClassSplitControls();
+            });
+        }
+        if (classSplitElements.encoderType) {
+            classSplitElements.encoderType.addEventListener("change", () => {
+                updateClassSplitBackboneOptions();
+                refreshClassSplitControls();
+            });
+        }
+        [
+            classSplitElements.padding,
+            classSplitElements.canonicalSize,
+            classSplitElements.preprocessMode,
+            classSplitElements.sizeBiasMode,
+            classSplitElements.dinov3Pooling,
+            classSplitElements.backgroundMode,
+            classSplitElements.viewMode,
+        ].forEach((control) => {
+            if (control) {
+                control.addEventListener("change", markClassSplitRecipeCustom);
+            }
+        });
+        if (classSplitElements.runButton) {
+            classSplitElements.runButton.addEventListener("click", () => {
+                startClassSplitAnalysis().catch((error) => {
+                    console.error("Class Split run failed", error);
+                });
+            });
+        }
+        if (classSplitElements.cancelButton) {
+            classSplitElements.cancelButton.addEventListener("click", () => {
+                cancelClassSplitJob().catch((error) => console.error("Class Split cancel failed", error));
+            });
+        }
+        if (classSplitElements.rerunButton) {
+            classSplitElements.rerunButton.addEventListener("click", () => {
+                startClassSplitAnalysis({ reuseLast: true }).catch((error) => {
+                    console.error("Class Split rerun failed", error);
+                });
+            });
+        }
+        if (classSplitElements.colorMode) {
+            classSplitElements.colorMode.addEventListener("change", renderClassSplitPlot);
+        }
+        if (classSplitElements.filterClass) {
+            classSplitElements.filterClass.addEventListener("change", renderClassSplitPlot);
+        }
+        document.addEventListener("keydown", (event) => handleClassSplitShiftPanEvent(event, true), true);
+        document.addEventListener("keyup", (event) => handleClassSplitShiftPanEvent(event, false), true);
+        window.addEventListener("blur", () => setClassSplitGraphPanMode(false));
+        populateClassSplitClasses({ preserveSelection: true });
+        refreshClassSplitControls();
+        loadClassSplitClipBackbones()
+            .then(() => loadClassSplitCapabilities())
+            .catch((error) => console.warn("Class Split init refresh failed", error));
+    }
+
     document.addEventListener("DOMContentLoaded", () => {
         initHelpTooltips();
         initializeThemeToggle();
@@ -33714,6 +36299,7 @@ async function cancelRfDetrTrainingJobRequest() {
         initQwenTrainingTab();
         initQwenModelTab();
         initAgentMiningUi();
+        initClassSplitExplorer();
         startAutomationLockPolling();
 
         registerFileLabel(imagesSelectButton, document.getElementById("images"));
@@ -35682,6 +38268,18 @@ async function cancelRfDetrTrainingJobRequest() {
         context.textBaseline = prevBaseline;
     }
 
+    function startClassSplitInstancePulse(bboxRecord, { durationMs = 2600 } = {}) {
+        if (!currentImage || !bboxRecord) {
+            return;
+        }
+        classSplitInstancePulse = {
+            imageName: currentImage.name,
+            bbox: bboxRecord,
+            startedAt: performance.now(),
+            durationMs,
+        };
+    }
+
     async function submitMultiPointSelection() {
         if (!multiPointMode) {
             return;
@@ -35902,6 +38500,7 @@ async function cancelRfDetrTrainingJobRequest() {
     let currentImage = null;
     let currentClass = null;
     let currentBbox = null;
+    let classSplitInstancePulse = null;
     const selectedBboxes = new Set();
     const negativeBboxes = new Set();
     let imageListIndex = 0;
@@ -36010,9 +38609,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 drawImage(context);
                 drawNewBbox(context);
                 drawExistingBboxes(context);
+                drawClassSplitInstancePulse(context);
                 drawPendingCornerResize(context);
                 drawAgentWindows(context);
                 drawQwenCaptionRegionOverlay(context);
+                drawSam3TextRegionOverlay(context);
                 drawSelectionRect(context);
                 drawYoloSelectionRect(context);
                 drawMultiPointMarkers(context);
@@ -36128,6 +38729,44 @@ async function cancelRfDetrTrainingJobRequest() {
         });
         context.restore();
     };
+
+    function drawClassSplitInstancePulse(context) {
+        const pulse = classSplitInstancePulse;
+        if (!pulse || !currentImage || pulse.imageName !== currentImage.name || !pulse.bbox) {
+            return;
+        }
+        const elapsed = performance.now() - pulse.startedAt;
+        const duration = Math.max(1, Number(pulse.durationMs) || 2600);
+        if (elapsed > duration) {
+            classSplitInstancePulse = null;
+            return;
+        }
+        const bounds = getBboxBounds(pulse.bbox);
+        if (!bounds || !Number.isFinite(bounds.left) || !Number.isFinite(bounds.top)) {
+            return;
+        }
+        const centerX = (bounds.left + bounds.right) / 2;
+        const centerY = (bounds.top + bounds.bottom) / 2;
+        const objectRadius = Math.max(10, Math.max(bounds.right - bounds.left, bounds.bottom - bounds.top) / 2);
+        const wave = (Math.sin((elapsed / 380) * Math.PI * 2 - Math.PI / 2) + 1) / 2;
+        const fade = 1 - Math.max(0, elapsed - duration * 0.72) / Math.max(1, duration * 0.28);
+        const radius = zoom(objectRadius) + Math.max(14, 22 * scale) + wave * Math.max(24, 32 * scale);
+        const x = zoomX(centerX);
+        const y = zoomY(centerY);
+        context.save();
+        context.setLineDash([]);
+        context.lineWidth = Math.max(2.8, (3.4 + wave * 3.2) * scale);
+        context.strokeStyle = withAlpha("#38bdf8", Math.max(0, (0.65 + wave * 0.32) * fade));
+        context.beginPath();
+        context.arc(x, y, radius, 0, Math.PI * 2);
+        context.stroke();
+        context.lineWidth = Math.max(1.2, 1.4 * scale);
+        context.strokeStyle = withAlpha("#ffffff", Math.max(0, (0.18 + wave * 0.24) * fade));
+        context.beginPath();
+        context.arc(x, y, radius + Math.max(4, 5 * scale), 0, Math.PI * 2);
+        context.stroke();
+        context.restore();
+    }
 
     const drawExistingBboxes = (context) => {
         const currentBboxes = bboxes[currentImage.name];
@@ -36370,6 +39009,51 @@ async function cancelRfDetrTrainingJobRequest() {
             const labelX = x + 8;
             const labelY = Math.max(16, y + 18);
             context.fillText(label, labelX, labelY);
+        }
+        context.restore();
+    };
+
+    const drawSam3TextRegionOverlay = (context) => {
+        const region = sam3TextRegionOverlay;
+        if (!region || !currentImage) {
+            return;
+        }
+        const left = Number(region.x);
+        const top = Number(region.y);
+        const width = Number(region.width);
+        const height = Number(region.height);
+        if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+            return;
+        }
+        const now = performance.now();
+        const pulseWave = (Math.sin((now / SAM3_TEXT_WINDOW_PULSE_MS) * Math.PI * 2 - Math.PI / 2) + 1) / 2;
+        const overlayColor = isDarkModeEnabled() || isPipboyThemeEnabled() ? "#38bdf8" : "#0ea5e9";
+        const x = zoomX(left);
+        const y = zoomY(top);
+        const w = zoom(width);
+        const h = zoom(height);
+        const glowPad = Math.max(7, 7 * scale) + pulseWave * Math.max(24, 24 * scale);
+        const lineWidth = Math.max(2.8, (3.0 + pulseWave * 3.2) * scale);
+        context.save();
+        context.setLineDash([]);
+        context.lineWidth = Math.max(2, 2 * scale);
+        context.strokeStyle = withAlpha(overlayColor, 0.34 + pulseWave * 0.42);
+        context.strokeRect(x - glowPad, y - glowPad, w + glowPad * 2, h + glowPad * 2);
+        context.fillStyle = withAlpha(overlayColor, 0.08 + pulseWave * 0.14);
+        context.fillRect(x, y, w, h);
+        context.setLineDash([11 * scale, 5 * scale]);
+        context.lineDashOffset = -(now / 28) % (16 * scale);
+        context.lineWidth = lineWidth;
+        context.strokeStyle = withAlpha(overlayColor, 0.72 + pulseWave * 0.28);
+        context.strokeRect(x, y, w, h);
+        context.setLineDash([]);
+        context.lineWidth = Math.max(1.2, 1.4 * scale);
+        context.strokeStyle = withAlpha("#ffffff", 0.18 + pulseWave * 0.26);
+        context.strokeRect(x, y, w, h);
+        if (region.label) {
+            context.font = context.font.replace(/\d+px/, `${Math.max(10, zoom(fontBaseSize + 2))}px`);
+            context.fillStyle = isPipboyThemeEnabled() ? withAlpha(overlayColor, 0.95) : "rgba(8, 47, 73, 0.9)";
+            context.fillText(String(region.label), x + 8, Math.max(16, y + 18));
         }
         context.restore();
     };
@@ -37562,13 +40246,13 @@ async function cancelRfDetrTrainingJobRequest() {
 
     async function runMagicTweakForCurrentBbox() {
         if (!currentBbox || !currentBbox.bbox) {
-            setSamStatus("Select a bbox before pressing X", { variant: "warn", duration: 3000 });
+            setSamStatus("Select a bbox before pressing W", { variant: "warn", duration: 3000 });
             return false;
         }
         return runMagicTweakForBbox(currentBbox.bbox, { updateSelection: true });
     }
 
-    async function runBatchTweakForClass(className = currentClass) {
+    async function runBatchTweakForRecords(records, className = currentClass, { scopeLabel = "class" } = {}) {
         if (batchTweakRunning) {
             setSamStatus("Batch tweak already running", { variant: "info", duration: 2500 });
             return;
@@ -37586,10 +40270,16 @@ async function cancelRfDetrTrainingJobRequest() {
             setSamStatus("Select a class before batch tweaking", { variant: "warn", duration: 3000 });
             return;
         }
-        const liveBucket = (bboxes[currentImage.name] && bboxes[currentImage.name][targetClass]) || [];
-        const bucket = Array.isArray(liveBucket) ? liveBucket.slice() : [];
+        const bucket = (Array.isArray(records) ? records : [])
+            .filter((bboxRecord) => bboxRecord && bboxRecord.class === targetClass)
+            .slice();
         if (!bucket.length) {
-            setSamStatus("No bboxes available for this class", { variant: "warn", duration: 3000 });
+            setSamStatus(
+                scopeLabel === "selected"
+                    ? "No selected bboxes available for this class"
+                    : "No bboxes available for this class",
+                { variant: "warn", duration: 3000 },
+            );
             return;
         }
         const batchImageName = currentImage.name;
@@ -37600,7 +40290,11 @@ async function cancelRfDetrTrainingJobRequest() {
         if (batchTweakElements.confirmAlways) {
             batchTweakElements.confirmAlways.disabled = true;
         }
-        setSamStatus(`Tweaking ${bucket.length} ${targetClass} bbox${bucket.length === 1 ? "" : "es"}…`, { variant: "info", duration: 0 });
+        const scopeText = scopeLabel === "selected" ? "selected " : "";
+        setSamStatus(`Tweaking ${bucket.length} ${scopeText}${targetClass} bbox${bucket.length === 1 ? "" : "es"}…`, {
+            variant: "info",
+            duration: 0,
+        });
         let successCount = 0;
         try {
             try {
@@ -37624,7 +40318,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             const allTweaked = successCount === bucket.length;
             setSamStatus(
-                `Tweaked ${successCount}/${bucket.length} ${targetClass} bbox${bucket.length === 1 ? "" : "es"}.`,
+                `Tweaked ${successCount}/${bucket.length} ${scopeText}${targetClass} bbox${bucket.length === 1 ? "" : "es"}.`,
                 { variant: allTweaked ? "success" : "warn", duration: allTweaked ? 3500 : 5000 },
             );
             if (currentBbox) {
@@ -37643,6 +40337,18 @@ async function cancelRfDetrTrainingJobRequest() {
                 batchTweakElements.confirmAlways.disabled = false;
             }
         }
+    }
+
+    async function runBatchTweakForClass(className = currentClass) {
+        const targetClass = String(className || "").trim();
+        const liveBucket = currentImage && currentImage.name && bboxes[currentImage.name]
+            ? (bboxes[currentImage.name][targetClass] || [])
+            : [];
+        return runBatchTweakForRecords(
+            Array.isArray(liveBucket) ? liveBucket.slice() : [],
+            targetClass,
+            { scopeLabel: "class" },
+        );
     }
 
     async function runBatchTweakForCurrentCategory() {
@@ -38116,6 +40822,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             syncLabelingSourceControls();
             syncImageSelectionToName(currentImage.name, { ensureVisible: false });
+            updateSam3TextWorkflow();
             showAnnotationFocusHud();
             runDeferredCurrentImageSelection(nextImageName);
         };
@@ -38510,6 +41217,7 @@ async function cancelRfDetrTrainingJobRequest() {
                             setCurrentClass();
                             updateQwenClassOptions({ resetOverride: true });
                             updateSam3ClassOptions({ resetOverride: true });
+                            populateClassSplitClasses({ preserveSelection: false });
                             refreshCaptionGlossaryForCurrentContext({ force: true, silent: true }).catch((error) => {
                                 console.warn("Failed to refresh caption glossary from class file", error);
                             });
@@ -38534,6 +41242,7 @@ async function cancelRfDetrTrainingJobRequest() {
         clearMultiPointAnnotations();
         updateQwenClassOptions({ resetOverride: true });
         updateSam3ClassOptions({ resetOverride: true });
+        populateClassSplitClasses({ preserveSelection: false });
         syncLabelingSourceControls();
     };
 
@@ -38554,6 +41263,8 @@ async function cancelRfDetrTrainingJobRequest() {
         clearMultiPointAnnotations();
         syncQwenClassToCurrent();
         updateSam3ClassOptions({ preserveSelection: true });
+        syncClassSplitCurrentClassSelection();
+        refreshClassSplitControls();
         showAnnotationFocusHud();
     };
 
@@ -39352,15 +42063,15 @@ async function cancelRfDetrTrainingJobRequest() {
                 return;
             }
 
-            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 88 || event.key === "x" || event.key === "X")) {
+            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 87 || event.key === "w" || event.key === "W")) {
                 event.preventDefault();
-                handleXHotkeyPress();
+                handleMagicTweakTapHotkey();
                 showShortcutToast("magic_tweak", "Magic tweak requested.");
                 return;
             }
 
             const plainDeleteHotkey = !event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey
-                && (key === 87 || event.key === "w" || event.key === "W");
+                && (key === 88 || event.key === "x" || event.key === "X");
             if (key === 8 || (key === 46 && event.metaKey === true) || plainDeleteHotkey) {
                 if (!annotationEditableGuard("Delete")) {
                     event.preventDefault();

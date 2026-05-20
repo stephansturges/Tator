@@ -81,6 +81,15 @@ def _load_clip_head_from_classifier_impl(
     normalize_embeddings: Optional[bool] = None
     embedding_center_values: Optional[Sequence[float]] = None
     embedding_std_values: Optional[Sequence[float]] = None
+    preprocess_mode: Optional[str] = None
+    canonical_size: Optional[int] = None
+    embedding_crop_mode: Optional[str] = None
+    embedding_crop_padding_ratio: Optional[float] = None
+    background_mode: Optional[str] = None
+    embedding_view_mode: Optional[str] = None
+    embedding_adjustment: Optional[str] = None
+    embedding_adjustment_transform: Optional[Dict[str, Any]] = None
+    dinov3_pooling: Optional[str] = None
     calibration_temperature: Optional[float] = None
     logit_adjustment: Optional[Sequence[float]] = None
     logit_adjustment_inference: bool = False
@@ -103,6 +112,30 @@ def _load_clip_head_from_classifier_impl(
                     embedding_center_values = meta_obj.get("embedding_center_values")
                 if meta_obj.get("embedding_std_values") is not None:
                     embedding_std_values = meta_obj.get("embedding_std_values")
+                if meta_obj.get("preprocess_mode") is not None:
+                    preprocess_mode = str(meta_obj.get("preprocess_mode"))
+                if meta_obj.get("canonical_size") is not None:
+                    try:
+                        canonical_size = int(meta_obj.get("canonical_size"))
+                    except Exception:
+                        canonical_size = None
+                if meta_obj.get("embedding_crop_mode") is not None:
+                    embedding_crop_mode = str(meta_obj.get("embedding_crop_mode"))
+                if meta_obj.get("embedding_crop_padding_ratio") is not None:
+                    try:
+                        embedding_crop_padding_ratio = float(meta_obj.get("embedding_crop_padding_ratio"))
+                    except Exception:
+                        embedding_crop_padding_ratio = None
+                if meta_obj.get("background_mode") is not None:
+                    background_mode = str(meta_obj.get("background_mode"))
+                if meta_obj.get("embedding_view_mode") is not None:
+                    embedding_view_mode = str(meta_obj.get("embedding_view_mode"))
+                if meta_obj.get("embedding_adjustment") is not None:
+                    embedding_adjustment = str(meta_obj.get("embedding_adjustment"))
+                if isinstance(meta_obj.get("embedding_adjustment_transform"), dict):
+                    embedding_adjustment_transform = meta_obj.get("embedding_adjustment_transform")
+                if meta_obj.get("dinov3_pooling") is not None:
+                    dinov3_pooling = str(meta_obj.get("dinov3_pooling"))
                 if meta_obj.get("calibration_temperature") is not None:
                     try:
                         calibration_temperature = float(meta_obj.get("calibration_temperature"))
@@ -204,6 +237,15 @@ def _load_clip_head_from_classifier_impl(
             "normalize_embeddings": bool(normalize_flag),
             "embedding_center_values": embedding_center_values,
             "embedding_std_values": embedding_std_values,
+            "preprocess_mode": preprocess_mode,
+            "canonical_size": canonical_size,
+            "embedding_crop_mode": embedding_crop_mode,
+            "embedding_crop_padding_ratio": embedding_crop_padding_ratio,
+            "background_mode": background_mode,
+            "embedding_view_mode": embedding_view_mode,
+            "embedding_adjustment": embedding_adjustment,
+            "embedding_adjustment_transform": embedding_adjustment_transform,
+            "dinov3_pooling": dinov3_pooling,
             "temperature": calibration_temperature,
             "logit_adjustment": logit_adjustment,
             "logit_adjustment_inference": bool(logit_adjustment_inference),
@@ -306,6 +348,15 @@ def _load_clip_head_from_classifier_impl(
         "normalize_embeddings": bool(normalize_embeddings),
         "embedding_center_values": embedding_center_values,
         "embedding_std_values": embedding_std_values,
+        "preprocess_mode": preprocess_mode,
+        "canonical_size": canonical_size,
+        "embedding_crop_mode": embedding_crop_mode,
+        "embedding_crop_padding_ratio": embedding_crop_padding_ratio,
+        "background_mode": background_mode,
+        "embedding_view_mode": embedding_view_mode,
+        "embedding_adjustment": embedding_adjustment,
+        "embedding_adjustment_transform": embedding_adjustment_transform,
+        "dinov3_pooling": dinov3_pooling,
         "temperature": calibration_temperature,
         "logit_adjustment": logit_adjustment,
         "logit_adjustment_inference": bool(logit_adjustment_inference),

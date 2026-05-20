@@ -34,6 +34,20 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, confusion_matrix, log_loss
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from sklearn.cluster import MiniBatchKMeans
+from utils.embedding_recipe import (
+    apply_size_bias_residualizer,
+    covariate_row as _embedding_covariate_row,
+    crop_bounds as _embedding_crop_bounds,
+    fit_size_bias_residualizer,
+    make_embedding_crop_views as _embedding_make_crop_views,
+    normalize_background_mode as _embedding_normalize_background_mode,
+    normalize_dinov3_pooling as _embedding_normalize_dinov3_pooling,
+    normalize_embedding_adjustment as _embedding_normalize_adjustment,
+    normalize_embedding_view_mode as _embedding_normalize_view_mode,
+    normalize_preprocess_mode as _embedding_normalize_preprocess,
+    normalize_rows as _embedding_normalize_rows,
+    preprocess_crop as _embedding_preprocess_crop,
+)
 
 # The datasets we work with can include truncated images; be lenient when reading.
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -138,6 +152,14 @@ class TrainingArtifacts:
     supcon_projection_hidden: int
     embedding_center: bool
     embedding_standardize: bool
+    preprocess_mode: str
+    canonical_size: int
+    embedding_crop_mode: str
+    embedding_crop_padding_ratio: float
+    background_mode: str
+    embedding_view_mode: str
+    embedding_adjustment: str
+    dinov3_pooling: str
     calibration_mode: str
     calibration_temperature: Optional[float]
     phase_timings: Dict[str, float]
@@ -283,6 +305,7 @@ def _compute_dataset_signature(
     aug_policy: Optional[str] = None,
     oversample_policy: Optional[str] = None,
     embed_norm: Optional[bool] = None,
+    embedding_recipe: Optional[Dict[str, Any]] = None,
 ) -> str:
     encoder_name = str(encoder_model or clip_model or "").strip()
     entries: List[str] = [f"encoder:{encoder_type}:{encoder_name}", f"bg:{bg_class_count}"]
@@ -303,6 +326,14 @@ def _compute_dataset_signature(
         entries.append(f"oversample_policy:{oversample_policy}")
     if embed_norm is not None:
         entries.append(f"embed_norm:{int(bool(embed_norm))}")
+    if embedding_recipe:
+        try:
+            entries.append(
+                "embedding_recipe:"
+                + json.dumps(embedding_recipe, sort_keys=True, separators=(",", ":"))
+            )
+        except Exception:
+            entries.append(f"embedding_recipe:{embedding_recipe}")
     dataset_signature = _detect_dataset_signature(images_path, labels_path)
     label_root = Path(labels_path)
     if dataset_signature:
@@ -373,6 +404,7 @@ def _load_cached_embeddings(signature: str) -> Optional[Dict[str, object]]:
         "y_class_names": meta.get("y_class_names", []),
         "y_numeric": meta.get("y_numeric", []),
         "groups": meta.get("groups", []),
+        "geometry_covariates": meta.get("geometry_covariates", []),
         "encountered_cids": set(meta.get("encountered_cids", [])),
         "bg_policy": meta.get("bg_policy"),
         "aug_policy": meta.get("aug_policy"),
@@ -388,6 +420,7 @@ def _write_cache_metadata(signature: str,
                           y_class_names: List[str],
                           y_numeric: List[int],
                           groups: List[str],
+                          geometry_covariates: Optional[List[List[float]]],
                           encountered_cids: set[int],
                           *,
                           bg_policy: Optional[Dict[str, float]] = None,
@@ -411,6 +444,7 @@ def _write_cache_metadata(signature: str,
         "y_class_names": list(y_class_names),
         "y_numeric": list(map(int, y_numeric)),
         "groups": list(groups),
+        "geometry_covariates": list(geometry_covariates or []),
         "encountered_cids": list(map(int, encountered_cids)),
         "chunks": rel_chunks,
         "bg_policy": bg_policy,
@@ -617,6 +651,7 @@ def _encode_batch_dinov3(
     images: Sequence[Image.Image],
     *,
     normalize: bool = True,
+    pooling: str = "pooler",
 ) -> np.ndarray:
     if not images:
         hidden = int(getattr(getattr(model, "config", None), "hidden_size", 0) or 0)
@@ -627,15 +662,65 @@ def _encode_batch_dinov3(
         batch = processor(images=list(images), return_tensors="pt")
         batch = {k: v.to(device) for k, v in batch.items()}
         outputs = model(**batch)
-        feats = getattr(outputs, "pooler_output", None)
-        if feats is None:
-            feats = getattr(outputs, "last_hidden_state", None)
-            if feats is None:
+        pooling_norm = _embedding_normalize_dinov3_pooling(pooling)
+        last_hidden = getattr(outputs, "last_hidden_state", None)
+        feats = getattr(outputs, "pooler_output", None) if pooling_norm == "pooler" else None
+        if feats is None and pooling_norm == "patch_mean" and last_hidden is not None and last_hidden.ndim == 3 and last_hidden.shape[1] > 1:
+            feats = last_hidden[:, 1:, :].mean(dim=1)
+        elif feats is None and pooling_norm == "cls_patch_concat" and last_hidden is not None and last_hidden.ndim == 3 and last_hidden.shape[1] > 1:
+            cls_feats = torch.nn.functional.normalize(last_hidden[:, 0, :], dim=-1)
+            patch_feats = torch.nn.functional.normalize(last_hidden[:, 1:, :].mean(dim=1), dim=-1)
+            feats = torch.cat([cls_feats, patch_feats], dim=-1)
+        elif feats is None:
+            if last_hidden is None:
                 raise TrainingError("DINOv3 output missing pooler_output/last_hidden_state.")
-            feats = feats[:, 0, :]
+            feats = last_hidden[:, 0, :]
         if normalize:
             feats = feats / feats.norm(dim=-1, keepdim=True)
     return feats.detach().cpu().numpy().astype(np.float32)
+
+
+def _crop_item_views(item: Any) -> List[Image.Image]:
+    if isinstance(item, (list, tuple)):
+        return [view for view in item if isinstance(view, Image.Image)]
+    if isinstance(item, Image.Image):
+        return [item]
+    return []
+
+
+def _close_crop_item(item: Any) -> None:
+    for view in _crop_item_views(item):
+        try:
+            view.close()
+        except Exception:
+            pass
+
+
+def _encode_embedding_items(
+    items: Sequence[Any],
+    *,
+    encode_images_fn: Callable[[Sequence[Image.Image]], np.ndarray],
+) -> np.ndarray:
+    if not items:
+        return np.empty((0, 0), dtype=np.float32)
+    view_counts = [len(_crop_item_views(item)) for item in items]
+    if all(count == 1 for count in view_counts):
+        return encode_images_fn([_crop_item_views(item)[0] for item in items])
+    if any(count <= 0 for count in view_counts):
+        raise TrainingError("Invalid multi-view crop item.")
+    flat_images: List[Image.Image] = []
+    for item in items:
+        flat_images.extend(_crop_item_views(item))
+    raw = encode_images_fn(flat_images)
+    if raw.shape[0] != len(flat_images):
+        raise TrainingError("Multi-view embedding count mismatch.")
+    composed: List[np.ndarray] = []
+    cursor = 0
+    for count in view_counts:
+        chunk = _embedding_normalize_rows(raw[cursor : cursor + count])
+        cursor += count
+        composed.append(_embedding_normalize_rows(chunk.reshape(1, -1))[0])
+    return np.stack(composed, axis=0).astype(np.float32, copy=False)
 
 
 def _clip_aug_signature(enabled: bool) -> str:
@@ -698,7 +783,7 @@ def _build_clip_augmenter() -> Optional["A.Compose"]:
 
 def _apply_augmenter(augmenter: Optional["A.Compose"], crop: Image.Image) -> Image.Image:
     if augmenter is None:
-        return crop
+        return crop.copy()
     arr = np.asarray(crop)
     if arr.ndim == 2:
         arr = np.stack([arr] * 3, axis=-1)
@@ -707,7 +792,7 @@ def _apply_augmenter(augmenter: Optional["A.Compose"], crop: Image.Image) -> Ima
     try:
         augmented = augmenter(image=arr)
     except Exception:
-        return crop
+        return crop.copy()
     out = augmented.get("image", arr)
     if out.ndim == 2:
         out = np.stack([out] * 3, axis=-1)
@@ -716,6 +801,14 @@ def _apply_augmenter(augmenter: Optional["A.Compose"], crop: Image.Image) -> Ima
     if out.dtype != np.uint8:
         out = np.clip(out, 0, 255).astype(np.uint8)
     return Image.fromarray(out)
+
+
+def _apply_augmenter_to_item(augmenter: Optional["A.Compose"], item: Any) -> Any:
+    views = _crop_item_views(item)
+    if not views:
+        raise TrainingError("Invalid crop item for augmentation.")
+    augmented = [_apply_augmenter(augmenter, view) for view in views]
+    return tuple(augmented) if isinstance(item, (list, tuple)) else augmented[0]
 
 
 def _parse_yolo_box_line(parts: Sequence[str],
@@ -837,6 +930,14 @@ def train_clip_from_yolo(
     supcon_projection_hidden: int = 0,
     embedding_center: bool = False,
     embedding_standardize: bool = False,
+    preprocess_mode: str = "canonical",
+    canonical_size: int = 336,
+    embedding_crop_mode: str = "padded_square",
+    embedding_crop_padding_ratio: float = 0.08,
+    background_mode: str = "full_crop",
+    embedding_view_mode: str = "single",
+    embedding_adjustment: str = "remove_size_bias",
+    dinov3_pooling: str = "pooler",
     calibration_mode: str = "none",
     calibration_max_iters: int = 50,
     calibration_min_temp: float = 0.5,
@@ -979,6 +1080,16 @@ def train_clip_from_yolo(
         embedding_standardize = bool(embedding_standardize)
     if embedding_standardize:
         embedding_center = True
+    preprocess_mode = _embedding_normalize_preprocess(preprocess_mode)
+    canonical_size = int(max(64, min(1024, int(canonical_size or 336))))
+    embedding_crop_mode = str(embedding_crop_mode or "padded_square").strip().lower()
+    if embedding_crop_mode not in {"tight", "padded", "padded_square"}:
+        embedding_crop_mode = "padded_square"
+    embedding_crop_padding_ratio = float(max(0.0, min(1.0, float(embedding_crop_padding_ratio or 0.0))))
+    background_mode = _embedding_normalize_background_mode(background_mode)
+    embedding_view_mode = _embedding_normalize_view_mode(embedding_view_mode)
+    embedding_adjustment = _embedding_normalize_adjustment(embedding_adjustment)
+    dinov3_pooling = _embedding_normalize_dinov3_pooling(dinov3_pooling)
     calibration_mode = str(calibration_mode or "none").strip().lower()
     if calibration_mode not in {"none", "temperature"}:
         calibration_mode = "none"
@@ -1062,12 +1173,22 @@ def train_clip_from_yolo(
         normalize_embeddings = bool(mlp_normalize_embeddings)
     if encoder_type == "clip":
         clip_net, preprocess = _load_clip(clip_model, resolved_device)
-        def encode_batch(images: Sequence[Image.Image]) -> np.ndarray:
+        def encode_images(images: Sequence[Image.Image]) -> np.ndarray:
             return _encode_batch(clip_net, preprocess, resolved_device, images, normalize=normalize_embeddings)
     else:
         dino_model, dino_processor = _load_dinov3(encoder_model_name, resolved_device)
-        def encode_batch(images: Sequence[Image.Image]) -> np.ndarray:
-            return _encode_batch_dinov3(dino_model, dino_processor, resolved_device, images, normalize=normalize_embeddings)
+        def encode_images(images: Sequence[Image.Image]) -> np.ndarray:
+            return _encode_batch_dinov3(
+                dino_model,
+                dino_processor,
+                resolved_device,
+                images,
+                normalize=normalize_embeddings,
+                pooling=dinov3_pooling,
+            )
+
+    def encode_batch(items: Sequence[Any]) -> np.ndarray:
+        return _encode_embedding_items(items, encode_images_fn=encode_images)
     augmenter = _build_clip_augmenter()
     aug_enabled = augmenter is not None
     aug_policy_signature = _clip_aug_signature(aug_enabled)
@@ -1088,6 +1209,16 @@ def train_clip_from_yolo(
         "iso_p": CLIP_AUG_ISO_P,
         "gauss_var_limit": CLIP_AUG_GAUSS_VAR,
         "gauss_p": CLIP_AUG_GAUSS_P,
+    }
+    embedding_recipe = {
+        "preprocess_mode": preprocess_mode,
+        "canonical_size": canonical_size,
+        "embedding_crop_mode": embedding_crop_mode,
+        "embedding_crop_padding_ratio": embedding_crop_padding_ratio,
+        "background_mode": background_mode,
+        "embedding_view_mode": embedding_view_mode,
+        "embedding_adjustment": embedding_adjustment,
+        "dinov3_pooling": dinov3_pooling,
     }
 
     cache_signature = None
@@ -1110,6 +1241,7 @@ def train_clip_from_yolo(
             aug_policy=aug_policy_signature,
             oversample_policy=oversample_policy_signature,
             embed_norm=normalize_embeddings,
+            embedding_recipe=embedding_recipe,
         )
         _check_cancel()
         cache_payload = _load_cached_embeddings(cache_signature)
@@ -1144,6 +1276,7 @@ def train_clip_from_yolo(
     y_class_names: List[str]
     y_numeric: List[int]
     groups: List[str]
+    geometry_covariates: List[List[float]]
     encountered_cids: set[int]
     background_classes: List[str] = []
 
@@ -1155,6 +1288,13 @@ def train_clip_from_yolo(
         y_class_names = [str(v) for v in cache_payload["y_class_names"]]
         y_numeric = [int(v) for v in cache_payload["y_numeric"]]
         groups = [str(v) for v in cache_payload["groups"]]
+        geometry_covariates = [
+            [float(x) for x in row]
+            for row in (cache_payload.get("geometry_covariates") or [])
+            if isinstance(row, (list, tuple))
+        ]
+        if len(geometry_covariates) != len(y_numeric):
+            geometry_covariates = []
         encountered_cids = {int(v) for v in cache_payload["encountered_cids"]}
         background_classes = [str(v) for v in cache_payload.get("background_classes") or []]
         should_cleanup_chunks = False
@@ -1176,37 +1316,45 @@ def train_clip_from_yolo(
         y_class_names = []
         y_numeric = []
         groups = []
+        geometry_covariates = []
         encountered_cids = set()
 
-        batch_crops: List[Image.Image] = []
-        batch_meta: List[Tuple[str, int, str]] = []  # (class_name, cid, group)
+        batch_crops: List[Any] = []
+        batch_meta: List[Tuple[str, int, str, List[float]]] = []  # (class_name, cid, group, covariates)
         bg_embeddings: List[np.ndarray] = []
         bg_groups: List[str] = []
-        bg_crop_batch: List[Image.Image] = []
-        bg_group_batch: List[str] = []
+        bg_covariates: List[List[float]] = []
+        bg_crop_batch: List[Any] = []
+        bg_group_batch: List[Tuple[str, List[float]]] = []
 
     def flush_batch() -> None:
         nonlocal batch_crops, batch_meta
         if not batch_crops:
             return
         _check_cancel()
-        embs = encode_batch(batch_crops)
-        chunk_start = len(y_class_names)
-        chunk_path = chunk_dir / f"chunk_{len(chunk_records):06d}.npy"
-        np.save(chunk_path, embs, allow_pickle=False)
-        for cls_name, cid, grp in batch_meta:
-            y_class_names.append(cls_name)
-            y_numeric.append(cid)
-            groups.append(grp)
-        chunk_records.append((str(chunk_path), chunk_start, len(embs)))
-        batch_crops.clear()
-        batch_meta.clear()
+        try:
+            embs = encode_batch(batch_crops)
+            chunk_start = len(y_class_names)
+            chunk_path = chunk_dir / f"chunk_{len(chunk_records):06d}.npy"
+            np.save(chunk_path, embs, allow_pickle=False)
+            for cls_name, cid, grp, covars in batch_meta:
+                y_class_names.append(cls_name)
+                y_numeric.append(cid)
+                groups.append(grp)
+                geometry_covariates.append([float(x) for x in covars])
+            chunk_records.append((str(chunk_path), chunk_start, len(embs)))
+        finally:
+            for crop_item in batch_crops:
+                _close_crop_item(crop_item)
+            batch_crops.clear()
+            batch_meta.clear()
 
     def append_embeddings(
         embs: np.ndarray,
         class_names: List[str],
         cids: List[int],
         group_names: List[str],
+        covariate_rows: Optional[List[List[float]]] = None,
     ) -> None:
         if embs.size == 0:
             return
@@ -1218,6 +1366,10 @@ def train_clip_from_yolo(
         y_class_names.extend(class_names)
         y_numeric.extend(cids)
         groups.extend(group_names)
+        if covariate_rows is None:
+            geometry_covariates.extend([[0.0, 0.0, 0.0, 0.0] for _ in range(len(embs))])
+        else:
+            geometry_covariates.extend([[float(x) for x in row] for row in covariate_rows])
         chunk_records.append((str(chunk_path), chunk_start, len(embs)))
 
     def flush_bg_batch() -> None:
@@ -1225,11 +1377,17 @@ def train_clip_from_yolo(
         if not bg_crop_batch:
             return
         _check_cancel()
-        embs = encode_batch(bg_crop_batch)
-        bg_embeddings.append(embs)
-        bg_groups.extend(bg_group_batch)
-        bg_crop_batch.clear()
-        bg_group_batch.clear()
+        try:
+            embs = encode_batch(bg_crop_batch)
+            bg_embeddings.append(embs)
+            for group_name, covars in bg_group_batch:
+                bg_groups.append(group_name)
+                bg_covariates.append([float(x) for x in covars])
+        finally:
+            for crop_item in bg_crop_batch:
+                _close_crop_item(crop_item)
+            bg_crop_batch.clear()
+            bg_group_batch.clear()
 
     total_pos = 0
     total_valid = 0
@@ -1251,7 +1409,8 @@ def train_clip_from_yolo(
             if label_file is None:
                 continue
             try:
-                lines = open(label_file, "r", encoding="utf-8").read().strip().splitlines()
+                with open(label_file, "r", encoding="utf-8") as handle:
+                    lines = handle.read().strip().splitlines()
             except Exception:
                 continue
             for ln in lines:
@@ -1277,70 +1436,113 @@ def train_clip_from_yolo(
                 pil_img = Image.open(img_path).convert("RGB")
             except Exception as exc:
                 raise TrainingError(f"Failed to open image '{img_rel}': {exc}") from exc
-            w_img, h_img = pil_img.size
-
             try:
-                lines = open(label_file, "r", encoding="utf-8").read().strip().splitlines()
-            except Exception as exc:
-                raise TrainingError(f"Failed to read label file '{label_file}': {exc}") from exc
+                w_img, h_img = pil_img.size
 
-            gt_boxes: List[Tuple[int, int, int, int]] = []
-            for ln in lines:
-                _check_cancel()
-                parts = ln.split()
-                parsed = _parse_yolo_box_line(parts, w_img, h_img)
-                if not parsed:
-                    continue
-                cid, bbox = parsed
-                X1, Y1, X2, Y2 = bbox
-                gt_boxes.append(bbox)
                 try:
-                    base_crop = pil_img.crop((X1, Y1, X2, Y2))
-                except Exception:
-                    continue
+                    with open(label_file, "r", encoding="utf-8") as handle:
+                        lines = handle.read().strip().splitlines()
+                except Exception as exc:
+                    raise TrainingError(f"Failed to read label file '{label_file}': {exc}") from exc
 
-                if labelmap_list and 0 <= cid < len(labelmap_list):
-                    cls_name = str(labelmap_list[cid])
-                else:
-                    cls_name = f"class_{cid}"
-
-                encountered_cids.add(cid)
-                repeat = _sample_repeat_count(oversample_multipliers.get(cid, 1.0), rng)
-                for _ in range(repeat):
-                    aug_crop = _apply_augmenter(augmenter, base_crop)
-                    batch_crops.append(aug_crop)
-                    batch_meta.append((cls_name, cid, base))
-                    total_pos += 1
-                    if len(batch_crops) >= batch_size:
-                        flush_batch()
-
-            if bg_class_count > 0:
-                bg_boxes = _sample_background_boxes(
-                    rng,
-                    w_img,
-                    h_img,
-                    gt_boxes,
-                    sample_count=bg_samples_per_image,
-                    max_attempts=bg_max_attempts,
-                    pad_ratio=bg_pad_ratio,
-                    iou_max=bg_iou_max,
-                    min_scale=bg_min_scale,
-                    max_scale=bg_max_scale,
-                )
-                for bg_box in bg_boxes:
+                gt_boxes: List[Tuple[int, int, int, int]] = []
+                for ln in lines:
+                    _check_cancel()
+                    parts = ln.split()
+                    parsed = _parse_yolo_box_line(parts, w_img, h_img)
+                    if not parsed:
+                        continue
+                    cid, bbox = parsed
+                    X1, Y1, X2, Y2 = bbox
+                    gt_boxes.append(bbox)
                     try:
-                        crop = pil_img.crop(bg_box)
+                        views, crop_xyxy, _view_meta = _embedding_make_crop_views(
+                            pil_img,
+                            (X1, Y1, X2, Y2),
+                            crop_mode=embedding_crop_mode,
+                            padding_ratio=embedding_crop_padding_ratio,
+                            preprocess_mode=preprocess_mode,
+                            canonical_size=canonical_size,
+                            background_mode=background_mode,
+                            view_mode=embedding_view_mode,
+                        )
+                        base_crop = tuple(views) if len(views) > 1 else views[0]
                     except Exception:
                         continue
-                    crop = _apply_augmenter(augmenter, crop)
-                    bg_crop_batch.append(crop)
-                    bg_group_batch.append(base)
-                    if len(bg_crop_batch) >= batch_size:
-                        flush_bg_batch()
+                    try:
+                        covars = _embedding_covariate_row(
+                            bbox_xyxy=(X1, Y1, X2, Y2),
+                            crop_xyxy=crop_xyxy,
+                        )
 
-            if idx % 25 == 0 or idx == len(image_files):
-                frac = idx / max(1, len(image_files))
-                _safe_progress(progress_cb, 0.05 + 0.30 * frac, f"Processed {idx}/{len(image_files)} images (accumulated crops={total_pos}) ...")
+                        if labelmap_list and 0 <= cid < len(labelmap_list):
+                            cls_name = str(labelmap_list[cid])
+                        else:
+                            cls_name = f"class_{cid}"
+
+                        encountered_cids.add(cid)
+                        repeat = _sample_repeat_count(oversample_multipliers.get(cid, 1.0), rng)
+                        for _ in range(repeat):
+                            aug_crop = _apply_augmenter_to_item(augmenter, base_crop)
+                            batch_crops.append(aug_crop)
+                            batch_meta.append((cls_name, cid, base, covars))
+                            total_pos += 1
+                            if len(batch_crops) >= batch_size:
+                                flush_batch()
+                    finally:
+                        _close_crop_item(base_crop)
+
+                if bg_class_count > 0:
+                    bg_boxes = _sample_background_boxes(
+                        rng,
+                        w_img,
+                        h_img,
+                        gt_boxes,
+                        sample_count=bg_samples_per_image,
+                        max_attempts=bg_max_attempts,
+                        pad_ratio=bg_pad_ratio,
+                        iou_max=bg_iou_max,
+                        min_scale=bg_min_scale,
+                        max_scale=bg_max_scale,
+                    )
+                    for bg_box in bg_boxes:
+                        base_bg_crop: Any = None
+                        try:
+                            views, crop_xyxy, _view_meta = _embedding_make_crop_views(
+                                pil_img,
+                                bg_box,
+                                crop_mode=embedding_crop_mode,
+                                padding_ratio=embedding_crop_padding_ratio,
+                                preprocess_mode=preprocess_mode,
+                                canonical_size=canonical_size,
+                                background_mode=background_mode,
+                                view_mode=embedding_view_mode,
+                            )
+                            base_bg_crop = tuple(views) if len(views) > 1 else views[0]
+                            crop = _apply_augmenter_to_item(augmenter, base_bg_crop)
+                        except Exception:
+                            continue
+                        finally:
+                            if base_bg_crop is not None:
+                                _close_crop_item(base_bg_crop)
+                        bg_crop_batch.append(crop)
+                        bg_group_batch.append(
+                            (
+                                base,
+                                _embedding_covariate_row(bbox_xyxy=bg_box, crop_xyxy=crop_xyxy),
+                            )
+                        )
+                        if len(bg_crop_batch) >= batch_size:
+                            flush_bg_batch()
+
+                if idx % 25 == 0 or idx == len(image_files):
+                    frac = idx / max(1, len(image_files))
+                    _safe_progress(progress_cb, 0.05 + 0.30 * frac, f"Processed {idx}/{len(image_files)} images (accumulated crops={total_pos}) ...")
+            finally:
+                try:
+                    pil_img.close()
+                except Exception:
+                    pass
 
         flush_batch()
         flush_bg_batch()
@@ -1356,6 +1558,7 @@ def train_clip_from_yolo(
                     sel = rng.sample(range(bg_total), max_bg)
                     bg_feats = bg_feats[sel]
                     bg_groups = [bg_groups[i] for i in sel]
+                    bg_covariates = [bg_covariates[i] for i in sel]
                     bg_total = max_bg
 
             min_cluster = max(2, min_per_class)
@@ -1385,7 +1588,7 @@ def train_clip_from_yolo(
                 bg_cids = [max_dataset_cid + 1 + i for i in range(bg_k)]
                 bg_names = [bg_class_names[int(idx)] for idx in labels]
                 bg_ids = [bg_cids[int(idx)] for idx in labels]
-                append_embeddings(bg_feats, bg_names, bg_ids, bg_groups)
+                append_embeddings(bg_feats, bg_names, bg_ids, bg_groups, bg_covariates)
                 total_valid += len(bg_names)
     else:
         total_valid = len(y_numeric)
@@ -1400,6 +1603,9 @@ def train_clip_from_yolo(
     y_numeric_np = np.array(y_numeric, dtype=int)
     groups_np = np.array(groups)
     y_class_names_arr = np.array(y_class_names, dtype=object)
+    if len(geometry_covariates) != len(y_numeric):
+        geometry_covariates = [[0.0, 0.0, 0.0, 0.0] for _ in range(len(y_numeric))]
+    geometry_covariates_np = np.asarray(geometry_covariates, dtype=np.float32)
     if not background_classes:
         background_classes = sorted({name for name in y_class_names if name.startswith("__bg_")})
 
@@ -1419,6 +1625,7 @@ def train_clip_from_yolo(
     y_numeric_np = y_numeric_np[keep_mask]
     groups_np = groups_np[keep_mask]
     y_class_names_arr = y_class_names_arr[keep_mask]
+    geometry_covariates_np = geometry_covariates_np[keep_mask]
 
     _safe_progress(progress_cb, 0.38, f"Retained {len(y_numeric_np)} samples across {len(set(y_class_names_arr))} classes; building train/test split ...")
 
@@ -1498,7 +1705,34 @@ def train_clip_from_yolo(
     X_test_mm.flush()
     X_train = np.asarray(X_train_mm)
     X_test = np.asarray(X_test_mm)
+    cov_train = geometry_covariates_np[train_idx]
+    cov_test = geometry_covariates_np[test_idx]
     phase_timings["embed"] = time.perf_counter() - embed_start
+    embedding_adjustment_transform: Optional[Dict[str, Any]] = None
+    if embedding_adjustment == "remove_size_bias":
+        _safe_progress(progress_cb, 0.395, "Removing embedding size/aspect bias ...")
+        try:
+            embedding_adjustment_transform = fit_size_bias_residualizer(X_train, cov_train)
+            if embedding_adjustment_transform is not None:
+                X_train = apply_size_bias_residualizer(
+                    X_train,
+                    cov_train,
+                    embedding_adjustment_transform,
+                    normalize=True,
+                )
+                if X_test.size:
+                    X_test = apply_size_bias_residualizer(
+                        X_test,
+                        cov_test,
+                        embedding_adjustment_transform,
+                        normalize=True,
+                    )
+            else:
+                embedding_adjustment = "none"
+        except Exception as exc:
+            logger.warning("Embedding size-bias residualization failed; continuing without it: %s", exc)
+            embedding_adjustment = "none"
+            embedding_adjustment_transform = None
     if classifier_type == "mlp" and mlp_normalize_embeddings:
         _safe_progress(progress_cb, 0.40, "Normalizing embeddings ...")
         train_norms = np.linalg.norm(X_train, axis=1, keepdims=True)
@@ -2079,6 +2313,15 @@ def train_clip_from_yolo(
                 "embedding_standardize": bool(embedding_standardize),
                 "embedding_center_values": embedding_center_values,
                 "embedding_std_values": embedding_std_values,
+                "preprocess_mode": preprocess_mode,
+                "canonical_size": int(canonical_size),
+                "embedding_crop_mode": embedding_crop_mode,
+                "embedding_crop_padding_ratio": float(embedding_crop_padding_ratio),
+                "background_mode": background_mode,
+                "embedding_view_mode": embedding_view_mode,
+                "embedding_adjustment": embedding_adjustment,
+                "embedding_adjustment_transform": embedding_adjustment_transform,
+                "dinov3_pooling": dinov3_pooling,
                 "calibration_temperature": calibration_temperature,
                 "logit_adjustment": logit_adjustment_vec,
                 "logit_adjustment_inference": bool(logit_adjustment_inference_flag),
@@ -2449,7 +2692,7 @@ def train_clip_from_yolo(
         meta = {
             "clip_model": clip_model,
             "encoder_type": encoder_type,
-            "encoder_model": clip_model,
+            "encoder_model": encoder_model_name,
             "device": resolved_device,
             "test_size": test_size,
             "random_seed": random_seed,
@@ -2501,6 +2744,15 @@ def train_clip_from_yolo(
             "embedding_standardize": embedding_standardize,
             "embedding_center_values": embedding_center_values.tolist() if embedding_center_values is not None else None,
             "embedding_std_values": embedding_std_values.tolist() if embedding_std_values is not None else None,
+            "preprocess_mode": preprocess_mode,
+            "canonical_size": int(canonical_size),
+            "embedding_crop_mode": embedding_crop_mode,
+            "embedding_crop_padding_ratio": float(embedding_crop_padding_ratio),
+            "background_mode": background_mode,
+            "embedding_view_mode": embedding_view_mode,
+            "embedding_adjustment": embedding_adjustment,
+            "embedding_adjustment_transform": embedding_adjustment_transform,
+            "dinov3_pooling": dinov3_pooling,
             "calibration_mode": calibration_mode,
             "calibration_temperature": calibration_temperature,
             "phase_timings": dict(phase_timings),
@@ -2526,6 +2778,7 @@ def train_clip_from_yolo(
                 y_class_names,
                 y_numeric,
                 groups,
+                geometry_covariates,
                 encountered_cids,
                 bg_policy=bg_policy,
                 aug_policy=aug_policy,
@@ -2554,7 +2807,7 @@ def train_clip_from_yolo(
             samples_test=n_test,
             clip_model=clip_model,
             encoder_type=encoder_type,
-            encoder_model=clip_model,
+            encoder_model=encoder_model_name,
             embedding_dim=embedding_dim,
             device=resolved_device,
             classification_report=report,
@@ -2607,6 +2860,14 @@ def train_clip_from_yolo(
             supcon_projection_hidden=int(supcon_projection_hidden),
             embedding_center=bool(embedding_center),
             embedding_standardize=bool(embedding_standardize),
+            preprocess_mode=str(preprocess_mode),
+            canonical_size=int(canonical_size),
+            embedding_crop_mode=str(embedding_crop_mode),
+            embedding_crop_padding_ratio=float(embedding_crop_padding_ratio),
+            background_mode=str(background_mode),
+            embedding_view_mode=str(embedding_view_mode),
+            embedding_adjustment=str(embedding_adjustment),
+            dinov3_pooling=str(dinov3_pooling),
             calibration_mode=str(calibration_mode),
             calibration_temperature=None if calibration_temperature is None else float(calibration_temperature),
             phase_timings=dict(phase_timings),

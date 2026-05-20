@@ -417,11 +417,34 @@ def _yolo_to_xyxy_int(width: int, height: int, bbox: Sequence[float]) -> Tuple[i
     return left, top, right, bottom
 
 
+def _coerce_mask_to_2d(mask: np.ndarray) -> Optional[np.ndarray]:
+    try:
+        mask_arr = np.asarray(mask)
+    except Exception:
+        return None
+    if mask_arr.ndim == 2:
+        return mask_arr
+    if mask_arr.ndim < 2:
+        return None
+    while mask_arr.ndim > 2:
+        if mask_arr.shape[0] == 1:
+            mask_arr = mask_arr[0]
+            continue
+        if mask_arr.shape[-1] == 1:
+            mask_arr = mask_arr[..., 0]
+            continue
+        return None
+    return mask_arr if mask_arr.ndim == 2 else None
+
+
 def _mask_to_bounding_box(mask: np.ndarray) -> Tuple[int, int, int, int]:
-    rows = np.any(mask, axis=1)
-    cols = np.any(mask, axis=0)
+    mask_arr = _coerce_mask_to_2d(mask)
+    if mask_arr is None:
+        return (0, 0, 0, 0)
+    rows = np.any(mask_arr, axis=1)
+    cols = np.any(mask_arr, axis=0)
     if not np.any(rows) or not np.any(cols):
         return (0, 0, 0, 0)
     y_min, y_max = np.where(rows)[0][[0, -1]]
     x_min, x_max = np.where(cols)[0][[0, -1]]
-    return (int(x_min), int(y_min), int(x_max), int(y_max))
+    return (int(x_min), int(y_min), int(x_max) + 1, int(y_max) + 1)

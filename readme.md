@@ -349,7 +349,9 @@ for large images and makes labelmap extension explicit from the labeling UI.
 - Added SAM3 text window settings to the UI: windowed mode, window size, and
   overlap. Cascade steps and "next N images" batch runs inherit the same
   windowing settings so the behavior is consistent across single-image and
-  batch usage.
+  batch usage. SAM3 polygon creation now honors the per-request simplify
+  epsilon from the SAM3 text prompt before falling back to the global polygon
+  slider.
 - Added labelmap extension from the SAM3 text prompt panel. Operators can add a
   new class, select it for SAM3 output, save the new labelmap, and see the
   retraining warning when an auto-class predictor may have been trained against
@@ -363,14 +365,23 @@ for large images and makes labelmap extension explicit from the labeling UI.
 - Fixed batch navigation for SAM3 text/cascade runs across next N images and
   removed a duplicate bbox-folder file-label registration introduced by the UI
   move.
+- Fixed singleton-channel SAM mask handling so shared mask encoding, window
+  mask reprojection, and mask bbox extraction correctly accept both `(H, W)`
+  and `(1, H, W)` masks, and mask-derived boxes now use exclusive right/bottom
+  bounds instead of dropping single-pixel-wide masks.
+- Aligned windowed SAM3 text result-limit handling with the direct SAM3 text
+  path: non-positive API limits are treated as unlimited instead of one result.
+- Fixed the UI control-manifest pytest wrapper to invoke the checker from the
+  repo root with the active Python interpreter instead of a bare `python`
+  executable.
+- Added a labeling-panel layout contract test for the closed-by-default
+  pop-down panels, EDR tooltip copy, and moved YOLO import/export controls.
 - Review validation used:
   `node --check ybat-master/ybat.js`,
-  `./.venv-macos/bin/python -m py_compile localinferenceapi.py models/schemas.py services/qwen.py`,
+  `./.venv-macos/bin/python -m py_compile localinferenceapi.py models/schemas.py services/qwen.py utils/image.py utils/coco.py utils/coords.py services/detector_params.py tests/ui/e2e/test_control_manifest_contract.py tests/test_labeling_panel_layout_contract.py`,
   `git diff --check`,
-  `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_prompt.py tests/test_sam3_text_windowed_prompt.py -q`
-  with 48 passing tests, and
-  `./.venv-macos/bin/python -m pytest tests/test_dataset_linked_annotation_flows.py -q`
-  with 16 passing tests.
+  and `./.venv-macos/bin/python -m pytest tests/test_qwen_caption_prompt.py tests/test_sam3_text_windowed_prompt.py tests/test_coords_window_normalization.py tests/test_qwen_agentic_coords.py tests/test_dataset_linked_annotation_flows.py tests/test_labeling_panel_layout_contract.py tests/ui/e2e/test_control_manifest_contract.py -q`
+  with 78 passing tests.
 
 ## Training and Model Management
 

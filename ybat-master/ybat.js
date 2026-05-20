@@ -30072,10 +30072,11 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!currentImage) {
             return null;
         }
+        const explicitEpsilon = Number.isFinite(simplifyEpsilon) && simplifyEpsilon >= 0 ? simplifyEpsilon : null;
         const uiEpsilon = getSimplifyEpsilon();
-        const epsilon = Number.isFinite(uiEpsilon) && uiEpsilon >= 0
-            ? uiEpsilon
-            : (Number.isFinite(simplifyEpsilon) && simplifyEpsilon >= 0 ? simplifyEpsilon : 1.0);
+        const epsilon = explicitEpsilon !== null
+            ? explicitEpsilon
+            : (Number.isFinite(uiEpsilon) && uiEpsilon >= 0 ? uiEpsilon : 1.0);
         const maxPts = Number.isFinite(maxPointsPerPolygon) && maxPointsPerPolygon > 3 ? maxPointsPerPolygon : getMaxPolygonPoints();
         const minMaskArea = Number.isFinite(minArea) && minArea >= 0 ? minArea : Math.max(0, getMinMaskArea());
         const polygons = maskPayloadToPolygons(maskPayload, {

@@ -467,6 +467,7 @@ from utils.coords import (
     _yolo_to_xyxy_int,
     _xyxy_to_yolo_norm,
     _xyxy_to_yolo_norm_list,
+    _coerce_mask_to_2d,
     _mask_to_bounding_box,
     _agent_det_payload,
     _extract_numeric_sequence,
@@ -3991,9 +3992,11 @@ def _run_sam3_text_inference(
         normalized_limit = None
     else:
         try:
-            normalized_limit = max(1, int(limit))
+            parsed_limit = int(limit)
         except (TypeError, ValueError):
             normalized_limit = None
+        else:
+            normalized_limit = parsed_limit if parsed_limit > 0 else None
     img_state = state if state is not None else processor.set_image(pil_img)
     masks_arr: Optional[np.ndarray] = None
     try:
@@ -4086,9 +4089,9 @@ def _sam3_window_mask_to_full(
     if crop_mask is None:
         return None
     try:
-        mask_arr = np.asarray(crop_mask)
-        if mask_arr.ndim > 2:
-            mask_arr = np.squeeze(mask_arr)
+        mask_arr = _coerce_mask_to_2d(crop_mask)
+        if mask_arr is None:
+            return None
         mask_arr = (mask_arr > 0).astype(np.uint8)
         if mask_arr.shape != (crop_h, crop_w):
             mask_img = Image.fromarray((mask_arr * 255).astype(np.uint8))
@@ -4148,6 +4151,17 @@ def _fuse_sam3_windowed_detections(
 ) -> Tuple[List[QwenDetection], List[Optional[np.ndarray]]]:
     if not pairs:
         return [], []
+    numeric_limit: Optional[int]
+    if limit is None:
+        numeric_limit = None
+    else:
+        try:
+            numeric_limit = int(limit)
+        except (TypeError, ValueError):
+            numeric_limit = None
+        else:
+            if numeric_limit <= 0:
+                numeric_limit = None
     prepared: List[Tuple[QwenDetection, Optional[np.ndarray], Tuple[float, float, float, float], float]] = []
     for det, mask in pairs:
         xyxy = _yolo_to_xyxy(img_w, img_h, det.bbox)
@@ -4169,7 +4183,7 @@ def _fuse_sam3_windowed_detections(
         if duplicate:
             continue
         kept.append((det, mask, xyxy))
-        if limit is not None and len(kept) >= limit:
+        if numeric_limit is not None and len(kept) >= numeric_limit:
             break
     detections = [item[0] for item in kept]
     masks = [item[1] for item in kept]
@@ -4216,9 +4230,11 @@ def _run_sam3_text_windowed_inference(
     per_window_limit = None
     if limit is not None:
         try:
-            per_window_limit = max(1, int(limit))
+            numeric_limit = int(limit)
         except (TypeError, ValueError):
             per_window_limit = None
+        else:
+            per_window_limit = numeric_limit if numeric_limit > 0 else None
     _, processor, _ = _ensure_sam3_text_runtime()
     pairs: List[Tuple[QwenDetection, Optional[np.ndarray]]] = []
     for tile, start in zip(slices, starts, strict=False):

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import base64
 import numpy as np
+
+from utils.coords import _coerce_mask_to_2d
+
 try:  # optional dependency
     from scipy.spatial import ConvexHull
 except Exception:  # pragma: no cover - optional
@@ -159,12 +162,10 @@ def _ensure_coco_supercategory_impl(path: Path, default: str = "object") -> bool
 
 def _encode_binary_mask_impl(mask: np.ndarray, *, max_bytes: int = 0) -> Optional[Dict[str, Any]]:
     try:
-        mask_arr = np.asarray(mask)
+        mask_arr = _coerce_mask_to_2d(mask)
     except Exception:
         return None
-    if mask_arr.ndim == 3 and mask_arr.shape[-1] == 1:
-        mask_arr = mask_arr[..., 0]
-    if mask_arr.ndim != 2:
+    if mask_arr is None:
         return None
     mask_bool = mask_arr.astype(bool)
     height, width = mask_bool.shape

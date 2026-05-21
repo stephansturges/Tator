@@ -29,6 +29,7 @@ logger = logging.getLogger("localinferenceapi")
 from api.detectors_default import build_detectors_default_router
 from api.datasets import build_datasets_router
 from api.class_analysis import build_class_analysis_router
+from api.data_ingestion import build_data_ingestion_router
 from api.glossaries import build_glossaries_router
 from api.predictor_settings import build_predictor_settings_router
 from api.runtime import build_runtime_router
@@ -285,6 +286,14 @@ from services.classifier_jobs import (
     _clip_job_log_impl as _clip_job_log_impl,
     _clip_job_update_impl as _clip_job_update_impl,
     _serialize_clip_job_impl as _serialize_clip_job_impl,
+)
+from services.data_ingestion import (
+    IMAGE_EXTS as DATA_INGESTION_IMAGE_EXTS,
+    VIDEO_EXTS as DATA_INGESTION_VIDEO_EXTS,
+    diversity_summary as _data_ingestion_diversity_summary,
+    greedy_diverse_indices as _data_ingestion_greedy_indices,
+    normalize_keep_fraction as _data_ingestion_keep_fraction,
+    safe_media_name as _data_ingestion_safe_media_name,
 )
 from services.detector_jobs import (
     _rfdetr_job_append_metric_impl as _rfdetr_job_append_metric_impl,
@@ -755,11 +764,32 @@ from utils.embedding_recipe import (
     make_embedding_crop_views as _embedding_make_crop_views,
     normalize_background_mode as _embedding_normalize_background_mode,
     normalize_dinov3_pooling as _embedding_normalize_dinov3_pooling,
+    normalize_embedding_aggregation as _embedding_normalize_aggregation,
     normalize_embedding_adjustment as _embedding_normalize_adjustment,
     normalize_embedding_view_mode as _embedding_normalize_view_mode,
     normalize_preprocess_mode as _embedding_normalize_preprocess,
     normalize_rows as _embedding_normalize_rows,
     preprocess_crop as _embedding_preprocess_crop,
+)
+from utils.local_salad import (
+    LOCAL_SALAD_CACHE_VERSION,
+    LOCAL_SALAD_POLICY,
+    LOCAL_SALAD_TRAINER,
+    LocalSALADConfig,
+    LocalSALADHead,
+    load_local_salad_head_file,
+    symmetric_infonce_loss,
+)
+from utils.cradio_embedding import (
+    CRADIO_DEFAULT_MODEL,
+    CRADIO_SUPPORTED_MODELS,
+    cradio_backend_status,
+    cradio_capabilities,
+    encode_cradio_images,
+    load_cradio_backbone,
+    normalize_cradio_model,
+    normalize_cradio_pooling,
+    resolve_cradio_torch_device,
 )
 
 # Ensure we import the bundled SAM3 package (sam3/sam3) rather than shadowing it
@@ -1224,6 +1254,22 @@ def _unload_dinov3_backbone() -> None:
     dinov3_initialized = state["dinov3_initialized"]
 
 
+def _unload_cradio_backbone() -> None:
+    """Release C-RADIOv4 encoder."""
+    global cradio_model, cradio_processor, cradio_model_name, cradio_model_device, cradio_initialized
+    with cradio_lock:
+        cradio_model = None
+        cradio_processor = None
+        cradio_model_name = None
+        cradio_model_device = None
+        cradio_initialized = False
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def _load_dinov3_backbone(
     model_name: str,
     target_device: str,
@@ -1240,6 +1286,47 @@ def _load_dinov3_backbone(
             "Failed to load DINOv3 backbone '%s' on %s: %s", model_name, target_device, exc
         )
         return None, None
+
+
+def _load_cradio_backbone_cached(
+    model_name: Optional[str],
+    target_device: Optional[str],
+    *,
+    raise_on_error: bool = False,
+) -> Tuple[Optional[Any], Optional[Any], str, str]:
+    global cradio_model, cradio_processor, cradio_model_name, cradio_model_device, cradio_initialized
+    resolved_model = normalize_cradio_model(model_name)
+    resolved_device = target_device or resolve_cradio_torch_device()
+    try:
+        if (
+            cradio_model is None
+            or cradio_processor is None
+            or cradio_model_name != resolved_model
+            or cradio_model_device != resolved_device
+        ):
+            with cradio_lock:
+                if (
+                    cradio_model is None
+                    or cradio_processor is None
+                    or cradio_model_name != resolved_model
+                    or cradio_model_device != resolved_device
+                ):
+                    model_obj, processor_obj, loaded_model, loaded_device = load_cradio_backbone(
+                        resolved_model,
+                        resolved_device,
+                    )
+                    cradio_model = model_obj
+                    cradio_processor = processor_obj
+                    cradio_model_name = loaded_model
+                    cradio_model_device = loaded_device
+                    cradio_initialized = True
+        return cradio_model, cradio_processor, cradio_model_name or resolved_model, cradio_model_device or resolved_device
+    except Exception as exc:  # noqa: BLE001
+        cradio_initialized = False
+        if raise_on_error:
+            raise RuntimeError(str(exc)) from exc
+        logger.warning("Failed to load C-RADIOv4 backbone '%s' on %s: %s", resolved_model, resolved_device, exc)
+        return None, None, resolved_model, resolved_device
 
 
 def _unload_detector_inference() -> None:
@@ -2770,6 +2857,12 @@ dinov3_model_device: Optional[str] = None
 dinov3_initialized = False
 dinov3_cuda_disabled = False
 dinov3_lock = threading.Lock()
+cradio_model: Optional[Any] = None
+cradio_processor: Optional[Any] = None
+cradio_model_name: Optional[str] = None
+cradio_model_device: Optional[str] = None
+cradio_initialized = False
+cradio_lock = threading.Lock()
 _agent_dinov3_backbones: Dict[Tuple[str, str], Tuple[Any, Any]] = {}
 _agent_dinov3_locks: Dict[Tuple[str, str], threading.Lock] = {}
 _agent_dinov3_backbones_lock = threading.Lock()
@@ -8235,6 +8328,8 @@ def _encode_pil_batch_for_head(
     batch_size = max(1, min(batch_size, len(images)))
     features: List[np.ndarray] = []
     if encoder_type == "dinov3":
+        aggregation = _embedding_normalize_aggregation(head.get("embedding_aggregation"))
+        salad_head: Optional[LocalSALADHead] = None
         global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_model_device, dinov3_initialized
         model_name = str(
             head.get("encoder_model") or head.get("clip_model") or DINOv3_MODEL_NAME or ""
@@ -8269,6 +8364,13 @@ def _encode_pil_batch_for_head(
         if dinov3_model is None or dinov3_processor is None:
             return None
         device_name = device_override or dinov3_model_device or target_device or device
+        if aggregation == "local_salad":
+            salad_head_id = str(head.get("embedding_salad_head_id") or "").strip()
+            if not salad_head_id:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
+            salad_head, _salad_meta = _load_local_salad_head(salad_head_id, device_name=device_name)
+            if str(_salad_meta.get("encoder_type") or "dinov3").strip().lower() != "dinov3":
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_encoder_mismatch")
         for idx in range(0, len(images), batch_size):
             batch = images[idx : idx + batch_size]
             inputs = dinov3_processor(images=batch, return_tensors="pt")
@@ -8277,7 +8379,15 @@ def _encode_pil_batch_for_head(
                 outputs = dinov3_model(**inputs)
             pooling = _embedding_normalize_dinov3_pooling(head.get("dinov3_pooling"))
             last_hidden = getattr(outputs, "last_hidden_state", None)
-            if pooling == "pooler" and hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+            if aggregation == "local_salad":
+                if last_hidden is None or last_hidden.ndim != 3 or last_hidden.shape[1] <= 1:
+                    raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dinov3_patch_tokens_missing")
+                global_token = getattr(outputs, "pooler_output", None)
+                if global_token is None:
+                    global_token = last_hidden[:, 0, :]
+                assert salad_head is not None
+                feats = salad_head(last_hidden[:, 1:, :], global_token=global_token)
+            elif pooling == "pooler" and hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
                 feats = outputs.pooler_output
             elif pooling == "patch_mean" and last_hidden is not None and last_hidden.ndim == 3 and last_hidden.shape[1] > 1:
                 feats = last_hidden[:, 1:, :].mean(dim=1)
@@ -8293,7 +8403,59 @@ def _encode_pil_batch_for_head(
                 feats = outputs[0]
             feats_np = feats.detach().float().cpu().numpy()
             features.append(feats_np)
+    elif encoder_type == "cradio":
+        aggregation = _embedding_normalize_aggregation(head.get("embedding_aggregation"))
+        salad_head: Optional[LocalSALADHead] = None
+        model_name = normalize_cradio_model(head.get("encoder_model") or head.get("clip_model") or CRADIO_DEFAULT_MODEL)
+        backend = str(head.get("cradio_backend") or os.environ.get("CRADIO_BACKEND") or "auto").strip()
+        target_device = device_override or resolve_cradio_torch_device(backend)
+        model_obj, processor_obj, resolved_model, device_name = _load_cradio_backbone_cached(
+            model_name,
+            target_device,
+        )
+        if model_obj is None or processor_obj is None:
+            return None
+        if aggregation == "local_salad":
+            salad_head_id = str(head.get("embedding_salad_head_id") or "").strip()
+            if not salad_head_id:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
+            salad_head, _salad_meta = _load_local_salad_head(salad_head_id, device_name=device_name)
+            if str(_salad_meta.get("encoder_type") or "dinov3").strip().lower() != "cradio":
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_encoder_mismatch")
+        pooling = normalize_cradio_pooling(head.get("cradio_pooling"))
+        for idx in range(0, len(images), batch_size):
+            batch = images[idx : idx + batch_size]
+            if aggregation == "local_salad":
+                feats_base, spatial_tokens, summary_tokens = encode_cradio_images(
+                    model_obj,
+                    processor_obj,
+                    device_name,
+                    batch,
+                    pooling=pooling,
+                    normalize=False,
+                    return_tokens=True,
+                )
+                if spatial_tokens.ndim != 3 or spatial_tokens.shape[1] <= 0:
+                    raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="cradio_spatial_tokens_missing")
+                assert salad_head is not None
+                with torch.no_grad():
+                    patch_tensor = torch.from_numpy(spatial_tokens).to(device_name)
+                    global_tensor = torch.from_numpy(summary_tokens).to(device_name)
+                    feats = salad_head(patch_tensor, global_token=global_tensor)
+                feats_np = feats.detach().float().cpu().numpy()
+            else:
+                feats_np = encode_cradio_images(
+                    model_obj,
+                    processor_obj,
+                    device_name,
+                    batch,
+                    pooling=pooling,
+                    normalize=False,
+                )
+            features.append(np.asarray(feats_np, dtype=np.float32))
     else:
+        if _embedding_normalize_aggregation(head.get("embedding_aggregation")) == "local_salad":
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_requires_spatial_encoder")
         if clip_model is None or clip_preprocess is None or _clip_reload_needed:
             _resume_clip_backbone()
         if clip_model is None or clip_preprocess is None:
@@ -8710,7 +8872,7 @@ def _score_detections_with_clip_head(
     if not detections or pil_img is None or not isinstance(clip_head, dict):
         return None
     img_w, img_h = pil_img.size
-    crops: List[Image.Image] = []
+    crops: List[Any] = []
     crop_records: List[Dict[str, Any]] = []
     det_refs: List[Any] = []
     target_indices: List[int] = []
@@ -8742,27 +8904,31 @@ def _score_detections_with_clip_head(
         target_indices.append(target_idx)
     if not crops:
         return None
-    feats = _encode_pil_batch_for_head(crops, head=clip_head, geometry_records=crop_records)
-    if feats is None:
-        return None
-    proba = _clip_head_predict_proba(feats, clip_head)
-    if proba is None or proba.ndim != 2:
-        return None
-    scores: Dict[int, float] = {}
-    for idx, det in enumerate(det_refs):
-        target_idx = target_indices[idx]
-        row = proba[idx]
-        target_prob = float(row[target_idx])
-        if score_mode == "clip_head_margin":
-            if len(row) > 1:
-                best_other = float(np.max(np.delete(row, target_idx)))
+    try:
+        feats = _encode_embedding_items_for_head(crops, head=clip_head, geometry_records=crop_records)
+        if feats is None:
+            return None
+        proba = _clip_head_predict_proba(feats, clip_head)
+        if proba is None or proba.ndim != 2:
+            return None
+        scores: Dict[int, float] = {}
+        for idx, det in enumerate(det_refs):
+            target_idx = target_indices[idx]
+            row = proba[idx]
+            target_prob = float(row[target_idx])
+            if score_mode == "clip_head_margin":
+                if len(row) > 1:
+                    best_other = float(np.max(np.delete(row, target_idx)))
+                else:
+                    best_other = 0.0
+                score_val = target_prob - best_other
             else:
-                best_other = 0.0
-            score_val = target_prob - best_other
-        else:
-            score_val = target_prob
-        scores[id(det)] = score_val
-    return scores
+                score_val = target_prob
+            scores[id(det)] = score_val
+        return scores
+    finally:
+        for crop in crops:
+            _close_crop_item(crop)
 
 
 def _agent_classifier_review(
@@ -8783,7 +8949,7 @@ def _agent_classifier_review(
     margin = float(classifier_head.get("margin") or 0.0)
     background_margin = float(classifier_head.get("background_margin") or 0.0)
     pending: List[Dict[str, Any]] = []
-    pending_crops: List[Image.Image] = []
+    pending_crops: List[Any] = []
     pending_crop_records: List[Dict[str, Any]] = []
     reviewed: List[Dict[str, Any]] = []
     for det in detections:
@@ -8817,16 +8983,20 @@ def _agent_classifier_review(
     if not pending:
         return reviewed, counts
     empty_cache_fn = torch.cuda.empty_cache if torch.cuda.is_available() else None
-    proba_arr = _predict_proba_batched_impl(
-        pending_crops,
-        classifier_head,
-        batch_size=_resolve_classifier_batch(),
-        encode_batch_fn=lambda items, head_obj, bs: _encode_pil_batch_for_head(
-            items, head=head_obj, batch_size_override=bs, geometry_records=pending_crop_records
-        ),
-        predict_proba_fn=_clip_head_predict_proba,
-        empty_cache_fn=empty_cache_fn,
-    )
+    try:
+        proba_arr = _predict_proba_batched_impl(
+            pending_crops,
+            classifier_head,
+            batch_size=_resolve_classifier_batch(),
+            encode_batch_fn=lambda items, head_obj, bs: _encode_embedding_items_for_head(
+                items, head=head_obj, batch_size_override=bs, geometry_records=pending_crop_records
+            ),
+            predict_proba_fn=_clip_head_predict_proba,
+            empty_cache_fn=empty_cache_fn,
+        )
+    finally:
+        for crop in pending_crops:
+            _close_crop_item(crop)
     if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] != len(pending):
         for pending_entry in pending:
             pending_entry["entry"]["classifier_accept"] = False
@@ -9246,7 +9416,7 @@ def _agent_sanitize_detection_items(
     cleaned: List[Dict[str, Any]] = []
     rejected = 0
     pending: List[Dict[str, Any]] = []
-    pending_crops: List[Image.Image] = []
+    pending_crops: List[Any] = []
     pending_crop_records: List[Dict[str, Any]] = []
     for ann in items:
         label = str(ann.get("label") or ann.get("class_name") or "").strip()
@@ -9364,16 +9534,20 @@ def _agent_sanitize_detection_items(
 
     if pending and pil_img is not None and isinstance(classifier_head, dict):
         empty_cache_fn = torch.cuda.empty_cache if torch.cuda.is_available() else None
-        proba_arr = _predict_proba_batched_impl(
-            pending_crops,
-            classifier_head,
-            batch_size=_resolve_classifier_batch(),
-            encode_batch_fn=lambda items, head_obj, bs: _encode_pil_batch_for_head(
-                items, head=head_obj, batch_size_override=bs, geometry_records=pending_crop_records
-            ),
-            predict_proba_fn=_clip_head_predict_proba,
-            empty_cache_fn=empty_cache_fn,
-        )
+        try:
+            proba_arr = _predict_proba_batched_impl(
+                pending_crops,
+                classifier_head,
+                batch_size=_resolve_classifier_batch(),
+                encode_batch_fn=lambda items, head_obj, bs: _encode_embedding_items_for_head(
+                    items, head=head_obj, batch_size_override=bs, geometry_records=pending_crop_records
+                ),
+                predict_proba_fn=_clip_head_predict_proba,
+                empty_cache_fn=empty_cache_fn,
+            )
+        finally:
+            for crop in pending_crops:
+                _close_crop_item(crop)
         if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] != len(pending):
             rejected += len(pending)
             return cleaned, rejected
@@ -10403,9 +10577,12 @@ def _agent_tool_classify_crop(
     if not isinstance(head, dict):
         raise HTTPException(
             status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_unavailable"
-        )
+    )
     crop, crop_record = _classifier_crop_for_head(pil_img, (x1, y1, x2, y2), head)
-    feats = _encode_pil_batch_for_head([crop], head=head, geometry_records=[crop_record])
+    try:
+        feats = _encode_embedding_items_for_head([crop], head=head, geometry_records=[crop_record])
+    finally:
+        _close_crop_item(crop)
     if feats is None or not isinstance(feats, np.ndarray) or feats.size == 0:
         raise HTTPException(
             status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_encode_failed"
@@ -12843,6 +13020,11 @@ CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL = os.environ.get(
     "CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL",
     "facebook/dinov3-vitb16-pretrain-lvd1689m",
 )
+DATA_INGESTION_ROOT = Path(os.environ.get("DATA_INGESTION_ROOT", "./uploads/data_ingestion"))
+DATA_INGESTION_ROOT.mkdir(parents=True, exist_ok=True)
+LOCAL_SALAD_HEAD_ROOT = Path(os.environ.get("LOCAL_SALAD_HEAD_ROOT", "./uploads/salad_heads"))
+LOCAL_SALAD_HEAD_ROOT.mkdir(parents=True, exist_ok=True)
+LOCAL_SALAD_HEAD_LOCK = threading.Lock()
 PROMPT_HELPER_JOB_ROOT = Path(
     os.environ.get("SAM3_PROMPT_HELPER_ROOT", "./uploads/prompt_helper_jobs")
 )
@@ -13058,6 +13240,23 @@ class ClassAnalysisJob:
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
 
+@dataclass
+class DataIngestionJob:
+    job_id: str
+    kind: str = "analysis"
+    status: str = "queued"
+    progress: float = 0.0
+    message: str = "Queued"
+    request: Dict[str, Any] = field(default_factory=dict)
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    result: Optional[Dict[str, Any]] = None
+    result_path: Optional[str] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
 QWEN_TRAINING_JOBS: Dict[str, QwenTrainingJob] = {}
 QWEN_TRAINING_JOBS_LOCK = threading.Lock()
 SAM3_TRAINING_JOBS: Dict[str, Sam3TrainingJob] = {}
@@ -13078,6 +13277,8 @@ AUTO_LABEL_JOBS: Dict[str, AutoLabelJob] = {}
 AUTO_LABEL_JOBS_LOCK = threading.Lock()
 CLASS_ANALYSIS_JOBS: Dict[str, ClassAnalysisJob] = {}
 CLASS_ANALYSIS_JOBS_LOCK = threading.Lock()
+DATA_INGESTION_JOBS: Dict[str, DataIngestionJob] = {}
+DATA_INGESTION_JOBS_LOCK = threading.Lock()
 CALIBRATION_JOBS: Dict[str, CalibrationJob] = {}
 CALIBRATION_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
@@ -15157,10 +15358,15 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
     except Exception:
         pass
     return {
-        "encoders": ["dinov3", "clip"],
+        "encoders": ["dinov3", "clip", "cradio"],
         "default_encoder_type": "dinov3",
         "default_dinov3_model": CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL,
         "default_clip_model": DEFAULT_CLIP_MODEL,
+        "default_cradio_model": CRADIO_DEFAULT_MODEL,
+        "cradio_models": list(CRADIO_SUPPORTED_MODELS),
+        "cradio_pooling_modes": ["summary", "spatial_mean", "summary_spatial_concat"],
+        "default_cradio_pooling": "summary",
+        "cradio_backend": cradio_capabilities()["backend"],
         "projection_methods": projection_methods,
         "default_projection": "pca",
         "preprocess_modes": ["canonical"],
@@ -15168,6 +15374,56 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
         "default_preprocess_mode": "canonical",
         "dinov3_pooling_modes": ["pooler", "cls", "patch_mean", "cls_patch_concat"],
         "default_dinov3_pooling": "pooler",
+        "embedding_aggregation_modes": ["pooled", "local_salad"],
+        "default_embedding_aggregation": "pooled",
+        "local_salad_heads": _list_local_salad_heads(),
+        "local_salad_policy": LOCAL_SALAD_POLICY,
+        "local_salad_trainer": LOCAL_SALAD_TRAINER,
+        "class_separation_recipes": [
+            {
+                "id": "balanced",
+                "label": "Balanced pooled",
+                "embedding_aggregation": "pooled",
+                "canonical_size": 336,
+                "padding_ratio": 0.08,
+                "embedding_view_mode": "single",
+                "dinov3_pooling": "pooler",
+                "embedding_adjustment": "remove_size_bias",
+            },
+            {
+                "id": "precise",
+                "label": "Precise pooled",
+                "embedding_aggregation": "pooled",
+                "canonical_size": 336,
+                "padding_ratio": 0.08,
+                "embedding_view_mode": "tight_context",
+                "dinov3_pooling": "pooler",
+                "embedding_adjustment": "remove_size_bias",
+            },
+            {
+                "id": "local_salad",
+                "label": "Local SALAD separation",
+                "embedding_aggregation": "local_salad",
+                "canonical_size": 336,
+                "padding_ratio": 0.08,
+                "embedding_view_mode": "single",
+                "dinov3_pooling": "pooler",
+                "embedding_adjustment": "remove_size_bias",
+                "requires_local_salad_head": True,
+            },
+            {
+                "id": "cradio_summary",
+                "label": "C-RADIOv4 summary",
+                "encoder_type": "cradio",
+                "encoder_model": CRADIO_DEFAULT_MODEL,
+                "embedding_aggregation": "pooled",
+                "canonical_size": 432,
+                "padding_ratio": 0.08,
+                "embedding_view_mode": "single",
+                "cradio_pooling": "summary",
+                "embedding_adjustment": "remove_size_bias",
+            },
+        ],
         "background_modes": ["full_crop", "mean_fill_outside_box", "blur_outside_box", "darken_outside_box"],
         "default_background_mode": "full_crop",
         "embedding_view_modes": ["single", "tight_standard", "standard_context", "tight_context"],
@@ -15175,7 +15431,7 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
         "embedding_adjustments": ["remove_size_bias"],
         "expert_embedding_adjustments": ["none", "remove_size_bias"],
         "default_embedding_adjustment": "remove_size_bias",
-        "default_projection_neighbor_k": 15,
+        "default_projection_neighbor_k": 50,
         "wrong_class": {
             "neighbor_k": 15,
             "top_other_threshold": 0.65,
@@ -15442,6 +15698,9 @@ def _class_analysis_embedding_cache_key(crop_cache_key: str, head: Dict[str, Any
             "encoder_model": encoder_model,
             "normalize_embeddings": bool(head.get("normalize_embeddings")),
             "dinov3_pooling": _embedding_normalize_dinov3_pooling(head.get("dinov3_pooling")),
+            "cradio_pooling": normalize_cradio_pooling(head.get("cradio_pooling")),
+            "embedding_aggregation": _embedding_normalize_aggregation(head.get("embedding_aggregation")),
+            "embedding_salad_head_id": str(head.get("embedding_salad_head_id") or "").strip(),
         }
     )
 
@@ -15621,6 +15880,9 @@ def _class_analysis_encoder_display_name(encoder_type: str, encoder_model: str =
         return "DINOv3"
     if encoder_norm == "clip":
         return f"CLIP {encoder_model}".strip()
+    if encoder_norm == "cradio":
+        model_tail = str(encoder_model or CRADIO_DEFAULT_MODEL).split("/")[-1]
+        return f"C-RADIOv4 {model_tail}".strip()
     return encoder_norm.upper() or "encoder"
 
 
@@ -15813,17 +16075,25 @@ def _class_analysis_collect_records(
     background_mode = _embedding_normalize_background_mode(payload.get("background_mode"))
     embedding_view_mode = _embedding_normalize_view_mode(payload.get("embedding_view_mode"))
     encoder_type_for_cache = str(payload.get("encoder_type") or "dinov3").strip().lower()
-    if encoder_type_for_cache not in {"clip", "dinov3"}:
+    if encoder_type_for_cache not in {"clip", "dinov3", "cradio"}:
         encoder_type_for_cache = "dinov3"
     encoder_model_for_cache = str(payload.get("encoder_model") or "").strip()
     if not encoder_model_for_cache:
-        encoder_model_for_cache = DEFAULT_CLIP_MODEL if encoder_type_for_cache == "clip" else CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL
+        if encoder_type_for_cache == "clip":
+            encoder_model_for_cache = DEFAULT_CLIP_MODEL
+        elif encoder_type_for_cache == "cradio":
+            encoder_model_for_cache = CRADIO_DEFAULT_MODEL
+        else:
+            encoder_model_for_cache = CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL
     embedding_head_for_cache = {
         "encoder_type": encoder_type_for_cache,
         "encoder_model": encoder_model_for_cache,
         "clip_model": encoder_model_for_cache,
         "normalize_embeddings": True,
         "dinov3_pooling": _embedding_normalize_dinov3_pooling(payload.get("dinov3_pooling")),
+        "cradio_pooling": normalize_cradio_pooling(payload.get("cradio_pooling")),
+        "embedding_aggregation": _embedding_normalize_aggregation(payload.get("embedding_aggregation")),
+        "embedding_salad_head_id": str(payload.get("embedding_salad_head_id") or "").strip(),
     }
     seed = _coerce_int(payload.get("seed"), 42)
     sample_cap = _class_analysis_sample_cap(payload.get("sample_cap"))
@@ -16154,6 +16424,8 @@ def _class_analysis_collect_records(
         "background_mode": background_mode,
         "embedding_view_mode": embedding_view_mode,
         "dinov3_pooling": _embedding_normalize_dinov3_pooling(payload.get("dinov3_pooling")),
+        "embedding_aggregation": _embedding_normalize_aggregation(payload.get("embedding_aggregation")),
+        "embedding_salad_head_id": str(payload.get("embedding_salad_head_id") or "").strip(),
         "crop_cache": {
             "reused": sum(1 for record in records if record.get("crop_cache_reused")),
             "total": len(records),
@@ -16177,7 +16449,7 @@ def _class_analysis_project_embeddings(
     if projection_norm == "umap":
         try:
             import umap
-            resolved_neighbors = int(projection_neighbor_k or 15)
+            resolved_neighbors = int(projection_neighbor_k or 50)
             if resolved_neighbors <= 0:
                 resolved_neighbors = n_samples - 1
             resolved_neighbors = max(2, min(resolved_neighbors, n_samples - 1))
@@ -16379,7 +16651,7 @@ def _class_analysis_build_result(
             }
         )
     class_counts = Counter(str(point.get("class_name") or "") for point in points)
-    projection_neighbor_raw = int(projection_neighbor_k if projection_neighbor_k is not None else 15)
+    projection_neighbor_raw = int(projection_neighbor_k if projection_neighbor_k is not None else 50)
     if projection_used == "umap":
         projection_neighbor_resolved = n_samples - 1 if projection_neighbor_raw <= 0 else projection_neighbor_raw
         projection_neighbor_resolved = max(2, min(projection_neighbor_resolved, max(1, n_samples - 1)))
@@ -16429,11 +16701,13 @@ def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
                 message=f"Encoding {len(records)} crops with {job.request.get('encoder_type') or 'dinov3'} ...",
             )
         encoder_type = str(job.request.get("encoder_type") or "dinov3").strip().lower()
-        if encoder_type not in {"clip", "dinov3"}:
+        if encoder_type not in {"clip", "dinov3", "cradio"}:
             encoder_type = "dinov3"
         encoder_model = str(job.request.get("encoder_model") or "").strip()
         if encoder_type == "clip":
             encoder_model = encoder_model or DEFAULT_CLIP_MODEL
+        elif encoder_type == "cradio":
+            encoder_model = normalize_cradio_model(encoder_model)
         else:
             encoder_model = encoder_model or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL
         batch_size = _coerce_int(job.request.get("batch_size"), 64, minimum=1)
@@ -16447,6 +16721,9 @@ def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
                 "clip_model": encoder_model,
                 "normalize_embeddings": True,
                 "dinov3_pooling": _embedding_normalize_dinov3_pooling(job.request.get("dinov3_pooling")),
+                "cradio_pooling": normalize_cradio_pooling(job.request.get("cradio_pooling")),
+                "embedding_aggregation": _embedding_normalize_aggregation(job.request.get("embedding_aggregation")),
+                "embedding_salad_head_id": str(job.request.get("embedding_salad_head_id") or "").strip(),
             },
             batch_size=batch_size,
             records=records,
@@ -16477,12 +16754,16 @@ def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
                 **summary,
                 "encoder_type": encoder_type,
                 "encoder_model": encoder_model,
+                "dinov3_pooling": _embedding_normalize_dinov3_pooling(job.request.get("dinov3_pooling")),
+                "cradio_pooling": normalize_cradio_pooling(job.request.get("cradio_pooling")),
+                "embedding_aggregation": _embedding_normalize_aggregation(job.request.get("embedding_aggregation")),
+                "embedding_salad_head_id": str(job.request.get("embedding_salad_head_id") or "").strip(),
                 "embedding_adjustment": embedding_adjustment,
                 "embedding_adjustment_info": adjustment_info,
                 "embedding_cache": cache_stats,
             },
             projection=str(job.request.get("projection") or "pca"),
-            projection_neighbor_k=_coerce_int(job.request.get("projection_neighbor_k"), 15, minimum=0),
+            projection_neighbor_k=_coerce_int(job.request.get("projection_neighbor_k"), 50, minimum=0),
             neighbor_k=_coerce_int(job.request.get("neighbor_k"), 15, minimum=1),
             seed=_coerce_int(job.request.get("seed"), 42),
         )
@@ -16525,17 +16806,43 @@ def _normalize_class_analysis_request(payload: Dict[str, Any]) -> Dict[str, Any]
     request_payload.setdefault("encoder_type", "dinov3")
     request_payload.setdefault("encoder_model", CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL)
     request_payload.setdefault("projection", "pca")
-    request_payload.setdefault("projection_neighbor_k", 15)
+    request_payload.setdefault("projection_neighbor_k", 50)
     request_payload.setdefault("crop_mode", "padded_square")
     request_payload.setdefault("padding_ratio", 0.08)
     request_payload.setdefault("preprocess_mode", "canonical")
     request_payload.setdefault("canonical_size", 336)
     request_payload.setdefault("dinov3_pooling", "pooler")
+    request_payload.setdefault("cradio_pooling", "summary")
+    request_payload.setdefault("embedding_aggregation", "pooled")
+    request_payload.setdefault("embedding_salad_head_id", "")
     request_payload.setdefault("background_mode", "full_crop")
     request_payload.setdefault("embedding_view_mode", "single")
     request_payload.setdefault("embedding_adjustment", "remove_size_bias")
     request_payload.setdefault("sample_cap", 0)
     request_payload.setdefault("neighbor_k", 15)
+    request_payload["encoder_type"] = str(request_payload.get("encoder_type") or "dinov3").strip().lower()
+    if request_payload["encoder_type"] not in {"clip", "dinov3", "cradio"}:
+        request_payload["encoder_type"] = "dinov3"
+    if not str(request_payload.get("encoder_model") or "").strip():
+        if request_payload["encoder_type"] == "clip":
+            request_payload["encoder_model"] = DEFAULT_CLIP_MODEL
+        elif request_payload["encoder_type"] == "cradio":
+            request_payload["encoder_model"] = CRADIO_DEFAULT_MODEL
+        else:
+            request_payload["encoder_model"] = CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL
+    if request_payload["encoder_type"] == "cradio":
+        request_payload["cradio_pooling"] = normalize_cradio_pooling(request_payload.get("cradio_pooling"))
+    request_payload["embedding_aggregation"] = _embedding_normalize_aggregation(
+        request_payload.get("embedding_aggregation")
+    )
+    request_payload["embedding_salad_head_id"] = str(
+        request_payload.get("embedding_salad_head_id") or ""
+    ).strip()
+    if request_payload["embedding_aggregation"] == "local_salad":
+        if request_payload["encoder_type"] not in {"dinov3", "cradio"}:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_requires_spatial_encoder")
+        if not request_payload["embedding_salad_head_id"]:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
     return request_payload
 
 
@@ -16713,6 +17020,957 @@ def cancel_class_analysis_job(job_id: str) -> Dict[str, Any]:
             raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
         job.cancel_event.set()
         _class_analysis_update(job, status="cancelling", message="Cancellation requested ...")
+    return {"status": job.status}
+
+
+def _data_ingestion_log(job: DataIngestionJob, message: str) -> None:
+    entry = {"timestamp": time.time(), "message": str(message or "")}
+    job.logs.append(entry)
+    if len(job.logs) > MAX_JOB_LOGS:
+        job.logs[:] = job.logs[-MAX_JOB_LOGS:]
+    job.message = str(message or "")
+    job.updated_at = time.time()
+    try:
+        logger.info("[data-ingestion %s] %s", job.job_id[:8], message)
+    except Exception:
+        pass
+
+
+def _data_ingestion_update(
+    job: DataIngestionJob,
+    *,
+    status: Optional[str] = None,
+    progress: Optional[float] = None,
+    message: Optional[str] = None,
+    error: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+) -> None:
+    if status is not None:
+        job.status = status
+    if progress is not None:
+        job.progress = max(0.0, min(1.0, float(progress)))
+    if message is not None:
+        if str(message or "") != str(job.message or ""):
+            _data_ingestion_log(job, str(message or ""))
+        else:
+            job.message = str(message or "")
+            job.updated_at = time.time()
+    if error is not None:
+        job.error = error
+    if result is not None:
+        job.result = result
+        job.updated_at = time.time()
+
+
+def _serialize_data_ingestion_job(job: DataIngestionJob) -> Dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "kind": job.kind,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message,
+        "request": job.request,
+        "logs": job.logs,
+        "summary": (job.result or {}).get("summary") if isinstance(job.result, dict) else None,
+        "error": job.error,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
+def _local_salad_head_path(head_id: str) -> Path:
+    safe = _class_analysis_safe_slug(str(head_id or ""), "")
+    if not safe:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_id_required")
+    return (LOCAL_SALAD_HEAD_ROOT / f"{safe}.pt").resolve()
+
+
+def _unique_local_salad_head_id(requested_name: str) -> str:
+    base = _class_analysis_safe_slug(str(requested_name or ""), f"local_salad_{uuid.uuid4().hex[:8]}")
+    candidate = base
+    counter = 2
+    while _local_salad_head_path(candidate).exists():
+        candidate = f"{base}_{counter}"
+        counter += 1
+    return candidate
+
+
+def _load_local_salad_head(head_id: str, *, device_name: str = "cpu") -> Tuple[LocalSALADHead, Dict[str, Any]]:
+    path = _local_salad_head_path(head_id)
+    try:
+        root = LOCAL_SALAD_HEAD_ROOT.resolve()
+        if not _path_is_within_root_impl(path, root):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_path_invalid")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_path_invalid")
+    if not path.exists():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="local_salad_head_not_found")
+    try:
+        return load_local_salad_head_file(path, device_name=device_name)
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        detail = str(exc) or "local_salad_head_unsupported_format"
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"local_salad_head_load_failed:{exc}") from exc
+
+
+def _list_local_salad_heads() -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    for path in sorted(LOCAL_SALAD_HEAD_ROOT.glob("*.pt")):
+        entry: Dict[str, Any] = {
+            "id": path.stem,
+            "filename": path.name,
+            "path": str(path),
+            "updated_at": path.stat().st_mtime,
+            "status": "available",
+        }
+        try:
+            _head, metadata = load_local_salad_head_file(path, device_name="cpu")
+            config = dict(metadata.get("config") or {})
+            entry.update(
+                {
+                    "label": metadata.get("label") or path.stem,
+                    "encoder_type": metadata.get("encoder_type") or "dinov3",
+                    "encoder_model": metadata.get("encoder_model") or "",
+                    "cradio_pooling": metadata.get("cradio_pooling") or None,
+                    "train_image_count": metadata.get("train_image_count") or 0,
+                    "descriptor_dim": int(config.get("token_dim") or 0)
+                    + int(config.get("num_clusters") or 0) * int(config.get("cluster_dim") or 0),
+                    "config": config,
+                }
+            )
+        except Exception as exc:
+            entry["status"] = f"unreadable:{exc}"
+            entry["label"] = path.stem
+        entries.append(entry)
+    return entries
+
+
+def _data_ingestion_capabilities() -> Dict[str, Any]:
+    return {
+        "encoders": ["dinov3_pooled", "cradio_pooled", "local_salad"],
+        "default_encoder": "dinov3_pooled",
+        "default_dinov3_model": CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL,
+        "default_cradio_model": CRADIO_DEFAULT_MODEL,
+        "cradio_models": list(CRADIO_SUPPORTED_MODELS),
+        "cradio_pooling_modes": ["summary", "spatial_mean", "summary_spatial_concat"],
+        "default_cradio_pooling": "summary",
+        "cradio_backend": cradio_capabilities()["backend"],
+        "local_salad_heads": _list_local_salad_heads(),
+        "data_ingestion_recipes": [
+            {
+                "id": "pooled_top20",
+                "label": "DINOv3 baseline top 20%",
+                "encoder": "dinov3_pooled",
+                "keep_fraction": 0.2,
+                "frame_interval": 1.0,
+                "max_frames_per_video": 200,
+            },
+            {
+                "id": "cradio_top20",
+                "label": "C-RADIOv4 summary top 20%",
+                "encoder": "cradio_pooled",
+                "cradio_pooling": "summary",
+                "keep_fraction": 0.2,
+                "frame_interval": 1.0,
+                "max_frames_per_video": 200,
+            },
+            {
+                "id": "local_salad_top20",
+                "label": "Local SALAD diversity top 20%",
+                "encoder": "local_salad",
+                "keep_fraction": 0.2,
+                "frame_interval": 1.0,
+                "max_frames_per_video": 200,
+                "requires_local_salad_head": True,
+            },
+            {
+                "id": "local_salad_review50",
+                "label": "Local SALAD broad review 50%",
+                "encoder": "local_salad",
+                "keep_fraction": 0.5,
+                "frame_interval": 0.5,
+                "max_frames_per_video": 400,
+                "requires_local_salad_head": True,
+            },
+        ],
+        "ffmpeg_available": bool(shutil.which("ffmpeg")),
+        "image_exts": sorted(DATA_INGESTION_IMAGE_EXTS),
+        "video_exts": sorted(DATA_INGESTION_VIDEO_EXTS),
+        "salad_policy": "local_training_only",
+        "local_salad_policy": LOCAL_SALAD_POLICY,
+        "local_salad_trainer": LOCAL_SALAD_TRAINER,
+    }
+
+
+async def _data_ingestion_save_uploads(files: Sequence[Any], target_dir: Path, field_name: str) -> List[Dict[str, Any]]:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    rows: List[Dict[str, Any]] = []
+    used: Set[str] = set()
+    for idx, upload in enumerate(files or []):
+        original = str(getattr(upload, "filename", "") or "").strip()
+        if not original:
+            continue
+        ext = Path(original).suffix.lower()
+        safe_stem = _data_ingestion_safe_media_name(original, f"{field_name}_{idx:05d}")
+        safe_name = f"{idx:05d}_{safe_stem}{ext}"
+        while safe_name in used:
+            safe_name = f"{idx:05d}_{safe_stem}_{uuid.uuid4().hex[:6]}{ext}"
+        used.add(safe_name)
+        target = target_dir / safe_name
+        size = 0
+        with target.open("wb") as handle:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                handle.write(chunk)
+        if size <= 0:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            continue
+        rows.append(
+            {
+                "path": str(target),
+                "filename": original,
+                "saved_name": safe_name,
+                "size": size,
+                "field": field_name,
+            }
+        )
+    return rows
+
+
+def _data_ingestion_open_image(path: Path) -> Image.Image:
+    img = Image.open(path)
+    img.load()
+    return img.convert("RGB")
+
+
+def _data_ingestion_prepare_media(
+    job: DataIngestionJob,
+    rows: Sequence[Dict[str, Any]],
+    *,
+    out_dir: Path,
+    frame_interval: float,
+    max_frames_per_video: int,
+    progress_start: float,
+    progress_end: float,
+) -> List[Dict[str, Any]]:
+    prepared: List[Dict[str, Any]] = []
+    total = max(1, len(rows))
+    ffmpeg_path = shutil.which("ffmpeg")
+    for idx, row in enumerate(rows):
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        path = Path(str(row.get("path") or ""))
+        ext = path.suffix.lower()
+        pct = progress_start + (progress_end - progress_start) * (idx / total)
+        _data_ingestion_update(job, progress=pct, message=f"Preparing media {idx + 1}/{len(rows)} ...")
+        if ext in DATA_INGESTION_IMAGE_EXTS:
+            try:
+                with _data_ingestion_open_image(path) as img:
+                    width, height = img.size
+                prepared.append(
+                    {
+                        **row,
+                        "image_path": str(path),
+                        "source_type": "image",
+                        "frame_index": 0,
+                        "width": width,
+                        "height": height,
+                    }
+                )
+            except Exception as exc:
+                _data_ingestion_log(job, f"Skipped unreadable image {path.name}: {exc}")
+            continue
+        if ext in DATA_INGESTION_VIDEO_EXTS:
+            if not ffmpeg_path:
+                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="ffmpeg_required_for_video_ingestion")
+            video_dir = out_dir / _data_ingestion_safe_media_name(path.name, f"video_{idx:05d}")
+            video_dir.mkdir(parents=True, exist_ok=True)
+            fps_expr = f"fps=1/{max(0.1, float(frame_interval or 1.0)):.3f}"
+            pattern = video_dir / "frame_%06d.jpg"
+            cmd = [
+                ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(path),
+                "-vf",
+                fps_expr,
+            ]
+            if int(max_frames_per_video or 0) > 0:
+                cmd += ["-frames:v", str(int(max_frames_per_video))]
+            cmd += [str(pattern)]
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            except subprocess.CalledProcessError as exc:
+                detail = (exc.stderr or exc.stdout or str(exc)).strip()
+                _data_ingestion_log(job, f"Video frame extraction failed for {path.name}: {detail[:500]}")
+                continue
+            frames = sorted(video_dir.glob("frame_*.jpg"))
+            for frame_idx, frame_path in enumerate(frames):
+                try:
+                    with _data_ingestion_open_image(frame_path) as img:
+                        width, height = img.size
+                    prepared.append(
+                        {
+                            **row,
+                            "image_path": str(frame_path),
+                            "source_type": "video_frame",
+                            "frame_index": frame_idx,
+                            "width": width,
+                            "height": height,
+                        }
+                    )
+                except Exception:
+                    continue
+            _data_ingestion_log(job, f"Extracted {len(frames)} frames from {path.name}.")
+    return prepared
+
+
+def _data_ingestion_encoder_label(encoder: str, base_encoder: str) -> str:
+    if str(encoder or "").strip().lower() == "local_salad":
+        return f"local SALAD ({'C-RADIOv4' if base_encoder == 'cradio' else 'DINOv3'})"
+    if str(base_encoder or "").strip().lower() == "cradio":
+        return "C-RADIOv4 pooled"
+    return "DINOv3 pooled"
+
+
+def _data_ingestion_get_dinov3(model_name: str, device_name: Optional[str] = None) -> Tuple[Any, Any, str, str]:
+    resolved_model = str(model_name or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL).strip() or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL
+    target_device = device_name or _dinov3_resolve_device_impl(device, cuda_disabled=dinov3_cuda_disabled)
+    model_obj, processor_obj = _load_dinov3_backbone(resolved_model, target_device)
+    if model_obj is None or processor_obj is None:
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dinov3_load_failed")
+    return model_obj, processor_obj, resolved_model, target_device
+
+
+def _data_ingestion_encode_prepared_images(
+    prepared: Sequence[Dict[str, Any]],
+    *,
+    job: DataIngestionJob,
+    encoder: str,
+    model_name: str,
+    salad_head_id: str = "",
+    cradio_pooling: str = "summary",
+    batch_size: int = 16,
+    progress_start: float = 0.35,
+    progress_end: float = 0.82,
+) -> np.ndarray:
+    if not prepared:
+        return np.empty((0, 0), dtype=np.float32)
+    encoder_norm = str(encoder or "dinov3_pooled").strip().lower()
+    salad_head: Optional[LocalSALADHead] = None
+    salad_meta: Dict[str, Any] = {}
+    if encoder_norm == "local_salad":
+        if not str(salad_head_id or "").strip():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
+        salad_head, salad_meta = _load_local_salad_head(salad_head_id, device_name="cpu")
+    base_encoder = "cradio" if encoder_norm == "cradio_pooled" else "dinov3"
+    if encoder_norm == "local_salad":
+        base_encoder = str(salad_meta.get("encoder_type") or "dinov3").strip().lower()
+        if base_encoder not in {"dinov3", "cradio"}:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_encoder_unsupported")
+        model_name = str(salad_meta.get("encoder_model") or model_name or "").strip()
+    if base_encoder == "cradio":
+        resolved_model_name = normalize_cradio_model(model_name)
+        device_name = resolve_cradio_torch_device()
+        model_obj, processor_obj, resolved_model, device_name = _load_cradio_backbone_cached(
+            resolved_model_name,
+            device_name,
+            raise_on_error=True,
+        )
+        if encoder_norm == "local_salad":
+            salad_head, salad_meta = _load_local_salad_head(salad_head_id, device_name=device_name)
+    else:
+        model_obj, processor_obj, resolved_model, device_name = _data_ingestion_get_dinov3(model_name)
+        if encoder_norm == "local_salad":
+            salad_head, salad_meta = _load_local_salad_head(salad_head_id, device_name=device_name)
+    resolved_batch = max(1, min(int(batch_size or 16), len(prepared)))
+    features: List[np.ndarray] = []
+    total = len(prepared)
+    started = time.time()
+    for start in range(0, total, resolved_batch):
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        batch_rows = prepared[start : start + resolved_batch]
+        images: List[Image.Image] = []
+        try:
+            for row in batch_rows:
+                images.append(_data_ingestion_open_image(Path(str(row.get("image_path") or ""))))
+            if base_encoder == "cradio":
+                pooling = normalize_cradio_pooling(
+                    salad_meta.get("cradio_pooling") if encoder_norm == "local_salad" else cradio_pooling
+                )
+                if encoder_norm == "local_salad":
+                    _base, spatial_tokens, summary_tokens = encode_cradio_images(
+                        model_obj,
+                        processor_obj,
+                        device_name,
+                        images,
+                        pooling=pooling,
+                        normalize=False,
+                        return_tokens=True,
+                    )
+                    if spatial_tokens.ndim != 3 or spatial_tokens.shape[1] <= 0:
+                        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="cradio_spatial_tokens_missing")
+                    assert salad_head is not None
+                    with torch.no_grad():
+                        feats = salad_head(
+                            torch.from_numpy(spatial_tokens).to(device_name),
+                            global_token=torch.from_numpy(summary_tokens).to(device_name),
+                        )
+                        feats = torch.nn.functional.normalize(feats.float(), dim=-1)
+                    features.append(feats.detach().cpu().numpy().astype(np.float32))
+                else:
+                    features.append(
+                        encode_cradio_images(
+                            model_obj,
+                            processor_obj,
+                            device_name,
+                            images,
+                            pooling=pooling,
+                            normalize=True,
+                        )
+                    )
+            else:
+                inputs = processor_obj(images=images, return_tensors="pt")
+                inputs = {k: v.to(device_name) for k, v in inputs.items()}
+                with torch.no_grad():
+                    outputs = model_obj(**inputs)
+                    last_hidden = getattr(outputs, "last_hidden_state", None)
+                    if encoder_norm == "local_salad":
+                        if last_hidden is None or last_hidden.ndim != 3 or last_hidden.shape[1] <= 1:
+                            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dinov3_patch_tokens_missing")
+                        global_token = getattr(outputs, "pooler_output", None)
+                        if global_token is None:
+                            global_token = last_hidden[:, 0, :]
+                        assert salad_head is not None
+                        feats = salad_head(last_hidden[:, 1:, :], global_token=global_token)
+                    else:
+                        feats = getattr(outputs, "pooler_output", None)
+                        if feats is None and last_hidden is not None:
+                            feats = last_hidden[:, 0, :]
+                        if feats is None:
+                            feats = outputs[0]
+                    feats = torch.nn.functional.normalize(feats.float(), dim=-1)
+                features.append(feats.detach().cpu().numpy().astype(np.float32))
+        finally:
+            for img in images:
+                try:
+                    img.close()
+                except Exception:
+                    pass
+        done = min(total, start + len(batch_rows))
+        speed = _class_analysis_progress_message(done=done, total=total, started_at=started)
+        progress = progress_start + (progress_end - progress_start) * (done / max(1, total))
+        _data_ingestion_update(
+            job,
+            progress=progress,
+            message=f"Encoding {done}/{total} images with {_data_ingestion_encoder_label(encoder_norm, base_encoder)}"
+            + (f" ({speed})" if speed else ""),
+        )
+    if not features:
+        return np.empty((0, 0), dtype=np.float32)
+    return np.concatenate(features, axis=0).astype(np.float32, copy=False)
+
+
+def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
+    out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job.job_id, "job")
+    media_dir = out_dir / "media"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        request = dict(job.request or {})
+        candidate_rows = list(request.get("candidate_uploads") or [])
+        reference_rows = list(request.get("reference_uploads") or [])
+        if not candidate_rows:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_candidate_files")
+        _data_ingestion_update(job, status="running", progress=0.02, message="Preparing candidate media ...")
+        frame_interval = _coerce_float(request.get("frame_interval"), 1.0, minimum=0.1)
+        max_frames = _coerce_int(request.get("max_frames_per_video"), 200, minimum=0)
+        candidates = _data_ingestion_prepare_media(
+            job,
+            candidate_rows,
+            out_dir=media_dir / "candidates",
+            frame_interval=frame_interval,
+            max_frames_per_video=max_frames,
+            progress_start=0.03,
+            progress_end=0.18,
+        )
+        if not candidates:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_candidate_images")
+        references: List[Dict[str, Any]] = []
+        if reference_rows:
+            _data_ingestion_update(job, progress=0.19, message="Preparing active-workspace reference media ...")
+            references = _data_ingestion_prepare_media(
+                job,
+                reference_rows,
+                out_dir=media_dir / "references",
+                frame_interval=frame_interval,
+                max_frames_per_video=max_frames,
+                progress_start=0.19,
+                progress_end=0.28,
+            )
+        encoder = str(request.get("encoder") or "dinov3_pooled").strip().lower()
+        if encoder not in {"dinov3_pooled", "cradio_pooled", "local_salad"}:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_encoder_unsupported")
+        model_name = str(
+            request.get("encoder_model")
+            or (CRADIO_DEFAULT_MODEL if encoder == "cradio_pooled" else CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL)
+        ).strip()
+        cradio_pooling = normalize_cradio_pooling(request.get("cradio_pooling"))
+        salad_head_id = str(request.get("salad_head_id") or "").strip()
+        if encoder == "local_salad" and not salad_head_id:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
+        batch_size = _coerce_int(request.get("batch_size"), 16, minimum=1)
+        candidate_embeddings = _data_ingestion_encode_prepared_images(
+            candidates,
+            job=job,
+            encoder=encoder,
+            model_name=model_name,
+            salad_head_id=salad_head_id,
+            cradio_pooling=cradio_pooling,
+            batch_size=batch_size,
+            progress_start=0.30,
+            progress_end=0.72,
+        )
+        reference_embeddings: Optional[np.ndarray] = None
+        if references:
+            reference_embeddings = _data_ingestion_encode_prepared_images(
+                references,
+                job=job,
+                encoder=encoder,
+                model_name=model_name,
+                salad_head_id=salad_head_id,
+                cradio_pooling=cradio_pooling,
+                batch_size=batch_size,
+                progress_start=0.72,
+                progress_end=0.88,
+            )
+        keep_fraction = _data_ingestion_keep_fraction(request.get("keep_fraction"), 0.2)
+        selected, novelty_scores = _data_ingestion_greedy_indices(
+            candidate_embeddings,
+            keep_fraction=keep_fraction,
+            reference_embeddings=reference_embeddings,
+        )
+        selected_set = set(selected)
+        ranked_items: List[Dict[str, Any]] = []
+        rank_by_idx = {idx: rank + 1 for rank, idx in enumerate(selected)}
+        for idx, row in enumerate(candidates):
+            ranked_items.append(
+                {
+                    "index": idx,
+                    "rank": rank_by_idx.get(idx),
+                    "keep": idx in selected_set,
+                    "diversity_score": float(novelty_scores[idx]) if idx < len(novelty_scores) else 0.0,
+                    "filename": row.get("filename") or Path(str(row.get("image_path") or "")).name,
+                    "saved_name": row.get("saved_name") or "",
+                    "source_type": row.get("source_type") or "image",
+                    "frame_index": row.get("frame_index") or 0,
+                    "width": row.get("width") or 0,
+                    "height": row.get("height") or 0,
+                    "image_path": row.get("image_path") or "",
+                }
+            )
+        ranked_items.sort(
+            key=lambda item: (
+                0 if item.get("keep") else 1,
+                int(item.get("rank") or 10**9),
+                -float(item.get("diversity_score") or 0.0),
+            )
+        )
+        summary = {
+            **_data_ingestion_diversity_summary(
+                candidate_embeddings,
+                selected_indices=selected,
+                reference_embeddings=reference_embeddings,
+            ),
+            "keep_fraction": keep_fraction,
+            "encoder": encoder,
+            "encoder_model": model_name or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL,
+            "cradio_pooling": cradio_pooling,
+            "salad_head_id": salad_head_id,
+            "reference_count": len(references),
+            "candidate_upload_count": len(candidate_rows),
+            "candidate_image_count": len(candidates),
+            "local_salad_policy": LOCAL_SALAD_POLICY,
+            "local_salad_trainer": LOCAL_SALAD_TRAINER,
+        }
+        result = {"summary": summary, "items": ranked_items}
+        result_path = out_dir / "result.json"
+        result_path.write_text(json.dumps(_class_analysis_json_safe(result), indent=2), encoding="utf-8")
+        np.savez_compressed(
+            out_dir / "embeddings.npz",
+            candidate_embeddings=candidate_embeddings,
+            reference_embeddings=reference_embeddings if reference_embeddings is not None else np.empty((0, 0), dtype=np.float32),
+        )
+        with DATA_INGESTION_JOBS_LOCK:
+            job.result_path = str(result_path)
+            _data_ingestion_update(job, status="completed", progress=1.0, message="Data ingestion analysis completed.", result=result)
+    except RuntimeError as exc:
+        with DATA_INGESTION_JOBS_LOCK:
+            if str(exc) == "cancelled":
+                _data_ingestion_update(job, status="cancelled", message="Data ingestion cancelled.")
+            else:
+                _data_ingestion_update(job, status="failed", message=str(exc), error=str(exc))
+    except HTTPException as exc:
+        with DATA_INGESTION_JOBS_LOCK:
+            _data_ingestion_update(job, status="failed", progress=1.0, message=str(exc.detail), error=str(exc.detail))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[data-ingestion %s] analysis crashed", job.job_id[:8])
+        with DATA_INGESTION_JOBS_LOCK:
+            _data_ingestion_update(job, status="failed", progress=1.0, message="Data ingestion crashed.", error=str(exc))
+
+
+def _data_ingestion_train_view(img: Image.Image, rng: random.Random) -> Image.Image:
+    work = img.convert("RGB")
+    width, height = work.size
+    if width > 8 and height > 8:
+        scale = rng.uniform(0.72, 1.0)
+        crop_w = max(8, int(width * scale))
+        crop_h = max(8, int(height * scale))
+        left = rng.randint(0, max(0, width - crop_w))
+        top = rng.randint(0, max(0, height - crop_h))
+        work = work.crop((left, top, left + crop_w, top + crop_h))
+    if rng.random() < 0.5:
+        work = work.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    return work
+
+
+def _local_salad_training_stage(progress: float) -> str:
+    pct = max(0.0, min(1.0, float(progress or 0.0)))
+    if pct < 0.18:
+        return "Selecting ingredients"
+    if pct < 0.35:
+        return "Washing lettuce"
+    if pct < 0.70:
+        return "Mixing dressing"
+    if pct < 0.94:
+        return "Tossing salad"
+    return "Finalizing SALAD"
+
+
+def _data_ingestion_dinov3_tokens(
+    model_obj: Any,
+    processor_obj: Any,
+    device_name: str,
+    images: Sequence[Image.Image],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    inputs = processor_obj(images=list(images), return_tensors="pt")
+    inputs = {k: v.to(device_name) for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = model_obj(**inputs)
+    last_hidden = getattr(outputs, "last_hidden_state", None)
+    if last_hidden is None or last_hidden.ndim != 3 or last_hidden.shape[1] <= 1:
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dinov3_patch_tokens_missing")
+    global_token = getattr(outputs, "pooler_output", None)
+    if global_token is None:
+        global_token = last_hidden[:, 0, :]
+    return last_hidden[:, 1:, :].detach(), global_token.detach()
+
+
+def _run_local_salad_training_job(job: DataIngestionJob) -> None:
+    out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job.job_id, "job")
+    media_dir = out_dir / "train_media"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        request = dict(job.request or {})
+        upload_rows = list(request.get("train_uploads") or [])
+        if not upload_rows:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_no_training_files")
+        _data_ingestion_update(job, status="running", progress=0.02, message="Selecting ingredients ...")
+        frame_interval = _coerce_float(request.get("frame_interval"), 1.0, minimum=0.1)
+        max_frames = _coerce_int(request.get("max_frames_per_video"), 200, minimum=0)
+        prepared = _data_ingestion_prepare_media(
+            job,
+            upload_rows,
+            out_dir=media_dir,
+            frame_interval=frame_interval,
+            max_frames_per_video=max_frames,
+            progress_start=0.03,
+            progress_end=0.18,
+        )
+        max_images = _coerce_int(request.get("max_train_images"), 0, minimum=0)
+        if max_images > 0 and len(prepared) > max_images:
+            rnd = random.Random(_coerce_int(request.get("seed"), 42))
+            prepared = [prepared[idx] for idx in sorted(rnd.sample(range(len(prepared)), max_images))]
+        if len(prepared) < 2:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_needs_at_least_two_images")
+        _data_ingestion_update(job, progress=0.18, message="Washing lettuce ...")
+        encoder_type = str(request.get("encoder_type") or "dinov3").strip().lower()
+        if encoder_type not in {"dinov3", "cradio"}:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_encoder_unsupported")
+        model_name = str(
+            request.get("encoder_model")
+            or (CRADIO_DEFAULT_MODEL if encoder_type == "cradio" else CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL)
+        ).strip()
+        cradio_pooling = normalize_cradio_pooling(request.get("cradio_pooling"))
+        if encoder_type == "cradio":
+            device_name = resolve_cradio_torch_device(str(request.get("cradio_backend") or "auto"))
+            model_obj, processor_obj, resolved_model, device_name = _load_cradio_backbone_cached(
+                model_name,
+                device_name,
+                raise_on_error=True,
+            )
+            with _data_ingestion_open_image(Path(str(prepared[0].get("image_path")))) as probe_img:
+                _probe_feats, probe_tokens, _probe_summary = encode_cradio_images(
+                    model_obj,
+                    processor_obj,
+                    device_name,
+                    [probe_img],
+                    pooling=cradio_pooling,
+                    normalize=False,
+                    return_tokens=True,
+                )
+            hidden_size = int(probe_tokens.shape[-1])
+        else:
+            model_obj, processor_obj, resolved_model, device_name = _data_ingestion_get_dinov3(model_name)
+            hidden_size = int(getattr(getattr(model_obj, "config", None), "hidden_size", 0) or 0)
+            if hidden_size <= 0:
+                # Probe one image if the config does not expose hidden_size.
+                with _data_ingestion_open_image(Path(str(prepared[0].get("image_path")))) as probe_img:
+                    patches, _global = _data_ingestion_dinov3_tokens(model_obj, processor_obj, device_name, [probe_img])
+                hidden_size = int(patches.shape[-1])
+        config = LocalSALADConfig(
+            num_channels=hidden_size,
+            num_clusters=_coerce_int(request.get("num_clusters"), 64, minimum=4),
+            cluster_dim=_coerce_int(request.get("cluster_dim"), 128, minimum=8),
+            token_dim=_coerce_int(request.get("token_dim"), 256, minimum=8),
+            hidden_dim=_coerce_int(request.get("hidden_dim"), 512, minimum=64),
+            dropout=_coerce_float(request.get("dropout"), 0.3, minimum=0.0, maximum=0.8),
+        )
+        head = LocalSALADHead(config).to(device_name)
+        head.train()
+        optimizer = torch.optim.AdamW(
+            head.parameters(),
+            lr=_coerce_float(request.get("learning_rate"), 1e-4, minimum=1e-7),
+            weight_decay=_coerce_float(request.get("weight_decay"), 1e-4, minimum=0.0),
+        )
+        epochs = _coerce_int(request.get("epochs"), 3, minimum=1)
+        batch_size = max(2, _coerce_int(request.get("batch_size"), 8, minimum=2))
+        temperature = _coerce_float(request.get("temperature"), 0.07, minimum=0.001)
+        seed = _coerce_int(request.get("seed"), 42)
+        rng = random.Random(seed)
+        losses: List[float] = []
+        total_steps = max(1, epochs * math.ceil(len(prepared) / batch_size))
+        step = 0
+        for epoch in range(epochs):
+            if job.cancel_event.is_set():
+                raise RuntimeError("cancelled")
+            order = list(range(len(prepared)))
+            rng.shuffle(order)
+            for start in range(0, len(order), batch_size):
+                batch_ids = order[start : start + batch_size]
+                if len(batch_ids) < 2:
+                    continue
+                images_left: List[Image.Image] = []
+                images_right: List[Image.Image] = []
+                originals: List[Image.Image] = []
+                try:
+                    for idx in batch_ids:
+                        original = _data_ingestion_open_image(Path(str(prepared[idx].get("image_path") or "")))
+                        originals.append(original)
+                        images_left.append(_data_ingestion_train_view(original, rng))
+                        images_right.append(_data_ingestion_train_view(original, rng))
+                    if encoder_type == "cradio":
+                        _feats_a, patches_a_np, global_a_np = encode_cradio_images(
+                            model_obj,
+                            processor_obj,
+                            device_name,
+                            images_left,
+                            pooling=cradio_pooling,
+                            normalize=False,
+                            return_tokens=True,
+                        )
+                        _feats_b, patches_b_np, global_b_np = encode_cradio_images(
+                            model_obj,
+                            processor_obj,
+                            device_name,
+                            images_right,
+                            pooling=cradio_pooling,
+                            normalize=False,
+                            return_tokens=True,
+                        )
+                        patches_a = torch.from_numpy(patches_a_np).to(device_name)
+                        patches_b = torch.from_numpy(patches_b_np).to(device_name)
+                        global_a = torch.from_numpy(global_a_np).to(device_name)
+                        global_b = torch.from_numpy(global_b_np).to(device_name)
+                    else:
+                        patches_a, global_a = _data_ingestion_dinov3_tokens(model_obj, processor_obj, device_name, images_left)
+                        patches_b, global_b = _data_ingestion_dinov3_tokens(model_obj, processor_obj, device_name, images_right)
+                    optimizer.zero_grad(set_to_none=True)
+                    desc_a = head(patches_a, global_token=global_a)
+                    desc_b = head(patches_b, global_token=global_b)
+                    loss = symmetric_infonce_loss(desc_a, desc_b, temperature=temperature)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
+                    optimizer.step()
+                    losses.append(float(loss.detach().cpu().item()))
+                finally:
+                    for img in [*images_left, *images_right, *originals]:
+                        try:
+                            img.close()
+                        except Exception:
+                            pass
+                step += 1
+                progress = 0.18 + 0.72 * (step / total_steps)
+                recent = float(np.mean(losses[-10:])) if losses else 0.0
+                stage = _local_salad_training_stage(progress)
+                _data_ingestion_update(
+                    job,
+                    progress=progress,
+                    message=f"{stage} • epoch {epoch + 1}/{epochs}, step {step}/{total_steps}, loss {recent:.4f}",
+                )
+        requested_name = str(request.get("head_name") or "").strip() or f"local_salad_{time.strftime('%Y%m%d_%H%M%S')}"
+        with LOCAL_SALAD_HEAD_LOCK:
+            head_id = _unique_local_salad_head_id(requested_name)
+            head_path = _local_salad_head_path(head_id)
+            metadata = {
+                "id": head_id,
+                "label": requested_name,
+                "encoder_type": encoder_type,
+                "encoder_model": resolved_model,
+                "cradio_pooling": cradio_pooling if encoder_type == "cradio" else None,
+                "train_image_count": len(prepared),
+                "source_mode": str(request.get("source_mode") or "uploaded_media"),
+                "active_image_count": _coerce_int(request.get("active_image_count"), 0, minimum=0),
+                "epochs": epochs,
+                "batch_size": batch_size,
+                "learning_rate": _coerce_float(request.get("learning_rate"), 1e-4, minimum=1e-7),
+                "loss_final": float(losses[-1]) if losses else None,
+                "loss_mean_last10": float(np.mean(losses[-10:])) if losses else None,
+                "created_at": time.time(),
+                "format": LOCAL_SALAD_CACHE_VERSION,
+                "policy": LOCAL_SALAD_POLICY,
+                "trainer": LOCAL_SALAD_TRAINER,
+            }
+            torch.save(
+                {
+                    "format": LOCAL_SALAD_CACHE_VERSION,
+                    "config": config.to_dict(),
+                    "state_dict": head.cpu().state_dict(),
+                    "metadata": metadata,
+                },
+                head_path,
+            )
+        result = {
+            "summary": {
+                "head_id": head_id,
+                "path": str(head_path),
+                "descriptor_dim": head.output_dim,
+                **metadata,
+            },
+            "losses": losses,
+        }
+        result_path = out_dir / "result.json"
+        result_path.write_text(json.dumps(_class_analysis_json_safe(result), indent=2), encoding="utf-8")
+        with DATA_INGESTION_JOBS_LOCK:
+            job.result_path = str(result_path)
+            _data_ingestion_update(job, status="completed", progress=1.0, message=f"Finalizing SALAD • head saved: {head_id}", result=result)
+    except RuntimeError as exc:
+        with DATA_INGESTION_JOBS_LOCK:
+            if str(exc) == "cancelled":
+                _data_ingestion_update(job, status="cancelled", message="Local SALAD training cancelled.")
+            else:
+                _data_ingestion_update(job, status="failed", message=str(exc), error=str(exc))
+    except HTTPException as exc:
+        with DATA_INGESTION_JOBS_LOCK:
+            _data_ingestion_update(job, status="failed", progress=1.0, message=str(exc.detail), error=str(exc.detail))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[data-ingestion %s] local SALAD training crashed", job.job_id[:8])
+        with DATA_INGESTION_JOBS_LOCK:
+            _data_ingestion_update(job, status="failed", progress=1.0, message="Local SALAD training crashed.", error=str(exc))
+
+
+async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files: List[Any], reference_files: List[Any]) -> Dict[str, Any]:
+    try:
+        manifest = json.loads(str(manifest_json or "{}"))
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_manifest_json_invalid") from exc
+    if not isinstance(manifest, dict):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_manifest_invalid")
+    if not candidate_files:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_candidate_files")
+    job_id = f"di_{uuid.uuid4().hex[:10]}"
+    out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job_id, "job")
+    candidate_rows = await _data_ingestion_save_uploads(candidate_files, out_dir / "uploads" / "candidates", "candidate")
+    reference_rows = await _data_ingestion_save_uploads(reference_files, out_dir / "uploads" / "references", "reference")
+    request_payload = {
+        **manifest,
+        "candidate_uploads": candidate_rows,
+        "reference_uploads": reference_rows,
+    }
+    job = DataIngestionJob(job_id=job_id, kind="analysis", request=request_payload)
+    with DATA_INGESTION_JOBS_LOCK:
+        DATA_INGESTION_JOBS[job_id] = job
+        _data_ingestion_log(job, f"Queued data ingestion analysis with {len(candidate_rows)} candidate uploads.")
+    thread = threading.Thread(target=_run_data_ingestion_analysis_job, args=(job,), daemon=True, name=f"data-ingest-{job_id[:8]}")
+    thread.start()
+    return {"job_id": job_id}
+
+
+async def create_local_salad_training_job(manifest_json: str, files: List[Any]) -> Dict[str, Any]:
+    try:
+        manifest = json.loads(str(manifest_json or "{}"))
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="salad_train_manifest_json_invalid") from exc
+    if not isinstance(manifest, dict):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="salad_train_manifest_invalid")
+    if not files:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_no_training_files")
+    job_id = f"salad_{uuid.uuid4().hex[:10]}"
+    out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job_id, "job")
+    rows = await _data_ingestion_save_uploads(files, out_dir / "uploads" / "train", "train")
+    request_payload = {**manifest, "train_uploads": rows}
+    job = DataIngestionJob(job_id=job_id, kind="local_salad_train", request=request_payload)
+    with DATA_INGESTION_JOBS_LOCK:
+        DATA_INGESTION_JOBS[job_id] = job
+        _data_ingestion_log(job, f"Queued local SALAD training with {len(rows)} uploads.")
+    thread = threading.Thread(target=_run_local_salad_training_job, args=(job,), daemon=True, name=f"local-salad-{job_id[:8]}")
+    thread.start()
+    return {"job_id": job_id}
+
+
+def _get_data_ingestion_job(job_id: str) -> DataIngestionJob:
+    with DATA_INGESTION_JOBS_LOCK:
+        job = DATA_INGESTION_JOBS.get(str(job_id or ""))
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_job_not_found")
+    return job
+
+
+def get_data_ingestion_job(job_id: str) -> Dict[str, Any]:
+    return _serialize_data_ingestion_job(_get_data_ingestion_job(job_id))
+
+
+def get_data_ingestion_result(job_id: str) -> Dict[str, Any]:
+    job = _get_data_ingestion_job(job_id)
+    if isinstance(job.result, dict):
+        return job.result
+    if job.result_path and Path(job.result_path).exists():
+        return _load_json_metadata(Path(job.result_path)) or {}
+    if job.status in {"queued", "running", "cancelling"}:
+        raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_finished")
+    raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="result_not_found")
+
+
+def cancel_data_ingestion_job(job_id: str) -> Dict[str, Any]:
+    job = _get_data_ingestion_job(job_id)
+    with DATA_INGESTION_JOBS_LOCK:
+        if job.status in {"completed", "failed", "cancelled"}:
+            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_cancellable")
+        job.cancel_event.set()
+        _data_ingestion_update(job, status="cancelling", message="Cancellation requested ...")
     return {"status": job.status}
 
 
@@ -25513,6 +26771,10 @@ def _active_encoder_ready() -> bool:
         return bool(
             dinov3_initialized and dinov3_model is not None and dinov3_processor is not None
         )
+    if str(active_encoder_type or "").strip().lower() == "cradio":
+        return bool(
+            cradio_initialized and cradio_model is not None and cradio_processor is not None
+        )
     return bool(clip_initialized and clip_model is not None and clip_preprocess is not None)
 
 
@@ -25912,6 +27174,9 @@ def _start_training_worker(
     embedding_view_mode: str,
     embedding_adjustment: str,
     dinov3_pooling: str,
+    cradio_pooling: str,
+    embedding_aggregation: str,
+    embedding_salad_head_id: str,
     calibration_mode: str,
     calibration_max_iters: int,
     calibration_min_temp: float,
@@ -26025,6 +27290,9 @@ def _start_training_worker(
                 embedding_view_mode=embedding_view_mode,
                 embedding_adjustment=embedding_adjustment,
                 dinov3_pooling=dinov3_pooling,
+                cradio_pooling=cradio_pooling,
+                embedding_aggregation=embedding_aggregation,
+                embedding_salad_head_id=embedding_salad_head_id,
                 calibration_mode=calibration_mode,
                 calibration_max_iters=calibration_max_iters,
                 calibration_min_temp=calibration_min_temp,
@@ -26133,6 +27401,9 @@ async def start_clip_training(
     embedding_view_mode: str = Form("single"),
     embedding_adjustment: str = Form("remove_size_bias"),
     dinov3_pooling: str = Form("pooler"),
+    cradio_pooling: str = Form("summary"),
+    embedding_aggregation: str = Form("pooled"),
+    embedding_salad_head_id: str = Form(""),
     calibration_mode: str = Form("none"),
     calibration_max_iters: int = Form(50),
     calibration_min_temp: float = Form(0.5),
@@ -26152,7 +27423,7 @@ async def start_clip_training(
     labelmap_path_native = _normalise_optional_path(labelmap_path_native)
 
     encoder_type_norm = (encoder_type or "clip").strip().lower()
-    if encoder_type_norm not in {"clip", "dinov3"}:
+    if encoder_type_norm not in {"clip", "dinov3", "cradio"}:
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="clip_encoder_type_unsupported"
         )
@@ -26162,9 +27433,11 @@ async def start_clip_training(
             clip_model_name = encoder_model_name
         if clip_model_name not in SUPPORTED_CLIP_MODELS:
             SUPPORTED_CLIP_MODELS.append(clip_model_name)
-    else:
+    elif encoder_type_norm == "dinov3":
         if not encoder_model_name:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="encoder_model_required")
+    else:
+        encoder_model_name = normalize_cradio_model(encoder_model_name)
 
     solver_name = (solver or "saga").strip().lower()
     if solver_name not in {"saga", "sag", "lbfgs", "liblinear", "newton-cg"}:
@@ -26335,6 +27608,14 @@ async def start_clip_training(
     embedding_view_mode_norm = _embedding_normalize_view_mode(embedding_view_mode)
     embedding_adjustment_norm = _embedding_normalize_adjustment(embedding_adjustment)
     dinov3_pooling_norm = _embedding_normalize_dinov3_pooling(dinov3_pooling)
+    cradio_pooling_norm = normalize_cradio_pooling(cradio_pooling)
+    embedding_aggregation_norm = _embedding_normalize_aggregation(embedding_aggregation)
+    embedding_salad_head_id_norm = str(embedding_salad_head_id or "").strip()
+    if embedding_aggregation_norm == "local_salad":
+        if encoder_type_norm not in {"dinov3", "cradio"}:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_requires_spatial_encoder")
+        if not embedding_salad_head_id_norm:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
     calibration_mode_norm = (calibration_mode or "none").strip().lower()
     if calibration_mode_norm not in {"none", "temperature"}:
         calibration_mode_norm = "none"
@@ -26372,6 +27653,10 @@ async def start_clip_training(
         extras.append(f"hard({hard_mis_weight_f:.1f}/{hard_low_conf_weight_f:.1f})")
     extras.append(f"bg={bg_class_count_i}")
     extras.append(f"embed={preprocess_mode_norm}/{embedding_adjustment_norm}")
+    if embedding_aggregation_norm != "pooled":
+        extras.append(f"agg={embedding_aggregation_norm}")
+    if embedding_salad_head_id_norm:
+        extras.append(f"salad={embedding_salad_head_id_norm}")
     job_message += f" [{', '.join(extras)}]"
     _job_log(job, job_message)
 
@@ -26436,6 +27721,9 @@ async def start_clip_training(
         embedding_view_mode=embedding_view_mode_norm,
         embedding_adjustment=embedding_adjustment_norm,
         dinov3_pooling=dinov3_pooling_norm,
+        cradio_pooling=cradio_pooling_norm,
+        embedding_aggregation=embedding_aggregation_norm,
+        embedding_salad_head_id=embedding_salad_head_id_norm,
         calibration_mode=calibration_mode_norm,
         calibration_max_iters=calibration_max_iters_i,
         calibration_min_temp=calibration_min_temp_f,
@@ -28604,6 +29892,7 @@ def set_active_model(payload: ActiveModelRequest):
     global active_classifier_path, active_labelmap_path, active_label_list, clip_last_error
     global active_encoder_type, active_encoder_model
     global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized, dinov3_model_device
+    global cradio_initialized
     global active_classifier_meta, active_head_normalize_embeddings, active_classifier_head
 
     classifier_path = _normalise_optional_path(payload.classifier_path) or active_classifier_path
@@ -28763,6 +30052,19 @@ def set_active_model(payload: ActiveModelRequest):
                 detail=f"dimension_mismatch:{embed_dim}!={dino_dim}",
             )
         encoder_model_for_active = encoder_model_norm
+    elif encoder_type_norm == "cradio":
+        encoder_model_norm = normalize_cradio_model(encoder_model_norm)
+        try:
+            target_device = resolve_cradio_torch_device()
+            _cradio_model, _cradio_processor, encoder_model_for_active, _cradio_device = _load_cradio_backbone_cached(
+                encoder_model_norm,
+                target_device,
+                raise_on_error=True,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail=f"cradio_load_failed:{exc}"
+            ) from exc
     else:
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="clip_encoder_type_unsupported"
@@ -28859,6 +30161,8 @@ def set_active_model(payload: ActiveModelRequest):
             dinov3_model_name = encoder_model_for_active
             dinov3_model_device = target_device
             dinov3_initialized = bool(dinov3_model is not None and dinov3_processor is not None)
+    elif encoder_type_norm == "cradio":
+        cradio_initialized = bool(cradio_model is not None and cradio_processor is not None)
 
     return _current_active_payload()
 
@@ -31736,6 +33040,17 @@ app.include_router(
         get_result_fn=get_class_analysis_result,
         get_thumbnail_fn=get_class_analysis_thumbnail,
         cancel_job_fn=cancel_class_analysis_job,
+    )
+)
+
+app.include_router(
+    build_data_ingestion_router(
+        capabilities_fn=_data_ingestion_capabilities,
+        create_analysis_job_fn=create_data_ingestion_analysis_job,
+        create_salad_train_job_fn=create_local_salad_training_job,
+        get_job_fn=get_data_ingestion_job,
+        get_result_fn=get_data_ingestion_result,
+        cancel_job_fn=cancel_data_ingestion_job,
     )
 )
 

@@ -17,7 +17,7 @@ def test_classifier_review_batches(monkeypatch):
         "background_margin": 0.0,
     }
 
-    def fake_encode(crops, head, max_batch_size=None, batch_size_override=None):
+    def fake_encode(crops, *, head, batch_size_override=None, geometry_records=None):
         return np.zeros((len(crops), 4), dtype=np.float32)
 
     def fake_predict(head, embeddings, return_prob=True):
@@ -26,7 +26,7 @@ def test_classifier_review_batches(monkeypatch):
     def fake_keep_mask(proba, target_index, min_prob, margin, background_indices=None, background_guard=False, background_margin=0.0):
         return np.array([float(proba[0, target_index]) >= 0.5], dtype=bool)
 
-    monkeypatch.setattr(api, "_encode_pil_batch_for_head", fake_encode)
+    monkeypatch.setattr(api, "_encode_embedding_items_for_head", fake_encode)
     monkeypatch.setattr(api, "_clip_head_predict_proba", fake_predict)
     monkeypatch.setattr(api, "_clip_head_keep_mask", fake_keep_mask)
 

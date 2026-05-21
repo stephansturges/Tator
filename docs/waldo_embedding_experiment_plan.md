@@ -93,6 +93,7 @@ Every run should produce a metrics row with:
 - crop padding and object occupancy settings
 - background mode
 - DINO pooling mode
+- embedding aggregation mode
 - multi-scale recipe
 - embedding adjustment
 - whitening or PCA denoise setting
@@ -201,6 +202,30 @@ Gate:
 - Prefer the pooling mode that reduces size-axis leakage and improves same-class neighbor purity.
 - If `patch_mean` or `cls_patch_concat` is better for small-object classes but worse for Building, consider per-class default suggestions.
 
+## Stage 3b - Token Aggregation Closure
+
+Closed for the original pooled crop-pipeline defaults. The earlier
+fixed-projection SALAD-style crop aggregator did not beat the pooled precise
+recipe and stays removed.
+
+The replacement SALAD path is local-only and trainable. Tator initializes and
+trains its own SALAD optimal-transport aggregation head from user-provided
+images/video frames, saves it under `uploads/salad_heads/`, and only reloads
+heads carrying the Tator `local-salad-v1`,
+`local_training_only_no_external_salad_checkpoint`, and
+`tator_local_salad_trainer` markers. No upstream SALAD checkpoint is loaded.
+The trained local head can then be used for Data Ingestion diversity scoring,
+Class Split crop-token aggregation, or auto-class training/inference metadata.
+For Data Ingestion, the intended default workflow is to train the local SALAD
+head from the active Label Images dataset first, freeze it, and then use that
+head to score candidate images/video frames against the accepted dataset
+reference bank.
+The first local Class Split smoke test intentionally keeps pooled DINOv3 as the
+default: a one-epoch, 32-image local SALAD head trained and ran cleanly, but
+ranked behind pooled Balanced and pooled Precise on class-balanced nearest
+neighbor purity. Local SALAD remains an opt-in recipe that should be evaluated
+with a meaningful local head before replacing pooled defaults.
+
 ## Stage 4 - Multi-Scale Object Context
 
 Implement multi-scale crop fusion:
@@ -265,13 +290,86 @@ Test backbones:
 - DINOv3 ViT-B LVD
 - DINOv3 ViT-L LVD, if local hardware can tolerate it
 - DINOv3 SAT backbone, because WALDO is aerial/satellite-like
+- C-RADIOv4 SO400M with `summary`, `spatial_mean`, and
+  `summary_spatial_concat` pooling
+- C-RADIOv4 H if local hardware can tolerate the larger model
 - CLIP ViT-L/14
 
 Gate:
 
 - Compare each backbone under the best preprocessing from Stages 2-5.
 - SAT should be seriously considered if it improves aerial object neighbor purity.
+- C-RADIOv4 should be promoted only if a full class-balanced benchmark beats
+  DINOv3 Precise without reintroducing size-axis leakage, runtime blowup, or
+  more wrong-class candidates. The 2026-05-21 full WALDO run improved
+  nearest-neighbor purity only in the slowest recipe, but did not clear the
+  default-promotion gate.
 - CLIP can win if semantic grouping improves enough, but reject it if it loses small-object visual distinctions.
+
+C-RADIOv4 implementation note:
+
+- Tator uses the Hugging Face/Transformers C-RADIOv4 model path with
+  `open_clip_torch>=3.3,<4.0`, Torch CUDA when available, and Torch MPS/CPU on
+  Apple hardware. C-RADIOv4 is not MLX-accelerated in Tator on Mac today, and
+  current full-dataset Torch/MPS runs are much slower than DINOv3.
+- C-RADIO-backed local SALAD heads are trained over the spatial-token channel
+  width. When the C-RADIO global summary width differs from the spatial-token
+  width, Tator falls back to the spatial-token mean for the SALAD global
+  descriptor so training and inference remain shape-consistent.
+- No official MLX C-RADIOv4 implementation or converted checkpoint was found,
+  so the backend exposes MLX status as unavailable for C-RADIOv4 rather than
+  silently falling back under an MLX label.
+- `tools/run_class_split_experiments.py --matrix cradio` runs the focused
+  C-RADIO pooling/backbone screen. `tools/benchmark_salad_diversity.py
+  --include-cradio-pooled` and `tools/benchmark_salad_class_separation.py
+  --include-cradio` compare C-RADIO against the DINOv3 baselines.
+
+Full WALDO C-RADIO matrix, uncapped, completed on 2026-05-21:
+
+```bash
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experiments.py \
+  --dataset-root uploads/datasets/labeling_session_1 \
+  --label-zip /tmp/tator_waldo_labels.zip \
+  --labelmap uploads/datasets/labeling_session_1/labelmap.txt \
+  --image-dir uploads/datasets/labeling_session_1/train/images \
+  --matrix cradio --sample-cap 0 \
+  --output-root uploads/class_analysis/benchmarks/waldo_cradio_full
+```
+
+Artifacts:
+
+- `uploads/class_analysis/benchmarks/waldo_cradio_full/leaderboard.csv`
+- `uploads/class_analysis/benchmarks/waldo_cradio_full/report.md`
+- `uploads/class_analysis/benchmarks/waldo_cradio_full/metrics.json`
+
+All-class C-RADIO results:
+
+| Recipe | Projection | Object-weighted NN purity | Class-balanced NN purity | Abs size leakage | Wrong-class candidates | Runtime | Cache hit |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Summary | PCA | `0.8876` | `0.7006` | `0.0663` | `1025` | `4893.5s` | `0.20` |
+| Summary | UMAP | `0.8876` | `0.7006` | `0.6722` | `1025` | `81.1s` | `1.00` |
+| Spatial mean | PCA | `0.8898` | `0.7001` | `0.0672` | `964` | `5006.4s` | `0.20` |
+| Summary + spatial mean | PCA | `0.8912` | `0.7053` | `0.0611` | `983` | `5022.3s` | `0.20` |
+| Precise tight + context | PCA | `0.9078` | `0.7264` | `0.0591` | `851` | `9046.9s` | `0.20` |
+
+Decision:
+
+- C-RADIOv4 Precise tight+context is the strongest C-RADIO candidate by
+  nearest-neighbor purity and beats DINOv3 Precise there (`0.9078` /
+  `0.7264` vs. `0.8969` / `0.6917`).
+- DINOv3 Precise remains the default because it is far faster (`45.3s` vs.
+  `9046.9s`), has lower size-axis leakage (`0.0273` vs. `0.0591`), and found
+  fewer wrong-class candidates (`804` vs. `851`).
+- Keep C-RADIOv4 as an opt-in slow audit path until cache sharing and/or a real
+  MLX implementation changes the speed profile.
+
+Backlog:
+
+- Improve C-RADIO cache handling so one model forward stores raw summary and
+  spatial-token outputs for a crop. Pooling variants should then derive
+  `summary`, `spatial_mean`, and `summary_spatial_concat` embeddings from that
+  shared cache instead of recomputing the same C-RADIO forward pass across
+  adjacent benchmark rows.
 
 ## Stage 8 - Ensemble Embeddings
 
@@ -389,6 +487,20 @@ Auto-class contract:
 - Auto-class inference reloads that metadata, reconstructs the same padded canonical crop, applies the saved size-bias residualizer, and then scores the classifier head.
 - SAM-generated auto-class boxes now route through the same full-image bbox crop helper instead of classifying an already-cropped mask image directly.
 
+Aggregation contract:
+
+- `embedding_aggregation=pooled` remains the conservative default and fallback
+  for Class Split and auto-class.
+- `embedding_aggregation=local_salad` is valid only with a spatial-token
+  encoder and an explicitly selected Tator-trained local SALAD head. DINOv3 is
+  the established baseline; C-RADIOv4 heads are supported as a candidate
+  encoder. The selected encoder, pooling mode, and head id are stored in Class
+  Split cache keys and classifier metadata so training and inference use the
+  same aggregation recipe.
+- Whole-image/frame SALAD diversity scoring and object-crop SALAD aggregation
+  share the same local head registry and the same no-external-checkpoint
+  loader policy.
+
 ## Remaining Lever Screen
 
 Executed on 2026-05-20 with:
@@ -481,10 +593,11 @@ Canonical presets:
   residualization, PCA by default.
 - **Balanced**: DINOv3 ViT-B LVD, canonical `336x336`, padded-square crop,
   padding `0.08`, pooler readout, full crop, single view, size-bias
-  residualization, PCA by default. This is the default for Class Split Explorer
-  and the conservative training default for auto-class.
+  residualization, PCA by default. This is the conservative training default
+  for auto-class and the faster Class Split audit preset.
 - **Precise**: Balanced settings plus `tight_context` multi-view embeddings.
-  Use when the user wants more detail and can tolerate slower runs.
+  Use when the user wants the strongest Class Split audit and can tolerate
+  slower runs.
 
 User-facing controls:
 
@@ -494,3 +607,54 @@ User-facing controls:
   views, and UMAP neighbors behind advanced controls with tooltips.
 - Do not expose raw/native embeddings, whitening, or image-bias removal as
   normal presets. They remain experiment-harness options only.
+
+## Full Uncapped Finalist Rerun
+
+Executed on 2026-05-20 with no sample cap:
+
+```bash
+NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python tools/run_class_split_experiments.py \
+  --dataset-root "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4" \
+  --label-zip "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/labels/bboxes_yolo (207).zip" \
+  --labelmap "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/code/labelmap.txt" \
+  --image-dir "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/cropped images" \
+  --output-root uploads/class_analysis/experiments/waldo_v4_finalists_rerun_20260520 \
+  --matrix finalists --sample-cap 0 --force
+```
+
+Artifacts:
+
+- `uploads/class_analysis/experiments/waldo_v4_finalists_rerun_20260520/leaderboard.csv`
+- `uploads/class_analysis/experiments/waldo_v4_finalists_rerun_20260520/report.md`
+- `uploads/class_analysis/experiments/waldo_v4_finalists_rerun_20260520/metrics.json`
+
+All-class results:
+
+| Preset | Projection | Object-weighted NN purity | Class-balanced NN purity | Abs size leakage | Wrong-class candidates | Runtime |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Precise | PCA | `0.8969` | `0.6917` | `0.0273` | `804` | `45.3s` |
+| Fast | PCA | `0.8701` | `0.6463` | `0.0308` | `1066` | `38.9s` |
+| Balanced | PCA | `0.8677` | `0.6465` | `0.0292` | `1133` | `38.7s` |
+| Precise | UMAP n=50 | `0.8969` | `0.6917` | `0.6332` | `804` | `54.6s` |
+| Balanced | UMAP n=50 | `0.8677` | `0.6465` | `0.7367` | `1133` | `46.3s` |
+
+A targeted full all-class rerun of the strongest sampled challenger,
+`tight_standard`, did not beat the precise recipe:
+
+| Challenger | Projection | Object-weighted NN purity | Class-balanced NN purity | Abs size leakage | Wrong-class candidates | Runtime |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Tight + standard | PCA | `0.8940` | `0.6858` | `0.0284` | `820` | `489.6s` |
+
+Decision:
+
+- Make **Precise** the Class Split Explorer default because it is the measured
+  winner for all-class wrong-label discovery and class-balanced local purity.
+- Keep **Balanced** as the conservative auto-class training default because it
+  is single-view, faster, and easier to run repeatedly during classifier
+  iteration.
+- Keep **Fast** for quick coarse audits.
+- Keep PCA as the diagnostic default. UMAP can still be useful for visual
+  browsing, but the projection itself showed large absolute size-axis leakage
+  even when the underlying embedding recipe had good PCA diagnostics.
+- Use UMAP `n_neighbors=50` when UMAP is selected; this matches the finalist
+  setup and is more stable than very local UMAP for this audit.

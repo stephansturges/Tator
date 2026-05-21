@@ -51,6 +51,7 @@
     <div class="tab-shell">
 		        <div class="tab-bar">
 	            <button class="tab-button active" data-tab="labeling" data-testid="tab.labeling.open" id="tabLabelingButton" type="button">Label Images</button>
+            <button class="tab-button" data-tab="data-ingestion" data-testid="tab.data_ingestion.open" id="tabDataIngestionButton" type="button">Data Ingestion</button>
             <button class="tab-button" data-tab="class-split" data-testid="tab.class_split.open" id="tabClassSplitButton" type="button">Class Split Explorer</button>
             <button class="tab-button" data-tab="prepass-builder" data-testid="tab.prepass_builder.open" id="tabPrepassBuilderButton" type="button">EDR [wip] Builder</button>
             <button class="tab-button" data-tab="training" data-testid="tab.training.open" id="tabTrainingButton" type="button">Train Class Predictor</button>
@@ -698,12 +699,156 @@
                     </div>
                 </div>
             </div>
+            <div class="tab-panel" id="tabDataIngestion" data-tab-panel="data-ingestion">
+                <div class="data-ingestion-workspace">
+                    <header class="data-ingestion-header">
+                        <div>
+                            <h2>Data Ingestion</h2>
+                            <div class="training-help">Train local SALAD heads and score new images or video frames for dataset diversity. WALDO benchmarks keep DINOv3 pooled as the stable baseline; C-RADIOv4 and local SALAD are candidate modes to compare before changing defaults.</div>
+                            <div class="training-help warn">C-RADIOv4 on Mac is not MLX-accelerated in Tator. Current Torch/MPS runs are much slower than DINOv3.</div>
+                        </div>
+                        <span id="dataIngestionStatus" class="qwen-caption-status"></span>
+                    </header>
+                    <section class="data-ingestion-panel" aria-labelledby="dataIngestionAnalyzeTitle">
+                        <div class="data-ingestion-panel__header">
+                            <div>
+                                <strong id="dataIngestionAnalyzeTitle">Diversity analysis</strong>
+                                <div class="training-help">Rank candidate media by novelty and keep the most diverse subset. Videos are sampled into frames before embedding.</div>
+                            </div>
+                        </div>
+                        <div class="data-ingestion-grid">
+                            <div class="data-ingestion-field data-ingestion-field--wide">
+                                <label for="dataIngestionFiles">Candidate images / videos<span class="help-icon" title="Files to evaluate for ingestion. Video files are decoded into frames with the frame interval below.">?</span></label>
+                                <input type="file" id="dataIngestionFiles" multiple accept="image/*,video/*" />
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionRecipe">Ingestion recipe<span class="help-icon" title="Applies an encoder, keep fraction, and video sampling recipe. DINOv3 pooled is the stable baseline from current internal tests. C-RADIOv4 is an explicit candidate mode, but on Mac it is not MLX-accelerated in Tator and can be much slower than DINOv3. Local SALAD recipes require a locally trained head.">?</span></label>
+                                <select id="dataIngestionRecipe">
+                                    <option value="pooled_top20" selected>DINOv3 baseline top 20%</option>
+                                    <option value="cradio_top20">C-RADIOv4 summary top 20%</option>
+                                    <option value="local_salad_top20">Local SALAD diversity top 20%</option>
+                                    <option value="local_salad_review50">Local SALAD broad review 50%</option>
+                                    <option value="custom">Custom</option>
+                                </select>
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionEncoder">Embedding mode<span class="help-icon" title="Chooses how candidate images/frames become vectors for novelty scoring. DINOv3 pooled is the current baseline. C-RADIOv4 pooled tests NVIDIA's Torch encoder; on Mac this is not MLX-accelerated in Tator and is much slower in current full-dataset runs. Local SALAD uses a Tator-trained head and never loads external SALAD checkpoints.">?</span></label>
+                                <select id="dataIngestionEncoder">
+                                    <option value="dinov3_pooled" selected>DINOv3 pooled baseline</option>
+                                    <option value="cradio_pooled">C-RADIOv4 pooled</option>
+                                    <option value="local_salad">Local SALAD head</option>
+                                </select>
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionCradioModel">C-RADIOv4 model<span class="help-icon" title="Used only when Embedding mode is C-RADIOv4 pooled. SO400M is the practical default candidate; H is larger and should be benchmarked on your hardware before routine use. Mac runs currently use Torch/MPS or CPU fallback rather than MLX. Local SALAD uses the encoder saved inside the selected head.">?</span></label>
+                                <select id="dataIngestionCradioModel"></select>
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionCradioPooling">C-RADIOv4 pooling<span class="help-icon" title="Used only for C-RADIOv4 pooled scoring. Summary is the global descriptor. Spatial mean averages local tokens. Summary + spatial mean concatenates both and can preserve more detail but doubles feature width. Benchmark before promoting over summary.">?</span></label>
+                                <select id="dataIngestionCradioPooling">
+                                    <option value="summary" selected>Summary</option>
+                                    <option value="spatial_mean">Spatial mean</option>
+                                    <option value="summary_spatial_concat">Summary + spatial mean</option>
+                                </select>
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionSaladHead">Local SALAD head<span class="help-icon" title="A Tator-trained SALAD aggregation head saved under uploads/salad_heads/. Required only for Local SALAD mode. The head fixes its base encoder, model, and pooling; those saved settings override the C-RADIO pooled controls.">?</span></label>
+                                <select id="dataIngestionSaladHead"></select>
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionKeepFraction">Keep fraction<span class="help-icon" title="Fraction of candidate images/frames to keep after greedy farthest-first diversity ranking. 0.2 keeps the top 20%.">?</span></label>
+                                <input type="number" id="dataIngestionKeepFraction" min="0.01" max="1" step="0.01" value="0.2" />
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionFrameInterval">Video frame interval (s)<span class="help-icon" title="Seconds between sampled frames for uploaded videos. Smaller values keep more frames and run slower.">?</span></label>
+                                <input type="number" id="dataIngestionFrameInterval" min="0.1" max="60" step="0.1" value="1.0" />
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionMaxFrames">Max frames / video<span class="help-icon" title="Safety limit for each video. Use 0 for no per-video limit.">?</span></label>
+                                <input type="number" id="dataIngestionMaxFrames" min="0" max="100000" step="1" value="200" />
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionReferenceCap">Active reference cap<span class="help-icon" title="When comparing against the current Label Images workspace, upload at most this many active images as reference. The default 0 means all loaded active images.">?</span></label>
+                                <input type="number" id="dataIngestionReferenceCap" min="0" max="100000" step="1" value="0" />
+                            </div>
+                            <div class="data-ingestion-field data-ingestion-field--checkbox">
+                                <label><input type="checkbox" id="dataIngestionUseActiveReference" checked /> Compare against active Label Images workspace</label>
+                            </div>
+                        </div>
+                        <div class="data-ingestion-actions">
+                            <button type="button" id="dataIngestionAnalyzeButton" class="training-button">Analyze diversity</button>
+                            <button type="button" id="dataIngestionCancelButton" class="training-button danger" disabled>Cancel</button>
+                            <button type="button" id="dataIngestionRefreshButton" class="training-button secondary">Refresh heads</button>
+                        </div>
+                        <div class="data-ingestion-progress" id="dataIngestionProgress" hidden>
+                            <div class="data-ingestion-progress__bar"><div id="dataIngestionProgressFill"></div></div>
+                            <div id="dataIngestionProgressText" class="training-help"></div>
+                        </div>
+                    </section>
+                    <section class="data-ingestion-panel" aria-labelledby="dataIngestionTrainTitle">
+                        <div class="data-ingestion-panel__header">
+                            <div>
+                                <strong id="dataIngestionTrainTitle">Train local SALAD</strong>
+                                <div class="training-help">Train a local SALAD aggregation head from your own images/video frames with a frozen spatial-token encoder underneath.</div>
+                            </div>
+                        </div>
+                        <div class="data-ingestion-grid">
+                            <div class="data-ingestion-field data-ingestion-field--wide">
+                                <label for="dataIngestionTrainFiles">Training images / videos<span class="help-icon" title="Local data used to train the SALAD aggregation head. No external SALAD checkpoint is loaded.">?</span></label>
+                                <input type="file" id="dataIngestionTrainFiles" multiple accept="image/*,video/*" />
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionHeadName">Head name<span class="help-icon" title="Human-readable name for the saved local SALAD head. Tator makes it unique if another head already uses the same name.">?</span></label>
+                                <input type="text" id="dataIngestionHeadName" value="local_salad_head" />
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionTrainEncoder">SALAD base encoder<span class="help-icon" title="Frozen encoder whose spatial tokens train the local SALAD head. DINOv3 is the established baseline. C-RADIOv4 is a candidate path that trains on C-RADIO spatial tokens; on Mac it is not MLX-accelerated in Tator, so benchmark the resulting head before using it as a dataset default.">?</span></label>
+                                <select id="dataIngestionTrainEncoder">
+                                    <option value="dinov3" selected>DINOv3</option>
+                                    <option value="cradio">C-RADIOv4</option>
+                                </select>
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionTrainCradioModel">Training C-RADIOv4 model<span class="help-icon" title="Used only when SALAD base encoder is C-RADIOv4. This model id is saved into the head metadata and must match at scoring/inference time.">?</span></label>
+                                <select id="dataIngestionTrainCradioModel"></select>
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionEpochs">Epochs<span class="help-icon" title="Number of contrastive passes over the training images/frames. More epochs can improve the local SALAD head but increase overfitting risk and runtime; smoke tests use 1, normal experiments usually start at 3.">?</span></label>
+                                <input type="number" id="dataIngestionEpochs" min="1" max="100" step="1" value="3" />
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionBatchSize">Batch size<span class="help-icon" title="Number of paired augmented images processed per SALAD optimization step. Larger batches improve contrastive signal but need more VRAM/RAM.">?</span></label>
+                                <input type="number" id="dataIngestionBatchSize" min="2" max="128" step="1" value="8" />
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionMaxTrainImages">Max train images<span class="help-icon" title="Optional safety cap for training. The default 0 trains on every selected image/frame, including every image in the active Label Images dataset.">?</span></label>
+                                <input type="number" id="dataIngestionMaxTrainImages" min="0" max="1000000" step="1" value="0" />
+                            </div>
+                        </div>
+                        <div class="data-ingestion-actions">
+                            <button type="button" id="dataIngestionTrainButton" class="training-button">Train local SALAD</button>
+                            <button type="button" id="dataIngestionTrainActiveButton" class="training-button secondary" title="Train a local SALAD head from every image currently loaded in Label Images, then select it for ingestion scoring. This is the intended dataset-specific SALAD workflow.">Train on active dataset</button>
+                        </div>
+                    </section>
+                    <section class="data-ingestion-panel data-ingestion-results" id="dataIngestionResults" hidden>
+                        <div>
+                            <strong>Ingestion report</strong>
+                            <div id="dataIngestionReport" class="data-ingestion-report"></div>
+                        </div>
+                        <div>
+                            <strong>Top diverse candidates</strong>
+                            <div id="dataIngestionList" class="data-ingestion-list"></div>
+                        </div>
+                    </section>
+                </div>
+            </div>
             <div class="tab-panel" id="tabClassSplit" data-tab-panel="class-split">
                 <div class="class-split-workspace">
                     <header class="class-split-workspace__header">
                         <div>
                             <h2>Class Split Explorer</h2>
-                            <div id="classSplitDatasetStatus" class="training-help">Open a dataset in Label Images to run analysis.</div>
+                            <div id="classSplitDatasetStatus" class="training-help">Open a dataset in Label Images to run analysis. Full WALDO tests keep DINOv3 Precise as the stable default; C-RADIOv4 improves NN purity only in a very slow opt-in audit path.</div>
+                            <div class="training-help warn">C-RADIOv4 on Mac is not MLX-accelerated in Tator. Current Torch/MPS runs are much slower than DINOv3.</div>
                         </div>
                         <span id="classSplitJobStatus" class="qwen-caption-status"></span>
                     </header>
@@ -716,34 +861,37 @@
                         </div>
                         <div class="class-split-grid">
                             <div class="class-split-field">
-                                <label>Scope</label>
+                                <label>Scope<span class="help-icon" title="Selected class looks for subclusters or outliers inside one class. All classes is slower but is the mode that surfaces likely wrong-class labels by comparing neighbors across the whole labelmap.">?</span></label>
                                 <div class="class-split-radio">
                                     <label><input type="radio" name="classSplitScope" id="classSplitScopeSelected" value="selected_class" checked /> Selected class</label>
                                     <label><input type="radio" name="classSplitScope" id="classSplitScopeAll" value="all_classes" /> All classes</label>
                                 </div>
                             </div>
                             <div class="class-split-field">
-                                <label for="classSplitRecipePreset">Quality preset<span class="help-icon" title="Fast uses a smaller canonical crop for quicker coarse audits. Balanced is the measured default. Precise adds multi-view object/context embeddings and is slower. Custom keeps your advanced settings.">?</span></label>
+                                <label for="classSplitRecipePreset">Quality preset<span class="help-icon" title="Fast is a quick coarse audit. Balanced is the faster single-view DINOv3 baseline. Precise is the measured WALDO default for all-class wrong-label discovery. C-RADIOv4 is opt-in: its slowest recipe improved NN purity in full WALDO tests but was much slower, leaked more size signal, and produced more wrong-class candidates than DINOv3 Precise. On Mac it is not MLX-accelerated in Tator. Local SALAD requires a trained local head.">?</span></label>
                                 <select id="classSplitRecipePreset">
-                                    <option value="balanced" selected>Balanced default</option>
+                                    <option value="balanced">Balanced faster</option>
                                     <option value="fast">Fast coarse</option>
-                                    <option value="precise">Precise slow</option>
+                                    <option value="precise" selected>Precise best</option>
+                                    <option value="cradio">C-RADIOv4 summary</option>
+                                    <option value="local_salad">Local SALAD separation</option>
                                     <option value="custom">Custom advanced</option>
                                 </select>
                             </div>
                             <div class="class-split-field">
-                                <label for="classSplitClassSelect">Class</label>
+                                <label for="classSplitClassSelect">Class<span class="help-icon" title="Class to audit when Scope is Selected class. Ignored in All classes mode, where every labeled object is embedded and scored together.">?</span></label>
                                 <select id="classSplitClassSelect"></select>
                             </div>
                             <div class="class-split-field">
-                                <label for="classSplitEncoderType">Encoder</label>
+                                <label for="classSplitEncoderType">Encoder<span class="help-icon" title="Backbone family used to embed object crops. DINOv3 is the current WALDO default. CLIP is available for comparison but weaker for these small visual distinctions. C-RADIOv4 is a Torch candidate; on Mac it is not MLX-accelerated in Tator and is benchmarked separately before promotion.">?</span></label>
                                 <select id="classSplitEncoderType">
                                     <option value="dinov3" selected>DINOv3</option>
                                     <option value="clip">CLIP</option>
+                                    <option value="cradio">C-RADIOv4</option>
                                 </select>
                             </div>
                             <div class="class-split-field">
-                                <label for="classSplitBackbone">Backbone</label>
+                                <label for="classSplitBackbone">Backbone<span class="help-icon" title="Specific model checkpoint for the selected encoder. Larger backbones may improve separation but can be slower or exceed local memory. C-RADIOv4 SO400M is the practical candidate; H is larger.">?</span></label>
                                 <select id="classSplitBackbone"></select>
                             </div>
                             <div class="class-split-field">
@@ -759,7 +907,7 @@
                             <div class="class-split-grid">
                             <div class="class-split-field">
                                 <label for="classSplitProjectionNeighborK">Projection neighbors<span class="help-icon" title="UMAP-only layout setting. Higher values make UMAP preserve broader/global structure; lower values emphasize tight local islands. PCA does not use neighbors, so this is reported as not applicable for PCA runs. Use 0 for all available neighbors.">?</span></label>
-                                <input type="number" id="classSplitProjectionNeighborK" min="0" max="5000" value="15" />
+                                <input type="number" id="classSplitProjectionNeighborK" min="0" max="5000" value="50" />
                             </div>
                             <div class="class-split-field">
                                 <label for="classSplitSampleCap">Sample cap<span class="help-icon" title="Optional. Leave blank to analyze every object in the selected scope. Use a positive number only when you want a faster sampled audit.">?</span></label>
@@ -783,6 +931,25 @@
                                 </select>
                             </div>
                             <div class="class-split-field">
+                                <label for="classSplitCradioPooling">C-RADIOv4 pooling<span class="help-icon" title="C-RADIOv4-only readout. Summary uses the global descriptor. Spatial mean averages local visual tokens. Summary + spatial mean concatenates both and can preserve more crop detail but doubles feature width. Mac runs are not MLX-accelerated in Tator; benchmark carefully before promoting any C-RADIO pooling mode.">?</span></label>
+                                <select id="classSplitCradioPooling">
+                                    <option value="summary" selected>Summary</option>
+                                    <option value="spatial_mean">Spatial mean</option>
+                                    <option value="summary_spatial_concat">Summary + spatial mean</option>
+                                </select>
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitEmbeddingAggregation">Embedding aggregation<span class="help-icon" title="Pooled uses the encoder's direct image descriptor and is the measured default. Local SALAD runs a selected Tator-trained aggregation head over spatial tokens. Heads can be DINOv3- or C-RADIOv4-backed; the backend rejects mismatches.">?</span></label>
+                                <select id="classSplitEmbeddingAggregation">
+                                    <option value="pooled" selected>Pooled / current best</option>
+                                    <option value="local_salad">Local SALAD head</option>
+                                </select>
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitSaladHead">Local SALAD head<span class="help-icon" title="Used only when Embedding aggregation is Local SALAD. Heads are trained locally in Data Ingestion, never loaded from upstream checkpoints, and carry their own encoder/model/pooling metadata.">?</span></label>
+                                <select id="classSplitSaladHead"></select>
+                            </div>
+                            <div class="class-split-field">
                                 <label for="classSplitBackgroundMode">Background<span class="help-icon" title="Controls pixels outside the bbox inside padded crops. Full crop keeps context; fill/blur/darken suppress background when scene context overwhelms small objects.">?</span></label>
                                 <select id="classSplitBackgroundMode">
                                     <option value="full_crop" selected>Full crop</option>
@@ -794,10 +961,10 @@
                             <div class="class-split-field">
                                 <label for="classSplitViewMode">Embedding views<span class="help-icon" title="Single is fastest. Multi-view modes encode two crops and concatenate them: object-focused, context-focused, or both. These are slower and mainly for precise audits.">?</span></label>
                                 <select id="classSplitViewMode">
-                                    <option value="single" selected>Single crop</option>
+                                    <option value="single">Single crop</option>
                                     <option value="tight_standard">Tight + standard</option>
                                     <option value="standard_context">Standard + context</option>
-                                    <option value="tight_context">Tight + context</option>
+                                    <option value="tight_context" selected>Tight + context</option>
                                 </select>
                             </div>
                             <div class="class-split-field">
@@ -1381,25 +1548,31 @@
                             <div style="margin-top: 6px; color: #475569;">Choose the largest model your GPU can handle if accuracy matters; use smaller models for faster iteration. Results vary by dataset.</div>
                         </div>
                         <div class="training-field">
-                            <label for="trainEncoderType">Encoder type</label>
+                            <label for="trainEncoderType">Encoder type<span class="help-icon" title="Embedding family for the auto-class predictor. CLIP supports text prompt prefiltering. DINOv3 is the current image-only default from WALDO tests. C-RADIOv4 is an image-only Torch candidate; on Mac it is not MLX-accelerated in Tator and should be benchmarked against DINOv3 before becoming the default.">?</span></label>
                             <select id="trainEncoderType">
                                 <option value="clip" selected>CLIP (image + text)</option>
                                 <option value="dinov3">DINOv3 (image-only)</option>
+                                <option value="cradio">C-RADIOv4 (image-only)</option>
                             </select>
-                            <div class="training-help">CLIP is the default and enables prompt prefiltering; DINOv3 is image-only and skips text-based prompt filters.</div>
+                            <div class="training-help">CLIP is the default and enables prompt prefiltering; DINOv3 and C-RADIOv4 are image-only and skip text-based prompt filters.</div>
                         </div>
                         <div class="training-field" id="clipBackboneRow">
-                            <label for="clipBackboneSelect">CLIP Backbone</label>
+                            <label for="clipBackboneSelect">CLIP Backbone<span class="help-icon" title="CLIP checkpoint for image embeddings and text prompt prefiltering. Larger CLIP models can improve semantic grouping but were weaker than DINOv3 on recent WALDO crop-separation tests.">?</span></label>
                             <select id="clipBackboneSelect"></select>
                             <div class="training-help">Default is the largest backbone (ViT-L/14) for best accuracy. Choose a smaller model for faster training or lower VRAM.</div>
                         </div>
                         <div class="training-field" id="dinov3BackboneRow" hidden>
-                            <label for="dinov3BackboneSelect">DINOv3 Backbone</label>
+                            <label for="dinov3BackboneSelect">DINOv3 Backbone<span class="help-icon" title="DINOv3 checkpoint for image-only crop embeddings. The WALDO recipe currently favors the LVD family with pooler output and size-bias residualization.">?</span></label>
                             <select id="dinov3BackboneSelect"></select>
                             <div class="training-help">Frozen image encoder only (no text). Larger models are more accurate but need more VRAM.</div>
                         </div>
+                        <div class="training-field" id="cradioBackboneRow" hidden>
+                            <label for="cradioBackboneSelect">C-RADIOv4 Backbone<span class="help-icon" title="NVIDIA C-RADIOv4 checkpoint for image-only crop embeddings. SO400M is the practical candidate; H is larger. Runs through Hugging Face/Torch with CUDA when available, MPS/CPU fallback on Mac, and no official MLX checkpoint.">?</span></label>
+                            <select id="cradioBackboneSelect"></select>
+                            <div class="training-help warn">HF/Torch C-RADIOv4 encoder. On Mac this is not MLX-accelerated in Tator and full-dataset runs can be much slower than DINOv3.</div>
+                        </div>
                         <div class="training-field logreg-only">
-                            <label for="trainSolver">Solver</label>
+                            <label for="trainSolver">Solver<span class="help-icon" title="LogReg-only optimizer. SAGA handles elastic-net style regularization and is the default; LBFGS/Newton-CG are stable dense solvers; LibLinear is useful for smaller one-vs-rest problems.">?</span></label>
                             <select id="trainSolver">
                                 <option value="saga" selected>SAGA (elastic net-friendly)</option>
                                 <option value="lbfgs">LBFGS</option>
@@ -1409,7 +1582,7 @@
                             </select>
                         </div>
                         <div class="training-field">
-                            <label for="trainClassifierType">Classifier head</label>
+                            <label for="trainClassifierType">Classifier head<span class="help-icon" title="Model trained on frozen crop embeddings. LogReg is fast and interpretable. MLP is nonlinear and can separate harder classes, but needs more data and is slower to tune.">?</span></label>
                             <select id="trainClassifierType">
                                 <option value="logreg">LogReg (fast, linear)</option>
                                 <option value="mlp" selected>MLP (nonlinear, slower)</option>
@@ -1469,22 +1642,24 @@
                                 <div class="training-help">Images encoded per CLIP forward pass.</div>
                             </div>
                             <div>
-                                <label for="trainEmbeddingRecipePreset">Embedding preset</label>
+                                <label for="trainEmbeddingRecipePreset">Embedding preset<span class="help-icon" title="Applies the same recipe family used by Class Split. Balanced is the conservative auto-class baseline. Precise mirrors the strongest DINOv3 audit recipe. C-RADIOv4 and Local SALAD are candidate paths that should be benchmarked before promotion; C-RADIOv4 on Mac is not MLX-accelerated in Tator.">?</span></label>
                                 <select id="trainEmbeddingRecipePreset">
                                     <option value="balanced" selected>Balanced default</option>
                                     <option value="fast">Fast coarse</option>
                                     <option value="precise">Precise slow</option>
+                                    <option value="cradio">C-RADIOv4 summary</option>
+                                    <option value="local_salad">Local SALAD separation</option>
                                     <option value="custom">Custom advanced</option>
                                 </select>
                                 <div class="training-help">Applies the same fast/balanced/precise recipe family as Class Split. Custom keeps the fields below.</div>
                             </div>
                             <div>
-                                <label for="trainCanonicalSize">Canonical size</label>
+                                <label for="trainCanonicalSize">Canonical size<span class="help-icon" title="Fixed square crop size sent to the embedding encoder. Larger values preserve small visual details but increase encoding time and memory. Balanced uses 336px from the WALDO recipe.">?</span></label>
                                 <input type="number" id="trainCanonicalSize" min="64" max="1024" step="16" value="336" />
                                 <div class="training-help">Input square size used when canonical crop normalization is enabled.</div>
                             </div>
                             <div>
-                                <label for="trainEmbeddingCropMode">Crop geometry</label>
+                                <label for="trainEmbeddingCropMode">Crop geometry<span class="help-icon" title="How a bbox becomes an encoder crop. Padded square normalizes aspect ratio and is the measured default. Padded bbox keeps rectangular context. Tight bbox removes surrounding pixels.">?</span></label>
                                 <select id="trainEmbeddingCropMode">
                                     <option value="padded_square" selected>Padded square</option>
                                     <option value="padded">Padded bbox</option>
@@ -1493,12 +1668,12 @@
                                 <div class="training-help">Saved into the classifier and reused during auto-class inference.</div>
                             </div>
                             <div>
-                                <label for="trainEmbeddingCropPadding">Crop padding</label>
+                                <label for="trainEmbeddingCropPadding">Crop padding<span class="help-icon" title="Extra context added around each bbox before embedding. More padding helps context-dependent classes; less padding focuses the classifier on the object itself.">?</span></label>
                                 <input type="number" id="trainEmbeddingCropPadding" min="0" max="1" step="0.01" value="0.08" />
                                 <div class="training-help">Extra context around each bbox before embedding; 0.08 mirrors the Class Split default.</div>
                             </div>
                             <div>
-                                <label for="trainBackgroundMode">Background</label>
+                                <label for="trainBackgroundMode">Background<span class="help-icon" title="Treatment of pixels outside the bbox inside padded crops. Full crop keeps scene context. Fill, blur, or darken can reduce background shortcuts when the classifier learns context instead of object appearance.">?</span></label>
                                 <select id="trainBackgroundMode">
                                     <option value="full_crop" selected>Full crop</option>
                                     <option value="mean_fill_outside_box">Mean fill outside box</option>
@@ -1508,7 +1683,7 @@
                                 <div class="training-help">How pixels outside the bbox are handled inside padded crops.</div>
                             </div>
                             <div>
-                                <label for="trainEmbeddingViewMode">Embedding views</label>
+                                <label for="trainEmbeddingViewMode">Embedding views<span class="help-icon" title="Single crop is fastest. Multi-view modes concatenate two views, such as tight object plus context, and should be reserved for precise audits or classifier experiments because they double encode work.">?</span></label>
                                 <select id="trainEmbeddingViewMode">
                                     <option value="single" selected>Single crop</option>
                                     <option value="tight_standard">Tight + standard</option>
@@ -1518,7 +1693,7 @@
                                 <div class="training-help">Multi-view modes encode two crops per object and concatenate them; slower but sometimes better for subtype review.</div>
                             </div>
                             <div>
-                                <label for="trainDinov3Pooling">DINOv3 pooling</label>
+                                <label for="trainDinov3Pooling">DINOv3 pooling<span class="help-icon" title="DINOv3-only readout. Pooler is the measured default. CLS and patch-mean variants are kept for experiments when a dataset behaves differently.">?</span></label>
                                 <select id="trainDinov3Pooling">
                                     <option value="pooler" selected>Pooler / default</option>
                                     <option value="cls">CLS token</option>
@@ -1527,18 +1702,40 @@
                                 </select>
                                 <div class="training-help">DINOv3-only embedding readout. CLIP ignores this setting.</div>
                             </div>
+                            <div>
+                                <label for="trainCradioPooling">C-RADIOv4 pooling<span class="help-icon" title="C-RADIOv4-only readout saved into classifier metadata and reused during auto-class inference. Summary is the global descriptor; spatial mean averages local tokens; summary + spatial mean concatenates both. On Mac this path is not MLX-accelerated in Tator and is slower than DINOv3 in current full-dataset runs.">?</span></label>
+                                <select id="trainCradioPooling">
+                                    <option value="summary" selected>Summary</option>
+                                    <option value="spatial_mean">Spatial mean</option>
+                                    <option value="summary_spatial_concat">Summary + spatial mean</option>
+                                </select>
+                                <div class="training-help">C-RADIOv4-only readout saved into classifier metadata.</div>
+                            </div>
+                            <div>
+                                <label for="trainEmbeddingAggregation">Embedding aggregation<span class="help-icon" title="Pooled uses the encoder's direct descriptor. Local SALAD uses a selected Tator-trained aggregation head over spatial tokens; the saved head must match the encoder family and is reused during auto-class inference.">?</span></label>
+                                <select id="trainEmbeddingAggregation">
+                                    <option value="pooled" selected>Pooled / current best</option>
+                                    <option value="local_salad">Local SALAD head</option>
+                                </select>
+                                <div class="training-help">Local SALAD uses a locally trained head from Data Ingestion for DINOv3 or C-RADIOv4 spatial-token descriptors.</div>
+                            </div>
+                            <div>
+                                <label for="trainSaladHead">Local SALAD head<span class="help-icon" title="Required only for Local SALAD aggregation. The selected head stores its encoder family, model, and pooling recipe; incompatible heads are rejected instead of silently mixing embeddings.">?</span></label>
+                                <select id="trainSaladHead"></select>
+                                <div class="training-help">Required only for Local SALAD aggregation; saved into the classifier and reused during auto-class inference.</div>
+                            </div>
                             <div class="logreg-only">
-                                <label for="trainMaxIter">Max Iter</label>
+                                <label for="trainMaxIter">Max Iter<span class="help-icon" title="LogReg-only cap on solver iterations. Increase if training reports convergence warnings; lower only for quick smoke runs.">?</span></label>
                                 <input type="number" id="trainMaxIter" value="1000" min="100" step="50" />
                                 <div class="training-help">Upper bound on solver iterations.</div>
                             </div>
                             <div>
-                                <label for="trainMinPerClass">Min / Class</label>
+                                <label for="trainMinPerClass">Min / Class<span class="help-icon" title="Classes with fewer examples than this are excluded before training. Raising it avoids unstable rare-class heads; lowering it lets tiny classes train at higher risk.">?</span></label>
                                 <input type="number" id="trainMinPerClass" value="2" min="1" />
                                 <div class="training-help">Drops classes with fewer samples before training.</div>
                             </div>
                             <div class="logreg-only">
-                                <label for="trainRegC">C</label>
+                                <label for="trainRegC">C<span class="help-icon" title="LogReg inverse regularization strength. Higher fits the training data more tightly; lower is more conservative and can generalize better.">?</span></label>
                                 <input type="number" id="trainRegC" value="1.0" step="0.1" min="0.01" />
                                 <div class="training-help">Inverse regularisation strength (higher = less regularisation).</div>
                             </div>

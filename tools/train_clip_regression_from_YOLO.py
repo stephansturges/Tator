@@ -2,7 +2,12 @@
 """CLI wrapper around :func:`tools.clip_training.train_clip_from_yolo`."""
 import argparse
 import sys
+from pathlib import Path
 from typing import Sequence
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from tools.clip_training import TrainingError, train_clip_from_yolo
 
@@ -49,6 +54,19 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="ViT-B/32",
         help="CLIP backbone (e.g., ViT-B/32, ViT-L/14, ViT-L/14@336px)",
+    )
+    parser.add_argument(
+        "--encoder-type",
+        type=str,
+        default="clip",
+        choices=["clip", "dinov3", "cradio"],
+        help="Embedding encoder for auto-class training.",
+    )
+    parser.add_argument(
+        "--encoder-model",
+        type=str,
+        default=None,
+        help="Hugging Face model id for DINOv3 or C-RADIOv4 encoders.",
     )
     parser.add_argument(
         "--device",
@@ -317,6 +335,26 @@ def parse_args() -> argparse.Namespace:
         help="DINOv3 embedding pooling mode.",
     )
     parser.add_argument(
+        "--cradio-pooling",
+        type=str,
+        default="summary",
+        choices=["summary", "spatial_mean", "summary_spatial_concat"],
+        help="C-RADIOv4 embedding pooling mode.",
+    )
+    parser.add_argument(
+        "--embedding-aggregation",
+        type=str,
+        default="pooled",
+        choices=["pooled", "local_salad"],
+        help="Token aggregation mode for DINOv3 auto-class training.",
+    )
+    parser.add_argument(
+        "--embedding-salad-head-id",
+        type=str,
+        default="",
+        help="Local SALAD head id under uploads/salad_heads/ when using --embedding-aggregation local_salad.",
+    )
+    parser.add_argument(
         "--calibration_mode",
         type=str,
         default="none",
@@ -417,6 +455,8 @@ def main() -> None:
             model_output=args.model_output,
             labelmap_output=args.labelmap_output,
             clip_model=args.clip_model,
+            encoder_type=args.encoder_type,
+            encoder_model=args.encoder_model,
             input_labelmap=args.input_labelmap,
             test_size=args.test_size,
             random_seed=args.random_seed,
@@ -464,6 +504,9 @@ def main() -> None:
             embedding_view_mode=args.embedding_view_mode,
             embedding_adjustment=args.embedding_adjustment,
             dinov3_pooling=args.dinov3_pooling,
+            cradio_pooling=args.cradio_pooling,
+            embedding_aggregation=args.embedding_aggregation,
+            embedding_salad_head_id=args.embedding_salad_head_id,
             calibration_mode=args.calibration_mode,
             calibration_max_iters=args.calibration_max_iters,
             calibration_min_temp=args.calibration_min_temp,
@@ -487,7 +530,7 @@ def main() -> None:
     print(f"Model path          : {artifacts.model_path}")
     print(f"Labelmap path       : {artifacts.labelmap_path}")
     print(f"Metadata path       : {artifacts.meta_path}")
-    print(f"CLIP backbone       : {artifacts.clip_model}")
+    print(f"Encoder             : {artifacts.encoder_type} / {artifacts.encoder_model}")
     print(f"Device              : {artifacts.device}")
     print(f"Train samples       : {artifacts.samples_train}")
     print(f"Test samples        : {artifacts.samples_test}")
@@ -501,6 +544,9 @@ def main() -> None:
     print(f"Crop pad / size     : {artifacts.embedding_crop_padding_ratio} / {artifacts.canonical_size}")
     print(f"Background / views  : {artifacts.background_mode} / {artifacts.embedding_view_mode}")
     print(f"DINOv3 pooling      : {artifacts.dinov3_pooling}")
+    print(f"Aggregation         : {artifacts.embedding_aggregation}")
+    if artifacts.embedding_salad_head_id:
+        print(f"SALAD head          : {artifacts.embedding_salad_head_id}")
     print(f"Accuracy            : {artifacts.accuracy:.4f}")
     if artifacts.classifier_type == "mlp":
         hidden_sizes = artifacts.mlp_hidden_sizes

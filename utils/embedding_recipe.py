@@ -45,6 +45,13 @@ def normalize_dinov3_pooling(value: Any) -> str:
     return "pooler"
 
 
+def normalize_embedding_aggregation(value: Any) -> str:
+    mode = str(value or "pooled").strip().lower()
+    if mode in {"local_salad", "salad", "salad_local"}:
+        return "local_salad"
+    return "pooled"
+
+
 def normalize_background_mode(value: Any) -> str:
     mode = str(value or "full_crop").strip().lower()
     if mode in {"none", "off", "raw", "full", "full_crop"}:

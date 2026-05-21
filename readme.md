@@ -460,6 +460,12 @@ analysis for open annotation datasets.
   multi-view crop composition. Class Split Explorer and auto-class training now
   use the same canonical crop/view metadata, and sampled Class Split runs defer
   expensive crop materialization until after the sampled records are selected.
+- Removed the earlier fixed-projection SALAD-style crop aggregator from Class
+  Split and auto-class. The replacement SALAD path is stricter: Tator now trains
+  its own local SALAD optimal-transport head from user media, stores it in the
+  local head registry, and reuses that exact selected head for Data Ingestion,
+  Class Split, and auto-class metadata. No upstream or third-party SALAD
+  checkpoint is loaded.
 - The shared recipe is intentionally narrow in the normal UI: object crops are
   padded to a square, resized to a canonical input size, optionally rendered as
   tight/context views, embedded with the selected CLIP or DINOv3 backbone, and
@@ -471,6 +477,22 @@ analysis for open annotation datasets.
   padding, canonical size, DINO pooling, background mode, embedding views, and
   UMAP neighbors. Raw/native embeddings, whitening, and image-bias removal
   remain experiment-harness levers rather than normal UI controls.
+- Reran the uncapped finalist recipe suite on the active WALDO v4 snapshot and
+  aligned Class Split Explorer with the measured winner. **Precise best**
+  (`336px`, padding `0.08`, tight+context views, size-bias residualization,
+  PCA) is now the Class Split default because it had the best all-class
+  neighbor purity (`0.897` object-weighted, `0.692` class-balanced) while
+  keeping absolute size leakage low (`0.027`). **Balanced** remains the faster
+  single-view recipe and the conservative auto-class training default. Optional
+  UMAP now defaults to `50` neighbors to match the evaluated finalist setup,
+  but PCA remains the diagnostic default because UMAP projections can re-expose
+  strong size-correlated axes even when the underlying embedding recipe is
+  sound.
+- Hardened the experiment harness report so it writes explicit absolute
+  size-axis leakage, class-balanced all-class nearest-neighbor purity, worst
+  class purity, sample-cap metadata, and an all-class ranking. This prevents
+  negative signed size correlations from looking better than equally large
+  positive size leakage in generated reports.
 - Aligned trained auto-class predictors with the Class Split recipe. Training
   now saves crop mode, crop padding, canonical size, DINO pooling, and the
   fitted size-bias residualizer; inference reloads those settings and applies
@@ -487,7 +509,198 @@ analysis for open annotation datasets.
 - Validation used `node --check ybat-master/ybat.js`,
   `NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m py_compile api/class_analysis.py tools/run_class_split_experiments.py localinferenceapi.py tools/clip_training.py services/classifier.py utils/embedding_recipe.py tests/test_class_analysis.py tests/test_labeling_panel_layout_contract.py tests/test_sam3_text_windowed_prompt.py`,
   `NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest tests/test_class_analysis.py tests/test_labeling_panel_layout_contract.py tests/test_sam3_text_windowed_prompt.py -q`
-  (39 passing tests), and `git diff --check`.
+  (44 passing tests), and `git diff --check`.
+
+### 2026-05-21: Data Ingestion and Local SALAD
+
+This checkpoint adds a first-class **Data Ingestion** workspace for deciding
+which new images or video frames are worth adding to the current dataset.
+
+- Added a top-level **Data Ingestion** tab. Candidate images/videos are embedded
+  and ranked by greedy farthest-first diversity so a user can keep, for
+  example, only the top `20%` most novel media.
+- Added optional comparison against the active Label Images workspace. The
+  frontend can upload the currently loaded images as reference media so new
+  candidates are scored against what is already in memory, not just against
+  each other. The reference cap defaults to `0`, meaning all active images are
+  used unless the user explicitly chooses a smaller cap.
+- Added video ingestion through `ffmpeg`: videos are sampled into frames using
+  the configured frame interval and per-video frame cap before embedding.
+- Added a pooled DINOv3 baseline encoder and a **local SALAD** encoder. Local
+  SALAD heads are initialized and trained inside Tator from the user's own
+  images/video frames with a frozen spatial-token encoder underneath. DINOv3 is
+  the default base encoder; C-RADIOv4 can now be selected as a candidate base
+  encoder. Training progress uses the staged messages **Selecting ingredients**,
+  **Washing lettuce**, **Mixing dressing**, **Tossing salad**, and
+  **Finalizing SALAD**.
+- Added **Train on active dataset** in Data Ingestion. This packages the images
+  currently loaded in Label Images, trains a local SALAD head from that accepted
+  dataset reference set, refreshes the local head registry, and selects the new
+  head plus the `local_salad_top20` ingestion recipe so candidate imports are
+  scored against the dataset with the same frozen head. The training cap now
+  defaults to `0`, meaning every active image/frame is used unless the user
+  explicitly sets a smaller safety cap.
+- Enforced a local-only SALAD policy. Tator does not load upstream SALAD
+  checkpoints; saved heads must use the Tator `local-salad-v1` format and the
+  `local_training_only_no_external_salad_checkpoint` policy marker before they
+  can be selected. New heads also carry a `tator_local_salad_trainer` marker so
+  generic external `.pt` files are rejected even if they are dropped into the
+  local folder.
+- Added `/data_ingestion/*` backend jobs for capabilities, local SALAD training,
+  diversity analysis, result retrieval, and cancellation. Results are written
+  under `uploads/data_ingestion/`; local heads are stored under
+  `uploads/salad_heads/`.
+- Added local SALAD recipes to Class Split and auto-class. These recipes require
+  a spatial-token encoder plus a selected Tator-trained SALAD head. DINOv3 is
+  the established baseline; C-RADIOv4 heads are now supported as an explicit
+  candidate. The selected encoder, pooling mode, and head id are saved into
+  cache keys and classifier metadata so inference cannot silently drift back to
+  pooled embeddings.
+- Added `tools/benchmark_salad_diversity.py` to compare pooled DINOv3 selection
+  against a locally trained SALAD head:
+
+```bash
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/benchmark_salad_diversity.py \
+  --image-dir uploads/datasets/labeling_session_1/train/images \
+  --sample-cap 8 --keep-fraction 0.25 --train-local-salad --epochs 1 --batch-size 2 \
+  --delete-trained-head --output-dir uploads/data_ingestion/benchmarks/smoke
+```
+- Validation used `node --check ybat-master/ybat.js`, `git diff --check`,
+  `NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python -m py_compile
+  localinferenceapi.py api/data_ingestion.py services/data_ingestion.py
+  utils/local_salad.py tools/benchmark_salad_diversity.py
+  tools/clip_training.py tools/train_clip_regression_from_YOLO.py
+  tools/run_class_split_experiments.py services/classifier.py
+  utils/embedding_recipe.py`, and
+  `NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python -m pytest
+  tests/test_data_ingestion.py tests/test_class_analysis.py
+  tests/test_labeling_panel_layout_contract.py -q` (38 passing tests). A
+  16-image smoke benchmark trained a throwaway local SALAD head and compared it
+  against pooled DINOv3; the two selectors overlapped on two of four kept items
+  (`Jaccard=0.333`), confirming the local train/load/analyze path without
+  keeping the generated head.
+- Added `tools/benchmark_salad_class_separation.py` to compare pooled crop
+  recipes against local SALAD crop-token aggregation for Class Split and
+  auto-class recipe selection:
+
+```bash
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/benchmark_salad_class_separation.py \
+  --dataset-root uploads/datasets/labeling_session_1 \
+  --image-cap 64 --object-sample-cap 128 --train-local-salad --epochs 1 \
+  --batch-size 4 --delete-trained-head
+```
+- Current smoke result on `labeling_session_1` shows local SALAD trains and
+  runs correctly, but a one-epoch 32-image head does **not** beat pooled DINOv3
+  for object class separation yet: Balanced pooled was ranked first
+  (`class-balanced NN purity 0.240`, size-axis abs corr `0.039`), Precise pooled
+  second (`0.232`, `0.046`), and local SALAD third (`0.185`, `0.050`). The UI
+  therefore keeps pooled DINOv3 as the default and exposes local SALAD as a
+  selectable, benchmarkable recipe once the user has trained a meaningful local
+  head.
+
+### 2026-05-21: C-RADIOv4 Candidate Embeddings
+
+This checkpoint adds NVIDIA C-RADIOv4 as a first-class candidate encoder for
+embedding-derived workflows while keeping DINOv3 as the default until larger
+dataset benchmarks justify a switch.
+
+- Added shared C-RADIOv4 helpers for `nvidia/C-RADIOv4-SO400M` and
+  `nvidia/C-RADIOv4-H`. The backend uses Hugging Face Transformers remote-code
+  loading and the model's `summary` plus spatial token outputs.
+- Added C-RADIOv4 pooling modes: `summary`, `spatial_mean`, and
+  `summary_spatial_concat`. These are exposed in Class Split, auto-class
+  training metadata, the C-RADIO experiment matrix, and Data Ingestion pooled
+  scoring.
+- Added C-RADIOv4 to Class Split Explorer, Data Ingestion, local SALAD training,
+  local SALAD scoring, and auto-class training/inference metadata. Local SALAD
+  heads now record their base encoder (`dinov3` or `cradio`), encoder model,
+  and C-RADIO pooling mode; inference rejects a head if the saved encoder type
+  does not match the requested aggregation path.
+- C-RADIOv4 local SALAD heads are trained over the spatial-token channel width.
+  If a model exposes a wider global `summary` vector than its spatial tokens,
+  the local SALAD head uses the spatial-token mean for the global descriptor so
+  training and inference stay width-consistent.
+- Added `open_clip_torch>=3.3,<4.0` to `requirements.txt` and
+  `requirements-macos-inference.txt` because NVIDIA's C-RADIOv4 remote-code
+  model imports `open_clip`.
+- Acceleration status: CUDA works through Torch when available, Apple Silicon
+  runs through Torch/MPS or CPU fallback, and the UI/backend reports MLX as
+  unavailable for C-RADIOv4 because no official MLX implementation or converted
+  checkpoint was found for these models. The code reports that state explicitly
+  instead of pretending to have an MLX path. In the current Mac implementation,
+  C-RADIOv4 is not MLX-accelerated and full-dataset runs are much slower than
+  DINOv3.
+- Added benchmark levers:
+
+```bash
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experiments.py \
+  --dataset-root <dataset-root> --label-zip <labels.zip> --labelmap <labelmap.txt> \
+  --image-dir <images> --matrix cradio --sample-cap 128
+
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/benchmark_salad_diversity.py \
+  --image-dir uploads/datasets/labeling_session_1/train/images \
+  --sample-cap 64 --keep-fraction 0.2 --include-cradio-pooled
+
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/benchmark_salad_class_separation.py \
+  --dataset-root uploads/datasets/labeling_session_1 \
+  --image-cap 64 --object-sample-cap 128 --include-cradio
+```
+
+- Smoke validation completed after installing the new dependency into
+  `.venv-macos`. A two-image Data Ingestion smoke wrote
+  `uploads/data_ingestion/benchmarks/cradio_audit/20260521_143717/benchmark.json`
+  and compared DINOv3 pooled with C-RADIOv4 pooled. An eight-object Class Split
+  smoke wrote
+  `uploads/class_analysis/benchmarks/cradio_audit/20260521_143747/benchmark.json`
+  and proved that C-RADIOv4 crop embeddings run through the same size-bias,
+  projection, scoring, and recommendation path.
+- A two-image, one-epoch C-RADIO local SALAD smoke wrote
+  `uploads/data_ingestion/benchmarks/cradio_salad_audit/20260521_144151/benchmark.json`.
+  It trained a throwaway C-RADIO-backed local SALAD head, used it for Data
+  Ingestion diversity scoring, emitted a Class Split/auto-class aggregation
+  recommendation, and deleted the test head afterward.
+- A synthetic YOLO auto-class smoke trained a C-RADIOv4 logistic-regression head
+  through `tools/train_clip_regression_from_YOLO.py`, wrote
+  `/tmp/tator_cradio_autoclass_smoke/cradio_logreg.pkl`, and verified the saved
+  metadata reloads as `encoder_type=cradio`, `encoder_model=nvidia/C-RADIOv4-SO400M`,
+  `cradio_pooling=summary`. The CLI also now runs correctly as a direct script
+  and handles scikit-learn versions that removed the deprecated
+  `LogisticRegression(multi_class=...)` constructor argument.
+- Full uncapped WALDO C-RADIO matrix completed on 2026-05-21:
+
+```bash
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experiments.py \
+  --dataset-root uploads/datasets/labeling_session_1 \
+  --label-zip /tmp/tator_waldo_labels.zip \
+  --labelmap uploads/datasets/labeling_session_1/labelmap.txt \
+  --image-dir uploads/datasets/labeling_session_1/train/images \
+  --matrix cradio --sample-cap 0 \
+  --output-root uploads/class_analysis/benchmarks/waldo_cradio_full
+```
+
+  Artifacts: `uploads/class_analysis/benchmarks/waldo_cradio_full/`.
+
+| C-RADIO recipe | Projection | Object-weighted NN purity | Class-balanced NN purity | Abs size leakage | Wrong-class candidates | Runtime |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Summary | PCA | `0.8876` | `0.7006` | `0.0663` | `1025` | `4893.5s` |
+| Summary | UMAP | `0.8876` | `0.7006` | `0.6722` | `1025` | `81.1s` |
+| Spatial mean | PCA | `0.8898` | `0.7001` | `0.0672` | `964` | `5006.4s` |
+| Summary + spatial mean | PCA | `0.8912` | `0.7053` | `0.0611` | `983` | `5022.3s` |
+| Precise tight + context | PCA | `0.9078` | `0.7264` | `0.0591` | `851` | `9046.9s` |
+
+- Current recommendation remains conservative: DINOv3 Precise stays the default
+  for Class Split and DINOv3 pooled stays the default for Data Ingestion.
+  C-RADIOv4 Precise tight+context improved nearest-neighbor purity on the full
+  WALDO run (`0.9078` object-weighted / `0.7264` class-balanced versus DINOv3
+  Precise at `0.8969` / `0.6917`), but it was about 200x slower than DINOv3
+  Precise on this Mac (`9046.9s` versus `45.3s`), had higher size-axis leakage
+  (`0.0591` versus `0.0273`), and produced more wrong-class candidates (`851`
+  versus `804`). Treat C-RADIOv4 as an opt-in slow audit path, not the default.
+- Backlog: improve C-RADIO cache handling so one forward pass can cache the raw
+  summary plus spatial-token outputs and derive `summary`, `spatial_mean`, and
+  `summary_spatial_concat` embeddings from that shared record. The current
+  per-pooling embedding cache can recompute the same C-RADIO forward for
+  adjacent benchmark variants.
 
 ## Training and Model Management
 

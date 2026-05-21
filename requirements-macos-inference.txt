@@ -33,6 +33,7 @@ datasets>=2.19,<5.0
 soundfile>=0.13,<0.14
 opencv-python>=4.10,<4.12
 git+https://github.com/openai/CLIP.git
+open_clip_torch>=3.3,<4.0
 git+https://github.com/facebookresearch/segment-anything.git
 git+https://github.com/facebookresearch/sam3.git
 einops>=0.7,<1.0

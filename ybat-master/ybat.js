@@ -791,6 +791,7 @@
     let yoloExportDirectoryHandleLoaded = false;
     let yoloExportDirectoryHandleLoadPromise = null;
     const TAB_LABELING = "labeling";
+    const TAB_DATA_INGESTION = "data-ingestion";
     const TAB_CLASS_SPLIT = "class-split";
     const TAB_PREPASS_BUILDER = "prepass-builder";
     const TAB_TRAINING = "training";
@@ -1947,6 +1948,7 @@
 
     const tabElements = {
         labelingButton: null,
+        dataIngestionButton: null,
         classSplitButton: null,
         prepassBuilderButton: null,
         trainingButton: null,
@@ -1964,6 +1966,7 @@
         predictorsButton: null,
         settingsButton: null,
         labelingPanel: null,
+        dataIngestionPanel: null,
         classSplitPanel: null,
         prepassBuilderPanel: null,
         trainingPanel: null,
@@ -2351,6 +2354,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         preprocessMode: null,
         sizeBiasMode: null,
         dinov3Pooling: null,
+        cradioPooling: null,
+        embeddingAggregation: null,
+        saladHead: null,
         backgroundMode: null,
         viewMode: null,
         neighborK: null,
@@ -2367,6 +2373,47 @@ const AUTOMATION_LOCKED_TABS = new Set([
         report: null,
         wrongList: null,
         inspector: null,
+    };
+    const dataIngestionElements = {
+        status: null,
+        files: null,
+        recipe: null,
+        encoder: null,
+        cradioModel: null,
+        cradioPooling: null,
+        saladHead: null,
+        keepFraction: null,
+        frameInterval: null,
+        maxFrames: null,
+        referenceCap: null,
+        useActiveReference: null,
+        analyzeButton: null,
+        cancelButton: null,
+        refreshButton: null,
+        progress: null,
+        progressFill: null,
+        progressText: null,
+        trainFiles: null,
+        headName: null,
+        trainEncoder: null,
+        trainCradioModel: null,
+        epochs: null,
+        batchSize: null,
+        maxTrainImages: null,
+        trainButton: null,
+        trainActiveButton: null,
+        results: null,
+        report: null,
+        list: null,
+    };
+    const dataIngestionState = {
+        initialized: false,
+        capabilities: null,
+        activeJobId: "",
+        active: false,
+        pollTimer: null,
+        pollRequestId: 0,
+        preferredSaladHeadId: "",
     };
     const sam3RecipeElements = {
         fileInput: null,
@@ -2722,8 +2769,10 @@ const AUTOMATION_LOCKED_TABS = new Set([
         encoderTypeSelect: null,
         clipBackboneSelect: null,
         dinov3BackboneSelect: null,
+        cradioBackboneSelect: null,
         clipBackboneRow: null,
         dinov3BackboneRow: null,
+        cradioBackboneRow: null,
         solverSelect: null,
         classifierTypeSelect: null,
         modelFilenameInput: null,
@@ -2773,6 +2822,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         embeddingViewModeSelect: null,
         embeddingAdjustmentSelect: null,
         dinov3PoolingSelect: null,
+        cradioPoolingSelect: null,
+        embeddingAggregationSelect: null,
+        saladHeadSelect: null,
         bgClassCountInput: null,
         startButton: null,
         cancelButton: null,
@@ -4883,6 +4935,7 @@ const sam3TrainState = {
         // Stable selectors for browser E2E tests. Keep this list additive so legacy ids remain untouched.
         const selectorMap = {
             tabLabelingButton: "tab.labeling.open",
+            tabDataIngestionButton: "tab.data_ingestion.open",
             tabPrepassBuilderButton: "tab.prepass_builder.open",
             tabTrainingButton: "tab.training.open",
             tabQwenTrainButton: "tab.qwen_train.open",
@@ -9333,6 +9386,10 @@ function ensureAutomationAvailable(actionLabel) {
         { value: "facebook/dinov3-vitl16-pretrain-sat493m", label: "DINOv3 ViT-L/16 (SAT-493M)" },
         { value: "facebook/dinov3-vit7b16-pretrain-sat493m", label: "DINOv3 ViT-7B/16 (SAT-493M)" },
     ];
+    const CRADIO_BACKBONES = [
+        { value: "nvidia/C-RADIOv4-SO400M", label: "C-RADIOv4 SO400M" },
+        { value: "nvidia/C-RADIOv4-H", label: "C-RADIOv4 H" },
+    ];
 
     function getTrainingEncoderType() {
         const raw = trainingElements.encoderTypeSelect ? trainingElements.encoderTypeSelect.value : "clip";
@@ -9341,12 +9398,20 @@ function ensureAutomationAvailable(actionLabel) {
 
     function updateTrainingEncoderControls() {
         const encoderType = getTrainingEncoderType();
-        const useClip = encoderType !== "dinov3";
+        const useClip = encoderType === "clip";
+        const useDino = encoderType === "dinov3";
+        const useCradio = encoderType === "cradio";
+        if (!useDino && !useCradio && trainingElements.embeddingAggregationSelect?.value === "local_salad") {
+            setSelectValueIfPresent(trainingElements.embeddingAggregationSelect, "pooled");
+        }
         if (trainingElements.clipBackboneRow) trainingElements.clipBackboneRow.hidden = !useClip;
-        if (trainingElements.dinov3BackboneRow) trainingElements.dinov3BackboneRow.hidden = useClip;
+        if (trainingElements.dinov3BackboneRow) trainingElements.dinov3BackboneRow.hidden = !useDino;
+        if (trainingElements.cradioBackboneRow) trainingElements.cradioBackboneRow.hidden = !useCradio;
         if (trainingElements.clipBackboneSelect) trainingElements.clipBackboneSelect.disabled = !useClip;
-        if (trainingElements.dinov3BackboneSelect) trainingElements.dinov3BackboneSelect.disabled = useClip;
-        if (trainingElements.dinov3PoolingSelect) trainingElements.dinov3PoolingSelect.disabled = useClip;
+        if (trainingElements.dinov3BackboneSelect) trainingElements.dinov3BackboneSelect.disabled = !useDino;
+        if (trainingElements.cradioBackboneSelect) trainingElements.cradioBackboneSelect.disabled = !useCradio;
+        if (trainingElements.dinov3PoolingSelect) trainingElements.dinov3PoolingSelect.disabled = !useDino;
+        if (trainingElements.cradioPoolingSelect) trainingElements.cradioPoolingSelect.disabled = !useCradio;
     }
 
     function updateTrainingClassifierControls() {
@@ -9471,7 +9536,9 @@ function ensureAutomationAvailable(actionLabel) {
         const encoderType = getTrainingEncoderType();
         const modelName = encoderType === "dinov3"
             ? (trainingElements.dinov3BackboneSelect ? trainingElements.dinov3BackboneSelect.value : null)
-            : (trainingElements.clipBackboneSelect ? trainingElements.clipBackboneSelect.value : null);
+            : (encoderType === "cradio"
+                ? (trainingElements.cradioBackboneSelect ? trainingElements.cradioBackboneSelect.value : null)
+                : (trainingElements.clipBackboneSelect ? trainingElements.clipBackboneSelect.value : null));
         const dim = inferEmbeddingDimFromEncoder(encoderType, modelName);
         return recommendedHiddenSizesForDim(dim);
     }
@@ -9493,6 +9560,7 @@ function ensureAutomationAvailable(actionLabel) {
 
     function populateDinov3Backbones() {
         fillSelectOptions(trainingElements.dinov3BackboneSelect, DINOV3_BACKBONES, DINOV3_BACKBONES[0] || "");
+        fillSelectOptions(trainingElements.cradioBackboneSelect, CRADIO_BACKBONES, CRADIO_BACKBONES[0] || "");
         updateTrainingEncoderControls();
     }
 
@@ -16259,6 +16327,9 @@ async function cancelRfDetrTrainingJobRequest() {
                     `Embedding recipe: ${escapeHtml(art.preprocess_mode || "canonical")} / ${escapeHtml(art.embedding_crop_mode || "padded_square")} / ${escapeHtml(art.embedding_adjustment || "remove_size_bias")}`,
                     `Crop padding: ${escapeHtml(formatNumber(art.embedding_crop_padding_ratio, 3))}; canonical size: ${escapeHtml(String(art.canonical_size || 336))}`,
                     ...(art.encoder_type === "dinov3" ? [`DINOv3 pooling: ${escapeHtml(art.dinov3_pooling || "pooler")}`] : []),
+                    ...(art.encoder_type === "cradio" ? [`C-RADIOv4 pooling: ${escapeHtml(art.cradio_pooling || "summary")}`] : []),
+                    `Aggregation: ${escapeHtml(art.embedding_aggregation || "pooled")}`,
+                    ...(art.embedding_salad_head_id ? [`SALAD head: ${escapeHtml(art.embedding_salad_head_id)}`] : []),
                     `Class weight: ${escapeHtml(art.class_weight || 'none')}`,
                     ...(art.logit_adjustment_mode && String(art.logit_adjustment_mode).toLowerCase() !== "none"
                         ? [`Logit adjustment: ${escapeHtml(String(art.logit_adjustment_mode))}${art.logit_adjustment_inference ? " (infer on)" : ""}`]
@@ -16413,6 +16484,10 @@ async function cancelRfDetrTrainingJobRequest() {
             if (trainingElements.dinov3BackboneSelect) {
                 formData.append("encoder_model", trainingElements.dinov3BackboneSelect.value);
             }
+        } else if (encoderType === "cradio") {
+            if (trainingElements.cradioBackboneSelect) {
+                formData.append("encoder_model", trainingElements.cradioBackboneSelect.value);
+            }
         } else if (trainingElements.clipBackboneSelect) {
             const clipModel = trainingElements.clipBackboneSelect.value;
             formData.append("clip_model_name", clipModel);
@@ -16529,6 +16604,15 @@ async function cancelRfDetrTrainingJobRequest() {
         if (trainingElements.dinov3PoolingSelect) {
             formData.append("dinov3_pooling", trainingElements.dinov3PoolingSelect.value || "pooler");
         }
+        if (trainingElements.cradioPoolingSelect) {
+            formData.append("cradio_pooling", trainingElements.cradioPoolingSelect.value || "summary");
+        }
+        if (trainingElements.embeddingAggregationSelect) {
+            formData.append("embedding_aggregation", trainingElements.embeddingAggregationSelect.value || "pooled");
+        }
+        if (trainingElements.saladHeadSelect) {
+            formData.append("embedding_salad_head_id", trainingElements.saladHeadSelect.value || "");
+        }
         if (trainingElements.mlpPatienceInput) {
             formData.append("mlp_patience", trainingElements.mlpPatienceInput.value || "6");
         }
@@ -16592,8 +16676,13 @@ async function cancelRfDetrTrainingJobRequest() {
         const active = trainingState.activeJobId ? trainingState.jobs.get(trainingState.activeJobId) : null;
         // Prevent overlapping CLIP training submissions while the active job is not terminal.
         const busy = trainingState.startInFlight || isBusyTrainingStatus(active?.status);
+        const needsSalad = String(trainingElements.embeddingAggregationSelect?.value || "pooled") === "local_salad";
+        const hasSalad = !!String(trainingElements.saladHeadSelect?.value || "").trim();
+        if (trainingElements.saladHeadSelect) {
+            trainingElements.saladHeadSelect.disabled = busy || !needsSalad;
+        }
         if (trainingElements.startButton) {
-            trainingElements.startButton.disabled = !ready || busy;
+            trainingElements.startButton.disabled = !ready || busy || (needsSalad && !hasSalad);
         }
         if (trainingElements.datasetWarning) {
             trainingElements.datasetWarning.style.display = ready ? "none" : "block";
@@ -16890,6 +16979,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function setupTabNavigation() {
         tabElements.labelingButton = document.getElementById("tabLabelingButton");
+        tabElements.dataIngestionButton = document.getElementById("tabDataIngestionButton");
         tabElements.classSplitButton = document.getElementById("tabClassSplitButton");
         tabElements.prepassBuilderButton = document.getElementById("tabPrepassBuilderButton");
         tabElements.trainingButton = document.getElementById("tabTrainingButton");
@@ -16907,6 +16997,7 @@ async function cancelRfDetrTrainingJobRequest() {
         tabElements.predictorsButton = document.getElementById("tabPredictorsButton");
         tabElements.settingsButton = document.getElementById("tabSettingsButton");
         tabElements.labelingPanel = document.getElementById("tabLabeling");
+        tabElements.dataIngestionPanel = document.getElementById("tabDataIngestion");
         tabElements.classSplitPanel = document.getElementById("tabClassSplit");
         tabElements.prepassBuilderPanel = document.getElementById("tabPrepassBuilder");
         tabElements.trainingPanel = document.getElementById("tabTraining");
@@ -16925,6 +17016,9 @@ async function cancelRfDetrTrainingJobRequest() {
         tabElements.settingsPanel = document.getElementById("tabSettings");
         if (tabElements.labelingButton) {
             tabElements.labelingButton.addEventListener("click", () => setActiveTab(TAB_LABELING));
+        }
+        if (tabElements.dataIngestionButton) {
+            tabElements.dataIngestionButton.addEventListener("click", () => setActiveTab(TAB_DATA_INGESTION));
         }
         if (tabElements.classSplitButton) {
             tabElements.classSplitButton.addEventListener("click", () => setActiveTab(TAB_CLASS_SPLIT));
@@ -16986,6 +17080,9 @@ async function cancelRfDetrTrainingJobRequest() {
         if (tabElements.labelingButton) {
             tabElements.labelingButton.classList.toggle("active", tabName === TAB_LABELING);
         }
+        if (tabElements.dataIngestionButton) {
+            tabElements.dataIngestionButton.classList.toggle("active", tabName === TAB_DATA_INGESTION);
+        }
         if (tabElements.classSplitButton) {
             tabElements.classSplitButton.classList.toggle("active", tabName === TAB_CLASS_SPLIT);
         }
@@ -17036,6 +17133,9 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (tabElements.labelingPanel) {
             tabElements.labelingPanel.classList.toggle("active", tabName === TAB_LABELING);
+        }
+        if (tabElements.dataIngestionPanel) {
+            tabElements.dataIngestionPanel.classList.toggle("active", tabName === TAB_DATA_INGESTION);
         }
         if (tabElements.classSplitPanel) {
             tabElements.classSplitPanel.classList.toggle("active", tabName === TAB_CLASS_SPLIT);
@@ -17103,6 +17203,10 @@ async function cancelRfDetrTrainingJobRequest() {
             initClassSplitExplorer();
             refreshClassSplitControls();
             window.setTimeout(() => renderClassSplitPlot(), 80);
+        }
+        if (tabName === TAB_DATA_INGESTION) {
+            initDataIngestionUi();
+            refreshDataIngestionControls();
         }
         if (tabName === TAB_DETECTORS && previous !== TAB_DETECTORS) {
             refreshDetectorStatus()
@@ -17187,8 +17291,10 @@ async function cancelRfDetrTrainingJobRequest() {
         trainingElements.encoderTypeSelect = document.getElementById("trainEncoderType");
         trainingElements.clipBackboneSelect = document.getElementById("clipBackboneSelect");
         trainingElements.dinov3BackboneSelect = document.getElementById("dinov3BackboneSelect");
+        trainingElements.cradioBackboneSelect = document.getElementById("cradioBackboneSelect");
         trainingElements.clipBackboneRow = document.getElementById("clipBackboneRow");
         trainingElements.dinov3BackboneRow = document.getElementById("dinov3BackboneRow");
+        trainingElements.cradioBackboneRow = document.getElementById("cradioBackboneRow");
         trainingElements.solverSelect = document.getElementById("trainSolver");
         trainingElements.classifierTypeSelect = document.getElementById("trainClassifierType");
         trainingElements.datasetSelect = document.getElementById("trainDatasetSelect");
@@ -17245,6 +17351,9 @@ async function cancelRfDetrTrainingJobRequest() {
         trainingElements.embeddingViewModeSelect = document.getElementById("trainEmbeddingViewMode");
         trainingElements.embeddingAdjustmentSelect = document.getElementById("trainEmbeddingAdjustment");
         trainingElements.dinov3PoolingSelect = document.getElementById("trainDinov3Pooling");
+        trainingElements.cradioPoolingSelect = document.getElementById("trainCradioPooling");
+        trainingElements.embeddingAggregationSelect = document.getElementById("trainEmbeddingAggregation");
+        trainingElements.saladHeadSelect = document.getElementById("trainSaladHead");
         trainingElements.hardMisWeightInput = document.getElementById("trainHardMisWeight");
         trainingElements.hardLowConfWeightInput = document.getElementById("trainHardLowConfWeight");
         trainingElements.hardLowConfThresholdInput = document.getElementById("trainHardLowConfThreshold");
@@ -17290,6 +17399,19 @@ async function cancelRfDetrTrainingJobRequest() {
         if (trainingElements.embeddingRecipePresetSelect) {
             trainingElements.embeddingRecipePresetSelect.addEventListener("change", () => {
                 applyEmbeddingRecipePresetToTraining(trainingElements.embeddingRecipePresetSelect.value || "balanced");
+                updateTrainingStartAvailability();
+            });
+        }
+        if (trainingElements.embeddingAggregationSelect) {
+            trainingElements.embeddingAggregationSelect.addEventListener("change", () => {
+                if (trainingElements.embeddingAggregationSelect.value === "local_salad") {
+                    const currentEncoderType = String(trainingElements.encoderTypeSelect?.value || "").trim().toLowerCase();
+                    if (!["dinov3", "cradio"].includes(currentEncoderType)) {
+                        setSelectValueIfPresent(trainingElements.encoderTypeSelect, "dinov3");
+                        updateTrainingEncoderControls();
+                    }
+                }
+                updateTrainingStartAvailability();
             });
         }
         [
@@ -17301,9 +17423,15 @@ async function cancelRfDetrTrainingJobRequest() {
             trainingElements.embeddingViewModeSelect,
             trainingElements.embeddingAdjustmentSelect,
             trainingElements.dinov3PoolingSelect,
+            trainingElements.cradioPoolingSelect,
+            trainingElements.embeddingAggregationSelect,
+            trainingElements.saladHeadSelect,
         ].forEach((control) => {
             if (control) {
-                control.addEventListener("change", markTrainingEmbeddingRecipeCustom);
+                control.addEventListener("change", () => {
+                    markTrainingEmbeddingRecipeCustom();
+                    updateTrainingStartAvailability();
+                });
             }
         });
         if (trainingElements.deviceOverrideInput) {
@@ -17316,6 +17444,9 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (trainingElements.dinov3BackboneSelect) {
             trainingElements.dinov3BackboneSelect.addEventListener("change", () => applyRecommendedMlpHiddenSizes(false));
+        }
+        if (trainingElements.cradioBackboneSelect) {
+            trainingElements.cradioBackboneSelect.addEventListener("change", () => applyRecommendedMlpHiddenSizes(false));
         }
         if (trainingElements.mlpHiddenSizesInput) {
             trainingElements.mlpHiddenSizesInput.addEventListener("input", () => {
@@ -17535,6 +17666,7 @@ async function cancelRfDetrTrainingJobRequest() {
             .catch((err) => console.warn("Dataset list init failed", err))
             .finally(() => updateTrainingStartAvailability());
         loadTrainingClipClassifiers().catch((err) => console.warn("Training classifier list load failed", err));
+        refreshDataIngestionCapabilities().catch((err) => console.warn("Local SALAD head list refresh failed", err));
     }
 
     function embeddingRecipePresetValues(preset) {
@@ -17549,6 +17681,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 viewMode: "single",
                 adjustment: "remove_size_bias",
                 dinov3Pooling: "pooler",
+                aggregation: "pooled",
             };
         }
         if (key === "precise") {
@@ -17561,6 +17694,36 @@ async function cancelRfDetrTrainingJobRequest() {
                 viewMode: "tight_context",
                 adjustment: "remove_size_bias",
                 dinov3Pooling: "pooler",
+                aggregation: "pooled",
+            };
+        }
+        if (key === "local_salad") {
+            return {
+                preprocessMode: "canonical",
+                canonicalSize: "336",
+                cropMode: "padded_square",
+                padding: "0.08",
+                backgroundMode: "full_crop",
+                viewMode: "single",
+                adjustment: "remove_size_bias",
+                dinov3Pooling: "pooler",
+                aggregation: "local_salad",
+                encoderType: "dinov3",
+            };
+        }
+        if (key === "cradio") {
+            return {
+                preprocessMode: "canonical",
+                canonicalSize: "432",
+                cropMode: "padded_square",
+                padding: "0.08",
+                backgroundMode: "full_crop",
+                viewMode: "single",
+                adjustment: "remove_size_bias",
+                dinov3Pooling: "pooler",
+                cradioPooling: "summary",
+                aggregation: "pooled",
+                encoderType: "cradio",
             };
         }
         return {
@@ -17572,6 +17735,8 @@ async function cancelRfDetrTrainingJobRequest() {
             viewMode: "single",
             adjustment: "remove_size_bias",
             dinov3Pooling: "pooler",
+            cradioPooling: "summary",
+            aggregation: "pooled",
         };
     }
 
@@ -17604,6 +17769,12 @@ async function cancelRfDetrTrainingJobRequest() {
         setSelectValueIfPresent(trainingElements.embeddingViewModeSelect, values.viewMode);
         setSelectValueIfPresent(trainingElements.embeddingAdjustmentSelect, values.adjustment);
         setSelectValueIfPresent(trainingElements.dinov3PoolingSelect, values.dinov3Pooling);
+        setSelectValueIfPresent(trainingElements.cradioPoolingSelect, values.cradioPooling || "summary");
+        setSelectValueIfPresent(trainingElements.embeddingAggregationSelect, values.aggregation);
+        if (values.encoderType) {
+            setSelectValueIfPresent(trainingElements.encoderTypeSelect, values.encoderType);
+            updateTrainingEncoderControls();
+        }
     }
 
     function markTrainingEmbeddingRecipeCustom() {
@@ -35005,6 +35176,601 @@ async function cancelRfDetrTrainingJobRequest() {
         throw new Error(`Image data is not available in the active workspace: ${imageKey}`);
     }
 
+    function setDataIngestionStatus(message, variant = "") {
+        if (!dataIngestionElements.status) {
+            return;
+        }
+        dataIngestionElements.status.textContent = message || "";
+        dataIngestionElements.status.classList.remove("warn", "error", "success");
+        if (variant) {
+            dataIngestionElements.status.classList.add(variant);
+        }
+    }
+
+    function renderDataIngestionProgress(job = null) {
+        if (!dataIngestionElements.progress) {
+            return;
+        }
+        const active = dataIngestionState.active || (job && !["completed", "failed", "cancelled"].includes(String(job.status || "")));
+        dataIngestionElements.progress.hidden = !active && !job;
+        const progress = Math.max(0, Math.min(1, Number(job?.progress) || 0));
+        if (dataIngestionElements.progressFill) {
+            dataIngestionElements.progressFill.style.width = `${Math.round(progress * 100)}%`;
+        }
+        if (dataIngestionElements.progressText) {
+            const pct = `${Math.round(progress * 100)}%`;
+            const message = String(job?.message || "").trim();
+            const logTail = Array.isArray(job?.logs) && job.logs.length
+                ? String(job.logs[job.logs.length - 1]?.message || "").trim()
+                : "";
+            dataIngestionElements.progressText.textContent = [pct, message || logTail].filter(Boolean).join(" • ");
+        }
+    }
+
+    function getDataIngestionNumber(element, fallback, { min = null, max = null } = {}) {
+        const parsed = parseFloat(element?.value || "");
+        let value = Number.isFinite(parsed) ? parsed : fallback;
+        if (min !== null) value = Math.max(min, value);
+        if (max !== null) value = Math.min(max, value);
+        return value;
+    }
+
+    function dataIngestionRecipeValues(recipeId) {
+        const recipes = Array.isArray(dataIngestionState.capabilities?.data_ingestion_recipes)
+            ? dataIngestionState.capabilities.data_ingestion_recipes
+            : [];
+        const found = recipes.find((recipe) => String(recipe.id || "") === String(recipeId || ""));
+        if (found) return found;
+        if (String(recipeId || "") === "local_salad_top20") {
+            return { encoder: "local_salad", keep_fraction: 0.2, frame_interval: 1.0, max_frames_per_video: 200 };
+        }
+        if (String(recipeId || "") === "local_salad_review50") {
+            return { encoder: "local_salad", keep_fraction: 0.5, frame_interval: 0.5, max_frames_per_video: 400 };
+        }
+        if (String(recipeId || "") === "cradio_top20") {
+            return { encoder: "cradio_pooled", keep_fraction: 0.2, frame_interval: 1.0, max_frames_per_video: 200, cradio_pooling: "summary" };
+        }
+        return { encoder: "dinov3_pooled", keep_fraction: 0.2, frame_interval: 1.0, max_frames_per_video: 200 };
+    }
+
+    function applyDataIngestionRecipe(recipeId) {
+        if (String(recipeId || "") === "custom") return;
+        const values = dataIngestionRecipeValues(recipeId);
+        setSelectValueIfPresent(dataIngestionElements.encoder, values.encoder || "dinov3_pooled");
+        setSelectValueIfPresent(dataIngestionElements.cradioPooling, values.cradio_pooling || "summary");
+        if (dataIngestionElements.keepFraction) dataIngestionElements.keepFraction.value = String(values.keep_fraction ?? 0.2);
+        if (dataIngestionElements.frameInterval) dataIngestionElements.frameInterval.value = String(values.frame_interval ?? 1.0);
+        if (dataIngestionElements.maxFrames) dataIngestionElements.maxFrames.value = String(values.max_frames_per_video ?? 200);
+    }
+
+    function markDataIngestionRecipeCustom() {
+        if (dataIngestionElements.recipe && dataIngestionElements.recipe.value !== "custom") {
+            dataIngestionElements.recipe.value = "custom";
+        }
+    }
+
+    function populateLocalSaladHeadSelect(selectEl, heads, previousValue = "") {
+        if (!selectEl) return;
+        const previous = previousValue || selectEl.value;
+        const availableHeads = Array.isArray(heads)
+            ? heads.filter((head) => String(head.status || "available") === "available")
+            : [];
+        selectEl.innerHTML = "";
+        const empty = document.createElement("option");
+        empty.value = "";
+        empty.textContent = availableHeads.length ? "Choose local SALAD head" : "No local SALAD heads trained";
+        selectEl.appendChild(empty);
+        availableHeads.forEach((head) => {
+            const option = document.createElement("option");
+            option.value = String(head.id || "");
+            const count = Number(head.train_image_count) || 0;
+            const encoder = head.encoder_type ? `, ${String(head.encoder_type).toUpperCase()}` : "";
+            option.textContent = `${head.label || head.id}${count ? ` (${count} imgs${encoder})` : encoder ? ` (${encoder.slice(2)})` : ""}`;
+            selectEl.appendChild(option);
+        });
+        const values = Array.from(selectEl.options || []).map((option) => option.value);
+        if (values.includes(previous)) {
+            selectEl.value = previous;
+        } else if (availableHeads.length) {
+            selectEl.value = String(availableHeads[0].id || "");
+        }
+    }
+
+    function populateDataIngestionSaladHeads(preferredHeadId = "") {
+        const heads = Array.isArray(dataIngestionState.capabilities?.local_salad_heads)
+            ? dataIngestionState.capabilities.local_salad_heads
+            : [];
+        const preferred = String(preferredHeadId || dataIngestionState.preferredSaladHeadId || "").trim();
+        populateLocalSaladHeadSelect(dataIngestionElements.saladHead, heads, preferred);
+        populateLocalSaladHeadSelect(classSplitElements.saladHead, heads, preferred);
+        populateLocalSaladHeadSelect(trainingElements.saladHeadSelect, heads, preferred);
+        if (preferred) {
+            const values = Array.from(dataIngestionElements.saladHead?.options || []).map((option) => option.value);
+            if (values.includes(preferred)) {
+                dataIngestionState.preferredSaladHeadId = "";
+            }
+        }
+    }
+
+    function populateDataIngestionCradioModels() {
+        const capsModels = Array.isArray(dataIngestionState.capabilities?.cradio_models)
+            ? dataIngestionState.capabilities.cradio_models.map((model) => ({ value: model, label: model.split("/").pop() || model }))
+            : CRADIO_BACKBONES;
+        const defaultModel = dataIngestionState.capabilities?.default_cradio_model || "nvidia/C-RADIOv4-SO400M";
+        fillSelectOptions(dataIngestionElements.cradioModel, capsModels, defaultModel);
+        fillSelectOptions(dataIngestionElements.trainCradioModel, capsModels, defaultModel);
+    }
+
+    function populateDataIngestionRecipes() {
+        const selectEl = dataIngestionElements.recipe;
+        if (!selectEl) return;
+        const previous = selectEl.value || "pooled_top20";
+        const recipes = Array.isArray(dataIngestionState.capabilities?.data_ingestion_recipes)
+            ? dataIngestionState.capabilities.data_ingestion_recipes
+            : [
+                { id: "pooled_top20", label: "DINOv3 baseline top 20%" },
+                { id: "cradio_top20", label: "C-RADIOv4 summary top 20%" },
+                { id: "local_salad_top20", label: "Local SALAD diversity top 20%" },
+                { id: "local_salad_review50", label: "Local SALAD broad review 50%" },
+            ];
+        selectEl.innerHTML = "";
+        recipes.forEach((recipe) => {
+            const option = document.createElement("option");
+            option.value = String(recipe.id || "");
+            option.textContent = String(recipe.label || recipe.id || "");
+            selectEl.appendChild(option);
+        });
+        const custom = document.createElement("option");
+        custom.value = "custom";
+        custom.textContent = "Custom";
+        selectEl.appendChild(custom);
+        setSelectValueIfPresent(selectEl, previous);
+    }
+
+    function refreshDataIngestionControls() {
+        const candidateCount = dataIngestionElements.files?.files?.length || 0;
+        const trainCount = dataIngestionElements.trainFiles?.files?.length || 0;
+        const activeTrainingCount = getClassSplitImageKeys().length;
+        const encoder = String(dataIngestionElements.encoder?.value || "dinov3_pooled");
+        const needsHead = encoder === "local_salad";
+        const usesCradio = encoder === "cradio_pooled";
+        const trainingUsesCradio = String(dataIngestionElements.trainEncoder?.value || "dinov3") === "cradio";
+        const hasHead = !!String(dataIngestionElements.saladHead?.value || "").trim();
+        if (dataIngestionElements.saladHead) {
+            dataIngestionElements.saladHead.disabled = dataIngestionState.active || !needsHead;
+        }
+        if (dataIngestionElements.cradioModel) dataIngestionElements.cradioModel.disabled = dataIngestionState.active || !usesCradio;
+        if (dataIngestionElements.cradioPooling) dataIngestionElements.cradioPooling.disabled = dataIngestionState.active || !usesCradio;
+        if (dataIngestionElements.trainCradioModel) dataIngestionElements.trainCradioModel.disabled = dataIngestionState.active || !trainingUsesCradio;
+        setButtonDisabled(dataIngestionElements.analyzeButton, dataIngestionState.active || candidateCount <= 0 || (needsHead && !hasHead));
+        setButtonDisabled(dataIngestionElements.trainButton, dataIngestionState.active || trainCount <= 1);
+        setButtonDisabled(dataIngestionElements.trainActiveButton, dataIngestionState.active || activeTrainingCount <= 1);
+        setButtonDisabled(dataIngestionElements.cancelButton, !dataIngestionState.active || !dataIngestionState.activeJobId);
+        [
+            dataIngestionElements.files,
+            dataIngestionElements.recipe,
+            dataIngestionElements.encoder,
+            dataIngestionElements.cradioModel,
+            dataIngestionElements.cradioPooling,
+            dataIngestionElements.keepFraction,
+            dataIngestionElements.frameInterval,
+            dataIngestionElements.maxFrames,
+            dataIngestionElements.referenceCap,
+            dataIngestionElements.useActiveReference,
+            dataIngestionElements.trainFiles,
+            dataIngestionElements.headName,
+            dataIngestionElements.trainEncoder,
+            dataIngestionElements.trainCradioModel,
+            dataIngestionElements.epochs,
+            dataIngestionElements.batchSize,
+            dataIngestionElements.maxTrainImages,
+        ].forEach((control) => {
+            if (control) control.disabled = dataIngestionState.active;
+        });
+        if (dataIngestionElements.saladHead) {
+            dataIngestionElements.saladHead.disabled = dataIngestionState.active || !needsHead;
+        }
+        if (dataIngestionElements.cradioModel) {
+            dataIngestionElements.cradioModel.disabled = dataIngestionState.active || !usesCradio;
+        }
+        if (dataIngestionElements.cradioPooling) {
+            dataIngestionElements.cradioPooling.disabled = dataIngestionState.active || !usesCradio;
+        }
+        if (dataIngestionElements.trainCradioModel) {
+            dataIngestionElements.trainCradioModel.disabled = dataIngestionState.active || !trainingUsesCradio;
+        }
+    }
+
+    async function refreshDataIngestionCapabilities() {
+        try {
+            const resp = await fetch(`${API_ROOT}/data_ingestion/capabilities`);
+            const detail = await resp.text();
+            if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            dataIngestionState.capabilities = parseJsonObjectSafe(detail, {});
+        } catch (error) {
+            console.warn("Failed to refresh Data Ingestion capabilities", error);
+            dataIngestionState.capabilities = { local_salad_heads: [] };
+        }
+        populateDataIngestionSaladHeads();
+        populateDataIngestionRecipes();
+        populateDataIngestionCradioModels();
+        refreshDataIngestionControls();
+    }
+
+    async function appendActiveWorkspaceReferenceFiles(formData, cap) {
+        if (!dataIngestionElements.useActiveReference?.checked) {
+            return 0;
+        }
+        const keys = getClassSplitImageKeys();
+        const maxCount = Math.max(0, parseInt(String(cap || "0"), 10) || 0);
+        const selectedKeys = maxCount > 0 ? keys.slice(0, maxCount) : keys;
+        const usedNames = new Set();
+        let appended = 0;
+        for (const imageKey of selectedKeys) {
+            const imageRecord = images?.[imageKey];
+            if (!imageRecord) continue;
+            const uploadName = makeClassSplitUploadName(imageKey, usedNames);
+            const blob = await getClassSplitImageBlob(imageKey, imageRecord);
+            formData.append("reference_files", blob, uploadName);
+            appended += 1;
+        }
+        return appended;
+    }
+
+    function activeDatasetSaladHeadName() {
+        const raw = String(
+            annotationSourceState.datasetLabel ||
+            annotationSourceState.datasetId ||
+            annotationSourceState.sessionId ||
+            "active_dataset"
+        );
+        const cleaned = raw
+            .toLowerCase()
+            .replace(/[^a-z0-9._-]+/g, "_")
+            .replace(/^[_ .-]+|[_ .-]+$/g, "")
+            .slice(0, 80);
+        return `${cleaned || "active_dataset"}_salad`;
+    }
+
+    async function appendActiveWorkspaceTrainingFiles(formData, cap) {
+        const keys = getClassSplitImageKeys();
+        const maxCount = Math.max(0, parseInt(String(cap || "0"), 10) || 0);
+        const selectedKeys = maxCount > 0 ? keys.slice(0, maxCount) : keys;
+        const usedNames = new Set();
+        let appended = 0;
+        for (const imageKey of selectedKeys) {
+            const imageRecord = images?.[imageKey];
+            if (!imageRecord) continue;
+            const uploadName = makeClassSplitUploadName(imageKey, usedNames);
+            const blob = await getClassSplitImageBlob(imageKey, imageRecord);
+            formData.append("train_files", blob, uploadName);
+            appended += 1;
+        }
+        return appended;
+    }
+
+    async function startDataIngestionAnalysis() {
+        if (dataIngestionState.active) return;
+        const files = Array.from(dataIngestionElements.files?.files || []);
+        if (!files.length) {
+            setDataIngestionStatus("Choose candidate images or videos first.", "warn");
+            return;
+        }
+        try {
+            dataIngestionState.active = true;
+            dataIngestionState.activeJobId = "";
+            setDataIngestionStatus("Packaging media ...");
+            renderDataIngestionProgress({ progress: 0, message: "Packaging candidate media ..." });
+            refreshDataIngestionControls();
+            const formData = new FormData();
+            files.forEach((file) => formData.append("candidate_files", file, file.name));
+            const referenceCount = await appendActiveWorkspaceReferenceFiles(
+                formData,
+                getDataIngestionNumber(dataIngestionElements.referenceCap, 0, { min: 0 })
+            );
+            const manifest = {
+                encoder: String(dataIngestionElements.encoder?.value || "dinov3_pooled"),
+                encoder_model: String(dataIngestionElements.encoder?.value || "") === "cradio_pooled"
+                    ? String(dataIngestionElements.cradioModel?.value || "nvidia/C-RADIOv4-SO400M")
+                    : "",
+                cradio_pooling: String(dataIngestionElements.cradioPooling?.value || "summary"),
+                salad_head_id: String(dataIngestionElements.saladHead?.value || ""),
+                keep_fraction: getDataIngestionNumber(dataIngestionElements.keepFraction, 0.2, { min: 0.01, max: 1 }),
+                frame_interval: getDataIngestionNumber(dataIngestionElements.frameInterval, 1.0, { min: 0.1 }),
+                max_frames_per_video: Math.round(getDataIngestionNumber(dataIngestionElements.maxFrames, 200, { min: 0 })),
+                reference_count: referenceCount,
+            };
+            formData.append("manifest", JSON.stringify(manifest));
+            const resp = await fetch(`${API_ROOT}/data_ingestion/jobs`, { method: "POST", body: formData });
+            const detail = await resp.text();
+            if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            const payload = parseJsonObjectSafe(detail, {});
+            const jobId = String(payload.job_id || "").trim();
+            if (!jobId) throw new Error("Data ingestion did not return a job id.");
+            dataIngestionState.activeJobId = jobId;
+            setDataIngestionStatus("Queued diversity analysis");
+            pollDataIngestionJob(jobId);
+        } catch (error) {
+            console.error("Data Ingestion analysis failed to start", error);
+            dataIngestionState.active = false;
+            setDataIngestionStatus(`Failed: ${error.message || error}`, "error");
+            renderDataIngestionProgress({ progress: 1, message: `Failed: ${error.message || error}` });
+            refreshDataIngestionControls();
+        }
+    }
+
+    async function startLocalSaladTraining(sourceMode = "files") {
+        if (dataIngestionState.active) return;
+        const useActiveDataset = String(sourceMode || "files") === "active_dataset";
+        const files = Array.from(dataIngestionElements.trainFiles?.files || []);
+        const activeKeys = getClassSplitImageKeys();
+        if (!useActiveDataset && files.length < 2) {
+            setDataIngestionStatus("Choose at least two training images or frames, or train from the active dataset.", "warn");
+            return;
+        }
+        if (useActiveDataset && activeKeys.length < 2) {
+            setDataIngestionStatus("Open at least two images in Label Images before training SALAD from the active dataset.", "warn");
+            return;
+        }
+        try {
+            dataIngestionState.active = true;
+            dataIngestionState.activeJobId = "";
+            const packageMessage = useActiveDataset
+                ? "Packaging active dataset for local SALAD training ..."
+                : "Packaging local SALAD training media ...";
+            setDataIngestionStatus(packageMessage);
+            renderDataIngestionProgress({ progress: 0, message: packageMessage });
+            refreshDataIngestionControls();
+            const formData = new FormData();
+            const maxTrainImages = Math.round(getDataIngestionNumber(dataIngestionElements.maxTrainImages, 0, { min: 0 }));
+            let packagedCount = 0;
+            if (useActiveDataset) {
+                packagedCount = await appendActiveWorkspaceTrainingFiles(formData, maxTrainImages);
+            } else {
+                files.forEach((file) => {
+                    formData.append("train_files", file, file.name);
+                    packagedCount += 1;
+                });
+            }
+            if (packagedCount < 2) {
+                throw new Error("SALAD training needs at least two usable images or frames.");
+            }
+            const requestedHeadName = String(dataIngestionElements.headName?.value || "").trim();
+            const genericHeadName = requestedHeadName === "local_salad_head";
+            const manifest = {
+                head_name: (useActiveDataset && (!requestedHeadName || genericHeadName))
+                    ? activeDatasetSaladHeadName()
+                    : (requestedHeadName || "local_salad_head"),
+                encoder_type: String(dataIngestionElements.trainEncoder?.value || "dinov3"),
+                encoder_model: String(dataIngestionElements.trainEncoder?.value || "dinov3") === "cradio"
+                    ? String(dataIngestionElements.trainCradioModel?.value || "nvidia/C-RADIOv4-SO400M")
+                    : "",
+                source_mode: useActiveDataset ? "active_label_images" : "uploaded_media",
+                active_image_count: useActiveDataset ? packagedCount : 0,
+                epochs: Math.round(getDataIngestionNumber(dataIngestionElements.epochs, 3, { min: 1 })),
+                batch_size: Math.round(getDataIngestionNumber(dataIngestionElements.batchSize, 8, { min: 2 })),
+                max_train_images: maxTrainImages,
+                frame_interval: getDataIngestionNumber(dataIngestionElements.frameInterval, 1.0, { min: 0.1 }),
+                max_frames_per_video: Math.round(getDataIngestionNumber(dataIngestionElements.maxFrames, 200, { min: 0 })),
+            };
+            formData.append("manifest", JSON.stringify(manifest));
+            const resp = await fetch(`${API_ROOT}/data_ingestion/salad_train_jobs`, { method: "POST", body: formData });
+            const detail = await resp.text();
+            if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            const payload = parseJsonObjectSafe(detail, {});
+            const jobId = String(payload.job_id || "").trim();
+            if (!jobId) throw new Error("Local SALAD training did not return a job id.");
+            dataIngestionState.activeJobId = jobId;
+            setDataIngestionStatus("Queued local SALAD training");
+            pollDataIngestionJob(jobId);
+        } catch (error) {
+            console.error("Local SALAD training failed to start", error);
+            dataIngestionState.active = false;
+            setDataIngestionStatus(`Failed: ${error.message || error}`, "error");
+            renderDataIngestionProgress({ progress: 1, message: `Failed: ${error.message || error}` });
+            refreshDataIngestionControls();
+        }
+    }
+
+    function stopDataIngestionPoll() {
+        if (dataIngestionState.pollTimer) {
+            clearTimeout(dataIngestionState.pollTimer);
+            dataIngestionState.pollTimer = null;
+        }
+    }
+
+    function pollDataIngestionJob(jobId) {
+        stopDataIngestionPoll();
+        const requestId = ++dataIngestionState.pollRequestId;
+        const run = async () => {
+            try {
+                const resp = await fetch(`${API_ROOT}/data_ingestion/jobs/${encodeURIComponent(jobId)}`);
+                const detail = await resp.text();
+                if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+                const job = parseJsonObjectSafe(detail, {});
+                if (requestId !== dataIngestionState.pollRequestId) return;
+                renderDataIngestionProgress(job);
+                const status = String(job.status || "");
+                if (status === "completed") {
+                    dataIngestionState.active = false;
+                    const summary = job.summary || {};
+                    const trainedHeadId = job.kind === "local_salad_train" ? String(summary.head_id || "").trim() : "";
+                    if (trainedHeadId) {
+                        dataIngestionState.preferredSaladHeadId = trainedHeadId;
+                        setSelectValueIfPresent(dataIngestionElements.recipe, "local_salad_top20");
+                        applyDataIngestionRecipe("local_salad_top20");
+                        setSelectValueIfPresent(dataIngestionElements.encoder, "local_salad");
+                    }
+                    setDataIngestionStatus(
+                        job.kind === "local_salad_train"
+                            ? (trainedHeadId ? `Local SALAD training completed; selected ${trainedHeadId}.` : "Local SALAD training completed.")
+                            : "Diversity analysis completed.",
+                        "success"
+                    );
+                    refreshDataIngestionControls();
+                    await refreshDataIngestionCapabilities();
+                    if (trainedHeadId) {
+                        setSelectValueIfPresent(dataIngestionElements.saladHead, trainedHeadId);
+                        setSelectValueIfPresent(classSplitElements.saladHead, trainedHeadId);
+                        setSelectValueIfPresent(trainingElements.saladHeadSelect, trainedHeadId);
+                        refreshDataIngestionControls();
+                    }
+                    await loadDataIngestionResult(jobId);
+                    return;
+                }
+                if (status === "failed" || status === "cancelled") {
+                    dataIngestionState.active = false;
+                    setDataIngestionStatus(`${status}: ${job.error || job.message || ""}`, status === "failed" ? "error" : "warn");
+                    refreshDataIngestionControls();
+                    return;
+                }
+                dataIngestionState.pollTimer = window.setTimeout(run, 1200);
+            } catch (error) {
+                console.error("Data Ingestion poll failed", error);
+                dataIngestionState.pollTimer = window.setTimeout(run, 2000);
+            }
+        };
+        run();
+    }
+
+    async function cancelDataIngestionJob() {
+        const jobId = dataIngestionState.activeJobId;
+        if (!jobId) return;
+        try {
+            await fetch(`${API_ROOT}/data_ingestion/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
+            setDataIngestionStatus("Cancellation requested ...", "warn");
+        } catch (error) {
+            setDataIngestionStatus(`Cancel failed: ${error.message || error}`, "error");
+        }
+    }
+
+    async function loadDataIngestionResult(jobId) {
+        const resp = await fetch(`${API_ROOT}/data_ingestion/jobs/${encodeURIComponent(jobId)}/result`);
+        const detail = await resp.text();
+        if (resp.ok) {
+            renderDataIngestionResult(parseJsonObjectSafe(detail, {}));
+        }
+    }
+
+    function renderDataIngestionResult(result) {
+        const summary = result?.summary || {};
+        const items = Array.isArray(result?.items) ? result.items : [];
+        if (dataIngestionElements.results) dataIngestionElements.results.hidden = false;
+        if (dataIngestionElements.report) {
+            const rows = [
+                ["Encoder", summary.encoder || "local_salad_train"],
+                ["SALAD policy", summary.local_salad_policy || summary.policy || "local_training_only"],
+                ["Source", summary.source_mode || ""],
+                ["Candidates", summary.candidate_image_count ?? summary.train_image_count ?? summary.item_count ?? 0],
+                ["Reference images", summary.reference_count ?? 0],
+                ["Keep fraction", summary.keep_fraction ?? ""],
+                ["Selected", summary.selected_count ?? ""],
+                ["Mean NN distance", Number(summary.mean_nearest_neighbor_distance || 0).toFixed(3)],
+                ["Mean reference distance", summary.mean_reference_distance == null ? "n/a" : Number(summary.mean_reference_distance || 0).toFixed(3)],
+                ["Head ID", summary.head_id || summary.salad_head_id || ""],
+            ];
+            dataIngestionElements.report.innerHTML = `<div class="data-ingestion-report__grid">${
+                rows.map(([label, value]) => `<div class="data-ingestion-report__item"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`).join("")
+            }</div>`;
+        }
+        if (dataIngestionElements.list) {
+            if (!items.length) {
+                dataIngestionElements.list.innerHTML = `<div class="training-help">No ranked candidates for this job.</div>`;
+            } else {
+                dataIngestionElements.list.innerHTML = items.slice(0, 120).map((item) => {
+                    const score = Number(item.diversity_score) || 0;
+                    const keep = !!item.keep;
+                    return [
+                        `<div class="data-ingestion-list__item${keep ? " is-keep" : ""}">`,
+                        `<strong>${keep ? `Keep #${escapeHtml(item.rank || "")}` : "Skip"}</strong> `,
+                        `${escapeHtml(item.filename || item.saved_name || "candidate")}`,
+                        `<br><span>${escapeHtml(item.source_type || "image")} • score ${score.toFixed(3)} • ${escapeHtml(item.width || "")}x${escapeHtml(item.height || "")}</span>`,
+                        `</div>`,
+                    ].join("");
+                }).join("");
+            }
+        }
+    }
+
+    function initDataIngestionUi() {
+        if (dataIngestionState.initialized) return;
+        dataIngestionState.initialized = true;
+        dataIngestionElements.status = document.getElementById("dataIngestionStatus");
+        dataIngestionElements.files = document.getElementById("dataIngestionFiles");
+        dataIngestionElements.recipe = document.getElementById("dataIngestionRecipe");
+        dataIngestionElements.encoder = document.getElementById("dataIngestionEncoder");
+        dataIngestionElements.cradioModel = document.getElementById("dataIngestionCradioModel");
+        dataIngestionElements.cradioPooling = document.getElementById("dataIngestionCradioPooling");
+        dataIngestionElements.saladHead = document.getElementById("dataIngestionSaladHead");
+        dataIngestionElements.keepFraction = document.getElementById("dataIngestionKeepFraction");
+        dataIngestionElements.frameInterval = document.getElementById("dataIngestionFrameInterval");
+        dataIngestionElements.maxFrames = document.getElementById("dataIngestionMaxFrames");
+        dataIngestionElements.referenceCap = document.getElementById("dataIngestionReferenceCap");
+        dataIngestionElements.useActiveReference = document.getElementById("dataIngestionUseActiveReference");
+        dataIngestionElements.analyzeButton = document.getElementById("dataIngestionAnalyzeButton");
+        dataIngestionElements.cancelButton = document.getElementById("dataIngestionCancelButton");
+        dataIngestionElements.refreshButton = document.getElementById("dataIngestionRefreshButton");
+        dataIngestionElements.progress = document.getElementById("dataIngestionProgress");
+        dataIngestionElements.progressFill = document.getElementById("dataIngestionProgressFill");
+        dataIngestionElements.progressText = document.getElementById("dataIngestionProgressText");
+        dataIngestionElements.trainFiles = document.getElementById("dataIngestionTrainFiles");
+        dataIngestionElements.headName = document.getElementById("dataIngestionHeadName");
+        dataIngestionElements.trainEncoder = document.getElementById("dataIngestionTrainEncoder");
+        dataIngestionElements.trainCradioModel = document.getElementById("dataIngestionTrainCradioModel");
+        dataIngestionElements.epochs = document.getElementById("dataIngestionEpochs");
+        dataIngestionElements.batchSize = document.getElementById("dataIngestionBatchSize");
+        dataIngestionElements.maxTrainImages = document.getElementById("dataIngestionMaxTrainImages");
+        dataIngestionElements.trainButton = document.getElementById("dataIngestionTrainButton");
+        dataIngestionElements.trainActiveButton = document.getElementById("dataIngestionTrainActiveButton");
+        dataIngestionElements.results = document.getElementById("dataIngestionResults");
+        dataIngestionElements.report = document.getElementById("dataIngestionReport");
+        dataIngestionElements.list = document.getElementById("dataIngestionList");
+        [
+            dataIngestionElements.files,
+            dataIngestionElements.trainFiles,
+            dataIngestionElements.saladHead,
+            dataIngestionElements.cradioModel,
+            dataIngestionElements.cradioPooling,
+            dataIngestionElements.trainEncoder,
+            dataIngestionElements.trainCradioModel,
+            dataIngestionElements.useActiveReference,
+        ].forEach((control) => {
+            if (control) control.addEventListener("change", refreshDataIngestionControls);
+        });
+        if (dataIngestionElements.recipe) {
+            dataIngestionElements.recipe.addEventListener("change", () => {
+                applyDataIngestionRecipe(dataIngestionElements.recipe.value || "pooled_top20");
+                refreshDataIngestionControls();
+            });
+        }
+        [
+            dataIngestionElements.encoder,
+            dataIngestionElements.cradioPooling,
+            dataIngestionElements.keepFraction,
+            dataIngestionElements.frameInterval,
+            dataIngestionElements.maxFrames,
+        ].forEach((control) => {
+            if (control) control.addEventListener("change", markDataIngestionRecipeCustom);
+        });
+        if (dataIngestionElements.analyzeButton) {
+            dataIngestionElements.analyzeButton.addEventListener("click", startDataIngestionAnalysis);
+        }
+        if (dataIngestionElements.trainButton) {
+            dataIngestionElements.trainButton.addEventListener("click", () => startLocalSaladTraining());
+        }
+        if (dataIngestionElements.trainActiveButton) {
+            dataIngestionElements.trainActiveButton.addEventListener("click", () => startLocalSaladTraining("active_dataset"));
+        }
+        if (dataIngestionElements.cancelButton) {
+            dataIngestionElements.cancelButton.addEventListener("click", cancelDataIngestionJob);
+        }
+        if (dataIngestionElements.refreshButton) {
+            dataIngestionElements.refreshButton.addEventListener("click", refreshDataIngestionCapabilities);
+        }
+        refreshDataIngestionCapabilities();
+        refreshDataIngestionControls();
+    }
+
     async function buildClassSplitActiveWorkspaceForm(request) {
         captureCurrentAnnotationDirtyState();
         const labelmap = getClassSplitLabelmapEntries();
@@ -35092,6 +35858,12 @@ async function cancelRfDetrTrainingJobRequest() {
         setSelectValueIfPresent(classSplitElements.preprocessMode, values.preprocessMode);
         setSelectValueIfPresent(classSplitElements.sizeBiasMode, values.adjustment);
         setSelectValueIfPresent(classSplitElements.dinov3Pooling, values.dinov3Pooling);
+        setSelectValueIfPresent(classSplitElements.cradioPooling, values.cradioPooling || "summary");
+        setSelectValueIfPresent(classSplitElements.embeddingAggregation, values.aggregation);
+        if (values.encoderType) {
+            setSelectValueIfPresent(classSplitElements.encoderType, values.encoderType);
+            updateClassSplitBackboneOptions();
+        }
         setSelectValueIfPresent(classSplitElements.backgroundMode, values.backgroundMode);
         setSelectValueIfPresent(classSplitElements.viewMode, values.viewMode);
     }
@@ -35166,6 +35938,14 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         updateClassSplitBackboneOptions();
         updateClassSplitProjectionOptions();
+        populateLocalSaladHeadSelect(
+            classSplitElements.saladHead,
+            Array.isArray(classSplitState.capabilities?.local_salad_heads) ? classSplitState.capabilities.local_salad_heads : []
+        );
+        populateLocalSaladHeadSelect(
+            trainingElements.saladHeadSelect,
+            Array.isArray(classSplitState.capabilities?.local_salad_heads) ? classSplitState.capabilities.local_salad_heads : []
+        );
         refreshClassSplitControls();
     }
 
@@ -35194,6 +35974,13 @@ async function cancelRfDetrTrainingJobRequest() {
                 ? classSplitState.clipBackbones
                 : [classSplitState.capabilities?.default_clip_model || "ViT-B/32"];
             fillSelectOptions(selectEl, clipOptions, classSplitState.capabilities?.default_clip_model || "");
+            return;
+        }
+        if (encoder === "cradio") {
+            const models = Array.isArray(classSplitState.capabilities?.cradio_models)
+                ? classSplitState.capabilities.cradio_models.map((model) => ({ value: model, label: model.split("/").pop() || model }))
+                : CRADIO_BACKBONES;
+            fillSelectOptions(selectEl, models, classSplitState.capabilities?.default_cradio_model || "nvidia/C-RADIOv4-SO400M");
             return;
         }
         fillSelectOptions(
@@ -35241,6 +36028,10 @@ async function cancelRfDetrTrainingJobRequest() {
         const scope = getClassSplitScope();
         const classSelected = !!String(classSplitElements.classSelect?.value || "").trim();
         const selectedClassCount = stats.counts.get(String(classSplitElements.classSelect?.value || "").trim()) || 0;
+        const classSplitEncoderType = String(classSplitElements.encoderType?.value || "dinov3").trim().toLowerCase();
+        if (!["dinov3", "cradio"].includes(classSplitEncoderType) && classSplitElements.embeddingAggregation?.value === "local_salad") {
+            setSelectValueIfPresent(classSplitElements.embeddingAggregation, "pooled");
+        }
         if (classSplitElements.datasetStatus) {
             if (!stats.imageCount) {
                 classSplitElements.datasetStatus.textContent = "Open images in Label Images to run analysis.";
@@ -35270,6 +36061,9 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitElements.preprocessMode,
             classSplitElements.sizeBiasMode,
             classSplitElements.dinov3Pooling,
+            classSplitElements.cradioPooling,
+            classSplitElements.embeddingAggregation,
+            classSplitElements.saladHead,
             classSplitElements.backgroundMode,
             classSplitElements.viewMode,
             classSplitElements.neighborK,
@@ -35281,7 +36075,18 @@ async function cancelRfDetrTrainingJobRequest() {
         const canRun = available
             && !classSplitState.active
             && (scope !== "selected_class" || (classSelected && selectedClassCount > 0));
-        setButtonDisabled(classSplitElements.runButton, !canRun);
+        const classSplitNeedsSalad = String(classSplitElements.embeddingAggregation?.value || "pooled") === "local_salad";
+        const classSplitHasSalad = !!String(classSplitElements.saladHead?.value || "").trim();
+        if (classSplitElements.saladHead) {
+            classSplitElements.saladHead.disabled = !available || classSplitState.active || !classSplitNeedsSalad;
+        }
+        if (classSplitElements.dinov3Pooling) {
+            classSplitElements.dinov3Pooling.disabled = !available || classSplitState.active || classSplitEncoderType !== "dinov3";
+        }
+        if (classSplitElements.cradioPooling) {
+            classSplitElements.cradioPooling.disabled = !available || classSplitState.active || classSplitEncoderType !== "cradio";
+        }
+        setButtonDisabled(classSplitElements.runButton, !canRun || (classSplitNeedsSalad && !classSplitHasSalad));
         setButtonDisabled(classSplitElements.cancelButton, !classSplitState.active || !classSplitState.currentJobId);
         setButtonDisabled(classSplitElements.rerunButton, classSplitState.active || !classSplitState.lastRequest);
     }
@@ -35312,10 +36117,10 @@ async function cancelRfDetrTrainingJobRequest() {
         const canonicalSize = Number.isFinite(canonicalSizeRaw)
             ? Math.max(64, Math.min(1024, canonicalSizeRaw))
             : 336;
-        const projectionNeighborRaw = parseInt(classSplitElements.projectionNeighborK?.value || "15", 10);
+        const projectionNeighborRaw = parseInt(classSplitElements.projectionNeighborK?.value || "50", 10);
         const projectionNeighborK = Number.isFinite(projectionNeighborRaw)
             ? Math.max(0, Math.min(5000, projectionNeighborRaw))
-            : 15;
+            : 50;
         const neighborK = Math.max(3, Math.min(100, parseInt(classSplitElements.neighborK?.value || "15", 10) || 15));
         const request = {
             analysis_scope: scope,
@@ -35330,6 +36135,9 @@ async function cancelRfDetrTrainingJobRequest() {
             canonical_size: canonicalSize,
             embedding_adjustment: String(classSplitElements.sizeBiasMode?.value || "remove_size_bias").trim().toLowerCase() || "remove_size_bias",
             dinov3_pooling: String(classSplitElements.dinov3Pooling?.value || "pooler").trim().toLowerCase() || "pooler",
+            cradio_pooling: String(classSplitElements.cradioPooling?.value || "summary").trim().toLowerCase() || "summary",
+            embedding_aggregation: String(classSplitElements.embeddingAggregation?.value || "pooled").trim().toLowerCase() || "pooled",
+            embedding_salad_head_id: String(classSplitElements.saladHead?.value || "").trim(),
             background_mode: String(classSplitElements.backgroundMode?.value || "full_crop").trim().toLowerCase() || "full_crop",
             embedding_view_mode: String(classSplitElements.viewMode?.value || "single").trim().toLowerCase() || "single",
             neighbor_k: neighborK,
@@ -35760,7 +36568,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const diagnostics = classSplitState.result?.diagnostics || {};
         const strongest = diagnostics.strongest_size_axis || {};
         const projectionNeighbors = String(summary.projection || request.projection || "pca") === "umap"
-            ? (summary.projection_neighbor_k_resolved || summary.projection_neighbor_k || request.projection_neighbor_k || 15)
+            ? (summary.projection_neighbor_k_resolved || summary.projection_neighbor_k || request.projection_neighbor_k || 50)
             : "n/a for PCA";
         const sizeCorr = strongest.metric
             ? `${strongest.axis || "axis"} vs ${strongest.metric}: ${Math.abs(Number(strongest.correlation) || 0).toFixed(2)}`
@@ -35778,6 +36586,9 @@ async function cancelRfDetrTrainingJobRequest() {
             ["Crop normalization", `${summary.preprocess_mode || request.preprocess_mode || "canonical"}`],
             ["Size-bias control", `${summary.embedding_adjustment || request.embedding_adjustment || "remove_size_bias"}`],
             ["DINOv3 pooling", `${summary.dinov3_pooling || request.dinov3_pooling || "pooler"}`],
+            ["C-RADIOv4 pooling", `${summary.cradio_pooling || request.cradio_pooling || "summary"}`],
+            ["Aggregation", `${summary.embedding_aggregation || request.embedding_aggregation || "pooled"}`],
+            ["SALAD head", `${summary.embedding_salad_head_id || request.embedding_salad_head_id || "n/a"}`],
             ["Background", `${summary.background_mode || request.background_mode || "full_crop"}`],
             ["Embedding views", `${summary.embedding_view_mode || request.embedding_view_mode || "single"}`],
             ["Crop cache", `${cropCache.reused || 0} reused / ${cropCache.total || 0} objects`],
@@ -36160,6 +36971,9 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.preprocessMode = document.getElementById("classSplitPreprocessMode");
         classSplitElements.sizeBiasMode = document.getElementById("classSplitSizeBiasMode");
         classSplitElements.dinov3Pooling = document.getElementById("classSplitDinov3Pooling");
+        classSplitElements.cradioPooling = document.getElementById("classSplitCradioPooling");
+        classSplitElements.embeddingAggregation = document.getElementById("classSplitEmbeddingAggregation");
+        classSplitElements.saladHead = document.getElementById("classSplitSaladHead");
         classSplitElements.backgroundMode = document.getElementById("classSplitBackgroundMode");
         classSplitElements.viewMode = document.getElementById("classSplitViewMode");
         classSplitElements.neighborK = document.getElementById("classSplitNeighborK");
@@ -36184,7 +36998,19 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (classSplitElements.recipePreset) {
             classSplitElements.recipePreset.addEventListener("change", () => {
-                applyEmbeddingRecipePresetToClassSplit(classSplitElements.recipePreset.value || "balanced");
+                applyEmbeddingRecipePresetToClassSplit(classSplitElements.recipePreset.value || "precise");
+                refreshClassSplitControls();
+            });
+        }
+        if (classSplitElements.embeddingAggregation) {
+            classSplitElements.embeddingAggregation.addEventListener("change", () => {
+                if (classSplitElements.embeddingAggregation.value === "local_salad") {
+                    const currentEncoder = String(classSplitElements.encoderType?.value || "dinov3").toLowerCase();
+                    if (!["dinov3", "cradio"].includes(currentEncoder)) {
+                        setSelectValueIfPresent(classSplitElements.encoderType, "dinov3");
+                    }
+                    updateClassSplitBackboneOptions();
+                }
                 refreshClassSplitControls();
             });
         }
@@ -36200,6 +37026,9 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitElements.preprocessMode,
             classSplitElements.sizeBiasMode,
             classSplitElements.dinov3Pooling,
+            classSplitElements.cradioPooling,
+            classSplitElements.embeddingAggregation,
+            classSplitElements.saladHead,
             classSplitElements.backgroundMode,
             classSplitElements.viewMode,
         ].forEach((control) => {
@@ -36235,6 +37064,7 @@ async function cancelRfDetrTrainingJobRequest() {
         document.addEventListener("keydown", (event) => handleClassSplitShiftPanEvent(event, true), true);
         document.addEventListener("keyup", (event) => handleClassSplitShiftPanEvent(event, false), true);
         window.addEventListener("blur", () => setClassSplitGraphPanMode(false));
+        applyEmbeddingRecipePresetToClassSplit(classSplitElements.recipePreset?.value || "precise");
         populateClassSplitClasses({ preserveSelection: true });
         refreshClassSplitControls();
         loadClassSplitClipBackbones()

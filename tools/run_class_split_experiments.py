@@ -24,6 +24,7 @@ import localinferenceapi as api
 
 
 DEFAULT_DINOV3 = "facebook/dinov3-vitb16-pretrain-lvd1689m"
+DEFAULT_CRADIO = "nvidia/C-RADIOv4-SO400M"
 
 
 def _read_labelmap(path: Path) -> List[str]:
@@ -79,6 +80,7 @@ def _minimum_matrix(sample_cap: int) -> List[Dict[str, Any]]:
         "neighbor_k": 15,
         "projection_neighbor_k": 50,
         "dinov3_pooling": "pooler",
+        "embedding_aggregation": "pooled",
         "background_mode": "full_crop",
         "embedding_view_mode": "single",
         "embedding_postprocess": "none",
@@ -120,6 +122,7 @@ def _remaining_lever_matrix(sample_cap: int) -> List[Dict[str, Any]]:
         "projection": "pca",
         "projection_neighbor_k": 50,
         "dinov3_pooling": "pooler",
+        "embedding_aggregation": "pooled",
         "background_mode": "full_crop",
         "embedding_view_mode": "single",
         "embedding_adjustment": "remove_size_bias",
@@ -147,6 +150,26 @@ def _remaining_lever_matrix(sample_cap: int) -> List[Dict[str, Any]]:
         ("pool_cls", {"dinov3_pooling": "cls"}),
         ("pool_patch_mean", {"dinov3_pooling": "patch_mean"}),
         ("pool_cls_patch", {"dinov3_pooling": "cls_patch_concat"}),
+        (
+            "cradio_summary",
+            {
+                "encoder_type": "cradio",
+                "encoder_model": DEFAULT_CRADIO,
+                "canonical_size": 432,
+                "cradio_pooling": "summary",
+                "batch_size": 16,
+            },
+        ),
+        (
+            "cradio_spatial_mean",
+            {
+                "encoder_type": "cradio",
+                "encoder_model": DEFAULT_CRADIO,
+                "canonical_size": 432,
+                "cradio_pooling": "spatial_mean",
+                "batch_size": 16,
+            },
+        ),
         ("post_pca64", {"embedding_postprocess": "pca64"}),
         ("post_whiten64", {"embedding_postprocess": "whiten64"}),
         ("post_image_bias", {"embedding_postprocess": "remove_image_bias"}),
@@ -183,6 +206,7 @@ def _finalist_matrix(sample_cap: int) -> List[Dict[str, Any]]:
         "neighbor_k": 15,
         "projection_neighbor_k": 50,
         "dinov3_pooling": "pooler",
+        "embedding_aggregation": "pooled",
         "background_mode": "full_crop",
         "embedding_view_mode": "single",
         "embedding_adjustment": "remove_size_bias",
@@ -222,8 +246,70 @@ def _finalist_matrix(sample_cap: int) -> List[Dict[str, Any]]:
     return runs
 
 
+def _cradio_matrix(sample_cap: int) -> List[Dict[str, Any]]:
+    base = {
+        "encoder_type": "cradio",
+        "encoder_model": DEFAULT_CRADIO,
+        "canonical_size": 432,
+        "padding_ratio": 0.08,
+        "crop_mode": "padded_square",
+        "neighbor_k": 15,
+        "projection_neighbor_k": 50,
+        "dinov3_pooling": "pooler",
+        "cradio_pooling": "summary",
+        "embedding_aggregation": "pooled",
+        "background_mode": "full_crop",
+        "embedding_view_mode": "single",
+        "embedding_adjustment": "remove_size_bias",
+        "embedding_postprocess": "none",
+        "preprocess_mode": "canonical",
+        "batch_size": 16,
+        "seed": 42,
+        "sample_cap": sample_cap,
+    }
+    variants = [
+        ("cradio_summary_pca", {"projection": "pca", "cradio_pooling": "summary"}),
+        ("cradio_summary_umap", {"projection": "umap", "projection_neighbor_k": 50, "cradio_pooling": "summary"}),
+        ("cradio_spatial_mean_pca", {"projection": "pca", "cradio_pooling": "spatial_mean"}),
+        (
+            "cradio_summary_spatial_concat_pca",
+            {"projection": "pca", "cradio_pooling": "summary_spatial_concat"},
+        ),
+        (
+            "cradio_precise_tight_context_pca",
+            {"projection": "pca", "embedding_view_mode": "tight_context", "cradio_pooling": "summary"},
+        ),
+    ]
+    scopes = [
+        ("LightVehicle", "selected_class"),
+        ("Person", "selected_class"),
+        ("all_classes", "all_classes"),
+    ]
+    runs: List[Dict[str, Any]] = []
+    for class_name, scope in scopes:
+        for variant_id, settings in variants:
+            run = dict(base)
+            run.update(settings)
+            run["analysis_scope"] = scope
+            run["class_name"] = "" if scope == "all_classes" else class_name
+            run["run_id"] = f"{variant_id}_{class_name}"
+            runs.append(run)
+    return runs
+
+
 def _json_safe(value: Any) -> Any:
     return api._class_analysis_json_safe(value)
+
+
+def _variant_from_run_id(run_id: str, class_name: Any, analysis_scope: Any) -> str:
+    class_suffix = str(class_name or "").strip()
+    if str(analysis_scope or "") == "all_classes" or class_suffix == "all_classes":
+        class_suffix = "all_classes"
+    if class_suffix:
+        suffix = f"_{class_suffix}"
+        if run_id.endswith(suffix):
+            return run_id[: -len(suffix)] or run_id
+    return run_id
 
 
 def _apply_embedding_postprocess(
@@ -295,8 +381,8 @@ def _run_one(
     job = api.ClassAnalysisJob(job_id=run_id, request=request)
     start = time.perf_counter()
     records, crops, summary = api._class_analysis_collect_records(job.request, job=job, out_dir=out_dir)
-    encoder_type = str(run.get("encoder_type") or "dinov3")
-    encoder_model = str(run.get("encoder_model") or DEFAULT_DINOV3)
+    encoder_type = str(run.get("encoder_type") or "dinov3").strip().lower()
+    encoder_model = str(run.get("encoder_model") or (DEFAULT_CRADIO if encoder_type == "cradio" else DEFAULT_DINOV3))
     cache_stats: Dict[str, int] = {}
     feats = api._class_analysis_encode_crops(
         crops,
@@ -307,6 +393,9 @@ def _run_one(
             "clip_model": encoder_model,
             "normalize_embeddings": True,
             "dinov3_pooling": run.get("dinov3_pooling") or "pooler",
+            "cradio_pooling": run.get("cradio_pooling") or "summary",
+            "embedding_aggregation": run.get("embedding_aggregation") or "pooled",
+            "embedding_salad_head_id": run.get("embedding_salad_head_id") or "",
         },
         batch_size=int(run.get("batch_size") or 64),
         records=records,
@@ -332,6 +421,10 @@ def _run_one(
             **summary,
             "encoder_type": encoder_type,
             "encoder_model": encoder_model,
+            "dinov3_pooling": run.get("dinov3_pooling") or "pooler",
+            "cradio_pooling": run.get("cradio_pooling") or "summary",
+            "embedding_aggregation": run.get("embedding_aggregation") or "pooled",
+            "embedding_salad_head_id": run.get("embedding_salad_head_id") or "",
             "embedding_adjustment": str(run.get("embedding_adjustment") or "none"),
             "embedding_adjustment_info": adjustment_info,
             "embedding_postprocess": str(run.get("embedding_postprocess") or "none"),
@@ -339,7 +432,7 @@ def _run_one(
             "embedding_cache": cache_stats,
         },
         projection=str(run.get("projection") or "pca"),
-        projection_neighbor_k=int(run.get("projection_neighbor_k") or 15),
+        projection_neighbor_k=int(run.get("projection_neighbor_k") or 50),
         neighbor_k=int(run.get("neighbor_k") or 15),
         seed=int(run.get("seed") or 42),
     )
@@ -369,13 +462,28 @@ def _metrics_from_result(run_id: str, run: Dict[str, Any], result: Dict[str, Any
     best_silhouette = max((float(c.get("silhouette")) for c in candidates), default=0.0)
     points = result.get("points") or []
     same_ratios = [float(p.get("same_class_neighbor_ratio") or 0.0) for p in points if isinstance(p, dict)]
+    class_ratios: Dict[str, List[float]] = {}
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        class_name = str(point.get("class_name") or point.get("className") or "")
+        class_ratios.setdefault(class_name, []).append(float(point.get("same_class_neighbor_ratio") or 0.0))
+    class_means = {
+        class_name: float(sum(values) / len(values))
+        for class_name, values in class_ratios.items()
+        if values
+    }
+    worst_class = min(class_means, key=class_means.get) if class_means else ""
+    signed_size_corr = float(strongest.get("correlation") or 0.0)
     cache = summary.get("embedding_cache") or {}
     total_cache = int(cache.get("total") or 0)
     cache_hit_rate = float(cache.get("hits") or 0) / max(1, total_cache)
+    metric_class_name = run.get("class_name") or "all_classes"
     return {
         "run_id": run_id,
+        "variant": run.get("variant") or _variant_from_run_id(run_id, metric_class_name, run.get("analysis_scope")),
         "analysis_scope": run.get("analysis_scope"),
-        "class_name": run.get("class_name") or "all_classes",
+        "class_name": metric_class_name,
         "encoder_type": run.get("encoder_type"),
         "encoder_model": run.get("encoder_model"),
         "preprocess_mode": run.get("preprocess_mode"),
@@ -383,6 +491,8 @@ def _metrics_from_result(run_id: str, run: Dict[str, Any], result: Dict[str, Any
         "crop_mode": run.get("crop_mode"),
         "padding_ratio": run.get("padding_ratio"),
         "dinov3_pooling": run.get("dinov3_pooling"),
+        "cradio_pooling": run.get("cradio_pooling"),
+        "embedding_aggregation": run.get("embedding_aggregation"),
         "background_mode": run.get("background_mode"),
         "embedding_view_mode": run.get("embedding_view_mode"),
         "embedding_adjustment": run.get("embedding_adjustment"),
@@ -396,11 +506,16 @@ def _metrics_from_result(run_id: str, run: Dict[str, Any], result: Dict[str, Any
         "cache_hit_rate": cache_hit_rate,
         "runtime_seconds": elapsed,
         "strongest_size_axis_metric": strongest.get("metric") or "",
-        "strongest_size_axis_correlation": float(strongest.get("correlation") or 0.0),
+        "strongest_size_axis_correlation": signed_size_corr,
+        "strongest_size_axis_abs_correlation": abs(signed_size_corr),
         "mean_abs_size_correlation": float(sum(corr_values) / len(corr_values)) if corr_values else 0.0,
         "kmeans_best_k": (clusters.get("best_k") if isinstance(clusters, dict) else None),
         "kmeans_best_silhouette": best_silhouette,
         "mean_neighbor_same_class_ratio": float(sum(same_ratios) / len(same_ratios)) if same_ratios else 0.0,
+        "class_balanced_neighbor_same_class_ratio": float(sum(class_means.values()) / len(class_means)) if class_means else 0.0,
+        "worst_class_neighbor_same_class": worst_class,
+        "worst_class_neighbor_same_class_ratio": class_means.get(worst_class, 0.0) if worst_class else 0.0,
+        "worst_class_neighbor_same_class_count": len(class_ratios.get(worst_class, [])) if worst_class else 0,
         "wrong_class_candidate_count": summary.get("wrong_class_candidate_count"),
     }
 
@@ -409,13 +524,18 @@ def _write_leaderboard(output_root: Path, metrics_rows: List[Dict[str, Any]]) ->
     output_root.mkdir(parents=True, exist_ok=True)
     fields = [
         "run_id",
+        "variant",
         "analysis_scope",
         "class_name",
+        "encoder_type",
+        "encoder_model",
         "preprocess_mode",
         "canonical_size",
         "crop_mode",
         "padding_ratio",
         "dinov3_pooling",
+        "cradio_pooling",
+        "embedding_aggregation",
         "background_mode",
         "embedding_view_mode",
         "embedding_adjustment",
@@ -423,13 +543,21 @@ def _write_leaderboard(output_root: Path, metrics_rows: List[Dict[str, Any]]) ->
         "projection",
         "projection_neighbor_k",
         "object_count",
+        "raw_object_count",
+        "sample_cap",
         "cache_hit_rate",
         "runtime_seconds",
+        "strongest_size_axis_metric",
         "strongest_size_axis_correlation",
+        "strongest_size_axis_abs_correlation",
         "mean_abs_size_correlation",
         "kmeans_best_k",
         "kmeans_best_silhouette",
         "mean_neighbor_same_class_ratio",
+        "class_balanced_neighbor_same_class_ratio",
+        "worst_class_neighbor_same_class",
+        "worst_class_neighbor_same_class_ratio",
+        "worst_class_neighbor_same_class_count",
         "wrong_class_candidate_count",
     ]
     with (output_root / "leaderboard.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -441,12 +569,34 @@ def _write_leaderboard(output_root: Path, metrics_rows: List[Dict[str, Any]]) ->
     lines = ["# WALDO v4 Class Split Experiment Report", ""]
     for row in metrics_rows:
         lines.append(
-            "- {run_id}: n={object_count}, projection={projection}, size_corr={strongest_size_axis_correlation:.3f}, "
-            "mean_size_corr={mean_abs_size_correlation:.3f}, nn_purity={mean_neighbor_same_class_ratio:.3f}, "
+            "- {run_id}: n={object_count}, projection={projection}, size_abs={strongest_size_axis_abs_correlation:.3f}, "
+            "size_signed={strongest_size_axis_correlation:.3f}, mean_size_abs={mean_abs_size_correlation:.3f}, "
+            "nn_purity={mean_neighbor_same_class_ratio:.3f}, class_balanced_nn={class_balanced_neighbor_same_class_ratio:.3f}, "
             "silhouette={kmeans_best_silhouette:.3f}".format(**row)
         )
     lines.append("")
-    lines.append("Recommendation rule: prefer the simplest recipe that keeps nearest-neighbor purity stable while lowering size-axis leakage; reserve multi-view and background suppression for a precise/slow preset only if they improve the screening and finalist matrices.")
+    all_class_rows = [row for row in metrics_rows if row.get("analysis_scope") == "all_classes"]
+    if all_class_rows:
+        lines.append("## All-Class Ranking")
+        lines.append("")
+        for row in sorted(
+            all_class_rows,
+            key=lambda item: (
+                float(item.get("strongest_size_axis_abs_correlation") or 0.0) > 0.35,
+                -float(item.get("class_balanced_neighbor_same_class_ratio") or 0.0),
+                -float(item.get("mean_neighbor_same_class_ratio") or 0.0),
+                float(item.get("strongest_size_axis_abs_correlation") or 0.0),
+            ),
+        ):
+            leakage_state = "high" if float(row.get("strongest_size_axis_abs_correlation") or 0.0) > 0.35 else "ok"
+            lines.append(
+                "- {variant}: class_balanced_nn={class_balanced_neighbor_same_class_ratio:.3f}, "
+                "object_weighted_nn={mean_neighbor_same_class_ratio:.3f}, size_abs={strongest_size_axis_abs_correlation:.3f}, "
+                f"leakage={leakage_state}, wrong_candidates={{wrong_class_candidate_count}}, worst_class={{worst_class_neighbor_same_class}} "
+                "({worst_class_neighbor_same_class_ratio:.3f})".format(**row)
+            )
+        lines.append("")
+    lines.append("Recommendation rule: compare absolute size-axis leakage, not signed correlation direction. Prefer the simplest recipe that improves class-balanced nearest-neighbor purity while keeping size-axis leakage low; reserve multi-view and background suppression for precise/slow presets only when they improve the screening and finalist matrices.")
     (output_root / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -458,7 +608,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-dir", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, default=Path("uploads/class_analysis/experiments/waldo_v4"))
     parser.add_argument("--sample-cap", type=int, default=0, help="0 means all objects in each scope.")
-    parser.add_argument("--matrix", choices=["minimum", "remaining", "finalists"], default="minimum")
+    parser.add_argument("--matrix", choices=["minimum", "remaining", "finalists", "cradio"], default="minimum")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -476,6 +626,8 @@ def main() -> None:
         runs = _remaining_lever_matrix(sample_cap=max(0, int(args.sample_cap or 0)))
     elif args.matrix == "finalists":
         runs = _finalist_matrix(sample_cap=max(0, int(args.sample_cap or 0)))
+    elif args.matrix == "cradio":
+        runs = _cradio_matrix(sample_cap=max(0, int(args.sample_cap or 0)))
     else:
         runs = _minimum_matrix(sample_cap=max(0, int(args.sample_cap or 0)))
     if args.dry_run:
@@ -497,7 +649,7 @@ def main() -> None:
         metrics_rows.append(row)
         _write_leaderboard(args.output_root, metrics_rows)
         print(
-            f"  n={row['object_count']} size_corr={row['strongest_size_axis_correlation']:.3f} "
+            f"  n={row['object_count']} size_abs={row['strongest_size_axis_abs_correlation']:.3f} "
             f"nn={row['mean_neighbor_same_class_ratio']:.3f} cache={row['cache_hit_rate']:.2f}",
             flush=True,
         )

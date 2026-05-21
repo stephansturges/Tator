@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 import localinferenceapi as api
+from tools import clip_training
 from localinferenceapi import (
     _copy2_if_different as _api_copy2_if_different,
     _link_or_copy_file,
@@ -26,6 +27,22 @@ def test_link_or_copy_file_noops_when_source_is_destination(tmp_path):
 
     assert artifact.read_bytes() == b"classifier"
     assert not artifact.is_symlink()
+
+
+def test_logistic_regression_constructor_matches_installed_sklearn():
+    clf = clip_training._make_logistic_regression(
+        random_state=0,
+        max_iter=1,
+        solver="lbfgs",
+        class_weight=None,
+        C=1.0,
+        warm_start=True,
+        verbose=0,
+        tol=1e-4,
+    )
+
+    assert clf.max_iter == 1
+    assert clf.solver == "lbfgs"
 
 
 def test_unlink_self_referential_symlink_removes_broken_artifact(tmp_path):

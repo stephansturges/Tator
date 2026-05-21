@@ -2,11 +2,22 @@ import json
 import types
 
 import numpy as np
+import pytest
+import torch
 from PIL import Image
 
 import localinferenceapi as api
 from services.classifier import _load_clip_head_from_classifier_impl
 from tools import clip_training
+from tools import run_class_split_experiments as class_split_experiments
+from utils.embedding_recipe import normalize_embedding_aggregation
+from utils.cradio_embedding import (
+    CRADIO_DEFAULT_MODEL,
+    _unpack_cradio_outputs,
+    cradio_backend_status,
+    normalize_cradio_pooling,
+)
+from utils.local_salad import LocalSALADConfig, LocalSALADHead, symmetric_infonce_loss
 
 
 def _record(point_id: str, class_name: str) -> dict:
@@ -36,6 +47,42 @@ def test_class_analysis_parses_bbox_polygon_and_crop_bounds():
     )
     assert bbox_with_confidence["kind"] == "bbox"
     assert bbox_with_confidence["bbox_xyxy"] == [40.0, 30.0, 60.0, 70.0]
+
+
+def test_local_salad_head_is_trainable_normalized_and_fixed_width():
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(123)
+    patches = torch.randn(3, 12, 32, generator=gen)
+    global_token = torch.randn(3, 32, generator=gen)
+    head = LocalSALADHead(
+        LocalSALADConfig(
+            num_channels=32,
+            num_clusters=4,
+            cluster_dim=8,
+            token_dim=16,
+            hidden_dim=24,
+            dropout=0.0,
+        )
+    )
+
+    desc_a = head(patches, global_token=global_token)
+    desc_b = head(patches, global_token=global_token)
+    mismatched_global = torch.randn(3, 64, generator=gen)
+    desc_mismatch = head(patches, global_token=mismatched_global)
+
+    assert desc_a.shape == (3, 48)
+    assert desc_mismatch.shape == (3, 48)
+    assert torch.allclose(desc_a, desc_b, atol=1e-6)
+    assert torch.isfinite(desc_a).all()
+    assert torch.isfinite(desc_mismatch).all()
+    assert torch.allclose(desc_a.norm(dim=1), torch.ones(3), atol=1e-5)
+    cluster_blocks = desc_a[:, 16:].reshape(3, 4, 8).transpose(1, 2)
+    assert torch.isfinite(cluster_blocks).all()
+    loss = symmetric_infonce_loss(desc_a[:2], desc_b[:2], temperature=0.2)
+    assert torch.isfinite(loss)
+    assert normalize_embedding_aggregation("salad") == "local_salad"
+    assert normalize_embedding_aggregation("local_salad") == "local_salad"
+    assert normalize_embedding_aggregation("anything_else") == "pooled"
 
     polygon = api._class_analysis_parse_yolo_geometry(
         "2 0.1 0.1 0.2 0.1 0.2 0.2",
@@ -129,6 +176,97 @@ def test_class_analysis_sample_cap_defaults_to_unlimited():
     assert api._class_analysis_stratified_indices(records, cap=0, seed=7) == list(range(12))
 
 
+def test_class_analysis_rejects_invalid_local_salad_request_before_queue():
+    with pytest.raises(api.HTTPException) as missing_head:
+        api._normalize_class_analysis_request(
+            {
+                "encoder_type": "dinov3",
+                "embedding_aggregation": "local_salad",
+                "embedding_salad_head_id": "",
+            }
+        )
+    assert missing_head.value.status_code == 400
+    assert missing_head.value.detail == "local_salad_head_required"
+
+    with pytest.raises(api.HTTPException) as wrong_encoder:
+        api._normalize_class_analysis_request(
+            {
+                "encoder_type": "clip",
+                "embedding_aggregation": "local_salad",
+                "embedding_salad_head_id": "unit_head",
+            }
+        )
+    assert wrong_encoder.value.status_code == 400
+    assert wrong_encoder.value.detail == "local_salad_requires_spatial_encoder"
+
+
+def test_cradio_embedding_contract_and_capabilities():
+    assert normalize_cradio_pooling("spatial") == "spatial_mean"
+    assert normalize_cradio_pooling("summary+spatial") == "summary_spatial_concat"
+    assert normalize_cradio_pooling("anything_else") == "summary"
+
+    mlx = cradio_backend_status("mlx")
+    assert mlx.resolved == "mlx"
+    assert mlx.available is False
+    assert "no official MLX C-RADIOv4" in mlx.detail
+
+    summary = torch.ones(2, 3)
+    spatial = torch.zeros(2, 4, 3)
+    unpacked = _unpack_cradio_outputs({"summary": summary, "spatial_features": spatial})
+    assert unpacked[0] is summary
+    assert unpacked[1] is spatial
+
+    caps = api._class_analysis_capabilities()
+    assert "cradio" in caps["encoders"]
+    assert caps["default_cradio_model"] == CRADIO_DEFAULT_MODEL
+    assert "summary_spatial_concat" in caps["cradio_pooling_modes"]
+    assert any(recipe["id"] == "cradio_summary" for recipe in caps["class_separation_recipes"])
+
+    request = api._normalize_class_analysis_request(
+        {
+            "encoder_type": "cradio",
+            "encoder_model": "",
+            "cradio_pooling": "summary+spatial",
+            "embedding_aggregation": "local_salad",
+            "embedding_salad_head_id": "unit_head",
+        }
+    )
+    assert request["encoder_model"] == CRADIO_DEFAULT_MODEL
+    assert request["cradio_pooling"] == "summary_spatial_concat"
+
+
+def test_cradio_head_encoding_uses_saved_pooling(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(api, "resolve_cradio_torch_device", lambda _backend=None: "cpu")
+    monkeypatch.setattr(
+        api,
+        "_load_cradio_backbone_cached",
+        lambda model_name, target_device, raise_on_error=False: ("model", "processor", model_name, "cpu"),
+    )
+
+    def fake_encode(model, processor, device_name, images, *, pooling, normalize=True, return_tokens=False):
+        captured["pooling"] = pooling
+        captured["normalize"] = normalize
+        captured["return_tokens"] = return_tokens
+        return np.asarray([[1.0, 2.0, 3.0] for _ in images], dtype=np.float32)
+
+    monkeypatch.setattr(api, "encode_cradio_images", fake_encode)
+    feats = api._encode_pil_batch_for_head(
+        [Image.new("RGB", (8, 8), (10, 20, 30))],
+        head={
+            "encoder_type": "cradio",
+            "encoder_model": "nvidia/C-RADIOv4-SO400M",
+            "cradio_pooling": "spatial_mean",
+            "normalize_embeddings": True,
+        },
+    )
+
+    assert captured == {"pooling": "spatial_mean", "normalize": False, "return_tokens": False}
+    assert feats.shape == (1, 3)
+    assert np.allclose(np.linalg.norm(feats, axis=1), 1.0)
+
+
 def test_class_analysis_capabilities_expose_only_normal_recipe_controls():
     caps = api._class_analysis_capabilities()
 
@@ -138,6 +276,87 @@ def test_class_analysis_capabilities_expose_only_normal_recipe_controls():
     assert caps["expert_embedding_adjustments"] == ["none", "remove_size_bias"]
     assert caps["default_preprocess_mode"] == "canonical"
     assert caps["default_embedding_adjustment"] == "remove_size_bias"
+    assert caps["default_projection_neighbor_k"] == 50
+    assert "local_salad" in caps["embedding_aggregation_modes"]
+    assert "local_salad_heads" in caps
+    assert caps["local_salad_policy"] == api.LOCAL_SALAD_POLICY
+    assert caps["local_salad_trainer"] == api.LOCAL_SALAD_TRAINER
+    assert any(recipe["id"] == "local_salad" for recipe in caps["class_separation_recipes"])
+
+
+def test_class_split_experiment_metrics_use_absolute_leakage_and_macro_purity(tmp_path):
+    result = {
+        "summary": {
+            "object_count": 3,
+            "raw_object_count": 3,
+            "sample_cap": 0,
+            "projection": "umap",
+            "projection_neighbor_k": 50,
+            "neighbor_k": 15,
+            "embedding_cache": {"hits": 1, "total": 4},
+            "wrong_class_candidate_count": 1,
+        },
+        "diagnostics": {
+            "strongest_size_axis": {"metric": "bbox_area", "correlation": -0.73},
+            "axis_correlations": {
+                "x": {"bbox_area": -0.73, "crop_area": 0.25},
+                "y": {"bbox_area": 0.11},
+            },
+        },
+        "clusters": {"best_k": 2, "candidates": [{"silhouette": 0.31}, {"silhouette": 0.12}]},
+        "points": [
+            {"class_name": "car", "same_class_neighbor_ratio": 1.0},
+            {"class_name": "car", "same_class_neighbor_ratio": 0.8},
+            {"class_name": "boat", "same_class_neighbor_ratio": 0.2},
+        ],
+    }
+    run = {
+        "analysis_scope": "all_classes",
+        "class_name": "",
+        "encoder_type": "dinov3",
+        "encoder_model": "test",
+        "preprocess_mode": "canonical",
+        "canonical_size": 336,
+        "crop_mode": "padded_square",
+        "padding_ratio": 0.08,
+        "dinov3_pooling": "pooler",
+        "embedding_aggregation": "pooled",
+        "background_mode": "full_crop",
+        "embedding_view_mode": "tight_context",
+        "embedding_adjustment": "remove_size_bias",
+        "embedding_postprocess": "none",
+    }
+
+    metrics = class_split_experiments._metrics_from_result(
+        "precise_tight_context_all_classes",
+        run,
+        result,
+        12.5,
+    )
+
+    assert metrics["variant"] == "precise_tight_context"
+    assert metrics["embedding_aggregation"] == "pooled"
+    assert metrics["strongest_size_axis_correlation"] == -0.73
+    assert np.isclose(metrics["strongest_size_axis_abs_correlation"], 0.73)
+    assert np.isclose(metrics["mean_abs_size_correlation"], (0.73 + 0.25 + 0.11) / 3)
+    assert np.isclose(metrics["mean_neighbor_same_class_ratio"], (1.0 + 0.8 + 0.2) / 3)
+    assert np.isclose(metrics["class_balanced_neighbor_same_class_ratio"], ((1.0 + 0.8) / 2 + 0.2) / 2)
+    assert metrics["worst_class_neighbor_same_class"] == "boat"
+    assert metrics["worst_class_neighbor_same_class_count"] == 1
+
+    class_split_experiments._write_leaderboard(tmp_path, [metrics])
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    leaderboard = (tmp_path / "leaderboard.csv").read_text(encoding="utf-8")
+    assert "size_abs=0.730" in report
+    assert "class_balanced_nn=0.550" in report
+    assert "strongest_size_axis_abs_correlation" in leaderboard
+    assert "class_balanced_neighbor_same_class_ratio" in leaderboard
+
+    cradio_runs = class_split_experiments._cradio_matrix(sample_cap=11)
+    assert cradio_runs
+    assert all(run["encoder_type"] == "cradio" for run in cradio_runs)
+    assert {run["cradio_pooling"] for run in cradio_runs} >= {"summary", "spatial_mean", "summary_spatial_concat"}
+    assert all(run["sample_cap"] == 11 for run in cradio_runs)
 
 
 def test_class_analysis_source_reads_active_workspace_manifest(tmp_path):
@@ -407,6 +626,78 @@ def test_class_analysis_corrupt_cache_rematerializes_real_crop(monkeypatch, tmp_
             api._close_crop_item(crop)
 
 
+def test_class_analysis_cache_validation_uses_cradio_recipe(monkeypatch, tmp_path):
+    workspace = tmp_path / "workspace"
+    images_dir = workspace / "images"
+    images_dir.mkdir(parents=True)
+    image_path = images_dir / "sample.jpg"
+    Image.new("RGB", (80, 60), (20, 40, 60)).save(image_path)
+    manifest_path = workspace / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset_label": "browser snapshot",
+                "labelmap": ["car"],
+                "images": [
+                    {
+                        "split": "train",
+                        "image_relpath": "sample.jpg",
+                        "frontend_image_key": "train/original/sample.jpg",
+                        "label_lines": ["0 0.5 0.5 0.25 0.25"],
+                    }
+                ],
+                "yolo_layout": "flat",
+            }
+        ),
+        encoding="utf-8",
+    )
+    cached_thumb = tmp_path / "cached_thumb.jpg"
+    Image.new("RGB", (8, 8), (1, 2, 3)).save(cached_thumb)
+    captured_heads = []
+
+    monkeypatch.setattr(api, "_class_analysis_thumbnail_cache_path", lambda _crop_cache_key: cached_thumb)
+
+    def fake_cached_valid(_crop_cache_key, head):
+        captured_heads.append(dict(head))
+        return False
+
+    monkeypatch.setattr(api, "_class_analysis_cached_embedding_valid", fake_cached_valid)
+
+    job = api.ClassAnalysisJob(job_id="ca_cradio_cache_recipe")
+    records, crops, summary = api._class_analysis_collect_records(
+        {
+            "source_mode": "active_workspace",
+            "workspace_id": "ca_test",
+            "workspace_dir": str(workspace),
+            "workspace_manifest_path": str(manifest_path),
+            "analysis_scope": "selected_class",
+            "class_name": "car",
+            "preprocess_mode": "canonical",
+            "canonical_size": 64,
+            "crop_mode": "padded_square",
+            "padding_ratio": 0.08,
+            "background_mode": "full_crop",
+            "embedding_view_mode": "single",
+            "encoder_type": "cradio",
+            "encoder_model": CRADIO_DEFAULT_MODEL,
+            "cradio_pooling": "spatial_mean",
+        },
+        job=job,
+        out_dir=tmp_path / "out",
+    )
+
+    try:
+        assert len(records) == 1
+        assert summary["object_count"] == 1
+        assert captured_heads
+        assert any(head["encoder_type"] == "cradio" for head in captured_heads)
+        assert any(head["encoder_model"] == CRADIO_DEFAULT_MODEL for head in captured_heads)
+        assert any(head["cradio_pooling"] == "spatial_mean" for head in captured_heads)
+    finally:
+        for crop in crops:
+            api._close_crop_item(crop)
+
+
 def test_class_analysis_multiview_embedding_composes_before_postprocess(monkeypatch):
     captured = {}
 
@@ -443,7 +734,10 @@ def test_classifier_crop_for_head_uses_saved_embedding_recipe(monkeypatch):
     }
 
     def fake_encode(images, *, head, batch_size_override=None, device_override=None, geometry_records=None):
+        crop_pixels = np.asarray(images[0], dtype=np.float32)
         captured["image_size"] = images[0].size
+        captured["outside_mean"] = float(crop_pixels[2, 2].mean())
+        captured["inside_mean"] = float(crop_pixels[40, 40].mean())
         captured["geometry"] = geometry_records[0]
         captured["head"] = head
         return np.ones((1, 4), dtype=np.float32)
@@ -456,11 +750,102 @@ def test_classifier_crop_for_head_uses_saved_embedding_recipe(monkeypatch):
 
     assert feats.shape == (1, 4)
     assert captured["image_size"] == (80, 80)
+    assert captured["outside_mean"] < captured["inside_mean"]
     assert captured["geometry"]["bbox_xyxy"] == [40.0, 20.0, 60.0, 30.0]
     assert captured["geometry"]["crop_xyxy"] == [30, 5, 70, 45]
     assert captured["geometry"]["background_mode"] == "darken_outside_box"
     assert captured["geometry"]["embedding_view_mode"] == "single"
     assert captured["head"]["embedding_adjustment_transform"]["mode"] == "remove_size_bias"
+
+
+def test_classifier_multiview_inference_composes_views_before_size_bias(monkeypatch):
+    captured = {}
+    transform = {"mode": "remove_size_bias", "sentinel": True}
+    head = {
+        "encoder_type": "dinov3",
+        "normalize_embeddings": False,
+        "preprocess_mode": "canonical",
+        "canonical_size": 48,
+        "embedding_crop_mode": "padded_square",
+        "embedding_crop_padding_ratio": 0.08,
+        "background_mode": "full_crop",
+        "embedding_view_mode": "tight_context",
+        "embedding_adjustment_transform": transform,
+    }
+
+    def fake_encode(images, *, head, batch_size_override=None, device_override=None, geometry_records=None):
+        captured["raw_image_sizes"] = [image.size for image in images]
+        captured["raw_geometry_records"] = geometry_records
+        return np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+
+    def fake_residualizer(embeddings, covariates, residualizer, *, normalize=True):
+        captured["residualizer_embedding_shape"] = embeddings.shape
+        captured["residualizer_covariate_shape"] = covariates.shape
+        captured["residualizer_transform"] = residualizer
+        captured["residualizer_normalize"] = normalize
+        return np.asarray(embeddings, dtype=np.float32) + 10.0
+
+    monkeypatch.setattr(api, "_active_classifier_head_for_inference", lambda: head)
+    monkeypatch.setattr(api, "_encode_pil_batch_for_head", fake_encode)
+    monkeypatch.setattr(api, "apply_size_bias_residualizer", fake_residualizer)
+
+    image = Image.new("RGB", (96, 72), (30, 60, 90))
+    feats = api._encode_classifier_xyxy_for_active(image, [20, 18, 36, 34])
+
+    assert feats.shape == (1, 4)
+    assert captured["raw_image_sizes"] == [(64, 64), (64, 64)]
+    assert captured["raw_geometry_records"] is None
+    assert captured["residualizer_embedding_shape"] == (1, 4)
+    assert captured["residualizer_covariate_shape"] == (1, 4)
+    assert captured["residualizer_transform"] == transform
+    assert captured["residualizer_normalize"] is False
+    assert np.all(feats > 9.0)
+
+
+def test_classifier_detection_scoring_closes_preprocessed_crops(monkeypatch):
+    crop = Image.new("RGB", (16, 16), (10, 20, 30))
+    original_close = crop.close
+    closed = []
+
+    def tracked_close():
+        closed.append(True)
+        original_close()
+
+    crop.close = tracked_close
+
+    def fake_crop_for_head(pil_img, xyxy, head):
+        return crop, {
+            "bbox_xyxy": [float(v) for v in xyxy],
+            "crop_xyxy": [0, 0, 16, 16],
+            "width": 10,
+            "height": 10,
+        }
+
+    def fake_encode(crops, *, head, batch_size_override=None, device_override=None, geometry_records=None):
+        assert crops == [crop]
+        assert geometry_records and geometry_records[0]["crop_xyxy"] == [0, 0, 16, 16]
+        return np.ones((1, 2), dtype=np.float32)
+
+    monkeypatch.setattr(api, "_classifier_crop_for_head", fake_crop_for_head)
+    monkeypatch.setattr(api, "_encode_pil_batch_for_head", fake_encode)
+    monkeypatch.setattr(
+        api,
+        "_clip_head_predict_proba",
+        lambda feats, head, empty_cache_fn=None: np.asarray([[0.2, 0.8]], dtype=np.float32),
+    )
+
+    image = Image.new("RGB", (100, 60), (20, 40, 60))
+    detection = {"label": "boat", "bbox_xyxy_px": [1, 2, 11, 12]}
+    scores = api._score_detections_with_clip_head(
+        [detection],
+        pil_img=image,
+        clip_head={"classes": ["car", "boat"]},
+        score_mode="clip_head_prob",
+    )
+
+    assert set(scores) == {id(detection)}
+    assert np.isclose(scores[id(detection)], 0.8)
+    assert closed == [True]
 
 
 def test_classifier_loader_preserves_embedding_recipe_metadata(tmp_path):
@@ -496,6 +881,9 @@ def test_classifier_loader_preserves_embedding_recipe_metadata(tmp_path):
                 "embedding_adjustment": "remove_size_bias",
                 "embedding_adjustment_transform": transform,
                 "dinov3_pooling": "pooler",
+                "cradio_pooling": "summary_spatial_concat",
+                "embedding_aggregation": "local_salad",
+                "embedding_salad_head_id": "unit_head",
             }
         return DummyClassifier()
 
@@ -527,6 +915,9 @@ def test_classifier_loader_preserves_embedding_recipe_metadata(tmp_path):
     assert head["embedding_adjustment"] == "remove_size_bias"
     assert head["embedding_adjustment_transform"] == transform
     assert head["dinov3_pooling"] == "pooler"
+    assert head["cradio_pooling"] == "summary_spatial_concat"
+    assert head["embedding_aggregation"] == "local_salad"
+    assert head["embedding_salad_head_id"] == "unit_head"
 
 
 def test_training_multiview_items_compose_consistent_embedding_widths():

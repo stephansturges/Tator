@@ -588,6 +588,10 @@ body {
     overflow-y: auto;
 }
 
+.tab-panel[data-tab-panel="data-ingestion"] {
+    overflow-y: auto;
+}
+
 .tab-panel[data-tab-panel="datasets"] {
     overflow-y: auto;
 }
@@ -2153,6 +2157,151 @@ body.annotation-focus-mode .class-scroll-indicator {
     min-width: 0;
 }
 
+.data-ingestion-workspace {
+    min-height: 100%;
+    padding: 16px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.data-ingestion-header,
+.data-ingestion-panel {
+    border: 1px solid #dbeafe;
+    background: #f8fbff;
+    border-radius: 12px;
+    padding: 12px 14px;
+}
+
+.data-ingestion-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    border-color: #cbd5e1;
+    background: #ffffff;
+}
+
+.data-ingestion-header h2 {
+    margin: 0 0 4px;
+}
+
+.data-ingestion-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.data-ingestion-panel__header {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.data-ingestion-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(170px, 1fr));
+    gap: 10px 12px;
+    align-items: end;
+}
+
+.data-ingestion-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.data-ingestion-field--wide {
+    grid-column: 1 / -1;
+}
+
+.data-ingestion-field--checkbox {
+    justify-content: center;
+    min-height: 42px;
+}
+
+.data-ingestion-field label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #475569;
+}
+
+.data-ingestion-field select,
+.data-ingestion-field input:not([type="checkbox"]) {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+}
+
+.data-ingestion-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.data-ingestion-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.data-ingestion-progress__bar {
+    height: 9px;
+    border-radius: 999px;
+    background: #dbeafe;
+    overflow: hidden;
+}
+
+#dataIngestionProgressFill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #2563eb, #06b6d4);
+    transition: width 0.2s ease;
+}
+
+.data-ingestion-results {
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    gap: 12px;
+}
+
+.data-ingestion-report,
+.data-ingestion-list {
+    min-height: 220px;
+    max-height: 520px;
+    overflow: auto;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #ffffff;
+    padding: 8px;
+}
+
+.data-ingestion-report__grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.data-ingestion-report__item,
+.data-ingestion-list__item {
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 7px;
+    padding: 7px;
+    background: rgba(248, 250, 252, 0.82);
+}
+
+.data-ingestion-list__item {
+    margin-bottom: 6px;
+}
+
+.data-ingestion-list__item.is-keep {
+    border-color: rgba(37, 99, 235, 0.45);
+    background: rgba(219, 234, 254, 0.75);
+}
+
 @media (max-width: 1180px) {
     .class-split-panel--workspace .class-split-grid {
         grid-template-columns: repeat(2, minmax(160px, 1fr));
@@ -2169,12 +2318,21 @@ body.annotation-focus-mode .class-scroll-indicator {
     .class-split-panel--workspace .class-split-graph {
         height: 58vh;
     }
+
+    .data-ingestion-grid {
+        grid-template-columns: repeat(2, minmax(170px, 1fr));
+    }
+
+    .data-ingestion-results {
+        grid-template-columns: 1fr;
+    }
 }
 
 @media (max-width: 760px) {
     .sam3-text-grid,
     .sam3-text-cascade__step-grid,
     .class-split-grid,
+    .data-ingestion-grid,
     .class-split-review {
         grid-template-columns: 1fr;
     }
@@ -3991,6 +4149,10 @@ html.theme-dark .settings-panel,
 html.theme-dark .tool-panel,
 html.theme-dark .qwen-panel,
 html.theme-dark .sam3-text-panel,
+html.theme-dark .data-ingestion-header,
+html.theme-dark .data-ingestion-panel,
+html.theme-dark .data-ingestion-report,
+html.theme-dark .data-ingestion-list,
 html.theme-dark .class-split-workspace__header,
 html.theme-dark .class-split-panel,
 html.theme-dark .class-split-graph,
@@ -4082,6 +4244,7 @@ html.theme-dark .qwen-caption-progress__detail {
 }
 
 html.theme-dark .class-split-field label,
+html.theme-dark .data-ingestion-field label,
 html.theme-dark .class-split-toolbar label,
 html.theme-dark .class-split-advanced summary,
 html.theme-dark .class-split-report__note,
@@ -4092,6 +4255,17 @@ html.theme-dark .class-split-inspector__meta {
 html.theme-dark .class-split-report__item {
     background: rgba(15, 23, 42, 0.72);
     border-color: rgba(148, 163, 184, 0.28);
+}
+
+html.theme-dark .data-ingestion-report__item,
+html.theme-dark .data-ingestion-list__item {
+    background: rgba(15, 23, 42, 0.72);
+    border-color: rgba(148, 163, 184, 0.28);
+}
+
+html.theme-dark .data-ingestion-list__item.is-keep {
+    background: rgba(30, 64, 175, 0.28);
+    border-color: rgba(96, 165, 250, 0.45);
 }
 
 html.theme-dark .class-split-report__item strong,
@@ -4658,6 +4832,10 @@ html.theme-pipboy .settings-panel,
 html.theme-pipboy .tool-panel,
 html.theme-pipboy .qwen-panel,
 html.theme-pipboy .sam3-text-panel,
+html.theme-pipboy .data-ingestion-header,
+html.theme-pipboy .data-ingestion-panel,
+html.theme-pipboy .data-ingestion-report,
+html.theme-pipboy .data-ingestion-list,
 html.theme-pipboy .class-split-workspace__header,
 html.theme-pipboy .class-split-panel,
 html.theme-pipboy .class-split-graph,
@@ -4749,6 +4927,7 @@ html.theme-pipboy .qwen-caption-progress__detail {
 }
 
 html.theme-pipboy .class-split-field label,
+html.theme-pipboy .data-ingestion-field label,
 html.theme-pipboy .class-split-toolbar label,
 html.theme-pipboy .class-split-advanced summary,
 html.theme-pipboy .class-split-report__note,
@@ -4759,6 +4938,17 @@ html.theme-pipboy .class-split-inspector__meta {
 html.theme-pipboy .class-split-report__item {
     background: color-mix(in srgb, var(--pip-panel) 80%, transparent);
     border-color: color-mix(in srgb, var(--pip-green) 35%, transparent);
+}
+
+html.theme-pipboy .data-ingestion-report__item,
+html.theme-pipboy .data-ingestion-list__item {
+    background: color-mix(in srgb, var(--pip-panel) 80%, transparent);
+    border-color: color-mix(in srgb, var(--pip-green) 35%, transparent);
+}
+
+html.theme-pipboy .data-ingestion-list__item.is-keep {
+    background: color-mix(in srgb, var(--pip-green) 14%, var(--pip-panel));
+    border-color: var(--pip-border-strong);
 }
 
 html.theme-pipboy .class-split-report__item strong,

@@ -8,6 +8,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 
+from utils.embedding_recipe import normalize_embedding_aggregation
+
 
 def _predict_proba_batched_impl(
     crops: Sequence[Any],
@@ -90,6 +92,9 @@ def _load_clip_head_from_classifier_impl(
     embedding_adjustment: Optional[str] = None
     embedding_adjustment_transform: Optional[Dict[str, Any]] = None
     dinov3_pooling: Optional[str] = None
+    cradio_pooling: Optional[str] = None
+    embedding_aggregation: Optional[str] = None
+    embedding_salad_head_id: Optional[str] = None
     calibration_temperature: Optional[float] = None
     logit_adjustment: Optional[Sequence[float]] = None
     logit_adjustment_inference: bool = False
@@ -136,6 +141,12 @@ def _load_clip_head_from_classifier_impl(
                     embedding_adjustment_transform = meta_obj.get("embedding_adjustment_transform")
                 if meta_obj.get("dinov3_pooling") is not None:
                     dinov3_pooling = str(meta_obj.get("dinov3_pooling"))
+                if meta_obj.get("cradio_pooling") is not None:
+                    cradio_pooling = str(meta_obj.get("cradio_pooling"))
+                if meta_obj.get("embedding_aggregation") is not None:
+                    embedding_aggregation = normalize_embedding_aggregation(meta_obj.get("embedding_aggregation"))
+                if meta_obj.get("embedding_salad_head_id") is not None:
+                    embedding_salad_head_id = str(meta_obj.get("embedding_salad_head_id") or "").strip()
                 if meta_obj.get("calibration_temperature") is not None:
                     try:
                         calibration_temperature = float(meta_obj.get("calibration_temperature"))
@@ -246,6 +257,9 @@ def _load_clip_head_from_classifier_impl(
             "embedding_adjustment": embedding_adjustment,
             "embedding_adjustment_transform": embedding_adjustment_transform,
             "dinov3_pooling": dinov3_pooling,
+            "cradio_pooling": cradio_pooling,
+            "embedding_aggregation": embedding_aggregation,
+            "embedding_salad_head_id": embedding_salad_head_id,
             "temperature": calibration_temperature,
             "logit_adjustment": logit_adjustment,
             "logit_adjustment_inference": bool(logit_adjustment_inference),
@@ -357,6 +371,9 @@ def _load_clip_head_from_classifier_impl(
         "embedding_adjustment": embedding_adjustment,
         "embedding_adjustment_transform": embedding_adjustment_transform,
         "dinov3_pooling": dinov3_pooling,
+        "cradio_pooling": cradio_pooling,
+        "embedding_aggregation": embedding_aggregation,
+        "embedding_salad_head_id": embedding_salad_head_id,
         "temperature": calibration_temperature,
         "logit_adjustment": logit_adjustment,
         "logit_adjustment_inference": bool(logit_adjustment_inference),

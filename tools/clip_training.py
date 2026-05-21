@@ -7,6 +7,7 @@ CLI script can share the same implementation.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -42,11 +43,22 @@ from utils.embedding_recipe import (
     make_embedding_crop_views as _embedding_make_crop_views,
     normalize_background_mode as _embedding_normalize_background_mode,
     normalize_dinov3_pooling as _embedding_normalize_dinov3_pooling,
+    normalize_embedding_aggregation as _embedding_normalize_aggregation,
     normalize_embedding_adjustment as _embedding_normalize_adjustment,
     normalize_embedding_view_mode as _embedding_normalize_view_mode,
     normalize_preprocess_mode as _embedding_normalize_preprocess,
     normalize_rows as _embedding_normalize_rows,
     preprocess_crop as _embedding_preprocess_crop,
+)
+from utils.local_salad import LocalSALADHead, load_local_salad_head_file
+from utils.cradio_embedding import (
+    CRADIO_DEFAULT_MODEL,
+    CRADIO_SUPPORTED_MODELS,
+    encode_cradio_images,
+    load_cradio_backbone,
+    normalize_cradio_model,
+    normalize_cradio_pooling,
+    resolve_cradio_torch_device,
 )
 
 # The datasets we work with can include truncated images; be lenient when reading.
@@ -56,6 +68,15 @@ EMBED_CACHE_ROOT = Path(os.environ.get("CLIP_EMBED_CACHE", "./uploads/clip_embed
 CACHE_VERSION = 1
 
 logger = logging.getLogger(__name__)
+
+
+def _make_logistic_regression(**kwargs: Any) -> LogisticRegression:
+    """Create LogisticRegression across scikit-learn versions."""
+
+    params = dict(kwargs)
+    if "multi_class" in inspect.signature(LogisticRegression).parameters:
+        params.setdefault("multi_class", "auto")
+    return LogisticRegression(**params)
 
 CLIP_AUG_HFLIP_P = 0.5
 CLIP_AUG_VFLIP_P = 0.1
@@ -160,6 +181,9 @@ class TrainingArtifacts:
     embedding_view_mode: str
     embedding_adjustment: str
     dinov3_pooling: str
+    cradio_pooling: str
+    embedding_aggregation: str
+    embedding_salad_head_id: str
     calibration_mode: str
     calibration_temperature: Optional[float]
     phase_timings: Dict[str, float]
@@ -633,6 +657,7 @@ def _encode_batch(
     images: Sequence[Image.Image],
     *,
     normalize: bool = True,
+    aggregation: str = "pooled",
 ) -> np.ndarray:
     if not images:
         return np.empty((0, 512), dtype=np.float32)
@@ -652,6 +677,8 @@ def _encode_batch_dinov3(
     *,
     normalize: bool = True,
     pooling: str = "pooler",
+    aggregation: str = "pooled",
+    salad_head: Optional[LocalSALADHead] = None,
 ) -> np.ndarray:
     if not images:
         hidden = int(getattr(getattr(model, "config", None), "hidden_size", 0) or 0)
@@ -663,8 +690,19 @@ def _encode_batch_dinov3(
         batch = {k: v.to(device) for k, v in batch.items()}
         outputs = model(**batch)
         pooling_norm = _embedding_normalize_dinov3_pooling(pooling)
+        aggregation_norm = _embedding_normalize_aggregation(aggregation)
         last_hidden = getattr(outputs, "last_hidden_state", None)
-        feats = getattr(outputs, "pooler_output", None) if pooling_norm == "pooler" else None
+        if aggregation_norm == "local_salad":
+            if salad_head is None:
+                raise TrainingError("Local SALAD aggregation requires a selected local SALAD head.")
+            if last_hidden is None or last_hidden.ndim != 3 or last_hidden.shape[1] <= 1:
+                raise TrainingError("DINOv3 output missing patch tokens for local SALAD aggregation.")
+            global_token = getattr(outputs, "pooler_output", None)
+            if global_token is None:
+                global_token = last_hidden[:, 0, :]
+            feats = salad_head(last_hidden[:, 1:, :], global_token=global_token)
+        else:
+            feats = getattr(outputs, "pooler_output", None) if pooling_norm == "pooler" else None
         if feats is None and pooling_norm == "patch_mean" and last_hidden is not None and last_hidden.ndim == 3 and last_hidden.shape[1] > 1:
             feats = last_hidden[:, 1:, :].mean(dim=1)
         elif feats is None and pooling_norm == "cls_patch_concat" and last_hidden is not None and last_hidden.ndim == 3 and last_hidden.shape[1] > 1:
@@ -938,6 +976,9 @@ def train_clip_from_yolo(
     embedding_view_mode: str = "single",
     embedding_adjustment: str = "remove_size_bias",
     dinov3_pooling: str = "pooler",
+    cradio_pooling: str = "summary",
+    embedding_aggregation: str = "pooled",
+    embedding_salad_head_id: str = "",
     calibration_mode: str = "none",
     calibration_max_iters: int = 50,
     calibration_min_temp: float = 0.5,
@@ -967,16 +1008,19 @@ def train_clip_from_yolo(
         raise TrainingError(f"Labels folder not found: {labels_path}")
 
     encoder_type = (encoder_type or "clip").strip().lower()
-    if encoder_type not in {"clip", "dinov3"}:
+    if encoder_type not in {"clip", "dinov3", "cradio"}:
         raise TrainingError(f"encoder_type_unsupported:{encoder_type}")
     encoder_model_name = (encoder_model or "").strip()
     if encoder_type == "clip":
         if encoder_model_name:
             clip_model = encoder_model_name
         encoder_model_name = clip_model
-    else:
+    elif encoder_type == "dinov3":
         if not encoder_model_name:
             raise TrainingError("encoder_model_required")
+        clip_model = encoder_model_name
+    else:
+        encoder_model_name = normalize_cradio_model(encoder_model_name)
         clip_model = encoder_model_name
 
     class_weight = (class_weight or "none").lower()
@@ -1090,6 +1134,11 @@ def train_clip_from_yolo(
     embedding_view_mode = _embedding_normalize_view_mode(embedding_view_mode)
     embedding_adjustment = _embedding_normalize_adjustment(embedding_adjustment)
     dinov3_pooling = _embedding_normalize_dinov3_pooling(dinov3_pooling)
+    cradio_pooling = normalize_cradio_pooling(cradio_pooling)
+    embedding_aggregation = _embedding_normalize_aggregation(embedding_aggregation)
+    embedding_salad_head_id = str(embedding_salad_head_id or "").strip()
+    if embedding_aggregation == "local_salad" and encoder_type not in {"dinov3", "cradio"}:
+        raise TrainingError("Local SALAD aggregation requires DINOv3 or C-RADIOv4.")
     calibration_mode = str(calibration_mode or "none").strip().lower()
     if calibration_mode not in {"none", "temperature"}:
         calibration_mode = "none"
@@ -1174,9 +1223,28 @@ def train_clip_from_yolo(
     if encoder_type == "clip":
         clip_net, preprocess = _load_clip(clip_model, resolved_device)
         def encode_images(images: Sequence[Image.Image]) -> np.ndarray:
-            return _encode_batch(clip_net, preprocess, resolved_device, images, normalize=normalize_embeddings)
-    else:
+            return _encode_batch(
+                clip_net,
+                preprocess,
+                resolved_device,
+                images,
+                normalize=normalize_embeddings,
+                aggregation=embedding_aggregation,
+            )
+    elif encoder_type == "dinov3":
         dino_model, dino_processor = _load_dinov3(encoder_model_name, resolved_device)
+        local_salad_head: Optional[LocalSALADHead] = None
+        if embedding_aggregation == "local_salad":
+            if not embedding_salad_head_id:
+                raise TrainingError("Local SALAD aggregation requires a selected local SALAD head.")
+            safe_head = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in embedding_salad_head_id).strip("._-")
+            if not safe_head:
+                raise TrainingError("Local SALAD aggregation requires a valid local SALAD head.")
+            head_path = Path(os.environ.get("LOCAL_SALAD_HEAD_ROOT", "./uploads/salad_heads")) / f"{safe_head}.pt"
+            local_salad_head, _salad_meta = load_local_salad_head_file(head_path, device_name=resolved_device)
+            if str(_salad_meta.get("encoder_type") or "dinov3").strip().lower() != "dinov3":
+                raise TrainingError("Selected local SALAD head was not trained with DINOv3.")
+
         def encode_images(images: Sequence[Image.Image]) -> np.ndarray:
             return _encode_batch_dinov3(
                 dino_model,
@@ -1185,6 +1253,56 @@ def train_clip_from_yolo(
                 images,
                 normalize=normalize_embeddings,
                 pooling=dinov3_pooling,
+                aggregation=embedding_aggregation,
+                salad_head=local_salad_head,
+            )
+    else:
+        cradio_device = resolve_cradio_torch_device(device or None)
+        cradio_model, cradio_processor, _resolved_cradio_model, cradio_device = load_cradio_backbone(
+            encoder_model_name,
+            cradio_device,
+        )
+        local_salad_head: Optional[LocalSALADHead] = None
+        if embedding_aggregation == "local_salad":
+            if not embedding_salad_head_id:
+                raise TrainingError("Local SALAD aggregation requires a selected local SALAD head.")
+            safe_head = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in embedding_salad_head_id).strip("._-")
+            if not safe_head:
+                raise TrainingError("Local SALAD aggregation requires a valid local SALAD head.")
+            head_path = Path(os.environ.get("LOCAL_SALAD_HEAD_ROOT", "./uploads/salad_heads")) / f"{safe_head}.pt"
+            local_salad_head, _salad_meta = load_local_salad_head_file(head_path, device_name=cradio_device)
+            if str(_salad_meta.get("encoder_type") or "dinov3").strip().lower() != "cradio":
+                raise TrainingError("Selected local SALAD head was not trained with C-RADIOv4.")
+
+        def encode_images(images: Sequence[Image.Image]) -> np.ndarray:
+            if embedding_aggregation == "local_salad":
+                _base, spatial_tokens, summary_tokens = encode_cradio_images(
+                    cradio_model,
+                    cradio_processor,
+                    cradio_device,
+                    images,
+                    pooling=cradio_pooling,
+                    normalize=False,
+                    return_tokens=True,
+                )
+                if spatial_tokens.ndim != 3 or spatial_tokens.shape[1] <= 0:
+                    raise TrainingError("C-RADIOv4 output missing spatial tokens for local SALAD aggregation.")
+                assert local_salad_head is not None
+                with torch.no_grad():
+                    feats = local_salad_head(
+                        torch.from_numpy(spatial_tokens).to(cradio_device),
+                        global_token=torch.from_numpy(summary_tokens).to(cradio_device),
+                    )
+                    if normalize_embeddings:
+                        feats = torch.nn.functional.normalize(feats, dim=-1)
+                return feats.detach().cpu().numpy().astype(np.float32)
+            return encode_cradio_images(
+                cradio_model,
+                cradio_processor,
+                cradio_device,
+                images,
+                pooling=cradio_pooling,
+                normalize=normalize_embeddings,
             )
 
     def encode_batch(items: Sequence[Any]) -> np.ndarray:
@@ -1219,6 +1337,9 @@ def train_clip_from_yolo(
         "embedding_view_mode": embedding_view_mode,
         "embedding_adjustment": embedding_adjustment,
         "dinov3_pooling": dinov3_pooling,
+        "cradio_pooling": cradio_pooling,
+        "embedding_aggregation": embedding_aggregation,
+        "embedding_salad_head_id": embedding_salad_head_id,
     }
 
     cache_signature = None
@@ -2322,6 +2443,9 @@ def train_clip_from_yolo(
                 "embedding_adjustment": embedding_adjustment,
                 "embedding_adjustment_transform": embedding_adjustment_transform,
                 "dinov3_pooling": dinov3_pooling,
+                "cradio_pooling": cradio_pooling,
+                "embedding_aggregation": embedding_aggregation,
+                "embedding_salad_head_id": embedding_salad_head_id,
                 "calibration_temperature": calibration_temperature,
                 "logit_adjustment": logit_adjustment_vec,
                 "logit_adjustment_inference": bool(logit_adjustment_inference_flag),
@@ -2382,10 +2506,9 @@ def train_clip_from_yolo(
                     num_classes=len(classes_list),
                 )
         else:
-            clf = LogisticRegression(
+            clf = _make_logistic_regression(
                 random_state=random_seed,
                 max_iter=1,
-                multi_class="auto",
                 solver=solver,
                 class_weight=class_weight_param,
                 C=C,
@@ -2753,6 +2876,9 @@ def train_clip_from_yolo(
             "embedding_adjustment": embedding_adjustment,
             "embedding_adjustment_transform": embedding_adjustment_transform,
             "dinov3_pooling": dinov3_pooling,
+            "cradio_pooling": cradio_pooling,
+            "embedding_aggregation": embedding_aggregation,
+            "embedding_salad_head_id": embedding_salad_head_id,
             "calibration_mode": calibration_mode,
             "calibration_temperature": calibration_temperature,
             "phase_timings": dict(phase_timings),
@@ -2868,6 +2994,9 @@ def train_clip_from_yolo(
             embedding_view_mode=str(embedding_view_mode),
             embedding_adjustment=str(embedding_adjustment),
             dinov3_pooling=str(dinov3_pooling),
+            cradio_pooling=str(cradio_pooling),
+            embedding_aggregation=str(embedding_aggregation),
+            embedding_salad_head_id=str(embedding_salad_head_id),
             calibration_mode=str(calibration_mode),
             calibration_temperature=None if calibration_temperature is None else float(calibration_temperature),
             phase_timings=dict(phase_timings),

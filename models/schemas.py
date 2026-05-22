@@ -12,6 +12,9 @@ class Base64Payload(BaseModel):
     image_token: Optional[str] = None
     uuid: Optional[str] = None
     background_guard: Optional[bool] = None
+    bbox_xyxy: Optional[List[float]] = None
+    image_width: Optional[int] = None
+    image_height: Optional[int] = None
 
 
 class PredictResponse(BaseModel):

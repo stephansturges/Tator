@@ -8304,6 +8304,9 @@ def _postprocess_features_for_head(
     geometry_records: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> np.ndarray:
     feats_np = np.asarray(feats_np, dtype=np.float32)
+    normalize_embeddings = bool(head.get("normalize_embeddings"))
+    if normalize_embeddings:
+        feats_np = _embedding_normalize_rows(feats_np)
     transform = head.get("embedding_adjustment_transform")
     if transform and geometry_records is not None:
         covariates, _names = _embedding_covariates_from_records(geometry_records)
@@ -8311,8 +8314,10 @@ def _postprocess_features_for_head(
             feats_np,
             covariates,
             transform,
-            normalize=bool(head.get("normalize_embeddings", True)),
+            normalize=True,
         )
+    if normalize_embeddings and str(head.get("classifier_type") or "").lower() == "mlp":
+        feats_np = _embedding_normalize_rows(feats_np)
     center_vals = head.get("embedding_center_values")
     std_vals = head.get("embedding_std_values")
     if center_vals is not None:
@@ -8324,10 +8329,6 @@ def _postprocess_features_for_head(
         if std_arr.shape[1] == feats_np.shape[1]:
             std_arr = np.where(std_arr == 0, 1.0, std_arr)
             feats_np = feats_np / std_arr
-    if head.get("normalize_embeddings"):
-        denom = np.linalg.norm(feats_np, axis=1, keepdims=True)
-        denom = np.where(denom == 0, 1.0, denom)
-        feats_np = feats_np / denom
     return feats_np.astype(np.float32, copy=False)
 
 
@@ -8639,9 +8640,19 @@ def _clip_head_predict_proba(
         if not isinstance(layers, list) or not layers:
             return None
         x = feats_np.astype(np.float32, copy=False)
-        for layer in layers:
+        arcface = bool(head.get("arcface"))
+        arcface_scale = _coerce_float(head.get("arcface_scale"), 1.0, minimum=1e-6)
+        for layer_idx, layer in enumerate(layers):
             weight = np.asarray(layer.get("weight"), dtype=np.float32)
             bias = np.asarray(layer.get("bias"), dtype=np.float32)
+            is_output_layer = layer_idx == len(layers) - 1
+            if arcface and is_output_layer:
+                x_norm = x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-12)
+                weight_norm = weight / np.maximum(
+                    np.linalg.norm(weight, axis=1, keepdims=True), 1e-12
+                )
+                x = (x_norm @ weight_norm.T) * arcface_scale
+                continue
             x = x @ weight.T + bias
             ln_weight = layer.get("layer_norm_weight")
             if ln_weight is not None:
@@ -8661,6 +8672,9 @@ def _clip_head_predict_proba(
             activation = str(layer.get("activation") or "").lower()
             if activation in {"relu"}:
                 x = np.maximum(0.0, x)
+            elif activation in {"gelu"}:
+                erf = np.vectorize(math.erf, otypes=[np.float32])
+                x = 0.5 * x * (1.0 + erf(x / math.sqrt(2.0)))
         logits = x
     else:
         coef = np.asarray(head.get("coef"), dtype=np.float32)
@@ -26879,6 +26893,61 @@ def _active_encoder_ready() -> bool:
     return bool(clip_initialized and clip_model is not None and clip_preprocess is not None)
 
 
+def _classifier_embedding_dim_multiplier(
+    encoder_type: str,
+    meta: Optional[Mapping[str, Any]],
+) -> int:
+    """Return the saved recipe's feature-width multiplier over the base encoder width."""
+    meta_map = meta or {}
+    multiplier = 1
+    view_mode = _embedding_normalize_view_mode(meta_map.get("embedding_view_mode"))
+    if view_mode != "single":
+        multiplier *= 2
+    encoder_type_norm = str(encoder_type or "clip").strip().lower()
+    if encoder_type_norm == "dinov3":
+        pooling = _embedding_normalize_dinov3_pooling(meta_map.get("dinov3_pooling"))
+        if pooling == "cls_patch_concat":
+            multiplier *= 2
+    elif encoder_type_norm == "cradio":
+        pooling = normalize_cradio_pooling(meta_map.get("cradio_pooling"))
+        if pooling == "summary_spatial_concat":
+            multiplier *= 2
+    return max(1, int(multiplier))
+
+
+def _classifier_base_dim_from_head_dim(
+    head_dim: Optional[int],
+    *,
+    encoder_type: str,
+    meta: Optional[Mapping[str, Any]],
+) -> Optional[int]:
+    if head_dim is None:
+        return None
+    try:
+        dim = int(head_dim)
+    except Exception:
+        return None
+    multiplier = _classifier_embedding_dim_multiplier(encoder_type, meta)
+    if multiplier > 1 and dim > 0 and dim % multiplier == 0:
+        return dim // multiplier
+    return dim
+
+
+def _classifier_expected_head_dim(
+    base_dim: Optional[int],
+    *,
+    encoder_type: str,
+    meta: Optional[Mapping[str, Any]],
+) -> Optional[int]:
+    if base_dim is None:
+        return None
+    try:
+        dim = int(base_dim)
+    except Exception:
+        return None
+    return dim * _classifier_embedding_dim_multiplier(encoder_type, meta)
+
+
 def predict_base64(payload: Base64Payload):
     # If CLIP/logreg not loaded, return error message in "prediction"
     if not _active_encoder_ready():
@@ -26899,7 +26968,27 @@ def predict_base64(payload: Base64Payload):
         store_preloaded_fn=_store_preloaded_image,
         hash_fn=lambda payload: hashlib.md5(payload).hexdigest(),
     )
-    feats_np = _encode_pil_batch_for_active([pil_img])
+    xyxy = None
+    raw_bbox = getattr(payload, "bbox_xyxy", None)
+    if raw_bbox is not None:
+        try:
+            values = [float(v) for v in list(raw_bbox)[:4]]
+            if len(values) == 4:
+                source_w = float(getattr(payload, "image_width", None) or pil_img.width)
+                source_h = float(getattr(payload, "image_height", None) or pil_img.height)
+                scale_x = (float(pil_img.width) / source_w) if source_w > 0 else 1.0
+                scale_y = (float(pil_img.height) / source_h) if source_h > 0 else 1.0
+                xyxy = [
+                    values[0] * scale_x,
+                    values[1] * scale_y,
+                    values[2] * scale_x,
+                    values[3] * scale_y,
+                ]
+        except Exception:
+            xyxy = None
+    if xyxy is None:
+        xyxy = [0.0, 0.0, float(pil_img.width), float(pil_img.height)]
+    feats_np = _encode_classifier_xyxy_for_active(pil_img, xyxy)
     if feats_np is None or not isinstance(feats_np, np.ndarray) or feats_np.size == 0:
         return PredictResponse(prediction=str(ERROR_MESSAGE), uuid=None, error="clip_unavailable")
     bg_guard = bool(payload.background_guard) if payload.background_guard is not None else False
@@ -30085,8 +30174,13 @@ def set_active_model(payload: ActiveModelRequest):
             or clip_model_name
             or DEFAULT_CLIP_MODEL
         )
+        base_embed_dim = _classifier_base_dim_from_head_dim(
+            embed_dim,
+            encoder_type=encoder_type_norm,
+            meta=meta_obj,
+        )
         inferred = _infer_clip_model_from_embedding_dim_impl(
-            embed_dim, active_name=clip_model_name or DEFAULT_CLIP_MODEL
+            base_embed_dim, active_name=clip_model_name or DEFAULT_CLIP_MODEL
         )
         if inferred and inferred != clip_name and not requested_clip_model:
             clip_name = inferred
@@ -30104,8 +30198,16 @@ def set_active_model(payload: ActiveModelRequest):
             new_clip_model = clip_model
             new_preprocess = clip_preprocess
         clip_dim = getattr(getattr(new_clip_model, "visual", None), "output_dim", None)
-        if embed_dim is not None and clip_dim is not None and embed_dim != clip_dim:
-            inferred = _infer_clip_model_from_embedding_dim_impl(embed_dim, active_name=clip_name)
+        expected_clip_dim = _classifier_expected_head_dim(
+            clip_dim,
+            encoder_type=encoder_type_norm,
+            meta=meta_obj,
+        )
+        if embed_dim is not None and expected_clip_dim is not None and embed_dim != expected_clip_dim:
+            inferred = _infer_clip_model_from_embedding_dim_impl(
+                base_embed_dim,
+                active_name=clip_name,
+            )
             if inferred and inferred != clip_name:
                 try:
                     new_clip_model, new_preprocess = clip.load(inferred, device=device)
@@ -30115,15 +30217,20 @@ def set_active_model(payload: ActiveModelRequest):
                     ) from exc
                 clip_name = inferred
                 clip_dim = getattr(getattr(new_clip_model, "visual", None), "output_dim", None)
+                expected_clip_dim = _classifier_expected_head_dim(
+                    clip_dim,
+                    encoder_type=encoder_type_norm,
+                    meta=meta_obj,
+                )
                 logger.warning(
                     "CLIP classifier embedding dim %s mismatched requested backbone; falling back to %s.",
                     embed_dim,
                     inferred,
                 )
-        if embed_dim is not None and clip_dim is not None and embed_dim != clip_dim:
+        if embed_dim is not None and expected_clip_dim is not None and embed_dim != expected_clip_dim:
             raise HTTPException(
                 status_code=HTTP_400_BAD_REQUEST,
-                detail=f"dimension_mismatch:{embed_dim}!={clip_dim}",
+                detail=f"dimension_mismatch:{embed_dim}!={expected_clip_dim}",
             )
         encoder_model_for_active = clip_name
     elif encoder_type_norm == "dinov3":
@@ -30146,10 +30253,15 @@ def set_active_model(payload: ActiveModelRequest):
             dino_dim = getattr(cfg, "hidden_size", None) or getattr(cfg, "embed_dim", None)
         except Exception:
             dino_dim = None
-        if embed_dim is not None and dino_dim is not None and int(embed_dim) != int(dino_dim):
+        expected_dino_dim = _classifier_expected_head_dim(
+            dino_dim,
+            encoder_type=encoder_type_norm,
+            meta=meta_obj,
+        )
+        if embed_dim is not None and expected_dino_dim is not None and int(embed_dim) != int(expected_dino_dim):
             raise HTTPException(
                 status_code=HTTP_400_BAD_REQUEST,
-                detail=f"dimension_mismatch:{embed_dim}!={dino_dim}",
+                detail=f"dimension_mismatch:{embed_dim}!={expected_dino_dim}",
             )
         encoder_model_for_active = encoder_model_norm
     elif encoder_type_norm == "cradio":

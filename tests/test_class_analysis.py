@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import types
 
 import numpy as np
@@ -965,7 +966,7 @@ def test_classifier_multiview_inference_composes_views_before_size_bias(monkeypa
     assert captured["residualizer_embedding_shape"] == (1, 4)
     assert captured["residualizer_covariate_shape"] == (1, 4)
     assert captured["residualizer_transform"] == transform
-    assert captured["residualizer_normalize"] is False
+    assert captured["residualizer_normalize"] is True
     assert np.all(feats > 9.0)
 
 
@@ -1085,6 +1086,301 @@ def test_classifier_loader_preserves_embedding_recipe_metadata(tmp_path):
     assert head["cradio_pooling"] == "summary_spatial_concat"
     assert head["embedding_aggregation"] == "local_salad"
     assert head["embedding_salad_head_id"] == "unit_head"
+
+
+def test_classifier_loader_preserves_mlp_gelu_activation(tmp_path):
+    classifier_path = tmp_path / "gelu_head.pkl"
+    meta_path = tmp_path / "gelu_head.meta.pkl"
+    classifier_path.write_bytes(b"classifier")
+    meta_path.write_bytes(b"meta")
+
+    clf_obj = {
+        "classifier_type": "mlp",
+        "classes": ["car", "boat"],
+        "embedding_dim": 2,
+        "layers": [
+            {
+                "weight": np.eye(2, dtype=np.float32),
+                "bias": np.zeros(2, dtype=np.float32),
+                "activation": "gelu",
+            },
+            {
+                "weight": np.eye(2, dtype=np.float32),
+                "bias": np.zeros(2, dtype=np.float32),
+                "activation": "linear",
+            },
+        ],
+    }
+
+    def fake_joblib_load(path):
+        if path.endswith(".meta.pkl"):
+            return {
+                "encoder_type": "dinov3",
+                "encoder_model": "facebook/dinov3-vitb16-pretrain-lvd1689m",
+                "mlp_normalize_embeddings": True,
+            }
+        return clf_obj
+
+    class HttpError(Exception):
+        def __init__(self, *, status_code, detail):
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
+
+    head = _load_clip_head_from_classifier_impl(
+        classifier_path,
+        joblib_load_fn=fake_joblib_load,
+        http_exception_cls=HttpError,
+        clip_head_background_indices_fn=lambda classes: [],
+        resolve_head_normalize_embeddings_fn=lambda clf, default: default,
+        infer_clip_model_fn=lambda dim, default: default,
+        active_clip_model_name=None,
+        default_clip_model="ViT-B/32",
+        logger=type("Logger", (), {"warning": lambda *args, **kwargs: None})(),
+    )
+
+    assert head["layers"][0]["activation"] == "gelu"
+
+
+def test_clip_head_predict_proba_replays_mlp_gelu_activation():
+    head = {
+        "classifier_type": "mlp",
+        "classes": ["car", "boat"],
+        "proba_mode": "softmax",
+        "layers": [
+            {
+                "weight": np.eye(2, dtype=np.float32),
+                "bias": np.zeros(2, dtype=np.float32),
+                "activation": "gelu",
+            },
+            {
+                "weight": np.asarray([[1.0, -0.5], [-0.75, 0.25]], dtype=np.float32),
+                "bias": np.asarray([0.1, -0.2], dtype=np.float32),
+                "activation": "linear",
+            },
+        ],
+    }
+    feats = np.asarray([[-1.0, 2.0]], dtype=np.float32)
+
+    hidden = 0.5 * feats * (1.0 + np.vectorize(math.erf)(feats / math.sqrt(2.0)))
+    logits = hidden @ head["layers"][1]["weight"].T + head["layers"][1]["bias"]
+    logits = logits - np.max(logits, axis=1, keepdims=True)
+    expected = np.exp(logits) / np.sum(np.exp(logits), axis=1, keepdims=True)
+
+    actual = api._clip_head_predict_proba(feats, head)
+
+    assert np.allclose(actual, expected.astype(np.float32), atol=1e-6)
+
+
+def test_clip_head_predict_proba_replays_mlp_arcface_output_layer():
+    head = {
+        "classifier_type": "mlp",
+        "classes": ["car", "boat"],
+        "proba_mode": "softmax",
+        "arcface": True,
+        "arcface_scale": 10.0,
+        "layers": [
+            {
+                "weight": np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+                "bias": np.zeros(2, dtype=np.float32),
+                "activation": "linear",
+            },
+        ],
+    }
+    feats = np.asarray([[3.0, 4.0]], dtype=np.float32)
+    feats_norm = feats / np.linalg.norm(feats, axis=1, keepdims=True)
+    weight = head["layers"][0]["weight"]
+    weight_norm = weight / np.linalg.norm(weight, axis=1, keepdims=True)
+    logits = (feats_norm @ weight_norm.T) * 10.0
+    logits = logits - np.max(logits, axis=1, keepdims=True)
+    expected = np.exp(logits) / np.sum(np.exp(logits), axis=1, keepdims=True)
+
+    actual = api._clip_head_predict_proba(feats, head)
+
+    assert np.allclose(actual, expected.astype(np.float32), atol=1e-6)
+
+
+def test_classifier_postprocess_matches_training_normalize_then_center_order():
+    feats = np.asarray([[3.0, 4.0]], dtype=np.float32)
+    head = {
+        "classifier_type": "logreg",
+        "normalize_embeddings": True,
+        "embedding_center_values": [0.6, 0.8],
+    }
+
+    actual = api._postprocess_features_for_head(feats, head=head)
+
+    assert np.allclose(actual, np.zeros((1, 2), dtype=np.float32), atol=1e-6)
+
+
+def test_predict_base64_replays_classifier_crop_recipe_with_scaled_bbox(monkeypatch):
+    captured = {}
+    image = Image.new("RGB", (50, 100), (10, 20, 30))
+
+    def fake_resolve(*args, **kwargs):
+        return image, np.asarray(image), "token"
+
+    def fake_encode(pil_img, xyxy):
+        captured["image_size"] = pil_img.size
+        captured["xyxy"] = [float(v) for v in xyxy]
+        return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    monkeypatch.setattr(api, "_active_encoder_ready", lambda: True)
+    monkeypatch.setattr(api, "_resolve_detector_image_impl", fake_resolve)
+    monkeypatch.setattr(api, "_encode_classifier_xyxy_for_active", fake_encode)
+    monkeypatch.setattr(
+        api,
+        "_clip_auto_predict_details",
+        lambda feats, background_guard=False: {
+            "label": "car",
+            "proba": 0.9,
+            "second_label": "boat",
+            "second_proba": 0.1,
+            "margin": 0.8,
+            "error": None,
+        },
+    )
+
+    response = api.predict_base64(
+        api.Base64Payload(
+            image_base64="ignored",
+            uuid="bbox-1",
+            bbox_xyxy=[10.0, 20.0, 30.0, 60.0],
+            image_width=100,
+            image_height=200,
+        )
+    )
+
+    assert response.prediction == "car"
+    assert response.uuid == "bbox-1"
+    assert captured["image_size"] == (50, 100)
+    assert captured["xyxy"] == [5.0, 10.0, 15.0, 30.0]
+
+
+def test_predict_base64_crop_only_uses_full_image_as_bbox(monkeypatch):
+    captured = {}
+    image = Image.new("RGB", (24, 16), (10, 20, 30))
+
+    monkeypatch.setattr(api, "_active_encoder_ready", lambda: True)
+    monkeypatch.setattr(
+        api,
+        "_resolve_detector_image_impl",
+        lambda *args, **kwargs: (image, np.asarray(image), "token"),
+    )
+    def fake_encode(pil_img, xyxy):
+        captured["xyxy"] = [float(v) for v in xyxy]
+        return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    monkeypatch.setattr(api, "_encode_classifier_xyxy_for_active", fake_encode)
+    monkeypatch.setattr(
+        api,
+        "_clip_auto_predict_details",
+        lambda feats, background_guard=False: {"label": "car", "error": None},
+    )
+
+    api.predict_base64(api.Base64Payload(image_base64="ignored", uuid="crop-1"))
+
+    assert captured["xyxy"] == [0.0, 0.0, 24.0, 16.0]
+
+
+def test_set_active_model_accepts_multiview_clip_embedding_width(tmp_path, monkeypatch):
+    classifiers_root = tmp_path / "classifiers"
+    labelmaps_root = tmp_path / "labelmaps"
+    classifiers_root.mkdir()
+    labelmaps_root.mkdir()
+    classifier_path = classifiers_root / "clip_multiview.pkl"
+    meta_path = classifiers_root / "clip_multiview.meta.pkl"
+    labelmap_path = labelmaps_root / "labels.pkl"
+    classifier = types.SimpleNamespace(
+        classes_=np.asarray(["car", "boat"], dtype=object),
+        coef_=np.zeros((2, 1536), dtype=np.float32),
+        intercept_=np.zeros(2, dtype=np.float32),
+        solver="lbfgs",
+        multi_class="auto",
+    )
+    api.joblib.dump(classifier, classifier_path)
+    api.joblib.dump(
+        {
+            "clip_model": "ViT-L/14",
+            "encoder_type": "clip",
+            "encoder_model": "ViT-L/14",
+            "embedding_view_mode": "tight_context",
+            "embedding_dim": 1536,
+        },
+        meta_path,
+    )
+    api.joblib.dump(["car", "boat"], labelmap_path)
+
+    class FakeClipModel:
+        visual = types.SimpleNamespace(output_dim=768)
+
+    monkeypatch.setattr(api, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(api, "clip_model", None)
+    monkeypatch.setattr(api, "clip_preprocess", None)
+    monkeypatch.setattr(api, "clip_model_name", "ViT-B/32")
+    monkeypatch.setattr(api.clip, "load", lambda name, device=None: (FakeClipModel(), object()))
+
+    payload = api.set_active_model(
+        api.ActiveModelRequest(
+            classifier_path=str(classifier_path),
+            labelmap_path=str(labelmap_path),
+        )
+    )
+
+    assert payload["encoder_type"] == "clip"
+    assert payload["encoder_ready"] is True
+    assert api.active_classifier_head["embedding_dim"] == 1536
+    assert api.active_classifier_head["embedding_view_mode"] == "tight_context"
+
+
+def test_set_active_model_accepts_multiview_dinov3_embedding_width(tmp_path, monkeypatch):
+    classifiers_root = tmp_path / "classifiers"
+    labelmaps_root = tmp_path / "labelmaps"
+    classifiers_root.mkdir()
+    labelmaps_root.mkdir()
+    classifier_path = classifiers_root / "dino_multiview.pkl"
+    meta_path = classifiers_root / "dino_multiview.meta.pkl"
+    labelmap_path = labelmaps_root / "labels.pkl"
+    classifier = types.SimpleNamespace(
+        classes_=np.asarray(["car", "boat"], dtype=object),
+        coef_=np.zeros((2, 2048), dtype=np.float32),
+        intercept_=np.zeros(2, dtype=np.float32),
+        solver="lbfgs",
+        multi_class="auto",
+    )
+    api.joblib.dump(classifier, classifier_path)
+    api.joblib.dump(
+        {
+            "encoder_type": "dinov3",
+            "encoder_model": "facebook/dinov3-vitl16-pretrain-lvd1689m",
+            "embedding_view_mode": "tight_context",
+            "dinov3_pooling": "pooler",
+            "embedding_dim": 2048,
+        },
+        meta_path,
+    )
+    api.joblib.dump(["car", "boat"], labelmap_path)
+
+    class FakeDinoModel:
+        config = types.SimpleNamespace(hidden_size=1024)
+
+    monkeypatch.setattr(api, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(api, "dinov3_model", None)
+    monkeypatch.setattr(api, "dinov3_processor", None)
+    monkeypatch.setattr(api, "dinov3_initialized", False)
+    monkeypatch.setattr(api, "_load_dinov3_backbone", lambda *args, **kwargs: (FakeDinoModel(), object()))
+
+    payload = api.set_active_model(
+        api.ActiveModelRequest(
+            classifier_path=str(classifier_path),
+            labelmap_path=str(labelmap_path),
+        )
+    )
+
+    assert payload["encoder_type"] == "dinov3"
+    assert payload["encoder_ready"] is True
+    assert api.active_classifier_head["embedding_dim"] == 2048
+    assert api.active_classifier_head["embedding_view_mode"] == "tight_context"
 
 
 def test_training_multiview_items_compose_consistent_embedding_widths():

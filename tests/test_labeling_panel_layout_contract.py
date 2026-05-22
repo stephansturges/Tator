@@ -449,7 +449,9 @@ def test_class_split_explorer_panel_contract():
     assert 'dragmode: "lasso"' in js
     assert "scrollZoom: true" in js
     assert "__classSplitShiftWheelGuard" not in js
-    assert 'graphEl.addEventListener("wheel"' not in js
+    assert "function suppressClassSplitShiftWheel" in js
+    assert "__classSplitShiftWheelSuppressor" in js
+    assert 'graphEl.addEventListener("wheel", graphEl.__classSplitShiftWheelSuppressor, { passive: false, capture: true })' in js
     assert "function rememberClassSplitSelectionFromPlot" in js
     assert "function changeClassSplitSelectedPointsClass" in js
     assert "function markClassSplitWrongCandidateCorrect" in js

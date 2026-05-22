@@ -208,7 +208,7 @@ def _load_clip_head_from_classifier_impl(
             activation = str(layer.get("activation") or "").strip().lower()
             if not activation:
                 activation = "linear" if idx == total_layers - 1 else "relu"
-            if activation not in {"relu", "linear", "none", "identity"}:
+            if activation not in {"relu", "gelu", "linear", "none", "identity"}:
                 activation = "relu" if idx < total_layers - 1 else "linear"
             layer_entry: Dict[str, Any] = {
                 "weight": weight,

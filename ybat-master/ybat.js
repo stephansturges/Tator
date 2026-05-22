@@ -36786,6 +36786,20 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+    function suppressClassSplitShiftWheel(graphEl) {
+        if (!graphEl || graphEl.__classSplitShiftWheelSuppressor) {
+            return;
+        }
+        graphEl.__classSplitShiftWheelSuppressor = (event) => {
+            if (!event.shiftKey) {
+                return;
+            }
+            event.preventDefault();
+            event.stopImmediatePropagation();
+        };
+        graphEl.addEventListener("wheel", graphEl.__classSplitShiftWheelSuppressor, { passive: false, capture: true });
+    }
+
     function renderClassSplitPlot() {
         const graphEl = classSplitElements.graph;
         if (!graphEl) {
@@ -36848,6 +36862,7 @@ async function cancelRfDetrTrainingJobRequest() {
             scrollZoom: true,
             modeBarButtonsToRemove: ["toImage"],
         };
+        suppressClassSplitShiftWheel(graphEl);
         window.Plotly.react(graphEl, traces, layout, config).then(() => {
             if (typeof graphEl.removeAllListeners === "function") {
                 [
@@ -39062,33 +39077,64 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             const cropWidth = Math.max(1, Math.round(Number(bbox?.width) || 0));
             const cropHeight = Math.max(1, Math.round(Number(bbox?.height) || 0));
-            const offCanvas = document.createElement("canvas");
-            offCanvas.width = cropWidth;
-            offCanvas.height = cropHeight;
-            const ctx = offCanvas.getContext("2d");
-            if (!ctx) {
-                throw new Error("Unable to initialize crop canvas context");
-            }
-            ctx.drawImage(
-                sourceImageObject,
-                bbox.x,
-                bbox.y,
-                bbox.width,
-                bbox.height,
-                0,
-                0,
-                cropWidth,
-                cropHeight
+            const bboxX = Number(bbox?.x) || 0;
+            const bboxY = Number(bbox?.y) || 0;
+            const bboxW = Number(bbox?.width) || cropWidth;
+            const bboxH = Number(bbox?.height) || cropHeight;
+            const sourceWidth = Math.max(
+                1,
+                Math.round(Number(sourceImageObject.naturalWidth || sourceImageObject.videoWidth || sourceImageObject.width || sourceImageRecord?.width || 0)),
             );
-            const base64String = offCanvas.toDataURL("image/jpeg");
-            const base64Data = base64String.split(",")[1];
+            const sourceHeight = Math.max(
+                1,
+                Math.round(Number(sourceImageObject.naturalHeight || sourceImageObject.videoHeight || sourceImageObject.height || sourceImageRecord?.height || 0)),
+            );
+            let requestBody = null;
+            try {
+                const sourceCanvas = document.createElement("canvas");
+                sourceCanvas.width = sourceWidth;
+                sourceCanvas.height = sourceHeight;
+                const sourceCtx = sourceCanvas.getContext("2d");
+                if (!sourceCtx) {
+                    throw new Error("Unable to initialize source image canvas context");
+                }
+                sourceCtx.drawImage(sourceImageObject, 0, 0, sourceWidth, sourceHeight);
+                requestBody = {
+                    image_base64: sourceCanvas.toDataURL("image/jpeg").split(",")[1],
+                    uuid: bbox.uuid,
+                    bbox_xyxy: [bboxX, bboxY, bboxX + bboxW, bboxY + bboxH],
+                    image_width: sourceWidth,
+                    image_height: sourceHeight,
+                };
+            } catch (canvasError) {
+                console.warn("Falling back to crop-only auto-class payload", canvasError);
+                const offCanvas = document.createElement("canvas");
+                offCanvas.width = cropWidth;
+                offCanvas.height = cropHeight;
+                const ctx = offCanvas.getContext("2d");
+                if (!ctx) {
+                    throw new Error("Unable to initialize crop canvas context");
+                }
+                ctx.drawImage(
+                    sourceImageObject,
+                    bboxX,
+                    bboxY,
+                    bboxW,
+                    bboxH,
+                    0,
+                    0,
+                    cropWidth,
+                    cropHeight
+                );
+                requestBody = {
+                    image_base64: offCanvas.toDataURL("image/jpeg").split(",")[1],
+                    uuid: bbox.uuid,
+                };
+            }
             const resp = await fetch(`${API_ROOT}/predict_base64`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    image_base64: base64Data,
-                    uuid: bbox.uuid,
-                }),
+                body: JSON.stringify(requestBody),
             });
             if (!resp.ok) {
                 const detail = await resp.text();

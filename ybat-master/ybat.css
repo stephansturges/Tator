@@ -2299,9 +2299,7 @@ body.annotation-focus-mode .class-scroll-indicator {
     max-height: none;
     flex: 0 0 auto;
     display: block;
-    transform: scale(var(--class-split-crop-scale, 1));
-    transform-origin: center center;
-    transition: transform 0.08s ease-out;
+    transition: width 0.08s ease-out, height 0.08s ease-out;
     image-rendering: auto;
     user-select: none;
     -webkit-user-drag: none;

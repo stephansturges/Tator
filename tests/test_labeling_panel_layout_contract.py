@@ -386,7 +386,7 @@ def test_class_split_explorer_panel_contract():
     assert ".class-split-hover-card" not in css
     assert "--class-split-crop-scale" in css
     assert "max-width: none;" in css
-    assert "transform: scale(var(--class-split-crop-scale, 1));" in css
+    assert "transition: width 0.08s ease-out, height 0.08s ease-out;" in css
     assert ".embedding-recipe-note__text" in css
     assert ".class-split-review" in css
     assert "height: calc(100vh - 330px);" in css
@@ -464,8 +464,11 @@ def test_class_split_explorer_panel_contract():
     assert "function showClassSplitHoverCard" not in js
     assert "cropPreview.naturalWidth" in js
     assert "Math.min(shellWidth / naturalWidth, shellHeight / naturalHeight)" in js
+    assert "cropPreview.style.width = `${Math.max(1, Math.round(naturalWidth * nextScale))}px`" in js
+    assert "cropPreview.style.height = `${Math.max(1, Math.round(naturalHeight * nextScale))}px`" in js
     assert "Math.max(0.2, Math.min(16, cropZoom * factor))" in js
     assert "new ResizeObserver(updateCropFitScale)" in js
+    assert "transition: width 0.08s ease-out, height 0.08s ease-out;" in css
     assert "function focusClassSplitPlotOnPoint" in js
     assert "classSplitElements.bulkPanel" in js
     assert "panClassSplitPlotWithWheel" not in js

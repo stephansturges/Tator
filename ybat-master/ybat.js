@@ -37104,11 +37104,15 @@ async function cancelRfDetrTrainingJobRequest() {
                 const shellHeight = Number(cropShell.clientHeight) || 0;
                 if (!naturalWidth || !naturalHeight || !shellWidth || !shellHeight) {
                     cropShell.style.setProperty("--class-split-crop-scale", cropZoom.toFixed(4));
+                    cropPreview.style.width = "";
+                    cropPreview.style.height = "";
                     return;
                 }
                 const fitScale = Math.min(shellWidth / naturalWidth, shellHeight / naturalHeight);
                 const nextScale = Math.max(0.01, fitScale * cropZoom);
                 cropShell.style.setProperty("--class-split-crop-scale", nextScale.toFixed(4));
+                cropPreview.style.width = `${Math.max(1, Math.round(naturalWidth * nextScale))}px`;
+                cropPreview.style.height = `${Math.max(1, Math.round(naturalHeight * nextScale))}px`;
                 cropShell.classList.toggle("class-split-inspector__crop-shell--zoomed", Math.abs(cropZoom - 1) > 0.01);
             };
             updateCropFitScale();

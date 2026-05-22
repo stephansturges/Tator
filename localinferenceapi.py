@@ -8645,6 +8645,10 @@ def _clip_head_predict_proba(
         for layer_idx, layer in enumerate(layers):
             weight = np.asarray(layer.get("weight"), dtype=np.float32)
             bias = np.asarray(layer.get("bias"), dtype=np.float32)
+            if weight.ndim != 2 or bias.ndim != 1 or bias.shape[0] != weight.shape[0]:
+                return None
+            if x.shape[1] != weight.shape[1]:
+                return None
             is_output_layer = layer_idx == len(layers) - 1
             if arcface and is_output_layer:
                 x_norm = x / np.maximum(np.linalg.norm(x, axis=1, keepdims=True), 1e-12)
@@ -8681,9 +8685,21 @@ def _clip_head_predict_proba(
         intercept = np.asarray(head.get("intercept"), dtype=np.float32)
         if coef.ndim != 2:
             return None
+        if feats_np.shape[1] != coef.shape[1]:
+            return None
         if intercept.ndim == 1:
             intercept = intercept.reshape(1, -1)
+        if intercept.ndim != 2 or intercept.shape[1] != coef.shape[0]:
+            return None
         logits = feats_np @ coef.T + intercept
+    proba_mode = str(head.get("proba_mode") or "softmax").lower()
+    classes_raw = head.get("classes")
+    class_count = len(classes_raw) if isinstance(classes_raw, (list, tuple)) else 0
+    if proba_mode == "binary":
+        if class_count and class_count != 2:
+            return None
+    elif class_count and logits.shape[1] != class_count:
+        return None
     temp = head.get("temperature")
     if temp:
         try:
@@ -8696,7 +8712,6 @@ def _clip_head_predict_proba(
             adj = np.asarray(adjust, dtype=np.float32).reshape(1, -1)
             if adj.shape[1] == logits.shape[1]:
                 logits = logits + adj
-    proba_mode = str(head.get("proba_mode") or "softmax").lower()
     if proba_mode == "binary":
         if logits.shape[1] != 1:
             logits = logits[:, :1]
@@ -8704,6 +8719,8 @@ def _clip_head_predict_proba(
         probs = np.concatenate([1.0 - pos, pos], axis=1)
     elif proba_mode == "ovr":
         probs = 1.0 / (1.0 + np.exp(-logits))
+        row_sums = probs.sum(axis=1, keepdims=True)
+        probs = probs / np.maximum(row_sums, 1e-12)
     else:
         logits = logits - np.max(logits, axis=1, keepdims=True)
         exp_logits = np.exp(logits)
@@ -26888,9 +26905,19 @@ def _active_encoder_ready() -> bool:
         )
     if str(active_encoder_type or "").strip().lower() == "cradio":
         return bool(
-            cradio_initialized and cradio_model is not None and cradio_processor is not None
+            cradio_initialized
+            and _cradio_runtime_ready(cradio_model, cradio_processor, cradio_model_device)
         )
     return bool(clip_initialized and clip_model is not None and clip_preprocess is not None)
+
+
+def _cradio_runtime_ready(model_obj: Any, processor_obj: Any, device_name: Optional[str]) -> bool:
+    """C-RADIO MLX intentionally has no processor object; Torch backends do."""
+    if model_obj is None:
+        return False
+    if processor_obj is not None:
+        return True
+    return str(device_name or "").strip().lower() == "mlx"
 
 
 def _classifier_embedding_dim_multiplier(
@@ -26946,6 +26973,35 @@ def _classifier_expected_head_dim(
     except Exception:
         return None
     return dim * _classifier_embedding_dim_multiplier(encoder_type, meta)
+
+
+def _classifier_cradio_base_dim(model_obj: Any) -> Optional[int]:
+    candidates: List[Any] = []
+    cfg = getattr(model_obj, "config", None)
+    if cfg is not None:
+        candidates.extend(
+            [
+                getattr(cfg, "hidden_size", None),
+                getattr(cfg, "embed_dim", None),
+                getattr(cfg, "projection_dim", None),
+            ]
+        )
+    candidates.extend(
+        [
+            getattr(model_obj, "output_dim", None),
+            getattr(model_obj, "embed_dim", None),
+            getattr(model_obj, "hidden_size", None),
+        ]
+    )
+    for candidate in candidates:
+        try:
+            value = candidate() if callable(candidate) else candidate
+            dim = int(value)
+        except Exception:
+            continue
+        if dim > 0:
+            return dim
+    return None
 
 
 def predict_base64(payload: Base64Payload):
@@ -30081,12 +30137,15 @@ def set_active_model(payload: ActiveModelRequest):
     global active_classifier_path, active_labelmap_path, active_label_list, clip_last_error
     global active_encoder_type, active_encoder_model
     global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized, dinov3_model_device
-    global cradio_initialized
+    global cradio_model, cradio_processor, cradio_model_name, cradio_model_device, cradio_initialized
     global active_classifier_meta, active_head_normalize_embeddings, active_classifier_head
 
     classifier_path = _normalise_optional_path(payload.classifier_path) or active_classifier_path
     labelmap_path = _normalise_optional_path(payload.labelmap_path)
-    labelmap_provided = "labelmap_path" in payload.__fields_set__
+    payload_fields_set = getattr(payload, "model_fields_set", None)
+    if payload_fields_set is None:
+        payload_fields_set = getattr(payload, "__fields_set__", set())
+    labelmap_provided = "labelmap_path" in payload_fields_set
     requested_clip_model = _normalise_optional_path(payload.clip_model)
 
     if not classifier_path:
@@ -30154,6 +30213,9 @@ def set_active_model(payload: ActiveModelRequest):
     new_preprocess = None
     new_dinov3_model = None
     new_dinov3_processor = None
+    new_cradio_model = None
+    new_cradio_processor = None
+    new_cradio_device = None
     encoder_model_for_active = None
 
     if not meta_found:
@@ -30268,7 +30330,7 @@ def set_active_model(payload: ActiveModelRequest):
         encoder_model_norm = normalize_cradio_model(encoder_model_norm)
         try:
             target_device = resolve_cradio_torch_device(model_name=encoder_model_norm)
-            _cradio_model, _cradio_processor, encoder_model_for_active, _cradio_device = _load_cradio_backbone_cached(
+            new_cradio_model, new_cradio_processor, encoder_model_for_active, new_cradio_device = _load_cradio_backbone_cached(
                 encoder_model_norm,
                 target_device,
                 raise_on_error=True,
@@ -30277,6 +30339,17 @@ def set_active_model(payload: ActiveModelRequest):
             raise HTTPException(
                 status_code=HTTP_400_BAD_REQUEST, detail=f"cradio_load_failed:{exc}"
             ) from exc
+        base_cradio_dim = _classifier_cradio_base_dim(new_cradio_model)
+        expected_cradio_dim = _classifier_expected_head_dim(
+            base_cradio_dim,
+            encoder_type=encoder_type_norm,
+            meta=meta_obj,
+        )
+        if embed_dim is not None and expected_cradio_dim is not None and int(embed_dim) != int(expected_cradio_dim):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail=f"dimension_mismatch:{embed_dim}!={expected_cradio_dim}",
+            )
     else:
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="clip_encoder_type_unsupported"
@@ -30374,7 +30447,16 @@ def set_active_model(payload: ActiveModelRequest):
             dinov3_model_device = target_device
             dinov3_initialized = bool(dinov3_model is not None and dinov3_processor is not None)
     elif encoder_type_norm == "cradio":
-        cradio_initialized = bool(cradio_model is not None and cradio_processor is not None)
+        with cradio_lock:
+            cradio_model = new_cradio_model
+            cradio_processor = new_cradio_processor
+            cradio_model_name = encoder_model_for_active
+            cradio_model_device = new_cradio_device
+            cradio_initialized = _cradio_runtime_ready(
+                cradio_model,
+                cradio_processor,
+                cradio_model_device,
+            )
 
     return _current_active_payload()
 

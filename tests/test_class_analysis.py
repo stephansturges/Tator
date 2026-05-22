@@ -1200,6 +1200,59 @@ def test_clip_head_predict_proba_replays_mlp_arcface_output_layer():
     assert np.allclose(actual, expected.astype(np.float32), atol=1e-6)
 
 
+def test_clip_head_predict_proba_normalizes_ovr_probabilities():
+    feats = np.asarray([[1.0, 0.0]], dtype=np.float32)
+    head = {
+        "classifier_type": "logreg",
+        "coef": np.asarray([[1.0, 0.0], [0.0, 0.0], [-1.0, 0.0]], dtype=np.float32),
+        "intercept": np.asarray([0.0, 0.0, 0.0], dtype=np.float32),
+        "proba_mode": "ovr",
+    }
+
+    actual = api._clip_head_predict_proba(feats, head)
+    raw = 1.0 / (1.0 + np.exp(-np.asarray([[1.0, 0.0, -1.0]], dtype=np.float32)))
+    expected = raw / raw.sum(axis=1, keepdims=True)
+
+    assert np.allclose(actual, expected, atol=1e-6)
+    assert np.allclose(actual.sum(axis=1), [1.0])
+
+
+def test_clip_head_predict_proba_fails_closed_on_embedding_width_mismatch():
+    feats = np.asarray([[1.0, 2.0, 3.0]], dtype=np.float32)
+    logreg_head = {
+        "classifier_type": "logreg",
+        "coef": np.zeros((2, 2), dtype=np.float32),
+        "intercept": np.zeros(2, dtype=np.float32),
+        "proba_mode": "softmax",
+    }
+    mlp_head = {
+        "classifier_type": "mlp",
+        "layers": [
+            {
+                "weight": np.zeros((2, 2), dtype=np.float32),
+                "bias": np.zeros(2, dtype=np.float32),
+                "activation": "linear",
+            }
+        ],
+    }
+
+    assert api._clip_head_predict_proba(feats, logreg_head) is None
+    assert api._clip_head_predict_proba(feats, mlp_head) is None
+
+
+def test_clip_head_predict_proba_fails_closed_on_class_count_mismatch():
+    feats = np.asarray([[1.0, 2.0]], dtype=np.float32)
+    head = {
+        "classifier_type": "logreg",
+        "classes": ["car", "boat", "plane"],
+        "coef": np.zeros((2, 2), dtype=np.float32),
+        "intercept": np.zeros(2, dtype=np.float32),
+        "proba_mode": "softmax",
+    }
+
+    assert api._clip_head_predict_proba(feats, head) is None
+
+
 def test_classifier_postprocess_matches_training_normalize_then_center_order():
     feats = np.asarray([[3.0, 4.0]], dtype=np.float32)
     head = {
@@ -1381,6 +1434,110 @@ def test_set_active_model_accepts_multiview_dinov3_embedding_width(tmp_path, mon
     assert payload["encoder_ready"] is True
     assert api.active_classifier_head["embedding_dim"] == 2048
     assert api.active_classifier_head["embedding_view_mode"] == "tight_context"
+
+
+def test_set_active_model_accepts_cradio_mlx_without_processor(tmp_path, monkeypatch):
+    classifiers_root = tmp_path / "classifiers"
+    labelmaps_root = tmp_path / "labelmaps"
+    classifiers_root.mkdir()
+    labelmaps_root.mkdir()
+    classifier_path = classifiers_root / "cradio_mlx.pkl"
+    meta_path = classifiers_root / "cradio_mlx.meta.pkl"
+    labelmap_path = labelmaps_root / "labels.pkl"
+    classifier = types.SimpleNamespace(
+        classes_=np.asarray(["car", "boat"], dtype=object),
+        coef_=np.zeros((2, 16), dtype=np.float32),
+        intercept_=np.zeros(2, dtype=np.float32),
+        solver="lbfgs",
+        multi_class="auto",
+    )
+    api.joblib.dump(classifier, classifier_path)
+    api.joblib.dump(
+        {
+            "encoder_type": "cradio",
+            "encoder_model": CRADIO_DEFAULT_MODEL,
+            "cradio_pooling": "summary_spatial_concat",
+            "embedding_dim": 16,
+        },
+        meta_path,
+    )
+    api.joblib.dump(["car", "boat"], labelmap_path)
+
+    fake_model = types.SimpleNamespace(output_dim=8)
+    monkeypatch.setattr(api, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(api, "cradio_model", None)
+    monkeypatch.setattr(api, "cradio_processor", None)
+    monkeypatch.setattr(api, "cradio_model_name", None)
+    monkeypatch.setattr(api, "cradio_model_device", None)
+    monkeypatch.setattr(api, "cradio_initialized", False)
+    monkeypatch.setattr(api, "resolve_cradio_torch_device", lambda **_kwargs: "mlx")
+    monkeypatch.setattr(
+        api,
+        "_load_cradio_backbone_cached",
+        lambda model_name, target_device, raise_on_error=False: (fake_model, None, model_name, "mlx"),
+    )
+
+    payload = api.set_active_model(
+        api.ActiveModelRequest(
+            classifier_path=str(classifier_path),
+            labelmap_path=str(labelmap_path),
+        )
+    )
+
+    assert payload["encoder_type"] == "cradio"
+    assert payload["encoder_ready"] is True
+    assert api.cradio_model is fake_model
+    assert api.cradio_processor is None
+    assert api.cradio_model_device == "mlx"
+    assert api.active_classifier_head["embedding_dim"] == 16
+    assert api.active_classifier_head["cradio_pooling"] == "summary_spatial_concat"
+
+
+def test_set_active_model_rejects_cradio_embedding_width_mismatch(tmp_path, monkeypatch):
+    classifiers_root = tmp_path / "classifiers"
+    labelmaps_root = tmp_path / "labelmaps"
+    classifiers_root.mkdir()
+    labelmaps_root.mkdir()
+    classifier_path = classifiers_root / "cradio_bad_width.pkl"
+    meta_path = classifiers_root / "cradio_bad_width.meta.pkl"
+    labelmap_path = labelmaps_root / "labels.pkl"
+    classifier = types.SimpleNamespace(
+        classes_=np.asarray(["car", "boat"], dtype=object),
+        coef_=np.zeros((2, 15), dtype=np.float32),
+        intercept_=np.zeros(2, dtype=np.float32),
+        solver="lbfgs",
+        multi_class="auto",
+    )
+    api.joblib.dump(classifier, classifier_path)
+    api.joblib.dump(
+        {
+            "encoder_type": "cradio",
+            "encoder_model": CRADIO_DEFAULT_MODEL,
+            "cradio_pooling": "summary_spatial_concat",
+            "embedding_dim": 15,
+        },
+        meta_path,
+    )
+    api.joblib.dump(["car", "boat"], labelmap_path)
+
+    fake_model = types.SimpleNamespace(output_dim=8)
+    monkeypatch.setattr(api, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(api, "resolve_cradio_torch_device", lambda **_kwargs: "mlx")
+    monkeypatch.setattr(
+        api,
+        "_load_cradio_backbone_cached",
+        lambda model_name, target_device, raise_on_error=False: (fake_model, None, model_name, "mlx"),
+    )
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.set_active_model(
+            api.ActiveModelRequest(
+                classifier_path=str(classifier_path),
+                labelmap_path=str(labelmap_path),
+            )
+        )
+
+    assert exc.value.detail == "dimension_mismatch:15!=16"
 
 
 def test_training_multiview_items_compose_consistent_embedding_widths():

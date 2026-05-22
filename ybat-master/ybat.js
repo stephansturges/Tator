@@ -16337,8 +16337,6 @@ async function cancelRfDetrTrainingJobRequest() {
                     `Crop padding: ${escapeHtml(formatNumber(art.embedding_crop_padding_ratio, 3))}; canonical size: ${escapeHtml(String(art.canonical_size || 336))}`,
                     ...(art.encoder_type === "dinov3" ? [`DINOv3 pooling: ${escapeHtml(art.dinov3_pooling || "pooler")}`] : []),
                     ...(art.encoder_type === "cradio" ? [`C-RADIOv4 pooling: ${escapeHtml(art.cradio_pooling || "summary")}`] : []),
-                    `Aggregation: ${escapeHtml(art.embedding_aggregation || "pooled")}`,
-                    ...(art.embedding_salad_head_id ? [`SALAD head: ${escapeHtml(art.embedding_salad_head_id)}`] : []),
                     `Class weight: ${escapeHtml(art.class_weight || 'none')}`,
                     ...(art.logit_adjustment_mode && String(art.logit_adjustment_mode).toLowerCase() !== "none"
                         ? [`Logit adjustment: ${escapeHtml(String(art.logit_adjustment_mode))}${art.logit_adjustment_inference ? " (infer on)" : ""}`]

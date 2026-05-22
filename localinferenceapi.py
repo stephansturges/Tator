@@ -8333,12 +8333,13 @@ def _encode_pil_batch_for_head(
     if not images:
         return None
     encoder_type = str(head.get("encoder_type") or "clip").strip().lower()
+    aggregation = _embedding_normalize_aggregation(head.get("embedding_aggregation"))
+    if aggregation == "local_salad":
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_auto_class_disabled")
     batch_size = int(batch_size_override or 0) or len(images)
     batch_size = max(1, min(batch_size, len(images)))
     features: List[np.ndarray] = []
     if encoder_type == "dinov3":
-        aggregation = _embedding_normalize_aggregation(head.get("embedding_aggregation"))
-        salad_head: Optional[Any] = None
         global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_model_device, dinov3_initialized
         model_name = str(
             head.get("encoder_model") or head.get("clip_model") or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL or ""
@@ -8373,13 +8374,6 @@ def _encode_pil_batch_for_head(
         if dinov3_model is None or dinov3_processor is None:
             return None
         device_name = device_override or dinov3_model_device or target_device or device
-        if aggregation == "local_salad":
-            salad_head_id = str(head.get("embedding_salad_head_id") or "").strip()
-            if not salad_head_id:
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
-            salad_head, _salad_meta = _load_local_salad_head(salad_head_id, device_name=device_name)
-            if str(_salad_meta.get("encoder_type") or "dinov3").strip().lower() != "dinov3":
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_encoder_mismatch")
         for idx in range(0, len(images), batch_size):
             batch = images[idx : idx + batch_size]
             inputs = dinov3_processor(images=batch, return_tensors="pt")
@@ -8388,17 +8382,7 @@ def _encode_pil_batch_for_head(
                 outputs = dinov3_model(**inputs)
             pooling = _embedding_normalize_dinov3_pooling(head.get("dinov3_pooling"))
             last_hidden = getattr(outputs, "last_hidden_state", None)
-            if aggregation == "local_salad":
-                if last_hidden is None or last_hidden.ndim != 3 or last_hidden.shape[1] <= 1:
-                    raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dinov3_patch_tokens_missing")
-                global_token = getattr(outputs, "pooler_output", None)
-                if global_token is None:
-                    global_token = last_hidden[:, 0, :]
-                assert salad_head is not None
-                feats_np = _encode_local_salad_head_np(salad_head, last_hidden[:, 1:, :], global_token)
-                features.append(feats_np)
-                continue
-            elif pooling == "pooler" and hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+            if pooling == "pooler" and hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
                 feats = outputs.pooler_output
             elif pooling == "patch_mean" and last_hidden is not None and last_hidden.ndim == 3 and last_hidden.shape[1] > 1:
                 feats = last_hidden[:, 1:, :].mean(dim=1)
@@ -8415,8 +8399,6 @@ def _encode_pil_batch_for_head(
             feats_np = feats.detach().float().cpu().numpy()
             features.append(feats_np)
     elif encoder_type == "cradio":
-        aggregation = _embedding_normalize_aggregation(head.get("embedding_aggregation"))
-        salad_head: Optional[Any] = None
         model_name = normalize_cradio_model(head.get("encoder_model") or head.get("clip_model") or CRADIO_DEFAULT_MODEL)
         backend = str(head.get("cradio_backend") or os.environ.get("CRADIO_BACKEND") or "auto").strip()
         target_device = device_override or resolve_cradio_torch_device(backend, model_name=model_name)
@@ -8426,51 +8408,19 @@ def _encode_pil_batch_for_head(
         )
         if model_obj is None or (processor_obj is None and device_name != "mlx"):
             return None
-        if aggregation == "local_salad":
-            salad_head_id = str(head.get("embedding_salad_head_id") or "").strip()
-            if not salad_head_id:
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
-            salad_device_name = device_name if device_name != "mlx" else resolve_cradio_aux_torch_device()
-            salad_head, _salad_meta = _load_local_salad_head(salad_head_id, device_name=salad_device_name)
-            if str(_salad_meta.get("encoder_type") or "dinov3").strip().lower() != "cradio":
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_encoder_mismatch")
         pooling = normalize_cradio_pooling(head.get("cradio_pooling"))
         for idx in range(0, len(images), batch_size):
             batch = images[idx : idx + batch_size]
-            if aggregation == "local_salad":
-                feats_base, spatial_tokens, summary_tokens = encode_cradio_images(
-                    model_obj,
-                    processor_obj,
-                    device_name,
-                    batch,
-                    pooling=pooling,
-                    normalize=False,
-                    return_tokens=True,
-                )
-                if spatial_tokens.ndim != 3 or spatial_tokens.shape[1] <= 0:
-                    raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="cradio_spatial_tokens_missing")
-                assert salad_head is not None
-                if is_mlx_local_salad_head(salad_head):
-                    feats_np = _encode_local_salad_head_np(salad_head, spatial_tokens, summary_tokens)
-                else:
-                    with torch.no_grad():
-                        salad_device = next(salad_head.parameters()).device
-                        patch_tensor = torch.from_numpy(spatial_tokens).to(salad_device)
-                        global_tensor = torch.from_numpy(summary_tokens).to(salad_device)
-                        feats_np = _encode_local_salad_head_np(salad_head, patch_tensor, global_tensor)
-            else:
-                feats_np = encode_cradio_images(
-                    model_obj,
-                    processor_obj,
-                    device_name,
-                    batch,
-                    pooling=pooling,
-                    normalize=False,
-                )
+            feats_np = encode_cradio_images(
+                model_obj,
+                processor_obj,
+                device_name,
+                batch,
+                pooling=pooling,
+                normalize=False,
+            )
             features.append(np.asarray(feats_np, dtype=np.float32))
     else:
-        if _embedding_normalize_aggregation(head.get("embedding_aggregation")) == "local_salad":
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_requires_spatial_encoder")
         if clip_model is None or clip_preprocess is None or _clip_reload_needed:
             _resume_clip_backbone()
         if clip_model is None or clip_preprocess is None:
@@ -16840,10 +16790,8 @@ def _normalize_class_analysis_request(payload: Dict[str, Any]) -> Dict[str, Any]
         request_payload.get("embedding_salad_head_id") or ""
     ).strip()
     if request_payload["embedding_aggregation"] == "local_salad":
-        if request_payload["encoder_type"] not in {"dinov3", "cradio"}:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_requires_spatial_encoder")
-        if not request_payload["embedding_salad_head_id"]:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_class_analysis_disabled")
+    request_payload["embedding_salad_head_id"] = ""
     return request_payload
 
 
@@ -27534,6 +27482,12 @@ async def start_clip_training(
     bg_class_count: int = Form(2),
     staged_temp_dir: Optional[str] = Form(None),
 ):
+    embedding_aggregation_norm = _embedding_normalize_aggregation(embedding_aggregation)
+    embedding_salad_head_id_norm = str(embedding_salad_head_id or "").strip()
+    if embedding_aggregation_norm == "local_salad":
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_auto_class_disabled")
+    embedding_salad_head_id_norm = ""
+
     images_path_native = _normalise_optional_path(images_path_native)
     labels_path_native = _normalise_optional_path(labels_path_native)
     labelmap_path_native = _normalise_optional_path(labelmap_path_native)
@@ -27725,13 +27679,6 @@ async def start_clip_training(
     embedding_adjustment_norm = _embedding_normalize_adjustment(embedding_adjustment)
     dinov3_pooling_norm = _embedding_normalize_dinov3_pooling(dinov3_pooling)
     cradio_pooling_norm = normalize_cradio_pooling(cradio_pooling)
-    embedding_aggregation_norm = _embedding_normalize_aggregation(embedding_aggregation)
-    embedding_salad_head_id_norm = str(embedding_salad_head_id or "").strip()
-    if embedding_aggregation_norm == "local_salad":
-        if encoder_type_norm not in {"dinov3", "cradio"}:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_requires_spatial_encoder")
-        if not embedding_salad_head_id_norm:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
     calibration_mode_norm = (calibration_mode or "none").strip().lower()
     if calibration_mode_norm not in {"none", "temperature"}:
         calibration_mode_norm = "none"

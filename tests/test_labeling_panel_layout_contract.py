@@ -133,6 +133,8 @@ def test_local_salad_is_data_ingestion_only_in_ui():
     assert '<option value="local_salad">Local SALAD separation</option>' not in html
     assert '<option value="local_salad">Local SALAD head</option>' not in html
     assert "Local SALAD requires a trained local head" not in html
+    assert "SALAD head: ${escapeHtml(art.embedding_salad_head_id)}" not in js
+    assert "Aggregation: ${escapeHtml(art.embedding_aggregation" not in js
     assert "startLocalSaladTraining" in js
     assert "canvas.element.focus();" in js
     assert "const isTextEditingTarget = (target) =>" in js

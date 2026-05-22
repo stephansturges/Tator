@@ -551,8 +551,9 @@ reference dataset.
 - Kept local SALAD out of Class Split and auto-class UI presets after the crop
   benchmark showed no promotion signal. DINOv3 remains the established
   crop-level baseline; C-RADIOv4 remains available for reference-profile
-  comparison. The selected encoder, pooling mode, and head id are saved into
-  profile metadata so inference cannot silently drift back to pooled embeddings.
+  comparison. Class Split, auto-class training, and auto-class inference now
+  reject manual `embedding_aggregation=local_salad` requests/artifacts so local
+  SALAD remains scoped to Data Ingestion reference-profile scoring.
 - Added `tools/benchmark_salad_diversity.py` to compare pooled DINOv3 selection
   against a locally trained SALAD head:
 

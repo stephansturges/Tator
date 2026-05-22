@@ -1,3 +1,4 @@
+import asyncio
 import json
 import types
 
@@ -232,28 +233,53 @@ def test_class_analysis_sample_cap_defaults_to_unlimited():
     assert api._class_analysis_stratified_indices(records, cap=0, seed=7) == list(range(12))
 
 
-def test_class_analysis_rejects_invalid_local_salad_request_before_queue():
-    with pytest.raises(api.HTTPException) as missing_head:
+def test_class_analysis_rejects_local_salad_aggregation_before_queue():
+    with pytest.raises(api.HTTPException) as disabled:
         api._normalize_class_analysis_request(
             {
                 "encoder_type": "dinov3",
                 "embedding_aggregation": "local_salad",
-                "embedding_salad_head_id": "",
-            }
-        )
-    assert missing_head.value.status_code == 400
-    assert missing_head.value.detail == "local_salad_head_required"
-
-    with pytest.raises(api.HTTPException) as wrong_encoder:
-        api._normalize_class_analysis_request(
-            {
-                "encoder_type": "clip",
-                "embedding_aggregation": "local_salad",
                 "embedding_salad_head_id": "unit_head",
             }
         )
-    assert wrong_encoder.value.status_code == 400
-    assert wrong_encoder.value.detail == "local_salad_requires_spatial_encoder"
+    assert disabled.value.status_code == 400
+    assert disabled.value.detail == "local_salad_class_analysis_disabled"
+
+    pooled = api._normalize_class_analysis_request(
+        {
+            "encoder_type": "dinov3",
+            "embedding_aggregation": "pooled",
+            "embedding_salad_head_id": "stale_head",
+        }
+    )
+    assert pooled["embedding_aggregation"] == "pooled"
+    assert pooled["embedding_salad_head_id"] == ""
+
+
+def test_auto_class_training_rejects_local_salad_aggregation_before_dataset_validation():
+    with pytest.raises(api.HTTPException) as disabled:
+        asyncio.run(
+            api.start_clip_training(
+                embedding_aggregation="local_salad",
+                embedding_salad_head_id="unit_head",
+            )
+        )
+    assert disabled.value.status_code == 400
+    assert disabled.value.detail == "local_salad_auto_class_disabled"
+
+
+def test_auto_class_runtime_rejects_local_salad_artifacts_before_encoding():
+    with pytest.raises(api.HTTPException) as disabled:
+        api._encode_pil_batch_for_head(
+            [Image.new("RGB", (8, 8), (10, 20, 30))],
+            head={
+                "encoder_type": "dinov3",
+                "embedding_aggregation": "local_salad",
+                "embedding_salad_head_id": "unit_head",
+            },
+        )
+    assert disabled.value.status_code == 400
+    assert disabled.value.detail == "local_salad_auto_class_disabled"
 
 
 def test_cradio_embedding_contract_and_capabilities(monkeypatch):
@@ -338,12 +364,13 @@ def test_cradio_embedding_contract_and_capabilities(monkeypatch):
             "encoder_type": "cradio",
             "encoder_model": "",
             "cradio_pooling": "summary+spatial",
-            "embedding_aggregation": "local_salad",
-            "embedding_salad_head_id": "unit_head",
+            "embedding_aggregation": "pooled",
+            "embedding_salad_head_id": "stale_head",
         }
     )
     assert request["encoder_model"] == CRADIO_DEFAULT_MODEL
     assert request["cradio_pooling"] == "summary_spatial_concat"
+    assert request["embedding_salad_head_id"] == ""
 
 
 def test_cradio_head_encoding_uses_saved_pooling(monkeypatch):

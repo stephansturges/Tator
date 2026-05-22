@@ -493,8 +493,10 @@ Aggregation contract:
   for Class Split and auto-class.
 - `embedding_aggregation=local_salad` is not exposed for object-crop Class Split
   or auto-class after the crop benchmarks failed to show a promotion signal.
-  Those crop workflows stay on pooled embeddings plus the saved
-  crop/preprocess/pooling/adjustment metadata contract.
+  New Class Split requests, auto-class training requests, and auto-class runtime
+  artifacts reject that aggregation mode, so those crop workflows stay on
+  pooled embeddings plus the saved crop/preprocess/pooling/adjustment metadata
+  contract.
 - Whole-image/frame SALAD diversity scoring is the remaining local SALAD
   workflow. It uses the local head registry and the same
   no-external-checkpoint loader policy, but it is kept in Data Ingestion rather

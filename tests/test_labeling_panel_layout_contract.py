@@ -209,6 +209,10 @@ def test_data_ingestion_panel_contract():
     assert "reference_dataset_id" in js
     assert "reference_source" in js
     assert "function dataIngestionHeadMatchesReference" in js
+    assert "function handleDataIngestionReferenceChange" in js
+    assert "heads.filter((head) => dataIngestionHeadMatchesReference(head))" in js
+    assert "Choose matching reference profile" in js
+    assert "No profiles for selected reference" in js
     assert "Selected reference profile does not match the chosen reference dataset" in js
     assert "encoder: \"local_salad\"" in js
     assert "dataIngestionElements.trainEncoder" in js

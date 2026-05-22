@@ -35331,7 +35331,7 @@ async function cancelRfDetrTrainingJobRequest() {
         return value;
     }
 
-    function populateLocalSaladHeadSelect(selectEl, heads, previousValue = "") {
+    function populateLocalSaladHeadSelect(selectEl, heads, previousValue = "", { emptyLabel = "" } = {}) {
         if (!selectEl) return;
         const previous = previousValue || selectEl.value;
         const availableHeads = Array.isArray(heads)
@@ -35340,7 +35340,7 @@ async function cancelRfDetrTrainingJobRequest() {
         selectEl.innerHTML = "";
         const empty = document.createElement("option");
         empty.value = "";
-        empty.textContent = availableHeads.length ? "Choose local SALAD head" : "No local SALAD heads trained";
+        empty.textContent = availableHeads.length ? "Choose matching reference profile" : (emptyLabel || "No local SALAD heads trained");
         selectEl.appendChild(empty);
         availableHeads.forEach((head) => {
             const option = document.createElement("option");
@@ -35364,8 +35364,14 @@ async function cancelRfDetrTrainingJobRequest() {
         const heads = Array.isArray(dataIngestionState.capabilities?.local_salad_heads)
             ? dataIngestionState.capabilities.local_salad_heads
             : [];
+        const matchingHeads = heads.filter((head) => dataIngestionHeadMatchesReference(head));
         const preferred = String(preferredHeadId || dataIngestionState.preferredSaladHeadId || "").trim();
-        populateLocalSaladHeadSelect(dataIngestionElements.saladHead, heads, preferred);
+        populateLocalSaladHeadSelect(
+            dataIngestionElements.saladHead,
+            matchingHeads,
+            preferred,
+            { emptyLabel: heads.length ? "No profiles for selected reference" : "No local SALAD heads trained" },
+        );
         if (preferred) {
             const values = Array.from(dataIngestionElements.saladHead?.options || []).map((option) => option.value);
             if (values.includes(preferred)) {
@@ -35433,6 +35439,11 @@ async function cancelRfDetrTrainingJobRequest() {
             return headDatasetId === activeDatasetId;
         }
         return headReferenceSource === "active_label_images";
+    }
+
+    function handleDataIngestionReferenceChange() {
+        populateDataIngestionSaladHeads();
+        refreshDataIngestionControls();
     }
 
     function getDataIngestionReferenceLabel() {
@@ -35882,10 +35893,14 @@ async function cancelRfDetrTrainingJobRequest() {
         dataIngestionElements.report = document.getElementById("dataIngestionReport");
         dataIngestionElements.list = document.getElementById("dataIngestionList");
         [
-            dataIngestionElements.files,
             dataIngestionElements.referenceActive,
             dataIngestionElements.referenceBackend,
             dataIngestionElements.referenceDataset,
+        ].forEach((control) => {
+            if (control) control.addEventListener("change", handleDataIngestionReferenceChange);
+        });
+        [
+            dataIngestionElements.files,
             dataIngestionElements.saladHead,
             dataIngestionElements.trainEncoder,
             dataIngestionElements.trainCradioModel,

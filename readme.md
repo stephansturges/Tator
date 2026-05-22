@@ -558,6 +558,10 @@ reference dataset.
   SALAD controls after those controls were removed from the UI, and suppress
   shift-wheel events over the Class Split plot so the abandoned pan shortcut
   cannot trigger jittery Plotly interactions.
+- Tightened the Data Ingestion profile picker so it only offers local SALAD
+  reference profiles that match the currently selected active/backend reference
+  dataset, instead of auto-selecting an unrelated global head and later
+  disabling candidate analysis.
 - Added `tools/benchmark_salad_diversity.py` to compare pooled DINOv3 selection
   against a locally trained SALAD head:
 

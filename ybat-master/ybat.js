@@ -36963,8 +36963,6 @@ async function cancelRfDetrTrainingJobRequest() {
             ["Size-bias control", `${summary.embedding_adjustment || request.embedding_adjustment || "remove_size_bias"}`],
             ["DINOv3 pooling", `${summary.dinov3_pooling || request.dinov3_pooling || "pooler"}`],
             ["C-RADIOv4 pooling", `${summary.cradio_pooling || request.cradio_pooling || "summary"}`],
-            ["Aggregation", `${summary.embedding_aggregation || request.embedding_aggregation || "pooled"}`],
-            ["SALAD head", `${summary.embedding_salad_head_id || request.embedding_salad_head_id || "n/a"}`],
             ["Background", `${summary.background_mode || request.background_mode || "full_crop"}`],
             ["Embedding views", `${summary.embedding_view_mode || request.embedding_view_mode || "single"}`],
             ["Crop cache", `${cropCache.reused || 0} reused / ${cropCache.total || 0} objects`],
@@ -36979,7 +36977,6 @@ async function cancelRfDetrTrainingJobRequest() {
             )).join(""),
             `</div>`,
             `<div class="class-split-report__note">${escapeHtml(suspicion.text)}</div>`,
-            `<div class="class-split-report__note">Hold Shift over this tab to switch the graph from lasso selection to pan mode; release Shift to return to lasso.</div>`,
         ].join("");
     }
 

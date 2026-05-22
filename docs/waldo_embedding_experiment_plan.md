@@ -491,15 +491,14 @@ Aggregation contract:
 
 - `embedding_aggregation=pooled` remains the conservative default and fallback
   for Class Split and auto-class.
-- `embedding_aggregation=local_salad` is valid only with a spatial-token
-  encoder and an explicitly selected Tator-trained local SALAD head. DINOv3 is
-  the established baseline; C-RADIOv4 heads are supported as a candidate
-  encoder. The selected encoder, pooling mode, and head id are stored in Class
-  Split cache keys and classifier metadata so training and inference use the
-  same aggregation recipe.
-- Whole-image/frame SALAD diversity scoring and object-crop SALAD aggregation
-  share the same local head registry and the same no-external-checkpoint
-  loader policy.
+- `embedding_aggregation=local_salad` is not exposed for object-crop Class Split
+  or auto-class after the crop benchmarks failed to show a promotion signal.
+  Those crop workflows stay on pooled embeddings plus the saved
+  crop/preprocess/pooling/adjustment metadata contract.
+- Whole-image/frame SALAD diversity scoring is the remaining local SALAD
+  workflow. It uses the local head registry and the same
+  no-external-checkpoint loader policy, but it is kept in Data Ingestion rather
+  than reused as a crop-level aggregation preset.
 
 ## Remaining Lever Screen
 

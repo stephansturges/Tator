@@ -421,6 +421,9 @@ def test_class_split_explorer_panel_contract():
     assert "Size-axis check" in js
     assert "Crop cache" in js
     assert "Embedding cache" in js
+    assert '["Aggregation",' not in js
+    assert '["SALAD head",' not in js
+    assert "Hold Shift over this tab to switch the graph" not in js
     assert "function setClassSplitGraphPanMode" not in js
     assert "function panClassSplitPlotWithWheel" not in js
     assert 'dragmode: "lasso"' in js

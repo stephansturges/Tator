@@ -571,14 +571,14 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/benchmark_salad_divers
   utils/embedding_recipe.py`, and
   `NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python -m pytest
   tests/test_data_ingestion.py tests/test_class_analysis.py
-  tests/test_labeling_panel_layout_contract.py -q` (38 passing tests). A
+  tests/test_labeling_panel_layout_contract.py -q` (47 passing tests). A
   16-image smoke benchmark trained a throwaway local SALAD head and compared it
   against pooled DINOv3; the two selectors overlapped on two of four kept items
   (`Jaccard=0.333`), confirming the local train/load/analyze path without
   keeping the generated head.
-- Added `tools/benchmark_salad_class_separation.py` to compare pooled crop
-  recipes against local SALAD crop-token aggregation for Class Split and
-  auto-class recipe selection:
+- Added `tools/benchmark_salad_class_separation.py` as a benchmark-only check
+  of pooled crop recipes against local SALAD crop-token aggregation before
+  deciding whether SALAD should be promoted into Class Split or auto-class:
 
 ```bash
 NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/benchmark_salad_class_separation.py \
@@ -607,11 +607,12 @@ dataset benchmarks justify a switch.
   `summary_spatial_concat`. These are exposed in Class Split, auto-class
   training metadata, the C-RADIO experiment matrix, and local SALAD
   reference-profile training.
-- Added C-RADIOv4 to Class Split Explorer, Data Ingestion, local SALAD training,
-  local SALAD scoring, and auto-class training/inference metadata. Local SALAD
-  heads now record their base encoder (`dinov3` or `cradio`), encoder model,
-  and C-RADIO pooling mode; inference rejects a head if the saved encoder type
-  does not match the requested aggregation path.
+- Added C-RADIOv4 to Class Split Explorer, Data Ingestion, local SALAD
+  reference-profile training/scoring, and auto-class training/inference
+  metadata. Local SALAD heads now record their base encoder (`dinov3` or
+  `cradio`), encoder model, and C-RADIO pooling mode; Data Ingestion scoring
+  rejects a head if the saved encoder type does not match the requested profile
+  path.
 - C-RADIOv4 local SALAD heads are trained over the spatial-token channel width.
   If a model exposes a wider global `summary` vector than its spatial tokens,
   the local SALAD head uses the spatial-token mean for the global descriptor so
@@ -743,9 +744,9 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experi
   back into the same Tator `.pt` payload with the same state-dict keys, plus
   metadata such as `salad_backend=mlx`. Existing Torch-trained heads can be
   loaded into the MLX runtime by mapping their state dict into MLX arrays.
-- Class Split, Data Ingestion, local SALAD diversity scoring, and auto-class
-  local SALAD aggregation now use the same backend resolver. This makes
-  C-RADIO-MLX plus SALAD-MLX the Mac default path while preserving Torch
+- Class Split, Data Ingestion, local SALAD diversity scoring, and C-RADIO
+  auto-class paths now use the same backend resolver. SALAD-MLX remains scoped
+  to the local SALAD Data Ingestion profile/scoring path while preserving Torch
   fallback for DINOv3/Torch and non-Mac environments.
 
 ## Training and Model Management

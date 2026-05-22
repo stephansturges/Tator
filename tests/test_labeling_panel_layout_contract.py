@@ -352,10 +352,12 @@ def test_class_split_explorer_panel_contract():
     assert 'id="classSplitSampleCap" min="0" max="50000" placeholder="All objects"' in html
     assert 'Crop padding<span class="help-icon"' in html
     assert '<option value="tight_context" selected>Tight + context</option>' in html
-    assert 'id="classSplitPreprocessMode"' not in html
-    assert 'id="classSplitSizeBiasMode"' not in html
-    assert "Native crop" not in html
-    assert "Raw embeddings" not in html
+    assert 'id="classSplitRecipeExplanation"' in html
+    assert 'id="classSplitPreprocessMode"' in html
+    assert 'id="classSplitSizeBiasMode"' in html
+    assert "Canonical square resize" in html
+    assert "Remove size/aspect bias" in html
+    assert "It is not full whitening" in html
     assert 'Scoring neighbors<span class="help-icon"' in html
     assert 'value="5000"' not in html
     assert 'id="classSplitGraph" class="class-split-graph"' in html
@@ -372,6 +374,7 @@ def test_class_split_explorer_panel_contract():
     assert ".class-split-graph" in css
     assert ".class-split-report" in css
     assert ".class-split-graph.class-split-graph--pan" in css
+    assert ".embedding-recipe-note__text" in css
     assert ".class-split-review" in css
     assert "height: calc(100vh - 330px);" in css
     assert "html.theme-dark .class-split-panel" in css
@@ -390,6 +393,9 @@ def test_class_split_explorer_panel_contract():
     assert "projection_neighbor_k: projectionNeighborK" in js
     assert "cradio_pooling:" in js
     assert "classSplitElements.cradioPooling" in js
+    assert "function updateClassSplitEmbeddingRecipeExplanation" in js
+    assert "function updateTrainingEmbeddingRecipeExplanation" in js
+    assert "regresses out log bbox area, log crop area, bbox aspect, and crop aspect" in js
     assert 'applyEmbeddingRecipePresetToClassSplit(classSplitElements.recipePreset?.value || "precise")' in js
     assert 'preprocess_mode: String(classSplitElements.preprocessMode?.value || "canonical")' in js
     assert 'embedding_adjustment: String(classSplitElements.sizeBiasMode?.value || "remove_size_bias")' in js
@@ -400,6 +406,11 @@ def test_class_split_explorer_panel_contract():
     assert 'C-RADIOv4 Backbone<span class="help-icon"' in html
     assert "HF/Torch C-RADIOv4 encoder. On Mac this is not MLX-accelerated in Tator" in html
     assert 'Embedding preset<span class="help-icon"' in html
+    assert 'id="trainEmbeddingRecipeExplanation"' in html
+    assert 'id="trainPreprocessMode"' in html
+    assert 'id="trainEmbeddingAdjustment"' in html
+    assert "Auto-class crop preprocessing" in html
+    assert "diagonal standardization, not full PCA/ZCA whitening" in html
     assert 'Crop geometry<span class="help-icon"' in html
     assert 'Background<span class="help-icon"' in html
     assert 'Embedding views<span class="help-icon"' in html

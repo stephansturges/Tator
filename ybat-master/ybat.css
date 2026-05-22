@@ -1926,6 +1926,41 @@ body.annotation-focus-mode .class-scroll-indicator {
     line-height: 1.35;
 }
 
+.embedding-recipe-note {
+    border: 1px solid rgba(37, 99, 235, 0.18);
+    border-radius: 8px;
+    background: rgba(248, 250, 252, 0.88);
+    padding: 8px 10px;
+    min-width: 0;
+}
+
+.embedding-recipe-note--wide {
+    grid-column: 1 / -1;
+}
+
+.embedding-recipe-note summary {
+    cursor: pointer;
+    color: #334155;
+    font-size: 12px;
+    font-weight: 800;
+    line-height: 1.25;
+}
+
+.embedding-recipe-note__text {
+    margin-top: 6px;
+    color: #475569;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.embedding-recipe-note__text strong {
+    color: #0f172a;
+}
+
+.embedding-recipe-note__text code {
+    font-size: 11px;
+}
+
 .class-split-panel {
     border: 1px solid #dbeafe;
     background: #f8fbff;
@@ -4339,6 +4374,23 @@ html.theme-dark .embedding-benchmark-note__item strong {
     color: #f8fafc;
 }
 
+html.theme-dark .embedding-recipe-note {
+    background: rgba(15, 23, 42, 0.72);
+    border-color: rgba(96, 165, 250, 0.3);
+}
+
+html.theme-dark .embedding-recipe-note summary {
+    color: #bfdbfe;
+}
+
+html.theme-dark .embedding-recipe-note__text {
+    color: #cbd5e1;
+}
+
+html.theme-dark .embedding-recipe-note__text strong {
+    color: #f8fafc;
+}
+
 html.theme-dark .data-ingestion-report__item,
 html.theme-dark .data-ingestion-list__item {
     background: rgba(15, 23, 42, 0.72);
@@ -5042,6 +5094,23 @@ html.theme-pipboy .embedding-benchmark-note__item {
 }
 
 html.theme-pipboy .embedding-benchmark-note__item strong {
+    color: var(--pip-green);
+}
+
+html.theme-pipboy .embedding-recipe-note {
+    background: color-mix(in srgb, var(--pip-panel) 82%, transparent);
+    border-color: color-mix(in srgb, var(--pip-green) 34%, transparent);
+}
+
+html.theme-pipboy .embedding-recipe-note summary {
+    color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .embedding-recipe-note__text {
+    color: var(--pip-green-muted);
+}
+
+html.theme-pipboy .embedding-recipe-note__text strong {
     color: var(--pip-green);
 }
 

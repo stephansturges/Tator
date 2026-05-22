@@ -2349,6 +2349,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         projection: null,
         projectionNeighborK: null,
         sampleCap: null,
+        recipeExplanation: null,
         padding: null,
         canonicalSize: null,
         preprocessMode: null,
@@ -2812,6 +2813,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         deviceOverrideHelp: null,
         calibrationModeSelect: null,
         embeddingRecipePresetSelect: null,
+        embeddingRecipeExplanation: null,
         embeddingCenterCheckbox: null,
         embeddingStandardizeCheckbox: null,
         preprocessModeSelect: null,
@@ -17341,6 +17343,7 @@ async function cancelRfDetrTrainingJobRequest() {
         trainingElements.deviceOverrideHelp = document.getElementById("trainDeviceOverrideHelp");
         trainingElements.calibrationModeSelect = document.getElementById("trainCalibrationMode");
         trainingElements.embeddingRecipePresetSelect = document.getElementById("trainEmbeddingRecipePreset");
+        trainingElements.embeddingRecipeExplanation = document.getElementById("trainEmbeddingRecipeExplanation");
         trainingElements.embeddingCenterCheckbox = document.getElementById("trainEmbeddingCenter");
         trainingElements.embeddingStandardizeCheckbox = document.getElementById("trainEmbeddingStandardize");
         trainingElements.preprocessModeSelect = document.getElementById("trainPreprocessMode");
@@ -17375,6 +17378,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (trainingElements.encoderTypeSelect) {
             trainingElements.encoderTypeSelect.addEventListener("change", () => {
                 updateTrainingEncoderControls();
+                updateTrainingEmbeddingRecipeExplanation();
                 applyRecommendedMlpHiddenSizes(false);
             });
         }
@@ -17391,10 +17395,16 @@ async function cancelRfDetrTrainingJobRequest() {
             trainingElements.hardMiningCheckbox.addEventListener("change", updateTrainingHardMiningControls);
         }
         if (trainingElements.embeddingStandardizeCheckbox) {
-            trainingElements.embeddingStandardizeCheckbox.addEventListener("change", updateEmbeddingStandardizeControls);
+            trainingElements.embeddingStandardizeCheckbox.addEventListener("change", () => {
+                updateEmbeddingStandardizeControls();
+                updateTrainingEmbeddingRecipeExplanation();
+            });
         }
         if (trainingElements.embeddingCenterCheckbox) {
-            trainingElements.embeddingCenterCheckbox.addEventListener("change", updateEmbeddingStandardizeControls);
+            trainingElements.embeddingCenterCheckbox.addEventListener("change", () => {
+                updateEmbeddingStandardizeControls();
+                updateTrainingEmbeddingRecipeExplanation();
+            });
         }
         if (trainingElements.embeddingRecipePresetSelect) {
             trainingElements.embeddingRecipePresetSelect.addEventListener("change", () => {
@@ -17430,6 +17440,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (control) {
                 control.addEventListener("change", () => {
                     markTrainingEmbeddingRecipeCustom();
+                    updateTrainingEmbeddingRecipeExplanation();
                     updateTrainingStartAvailability();
                 });
             }
@@ -17465,6 +17476,7 @@ async function cancelRfDetrTrainingJobRequest() {
         updateTrainingHardMiningControls();
         updateTrainingClassWeightControls();
         updateEmbeddingStandardizeControls();
+        updateTrainingEmbeddingRecipeExplanation();
 
         const applyDatasetSelection = (datasetId) => {
             const item = clipDatasetState.items.find((d) => d.id === datasetId);
@@ -17740,6 +17752,159 @@ async function cancelRfDetrTrainingJobRequest() {
         };
     }
 
+    function embeddingRecipePresetLabel(preset) {
+        const key = String(preset || "").toLowerCase();
+        const labels = {
+            fast: "Fast coarse",
+            balanced: "Balanced default",
+            precise: "Precise best",
+            cradio: "C-RADIOv4 summary",
+            local_salad: "Local SALAD separation",
+            custom: "Custom advanced",
+        };
+        return labels[key] || labels.balanced;
+    }
+
+    function embeddingRecipeWhyText(preset, context) {
+        const key = String(preset || "").toLowerCase();
+        if (key === "fast") {
+            return "chosen for quick iteration: smaller canonical crops and one view reduce encode time.";
+        }
+        if (key === "precise") {
+            return context === "analysis"
+                ? "selected by default for Class Split because tight+context views reduce object-vs-context ambiguity and the DINOv3 path stayed far faster and cleaner than the slow C-RADIO audit row."
+                : "useful for slower classifier experiments when class boundaries depend on both tight object shape and nearby context.";
+        }
+        if (key === "cradio") {
+            return "available as an opt-in C-RADIO comparison path; on Mac it is Torch/MPS or CPU backed in Tator, not MLX accelerated.";
+        }
+        if (key === "local_salad") {
+            return "uses a locally trained SALAD head over spatial tokens; Tator verifies the selected head matches the encoder family before inference.";
+        }
+        if (key === "custom") {
+            return "manual values are being used; review the fields below because the preset no longer defines the full recipe.";
+        }
+        return context === "analysis"
+            ? "balanced is the faster one-view DINOv3 baseline; switch to Precise when you want the measured full-audit default."
+            : "selected for auto-class because it keeps training and inference reasonably fast while retaining the same crop normalization and size-bias controls used by Class Split.";
+    }
+
+    function embeddingRecipeValueLabel(kind, value) {
+        const raw = String(value || "").toLowerCase();
+        const maps = {
+            preprocess: {
+                canonical: "canonical square resize",
+                native: "native encoder resize",
+            },
+            crop: {
+                padded_square: "padded square",
+                padded: "padded bbox",
+                tight: "tight bbox",
+            },
+            background: {
+                full_crop: "full crop",
+                mean_fill_outside_box: "mean-fill outside bbox",
+                blur_outside_box: "blur outside bbox",
+                darken_outside_box: "darken outside bbox",
+            },
+            view: {
+                single: "single crop",
+                tight_standard: "tight + standard",
+                standard_context: "standard + context",
+                tight_context: "tight + context",
+            },
+            adjustment: {
+                remove_size_bias: "remove size/aspect bias",
+                none: "none",
+            },
+            aggregation: {
+                pooled: "pooled descriptor",
+                local_salad: "local SALAD head",
+            },
+        };
+        return maps[kind]?.[raw] || raw || "default";
+    }
+
+    function renderEmbeddingRecipeExplanation(element, values, context) {
+        if (!element) {
+            return;
+        }
+        const preset = String(values.preset || "balanced").toLowerCase();
+        const encoderType = String(values.encoderType || "current encoder").toLowerCase();
+        const encoder = encoderType === "dinov3" ? "DINOv3" : encoderType === "cradio" ? "C-RADIOv4" : encoderType === "clip" ? "CLIP" : "current encoder";
+        const preprocess = embeddingRecipeValueLabel("preprocess", values.preprocessMode);
+        const crop = embeddingRecipeValueLabel("crop", values.cropMode);
+        const background = embeddingRecipeValueLabel("background", values.backgroundMode);
+        const view = embeddingRecipeValueLabel("view", values.viewMode);
+        const adjustment = embeddingRecipeValueLabel("adjustment", values.adjustment);
+        const aggregation = embeddingRecipeValueLabel("aggregation", values.aggregation);
+        const pooling = encoderType === "cradio"
+            ? `C-RADIO pooling: ${values.cradioPooling || "summary"}`
+            : encoderType === "dinov3"
+                ? `DINOv3 pooling: ${values.dinov3Pooling || "pooler"}`
+                : "CLIP image descriptor";
+        const standardizeNote = context === "training"
+            ? ` Center/standardize: ${values.standardize ? "standardize enabled (subtract train mean, divide by per-dimension std)" : values.center ? "center enabled (subtract train mean)" : "off"}. Standardization is whitening-like scaling, not full covariance whitening, and the saved train-set values are reused at inference.`
+            : " Class Split does not fit classifier standardization; it residualizes crop geometry and L2-normalizes before scoring.";
+        const reuseNote = context === "training"
+            ? "Auto-class stores this exact recipe in the classifier metadata and replays it for every new bbox before predicting a class."
+            : "Analysis applies this recipe to every active object before PCA/UMAP layout and nearest-neighbor wrong-class scoring; PCA/UMAP changes only the 2D view, not the stored embeddings.";
+        element.innerHTML = [
+            `<strong>${escapeHtml(embeddingRecipePresetLabel(preset))}</strong> uses ${escapeHtml(encoder)} with ${escapeHtml(preprocess)}, ${escapeHtml(crop)} crops, ${escapeHtml(String(values.padding || "0.08"))} padding, ${escapeHtml(String(values.canonicalSize || "336"))}px canonical size, ${escapeHtml(background)} background, ${escapeHtml(view)} views, ${escapeHtml(pooling)}, and ${escapeHtml(aggregation)}.`,
+            `Embedding adjustment: <strong>${escapeHtml(adjustment)}</strong>. remove size/aspect bias regresses out log bbox area, log crop area, bbox aspect, and crop aspect, then L2-normalizes; it is targeted geometry residualization rather than full whitening.`,
+            `${escapeHtml(reuseNote)} ${escapeHtml(standardizeNote)}`,
+            `Why: ${escapeHtml(embeddingRecipeWhyText(preset, context))}`,
+        ].join("<br />");
+    }
+
+    function updateTrainingEmbeddingRecipeExplanation() {
+        const preset = String(trainingElements.embeddingRecipePresetSelect?.value || "balanced").toLowerCase();
+        const defaults = embeddingRecipePresetValues(preset);
+        renderEmbeddingRecipeExplanation(
+            trainingElements.embeddingRecipeExplanation,
+            {
+                preset,
+                encoderType: trainingElements.encoderTypeSelect?.value || defaults.encoderType || "clip",
+                preprocessMode: trainingElements.preprocessModeSelect?.value || defaults.preprocessMode,
+                canonicalSize: trainingElements.canonicalSizeInput?.value || defaults.canonicalSize,
+                cropMode: trainingElements.embeddingCropModeSelect?.value || defaults.cropMode,
+                padding: trainingElements.embeddingCropPaddingInput?.value || defaults.padding,
+                backgroundMode: trainingElements.backgroundModeSelect?.value || defaults.backgroundMode,
+                viewMode: trainingElements.embeddingViewModeSelect?.value || defaults.viewMode,
+                adjustment: trainingElements.embeddingAdjustmentSelect?.value || defaults.adjustment,
+                dinov3Pooling: trainingElements.dinov3PoolingSelect?.value || defaults.dinov3Pooling,
+                cradioPooling: trainingElements.cradioPoolingSelect?.value || defaults.cradioPooling || "summary",
+                aggregation: trainingElements.embeddingAggregationSelect?.value || defaults.aggregation,
+                center: Boolean(trainingElements.embeddingCenterCheckbox?.checked),
+                standardize: Boolean(trainingElements.embeddingStandardizeCheckbox?.checked),
+            },
+            "training",
+        );
+    }
+
+    function updateClassSplitEmbeddingRecipeExplanation() {
+        const preset = String(classSplitElements.recipePreset?.value || "precise").toLowerCase();
+        const defaults = embeddingRecipePresetValues(preset);
+        renderEmbeddingRecipeExplanation(
+            classSplitElements.recipeExplanation,
+            {
+                preset,
+                encoderType: classSplitElements.encoderType?.value || defaults.encoderType || "dinov3",
+                preprocessMode: classSplitElements.preprocessMode?.value || defaults.preprocessMode,
+                canonicalSize: classSplitElements.canonicalSize?.value || defaults.canonicalSize,
+                cropMode: "padded_square",
+                padding: classSplitElements.padding?.value || defaults.padding,
+                backgroundMode: classSplitElements.backgroundMode?.value || defaults.backgroundMode,
+                viewMode: classSplitElements.viewMode?.value || defaults.viewMode,
+                adjustment: classSplitElements.sizeBiasMode?.value || defaults.adjustment,
+                dinov3Pooling: classSplitElements.dinov3Pooling?.value || defaults.dinov3Pooling,
+                cradioPooling: classSplitElements.cradioPooling?.value || defaults.cradioPooling || "summary",
+                aggregation: classSplitElements.embeddingAggregation?.value || defaults.aggregation,
+            },
+            "analysis",
+        );
+    }
+
     function setSelectValueIfPresent(element, value) {
         if (!element) {
             return;
@@ -17754,6 +17919,7 @@ async function cancelRfDetrTrainingJobRequest() {
     function applyEmbeddingRecipePresetToTraining(preset) {
         const key = String(preset || "balanced").toLowerCase();
         if (key === "custom") {
+            updateTrainingEmbeddingRecipeExplanation();
             return;
         }
         const values = embeddingRecipePresetValues(key);
@@ -17775,6 +17941,7 @@ async function cancelRfDetrTrainingJobRequest() {
             setSelectValueIfPresent(trainingElements.encoderTypeSelect, values.encoderType);
             updateTrainingEncoderControls();
         }
+        updateTrainingEmbeddingRecipeExplanation();
     }
 
     function markTrainingEmbeddingRecipeCustom() {
@@ -35846,6 +36013,7 @@ async function cancelRfDetrTrainingJobRequest() {
     function applyEmbeddingRecipePresetToClassSplit(preset) {
         const key = String(preset || "balanced").toLowerCase();
         if (key === "custom") {
+            updateClassSplitEmbeddingRecipeExplanation();
             return;
         }
         const values = embeddingRecipePresetValues(key);
@@ -35866,6 +36034,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         setSelectValueIfPresent(classSplitElements.backgroundMode, values.backgroundMode);
         setSelectValueIfPresent(classSplitElements.viewMode, values.viewMode);
+        updateClassSplitEmbeddingRecipeExplanation();
     }
 
     function populateClassSplitClasses({ preserveSelection = true } = {}) {
@@ -36966,6 +37135,7 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.projection = document.getElementById("classSplitProjection");
         classSplitElements.projectionNeighborK = document.getElementById("classSplitProjectionNeighborK");
         classSplitElements.sampleCap = document.getElementById("classSplitSampleCap");
+        classSplitElements.recipeExplanation = document.getElementById("classSplitRecipeExplanation");
         classSplitElements.padding = document.getElementById("classSplitPadding");
         classSplitElements.canonicalSize = document.getElementById("classSplitCanonicalSize");
         classSplitElements.preprocessMode = document.getElementById("classSplitPreprocessMode");
@@ -37011,12 +37181,14 @@ async function cancelRfDetrTrainingJobRequest() {
                     }
                     updateClassSplitBackboneOptions();
                 }
+                updateClassSplitEmbeddingRecipeExplanation();
                 refreshClassSplitControls();
             });
         }
         if (classSplitElements.encoderType) {
             classSplitElements.encoderType.addEventListener("change", () => {
                 updateClassSplitBackboneOptions();
+                updateClassSplitEmbeddingRecipeExplanation();
                 refreshClassSplitControls();
             });
         }
@@ -37033,7 +37205,10 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitElements.viewMode,
         ].forEach((control) => {
             if (control) {
-                control.addEventListener("change", markClassSplitRecipeCustom);
+                control.addEventListener("change", () => {
+                    markClassSplitRecipeCustom();
+                    updateClassSplitEmbeddingRecipeExplanation();
+                });
             }
         });
         if (classSplitElements.runButton) {

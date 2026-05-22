@@ -914,6 +914,10 @@
                                     <option value="custom">Custom advanced</option>
                                 </select>
                             </div>
+                            <details class="class-split-field class-split-field--wide embedding-recipe-note" open>
+                                <summary>Analysis crop preprocessing<span class="help-icon" title="Shows the actual crop and embedding normalization recipe used before Class Split graph projection and wrong-class scoring.">?</span></summary>
+                                <div id="classSplitRecipeExplanation" class="embedding-recipe-note__text"></div>
+                            </details>
                             <div class="class-split-field">
                                 <label for="classSplitClassSelect">Class<span class="help-icon" title="Class to audit when Scope is Selected class. Ignored in All classes mode, where every labeled object is embedded and scored together.">?</span></label>
                                 <select id="classSplitClassSelect"></select>
@@ -956,6 +960,20 @@
                             <div class="class-split-field">
                                 <label for="classSplitCanonicalSize">Canonical size<span class="help-icon" title="Pixel size of the fixed square crop sent to the encoder when crop normalization is canonical. Smaller is faster; larger preserves more detail.">?</span></label>
                                 <input type="number" id="classSplitCanonicalSize" min="64" max="1024" step="16" value="336" />
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitPreprocessMode">Crop preprocessing<span class="help-icon" title="Canonical makes every object crop a fixed square before embedding. Non-square crops are padded with the crop mean color, then resized to the canonical size. Native leaves sizing to the model processor and is kept only for expert comparison.">?</span></label>
+                                <select id="classSplitPreprocessMode">
+                                    <option value="canonical" selected>Canonical square resize</option>
+                                    <option value="native">Native encoder resize</option>
+                                </select>
+                            </div>
+                            <div class="class-split-field">
+                                <label for="classSplitSizeBiasMode">Embedding adjustment<span class="help-icon" title="Remove size/aspect bias regresses out log bbox area, log crop area, bbox aspect, and crop aspect, then L2-normalizes. It is not full whitening; it specifically reduces crop-geometry shortcuts in the graph.">?</span></label>
+                                <select id="classSplitSizeBiasMode">
+                                    <option value="remove_size_bias" selected>Remove size/aspect bias</option>
+                                    <option value="none">None / raw normalized embeddings</option>
+                                </select>
                             </div>
                             <div class="class-split-field">
                                 <label for="classSplitDinov3Pooling">DINOv3 pooling<span class="help-icon" title="DINOv3-only readout. Pooler is the current measured default. CLS, patch mean, and concat are advanced comparison modes. CLIP ignores this setting.">?</span></label>
@@ -1693,6 +1711,18 @@
                                 </select>
                                 <div class="training-help">Applies the same fast/balanced/precise recipe family as Class Split. Custom keeps the fields below.</div>
                             </div>
+                            <details class="embedding-recipe-note embedding-recipe-note--wide" open>
+                                <summary>Auto-class crop preprocessing<span class="help-icon" title="Shows the actual crop and embedding normalization recipe saved with trained classifiers and reused during auto-class inference.">?</span></summary>
+                                <div id="trainEmbeddingRecipeExplanation" class="embedding-recipe-note__text"></div>
+                            </details>
+                            <div>
+                                <label for="trainPreprocessMode">Crop preprocessing<span class="help-icon" title="Canonical makes every object crop a fixed square before the encoder sees it. Non-square crops are padded with the crop mean color, then resized to the canonical size. Native leaves sizing to the model processor and is kept for expert comparison only.">?</span></label>
+                                <select id="trainPreprocessMode">
+                                    <option value="canonical" selected>Canonical square resize</option>
+                                    <option value="native">Native encoder resize</option>
+                                </select>
+                                <div class="training-help">Canonical is the selected recipe because it makes crop scale and aspect handling consistent between training and inference.</div>
+                            </div>
                             <div>
                                 <label for="trainCanonicalSize">Canonical size<span class="help-icon" title="Fixed square crop size sent to the embedding encoder. Larger values preserve small visual details but increase encoding time and memory. Balanced uses 336px from the WALDO recipe.">?</span></label>
                                 <input type="number" id="trainCanonicalSize" min="64" max="1024" step="16" value="336" />
@@ -1731,6 +1761,14 @@
                                     <option value="tight_context">Tight + context</option>
                                 </select>
                                 <div class="training-help">Multi-view modes encode two crops per object and concatenate them; slower but sometimes better for subtype review.</div>
+                            </div>
+                            <div>
+                                <label for="trainEmbeddingAdjustment">Embedding adjustment<span class="help-icon" title="Remove size/aspect bias fits a residualizer on training-set crop geometry, subtracts the predictable size/aspect component from embeddings, then L2-normalizes. It is not full whitening; it targets crop-size shortcuts that otherwise dominate class-split graphs and auto-class heads.">?</span></label>
+                                <select id="trainEmbeddingAdjustment">
+                                    <option value="remove_size_bias" selected>Remove size/aspect bias</option>
+                                    <option value="none">None / raw normalized embeddings</option>
+                                </select>
+                                <div class="training-help">Saved into classifier metadata and replayed on new crops during auto-class inference.</div>
                             </div>
                             <div>
                                 <label for="trainDinov3Pooling">DINOv3 pooling<span class="help-icon" title="DINOv3-only readout. Pooler is the measured default. CLS and patch-mean variants are kept for experiments when a dataset behaves differently.">?</span></label>
@@ -1869,7 +1907,7 @@
                                 <div class="training-help">Stabilizes MLP training when embedding scales vary.</div>
                             </div>
                             <div>
-                                <label for="trainEmbeddingCenter">Center embeddings</label>
+                                <label for="trainEmbeddingCenter">Center embeddings<span class="help-icon" title="Subtracts the train-set per-dimension mean after size/aspect residualization. The mean vector is saved with the classifier and reused during inference.">?</span></label>
                                 <div class="training-toggle-row" style="margin: 6px 0 0;">
                                     <input type="checkbox" id="trainEmbeddingCenter" />
                                     <span>Subtract mean (per-dimension)</span>
@@ -1877,12 +1915,12 @@
                                 <div class="training-help">Reduces CLIP/DINO embedding anisotropy.</div>
                             </div>
                             <div>
-                                <label for="trainEmbeddingStandardize">Standardize embeddings</label>
+                                <label for="trainEmbeddingStandardize">Standardize embeddings<span class="help-icon" title="Subtracts the train-set mean and divides each embedding dimension by its train-set standard deviation. This is diagonal standardization, not full PCA/ZCA whitening; saved mean/std values are reused at inference.">?</span></label>
                                 <div class="training-toggle-row" style="margin: 6px 0 0;">
                                     <input type="checkbox" id="trainEmbeddingStandardize" checked />
                                     <span>Divide by per-dimension std</span>
                                 </div>
-                                <div class="training-help">Acts like whitening; can boost separation for hard classes.</div>
+                                <div class="training-help">Whitening-like scaling without rotating features; can boost separation for hard classes.</div>
                             </div>
                             <div class="mlp-only" hidden>
                                 <label for="trainMlpPatience">MLP early-stop patience</label>

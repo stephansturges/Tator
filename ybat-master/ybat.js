@@ -35426,16 +35426,16 @@ async function cancelRfDetrTrainingJobRequest() {
         const selectedSource = getDataIngestionReferenceSource();
         const selectedDatasetId = getDataIngestionReferenceDatasetId();
         if (!headReferenceSource && !headDatasetId) {
-            return true;
+            return false;
         }
         if (selectedSource === "backend_dataset") {
-            if (headDatasetId) {
-                return headDatasetId === selectedDatasetId;
-            }
-            return headReferenceSource === "backend_dataset";
+            return !!headDatasetId && !!selectedDatasetId && headDatasetId === selectedDatasetId;
         }
         const activeDatasetId = String(annotationSourceState.datasetId || "").trim();
-        if (headDatasetId && activeDatasetId) {
+        if (headDatasetId || activeDatasetId) {
+            if (!headDatasetId || !activeDatasetId) {
+                return false;
+            }
             return headDatasetId === activeDatasetId;
         }
         return headReferenceSource === "active_label_images";

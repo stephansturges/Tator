@@ -562,6 +562,10 @@ reference dataset.
   reference profiles that match the currently selected active/backend reference
   dataset, instead of auto-selecting an unrelated global head and later
   disabling candidate analysis.
+- Made the same reference/profile check fail closed in the backend. Local SALAD
+  analysis now rejects heads with missing reference metadata or a mismatched
+  `reference_dataset_id`, so direct API calls cannot bypass the Data Ingestion
+  reference-first flow.
 - Added `tools/benchmark_salad_diversity.py` to compare pooled DINOv3 selection
   against a locally trained SALAD head:
 

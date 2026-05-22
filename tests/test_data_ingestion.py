@@ -70,6 +70,27 @@ class _FakeUpload:
         return self._payload
 
 
+def _write_unit_local_salad_head(root: Path, head_id: str, metadata: dict | None = None) -> None:
+    config = LocalSALADConfig(num_channels=8, num_clusters=2, cluster_dim=4, token_dim=6, hidden_dim=12, dropout=0.0)
+    head = LocalSALADHead(config)
+    payload_metadata = {
+        "id": head_id,
+        "label": head_id,
+        "policy": api.LOCAL_SALAD_POLICY,
+        "trainer": api.LOCAL_SALAD_TRAINER,
+        **(metadata or {}),
+    }
+    torch.save(
+        {
+            "format": api.LOCAL_SALAD_CACHE_VERSION,
+            "config": config.to_dict(),
+            "state_dict": head.state_dict(),
+            "metadata": payload_metadata,
+        },
+        root / f"{head_id}.pt",
+    )
+
+
 def test_data_ingestion_create_jobs_reject_empty_uploads_before_queueing(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "DATA_INGESTION_ROOT", tmp_path)
 
@@ -151,6 +172,7 @@ def test_data_ingestion_active_reference_dataset_id_is_metadata_only(tmp_path, m
     manifest = json.dumps({
         "reference_source": "active_label_images",
         "reference_dataset_id": "open_label_images_dataset",
+        "encoder": "dinov3_pooled",
     })
 
     analysis_result = asyncio.run(
@@ -173,6 +195,96 @@ def test_data_ingestion_active_reference_dataset_id_is_metadata_only(tmp_path, m
     train_job = api.DATA_INGESTION_JOBS[train_result["job_id"]]
     assert train_job.request["reference_dataset_id"] == "open_label_images_dataset"
     assert len(train_job.request["train_uploads"]) == 2
+
+
+def test_local_salad_reference_matching_requires_specific_metadata():
+    assert not api._local_salad_head_reference_matches_request(
+        {},
+        {"reference_source": "active_label_images"},
+    )
+    assert api._local_salad_head_reference_matches_request(
+        {"reference_source": "active_label_images"},
+        {"reference_source": "active_label_images"},
+    )
+    assert not api._local_salad_head_reference_matches_request(
+        {"reference_source": "backend_dataset"},
+        {"reference_source": "backend_dataset", "reference_dataset_id": "dataset_a"},
+    )
+    assert api._local_salad_head_reference_matches_request(
+        {"reference_source": "active_label_images", "reference_dataset_id": "dataset_a"},
+        {"reference_source": "backend_dataset", "reference_dataset_id": "dataset_a"},
+    )
+    assert not api._local_salad_head_reference_matches_request(
+        {"reference_source": "active_label_images", "reference_dataset_id": "dataset_a"},
+        {"reference_source": "backend_dataset", "reference_dataset_id": "dataset_b"},
+    )
+
+
+def test_data_ingestion_rejects_mismatched_local_salad_profile_before_queue(tmp_path, monkeypatch):
+    jobs_root = tmp_path / "jobs"
+    heads_root = tmp_path / "heads"
+    jobs_root.mkdir()
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+    _write_unit_local_salad_head(
+        heads_root,
+        "dataset_a_head",
+        {
+            "reference_source": "backend_dataset",
+            "reference_dataset_id": "dataset_a",
+        },
+    )
+    manifest = json.dumps({
+        "encoder": "local_salad",
+        "salad_head_id": "dataset_a_head",
+        "reference_source": "backend_dataset",
+        "reference_dataset_id": "dataset_b",
+    })
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(
+            api.create_data_ingestion_analysis_job(
+                manifest,
+                [_FakeUpload("candidate.jpg", b"candidate")],
+                [_FakeUpload("reference.jpg", b"reference")],
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "local_salad_head_reference_mismatch"
+
+
+def test_data_ingestion_runtime_rejects_mismatched_local_salad_profile(tmp_path, monkeypatch):
+    heads_root = tmp_path / "heads"
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", tmp_path / "jobs")
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+    _write_unit_local_salad_head(
+        heads_root,
+        "dataset_a_head",
+        {
+            "reference_source": "backend_dataset",
+            "reference_dataset_id": "dataset_a",
+        },
+    )
+    job = api.DataIngestionJob(
+        job_id="di_mismatch_runtime",
+        kind="analysis",
+        request={
+            "encoder": "local_salad",
+            "salad_head_id": "dataset_a_head",
+            "reference_source": "backend_dataset",
+            "reference_dataset_id": "dataset_b",
+            "candidate_uploads": [{"path": str(tmp_path / "candidate.jpg"), "filename": "candidate.jpg"}],
+            "reference_uploads": [{"path": str(tmp_path / "reference.jpg"), "filename": "reference.jpg"}],
+        },
+    )
+
+    api._run_data_ingestion_analysis_job(job)
+
+    assert job.status == "failed"
+    assert job.error == "local_salad_head_reference_mismatch"
 
 
 def test_data_ingestion_cradio_pooled_uses_requested_pooling(tmp_path, monkeypatch):

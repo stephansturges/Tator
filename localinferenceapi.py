@@ -17121,6 +17121,30 @@ def _list_local_salad_heads() -> List[Dict[str, Any]]:
     return entries
 
 
+def _local_salad_head_reference_matches_request(metadata: Dict[str, Any], request: Dict[str, Any]) -> bool:
+    head_source = str(metadata.get("reference_source") or metadata.get("source_mode") or "").strip()
+    head_dataset_id = str(metadata.get("reference_dataset_id") or "").strip()
+    request_source = str(request.get("reference_source") or request.get("source_mode") or "").strip()
+    request_dataset_id = str(request.get("reference_dataset_id") or "").strip()
+    if not head_source and not head_dataset_id:
+        return False
+    if request_source == "backend_dataset":
+        return bool(head_dataset_id and request_dataset_id and head_dataset_id == request_dataset_id)
+    if request_source == "active_label_images":
+        if head_dataset_id or request_dataset_id:
+            return bool(head_dataset_id and request_dataset_id and head_dataset_id == request_dataset_id)
+        return head_source == "active_label_images"
+    return False
+
+
+def _validate_local_salad_head_reference(head_id: str, request: Dict[str, Any]) -> None:
+    if not str(head_id or "").strip():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
+    _head, metadata = _load_local_salad_head(head_id, device_name="cpu", backend="torch")
+    if not _local_salad_head_reference_matches_request(metadata, request):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_reference_mismatch")
+
+
 def _data_ingestion_capabilities() -> Dict[str, Any]:
     return {
         "encoders": ["local_salad"],
@@ -17497,6 +17521,17 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_candidate_files")
         if not reference_rows:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_files")
+        encoder = str(request.get("encoder") or "dinov3_pooled").strip().lower()
+        if encoder not in {"dinov3_pooled", "cradio_pooled", "local_salad"}:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_encoder_unsupported")
+        model_name = str(
+            request.get("encoder_model")
+            or (CRADIO_DEFAULT_MODEL if encoder == "cradio_pooled" else CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL)
+        ).strip()
+        cradio_pooling = normalize_cradio_pooling(request.get("cradio_pooling"))
+        salad_head_id = str(request.get("salad_head_id") or "").strip()
+        if encoder == "local_salad":
+            _validate_local_salad_head_reference(salad_head_id, request)
         _data_ingestion_update(job, status="running", progress=0.02, message="Preparing candidate media ...")
         frame_interval = _coerce_float(request.get("frame_interval"), 1.0, minimum=0.1)
         max_frames = _coerce_int(request.get("max_frames_per_video"), 200, minimum=0)
@@ -17523,17 +17558,6 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         )
         if not references:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_images")
-        encoder = str(request.get("encoder") or "dinov3_pooled").strip().lower()
-        if encoder not in {"dinov3_pooled", "cradio_pooled", "local_salad"}:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_encoder_unsupported")
-        model_name = str(
-            request.get("encoder_model")
-            or (CRADIO_DEFAULT_MODEL if encoder == "cradio_pooled" else CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL)
-        ).strip()
-        cradio_pooling = normalize_cradio_pooling(request.get("cradio_pooling"))
-        salad_head_id = str(request.get("salad_head_id") or "").strip()
-        if encoder == "local_salad" and not salad_head_id:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
         batch_size = _coerce_int(request.get("batch_size"), 16, minimum=1)
         candidate_embeddings = _data_ingestion_encode_prepared_images(
             candidates,
@@ -17943,6 +17967,9 @@ async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_manifest_invalid")
     if not candidate_files:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_candidate_files")
+    encoder = str(manifest.get("encoder") or "").strip().lower()
+    if encoder == "local_salad":
+        _validate_local_salad_head_reference(str(manifest.get("salad_head_id") or "").strip(), manifest)
     job_id = f"di_{uuid.uuid4().hex[:10]}"
     out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job_id, "job")
     candidate_rows = await _data_ingestion_save_uploads(candidate_files, out_dir / "uploads" / "candidates", "candidate")

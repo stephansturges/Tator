@@ -209,6 +209,7 @@ def test_data_ingestion_panel_contract():
     assert "reference_dataset_id" in js
     assert "reference_source" in js
     assert "function dataIngestionHeadMatchesReference" in js
+    assert 'if (!headReferenceSource && !headDatasetId) {\n            return false;' in js
     assert "function handleDataIngestionReferenceChange" in js
     assert "heads.filter((head) => dataIngestionHeadMatchesReference(head))" in js
     assert "Choose matching reference profile" in js

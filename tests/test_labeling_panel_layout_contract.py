@@ -457,6 +457,10 @@ def test_class_split_explorer_panel_contract():
     assert "function markClassSplitWrongCandidateCorrect" in js
     assert "const focusPromise = window.Plotly.relayout" in js
     assert "focusPromise\n            .then(() => {" in js
+    assert "return window.Plotly.react(graphEl, traces, layout, config).then(() => {" in js
+    assert "const plotRender = renderClassSplitPlot();" in js
+    assert "Promise.resolve(plotRender).then(() => {" in js
+    assert "classSplitState.selectedPointId === safeId" in js
     assert "Suggested by neighbors: ${escapeHtml(point.suggested_neighbor_class)}" in js
     assert "clearClassSplitBulkSelection({ render: true });" in js
     assert 'classSplitElements.filterClass.addEventListener("change", () => {' in js

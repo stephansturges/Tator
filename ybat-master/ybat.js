@@ -36803,16 +36803,16 @@ async function cancelRfDetrTrainingJobRequest() {
     function renderClassSplitPlot() {
         const graphEl = classSplitElements.graph;
         if (!graphEl) {
-            return;
+            return Promise.resolve(false);
         }
         if (!window.Plotly) {
             graphEl.innerHTML = `<div class="training-help">Plotly did not load; cannot render the cluster graph.</div>`;
-            return;
+            return Promise.resolve(false);
         }
         const points = getClassSplitFilteredPoints();
         if (!points.length) {
             graphEl.innerHTML = `<div class="training-help">No points match the current filter.</div>`;
-            return;
+            return Promise.resolve(false);
         }
         const theme = getClassSplitPlotTheme();
         const traces = [
@@ -36863,7 +36863,7 @@ async function cancelRfDetrTrainingJobRequest() {
             modeBarButtonsToRemove: ["toImage"],
         };
         suppressClassSplitShiftWheel(graphEl);
-        window.Plotly.react(graphEl, traces, layout, config).then(() => {
+        return window.Plotly.react(graphEl, traces, layout, config).then(() => {
             if (typeof graphEl.removeAllListeners === "function") {
                 [
                     "plotly_click",
@@ -36882,9 +36882,11 @@ async function cancelRfDetrTrainingJobRequest() {
             graphEl.on("plotly_deselect", () => {
                 clearClassSplitBulkSelection({ render: true });
             });
+            return true;
         }).catch((error) => {
             console.warn("Class Split plot render failed", error);
             graphEl.innerHTML = `<div class="training-help error">Graph render failed: ${escapeHtml(error.message || error)}</div>`;
+            return false;
         });
     }
 
@@ -37202,13 +37204,15 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         classSplitState.selectedPointId = safeId;
         renderClassSplitInspector();
-        renderClassSplitPlot();
+        const plotRender = renderClassSplitPlot();
         if (filterChanged) {
             renderClassSplitBulkPanel();
         }
         if (focusPlot) {
-            window.requestAnimationFrame(() => {
-                focusClassSplitPlotOnPoint(safeId, { flash });
+            Promise.resolve(plotRender).then(() => {
+                if (classSplitState.selectedPointId === safeId) {
+                    focusClassSplitPlotOnPoint(safeId, { flash });
+                }
             });
         } else if (flash) {
             startClassSplitPlotFlash(safeId);

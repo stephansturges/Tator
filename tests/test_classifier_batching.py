@@ -10,7 +10,7 @@ def test_classifier_review_batches(monkeypatch):
         {"label": "car", "bbox_xyxy_px": [20, 20, 30, 30], "score": 0.9},
     ]
     head = {
-        "classes": ["car", "background"],
+        "classes": np.asarray(["car", "background"], dtype=object),
         "background_labels": ["background"],
         "min_prob": 0.5,
         "margin": 0.0,

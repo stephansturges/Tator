@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import numpy as np
 
 from utils.embedding_recipe import normalize_embedding_aggregation
+from utils.classifier_utils import _classifier_classes_list
 
 
 def _predict_proba_batched_impl(
@@ -186,7 +187,7 @@ def _load_clip_head_from_classifier_impl(
             solver_used = None
 
     if isinstance(clf_obj, dict) and str(clf_obj.get("classifier_type") or clf_obj.get("head_type") or "").lower() == "mlp":
-        classes = [str(c) for c in list(clf_obj.get("classes") or [])]
+        classes = _classifier_classes_list(clf_obj.get("classes"))
         layers_raw = clf_obj.get("layers")
         if not classes or not isinstance(layers_raw, list) or not layers_raw:
             raise http_exception_cls(status_code=400, detail="agent_clip_classifier_invalid")
@@ -697,10 +698,12 @@ def _list_clip_classifiers_impl(
             if classes_raw is not None:
                 entry["classes"] = [str(c) for c in list(classes_raw)]
                 entry["n_classes"] = len(entry["classes"])
-            elif isinstance(clf_obj, dict) and clf_obj.get("classes"):
-                entry["classes"] = [str(c) for c in list(clf_obj.get("classes") or [])]
-                entry["n_classes"] = len(entry["classes"])
-                entry["classifier_type"] = clf_obj.get("classifier_type") or clf_obj.get("head_type")
+            elif isinstance(clf_obj, dict):
+                classes = _classifier_classes_list(clf_obj.get("classes"))
+                if classes:
+                    entry["classes"] = classes
+                    entry["n_classes"] = len(entry["classes"])
+                    entry["classifier_type"] = clf_obj.get("classifier_type") or clf_obj.get("head_type")
             coef = getattr(clf_obj, "coef_", None)
             if coef is not None and hasattr(coef, "shape") and len(getattr(coef, "shape", [])) >= 2:
                 entry["embedding_dim"] = int(coef.shape[1])

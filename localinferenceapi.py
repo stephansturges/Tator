@@ -203,6 +203,8 @@ from utils.labels import (
 )
 from utils.classifier_utils import (
     _clip_head_background_indices,
+    _clip_head_classes,
+    _classifier_classes_list,
     _agent_background_classes_from_head,
     _find_clip_head_target_index,
 )
@@ -8666,6 +8668,10 @@ def _clip_head_predict_proba(
                     if layer.get("layer_norm_bias") is not None
                     else None
                 )
+                if ln_weight.shape != (x.shape[1],):
+                    return None
+                if ln_bias is not None and ln_bias.shape != (x.shape[1],):
+                    return None
                 eps = float(layer.get("layer_norm_eps") or 1e-5)
                 mean = x.mean(axis=-1, keepdims=True)
                 var = x.var(axis=-1, keepdims=True)
@@ -8693,8 +8699,8 @@ def _clip_head_predict_proba(
             return None
         logits = feats_np @ coef.T + intercept
     proba_mode = str(head.get("proba_mode") or "softmax").lower()
-    classes_raw = head.get("classes")
-    class_count = len(classes_raw) if isinstance(classes_raw, (list, tuple)) else 0
+    classes = _clip_head_classes(head)
+    class_count = len(classes)
     if proba_mode == "binary":
         if class_count and class_count != 2:
             return None
@@ -8740,7 +8746,7 @@ def _clip_auto_predict_details(feats_np: Any, *, background_guard: bool = True) 
     proba_arr = _clip_head_predict_proba(feats_np, head)
     if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] == 0:
         return {"error": "classifier_failed"}
-    classes = [str(c) for c in list(head.get("classes") or [])]
+    classes = _clip_head_classes(head)
     if not classes:
         return {"error": "classifier_no_classes"}
     row = proba_arr[0]
@@ -8881,7 +8887,7 @@ def _score_detections_with_clip_head(
     crop_records: List[Dict[str, Any]] = []
     det_refs: List[Any] = []
     target_indices: List[int] = []
-    classes = [str(c) for c in list(clip_head.get("classes") or [])]
+    classes = _clip_head_classes(clip_head)
     for det in detections:
         label = None
         if isinstance(det, dict):
@@ -8945,7 +8951,7 @@ def _agent_classifier_review(
     counts = {"classifier_checked": 0, "classifier_rejected": 0}
     if not detections or pil_img is None or not isinstance(classifier_head, dict):
         return detections, counts
-    classes = [str(c) for c in list(classifier_head.get("classes") or [])]
+    classes = _clip_head_classes(classifier_head)
     if not classes:
         return detections, counts
     img_w, img_h = pil_img.size
@@ -9498,7 +9504,7 @@ def _agent_sanitize_detection_items(
                 base_entry["prepass_atom_ids"] = atom_ids
 
         if pil_img is not None and isinstance(classifier_head, dict):
-            classes = [str(c) for c in list(classifier_head.get("classes") or [])]
+            classes = _clip_head_classes(classifier_head)
             target_idx = _find_clip_head_target_index(classes, aligned)
             if target_idx is None:
                 rejected += 1
@@ -9556,7 +9562,7 @@ def _agent_sanitize_detection_items(
         if proba_arr is None or proba_arr.ndim != 2 or proba_arr.shape[0] != len(pending):
             rejected += len(pending)
             return cleaned, rejected
-        classes = [str(c) for c in list(classifier_head.get("classes") or [])]
+        classes = _clip_head_classes(classifier_head)
         bg_indices = _clip_head_background_indices(classes)
         for row, pending_entry in zip(proba_arr, pending, strict=False):
             entry = pending_entry["entry"]
@@ -10593,7 +10599,7 @@ def _agent_tool_classify_crop(
             status_code=HTTP_503_SERVICE_UNAVAILABLE, detail="classifier_encode_failed"
         )
     proba_arr = _clip_head_predict_proba(feats, head)
-    classes = [str(c) for c in list(head.get("classes") or [])]
+    classes = _clip_head_classes(head)
     if (
         proba_arr is None
         or proba_arr.ndim != 2
@@ -22421,9 +22427,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             if isinstance(clip_name, str) and clip_name.strip()
             else "unknown"
         )
-        classes_list = (
-            clip_head.get("classes") if isinstance(clip_head.get("classes"), list) else []
-        )
+        classes_list = _clip_head_classes(clip_head)
         _log(
             "Pretrained CLIP head enabled: "
             f"{clip_head_path.name} "
@@ -23263,11 +23267,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
                         "artifact": "clip_head/head.npz",
                         "clip_model": clip_head.get("clip_model"),
                         "proba_mode": clip_head.get("proba_mode"),
-                        "classes": (
-                            clip_head.get("classes")
-                            if isinstance(clip_head.get("classes"), list)
-                            else []
-                        ),
+                        "classes": _clip_head_classes(clip_head),
                         "min_prob": (
                             float(tuned_min_prob)
                             if tuned_min_prob is not None
@@ -30379,9 +30379,9 @@ def set_active_model(payload: ActiveModelRequest):
         labelmap_entries = list(active_label_list)
     classes_raw = getattr(new_clf, "classes_", None)
     if classes_raw is None and isinstance(new_clf, dict):
-        classes_list = [str(c) for c in list(new_clf.get("classes") or [])]
+        classes_list = _classifier_classes_list(new_clf.get("classes"))
     else:
-        classes_list = [str(c) for c in list(classes_raw)] if classes_raw is not None else []
+        classes_list = _classifier_classes_list(classes_raw)
     clf_classes = len(classes_list) if classes_list else None
     if clf_classes is not None:
         if not labelmap_entries:

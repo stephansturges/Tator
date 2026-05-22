@@ -1007,7 +1007,7 @@ def test_classifier_detection_scoring_closes_preprocessed_crops(monkeypatch):
     scores = api._score_detections_with_clip_head(
         [detection],
         pil_img=image,
-        clip_head={"classes": ["car", "boat"]},
+        clip_head={"classes": np.asarray(["car", "boat"], dtype=object)},
         score_mode="clip_head_prob",
     )
 
@@ -1096,7 +1096,7 @@ def test_classifier_loader_preserves_mlp_gelu_activation(tmp_path):
 
     clf_obj = {
         "classifier_type": "mlp",
-        "classes": ["car", "boat"],
+        "classes": np.asarray(["car", "boat"], dtype=object),
         "embedding_dim": 2,
         "layers": [
             {
@@ -1140,6 +1140,7 @@ def test_classifier_loader_preserves_mlp_gelu_activation(tmp_path):
     )
 
     assert head["layers"][0]["activation"] == "gelu"
+    assert head["classes"] == ["car", "boat"]
 
 
 def test_clip_head_predict_proba_replays_mlp_gelu_activation():
@@ -1217,6 +1218,43 @@ def test_clip_head_predict_proba_normalizes_ovr_probabilities():
     assert np.allclose(actual.sum(axis=1), [1.0])
 
 
+def test_clip_head_predict_proba_accepts_numpy_array_classes():
+    feats = np.asarray([[1.0, 0.0]], dtype=np.float32)
+    head = {
+        "classifier_type": "logreg",
+        "classes": np.asarray(["car", "boat"], dtype=object),
+        "coef": np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+        "intercept": np.zeros(2, dtype=np.float32),
+        "proba_mode": "softmax",
+    }
+
+    actual = api._clip_head_predict_proba(feats, head)
+
+    assert actual is not None
+    assert actual.shape == (1, 2)
+    assert float(actual[0, 0]) > float(actual[0, 1])
+
+
+def test_clip_auto_predict_details_accepts_numpy_array_classes(monkeypatch):
+    head = {
+        "classifier_type": "logreg",
+        "classes": np.asarray(["car", "boat"], dtype=object),
+        "coef": np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+        "intercept": np.zeros(2, dtype=np.float32),
+        "proba_mode": "softmax",
+    }
+    monkeypatch.setattr(api, "_active_classifier_head_for_inference", lambda: head)
+
+    details = api._clip_auto_predict_details(
+        np.asarray([[2.0, 0.0]], dtype=np.float32),
+        background_guard=False,
+    )
+
+    assert details["error"] is None
+    assert details["label"] == "car"
+    assert details["second_label"] == "boat"
+
+
 def test_clip_head_predict_proba_fails_closed_on_embedding_width_mismatch():
     feats = np.asarray([[1.0, 2.0, 3.0]], dtype=np.float32)
     logreg_head = {
@@ -1248,6 +1286,24 @@ def test_clip_head_predict_proba_fails_closed_on_class_count_mismatch():
         "coef": np.zeros((2, 2), dtype=np.float32),
         "intercept": np.zeros(2, dtype=np.float32),
         "proba_mode": "softmax",
+    }
+
+    assert api._clip_head_predict_proba(feats, head) is None
+
+
+def test_clip_head_predict_proba_fails_closed_on_layer_norm_shape_mismatch():
+    feats = np.asarray([[1.0, 2.0]], dtype=np.float32)
+    head = {
+        "classifier_type": "mlp",
+        "classes": ["car", "boat"],
+        "layers": [
+            {
+                "weight": np.eye(2, dtype=np.float32),
+                "bias": np.zeros(2, dtype=np.float32),
+                "layer_norm_weight": np.ones(3, dtype=np.float32),
+                "activation": "linear",
+            }
+        ],
     }
 
     assert api._clip_head_predict_proba(feats, head) is None

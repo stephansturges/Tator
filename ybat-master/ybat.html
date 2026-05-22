@@ -53,7 +53,7 @@
 	            <button class="tab-button active" data-tab="labeling" data-testid="tab.labeling.open" id="tabLabelingButton" type="button">Label Images</button>
             <button class="tab-button" data-tab="data-ingestion" data-testid="tab.data_ingestion.open" id="tabDataIngestionButton" type="button">Data Ingestion</button>
             <button class="tab-button" data-tab="class-split" data-testid="tab.class_split.open" id="tabClassSplitButton" type="button">Class Split Explorer</button>
-            <button class="tab-button" data-tab="prepass-builder" data-testid="tab.prepass_builder.open" id="tabPrepassBuilderButton" type="button">EDR [wip] Builder</button>
+            <button class="tab-button" data-tab="prepass-builder" data-testid="tab.prepass_builder.open" id="tabPrepassBuilderButton" type="button">EDR Builder [wip]</button>
             <button class="tab-button" data-tab="training" data-testid="tab.training.open" id="tabTrainingButton" type="button">Train Class Predictor</button>
             <button class="tab-button" data-tab="qwen-train" data-testid="tab.qwen_train.open" id="tabQwenTrainButton" type="button">Train Qwen 3</button>
             <button class="tab-button" data-tab="sam3-train" data-testid="tab.sam3_train.open" id="tabSam3TrainButton" type="button">Train SAM3</button>
@@ -801,11 +801,11 @@
                     </section>
                     <section class="data-ingestion-panel data-ingestion-results" id="dataIngestionResults" hidden>
                         <div>
-                            <strong>Ingestion report</strong>
+                            <strong id="dataIngestionReportTitle">Ingestion report</strong>
                             <div id="dataIngestionReport" class="data-ingestion-report"></div>
                         </div>
                         <div>
-                            <strong>Top diverse candidates</strong>
+                            <strong id="dataIngestionListTitle">Top diverse candidates</strong>
                             <div id="dataIngestionList" class="data-ingestion-list"></div>
                         </div>
                     </section>
@@ -1020,7 +1020,7 @@
             <div class="tab-panel" id="tabPrepassBuilder" data-tab-panel="prepass-builder">
                 <div class="container">
                     <div class="left">
-                        <h2>EDR [wip] Builder</h2>
+                        <h2>EDR Builder [wip]</h2>
                         <div class="training-help">Build, calibrate, and export Ensemble Detection Recipes (EDR [wip]). Use the Label Images tab to apply saved EDR [wip] recipes.</div>
                         <div class="training-help" style="margin-top:8px; border-left:3px solid #4a5568; padding-left:10px;">
                             <strong>What EDR [wip] is:</strong> An Ensemble Detection Recipe combines a <strong>prepass</strong> and a <strong>calibration</strong>.
@@ -1061,7 +1061,7 @@
                                         </div>
                                     </div>
                                     <div class="training-help" style="margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc; padding: 10px 12px;">
-                                        <div style="font-weight: 600; color: #0f172a;">Canonical EDR [wip] recipes</div>
+                                        <div style="font-weight: 600; color: #0f172a;">Canonical EDRs [wip]</div>
                                         <div style="margin-top: 4px;">Promoted dataset-specific EDR [wip] recipes live here so they are easy to find, load, and reuse from the WebUI without browsing the filesystem.</div>
                                         <div class="qwen-caption-grid" style="margin-top: 10px;">
                                             <div>
@@ -1438,7 +1438,7 @@
                                             <input type="number" id="qwenCalibrationImageCount" min="10" max="100000" value="2000" />
                                         </div>
                                         <div>
-                                            <label for="qwenCalibrationRecipeMode">EDR [wip] mode<span class="help-icon" title="Auto reuses a promoted EDR [wip] recipe for this exact dataset/settings fingerprint if available; otherwise it runs discovery, promotes an EDR [wip] recipe, then trains. Reuse only requires an existing promoted EDR [wip] recipe. Force rediscover always reruns discovery first.">?</span></label>
+                                            <label for="qwenCalibrationRecipeMode">EDR mode [wip]<span class="help-icon" title="Auto reuses a promoted EDR [wip] recipe for this exact dataset/settings fingerprint if available; otherwise it runs discovery, promotes an EDR [wip] recipe, then trains. Reuse only requires an existing promoted EDR [wip] recipe. Force rediscover always reruns discovery first.">?</span></label>
                                             <select id="qwenCalibrationRecipeMode">
                                                 <option value="auto" selected>Auto</option>
                                                 <option value="reuse_only">Reuse only</option>

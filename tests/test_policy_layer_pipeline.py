@@ -1,11 +1,24 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
-import xgboost as xgb
 import pytest
+
+
+def _single_thread_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for key in (
+        'OMP_NUM_THREADS',
+        'OPENBLAS_NUM_THREADS',
+        'MKL_NUM_THREADS',
+        'VECLIB_MAXIMUM_THREADS',
+        'NUMEXPR_NUM_THREADS',
+    ):
+        env[key] = '1'
+    return env
 
 
 def _feature_names():
@@ -215,69 +228,93 @@ def _build_fixture_npz(path: Path):
 
 
 def _train_base_model(npz_path: Path, out_prefix: Path):
-    data = np.load(npz_path, allow_pickle=True)
-    X = data['X'].astype(np.float32)
-    y = data['y'].astype(np.int64)
-    meta_rows = [json.loads(str(row)) for row in data['meta']]
-    train_images = {f'img_{idx}.jpg' for idx in range(8)}
-    val_images = {f'img_{idx}.jpg' for idx in range(8, 12)}
-    train_idx = [idx for idx, row in enumerate(meta_rows) if row['image'] in train_images]
-    val_idx = [idx for idx, row in enumerate(meta_rows) if row['image'] in val_images]
-    dtrain = xgb.DMatrix(X[train_idx], label=y[train_idx])
-    dval = xgb.DMatrix(X[val_idx], label=y[val_idx])
-    params = {
-        'objective': 'binary:logistic',
-        'eval_metric': 'logloss',
-        'max_depth': 3,
-        'eta': 0.1,
-        'subsample': 0.8,
-        'colsample_bytree': 0.8,
-        'min_child_weight': 1.0,
-        'gamma': 0.0,
-        'lambda': 1.0,
-        'alpha': 0.0,
-        'tree_method': 'hist',
-        'seed': 7,
-    }
-    booster = xgb.train(params, dtrain, num_boost_round=40, evals=[(dtrain, 'train'), (dval, 'val')], verbose_eval=False)
     model_path = out_prefix.with_suffix('.json')
     meta_path = out_prefix.with_suffix('.meta.json')
-    booster.save_model(str(model_path))
-    meta_payload = {
-        'model_path': str(model_path),
-        'calibrated_threshold': 0.5,
-        'calibrated_thresholds': {'person': 0.5, 'truck': 0.5},
-        'feature_mean': None,
-        'feature_std': None,
-        'log1p_counts': False,
-        'standardize': False,
-        'split_seed': 7,
-        'val_ratio': 0.2,
-        'split_val_images': sorted(val_images),
-        'split_train_images': sorted(train_images),
-        'split_type': 'fixed',
-        'xgb_params': params,
-        'calibration_optimize': 'f1',
-        'n_estimators': 40,
-        'best_iteration': int(getattr(booster, 'best_iteration', 0) or 0),
-        'ensemble_policy': {
-            'sam_bias_scope': 'sam_only',
-            'logit_bias_by_source_class': {
-                'sam3_text': {'__default__': -1.4},
-                'sam3_similarity': {'__default__': -1.2},
-            },
-            'sam_only_min_prob_default': 0.15,
-            'consensus_iou_default': 0.7,
-            'consensus_iou_by_source_class': {
-                'sam3_text': {'__default__': 0.7},
-                'sam3_similarity': {'__default__': 0.7},
-            },
-            'consensus_class_aware': True,
+    code = """
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import xgboost as xgb
+
+npz_path = Path(sys.argv[1])
+model_path = Path(sys.argv[2])
+meta_path = Path(sys.argv[3])
+data = np.load(npz_path, allow_pickle=True)
+X = data['X'].astype(np.float32)
+y = data['y'].astype(np.int64)
+meta_rows = [json.loads(str(row)) for row in data['meta']]
+train_images = {f'img_{idx}.jpg' for idx in range(8)}
+val_images = {f'img_{idx}.jpg' for idx in range(8, 12)}
+train_idx = [idx for idx, row in enumerate(meta_rows) if row['image'] in train_images]
+val_idx = [idx for idx, row in enumerate(meta_rows) if row['image'] in val_images]
+dtrain = xgb.DMatrix(X[train_idx], label=y[train_idx])
+dval = xgb.DMatrix(X[val_idx], label=y[val_idx])
+params = {
+    'objective': 'binary:logistic',
+    'eval_metric': 'logloss',
+    'max_depth': 3,
+    'eta': 0.1,
+    'subsample': 0.8,
+    'colsample_bytree': 0.8,
+    'min_child_weight': 1.0,
+    'gamma': 0.0,
+    'lambda': 1.0,
+    'alpha': 0.0,
+    'tree_method': 'hist',
+    'seed': 7,
+    'nthread': 1,
+}
+booster = xgb.train(params, dtrain, num_boost_round=40, evals=[(dtrain, 'train'), (dval, 'val')], verbose_eval=False)
+booster.save_model(str(model_path))
+meta_payload = {
+    'model_path': str(model_path),
+    'calibrated_threshold': 0.5,
+    'calibrated_thresholds': {'person': 0.5, 'truck': 0.5},
+    'feature_mean': None,
+    'feature_std': None,
+    'log1p_counts': False,
+    'standardize': False,
+    'split_seed': 7,
+    'val_ratio': 0.2,
+    'split_val_images': sorted(val_images),
+    'split_train_images': sorted(train_images),
+    'split_type': 'fixed',
+    'xgb_params': params,
+    'calibration_optimize': 'f1',
+    'n_estimators': 40,
+    'best_iteration': int(getattr(booster, 'best_iteration', 0) or 0),
+    'ensemble_policy': {
+        'sam_bias_scope': 'sam_only',
+        'logit_bias_by_source_class': {
+            'sam3_text': {'__default__': -1.4},
+            'sam3_similarity': {'__default__': -1.2},
         },
-        'split_head': {'enabled': False, 'route': 'detector_support', 'models': {}},
-        'sam3_text_quality': {'enabled': False},
-    }
-    meta_path.write_text(json.dumps(meta_payload), encoding='utf-8')
+        'sam_only_min_prob_default': 0.15,
+        'consensus_iou_default': 0.7,
+        'consensus_iou_by_source_class': {
+            'sam3_text': {'__default__': 0.7},
+            'sam3_similarity': {'__default__': 0.7},
+        },
+        'consensus_class_aware': True,
+    },
+    'split_head': {'enabled': False, 'route': 'detector_support', 'models': {}},
+    'sam3_text_quality': {'enabled': False},
+}
+meta_path.write_text(json.dumps(meta_payload), encoding='utf-8')
+"""
+    result = subprocess.run(
+        [sys.executable, '-c', code, str(npz_path), str(model_path), str(meta_path)],
+        env=_single_thread_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        if "No module named 'xgboost'" in result.stderr:
+            pytest.skip("xgboost is not installed")
+        raise AssertionError(f"base XGBoost training failed\n{result.stdout}\n{result.stderr}".strip())
     return model_path, meta_path
 
 
@@ -307,6 +344,7 @@ def test_train_policy_layer_and_runtime_scoring(tmp_path: Path, variant: str, ex
             '--nested-folds', '4',
         ],
         cwd=Path(__file__).resolve().parents[1],
+        env=_single_thread_env(),
         check=True,
         capture_output=True,
         text=True,
@@ -339,6 +377,7 @@ def test_train_policy_layer_and_runtime_scoring(tmp_path: Path, variant: str, ex
             '--output', str(scored_path),
         ],
         cwd=Path(__file__).resolve().parents[1],
+        env=_single_thread_env(),
         check=True,
         capture_output=True,
         text=True,
@@ -367,6 +406,7 @@ def test_selected_policy_resolves_from_copied_meta(tmp_path: Path):
             '--nested-folds', '4',
         ],
         cwd=Path(__file__).resolve().parents[1],
+        env=_single_thread_env(),
         check=True,
         capture_output=True,
         text=True,
@@ -388,6 +428,7 @@ def test_selected_policy_resolves_from_copied_meta(tmp_path: Path):
             '--output', str(scored_path),
         ],
         cwd=Path(__file__).resolve().parents[1],
+        env=_single_thread_env(),
         check=True,
         capture_output=True,
         text=True,

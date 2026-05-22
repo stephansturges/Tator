@@ -50,11 +50,11 @@ def test_data_ingestion_capabilities_expose_reference_profile_flow():
     assert caps["local_salad_backend"]["auto_resolved"] in {"mlx", "torch"}
     assert "local_salad_heads" in caps
     assert "data_ingestion_recipes" not in caps
-    assert api._local_salad_training_stage(0.02) == "Selecting ingredients"
-    assert api._local_salad_training_stage(0.20) == "Washing lettuce"
-    assert api._local_salad_training_stage(0.50) == "Mixing dressing"
-    assert api._local_salad_training_stage(0.80) == "Tossing salad"
-    assert api._local_salad_training_stage(0.99) == "Finalizing SALAD"
+    assert api._local_salad_training_stage(0.02) == "Preparing reference media"
+    assert api._local_salad_training_stage(0.20) == "Encoding reference views"
+    assert api._local_salad_training_stage(0.50) == "Training reference profile"
+    assert api._local_salad_training_stage(0.80) == "Optimizing reference profile"
+    assert api._local_salad_training_stage(0.99) == "Finalizing reference profile"
 
 
 class _FakeUpload:

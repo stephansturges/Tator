@@ -173,6 +173,8 @@ def test_data_ingestion_panel_contract():
     assert 'id="dataIngestionKeepFraction"' in html
     assert 'id="dataIngestionUseActiveReference"' not in html
     assert 'id="dataIngestionSaladHead"' in html
+    assert 'id="dataIngestionReportTitle">Ingestion report</strong>' in html
+    assert 'id="dataIngestionListTitle">Top diverse candidates</strong>' in html
     assert "WALDO encoder benchmark comparison" in html
     assert "Data Ingestion" in html
     assert 'id="dataIngestionCradioModel"' not in html
@@ -211,6 +213,10 @@ def test_data_ingestion_panel_contract():
     assert "function dataIngestionHeadMatchesReference" in js
     assert 'if (!headReferenceSource && !headDatasetId) {\n            return false;' in js
     assert "function handleDataIngestionReferenceChange" in js
+    assert "dataIngestionElements.reportTitle" in js
+    assert "dataIngestionElements.listTitle" in js
+    assert "Reference profile report" in js
+    assert "Profile ready for candidate review" in js
     assert "heads.filter((head) => dataIngestionHeadMatchesReference(head))" in js
     assert "Choose matching reference profile" in js
     assert "No profiles for selected reference" in js
@@ -387,6 +393,7 @@ def test_class_split_explorer_panel_contract():
     assert "html.theme-dark .class-split-panel" in css
     assert "html.theme-dark .class-split-workspace__header" in css
     assert "html.theme-pipboy .class-split-panel" in css
+    assert '"bulk"\n            "graph"' in css
 
     assert 'const TAB_CLASS_SPLIT = "class-split";' in js
     assert "tabElements.classSplitButton = document.getElementById(\"tabClassSplitButton\")" in js
@@ -440,11 +447,18 @@ def test_class_split_explorer_panel_contract():
     assert "function setClassSplitGraphPanMode" not in js
     assert "function panClassSplitPlotWithWheel" not in js
     assert 'dragmode: "lasso"' in js
-    assert "__classSplitShiftWheelGuard" in js
-    assert "event.stopImmediatePropagation();" in js
+    assert "scrollZoom: true" in js
+    assert "__classSplitShiftWheelGuard" not in js
+    assert 'graphEl.addEventListener("wheel"' not in js
     assert "function rememberClassSplitSelectionFromPlot" in js
     assert "function changeClassSplitSelectedPointsClass" in js
     assert "function markClassSplitWrongCandidateCorrect" in js
+    assert "const focusPromise = window.Plotly.relayout" in js
+    assert "focusPromise\n            .then(() => {" in js
+    assert "Suggested by neighbors: ${escapeHtml(point.suggested_neighbor_class)}" in js
+    assert "clearClassSplitBulkSelection({ render: true });" in js
+    assert 'classSplitElements.filterClass.addEventListener("change", () => {' in js
+    assert "clearClassSplitBulkSelection();\n                renderClassSplitPlot();" in js
     assert "function showClassSplitHoverCard" not in js
     assert "cropPreview.naturalWidth" in js
     assert "Math.min(shellWidth / naturalWidth, shellHeight / naturalHeight)" in js

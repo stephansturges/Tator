@@ -530,9 +530,9 @@ reference dataset.
   and trained inside Tator from the user's own reference dataset images with a
   frozen spatial-token encoder underneath. DINOv3 is the default base encoder;
   C-RADIOv4 can be selected as a candidate base encoder. Training progress uses
-  the staged messages **Selecting ingredients**,
-  **Washing lettuce**, **Mixing dressing**, **Tossing salad**, and
-  **Finalizing SALAD**.
+  plain reference-profile stages: **Preparing reference media**,
+  **Encoding reference views**, **Training reference profile**,
+  **Optimizing reference profile**, and **Finalizing reference profile**.
 - Added **Build reference profile** in Data Ingestion. Active Label Images
   references are uploaded from the browser; backend datasets are resolved
   server-side without re-uploading. The max-reference cap defaults to `0`,

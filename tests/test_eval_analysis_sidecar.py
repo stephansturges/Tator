@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -9,7 +10,53 @@ import torch
 from PIL import Image
 
 
-xgb = pytest.importorskip("xgboost")
+def _single_thread_env() -> dict[str, str]:
+    env = os.environ.copy()
+    for key in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        env[key] = "1"
+    return env
+
+
+def _write_toy_xgb_model(train_path: Path, model_path: Path) -> None:
+    code = """
+import sys
+import numpy as np
+import xgboost as xgb
+
+payload = np.load(sys.argv[1])
+X = payload["X"]
+y = payload["y"]
+booster = xgb.train(
+    {
+        "objective": "binary:logistic",
+        "max_depth": 2,
+        "eta": 0.5,
+        "eval_metric": "logloss",
+        "tree_method": "hist",
+        "nthread": 1,
+    },
+    xgb.DMatrix(X, label=y),
+    num_boost_round=10,
+)
+booster.save_model(sys.argv[2])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(train_path), str(model_path)],
+        env=_single_thread_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        if "No module named 'xgboost'" in result.stderr:
+            pytest.skip("xgboost is not installed")
+        raise AssertionError(f"toy XGBoost training failed\n{result.stdout}\n{result.stderr}".strip())
 
 
 def _write_image(path: Path, size=(100, 100)) -> None:
@@ -49,8 +96,9 @@ def test_eval_ensemble_xgb_dedupe_writes_analysis_sidecar(tmp_path: Path):
     np.savez(npz_path, X=X, y=y, meta=meta_rows, feature_names=feature_names)
 
     model_path = tmp_path / "model.json"
-    booster = xgb.train({"objective": "binary:logistic", "max_depth": 2, "eta": 0.5, "eval_metric": "logloss", "tree_method": "hist"}, xgb.DMatrix(X, label=y), num_boost_round=10)
-    booster.save_model(str(model_path))
+    train_path = tmp_path / "xgb_train.npz"
+    np.savez(train_path, X=X, y=y)
+    _write_toy_xgb_model(train_path, model_path)
     meta_path = tmp_path / "model.meta.json"
     meta_path.write_text(json.dumps({"calibrated_threshold": 0.5}, indent=2), encoding="utf-8")
     analysis_path = tmp_path / "analysis.json"
@@ -79,6 +127,7 @@ def test_eval_ensemble_xgb_dedupe_writes_analysis_sidecar(tmp_path: Path):
             "--analysis-json",
             str(analysis_path),
         ],
+        env=_single_thread_env(),
         cwd=str(tmp_path),
         check=True,
         capture_output=True,
@@ -157,6 +206,7 @@ def test_eval_ensemble_mlp_dedupe_writes_analysis_sidecar(tmp_path: Path):
             "--analysis-json",
             str(analysis_path),
         ],
+        env=_single_thread_env(),
         cwd=str(tmp_path),
         check=True,
         capture_output=True,

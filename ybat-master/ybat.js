@@ -2403,7 +2403,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         batchSize: null,
         maxTrainImages: null,
         results: null,
+        reportTitle: null,
         report: null,
+        listTitle: null,
         list: null,
     };
     const dataIngestionState = {
@@ -28741,7 +28743,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!loaded) {
             return;
         }
-        setSamStatus("Canonical EDR [wip] is now active for Label Images.", { variant: "info", duration: 2500 });
+        setSamStatus("Canonical EDR is now active for Label Images.", { variant: "info", duration: 2500 });
     }
 
     async function refreshPrepassRecipes() {
@@ -35826,27 +35828,47 @@ async function cancelRfDetrTrainingJobRequest() {
     function renderDataIngestionResult(result) {
         const summary = result?.summary || {};
         const items = Array.isArray(result?.items) ? result.items : [];
+        const isProfileBuild = !!String(summary.head_id || "").trim() && !items.length;
         if (dataIngestionElements.results) dataIngestionElements.results.hidden = false;
+        if (dataIngestionElements.reportTitle) {
+            dataIngestionElements.reportTitle.textContent = isProfileBuild ? "Reference profile report" : "Ingestion report";
+        }
+        if (dataIngestionElements.listTitle) {
+            dataIngestionElements.listTitle.textContent = isProfileBuild ? "Next step" : "Top diverse candidates";
+        }
         if (dataIngestionElements.report) {
-            const rows = [
-                ["Profile", summary.head_id || summary.salad_head_id || ""],
-                ["Reference", summary.reference_dataset_label || summary.reference_label || summary.source_mode || ""],
-                ["Source", summary.reference_source || summary.source_mode || ""],
-                ["Encoder", summary.encoder_type || summary.encoder || "local_salad"],
-                ["SALAD policy", summary.local_salad_policy || summary.policy || "local_training_only"],
-                ["Candidates", summary.candidate_image_count ?? summary.train_image_count ?? summary.item_count ?? 0],
-                ["Reference images", summary.reference_count ?? 0],
-                ["Keep fraction", summary.keep_fraction ?? ""],
-                ["Selected", summary.selected_count ?? ""],
-                ["Mean NN distance", Number(summary.mean_nearest_neighbor_distance || 0).toFixed(3)],
-                ["Mean reference distance", summary.mean_reference_distance == null ? "n/a" : Number(summary.mean_reference_distance || 0).toFixed(3)],
-            ];
+            const rows = isProfileBuild
+                ? [
+                    ["Profile", summary.head_id || ""],
+                    ["Reference", summary.reference_dataset_label || summary.reference_label || summary.source_mode || ""],
+                    ["Source", summary.reference_source || summary.source_mode || ""],
+                    ["Base encoder", summary.encoder_type || ""],
+                    ["Reference images", summary.train_image_count ?? 0],
+                    ["Epochs", summary.epochs ?? ""],
+                    ["Batch size", summary.batch_size ?? ""],
+                    ["Final loss", summary.loss_final == null ? "n/a" : Number(summary.loss_final || 0).toFixed(4)],
+                ]
+                : [
+                    ["Profile", summary.head_id || summary.salad_head_id || ""],
+                    ["Reference", summary.reference_dataset_label || summary.reference_label || summary.source_mode || ""],
+                    ["Source", summary.reference_source || summary.source_mode || ""],
+                    ["Encoder", summary.encoder_type || summary.encoder || "local_salad"],
+                    ["SALAD policy", summary.local_salad_policy || summary.policy || "local_training_only"],
+                    ["Candidates", summary.candidate_image_count ?? summary.train_image_count ?? summary.item_count ?? 0],
+                    ["Reference images", summary.reference_count ?? 0],
+                    ["Keep fraction", summary.keep_fraction ?? ""],
+                    ["Selected", summary.selected_count ?? ""],
+                    ["Mean NN distance", Number(summary.mean_nearest_neighbor_distance || 0).toFixed(3)],
+                    ["Mean reference distance", summary.mean_reference_distance == null ? "n/a" : Number(summary.mean_reference_distance || 0).toFixed(3)],
+                ];
             dataIngestionElements.report.innerHTML = `<div class="data-ingestion-report__grid">${
                 rows.map(([label, value]) => `<div class="data-ingestion-report__item"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`).join("")
             }</div>`;
         }
         if (dataIngestionElements.list) {
-            if (!items.length) {
+            if (isProfileBuild) {
+                dataIngestionElements.list.innerHTML = `<div class="training-help">Profile ready for candidate review. Choose candidate media and run analysis when ready.</div>`;
+            } else if (!items.length) {
                 dataIngestionElements.list.innerHTML = `<div class="training-help">No ranked candidates for this job.</div>`;
             } else {
                 dataIngestionElements.list.innerHTML = items.slice(0, 120).map((item) => {
@@ -35890,7 +35912,9 @@ async function cancelRfDetrTrainingJobRequest() {
         dataIngestionElements.batchSize = document.getElementById("dataIngestionBatchSize");
         dataIngestionElements.maxTrainImages = document.getElementById("dataIngestionMaxTrainImages");
         dataIngestionElements.results = document.getElementById("dataIngestionResults");
+        dataIngestionElements.reportTitle = document.getElementById("dataIngestionReportTitle");
         dataIngestionElements.report = document.getElementById("dataIngestionReport");
+        dataIngestionElements.listTitle = document.getElementById("dataIngestionListTitle");
         dataIngestionElements.list = document.getElementById("dataIngestionList");
         [
             dataIngestionElements.referenceActive,
@@ -36640,13 +36664,22 @@ async function cancelRfDetrTrainingJobRequest() {
         const fullYRange = getClassSplitPointRange(getClassSplitFilteredPoints(), 1);
         const xSpan = Math.max(Math.abs(xRange[1] - xRange[0]), Math.abs(fullXRange[1] - fullXRange[0]) * 0.18, 1e-6);
         const ySpan = Math.max(Math.abs(yRange[1] - yRange[0]), Math.abs(fullYRange[1] - fullYRange[0]) * 0.18, 1e-6);
-        window.Plotly.relayout(graphEl, {
+        const focusPromise = window.Plotly.relayout(graphEl, {
             "xaxis.range": [pointX - xSpan / 2, pointX + xSpan / 2],
             "yaxis.range": [pointY - ySpan / 2, pointY + ySpan / 2],
-        }).catch((error) => console.debug("Class Split plot focus failed", error));
-        if (flash) {
-            startClassSplitPlotFlash(pointId);
-        }
+        });
+        focusPromise
+            .then(() => {
+                if (flash) {
+                    startClassSplitPlotFlash(pointId);
+                }
+            })
+            .catch((error) => {
+                console.debug("Class Split plot focus failed", error);
+                if (flash) {
+                    startClassSplitPlotFlash(pointId);
+                }
+            });
     }
 
     function buildClassSplitTrace(points, name, suspiciousOnly = false) {
@@ -36660,7 +36693,7 @@ async function cancelRfDetrTrainingJobRequest() {
             customdata: filtered.map((point) => String(point.point_id || "")),
             text: filtered.map((point) => {
                 const neighbor = point.suggested_neighbor_class
-                    ? `Suggested by neighbors: ${point.suggested_neighbor_class}<br>`
+                    ? `Suggested by neighbors: ${escapeHtml(point.suggested_neighbor_class)}<br>`
                     : "";
                 const imageName = classSplitShortHoverText(point.image_relpath || "");
                 return [
@@ -36815,17 +36848,6 @@ async function cancelRfDetrTrainingJobRequest() {
             scrollZoom: true,
             modeBarButtonsToRemove: ["toImage"],
         };
-        if (graphEl.__classSplitShiftWheelGuard) {
-            graphEl.removeEventListener("wheel", graphEl.__classSplitShiftWheelGuard, true);
-        }
-        graphEl.__classSplitShiftWheelGuard = (event) => {
-            if (!event.shiftKey) {
-                return;
-            }
-            event.preventDefault();
-            event.stopImmediatePropagation();
-        };
-        graphEl.addEventListener("wheel", graphEl.__classSplitShiftWheelGuard, { capture: true, passive: false });
         window.Plotly.react(graphEl, traces, layout, config).then(() => {
             if (typeof graphEl.removeAllListeners === "function") {
                 [
@@ -36843,7 +36865,7 @@ async function cancelRfDetrTrainingJobRequest() {
             });
             graphEl.on("plotly_selected", rememberClassSplitSelectionFromPlot);
             graphEl.on("plotly_deselect", () => {
-                clearClassSplitBulkSelection();
+                clearClassSplitBulkSelection({ render: true });
             });
         }).catch((error) => {
             console.warn("Class Split plot render failed", error);
@@ -37652,7 +37674,10 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitElements.colorMode.addEventListener("change", renderClassSplitPlot);
         }
         if (classSplitElements.filterClass) {
-            classSplitElements.filterClass.addEventListener("change", renderClassSplitPlot);
+            classSplitElements.filterClass.addEventListener("change", () => {
+                clearClassSplitBulkSelection();
+                renderClassSplitPlot();
+            });
         }
         if (classSplitElements.bulkApply) {
             classSplitElements.bulkApply.addEventListener("click", () => {

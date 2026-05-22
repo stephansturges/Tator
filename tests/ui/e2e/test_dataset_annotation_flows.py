@@ -203,6 +203,16 @@ def test_close_blocks_when_snapshot_save_fails_then_recovers(playwright_page):
         "(() => { const c = document.querySelector('#canvas'); return !!c && c.width > 0 && c.height > 0; })()",
         timeout=20000,
     )
+    page.eval_on_selector("#qwenCaptionDetails", "el => { el.open = true; }")
+    page.wait_for_function(
+        """
+(() => {
+  const el = document.querySelector('#qwenCaptionOutput');
+  return !!el && !el.disabled && el.offsetParent !== null;
+})()
+""",
+        timeout=5000,
+    )
     caption = page.locator("#qwenCaptionOutput")
     caption.fill(f"playwright dirty {uuid.uuid4().hex[:6]}")
     caption.press("Tab")

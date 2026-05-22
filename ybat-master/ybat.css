@@ -2492,6 +2492,7 @@ body.annotation-focus-mode .class-scroll-indicator {
         grid-template-columns: 1fr;
         grid-template-areas:
             "toolbar"
+            "bulk"
             "graph"
             "review";
     }

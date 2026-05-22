@@ -3662,12 +3662,18 @@ class SamPreloadJob:
 
 class SamPreloadManager:
     def __init__(self):
-        self.queue: "queue.Queue[SamPreloadJob]" = queue.Queue()
+        self.queue: "queue.Queue[Optional[SamPreloadJob]]" = queue.Queue()
         self.lock = threading.Lock()
         self.latest_request_id: Dict[str, int] = {}
         self.latest_generation: Dict[str, int] = {}
+        self.stop_event = threading.Event()
         self.worker = threading.Thread(target=self._worker, name="sam-preload-worker", daemon=True)
         self.worker.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        self.queue.put(None)
+        self.worker.join(timeout=1.0)
 
     def submit(
         self,
@@ -3702,8 +3708,11 @@ class SamPreloadManager:
         return job.result  # type: ignore[return-value]
 
     def _worker(self) -> None:
-        while True:
+        while not self.stop_event.is_set():
             job = self.queue.get()
+            if job is None:
+                self.queue.task_done()
+                break
             try:
                 if self._is_superseded(job):
                     job.result = SamPreloadResponse(
@@ -17676,14 +17685,14 @@ def _data_ingestion_train_view(img: Image.Image, rng: random.Random) -> Image.Im
 def _local_salad_training_stage(progress: float) -> str:
     pct = max(0.0, min(1.0, float(progress or 0.0)))
     if pct < 0.18:
-        return "Selecting ingredients"
+        return "Preparing reference media"
     if pct < 0.35:
-        return "Washing lettuce"
+        return "Encoding reference views"
     if pct < 0.70:
-        return "Mixing dressing"
+        return "Training reference profile"
     if pct < 0.94:
-        return "Tossing salad"
-    return "Finalizing SALAD"
+        return "Optimizing reference profile"
+    return "Finalizing reference profile"
 
 
 def _data_ingestion_dinov3_tokens(
@@ -17714,7 +17723,7 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
         upload_rows = list(request.get("train_uploads") or [])
         if not upload_rows:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_no_training_files")
-        _data_ingestion_update(job, status="running", progress=0.02, message="Selecting ingredients ...")
+        _data_ingestion_update(job, status="running", progress=0.02, message="Preparing reference media ...")
         frame_interval = _coerce_float(request.get("frame_interval"), 1.0, minimum=0.1)
         max_frames = _coerce_int(request.get("max_frames_per_video"), 200, minimum=0)
         prepared = _data_ingestion_prepare_media(
@@ -17732,7 +17741,7 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
             prepared = [prepared[idx] for idx in sorted(rnd.sample(range(len(prepared)), max_images))]
         if len(prepared) < 2:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_needs_at_least_two_images")
-        _data_ingestion_update(job, progress=0.18, message="Washing lettuce ...")
+        _data_ingestion_update(job, progress=0.18, message="Encoding reference views ...")
         encoder_type = str(request.get("encoder_type") or "dinov3").strip().lower()
         if encoder_type not in {"dinov3", "cradio"}:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_encoder_unsupported")
@@ -17940,7 +17949,7 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
         result_path.write_text(json.dumps(_class_analysis_json_safe(result), indent=2), encoding="utf-8")
         with DATA_INGESTION_JOBS_LOCK:
             job.result_path = str(result_path)
-            _data_ingestion_update(job, status="completed", progress=1.0, message=f"Finalizing SALAD • head saved: {head_id}", result=result)
+            _data_ingestion_update(job, status="completed", progress=1.0, message=f"Reference profile saved: {head_id}", result=result)
     except RuntimeError as exc:
         with DATA_INGESTION_JOBS_LOCK:
             if str(exc) == "cancelled":

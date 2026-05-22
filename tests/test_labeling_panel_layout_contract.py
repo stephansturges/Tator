@@ -169,6 +169,14 @@ def test_data_ingestion_panel_contract():
     assert "C-RADIOv4 and local SALAD are candidate modes" in html
     assert "C-RADIOv4 on Mac is not MLX-accelerated in Tator" in html
     assert "Current Torch/MPS runs are much slower than DINOv3" in html
+    assert "WALDO encoder benchmark comparison" in html
+    assert "NN purity means: for each embedded object crop, what fraction of its nearest neighbors have the same class" in html
+    assert "This is a clustering score, not classifier accuracy" in html
+    assert "C-RADIOv4 tight+context audit" in html
+    assert "not the default summary preset" in html
+    assert "NN 0.8969 / 0.6917, size 0.0273, wrong 804, runtime 45.3s." in html
+    assert "NN 0.9078 / 0.7264, size 0.0591, wrong 851, runtime 9046.9s." in html
+    assert "no full uncapped WALDO promotion row is recorded here" in html
     assert "The head fixes its base encoder, model, and pooling" in html
     assert "Tator makes it unique if another head already uses the same name" in html
     assert "Number of contrastive passes over the training images/frames" in html
@@ -182,8 +190,11 @@ def test_data_ingestion_panel_contract():
     assert '.tab-panel[data-tab-panel="data-ingestion"]' in css
     assert ".data-ingestion-workspace" in css
     assert ".data-ingestion-results" in css
+    assert ".embedding-benchmark-note__grid" in css
     assert "html.theme-dark .data-ingestion-panel" in css
+    assert "html.theme-dark .embedding-benchmark-note" in css
     assert "html.theme-pipboy .data-ingestion-panel" in css
+    assert "html.theme-pipboy .embedding-benchmark-note" in css
 
     assert 'const TAB_DATA_INGESTION = "data-ingestion";' in js
     assert "tabElements.dataIngestionButton = document.getElementById(\"tabDataIngestionButton\")" in js
@@ -334,6 +345,8 @@ def test_class_split_explorer_panel_contract():
     assert "Full WALDO tests keep DINOv3 Precise as the stable default" in html
     assert "C-RADIOv4 improves NN purity only in a very slow opt-in audit path" in html
     assert "its slowest recipe improved NN purity in full WALDO tests" in html
+    assert "The first NN number is object-weighted; the second balances classes" in html
+    assert "the visible C-RADIO preset starts from summary mode" in html
     assert "not MLX-accelerated in Tator and can be much slower than DINOv3" in html
     assert 'id="classSplitProjectionNeighborK" min="0" max="5000" value="50"' in html
     assert 'id="classSplitSampleCap" min="0" max="50000" placeholder="All objects"' in html

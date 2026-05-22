@@ -706,6 +706,24 @@
                             <h2>Data Ingestion</h2>
                             <div class="training-help">Train local SALAD heads and score new images or video frames for dataset diversity. WALDO benchmarks keep DINOv3 pooled as the stable baseline; C-RADIOv4 and local SALAD are candidate modes to compare before changing defaults.</div>
                             <div class="training-help warn">C-RADIOv4 on Mac is not MLX-accelerated in Tator. Current Torch/MPS runs are much slower than DINOv3.</div>
+                            <details class="embedding-benchmark-note" open>
+                                <summary>WALDO encoder benchmark comparison</summary>
+                                <div class="embedding-benchmark-note__intro">All-class object-crop audit, uncapped. NN purity means: for each embedded object crop, what fraction of its nearest neighbors have the same class. The first NN number is object-weighted; the second balances classes. This is a clustering score, not classifier accuracy. The C-RADIO number is the slow tight+context audit row, not the default summary preset; rerun on your dataset before promoting a slower encoder for routine ingestion.</div>
+                                <div class="embedding-benchmark-note__grid">
+                                    <div class="embedding-benchmark-note__item">
+                                        <strong>DINOv3 Precise</strong>
+                                        <span>NN 0.8969 / 0.6917, size 0.0273, wrong 804, runtime 45.3s.</span>
+                                    </div>
+                                    <div class="embedding-benchmark-note__item">
+                                        <strong>C-RADIOv4 tight+context audit</strong>
+                                        <span>NN 0.9078 / 0.7264, size 0.0591, wrong 851, runtime 9046.9s.</span>
+                                    </div>
+                                    <div class="embedding-benchmark-note__item">
+                                        <strong>CLIP</strong>
+                                        <span>Available for comparison, but no full uncapped WALDO promotion row is recorded here.</span>
+                                    </div>
+                                </div>
+                            </details>
                         </div>
                         <span id="dataIngestionStatus" class="qwen-caption-status"></span>
                     </header>
@@ -849,6 +867,24 @@
                             <h2>Class Split Explorer</h2>
                             <div id="classSplitDatasetStatus" class="training-help">Open a dataset in Label Images to run analysis. Full WALDO tests keep DINOv3 Precise as the stable default; C-RADIOv4 improves NN purity only in a very slow opt-in audit path.</div>
                             <div class="training-help warn">C-RADIOv4 on Mac is not MLX-accelerated in Tator. Current Torch/MPS runs are much slower than DINOv3.</div>
+                            <details class="embedding-benchmark-note" open>
+                                <summary>WALDO encoder benchmark comparison</summary>
+                                <div class="embedding-benchmark-note__intro">All-class object-crop audit, uncapped. NN purity means: for each embedded object crop, what fraction of its nearest neighbors have the same class. The first NN number is object-weighted; the second balances classes. This is a clustering score, not classifier accuracy. Lower size leakage and fewer wrong-class candidates are better. The C-RADIO card is the slow tight+context audit row; the visible C-RADIO preset starts from summary mode.</div>
+                                <div class="embedding-benchmark-note__grid">
+                                    <div class="embedding-benchmark-note__item">
+                                        <strong>DINOv3 Precise</strong>
+                                        <span>NN 0.8969 / 0.6917, size 0.0273, wrong 804, runtime 45.3s.</span>
+                                    </div>
+                                    <div class="embedding-benchmark-note__item">
+                                        <strong>C-RADIOv4 tight+context audit</strong>
+                                        <span>NN 0.9078 / 0.7264, size 0.0591, wrong 851, runtime 9046.9s.</span>
+                                    </div>
+                                    <div class="embedding-benchmark-note__item">
+                                        <strong>CLIP</strong>
+                                        <span>Available for comparison, but no full uncapped WALDO promotion row is recorded here.</span>
+                                    </div>
+                                </div>
+                            </details>
                         </div>
                         <span id="classSplitJobStatus" class="qwen-caption-status"></span>
                     </header>
@@ -883,7 +919,7 @@
                                 <select id="classSplitClassSelect"></select>
                             </div>
                             <div class="class-split-field">
-                                <label for="classSplitEncoderType">Encoder<span class="help-icon" title="Backbone family used to embed object crops. DINOv3 is the current WALDO default. CLIP is available for comparison but weaker for these small visual distinctions. C-RADIOv4 is a Torch candidate; on Mac it is not MLX-accelerated in Tator and is benchmarked separately before promotion.">?</span></label>
+                                <label for="classSplitEncoderType">Encoder<span class="help-icon" title="Backbone family used to embed object crops. DINOv3 is the current WALDO default. CLIP is available for comparison, but no full uncapped WALDO promotion row is recorded here. C-RADIOv4 is a Torch candidate; on Mac it is not MLX-accelerated in Tator and is benchmarked separately before promotion.">?</span></label>
                                 <select id="classSplitEncoderType">
                                     <option value="dinov3" selected>DINOv3</option>
                                     <option value="clip">CLIP</option>
@@ -1544,6 +1580,10 @@
                                 <strong>Compute / VRAM / latency (rough bands)</strong><br />
                                 CLIP ViT-B/32: Low (<=8&nbsp;GB) • Fast · CLIP ViT-B/16: Medium (8-12&nbsp;GB) • Medium · CLIP ViT-L/14: High (12-16&nbsp;GB) • Slow<br />
                                 DINOv3 LVD ViT-S/B: Medium (12-16&nbsp;GB) • Slow · DINOv3 LVD ViT-L/H+: High (16-24&nbsp;GB+) • Slower · DINOv3 7B/SAT: Very high (48&nbsp;GB+) • Very slow
+                            </div>
+                            <div style="margin-top: 6px;">
+                                <strong>WALDO Class Split all-class reference</strong><br />
+                                NN purity is nearest-neighbor same-class agreement, reported as object-weighted / class-balanced. DINOv3 Precise: NN 0.8969 / 0.6917, size 0.0273, wrong 804, runtime 45.3s. C-RADIOv4 tight+context audit: NN 0.9078 / 0.7264, size 0.0591, wrong 851, runtime 9046.9s. CLIP has no full uncapped WALDO promotion row recorded here.
                             </div>
                             <div style="margin-top: 6px; color: #475569;">Choose the largest model your GPU can handle if accuracy matters; use smaller models for faster iteration. Results vary by dataset.</div>
                         </div>

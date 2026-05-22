@@ -690,12 +690,19 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experi
 
 - Current recommendation remains conservative: DINOv3 Precise stays the default
   for Class Split and DINOv3 pooled stays the default for Data Ingestion.
-  C-RADIOv4 Precise tight+context improved nearest-neighbor purity on the full
+  C-RADIOv4 tight+context audit improved nearest-neighbor purity on the full
   WALDO run (`0.9078` object-weighted / `0.7264` class-balanced versus DINOv3
   Precise at `0.8969` / `0.6917`), but it was about 200x slower than DINOv3
   Precise on this Mac (`9046.9s` versus `45.3s`), had higher size-axis leakage
   (`0.0591` versus `0.0273`), and produced more wrong-class candidates (`851`
   versus `804`). Treat C-RADIOv4 as an opt-in slow audit path, not the default.
+- The UI now exposes the same benchmark context in Data Ingestion, Class Split
+  Explorer, and Class Predictor Settings. The note explains that nearest-neighbor
+  purity means same-class agreement among nearby object-crop embeddings, reports
+  the DINOv3 Precise and C-RADIOv4 tight+context audit numbers side by side,
+  warns that the C-RADIO number is the slow audit path rather than the default
+  summary preset, and explicitly states that no full uncapped WALDO promotion row
+  is recorded for CLIP in this benchmark set.
 - Backlog: improve C-RADIO cache handling so one forward pass can cache the raw
   summary plus spatial-token outputs and derive `summary`, `spatial_mean`, and
   `summary_spatial_concat` embeddings from that shared record. The current

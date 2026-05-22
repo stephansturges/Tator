@@ -2356,8 +2356,6 @@ const AUTOMATION_LOCKED_TABS = new Set([
         sizeBiasMode: null,
         dinov3Pooling: null,
         cradioPooling: null,
-        embeddingAggregation: null,
-        saladHead: null,
         backgroundMode: null,
         viewMode: null,
         neighborK: null,
@@ -2832,8 +2830,6 @@ const AUTOMATION_LOCKED_TABS = new Set([
         embeddingAdjustmentSelect: null,
         dinov3PoolingSelect: null,
         cradioPoolingSelect: null,
-        embeddingAggregationSelect: null,
-        saladHeadSelect: null,
         bgClassCountInput: null,
         startButton: null,
         cancelButton: null,
@@ -9410,9 +9406,6 @@ function ensureAutomationAvailable(actionLabel) {
         const useClip = encoderType === "clip";
         const useDino = encoderType === "dinov3";
         const useCradio = encoderType === "cradio";
-        if (!useDino && !useCradio && trainingElements.embeddingAggregationSelect?.value === "local_salad") {
-            setSelectValueIfPresent(trainingElements.embeddingAggregationSelect, "pooled");
-        }
         if (trainingElements.clipBackboneRow) trainingElements.clipBackboneRow.hidden = !useClip;
         if (trainingElements.dinov3BackboneRow) trainingElements.dinov3BackboneRow.hidden = !useDino;
         if (trainingElements.cradioBackboneRow) trainingElements.cradioBackboneRow.hidden = !useCradio;
@@ -16614,12 +16607,6 @@ async function cancelRfDetrTrainingJobRequest() {
         if (trainingElements.cradioPoolingSelect) {
             formData.append("cradio_pooling", trainingElements.cradioPoolingSelect.value || "summary");
         }
-        if (trainingElements.embeddingAggregationSelect) {
-            formData.append("embedding_aggregation", trainingElements.embeddingAggregationSelect.value || "pooled");
-        }
-        if (trainingElements.saladHeadSelect) {
-            formData.append("embedding_salad_head_id", trainingElements.saladHeadSelect.value || "");
-        }
         if (trainingElements.mlpPatienceInput) {
             formData.append("mlp_patience", trainingElements.mlpPatienceInput.value || "6");
         }
@@ -16683,13 +16670,8 @@ async function cancelRfDetrTrainingJobRequest() {
         const active = trainingState.activeJobId ? trainingState.jobs.get(trainingState.activeJobId) : null;
         // Prevent overlapping CLIP training submissions while the active job is not terminal.
         const busy = trainingState.startInFlight || isBusyTrainingStatus(active?.status);
-        const needsSalad = String(trainingElements.embeddingAggregationSelect?.value || "pooled") === "local_salad";
-        const hasSalad = !!String(trainingElements.saladHeadSelect?.value || "").trim();
-        if (trainingElements.saladHeadSelect) {
-            trainingElements.saladHeadSelect.disabled = busy || !needsSalad;
-        }
         if (trainingElements.startButton) {
-            trainingElements.startButton.disabled = !ready || busy || (needsSalad && !hasSalad);
+            trainingElements.startButton.disabled = !ready || busy;
         }
         if (trainingElements.datasetWarning) {
             trainingElements.datasetWarning.style.display = ready ? "none" : "block";
@@ -17360,8 +17342,6 @@ async function cancelRfDetrTrainingJobRequest() {
         trainingElements.embeddingAdjustmentSelect = document.getElementById("trainEmbeddingAdjustment");
         trainingElements.dinov3PoolingSelect = document.getElementById("trainDinov3Pooling");
         trainingElements.cradioPoolingSelect = document.getElementById("trainCradioPooling");
-        trainingElements.embeddingAggregationSelect = document.getElementById("trainEmbeddingAggregation");
-        trainingElements.saladHeadSelect = document.getElementById("trainSaladHead");
         trainingElements.hardMisWeightInput = document.getElementById("trainHardMisWeight");
         trainingElements.hardLowConfWeightInput = document.getElementById("trainHardLowConfWeight");
         trainingElements.hardLowConfThresholdInput = document.getElementById("trainHardLowConfThreshold");
@@ -17417,18 +17397,6 @@ async function cancelRfDetrTrainingJobRequest() {
                 updateTrainingStartAvailability();
             });
         }
-        if (trainingElements.embeddingAggregationSelect) {
-            trainingElements.embeddingAggregationSelect.addEventListener("change", () => {
-                if (trainingElements.embeddingAggregationSelect.value === "local_salad") {
-                    const currentEncoderType = String(trainingElements.encoderTypeSelect?.value || "").trim().toLowerCase();
-                    if (!["dinov3", "cradio"].includes(currentEncoderType)) {
-                        setSelectValueIfPresent(trainingElements.encoderTypeSelect, "dinov3");
-                        updateTrainingEncoderControls();
-                    }
-                }
-                updateTrainingStartAvailability();
-            });
-        }
         [
             trainingElements.preprocessModeSelect,
             trainingElements.canonicalSizeInput,
@@ -17439,8 +17407,6 @@ async function cancelRfDetrTrainingJobRequest() {
             trainingElements.embeddingAdjustmentSelect,
             trainingElements.dinov3PoolingSelect,
             trainingElements.cradioPoolingSelect,
-            trainingElements.embeddingAggregationSelect,
-            trainingElements.saladHeadSelect,
         ].forEach((control) => {
             if (control) {
                 control.addEventListener("change", () => {
@@ -17683,7 +17649,6 @@ async function cancelRfDetrTrainingJobRequest() {
             .catch((err) => console.warn("Dataset list init failed", err))
             .finally(() => updateTrainingStartAvailability());
         loadTrainingClipClassifiers().catch((err) => console.warn("Training classifier list load failed", err));
-        refreshDataIngestionCapabilities().catch((err) => console.warn("Local SALAD head list refresh failed", err));
     }
 
     function embeddingRecipePresetValues(preset) {
@@ -17698,7 +17663,6 @@ async function cancelRfDetrTrainingJobRequest() {
                 viewMode: "single",
                 adjustment: "remove_size_bias",
                 dinov3Pooling: "pooler",
-                aggregation: "pooled",
             };
         }
         if (key === "precise") {
@@ -17711,7 +17675,6 @@ async function cancelRfDetrTrainingJobRequest() {
                 viewMode: "tight_context",
                 adjustment: "remove_size_bias",
                 dinov3Pooling: "pooler",
-                aggregation: "pooled",
             };
         }
         if (key === "cradio") {
@@ -17725,7 +17688,6 @@ async function cancelRfDetrTrainingJobRequest() {
                 adjustment: "remove_size_bias",
                 dinov3Pooling: "pooler",
                 cradioPooling: "summary",
-                aggregation: "pooled",
                 encoderType: "cradio",
             };
         }
@@ -17739,7 +17701,6 @@ async function cancelRfDetrTrainingJobRequest() {
             adjustment: "remove_size_bias",
             dinov3Pooling: "pooler",
             cradioPooling: "summary",
-            aggregation: "pooled",
         };
     }
 
@@ -17804,10 +17765,6 @@ async function cancelRfDetrTrainingJobRequest() {
                 remove_size_bias: "remove size/aspect bias",
                 none: "none",
             },
-            aggregation: {
-                pooled: "pooled descriptor",
-                local_salad: "local SALAD head",
-            },
         };
         return maps[kind]?.[raw] || raw || "default";
     }
@@ -17824,7 +17781,6 @@ async function cancelRfDetrTrainingJobRequest() {
         const background = embeddingRecipeValueLabel("background", values.backgroundMode);
         const view = embeddingRecipeValueLabel("view", values.viewMode);
         const adjustment = embeddingRecipeValueLabel("adjustment", values.adjustment);
-        const aggregation = embeddingRecipeValueLabel("aggregation", values.aggregation);
         const pooling = encoderType === "cradio"
             ? `C-RADIO pooling: ${values.cradioPooling || "summary"}`
             : encoderType === "dinov3"
@@ -17842,7 +17798,7 @@ async function cancelRfDetrTrainingJobRequest() {
             ? `Auto-class center/standardize is ${standardizeMode}. Those train-set values are saved with the classifier and reused at inference.`
             : "Class Split intentionally does not fit classifier-style center/std transforms; it applies the geometry residualizer and L2-normalizes before scoring so audits remain comparable across runs.";
         element.innerHTML = [
-            `<div class="embedding-recipe-note__summary"><strong>${escapeHtml(embeddingRecipePresetLabel(preset))}</strong> currently uses ${escapeHtml(encoder)} with ${escapeHtml(preprocess)}, ${escapeHtml(crop)} crops, ${escapeHtml(String(values.padding || "0.08"))} padding, ${escapeHtml(String(values.canonicalSize || "336"))}px canonical size, ${escapeHtml(background)} background, ${escapeHtml(view)} views, ${escapeHtml(pooling)}, and ${escapeHtml(aggregation)}.</div>`,
+            `<div class="embedding-recipe-note__summary"><strong>${escapeHtml(embeddingRecipePresetLabel(preset))}</strong> currently uses ${escapeHtml(encoder)} with ${escapeHtml(preprocess)}, ${escapeHtml(crop)} crops, ${escapeHtml(String(values.padding || "0.08"))} padding, ${escapeHtml(String(values.canonicalSize || "336"))}px canonical size, ${escapeHtml(background)} background, ${escapeHtml(view)} views, and ${escapeHtml(pooling)}.</div>`,
             `<ul class="embedding-recipe-note__reasons">`,
             `<li><strong>Why fixed canonical crops:</strong> object crops from aerial datasets vary wildly in pixel size and aspect ratio. Resizing every crop through the same square recipe makes training, auto-class inference, and Class Split analysis see the same kind of input. Mean-color padding avoids adding artificial black borders that could become a shortcut.</li>`,
             `<li><strong>Why padding and views:</strong> a small amount of padding keeps immediate context that often disambiguates classes, while background controls let you suppress context if it becomes a shortcut. Multi-view modes concatenate object-focused and context-focused crops when the precise recipe needs both shape and surroundings.</li>`,
@@ -17870,7 +17826,6 @@ async function cancelRfDetrTrainingJobRequest() {
                 adjustment: trainingElements.embeddingAdjustmentSelect?.value || defaults.adjustment,
                 dinov3Pooling: trainingElements.dinov3PoolingSelect?.value || defaults.dinov3Pooling,
                 cradioPooling: trainingElements.cradioPoolingSelect?.value || defaults.cradioPooling || "summary",
-                aggregation: trainingElements.embeddingAggregationSelect?.value || defaults.aggregation,
                 center: Boolean(trainingElements.embeddingCenterCheckbox?.checked),
                 standardize: Boolean(trainingElements.embeddingStandardizeCheckbox?.checked),
             },
@@ -17895,7 +17850,6 @@ async function cancelRfDetrTrainingJobRequest() {
                 adjustment: classSplitElements.sizeBiasMode?.value || defaults.adjustment,
                 dinov3Pooling: classSplitElements.dinov3Pooling?.value || defaults.dinov3Pooling,
                 cradioPooling: classSplitElements.cradioPooling?.value || defaults.cradioPooling || "summary",
-                aggregation: classSplitElements.embeddingAggregation?.value || defaults.aggregation,
             },
             "analysis",
         );
@@ -17932,7 +17886,6 @@ async function cancelRfDetrTrainingJobRequest() {
         setSelectValueIfPresent(trainingElements.embeddingAdjustmentSelect, values.adjustment);
         setSelectValueIfPresent(trainingElements.dinov3PoolingSelect, values.dinov3Pooling);
         setSelectValueIfPresent(trainingElements.cradioPoolingSelect, values.cradioPooling || "summary");
-        setSelectValueIfPresent(trainingElements.embeddingAggregationSelect, values.aggregation);
         if (values.encoderType) {
             setSelectValueIfPresent(trainingElements.encoderTypeSelect, values.encoderType);
             updateTrainingEncoderControls();
@@ -36047,7 +36000,6 @@ async function cancelRfDetrTrainingJobRequest() {
         setSelectValueIfPresent(classSplitElements.sizeBiasMode, values.adjustment);
         setSelectValueIfPresent(classSplitElements.dinov3Pooling, values.dinov3Pooling);
         setSelectValueIfPresent(classSplitElements.cradioPooling, values.cradioPooling || "summary");
-        setSelectValueIfPresent(classSplitElements.embeddingAggregation, values.aggregation);
         if (values.encoderType) {
             setSelectValueIfPresent(classSplitElements.encoderType, values.encoderType);
             updateClassSplitBackboneOptions();
@@ -36127,14 +36079,6 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         updateClassSplitBackboneOptions();
         updateClassSplitProjectionOptions();
-        populateLocalSaladHeadSelect(
-            classSplitElements.saladHead,
-            Array.isArray(classSplitState.capabilities?.local_salad_heads) ? classSplitState.capabilities.local_salad_heads : []
-        );
-        populateLocalSaladHeadSelect(
-            trainingElements.saladHeadSelect,
-            Array.isArray(classSplitState.capabilities?.local_salad_heads) ? classSplitState.capabilities.local_salad_heads : []
-        );
         refreshClassSplitControls();
     }
 
@@ -36218,9 +36162,6 @@ async function cancelRfDetrTrainingJobRequest() {
         const classSelected = !!String(classSplitElements.classSelect?.value || "").trim();
         const selectedClassCount = stats.counts.get(String(classSplitElements.classSelect?.value || "").trim()) || 0;
         const classSplitEncoderType = String(classSplitElements.encoderType?.value || "dinov3").trim().toLowerCase();
-        if (!["dinov3", "cradio"].includes(classSplitEncoderType) && classSplitElements.embeddingAggregation?.value === "local_salad") {
-            setSelectValueIfPresent(classSplitElements.embeddingAggregation, "pooled");
-        }
         if (classSplitElements.datasetStatus) {
             if (!stats.imageCount) {
                 classSplitElements.datasetStatus.textContent = "Open images in Label Images to run analysis.";
@@ -36251,8 +36192,6 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitElements.sizeBiasMode,
             classSplitElements.dinov3Pooling,
             classSplitElements.cradioPooling,
-            classSplitElements.embeddingAggregation,
-            classSplitElements.saladHead,
             classSplitElements.backgroundMode,
             classSplitElements.viewMode,
             classSplitElements.neighborK,
@@ -36264,18 +36203,13 @@ async function cancelRfDetrTrainingJobRequest() {
         const canRun = available
             && !classSplitState.active
             && (scope !== "selected_class" || (classSelected && selectedClassCount > 0));
-        const classSplitNeedsSalad = String(classSplitElements.embeddingAggregation?.value || "pooled") === "local_salad";
-        const classSplitHasSalad = !!String(classSplitElements.saladHead?.value || "").trim();
-        if (classSplitElements.saladHead) {
-            classSplitElements.saladHead.disabled = !available || classSplitState.active || !classSplitNeedsSalad;
-        }
         if (classSplitElements.dinov3Pooling) {
             classSplitElements.dinov3Pooling.disabled = !available || classSplitState.active || classSplitEncoderType !== "dinov3";
         }
         if (classSplitElements.cradioPooling) {
             classSplitElements.cradioPooling.disabled = !available || classSplitState.active || classSplitEncoderType !== "cradio";
         }
-        setButtonDisabled(classSplitElements.runButton, !canRun || (classSplitNeedsSalad && !classSplitHasSalad));
+        setButtonDisabled(classSplitElements.runButton, !canRun);
         setButtonDisabled(classSplitElements.cancelButton, !classSplitState.active || !classSplitState.currentJobId);
         setButtonDisabled(classSplitElements.rerunButton, classSplitState.active || !classSplitState.lastRequest);
     }
@@ -36325,8 +36259,6 @@ async function cancelRfDetrTrainingJobRequest() {
             embedding_adjustment: String(classSplitElements.sizeBiasMode?.value || "remove_size_bias").trim().toLowerCase() || "remove_size_bias",
             dinov3_pooling: String(classSplitElements.dinov3Pooling?.value || "pooler").trim().toLowerCase() || "pooler",
             cradio_pooling: String(classSplitElements.cradioPooling?.value || "summary").trim().toLowerCase() || "summary",
-            embedding_aggregation: String(classSplitElements.embeddingAggregation?.value || "pooled").trim().toLowerCase() || "pooled",
-            embedding_salad_head_id: String(classSplitElements.saladHead?.value || "").trim(),
             background_mode: String(classSplitElements.backgroundMode?.value || "full_crop").trim().toLowerCase() || "full_crop",
             embedding_view_mode: String(classSplitElements.viewMode?.value || "single").trim().toLowerCase() || "single",
             neighbor_k: neighborK,
@@ -36868,6 +36800,17 @@ async function cancelRfDetrTrainingJobRequest() {
             scrollZoom: true,
             modeBarButtonsToRemove: ["toImage"],
         };
+        if (graphEl.__classSplitShiftWheelGuard) {
+            graphEl.removeEventListener("wheel", graphEl.__classSplitShiftWheelGuard, true);
+        }
+        graphEl.__classSplitShiftWheelGuard = (event) => {
+            if (!event.shiftKey) {
+                return;
+            }
+            event.preventDefault();
+            event.stopImmediatePropagation();
+        };
+        graphEl.addEventListener("wheel", graphEl.__classSplitShiftWheelGuard, { capture: true, passive: false });
         window.Plotly.react(graphEl, traces, layout, config).then(() => {
             if (typeof graphEl.removeAllListeners === "function") {
                 [
@@ -37613,8 +37556,6 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.sizeBiasMode = document.getElementById("classSplitSizeBiasMode");
         classSplitElements.dinov3Pooling = document.getElementById("classSplitDinov3Pooling");
         classSplitElements.cradioPooling = document.getElementById("classSplitCradioPooling");
-        classSplitElements.embeddingAggregation = document.getElementById("classSplitEmbeddingAggregation");
-        classSplitElements.saladHead = document.getElementById("classSplitSaladHead");
         classSplitElements.backgroundMode = document.getElementById("classSplitBackgroundMode");
         classSplitElements.viewMode = document.getElementById("classSplitViewMode");
         classSplitElements.neighborK = document.getElementById("classSplitNeighborK");
@@ -37649,19 +37590,6 @@ async function cancelRfDetrTrainingJobRequest() {
                 refreshClassSplitControls();
             });
         }
-        if (classSplitElements.embeddingAggregation) {
-            classSplitElements.embeddingAggregation.addEventListener("change", () => {
-                if (classSplitElements.embeddingAggregation.value === "local_salad") {
-                    const currentEncoder = String(classSplitElements.encoderType?.value || "dinov3").toLowerCase();
-                    if (!["dinov3", "cradio"].includes(currentEncoder)) {
-                        setSelectValueIfPresent(classSplitElements.encoderType, "dinov3");
-                    }
-                    updateClassSplitBackboneOptions();
-                }
-                updateClassSplitEmbeddingRecipeExplanation();
-                refreshClassSplitControls();
-            });
-        }
         if (classSplitElements.encoderType) {
             classSplitElements.encoderType.addEventListener("change", () => {
                 updateClassSplitBackboneOptions();
@@ -37676,8 +37604,6 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitElements.sizeBiasMode,
             classSplitElements.dinov3Pooling,
             classSplitElements.cradioPooling,
-            classSplitElements.embeddingAggregation,
-            classSplitElements.saladHead,
             classSplitElements.backgroundMode,
             classSplitElements.viewMode,
         ].forEach((control) => {

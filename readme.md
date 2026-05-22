@@ -554,6 +554,10 @@ reference dataset.
   comparison. Class Split, auto-class training, and auto-class inference now
   reject manual `embedding_aggregation=local_salad` requests/artifacts so local
   SALAD remains scoped to Data Ingestion reference-profile scoring.
+- Removed dormant Class Split and auto-class frontend request wiring for local
+  SALAD controls after those controls were removed from the UI, and suppress
+  shift-wheel events over the Class Split plot so the abandoned pan shortcut
+  cannot trigger jittery Plotly interactions.
 - Added `tools/benchmark_salad_diversity.py` to compare pooled DINOv3 selection
   against a locally trained SALAD head:
 

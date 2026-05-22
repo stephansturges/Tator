@@ -133,6 +133,12 @@ def test_local_salad_is_data_ingestion_only_in_ui():
     assert '<option value="local_salad">Local SALAD separation</option>' not in html
     assert '<option value="local_salad">Local SALAD head</option>' not in html
     assert "Local SALAD requires a trained local head" not in html
+    assert "classSplitElements.embeddingAggregation" not in js
+    assert "classSplitElements.saladHead" not in js
+    assert "trainingElements.embeddingAggregationSelect" not in js
+    assert "trainingElements.saladHeadSelect" not in js
+    assert 'formData.append("embedding_aggregation"' not in js
+    assert 'formData.append("embedding_salad_head_id"' not in js
     assert "SALAD head: ${escapeHtml(art.embedding_salad_head_id)}" not in js
     assert "Aggregation: ${escapeHtml(art.embedding_aggregation" not in js
     assert "startLocalSaladTraining" in js
@@ -429,6 +435,8 @@ def test_class_split_explorer_panel_contract():
     assert "function setClassSplitGraphPanMode" not in js
     assert "function panClassSplitPlotWithWheel" not in js
     assert 'dragmode: "lasso"' in js
+    assert "__classSplitShiftWheelGuard" in js
+    assert "event.stopImmediatePropagation();" in js
     assert "function rememberClassSplitSelectionFromPlot" in js
     assert "function changeClassSplitSelectedPointsClass" in js
     assert "function markClassSplitWrongCandidateCorrect" in js

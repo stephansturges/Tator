@@ -623,13 +623,15 @@ dataset benchmarks justify a switch.
 - Added `open_clip_torch>=3.3,<4.0` to `requirements.txt` and
   `requirements-macos-inference.txt` because NVIDIA's C-RADIOv4 remote-code
   model imports `open_clip`.
-- Acceleration status: CUDA works through Torch when available, Apple Silicon
-  runs through Torch/MPS or CPU fallback, and the UI/backend reports MLX as
-  unavailable for C-RADIOv4 because no official MLX implementation or converted
-  checkpoint was found for these models. The code reports that state explicitly
-  instead of pretending to have an MLX path. In the current Mac implementation,
-  C-RADIOv4 is not MLX-accelerated and full-dataset runs are much slower than
-  DINOv3.
+- Acceleration status: CUDA still works through Torch when available. On Mac,
+  `auto` now prefers the local `~/cradio_mlx` runtime and its
+  `checkpoints/c-radiov4-so400m` or `checkpoints/c-radiov4-h` safetensors
+  checkpoints. If that local framework, MLX, or the requested checkpoint is not
+  present, C-RADIOv4 falls back to Torch CUDA/MPS/CPU. The backend reports the
+  resolved path in capabilities so the UI can distinguish local MLX from Torch
+  fallback. Local SALAD now has its own MLX backend, so Mac auto mode can keep
+  both C-RADIO token extraction and SALAD aggregation/training in MLX when
+  available.
 - Added benchmark levers:
 
 ```bash
@@ -708,6 +710,46 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experi
   `summary_spatial_concat` embeddings from that shared record. The current
   per-pooling embedding cache can recompute the same C-RADIO forward for
   adjacent benchmark variants.
+
+### 2026-05-22: C-RADIOv4 Local MLX Backend
+
+- Wired the local `~/cradio_mlx` framework into Tator's shared C-RADIO helper.
+  On macOS, `CRADIO_BACKEND=auto` now resolves to `mlx` when the local package
+  and requested checkpoint are present. Existing consumers keep calling
+  `load_cradio_backbone()` and `encode_cradio_images()`, so Class Split, Data
+  Ingestion, local SALAD C-RADIO training/scoring, and C-RADIO auto-class
+  training/inference use the same backend selection.
+- Default checkpoint discovery:
+  - `nvidia/C-RADIOv4-SO400M` -> `~/cradio_mlx/checkpoints/c-radiov4-so400m`
+  - `nvidia/C-RADIOv4-H` -> `~/cradio_mlx/checkpoints/c-radiov4-h`
+- Useful overrides: `CRADIO_MLX_ROOT`, `CRADIO_MLX_SRC`,
+  `CRADIO_MLX_SO400M_CHECKPOINT`, `CRADIO_MLX_H_CHECKPOINT`,
+  `CRADIO_MLX_CHECKPOINT`, `CRADIO_MLX_DTYPE`, `CRADIO_MLX_IMAGE_SIZE`, and
+  `CRADIO_MLX_PRESERVE_INPUT_SIZE=1`. The default MLX input size remains 512px
+  to avoid accidentally sending large raw ingestion images through the ViT; use
+  `CRADIO_MLX_IMAGE_SIZE` for controlled resolution experiments. If MLX import
+  or checkpoint discovery fails, auto mode falls back to the existing Torch
+  CUDA/MPS/CPU path and reports the fallback in backend capabilities.
+
+### 2026-05-22: Local SALAD MLX Runtime
+
+- Added a Tator-owned MLX implementation of the existing local SALAD head in
+  `utils/local_salad_mlx.py`. It mirrors the current locally trained
+  optimal-transport aggregation head: token/global projection MLPs, learned
+  dustbin score, Sinkhorn assignment, cluster pooling, and symmetric InfoNCE
+  training.
+- `LOCAL_SALAD_BACKEND=auto` is now the standard Mac behavior. On macOS it
+  resolves to `mlx` when MLX is installed; otherwise it falls back to the
+  existing Torch implementation. `LOCAL_SALAD_BACKEND=torch` and
+  `LOCAL_SALAD_BACKEND=mlx` can force either path.
+- The saved head contract stays compatible. MLX-trained heads are serialized
+  back into the same Tator `.pt` payload with the same state-dict keys, plus
+  metadata such as `salad_backend=mlx`. Existing Torch-trained heads can be
+  loaded into the MLX runtime by mapping their state dict into MLX arrays.
+- Class Split, Data Ingestion, local SALAD diversity scoring, and auto-class
+  local SALAD aggregation now use the same backend resolver. This makes
+  C-RADIO-MLX plus SALAD-MLX the Mac default path while preserving Torch
+  fallback for DINOv3/Torch and non-Mac environments.
 
 ## Training and Model Management
 

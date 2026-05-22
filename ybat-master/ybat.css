@@ -1953,6 +1953,19 @@ body.annotation-focus-mode .class-scroll-indicator {
     line-height: 1.4;
 }
 
+.embedding-recipe-note__summary {
+    margin-bottom: 6px;
+}
+
+.embedding-recipe-note__reasons {
+    margin: 6px 0 0;
+    padding-left: 18px;
+}
+
+.embedding-recipe-note__reasons li {
+    margin: 4px 0;
+}
+
 .embedding-recipe-note__text strong {
     color: #0f172a;
 }

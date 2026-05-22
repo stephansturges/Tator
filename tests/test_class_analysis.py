@@ -13,11 +13,22 @@ from tools import run_class_split_experiments as class_split_experiments
 from utils.embedding_recipe import normalize_embedding_aggregation
 from utils.cradio_embedding import (
     CRADIO_DEFAULT_MODEL,
+    CRadioBackendStatus,
     _unpack_cradio_outputs,
     cradio_backend_status,
+    encode_cradio_images,
     normalize_cradio_pooling,
 )
+from utils import cradio_embedding as cradio_embedding_utils
 from utils.local_salad import LocalSALADConfig, LocalSALADHead, symmetric_infonce_loss
+from utils.local_salad_mlx import (
+    MLXLocalSALADHead,
+    encode_local_salad_mlx,
+    local_salad_mlx_available,
+    make_mlx_local_salad_optimizer,
+    mlx_local_salad_state_dict,
+    mlx_local_salad_train_step,
+)
 
 
 def _record(point_id: str, class_name: str) -> dict:
@@ -101,6 +112,51 @@ def test_local_salad_head_is_trainable_normalized_and_fixed_width():
         padding_ratio=0.1,
     )
     assert crop_bounds == (26, 26, 74, 74)
+
+
+def test_mlx_local_salad_matches_torch_state_and_trains_one_step():
+    if not local_salad_mlx_available():
+        pytest.skip("MLX is not available")
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(321)
+    config = LocalSALADConfig(
+        num_channels=8,
+        num_clusters=3,
+        cluster_dim=5,
+        token_dim=7,
+        hidden_dim=11,
+        dropout=0.0,
+    )
+    torch_head = LocalSALADHead(config)
+    torch_head.eval()
+    mlx_head = MLXLocalSALADHead(config)
+    mlx_head.load_torch_state_dict(torch_head.state_dict())
+    patches = torch.randn(4, 9, 8, generator=gen)
+    global_token = torch.randn(4, 8, generator=gen)
+
+    with torch.no_grad():
+        torch_out = torch_head(patches, global_token=global_token).detach().numpy()
+    mlx_out = encode_local_salad_mlx(mlx_head, patches, global_token=global_token)
+
+    assert mlx_out.shape == torch_out.shape == (4, 22)
+    assert np.max(np.abs(torch_out - mlx_out)) < 1e-3
+    assert np.allclose(np.linalg.norm(mlx_out, axis=1), np.ones(4), atol=1e-5)
+
+    optimizer = make_mlx_local_salad_optimizer(learning_rate=1e-4, weight_decay=0.0)
+    loss_value = mlx_local_salad_train_step(
+        mlx_head,
+        optimizer,
+        patches,
+        global_token,
+        patches + 0.01,
+        global_token + 0.01,
+        temperature=0.2,
+    )
+    state_dict = mlx_local_salad_state_dict(mlx_head)
+
+    assert np.isfinite(loss_value)
+    assert set(torch_head.state_dict()) == set(state_dict)
+    assert state_dict["token_features.0.weight"].shape == torch_head.state_dict()["token_features.0.weight"].shape
 
 
 def test_class_analysis_flags_neighbor_disagreement_only_in_all_classes():
@@ -200,21 +256,76 @@ def test_class_analysis_rejects_invalid_local_salad_request_before_queue():
     assert wrong_encoder.value.detail == "local_salad_requires_spatial_encoder"
 
 
-def test_cradio_embedding_contract_and_capabilities():
+def test_cradio_embedding_contract_and_capabilities(monkeypatch):
     assert normalize_cradio_pooling("spatial") == "spatial_mean"
     assert normalize_cradio_pooling("summary+spatial") == "summary_spatial_concat"
     assert normalize_cradio_pooling("anything_else") == "summary"
 
+    monkeypatch.setattr(
+        cradio_embedding_utils,
+        "_cradio_mlx_backend_status",
+        lambda model_name=None, *, requested="mlx": CRadioBackendStatus(
+            requested=requested,
+            resolved="mlx",
+            available=True,
+            detail="Local MLX C-RADIOv4 backend (/tmp/model.safetensors)",
+        ),
+    )
+
     mlx = cradio_backend_status("mlx")
     assert mlx.resolved == "mlx"
-    assert mlx.available is False
-    assert "no official MLX C-RADIOv4" in mlx.detail
+    assert mlx.available is True
+    assert "Local MLX C-RADIOv4 backend" in mlx.detail
+
+    def model_specific_mlx_status(model_name=None, *, requested="mlx"):
+        model = model_name or CRADIO_DEFAULT_MODEL
+        return CRadioBackendStatus(
+            requested=requested,
+            resolved="mlx",
+            available=model == CRADIO_DEFAULT_MODEL,
+            detail=f"mlx status for {model}",
+        )
+
+    monkeypatch.setattr(cradio_embedding_utils, "_cradio_mlx_backend_status", model_specific_mlx_status)
+    monkeypatch.setattr(cradio_embedding_utils.platform, "system", lambda: "Darwin")
+    assert cradio_backend_status("auto", model_name=CRADIO_DEFAULT_MODEL).resolved == "mlx"
+    assert cradio_backend_status("auto", model_name="nvidia/C-RADIOv4-H").resolved != "mlx"
 
     summary = torch.ones(2, 3)
     spatial = torch.zeros(2, 4, 3)
     unpacked = _unpack_cradio_outputs({"summary": summary, "spatial_features": spatial})
     assert unpacked[0] is summary
     assert unpacked[1] is spatial
+
+    class FakeMLXEncoder:
+        def encode_batch(self, images, image_size=512):
+            assert len(images) == 2
+            assert image_size == 512
+            return types.SimpleNamespace(
+                summary=np.asarray([[3.0, 4.0], [0.0, 5.0]], dtype=np.float32),
+                spatial=np.asarray(
+                    [
+                        [[1.0, 0.0], [0.0, 1.0]],
+                        [[2.0, 0.0], [0.0, 2.0]],
+                    ],
+                    dtype=np.float32,
+                ),
+            )
+
+    mlx_images = [Image.new("RGB", (32, 32)), Image.new("RGB", (32, 32))]
+    mlx_feats, mlx_spatial, mlx_summary = encode_cradio_images(
+        FakeMLXEncoder(),
+        None,
+        "mlx",
+        mlx_images,
+        pooling="summary_spatial_concat",
+        normalize=True,
+        return_tokens=True,
+    )
+    assert mlx_feats.shape == (2, 4)
+    assert mlx_spatial.shape == (2, 2, 2)
+    assert mlx_summary.shape == (2, 2)
+    assert np.allclose(np.linalg.norm(mlx_feats, axis=1), np.ones(2), atol=1e-6)
 
     caps = api._class_analysis_capabilities()
     assert "cradio" in caps["encoders"]
@@ -238,7 +349,7 @@ def test_cradio_embedding_contract_and_capabilities():
 def test_cradio_head_encoding_uses_saved_pooling(monkeypatch):
     captured = {}
 
-    monkeypatch.setattr(api, "resolve_cradio_torch_device", lambda _backend=None: "cpu")
+    monkeypatch.setattr(api, "resolve_cradio_torch_device", lambda _backend=None, **_kwargs: "cpu")
     monkeypatch.setattr(
         api,
         "_load_cradio_backbone_cached",
@@ -281,7 +392,39 @@ def test_class_analysis_capabilities_expose_only_normal_recipe_controls():
     assert "local_salad_heads" in caps
     assert caps["local_salad_policy"] == api.LOCAL_SALAD_POLICY
     assert caps["local_salad_trainer"] == api.LOCAL_SALAD_TRAINER
+    assert caps["local_salad_backend"]["default"] == "auto"
+    assert caps["local_salad_backend"]["auto_resolved"] in {"mlx", "torch"}
     assert any(recipe["id"] == "local_salad" for recipe in caps["class_separation_recipes"])
+
+
+def test_dinov3_head_encoding_uses_default_model_constant(monkeypatch):
+    class DummyProcessor:
+        def __call__(self, images, return_tensors="pt"):
+            assert return_tensors == "pt"
+            return {"pixel_values": torch.zeros(len(images), 1)}
+
+    class DummyModel:
+        def __call__(self, **inputs):
+            batch = int(inputs["pixel_values"].shape[0])
+            return types.SimpleNamespace(
+                last_hidden_state=torch.ones(batch, 2, 2),
+                pooler_output=torch.tensor([[3.0, 4.0], [0.0, 5.0]], dtype=torch.float32)[:batch],
+            )
+
+    monkeypatch.setattr(api, "dinov3_model", DummyModel())
+    monkeypatch.setattr(api, "dinov3_processor", DummyProcessor())
+    monkeypatch.setattr(api, "dinov3_model_name", api.CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL)
+    monkeypatch.setattr(api, "dinov3_model_device", "cpu")
+    monkeypatch.setattr(api, "_load_dinov3_backbone", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unexpected load")))
+
+    feats = api._encode_pil_batch_for_head(
+        [Image.new("RGB", (8, 8)), Image.new("RGB", (8, 8))],
+        head={"encoder_type": "dinov3", "normalize_embeddings": True},
+        device_override="cpu",
+    )
+
+    assert feats.shape == (2, 2)
+    assert np.allclose(np.linalg.norm(feats, axis=1), np.ones(2), atol=1e-6)
 
 
 def test_class_split_experiment_metrics_use_absolute_leakage_and_macro_purity(tmp_path):

@@ -780,15 +780,26 @@ from utils.local_salad import (
     load_local_salad_head_file,
     symmetric_infonce_loss,
 )
+from utils.local_salad_mlx import (
+    MLXLocalSALADHead,
+    encode_local_salad_mlx,
+    is_mlx_local_salad_head,
+    load_mlx_local_salad_head_file,
+    local_salad_mlx_available,
+    make_mlx_local_salad_optimizer,
+    mlx_local_salad_state_dict,
+    mlx_local_salad_train_step,
+    resolve_local_salad_backend,
+)
 from utils.cradio_embedding import (
     CRADIO_DEFAULT_MODEL,
     CRADIO_SUPPORTED_MODELS,
-    cradio_backend_status,
     cradio_capabilities,
     encode_cradio_images,
     load_cradio_backbone,
     normalize_cradio_model,
     normalize_cradio_pooling,
+    resolve_cradio_aux_torch_device,
     resolve_cradio_torch_device,
 )
 
@@ -1296,18 +1307,16 @@ def _load_cradio_backbone_cached(
 ) -> Tuple[Optional[Any], Optional[Any], str, str]:
     global cradio_model, cradio_processor, cradio_model_name, cradio_model_device, cradio_initialized
     resolved_model = normalize_cradio_model(model_name)
-    resolved_device = target_device or resolve_cradio_torch_device()
+    resolved_device = target_device or resolve_cradio_torch_device(model_name=resolved_model)
     try:
         if (
             cradio_model is None
-            or cradio_processor is None
             or cradio_model_name != resolved_model
             or cradio_model_device != resolved_device
         ):
             with cradio_lock:
                 if (
                     cradio_model is None
-                    or cradio_processor is None
                     or cradio_model_name != resolved_model
                     or cradio_model_device != resolved_device
                 ):
@@ -8329,10 +8338,10 @@ def _encode_pil_batch_for_head(
     features: List[np.ndarray] = []
     if encoder_type == "dinov3":
         aggregation = _embedding_normalize_aggregation(head.get("embedding_aggregation"))
-        salad_head: Optional[LocalSALADHead] = None
+        salad_head: Optional[Any] = None
         global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_model_device, dinov3_initialized
         model_name = str(
-            head.get("encoder_model") or head.get("clip_model") or DINOv3_MODEL_NAME or ""
+            head.get("encoder_model") or head.get("clip_model") or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL or ""
         ).strip()
         target_device = device_override or _dinov3_resolve_device_impl(
             device, cuda_disabled=dinov3_cuda_disabled
@@ -8350,7 +8359,7 @@ def _encode_pil_batch_for_head(
                     or (model_name and dinov3_model_name != model_name)
                     or (dinov3_model_device and dinov3_model_device != target_device)
                 ):
-                    load_name = model_name or DINOv3_MODEL_NAME
+                    load_name = model_name or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL
                     model_obj, processor_obj = _load_dinov3_backbone(
                         load_name,
                         target_device,
@@ -8386,7 +8395,9 @@ def _encode_pil_batch_for_head(
                 if global_token is None:
                     global_token = last_hidden[:, 0, :]
                 assert salad_head is not None
-                feats = salad_head(last_hidden[:, 1:, :], global_token=global_token)
+                feats_np = _encode_local_salad_head_np(salad_head, last_hidden[:, 1:, :], global_token)
+                features.append(feats_np)
+                continue
             elif pooling == "pooler" and hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
                 feats = outputs.pooler_output
             elif pooling == "patch_mean" and last_hidden is not None and last_hidden.ndim == 3 and last_hidden.shape[1] > 1:
@@ -8405,21 +8416,22 @@ def _encode_pil_batch_for_head(
             features.append(feats_np)
     elif encoder_type == "cradio":
         aggregation = _embedding_normalize_aggregation(head.get("embedding_aggregation"))
-        salad_head: Optional[LocalSALADHead] = None
+        salad_head: Optional[Any] = None
         model_name = normalize_cradio_model(head.get("encoder_model") or head.get("clip_model") or CRADIO_DEFAULT_MODEL)
         backend = str(head.get("cradio_backend") or os.environ.get("CRADIO_BACKEND") or "auto").strip()
-        target_device = device_override or resolve_cradio_torch_device(backend)
+        target_device = device_override or resolve_cradio_torch_device(backend, model_name=model_name)
         model_obj, processor_obj, resolved_model, device_name = _load_cradio_backbone_cached(
             model_name,
             target_device,
         )
-        if model_obj is None or processor_obj is None:
+        if model_obj is None or (processor_obj is None and device_name != "mlx"):
             return None
         if aggregation == "local_salad":
             salad_head_id = str(head.get("embedding_salad_head_id") or "").strip()
             if not salad_head_id:
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
-            salad_head, _salad_meta = _load_local_salad_head(salad_head_id, device_name=device_name)
+            salad_device_name = device_name if device_name != "mlx" else resolve_cradio_aux_torch_device()
+            salad_head, _salad_meta = _load_local_salad_head(salad_head_id, device_name=salad_device_name)
             if str(_salad_meta.get("encoder_type") or "dinov3").strip().lower() != "cradio":
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_encoder_mismatch")
         pooling = normalize_cradio_pooling(head.get("cradio_pooling"))
@@ -8438,11 +8450,14 @@ def _encode_pil_batch_for_head(
                 if spatial_tokens.ndim != 3 or spatial_tokens.shape[1] <= 0:
                     raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="cradio_spatial_tokens_missing")
                 assert salad_head is not None
-                with torch.no_grad():
-                    patch_tensor = torch.from_numpy(spatial_tokens).to(device_name)
-                    global_tensor = torch.from_numpy(summary_tokens).to(device_name)
-                    feats = salad_head(patch_tensor, global_token=global_tensor)
-                feats_np = feats.detach().float().cpu().numpy()
+                if is_mlx_local_salad_head(salad_head):
+                    feats_np = _encode_local_salad_head_np(salad_head, spatial_tokens, summary_tokens)
+                else:
+                    with torch.no_grad():
+                        salad_device = next(salad_head.parameters()).device
+                        patch_tensor = torch.from_numpy(spatial_tokens).to(salad_device)
+                        global_tensor = torch.from_numpy(summary_tokens).to(salad_device)
+                        feats_np = _encode_local_salad_head_np(salad_head, patch_tensor, global_tensor)
             else:
                 feats_np = encode_cradio_images(
                     model_obj,
@@ -15379,6 +15394,15 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
         "local_salad_heads": _list_local_salad_heads(),
         "local_salad_policy": LOCAL_SALAD_POLICY,
         "local_salad_trainer": LOCAL_SALAD_TRAINER,
+        "local_salad_backend": {
+            "default": "auto",
+            "auto_resolved": resolve_local_salad_backend("auto"),
+            "mlx_available": local_salad_mlx_available(),
+            "detail": (
+                "MLX local SALAD head runtime/training is the macOS auto default when available; "
+                "Torch remains the fallback and compatibility loader."
+            ),
+        },
         "class_separation_recipes": [
             {
                 "id": "balanced",
@@ -17095,7 +17119,12 @@ def _unique_local_salad_head_id(requested_name: str) -> str:
     return candidate
 
 
-def _load_local_salad_head(head_id: str, *, device_name: str = "cpu") -> Tuple[LocalSALADHead, Dict[str, Any]]:
+def _load_local_salad_head(
+    head_id: str,
+    *,
+    device_name: str = "cpu",
+    backend: Optional[str] = None,
+) -> Tuple[Any, Dict[str, Any]]:
     path = _local_salad_head_path(head_id)
     try:
         root = LOCAL_SALAD_HEAD_ROOT.resolve()
@@ -17108,6 +17137,9 @@ def _load_local_salad_head(head_id: str, *, device_name: str = "cpu") -> Tuple[L
     if not path.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="local_salad_head_not_found")
     try:
+        resolved_backend = resolve_local_salad_backend(backend)
+        if resolved_backend == "mlx":
+            return load_mlx_local_salad_head_file(path)
         return load_local_salad_head_file(path, device_name=device_name)
     except HTTPException:
         raise
@@ -17116,6 +17148,14 @@ def _load_local_salad_head(head_id: str, *, device_name: str = "cpu") -> Tuple[L
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
     except Exception as exc:
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"local_salad_head_load_failed:{exc}") from exc
+
+
+def _encode_local_salad_head_np(head: Any, patch_tokens: Any, global_token: Any = None) -> np.ndarray:
+    if is_mlx_local_salad_head(head):
+        return encode_local_salad_mlx(head, patch_tokens, global_token=global_token)
+    with torch.no_grad():
+        feats = head(patch_tokens, global_token=global_token)
+    return feats.detach().float().cpu().numpy().astype(np.float32)
 
 
 def _list_local_salad_heads() -> List[Dict[str, Any]]:
@@ -17137,6 +17177,7 @@ def _list_local_salad_heads() -> List[Dict[str, Any]]:
                     "encoder_type": metadata.get("encoder_type") or "dinov3",
                     "encoder_model": metadata.get("encoder_model") or "",
                     "cradio_pooling": metadata.get("cradio_pooling") or None,
+                    "salad_backend": metadata.get("salad_backend") or "torch",
                     "train_image_count": metadata.get("train_image_count") or 0,
                     "descriptor_dim": int(config.get("token_dim") or 0)
                     + int(config.get("num_clusters") or 0) * int(config.get("cluster_dim") or 0),
@@ -17204,6 +17245,15 @@ def _data_ingestion_capabilities() -> Dict[str, Any]:
         "salad_policy": "local_training_only",
         "local_salad_policy": LOCAL_SALAD_POLICY,
         "local_salad_trainer": LOCAL_SALAD_TRAINER,
+        "local_salad_backend": {
+            "default": "auto",
+            "auto_resolved": resolve_local_salad_backend("auto"),
+            "mlx_available": local_salad_mlx_available(),
+            "detail": (
+                "MLX local SALAD head runtime/training is the macOS auto default when available; "
+                "Torch remains the fallback and compatibility loader."
+            ),
+        },
     }
 
 
@@ -17370,7 +17420,7 @@ def _data_ingestion_encode_prepared_images(
     if not prepared:
         return np.empty((0, 0), dtype=np.float32)
     encoder_norm = str(encoder or "dinov3_pooled").strip().lower()
-    salad_head: Optional[LocalSALADHead] = None
+    salad_head: Optional[Any] = None
     salad_meta: Dict[str, Any] = {}
     if encoder_norm == "local_salad":
         if not str(salad_head_id or "").strip():
@@ -17384,14 +17434,15 @@ def _data_ingestion_encode_prepared_images(
         model_name = str(salad_meta.get("encoder_model") or model_name or "").strip()
     if base_encoder == "cradio":
         resolved_model_name = normalize_cradio_model(model_name)
-        device_name = resolve_cradio_torch_device()
+        device_name = resolve_cradio_torch_device(model_name=resolved_model_name)
         model_obj, processor_obj, resolved_model, device_name = _load_cradio_backbone_cached(
             resolved_model_name,
             device_name,
             raise_on_error=True,
         )
         if encoder_norm == "local_salad":
-            salad_head, salad_meta = _load_local_salad_head(salad_head_id, device_name=device_name)
+            salad_device_name = device_name if device_name != "mlx" else resolve_cradio_aux_torch_device()
+            salad_head, salad_meta = _load_local_salad_head(salad_head_id, device_name=salad_device_name)
     else:
         model_obj, processor_obj, resolved_model, device_name = _data_ingestion_get_dinov3(model_name)
         if encoder_norm == "local_salad":
@@ -17425,13 +17476,18 @@ def _data_ingestion_encode_prepared_images(
                     if spatial_tokens.ndim != 3 or spatial_tokens.shape[1] <= 0:
                         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="cradio_spatial_tokens_missing")
                     assert salad_head is not None
-                    with torch.no_grad():
-                        feats = salad_head(
-                            torch.from_numpy(spatial_tokens).to(device_name),
-                            global_token=torch.from_numpy(summary_tokens).to(device_name),
-                        )
-                        feats = torch.nn.functional.normalize(feats.float(), dim=-1)
-                    features.append(feats.detach().cpu().numpy().astype(np.float32))
+                    if is_mlx_local_salad_head(salad_head):
+                        features.append(_encode_local_salad_head_np(salad_head, spatial_tokens, summary_tokens))
+                    else:
+                        with torch.no_grad():
+                            salad_device = next(salad_head.parameters()).device
+                            features.append(
+                                _encode_local_salad_head_np(
+                                    salad_head,
+                                    torch.from_numpy(spatial_tokens).to(salad_device),
+                                    torch.from_numpy(summary_tokens).to(salad_device),
+                                )
+                            )
                 else:
                     features.append(
                         encode_cradio_images(
@@ -17456,7 +17512,8 @@ def _data_ingestion_encode_prepared_images(
                         if global_token is None:
                             global_token = last_hidden[:, 0, :]
                         assert salad_head is not None
-                        feats = salad_head(last_hidden[:, 1:, :], global_token=global_token)
+                        features.append(_encode_local_salad_head_np(salad_head, last_hidden[:, 1:, :], global_token))
+                        continue
                     else:
                         feats = getattr(outputs, "pooler_output", None)
                         if feats is None and last_hidden is not None:
@@ -17716,7 +17773,10 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
         ).strip()
         cradio_pooling = normalize_cradio_pooling(request.get("cradio_pooling"))
         if encoder_type == "cradio":
-            device_name = resolve_cradio_torch_device(str(request.get("cradio_backend") or "auto"))
+            device_name = resolve_cradio_torch_device(
+                str(request.get("cradio_backend") or "auto"),
+                model_name=model_name,
+            )
             model_obj, processor_obj, resolved_model, device_name = _load_cradio_backbone_cached(
                 model_name,
                 device_name,
@@ -17733,8 +17793,10 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                     return_tokens=True,
                 )
             hidden_size = int(probe_tokens.shape[-1])
+            salad_device_name = device_name if device_name != "mlx" else resolve_cradio_aux_torch_device()
         else:
             model_obj, processor_obj, resolved_model, device_name = _data_ingestion_get_dinov3(model_name)
+            salad_device_name = device_name
             hidden_size = int(getattr(getattr(model_obj, "config", None), "hidden_size", 0) or 0)
             if hidden_size <= 0:
                 # Probe one image if the config does not expose hidden_size.
@@ -17749,13 +17811,23 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
             hidden_dim=_coerce_int(request.get("hidden_dim"), 512, minimum=64),
             dropout=_coerce_float(request.get("dropout"), 0.3, minimum=0.0, maximum=0.8),
         )
-        head = LocalSALADHead(config).to(device_name)
-        head.train()
-        optimizer = torch.optim.AdamW(
-            head.parameters(),
-            lr=_coerce_float(request.get("learning_rate"), 1e-4, minimum=1e-7),
-            weight_decay=_coerce_float(request.get("weight_decay"), 1e-4, minimum=0.0),
-        )
+        salad_backend = resolve_local_salad_backend(request.get("local_salad_backend"))
+        learning_rate = _coerce_float(request.get("learning_rate"), 1e-4, minimum=1e-7)
+        weight_decay = _coerce_float(request.get("weight_decay"), 1e-4, minimum=0.0)
+        if salad_backend == "mlx":
+            head: Any = MLXLocalSALADHead(config)
+            optimizer = make_mlx_local_salad_optimizer(
+                learning_rate=learning_rate,
+                weight_decay=weight_decay,
+            )
+        else:
+            head = LocalSALADHead(config).to(salad_device_name)
+            head.train()
+            optimizer = torch.optim.AdamW(
+                head.parameters(),
+                lr=learning_rate,
+                weight_decay=weight_decay,
+            )
         epochs = _coerce_int(request.get("epochs"), 3, minimum=1)
         batch_size = max(2, _coerce_int(request.get("batch_size"), 8, minimum=2))
         temperature = _coerce_float(request.get("temperature"), 0.07, minimum=0.001)
@@ -17801,21 +17873,38 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                             normalize=False,
                             return_tokens=True,
                         )
-                        patches_a = torch.from_numpy(patches_a_np).to(device_name)
-                        patches_b = torch.from_numpy(patches_b_np).to(device_name)
-                        global_a = torch.from_numpy(global_a_np).to(device_name)
-                        global_b = torch.from_numpy(global_b_np).to(device_name)
+                        if salad_backend == "mlx":
+                            patches_a, global_a = patches_a_np, global_a_np
+                            patches_b, global_b = patches_b_np, global_b_np
+                        else:
+                            patches_a = torch.from_numpy(patches_a_np).to(salad_device_name)
+                            patches_b = torch.from_numpy(patches_b_np).to(salad_device_name)
+                            global_a = torch.from_numpy(global_a_np).to(salad_device_name)
+                            global_b = torch.from_numpy(global_b_np).to(salad_device_name)
                     else:
                         patches_a, global_a = _data_ingestion_dinov3_tokens(model_obj, processor_obj, device_name, images_left)
                         patches_b, global_b = _data_ingestion_dinov3_tokens(model_obj, processor_obj, device_name, images_right)
-                    optimizer.zero_grad(set_to_none=True)
-                    desc_a = head(patches_a, global_token=global_a)
-                    desc_b = head(patches_b, global_token=global_b)
-                    loss = symmetric_infonce_loss(desc_a, desc_b, temperature=temperature)
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
-                    optimizer.step()
-                    losses.append(float(loss.detach().cpu().item()))
+                    if salad_backend == "mlx":
+                        loss_value = mlx_local_salad_train_step(
+                            head,
+                            optimizer,
+                            patches_a,
+                            global_a,
+                            patches_b,
+                            global_b,
+                            temperature=temperature,
+                            max_grad_norm=1.0,
+                        )
+                    else:
+                        optimizer.zero_grad(set_to_none=True)
+                        desc_a = head(patches_a, global_token=global_a)
+                        desc_b = head(patches_b, global_token=global_b)
+                        loss = symmetric_infonce_loss(desc_a, desc_b, temperature=temperature)
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
+                        optimizer.step()
+                        loss_value = float(loss.detach().cpu().item())
+                    losses.append(float(loss_value))
                 finally:
                     for img in [*images_left, *images_right, *originals]:
                         try:
@@ -17846,7 +17935,9 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                 "active_image_count": _coerce_int(request.get("active_image_count"), 0, minimum=0),
                 "epochs": epochs,
                 "batch_size": batch_size,
-                "learning_rate": _coerce_float(request.get("learning_rate"), 1e-4, minimum=1e-7),
+                "learning_rate": learning_rate,
+                "weight_decay": weight_decay,
+                "salad_backend": salad_backend,
                 "loss_final": float(losses[-1]) if losses else None,
                 "loss_mean_last10": float(np.mean(losses[-10:])) if losses else None,
                 "created_at": time.time(),
@@ -17858,7 +17949,7 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                 {
                     "format": LOCAL_SALAD_CACHE_VERSION,
                     "config": config.to_dict(),
-                    "state_dict": head.cpu().state_dict(),
+                    "state_dict": mlx_local_salad_state_dict(head) if is_mlx_local_salad_head(head) else head.cpu().state_dict(),
                     "metadata": metadata,
                 },
                 head_path,
@@ -30055,7 +30146,7 @@ def set_active_model(payload: ActiveModelRequest):
     elif encoder_type_norm == "cradio":
         encoder_model_norm = normalize_cradio_model(encoder_model_norm)
         try:
-            target_device = resolve_cradio_torch_device()
+            target_device = resolve_cradio_torch_device(model_name=encoder_model_norm)
             _cradio_model, _cradio_processor, encoder_model_for_active, _cradio_device = _load_cradio_backbone_cached(
                 encoder_model_norm,
                 target_device,

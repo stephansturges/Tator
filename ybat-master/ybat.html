@@ -704,8 +704,8 @@
                     <header class="data-ingestion-header">
                         <div>
                             <h2>Data Ingestion</h2>
-                            <div class="training-help">Train local SALAD heads and score new images or video frames for dataset diversity. WALDO benchmarks keep DINOv3 pooled as the stable baseline; C-RADIOv4 and local SALAD are candidate modes to compare before changing defaults.</div>
-                            <div class="training-help warn">C-RADIOv4 on Mac is not MLX-accelerated in Tator. Current Torch/MPS runs are much slower than DINOv3.</div>
+                            <div class="training-help">Train local SALAD heads and score new images or video frames for dataset diversity. On Mac, local SALAD runtime and training use MLX by default when available, with Torch fallback. WALDO benchmarks keep DINOv3 pooled as the stable baseline; C-RADIOv4 and local SALAD are candidate modes to compare before changing defaults.</div>
+                            <div class="training-help warn">C-RADIOv4 on Mac now uses the local MLX backend by default when <code>~/cradio_mlx</code> and its checkpoints are present; otherwise it falls back to Torch CUDA/MPS/CPU. Keep benchmarking against DINOv3 before changing dataset defaults.</div>
                             <details class="embedding-benchmark-note" open>
                                 <summary>WALDO encoder benchmark comparison</summary>
                                 <div class="embedding-benchmark-note__intro">All-class object-crop audit, uncapped. NN purity means: for each embedded object crop, what fraction of its nearest neighbors have the same class. The first NN number is object-weighted; the second balances classes. This is a clustering score, not classifier accuracy. The C-RADIO number is the slow tight+context audit row, not the default summary preset; rerun on your dataset before promoting a slower encoder for routine ingestion.</div>
@@ -740,7 +740,7 @@
                                 <input type="file" id="dataIngestionFiles" multiple accept="image/*,video/*" />
                             </div>
                             <div class="data-ingestion-field">
-                                <label for="dataIngestionRecipe">Ingestion recipe<span class="help-icon" title="Applies an encoder, keep fraction, and video sampling recipe. DINOv3 pooled is the stable baseline from current internal tests. C-RADIOv4 is an explicit candidate mode, but on Mac it is not MLX-accelerated in Tator and can be much slower than DINOv3. Local SALAD recipes require a locally trained head.">?</span></label>
+                                <label for="dataIngestionRecipe">Ingestion recipe<span class="help-icon" title="Applies an encoder, keep fraction, and video sampling recipe. DINOv3 pooled is the stable baseline from current internal tests. C-RADIOv4 is an explicit candidate mode; on Mac it uses local MLX by default when ~/cradio_mlx is available and falls back to Torch otherwise. Local SALAD recipes require a locally trained head.">?</span></label>
                                 <select id="dataIngestionRecipe">
                                     <option value="pooled_top20" selected>DINOv3 baseline top 20%</option>
                                     <option value="cradio_top20">C-RADIOv4 summary top 20%</option>
@@ -750,7 +750,7 @@
                                 </select>
                             </div>
                             <div class="data-ingestion-field">
-                                <label for="dataIngestionEncoder">Embedding mode<span class="help-icon" title="Chooses how candidate images/frames become vectors for novelty scoring. DINOv3 pooled is the current baseline. C-RADIOv4 pooled tests NVIDIA's Torch encoder; on Mac this is not MLX-accelerated in Tator and is much slower in current full-dataset runs. Local SALAD uses a Tator-trained head and never loads external SALAD checkpoints.">?</span></label>
+                                <label for="dataIngestionEncoder">Embedding mode<span class="help-icon" title="Chooses how candidate images/frames become vectors for novelty scoring. DINOv3 pooled is the current baseline. C-RADIOv4 pooled uses the shared C-RADIO helper: local MLX on Mac when available, otherwise Torch CUDA/MPS/CPU. Local SALAD uses a Tator-trained head, runs on MLX by default on Mac, and never loads external SALAD checkpoints.">?</span></label>
                                 <select id="dataIngestionEncoder">
                                     <option value="dinov3_pooled" selected>DINOv3 pooled baseline</option>
                                     <option value="cradio_pooled">C-RADIOv4 pooled</option>
@@ -758,7 +758,7 @@
                                 </select>
                             </div>
                             <div class="data-ingestion-field">
-                                <label for="dataIngestionCradioModel">C-RADIOv4 model<span class="help-icon" title="Used only when Embedding mode is C-RADIOv4 pooled. SO400M is the practical default candidate; H is larger and should be benchmarked on your hardware before routine use. Mac runs currently use Torch/MPS or CPU fallback rather than MLX. Local SALAD uses the encoder saved inside the selected head.">?</span></label>
+                                <label for="dataIngestionCradioModel">C-RADIOv4 model<span class="help-icon" title="Used only when Embedding mode is C-RADIOv4 pooled. SO400M is the practical default candidate; H is larger and should be benchmarked on your hardware before routine use. Mac auto mode uses the matching local MLX checkpoint under ~/cradio_mlx when present. Local SALAD uses the encoder saved inside the selected head.">?</span></label>
                                 <select id="dataIngestionCradioModel"></select>
                             </div>
                             <div class="data-ingestion-field">
@@ -807,7 +807,7 @@
                         <div class="data-ingestion-panel__header">
                             <div>
                                 <strong id="dataIngestionTrainTitle">Train local SALAD</strong>
-                                <div class="training-help">Train a local SALAD aggregation head from your own images/video frames with a frozen spatial-token encoder underneath.</div>
+                                <div class="training-help">Train a local SALAD aggregation head from your own images/video frames with a frozen spatial-token encoder underneath. Mac auto mode trains the head with MLX when available and saves the same compatible head file.</div>
                             </div>
                         </div>
                         <div class="data-ingestion-grid">
@@ -820,7 +820,7 @@
                                 <input type="text" id="dataIngestionHeadName" value="local_salad_head" />
                             </div>
                             <div class="data-ingestion-field">
-                                <label for="dataIngestionTrainEncoder">SALAD base encoder<span class="help-icon" title="Frozen encoder whose spatial tokens train the local SALAD head. DINOv3 is the established baseline. C-RADIOv4 is a candidate path that trains on C-RADIO spatial tokens; on Mac it is not MLX-accelerated in Tator, so benchmark the resulting head before using it as a dataset default.">?</span></label>
+                                <label for="dataIngestionTrainEncoder">SALAD base encoder<span class="help-icon" title="Frozen encoder whose spatial tokens train the local SALAD head. DINOv3 is the established baseline. C-RADIOv4 is a candidate path that trains on C-RADIO spatial tokens; on Mac the C-RADIO encoder and the SALAD head both use MLX by default when available, with Torch fallback. Benchmark the resulting head before using it as a dataset default.">?</span></label>
                                 <select id="dataIngestionTrainEncoder">
                                     <option value="dinov3" selected>DINOv3</option>
                                     <option value="cradio">C-RADIOv4</option>
@@ -866,7 +866,7 @@
                         <div>
                             <h2>Class Split Explorer</h2>
                             <div id="classSplitDatasetStatus" class="training-help">Open a dataset in Label Images to run analysis. Full WALDO tests keep DINOv3 Precise as the stable default; C-RADIOv4 improves NN purity only in a very slow opt-in audit path.</div>
-                            <div class="training-help warn">C-RADIOv4 on Mac is not MLX-accelerated in Tator. Current Torch/MPS runs are much slower than DINOv3.</div>
+                            <div class="training-help warn">C-RADIOv4 on Mac now uses the local MLX backend by default when <code>~/cradio_mlx</code> and its checkpoints are present; otherwise it falls back to Torch CUDA/MPS/CPU. The old WALDO C-RADIO timings were Torch/MPS-era numbers.</div>
                             <details class="embedding-benchmark-note" open>
                                 <summary>WALDO encoder benchmark comparison</summary>
                                 <div class="embedding-benchmark-note__intro">All-class object-crop audit, uncapped. NN purity means: for each embedded object crop, what fraction of its nearest neighbors have the same class. The first NN number is object-weighted; the second balances classes. This is a clustering score, not classifier accuracy. Lower size leakage and fewer wrong-class candidates are better. The C-RADIO card is the slow tight+context audit row; the visible C-RADIO preset starts from summary mode.</div>
@@ -904,7 +904,7 @@
                                 </div>
                             </div>
                             <div class="class-split-field">
-                                <label for="classSplitRecipePreset">Quality preset<span class="help-icon" title="Fast is a quick coarse audit. Balanced is the faster single-view DINOv3 baseline. Precise is the measured WALDO default for all-class wrong-label discovery. C-RADIOv4 is opt-in: its slowest recipe improved NN purity in full WALDO tests but was much slower, leaked more size signal, and produced more wrong-class candidates than DINOv3 Precise. On Mac it is not MLX-accelerated in Tator. Local SALAD requires a trained local head.">?</span></label>
+                                <label for="classSplitRecipePreset">Quality preset<span class="help-icon" title="Fast is a quick coarse audit. Balanced is the faster single-view DINOv3 baseline. Precise is the measured WALDO default for all-class wrong-label discovery. C-RADIOv4 is opt-in: its slowest recipe improved NN purity in full WALDO tests but leaked more size signal and produced more wrong-class candidates than DINOv3 Precise. On Mac it now uses local MLX when available. Local SALAD requires a trained local head.">?</span></label>
                                 <select id="classSplitRecipePreset">
                                     <option value="balanced">Balanced faster</option>
                                     <option value="fast">Fast coarse</option>
@@ -923,7 +923,7 @@
                                 <select id="classSplitClassSelect"></select>
                             </div>
                             <div class="class-split-field">
-                                <label for="classSplitEncoderType">Encoder<span class="help-icon" title="Backbone family used to embed object crops. DINOv3 is the current WALDO default. CLIP is available for comparison, but no full uncapped WALDO promotion row is recorded here. C-RADIOv4 is a Torch candidate; on Mac it is not MLX-accelerated in Tator and is benchmarked separately before promotion.">?</span></label>
+                                <label for="classSplitEncoderType">Encoder<span class="help-icon" title="Backbone family used to embed object crops. DINOv3 is the current WALDO default. CLIP is available for comparison, but no full uncapped WALDO promotion row is recorded here. C-RADIOv4 is a candidate; on Mac it uses the local MLX runtime by default when ~/cradio_mlx is available and is benchmarked separately before promotion.">?</span></label>
                                 <select id="classSplitEncoderType">
                                     <option value="dinov3" selected>DINOv3</option>
                                     <option value="clip">CLIP</option>
@@ -985,7 +985,7 @@
                                 </select>
                             </div>
                             <div class="class-split-field">
-                                <label for="classSplitCradioPooling">C-RADIOv4 pooling<span class="help-icon" title="C-RADIOv4-only readout. Summary uses the global descriptor. Spatial mean averages local visual tokens. Summary + spatial mean concatenates both and can preserve more crop detail but doubles feature width. Mac runs are not MLX-accelerated in Tator; benchmark carefully before promoting any C-RADIO pooling mode.">?</span></label>
+                                <label for="classSplitCradioPooling">C-RADIOv4 pooling<span class="help-icon" title="C-RADIOv4-only readout. Summary uses the global descriptor. Spatial mean averages local visual tokens. Summary + spatial mean concatenates both and can preserve more crop detail but doubles feature width. Mac auto mode uses local MLX when available; benchmark carefully before promoting any C-RADIO pooling mode.">?</span></label>
                                 <select id="classSplitCradioPooling">
                                     <option value="summary" selected>Summary</option>
                                     <option value="spatial_mean">Spatial mean</option>
@@ -993,7 +993,7 @@
                                 </select>
                             </div>
                             <div class="class-split-field">
-                                <label for="classSplitEmbeddingAggregation">Embedding aggregation<span class="help-icon" title="Pooled uses the encoder's direct image descriptor and is the measured default. Local SALAD runs a selected Tator-trained aggregation head over spatial tokens. Heads can be DINOv3- or C-RADIOv4-backed; the backend rejects mismatches.">?</span></label>
+                                <label for="classSplitEmbeddingAggregation">Embedding aggregation<span class="help-icon" title="Pooled uses the encoder's direct image descriptor and is the measured default. Local SALAD runs a selected Tator-trained aggregation head over spatial tokens. On Mac, local SALAD uses MLX by default when available and falls back to Torch. Heads can be DINOv3- or C-RADIOv4-backed; the backend rejects mismatches.">?</span></label>
                                 <select id="classSplitEmbeddingAggregation">
                                     <option value="pooled" selected>Pooled / current best</option>
                                     <option value="local_salad">Local SALAD head</option>
@@ -1606,7 +1606,7 @@
                             <div style="margin-top: 6px; color: #475569;">Choose the largest model your GPU can handle if accuracy matters; use smaller models for faster iteration. Results vary by dataset.</div>
                         </div>
                         <div class="training-field">
-                            <label for="trainEncoderType">Encoder type<span class="help-icon" title="Embedding family for the auto-class predictor. CLIP supports text prompt prefiltering. DINOv3 is the current image-only default from WALDO tests. C-RADIOv4 is an image-only Torch candidate; on Mac it is not MLX-accelerated in Tator and should be benchmarked against DINOv3 before becoming the default.">?</span></label>
+                            <label for="trainEncoderType">Encoder type<span class="help-icon" title="Embedding family for the auto-class predictor. CLIP supports text prompt prefiltering. DINOv3 is the current image-only default from WALDO tests. C-RADIOv4 is an image-only candidate; on Mac it uses local MLX by default when ~/cradio_mlx is available and should still be benchmarked against DINOv3 before becoming the default.">?</span></label>
                             <select id="trainEncoderType">
                                 <option value="clip" selected>CLIP (image + text)</option>
                                 <option value="dinov3">DINOv3 (image-only)</option>
@@ -1625,9 +1625,9 @@
                             <div class="training-help">Frozen image encoder only (no text). Larger models are more accurate but need more VRAM.</div>
                         </div>
                         <div class="training-field" id="cradioBackboneRow" hidden>
-                            <label for="cradioBackboneSelect">C-RADIOv4 Backbone<span class="help-icon" title="NVIDIA C-RADIOv4 checkpoint for image-only crop embeddings. SO400M is the practical candidate; H is larger. Runs through Hugging Face/Torch with CUDA when available, MPS/CPU fallback on Mac, and no official MLX checkpoint.">?</span></label>
+                            <label for="cradioBackboneSelect">C-RADIOv4 Backbone<span class="help-icon" title="NVIDIA C-RADIOv4 checkpoint for image-only crop embeddings. SO400M is the practical candidate; H is larger. Auto mode uses the local ~/cradio_mlx MLX checkpoints on Mac when present, with Torch CUDA/MPS/CPU fallback otherwise.">?</span></label>
                             <select id="cradioBackboneSelect"></select>
-                            <div class="training-help warn">HF/Torch C-RADIOv4 encoder. On Mac this is not MLX-accelerated in Tator and full-dataset runs can be much slower than DINOv3.</div>
+                            <div class="training-help warn">C-RADIOv4 uses the shared backend: local MLX on Mac when <code>~/cradio_mlx</code> is available, Torch CUDA/MPS/CPU otherwise. Full-dataset promotion still needs benchmark evidence.</div>
                         </div>
                         <div class="training-field logreg-only">
                             <label for="trainSolver">Solver<span class="help-icon" title="LogReg-only optimizer. SAGA handles elastic-net style regularization and is the default; LBFGS/Newton-CG are stable dense solvers; LibLinear is useful for smaller one-vs-rest problems.">?</span></label>
@@ -1700,7 +1700,7 @@
                                 <div class="training-help">Images encoded per CLIP forward pass.</div>
                             </div>
                             <div>
-                                <label for="trainEmbeddingRecipePreset">Embedding preset<span class="help-icon" title="Applies the same recipe family used by Class Split. Balanced is the conservative auto-class baseline. Precise mirrors the strongest DINOv3 audit recipe. C-RADIOv4 and Local SALAD are candidate paths that should be benchmarked before promotion; C-RADIOv4 on Mac is not MLX-accelerated in Tator.">?</span></label>
+                                <label for="trainEmbeddingRecipePreset">Embedding preset<span class="help-icon" title="Applies the same recipe family used by Class Split. Balanced is the conservative auto-class baseline. Precise mirrors the strongest DINOv3 audit recipe. C-RADIOv4 and Local SALAD are candidate paths that should be benchmarked before promotion; C-RADIOv4 on Mac uses local MLX when available.">?</span></label>
                                 <select id="trainEmbeddingRecipePreset">
                                     <option value="balanced" selected>Balanced default</option>
                                     <option value="fast">Fast coarse</option>
@@ -1781,7 +1781,7 @@
                                 <div class="training-help">DINOv3-only embedding readout. CLIP ignores this setting.</div>
                             </div>
                             <div>
-                                <label for="trainCradioPooling">C-RADIOv4 pooling<span class="help-icon" title="C-RADIOv4-only readout saved into classifier metadata and reused during auto-class inference. Summary is the global descriptor; spatial mean averages local tokens; summary + spatial mean concatenates both. On Mac this path is not MLX-accelerated in Tator and is slower than DINOv3 in current full-dataset runs.">?</span></label>
+                                <label for="trainCradioPooling">C-RADIOv4 pooling<span class="help-icon" title="C-RADIOv4-only readout saved into classifier metadata and reused during auto-class inference. Summary is the global descriptor; spatial mean averages local tokens; summary + spatial mean concatenates both. On Mac the encoder uses local MLX when available; keep comparing against DINOv3 on the active dataset.">?</span></label>
                                 <select id="trainCradioPooling">
                                     <option value="summary" selected>Summary</option>
                                     <option value="spatial_mean">Spatial mean</option>
@@ -1795,7 +1795,7 @@
                                     <option value="pooled" selected>Pooled / current best</option>
                                     <option value="local_salad">Local SALAD head</option>
                                 </select>
-                                <div class="training-help">Local SALAD uses a locally trained head from Data Ingestion for DINOv3 or C-RADIOv4 spatial-token descriptors.</div>
+                                <div class="training-help">Local SALAD uses a locally trained head from Data Ingestion for DINOv3 or C-RADIOv4 spatial-token descriptors. On Mac, the head runs through MLX by default when available.</div>
                             </div>
                             <div>
                                 <label for="trainSaladHead">Local SALAD head<span class="help-icon" title="Required only for Local SALAD aggregation. The selected head stores its encoder family, model, and pooling recipe; incompatible heads are rejected instead of silently mixing embeddings.">?</span></label>

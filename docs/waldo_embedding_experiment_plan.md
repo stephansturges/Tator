@@ -308,17 +308,18 @@ Gate:
 
 C-RADIOv4 implementation note:
 
-- Tator uses the Hugging Face/Transformers C-RADIOv4 model path with
-  `open_clip_torch>=3.3,<4.0`, Torch CUDA when available, and Torch MPS/CPU on
-  Apple hardware. C-RADIOv4 is not MLX-accelerated in Tator on Mac today, and
-  current full-dataset Torch/MPS runs are much slower than DINOv3.
+- Tator uses the shared C-RADIOv4 helper everywhere C-RADIO embeddings are
+  needed. On macOS, `CRADIO_BACKEND=auto` now prefers the local `~/cradio_mlx`
+  runtime and matching checkpoint when present; otherwise it falls back to the
+  Hugging Face/Transformers path with `open_clip_torch>=3.3,<4.0`, Torch CUDA,
+  MPS, or CPU.
 - C-RADIO-backed local SALAD heads are trained over the spatial-token channel
   width. When the C-RADIO global summary width differs from the spatial-token
   width, Tator falls back to the spatial-token mean for the SALAD global
   descriptor so training and inference remain shape-consistent.
-- No official MLX C-RADIOv4 implementation or converted checkpoint was found,
-  so the backend exposes MLX status as unavailable for C-RADIOv4 rather than
-  silently falling back under an MLX label.
+- Existing WALDO promotion numbers for C-RADIOv4 were gathered on the older
+  Torch/MPS path and still do not clear the default-promotion gate. Re-run the
+  benchmark matrix on the active hardware before promoting any C-RADIO recipe.
 - `tools/run_class_split_experiments.py --matrix cradio` runs the focused
   C-RADIO pooling/backbone screen. `tools/benchmark_salad_diversity.py
   --include-cradio-pooled` and `tools/benchmark_salad_class_separation.py

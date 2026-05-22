@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -7,6 +8,7 @@ import torch
 import localinferenceapi as api
 from services.data_ingestion import greedy_diverse_indices, normalize_keep_fraction
 from utils.local_salad import LocalSALADConfig, LocalSALADHead
+from utils.local_salad_mlx import local_salad_mlx_available
 from PIL import Image
 
 
@@ -40,6 +42,8 @@ def test_data_ingestion_capabilities_expose_salad_and_cradio():
     assert caps["salad_policy"] == "local_training_only"
     assert caps["local_salad_policy"] == api.LOCAL_SALAD_POLICY
     assert caps["local_salad_trainer"] == api.LOCAL_SALAD_TRAINER
+    assert caps["local_salad_backend"]["default"] == "auto"
+    assert caps["local_salad_backend"]["auto_resolved"] in {"mlx", "torch"}
     assert "local_salad_heads" in caps
     assert any(recipe["id"] == "local_salad_top20" for recipe in caps["data_ingestion_recipes"])
     assert any(recipe["id"] == "cradio_top20" and recipe["cradio_pooling"] == "summary" for recipe in caps["data_ingestion_recipes"])
@@ -82,7 +86,7 @@ def test_data_ingestion_cradio_pooled_uses_requested_pooling(tmp_path, monkeypat
         "_load_cradio_backbone_cached",
         lambda model_name, target_device, raise_on_error=False: ("model", "processor", model_name, "cpu"),
     )
-    monkeypatch.setattr(api, "resolve_cradio_torch_device", lambda _requested=None: "cpu")
+    monkeypatch.setattr(api, "resolve_cradio_torch_device", lambda _requested=None, **_kwargs: "cpu")
 
     def fake_encode(model, processor, device_name, images, *, pooling, normalize=True, return_tokens=False):
         captured["pooling"] = pooling
@@ -127,11 +131,94 @@ def test_local_salad_head_save_load_roundtrip(tmp_path, monkeypatch):
 
     loaded, meta = api._load_local_salad_head("unit_head")
     patches = torch.randn(2, 5, 8)
-    desc = loaded(patches)
+    desc = api._encode_local_salad_head_np(loaded, patches)
 
     assert meta["id"] == "unit_head"
     assert desc.shape == (2, loaded.output_dim)
-    assert torch.allclose(desc.norm(dim=1), torch.ones(2), atol=1e-5)
+    assert np.allclose(np.linalg.norm(desc, axis=1), np.ones(2), atol=1e-5)
+
+
+def test_local_salad_training_job_uses_mlx_backend_and_saves_compatible_head(tmp_path, monkeypatch):
+    if not local_salad_mlx_available():
+        pytest.skip("MLX is not available in this environment")
+
+    jobs_root = tmp_path / "jobs"
+    heads_root = tmp_path / "heads"
+    jobs_root.mkdir()
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+
+    image_a = tmp_path / "a.jpg"
+    image_b = tmp_path / "b.jpg"
+    Image.new("RGB", (24, 24), (30, 80, 120)).save(image_a)
+    Image.new("RGB", (24, 24), (140, 70, 20)).save(image_b)
+    prepared = [
+        {"image_path": str(image_a), "filename": "a.jpg", "width": 24, "height": 24, "source_type": "image"},
+        {"image_path": str(image_b), "filename": "b.jpg", "width": 24, "height": 24, "source_type": "image"},
+    ]
+
+    class DummyDino:
+        class Config:
+            hidden_size = 8
+
+        config = Config()
+
+    monkeypatch.setattr(api, "_data_ingestion_prepare_media", lambda *args, **kwargs: list(prepared))
+    monkeypatch.setattr(api, "_data_ingestion_get_dinov3", lambda model_name: (DummyDino(), object(), "unit-dino", "cpu"))
+
+    def fake_dinov3_tokens(model_obj, processor_obj, device_name, images):
+        patches = []
+        globals_ = []
+        ramp = torch.arange(48, dtype=torch.float32).reshape(6, 8) / 100.0
+        for img in images:
+            base = float(np.asarray(img.convert("RGB"), dtype=np.float32).mean() / 255.0)
+            sample = ramp + base
+            patches.append(sample)
+            globals_.append(sample.mean(dim=0))
+        return torch.stack(patches), torch.stack(globals_)
+
+    monkeypatch.setattr(api, "_data_ingestion_dinov3_tokens", fake_dinov3_tokens)
+
+    job = api.DataIngestionJob(
+        job_id="salad_mlx_unit",
+        kind="local_salad_train",
+        request={
+            "train_uploads": prepared,
+            "encoder_type": "dinov3",
+            "encoder_model": "unit-dino",
+            "head_name": "MLX Unit Head",
+            "local_salad_backend": "mlx",
+            "epochs": 1,
+            "batch_size": 2,
+            "num_clusters": 4,
+            "cluster_dim": 8,
+            "token_dim": 8,
+            "hidden_dim": 64,
+            "dropout": 0.0,
+            "seed": 7,
+        },
+    )
+
+    api._run_local_salad_training_job(job)
+
+    assert job.status == "completed"
+    assert job.result
+    summary = job.result["summary"]
+    assert summary["salad_backend"] == "mlx"
+    assert summary["head_id"] == "MLX_Unit_Head"
+    assert Path(summary["path"]).exists()
+
+    loaded, meta = api._load_local_salad_head(summary["head_id"], device_name="cpu", backend="torch")
+    assert isinstance(loaded, LocalSALADHead)
+    assert meta["salad_backend"] == "mlx"
+    assert meta["encoder_type"] == "dinov3"
+    assert meta["encoder_model"] == "unit-dino"
+    with Image.open(image_a) as opened_a, Image.open(image_b) as opened_b:
+        test_patches, test_global = fake_dinov3_tokens(None, None, "cpu", [opened_a, opened_b])
+    desc = api._encode_local_salad_head_np(loaded, test_patches, test_global)
+    assert desc.shape == (2, summary["descriptor_dim"])
+    assert np.allclose(np.linalg.norm(desc, axis=1), np.ones(2), atol=1e-5)
 
 
 def test_local_salad_head_loader_rejects_external_or_stale_payloads(tmp_path, monkeypatch):

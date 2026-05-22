@@ -155,6 +155,7 @@ def test_data_ingestion_panel_contract():
     assert 'data-tab="data-ingestion"' in html
     assert 'id="tabDataIngestion" data-tab-panel="data-ingestion"' in html
     assert "Train local SALAD" in html
+    assert "local SALAD runtime and training use MLX by default when available" in html
     assert 'id="dataIngestionFiles"' in html
     assert 'id="dataIngestionRecipe"' in html
     assert 'id="dataIngestionTrainFiles"' in html
@@ -167,8 +168,8 @@ def test_data_ingestion_panel_contract():
     assert "never loads external SALAD checkpoints" in html
     assert "WALDO benchmarks keep DINOv3 pooled as the stable baseline" in html
     assert "C-RADIOv4 and local SALAD are candidate modes" in html
-    assert "C-RADIOv4 on Mac is not MLX-accelerated in Tator" in html
-    assert "Current Torch/MPS runs are much slower than DINOv3" in html
+    assert "C-RADIOv4 on Mac now uses the local MLX backend by default" in html
+    assert "falls back to Torch CUDA/MPS/CPU" in html
     assert "WALDO encoder benchmark comparison" in html
     assert "NN purity means: for each embedded object crop, what fraction of its nearest neighbors have the same class" in html
     assert "This is a clustering score, not classifier accuracy" in html
@@ -347,7 +348,7 @@ def test_class_split_explorer_panel_contract():
     assert "its slowest recipe improved NN purity in full WALDO tests" in html
     assert "The first NN number is object-weighted; the second balances classes" in html
     assert "the visible C-RADIO preset starts from summary mode" in html
-    assert "not MLX-accelerated in Tator and can be much slower than DINOv3" in html
+    assert "On Mac it now uses local MLX when available" in html
     assert 'id="classSplitProjectionNeighborK" min="0" max="5000" value="50"' in html
     assert 'id="classSplitSampleCap" min="0" max="50000" placeholder="All objects"' in html
     assert 'Crop padding<span class="help-icon"' in html
@@ -396,6 +397,10 @@ def test_class_split_explorer_panel_contract():
     assert "function updateClassSplitEmbeddingRecipeExplanation" in js
     assert "function updateTrainingEmbeddingRecipeExplanation" in js
     assert "regresses out log bbox area, log crop area, bbox aspect, and crop aspect" in js
+    assert "Why fixed canonical crops" in js
+    assert "Mean-color padding avoids adding artificial black borders" in js
+    assert "Why not full whitening" in js
+    assert "full covariance whitening/PCA would rotate every embedding dimension" in js
     assert 'applyEmbeddingRecipePresetToClassSplit(classSplitElements.recipePreset?.value || "precise")' in js
     assert 'preprocess_mode: String(classSplitElements.preprocessMode?.value || "canonical")' in js
     assert 'embedding_adjustment: String(classSplitElements.sizeBiasMode?.value || "remove_size_bias")' in js
@@ -404,7 +409,7 @@ def test_class_split_explorer_panel_contract():
     assert 'if (trainingElements.embeddingAdjustmentSelect) {\n            formData.append("embedding_adjustment", trainingElements.embeddingAdjustmentSelect.value || "remove_size_bias");\n        }' in js
     assert 'Encoder type<span class="help-icon"' in html
     assert 'C-RADIOv4 Backbone<span class="help-icon"' in html
-    assert "HF/Torch C-RADIOv4 encoder. On Mac this is not MLX-accelerated in Tator" in html
+    assert "C-RADIOv4 uses the shared backend: local MLX on Mac" in html
     assert 'Embedding preset<span class="help-icon"' in html
     assert 'id="trainEmbeddingRecipeExplanation"' in html
     assert 'id="trainPreprocessMode"' in html
@@ -416,7 +421,7 @@ def test_class_split_explorer_panel_contract():
     assert 'Embedding views<span class="help-icon"' in html
     assert 'DINOv3 pooling<span class="help-icon"' in html
     assert 'C-RADIOv4 pooling<span class="help-icon"' in html
-    assert 'Local SALAD uses a locally trained head from Data Ingestion for DINOv3 or C-RADIOv4 spatial-token descriptors.' in html
+    assert 'Local SALAD uses a locally trained head from Data Ingestion for DINOv3 or C-RADIOv4 spatial-token descriptors. On Mac, the head runs through MLX by default when available.' in html
     assert "Active Label Images workspace" in js
     assert "function buildClassSplitActiveWorkspaceForm" in js
     assert "function getClassSplitPointImageKey" in js

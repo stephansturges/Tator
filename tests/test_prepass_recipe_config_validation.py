@@ -2,6 +2,7 @@ import json
 import zipfile
 from pathlib import Path
 
+import numpy as np
 import pytest
 from fastapi import HTTPException
 
@@ -12,6 +13,7 @@ from services.prepass_recipes import (
     _import_prepass_recipe_from_zip_impl,
     _list_prepass_recipes_impl,
     _load_prepass_recipe_meta,
+    _persist_agent_recipe_impl,
     _save_prepass_recipe_impl,
     _validate_prepass_recipe_config_impl,
     _write_prepass_recipe_meta,
@@ -79,6 +81,52 @@ def test_save_prepass_recipe_preserves_created_at(tmp_path):
     )
     assert updated["created_at"] == first["created_at"]
     assert updated["updated_at"] >= first["updated_at"]
+
+
+def test_persist_agent_recipe_preserves_numpy_clip_head_classes(tmp_path):
+    saved = _persist_agent_recipe_impl(
+        dataset_id=None,
+        class_id=None,
+        class_name="person",
+        label="person recipe",
+        recipe={
+            "text_prompts": ["person"],
+            "_clip_head_classifier_path": "classifier.pkl",
+        },
+        meta_overrides={
+            "dataset_signature": "dataset-signature",
+            "labelmap_hash": "labelmap-hash",
+            "labelmap": ["person", "vehicle"],
+        },
+        recipes_root=tmp_path,
+        max_clip_head_bytes=1024 * 1024,
+        max_crops=10,
+        max_crop_bytes=1024 * 1024,
+        resolve_dataset_fn=lambda _dataset_id: tmp_path,
+        load_coco_index_fn=lambda _root: ({"categories": []}, {}, {}),
+        compute_dataset_signature_fn=lambda *_args: "dataset-signature",
+        compute_labelmap_hash_fn=lambda _categories: ("labelmap-hash", ["person", "vehicle"]),
+        resolve_clip_classifier_fn=lambda _path: tmp_path / "classifier.pkl",
+        load_clip_head_fn=lambda _path: {
+            "classes": np.asarray(["person", "vehicle"], dtype=object),
+            "clip_model": "ViT-B/32",
+            "proba_mode": "softmax",
+        },
+        save_clip_head_artifacts_fn=lambda **_kwargs: None,
+        load_clip_head_artifacts_fn=lambda **_kwargs: {
+            "classes": np.asarray(["person", "vehicle"], dtype=object),
+            "clip_model": "ViT-B/32",
+            "proba_mode": "softmax",
+            "min_prob": 0.6,
+            "margin": 0.1,
+        },
+        save_exemplar_crop_fn=lambda **_kwargs: None,
+        sanitize_prompts_fn=lambda prompts: prompts,
+        path_is_within_root_fn=lambda path, root: str(Path(path).resolve()).startswith(str(Path(root).resolve())),
+    )
+
+    assert saved["recipe"]["clip_head"]["classes"] == ["person", "vehicle"]
+    assert saved["recipe"]["clip_head"]["min_prob"] == 0.6
 
 
 def test_load_prepass_recipe_meta_supports_legacy_recipe_json(tmp_path):

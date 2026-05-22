@@ -34,6 +34,7 @@ from services.calibration_recipe_registry import (
     CANONICAL_EDR_ORIGIN_IMPORTED_PORTABLE,
     register_promoted_recipe,
 )
+from utils.classifier_utils import _clip_head_classes
 
 
 def _write_prepass_recipe_meta(recipe_dir: Path, payload: Dict[str, Any]) -> None:
@@ -831,7 +832,7 @@ def _persist_agent_recipe_impl(
                     "artifact": "clip_head/head.npz",
                     "clip_model": loaded.get("clip_model"),
                     "proba_mode": loaded.get("proba_mode"),
-                    "classes": loaded.get("classes") if isinstance(loaded.get("classes"), list) else [],
+                    "classes": _clip_head_classes(loaded),
                     "min_prob": float(max(0.0, min(1.0, min_prob))),
                     "margin": float(max(0.0, min(1.0, margin))),
                 }

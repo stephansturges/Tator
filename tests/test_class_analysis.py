@@ -1309,6 +1309,62 @@ def test_clip_head_predict_proba_fails_closed_on_layer_norm_shape_mismatch():
     assert api._clip_head_predict_proba(feats, head) is None
 
 
+def test_clip_head_predict_proba_fails_closed_on_malformed_arrays():
+    feats = np.asarray([[1.0, 2.0]], dtype=np.float32)
+    bad_logreg = {
+        "classifier_type": "logreg",
+        "coef": [[object(), 0.0]],
+        "intercept": [0.0],
+        "proba_mode": "softmax",
+    }
+    bad_mlp_weight = {
+        "classifier_type": "mlp",
+        "classes": ["car", "boat"],
+        "layers": [
+            {
+                "weight": [[object(), 0.0], [0.0, 1.0]],
+                "bias": np.zeros(2, dtype=np.float32),
+                "activation": "linear",
+            }
+        ],
+    }
+    bad_layer_norm = {
+        "classifier_type": "mlp",
+        "classes": ["car", "boat"],
+        "layers": [
+            {
+                "weight": np.eye(2, dtype=np.float32),
+                "bias": np.zeros(2, dtype=np.float32),
+                "layer_norm_weight": [object(), 1.0],
+                "activation": "linear",
+            }
+        ],
+    }
+
+    assert api._clip_head_predict_proba(feats, bad_logreg) is None
+    assert api._clip_head_predict_proba(feats, bad_mlp_weight) is None
+    assert api._clip_head_predict_proba(feats, bad_layer_norm) is None
+
+
+def test_clip_head_predict_proba_ignores_malformed_logit_adjustment():
+    feats = np.asarray([[1.0, 0.0]], dtype=np.float32)
+    head = {
+        "classifier_type": "logreg",
+        "classes": ["car", "boat"],
+        "coef": np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+        "intercept": np.zeros(2, dtype=np.float32),
+        "proba_mode": "softmax",
+        "logit_adjustment_inference": True,
+        "logit_adjustment": [object(), 0.0],
+    }
+
+    actual = api._clip_head_predict_proba(feats, head)
+
+    assert actual is not None
+    assert actual.shape == (1, 2)
+    assert float(actual[0, 0]) > float(actual[0, 1])
+
+
 def test_classifier_postprocess_matches_training_normalize_then_center_order():
     feats = np.asarray([[3.0, 4.0]], dtype=np.float32)
     head = {

@@ -8645,8 +8645,11 @@ def _clip_head_predict_proba(
         arcface = bool(head.get("arcface"))
         arcface_scale = _coerce_float(head.get("arcface_scale"), 1.0, minimum=1e-6)
         for layer_idx, layer in enumerate(layers):
-            weight = np.asarray(layer.get("weight"), dtype=np.float32)
-            bias = np.asarray(layer.get("bias"), dtype=np.float32)
+            try:
+                weight = np.asarray(layer.get("weight"), dtype=np.float32)
+                bias = np.asarray(layer.get("bias"), dtype=np.float32)
+            except Exception:
+                return None
             if weight.ndim != 2 or bias.ndim != 1 or bias.shape[0] != weight.shape[0]:
                 return None
             if x.shape[1] != weight.shape[1]:
@@ -8662,12 +8665,15 @@ def _clip_head_predict_proba(
             x = x @ weight.T + bias
             ln_weight = layer.get("layer_norm_weight")
             if ln_weight is not None:
-                ln_weight = np.asarray(ln_weight, dtype=np.float32)
-                ln_bias = (
-                    np.asarray(layer.get("layer_norm_bias"), dtype=np.float32)
-                    if layer.get("layer_norm_bias") is not None
-                    else None
-                )
+                try:
+                    ln_weight = np.asarray(ln_weight, dtype=np.float32)
+                    ln_bias = (
+                        np.asarray(layer.get("layer_norm_bias"), dtype=np.float32)
+                        if layer.get("layer_norm_bias") is not None
+                        else None
+                    )
+                except Exception:
+                    return None
                 if ln_weight.shape != (x.shape[1],):
                     return None
                 if ln_bias is not None and ln_bias.shape != (x.shape[1],):
@@ -8687,8 +8693,11 @@ def _clip_head_predict_proba(
                 x = 0.5 * x * (1.0 + erf(x / math.sqrt(2.0)))
         logits = x
     else:
-        coef = np.asarray(head.get("coef"), dtype=np.float32)
-        intercept = np.asarray(head.get("intercept"), dtype=np.float32)
+        try:
+            coef = np.asarray(head.get("coef"), dtype=np.float32)
+            intercept = np.asarray(head.get("intercept"), dtype=np.float32)
+        except Exception:
+            return None
         if coef.ndim != 2:
             return None
         if feats_np.shape[1] != coef.shape[1]:
@@ -8715,8 +8724,11 @@ def _clip_head_predict_proba(
     if head.get("logit_adjustment_inference"):
         adjust = head.get("logit_adjustment")
         if adjust is not None:
-            adj = np.asarray(adjust, dtype=np.float32).reshape(1, -1)
-            if adj.shape[1] == logits.shape[1]:
+            try:
+                adj = np.asarray(adjust, dtype=np.float32).reshape(1, -1)
+            except Exception:
+                adj = None
+            if adj is not None and adj.shape[1] == logits.shape[1]:
                 logits = logits + adj
     if proba_mode == "binary":
         if logits.shape[1] != 1:

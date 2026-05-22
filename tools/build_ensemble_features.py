@@ -15,6 +15,7 @@ sys.path.append(str(ROOT))
 
 import localinferenceapi as api
 from tools.context_feature_variants import CANONICAL_BASE_VARIANT, compute_feature_schema_hash
+from utils.classifier_utils import _clip_head_classes
 
 SOURCE_RUNS = [
     "yolo_full",
@@ -497,7 +498,7 @@ def _encode_classifier_features(
     out_embed: List[np.ndarray] = []
     projection_matrix: Optional[np.ndarray] = None
     projection_input_dim: Optional[int] = None
-    class_count = len(list(head.get("classes") or []))
+    class_count = len(_clip_head_classes(head))
     for start in range(0, len(crops), batch_size):
         batch = []
         for crop in crops[start : start + batch_size]:
@@ -624,7 +625,7 @@ def main() -> None:
         )
         _activate_classifier_runtime(classifier_path, args.dataset)
         classifier_head = api._load_clip_head_from_classifier(classifier_path)
-        classifier_classes = [str(c) for c in list(classifier_head.get("classes") or [])]
+        classifier_classes = _clip_head_classes(classifier_head)
         if args.require_classifier and not classifier_classes:
             raise SystemExit("classifier_classes_missing")
     try:

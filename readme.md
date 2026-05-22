@@ -565,7 +565,9 @@ reference dataset.
 - Made the same reference/profile check fail closed in the backend. Local SALAD
   analysis now rejects heads with missing reference metadata or a mismatched
   `reference_dataset_id`, so direct API calls cannot bypass the Data Ingestion
-  reference-first flow.
+  reference-first flow. The Data Ingestion analysis job path now rejects pooled
+  DINOv3/C-RADIO encoder requests as unsupported; pooled encoders remain
+  internal helpers/benchmark paths, not ingestion analysis modes.
 - Added `tools/benchmark_salad_diversity.py` to compare pooled DINOv3 selection
   against a locally trained SALAD head:
 

@@ -104,6 +104,17 @@ def test_data_ingestion_create_jobs_reject_empty_uploads_before_queueing(tmp_pat
     assert reference_error.value.status_code == 400
     assert reference_error.value.detail == "data_ingestion_no_reference_files"
 
+    with pytest.raises(api.HTTPException) as encoder_error:
+        asyncio.run(
+            api.create_data_ingestion_analysis_job(
+                json.dumps({"encoder": "dinov3_pooled"}),
+                [_FakeUpload("candidate.jpg", b"candidate")],
+                [_FakeUpload("reference.jpg", b"reference")],
+            )
+        )
+    assert encoder_error.value.status_code == 400
+    assert encoder_error.value.detail == "data_ingestion_encoder_unsupported"
+
     with pytest.raises(api.HTTPException) as salad_error:
         asyncio.run(api.create_local_salad_training_job("{}", []))
     assert salad_error.value.status_code == 400
@@ -169,10 +180,20 @@ def test_data_ingestion_active_reference_dataset_id_is_metadata_only(tmp_path, m
 
     monkeypatch.setattr(api, "_resolve_dataset_entry", fail_dataset_resolution)
     monkeypatch.setattr(api.threading, "Thread", DummyThread)
+    _write_unit_local_salad_head(
+        jobs_root,
+        "open_label_images_head",
+        {
+            "reference_source": "active_label_images",
+            "reference_dataset_id": "open_label_images_dataset",
+        },
+    )
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", jobs_root)
     manifest = json.dumps({
         "reference_source": "active_label_images",
         "reference_dataset_id": "open_label_images_dataset",
-        "encoder": "dinov3_pooled",
+        "encoder": "local_salad",
+        "salad_head_id": "open_label_images_head",
     })
 
     analysis_result = asyncio.run(
@@ -285,6 +306,38 @@ def test_data_ingestion_runtime_rejects_mismatched_local_salad_profile(tmp_path,
 
     assert job.status == "failed"
     assert job.error == "local_salad_head_reference_mismatch"
+
+
+def test_data_ingestion_runtime_requires_local_salad_encoder(tmp_path, monkeypatch):
+    job = api.DataIngestionJob(
+        job_id="di_pooled_runtime",
+        kind="analysis",
+        request={
+            "encoder": "dinov3_pooled",
+            "candidate_uploads": [{"path": str(tmp_path / "candidate.jpg"), "filename": "candidate.jpg"}],
+            "reference_uploads": [{"path": str(tmp_path / "reference.jpg"), "filename": "reference.jpg"}],
+        },
+    )
+
+    api._run_data_ingestion_analysis_job(job)
+
+    assert job.status == "failed"
+    assert job.error == "data_ingestion_encoder_unsupported"
+
+
+def test_data_ingestion_analysis_requires_reference_profile_by_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", tmp_path / "jobs")
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(
+            api.create_data_ingestion_analysis_job(
+                json.dumps({"reference_source": "active_label_images"}),
+                [_FakeUpload("candidate.jpg", b"candidate")],
+                [_FakeUpload("reference.jpg", b"reference")],
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "local_salad_head_required"
 
 
 def test_data_ingestion_cradio_pooled_uses_requested_pooling(tmp_path, monkeypatch):

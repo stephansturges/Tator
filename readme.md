@@ -463,9 +463,9 @@ analysis for open annotation datasets.
 - Removed the earlier fixed-projection SALAD-style crop aggregator from Class
   Split and auto-class. The replacement SALAD path is stricter: Tator now trains
   its own local SALAD optimal-transport head from user media, stores it in the
-  local head registry, and reuses that exact selected head for Data Ingestion,
-  Class Split, and auto-class metadata. No upstream or third-party SALAD
-  checkpoint is loaded.
+  local head registry, and reuses that exact selected head for Data Ingestion
+  reference-profile scoring. No upstream or third-party SALAD checkpoint is
+  loaded.
 - The shared recipe is intentionally narrow in the normal UI: object crops are
   padded to a square, resized to a canonical input size, optionally rendered as
   tight/context views, embedded with the selected CLIP or DINOv3 backbone, and
@@ -514,32 +514,30 @@ analysis for open annotation datasets.
 ### 2026-05-21: Data Ingestion and Local SALAD
 
 This checkpoint adds a first-class **Data Ingestion** workspace for deciding
-which new images or video frames are worth adding to the current dataset.
+which new images or video frames are worth adding relative to an accepted
+reference dataset.
 
-- Added a top-level **Data Ingestion** tab. Candidate images/videos are embedded
-  and ranked by greedy farthest-first diversity so a user can keep, for
-  example, only the top `20%` most novel media.
-- Added optional comparison against the active Label Images workspace. The
-  frontend can upload the currently loaded images as reference media so new
-  candidates are scored against what is already in memory, not just against
-  each other. The reference cap defaults to `0`, meaning all active images are
-  used unless the user explicitly chooses a smaller cap.
+- Added a top-level **Data Ingestion** tab with a reference-first flow. The user
+  chooses either the current Label Images dataset or a registered backend
+  dataset, builds/selects a local SALAD reference profile from that accepted
+  set, and only then submits candidate media for novelty/diversity review.
+- Candidate images/videos are embedded with the selected reference profile and
+  ranked by greedy farthest-first diversity against the reference set so a user
+  can keep, for example, only the top `20%` most novel media.
 - Added video ingestion through `ffmpeg`: videos are sampled into frames using
   the configured frame interval and per-video frame cap before embedding.
-- Added a pooled DINOv3 baseline encoder and a **local SALAD** encoder. Local
-  SALAD heads are initialized and trained inside Tator from the user's own
-  images/video frames with a frozen spatial-token encoder underneath. DINOv3 is
-  the default base encoder; C-RADIOv4 can now be selected as a candidate base
-  encoder. Training progress uses the staged messages **Selecting ingredients**,
+- Added **local SALAD reference profiles**. Local SALAD heads are initialized
+  and trained inside Tator from the user's own reference dataset images with a
+  frozen spatial-token encoder underneath. DINOv3 is the default base encoder;
+  C-RADIOv4 can be selected as a candidate base encoder. Training progress uses
+  the staged messages **Selecting ingredients**,
   **Washing lettuce**, **Mixing dressing**, **Tossing salad**, and
   **Finalizing SALAD**.
-- Added **Train on active dataset** in Data Ingestion. This packages the images
-  currently loaded in Label Images, trains a local SALAD head from that accepted
-  dataset reference set, refreshes the local head registry, and selects the new
-  head plus the `local_salad_top20` ingestion recipe so candidate imports are
-  scored against the dataset with the same frozen head. The training cap now
-  defaults to `0`, meaning every active image/frame is used unless the user
-  explicitly sets a smaller safety cap.
+- Added **Build reference profile** in Data Ingestion. Active Label Images
+  references are uploaded from the browser; backend datasets are resolved
+  server-side without re-uploading. The max-reference cap defaults to `0`,
+  meaning every reference image/frame is used unless the user explicitly sets a
+  smaller safety cap.
 - Enforced a local-only SALAD policy. Tator does not load upstream SALAD
   checkpoints; saved heads must use the Tator `local-salad-v1` format and the
   `local_training_only_no_external_salad_checkpoint` policy marker before they
@@ -550,12 +548,11 @@ which new images or video frames are worth adding to the current dataset.
   diversity analysis, result retrieval, and cancellation. Results are written
   under `uploads/data_ingestion/`; local heads are stored under
   `uploads/salad_heads/`.
-- Added local SALAD recipes to Class Split and auto-class. These recipes require
-  a spatial-token encoder plus a selected Tator-trained SALAD head. DINOv3 is
-  the established baseline; C-RADIOv4 heads are now supported as an explicit
-  candidate. The selected encoder, pooling mode, and head id are saved into
-  cache keys and classifier metadata so inference cannot silently drift back to
-  pooled embeddings.
+- Kept local SALAD out of Class Split and auto-class UI presets after the crop
+  benchmark showed no promotion signal. DINOv3 remains the established
+  crop-level baseline; C-RADIOv4 remains available for reference-profile
+  comparison. The selected encoder, pooling mode, and head id are saved into
+  profile metadata so inference cannot silently drift back to pooled embeddings.
 - Added `tools/benchmark_salad_diversity.py` to compare pooled DINOv3 selection
   against a locally trained SALAD head:
 
@@ -594,9 +591,8 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/benchmark_salad_class_
   for object class separation yet: Balanced pooled was ranked first
   (`class-balanced NN purity 0.240`, size-axis abs corr `0.039`), Precise pooled
   second (`0.232`, `0.046`), and local SALAD third (`0.185`, `0.050`). The UI
-  therefore keeps pooled DINOv3 as the default and exposes local SALAD as a
-  selectable, benchmarkable recipe once the user has trained a meaningful local
-  head.
+  therefore keeps local SALAD in Data Ingestion only and does not expose it as a
+  crop-level Class Split or auto-class preset.
 
 ### 2026-05-21: C-RADIOv4 Candidate Embeddings
 
@@ -609,8 +605,8 @@ dataset benchmarks justify a switch.
   loading and the model's `summary` plus spatial token outputs.
 - Added C-RADIOv4 pooling modes: `summary`, `spatial_mean`, and
   `summary_spatial_concat`. These are exposed in Class Split, auto-class
-  training metadata, the C-RADIO experiment matrix, and Data Ingestion pooled
-  scoring.
+  training metadata, the C-RADIO experiment matrix, and local SALAD
+  reference-profile training.
 - Added C-RADIOv4 to Class Split Explorer, Data Ingestion, local SALAD training,
   local SALAD scoring, and auto-class training/inference metadata. Local SALAD
   heads now record their base encoder (`dinov3` or `cradio`), encoder model,
@@ -691,15 +687,16 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experi
 | Precise tight + context | PCA | `0.9078` | `0.7264` | `0.0591` | `851` | `9046.9s` |
 
 - Current recommendation remains conservative: DINOv3 Precise stays the default
-  for Class Split and DINOv3 pooled stays the default for Data Ingestion.
+  for Class Split, while Data Ingestion now uses a selected local SALAD
+  reference profile trained from the accepted dataset.
   C-RADIOv4 tight+context audit improved nearest-neighbor purity on the full
   WALDO run (`0.9078` object-weighted / `0.7264` class-balanced versus DINOv3
   Precise at `0.8969` / `0.6917`), but it was about 200x slower than DINOv3
   Precise on this Mac (`9046.9s` versus `45.3s`), had higher size-axis leakage
   (`0.0591` versus `0.0273`), and produced more wrong-class candidates (`851`
   versus `804`). Treat C-RADIOv4 as an opt-in slow audit path, not the default.
-- The UI now exposes the same benchmark context in Data Ingestion, Class Split
-  Explorer, and Class Predictor Settings. The note explains that nearest-neighbor
+- The UI now exposes the benchmark context in Class Split Explorer and Class
+  Predictor Settings. The note explains that nearest-neighbor
   purity means same-class agreement among nearby object-crop embeddings, reports
   the DINOv3 Precise and C-RADIOv4 tight+context audit numbers side by side,
   warns that the C-RADIO number is the slow audit path rather than the default

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 
 import numpy as np
@@ -32,11 +33,14 @@ def test_diverse_indices_use_reference_novelty_and_keep_fraction():
     assert novelty[3] > novelty[2] > novelty[1]
 
 
-def test_data_ingestion_capabilities_expose_salad_and_cradio():
+def test_data_ingestion_capabilities_expose_reference_profile_flow():
     caps = api._data_ingestion_capabilities()
 
-    assert "local_salad" in caps["encoders"]
-    assert "cradio_pooled" in caps["encoders"]
+    assert caps["encoders"] == ["local_salad"]
+    assert caps["default_encoder"] == "local_salad"
+    assert caps["reference_profile_flow"] is True
+    assert caps["analysis_encoders"] == ["local_salad"]
+    assert caps["reference_profile_base_encoders"] == ["dinov3", "cradio"]
     assert caps["default_cradio_model"] == api.CRADIO_DEFAULT_MODEL
     assert "summary_spatial_concat" in caps["cradio_pooling_modes"]
     assert caps["salad_policy"] == "local_training_only"
@@ -45,8 +49,7 @@ def test_data_ingestion_capabilities_expose_salad_and_cradio():
     assert caps["local_salad_backend"]["default"] == "auto"
     assert caps["local_salad_backend"]["auto_resolved"] in {"mlx", "torch"}
     assert "local_salad_heads" in caps
-    assert any(recipe["id"] == "local_salad_top20" for recipe in caps["data_ingestion_recipes"])
-    assert any(recipe["id"] == "cradio_top20" and recipe["cradio_pooling"] == "summary" for recipe in caps["data_ingestion_recipes"])
+    assert "data_ingestion_recipes" not in caps
     assert api._local_salad_training_stage(0.02) == "Selecting ingredients"
     assert api._local_salad_training_stage(0.20) == "Washing lettuce"
     assert api._local_salad_training_stage(0.50) == "Mixing dressing"
@@ -54,16 +57,122 @@ def test_data_ingestion_capabilities_expose_salad_and_cradio():
     assert api._local_salad_training_stage(0.99) == "Finalizing SALAD"
 
 
-def test_data_ingestion_create_jobs_reject_empty_uploads_before_queueing():
+class _FakeUpload:
+    def __init__(self, filename: str, payload: bytes):
+        self.filename = filename
+        self._payload = payload
+        self._read = False
+
+    async def read(self, _size: int = -1):
+        if self._read:
+            return b""
+        self._read = True
+        return self._payload
+
+
+def test_data_ingestion_create_jobs_reject_empty_uploads_before_queueing(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", tmp_path)
+
     with pytest.raises(api.HTTPException) as analysis_error:
         asyncio.run(api.create_data_ingestion_analysis_job("{}", [], []))
     assert analysis_error.value.status_code == 400
     assert analysis_error.value.detail == "data_ingestion_no_candidate_files"
 
+    with pytest.raises(api.HTTPException) as reference_error:
+        asyncio.run(api.create_data_ingestion_analysis_job("{}", [_FakeUpload("candidate.jpg", b"candidate")], []))
+    assert reference_error.value.status_code == 400
+    assert reference_error.value.detail == "data_ingestion_no_reference_files"
+
     with pytest.raises(api.HTTPException) as salad_error:
         asyncio.run(api.create_local_salad_training_job("{}", []))
     assert salad_error.value.status_code == 400
     assert salad_error.value.detail == "local_salad_no_training_files"
+
+
+def test_data_ingestion_backend_dataset_rows_and_training_queue(tmp_path, monkeypatch):
+    dataset_root = tmp_path / "dataset"
+    images_root = dataset_root / "images"
+    images_root.mkdir(parents=True)
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(images_root / "a.jpg")
+    Image.new("RGB", (8, 8), (40, 50, 60)).save(images_root / "b.jpg")
+    entry = {
+        "id": "unit_dataset",
+        "label": "Unit Dataset",
+        "dataset_root": str(dataset_root),
+        "yolo_layout": "flat",
+    }
+    jobs_root = tmp_path / "jobs"
+    heads_root = tmp_path / "heads"
+    jobs_root.mkdir()
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+
+    rows = api._data_ingestion_dataset_media_rows("unit_dataset", field_name="reference", max_count=1)
+    assert len(rows) == 1
+    assert rows[0]["source_dataset_id"] == "unit_dataset"
+    assert rows[0]["source_dataset_label"] == "Unit Dataset"
+    assert rows[0]["field"] == "reference"
+
+    class DummyThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(api.threading, "Thread", DummyThread)
+    manifest = json.dumps({"reference_dataset_id": "unit_dataset", "reference_source": "backend_dataset"})
+    result = asyncio.run(api.create_local_salad_training_job(manifest, []))
+    job = api.DATA_INGESTION_JOBS[result["job_id"]]
+    assert job.kind == "local_salad_train"
+    assert len(job.request["train_uploads"]) == 2
+    assert job.request["train_uploads"][0]["source_dataset_id"] == "unit_dataset"
+
+
+def test_data_ingestion_active_reference_dataset_id_is_metadata_only(tmp_path, monkeypatch):
+    jobs_root = tmp_path / "jobs"
+    jobs_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+
+    def fail_dataset_resolution(_dataset_id):
+        raise AssertionError("active Label Images dataset id should not resolve as a backend dataset")
+
+    class DummyThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", fail_dataset_resolution)
+    monkeypatch.setattr(api.threading, "Thread", DummyThread)
+    manifest = json.dumps({
+        "reference_source": "active_label_images",
+        "reference_dataset_id": "open_label_images_dataset",
+    })
+
+    analysis_result = asyncio.run(
+        api.create_data_ingestion_analysis_job(
+            manifest,
+            [_FakeUpload("candidate.jpg", b"candidate")],
+            [_FakeUpload("reference.jpg", b"reference")],
+        )
+    )
+    analysis_job = api.DATA_INGESTION_JOBS[analysis_result["job_id"]]
+    assert analysis_job.request["reference_dataset_id"] == "open_label_images_dataset"
+    assert len(analysis_job.request["reference_uploads"]) == 1
+
+    train_result = asyncio.run(
+        api.create_local_salad_training_job(
+            manifest,
+            [_FakeUpload("train_a.jpg", b"a"), _FakeUpload("train_b.jpg", b"b")],
+        )
+    )
+    train_job = api.DATA_INGESTION_JOBS[train_result["job_id"]]
+    assert train_job.request["reference_dataset_id"] == "open_label_images_dataset"
+    assert len(train_job.request["train_uploads"]) == 2
 
 
 def test_data_ingestion_cradio_pooled_uses_requested_pooling(tmp_path, monkeypatch):

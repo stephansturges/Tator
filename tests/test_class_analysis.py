@@ -388,13 +388,10 @@ def test_class_analysis_capabilities_expose_only_normal_recipe_controls():
     assert caps["default_preprocess_mode"] == "canonical"
     assert caps["default_embedding_adjustment"] == "remove_size_bias"
     assert caps["default_projection_neighbor_k"] == 50
-    assert "local_salad" in caps["embedding_aggregation_modes"]
-    assert "local_salad_heads" in caps
-    assert caps["local_salad_policy"] == api.LOCAL_SALAD_POLICY
-    assert caps["local_salad_trainer"] == api.LOCAL_SALAD_TRAINER
-    assert caps["local_salad_backend"]["default"] == "auto"
-    assert caps["local_salad_backend"]["auto_resolved"] in {"mlx", "torch"}
-    assert any(recipe["id"] == "local_salad" for recipe in caps["class_separation_recipes"])
+    assert caps["embedding_aggregation_modes"] == ["pooled"]
+    assert "local_salad_heads" not in caps
+    assert "local_salad_policy" not in caps
+    assert not any(recipe["id"] == "local_salad" for recipe in caps["class_separation_recipes"])
 
 
 def test_dinov3_head_encoding_uses_default_model_constant(monkeypatch):

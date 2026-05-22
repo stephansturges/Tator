@@ -214,17 +214,16 @@ images/video frames, saves it under `uploads/salad_heads/`, and only reloads
 heads carrying the Tator `local-salad-v1`,
 `local_training_only_no_external_salad_checkpoint`, and
 `tator_local_salad_trainer` markers. No upstream SALAD checkpoint is loaded.
-The trained local head can then be used for Data Ingestion diversity scoring,
-Class Split crop-token aggregation, or auto-class training/inference metadata.
-For Data Ingestion, the intended default workflow is to train the local SALAD
-head from the active Label Images dataset first, freeze it, and then use that
-head to score candidate images/video frames against the accepted dataset
-reference bank.
+The trained local head is used for Data Ingestion diversity scoring. The
+intended default workflow is to choose the accepted reference dataset first
+(either the active Label Images dataset or a registered backend dataset), train
+and freeze a local SALAD reference profile from that set, and then use that head
+to score candidate images/video frames against the accepted reference bank.
 The first local Class Split smoke test intentionally keeps pooled DINOv3 as the
 default: a one-epoch, 32-image local SALAD head trained and ran cleanly, but
 ranked behind pooled Balanced and pooled Precise on class-balanced nearest
-neighbor purity. Local SALAD remains an opt-in recipe that should be evaluated
-with a meaningful local head before replacing pooled defaults.
+neighbor purity. Local SALAD remains a Data Ingestion diversity-scoring path;
+crop-level Class Split and auto-class UI presets stay on pooled embeddings.
 
 ## Stage 4 - Multi-Scale Object Context
 

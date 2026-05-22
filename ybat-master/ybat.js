@@ -2372,37 +2372,38 @@ const AUTOMATION_LOCKED_TABS = new Set([
         filterClass: null,
         graph: null,
         report: null,
+        wrongPanel: null,
         wrongList: null,
         inspector: null,
+        bulkPanel: null,
+        bulkCount: null,
+        bulkClass: null,
+        bulkApply: null,
+        bulkClear: null,
     };
     const dataIngestionElements = {
         status: null,
         files: null,
-        recipe: null,
-        encoder: null,
-        cradioModel: null,
-        cradioPooling: null,
+        referenceActive: null,
+        referenceBackend: null,
+        referenceDataset: null,
         saladHead: null,
         keepFraction: null,
         frameInterval: null,
         maxFrames: null,
-        referenceCap: null,
-        useActiveReference: null,
         analyzeButton: null,
+        buildProfileButton: null,
         cancelButton: null,
         refreshButton: null,
         progress: null,
         progressFill: null,
         progressText: null,
-        trainFiles: null,
         headName: null,
         trainEncoder: null,
         trainCradioModel: null,
         epochs: null,
         batchSize: null,
         maxTrainImages: null,
-        trainButton: null,
-        trainActiveButton: null,
         results: null,
         report: null,
         list: null,
@@ -2410,6 +2411,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     const dataIngestionState = {
         initialized: false,
         capabilities: null,
+        datasets: [],
         activeJobId: "",
         active: false,
         pollTimer: null,
@@ -2562,8 +2564,13 @@ const AUTOMATION_LOCKED_TABS = new Set([
         result: null,
         pointsById: new Map(),
         selectedPointId: "",
+        lassoPointIds: new Set(),
+        dismissedWrongIds: new Set(),
         relabelInFlight: false,
-        shiftPanActive: false,
+        flashPointId: "",
+        flashTimer: null,
+        flashStartedAt: 0,
+        cropResizeObserver: null,
     };
     let qwenClassOverride = false;
     let qwenAdvancedVisible = false;
@@ -17709,20 +17716,6 @@ async function cancelRfDetrTrainingJobRequest() {
                 aggregation: "pooled",
             };
         }
-        if (key === "local_salad") {
-            return {
-                preprocessMode: "canonical",
-                canonicalSize: "336",
-                cropMode: "padded_square",
-                padding: "0.08",
-                backgroundMode: "full_crop",
-                viewMode: "single",
-                adjustment: "remove_size_bias",
-                dinov3Pooling: "pooler",
-                aggregation: "local_salad",
-                encoderType: "dinov3",
-            };
-        }
         if (key === "cradio") {
             return {
                 preprocessMode: "canonical",
@@ -17759,7 +17752,6 @@ async function cancelRfDetrTrainingJobRequest() {
             balanced: "Balanced default",
             precise: "Precise best",
             cradio: "C-RADIOv4 summary",
-            local_salad: "Local SALAD separation",
             custom: "Custom advanced",
         };
         return labels[key] || labels.balanced;
@@ -17777,9 +17769,6 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (key === "cradio") {
             return "available as an opt-in C-RADIO comparison path; on Mac it uses the local MLX backend when ~/cradio_mlx and checkpoints are present, with Torch CUDA/MPS/CPU fallback.";
-        }
-        if (key === "local_salad") {
-            return "uses a locally trained SALAD head over spatial tokens; on Mac the head runs through MLX by default when available, and Tator verifies the selected head matches the encoder family before inference.";
         }
         if (key === "custom") {
             return "manual values are being used; review the fields below because the preset no longer defines the full recipe.";
@@ -35391,40 +35380,6 @@ async function cancelRfDetrTrainingJobRequest() {
         return value;
     }
 
-    function dataIngestionRecipeValues(recipeId) {
-        const recipes = Array.isArray(dataIngestionState.capabilities?.data_ingestion_recipes)
-            ? dataIngestionState.capabilities.data_ingestion_recipes
-            : [];
-        const found = recipes.find((recipe) => String(recipe.id || "") === String(recipeId || ""));
-        if (found) return found;
-        if (String(recipeId || "") === "local_salad_top20") {
-            return { encoder: "local_salad", keep_fraction: 0.2, frame_interval: 1.0, max_frames_per_video: 200 };
-        }
-        if (String(recipeId || "") === "local_salad_review50") {
-            return { encoder: "local_salad", keep_fraction: 0.5, frame_interval: 0.5, max_frames_per_video: 400 };
-        }
-        if (String(recipeId || "") === "cradio_top20") {
-            return { encoder: "cradio_pooled", keep_fraction: 0.2, frame_interval: 1.0, max_frames_per_video: 200, cradio_pooling: "summary" };
-        }
-        return { encoder: "dinov3_pooled", keep_fraction: 0.2, frame_interval: 1.0, max_frames_per_video: 200 };
-    }
-
-    function applyDataIngestionRecipe(recipeId) {
-        if (String(recipeId || "") === "custom") return;
-        const values = dataIngestionRecipeValues(recipeId);
-        setSelectValueIfPresent(dataIngestionElements.encoder, values.encoder || "dinov3_pooled");
-        setSelectValueIfPresent(dataIngestionElements.cradioPooling, values.cradio_pooling || "summary");
-        if (dataIngestionElements.keepFraction) dataIngestionElements.keepFraction.value = String(values.keep_fraction ?? 0.2);
-        if (dataIngestionElements.frameInterval) dataIngestionElements.frameInterval.value = String(values.frame_interval ?? 1.0);
-        if (dataIngestionElements.maxFrames) dataIngestionElements.maxFrames.value = String(values.max_frames_per_video ?? 200);
-    }
-
-    function markDataIngestionRecipeCustom() {
-        if (dataIngestionElements.recipe && dataIngestionElements.recipe.value !== "custom") {
-            dataIngestionElements.recipe.value = "custom";
-        }
-    }
-
     function populateLocalSaladHeadSelect(selectEl, heads, previousValue = "") {
         if (!selectEl) return;
         const previous = previousValue || selectEl.value;
@@ -35441,7 +35396,9 @@ async function cancelRfDetrTrainingJobRequest() {
             option.value = String(head.id || "");
             const count = Number(head.train_image_count) || 0;
             const encoder = head.encoder_type ? `, ${String(head.encoder_type).toUpperCase()}` : "";
-            option.textContent = `${head.label || head.id}${count ? ` (${count} imgs${encoder})` : encoder ? ` (${encoder.slice(2)})` : ""}`;
+            const referenceLabel = String(head.reference_dataset_label || head.reference_label || "").trim();
+            const referenceSuffix = referenceLabel ? `, ref: ${referenceLabel}` : "";
+            option.textContent = `${head.label || head.id}${count ? ` (${count} imgs${encoder}${referenceSuffix})` : encoder ? ` (${encoder.slice(2)}${referenceSuffix})` : referenceSuffix ? ` (${referenceSuffix.slice(2)})` : ""}`;
             selectEl.appendChild(option);
         });
         const values = Array.from(selectEl.options || []).map((option) => option.value);
@@ -35458,8 +35415,6 @@ async function cancelRfDetrTrainingJobRequest() {
             : [];
         const preferred = String(preferredHeadId || dataIngestionState.preferredSaladHeadId || "").trim();
         populateLocalSaladHeadSelect(dataIngestionElements.saladHead, heads, preferred);
-        populateLocalSaladHeadSelect(classSplitElements.saladHead, heads, preferred);
-        populateLocalSaladHeadSelect(trainingElements.saladHeadSelect, heads, preferred);
         if (preferred) {
             const values = Array.from(dataIngestionElements.saladHead?.options || []).map((option) => option.value);
             if (values.includes(preferred)) {
@@ -35473,67 +35428,129 @@ async function cancelRfDetrTrainingJobRequest() {
             ? dataIngestionState.capabilities.cradio_models.map((model) => ({ value: model, label: model.split("/").pop() || model }))
             : CRADIO_BACKBONES;
         const defaultModel = dataIngestionState.capabilities?.default_cradio_model || "nvidia/C-RADIOv4-SO400M";
-        fillSelectOptions(dataIngestionElements.cradioModel, capsModels, defaultModel);
         fillSelectOptions(dataIngestionElements.trainCradioModel, capsModels, defaultModel);
     }
 
-    function populateDataIngestionRecipes() {
-        const selectEl = dataIngestionElements.recipe;
+    function getDataIngestionReferenceSource() {
+        return dataIngestionElements.referenceBackend?.checked ? "backend_dataset" : "active_label_images";
+    }
+
+    function getDataIngestionReferenceDatasetId() {
+        return String(dataIngestionElements.referenceDataset?.value || "").trim();
+    }
+
+    function getDataIngestionReferenceDatasetEntry(datasetId = "") {
+        const safeId = String(datasetId || getDataIngestionReferenceDatasetId()).trim();
+        if (!safeId) return null;
+        return (Array.isArray(dataIngestionState.datasets) ? dataIngestionState.datasets : [])
+            .find((entry) => String(entry?.id || "") === safeId) || null;
+    }
+
+    function getDataIngestionReferenceDatasetImageCount() {
+        const entry = getDataIngestionReferenceDatasetEntry();
+        if (!entry) return null;
+        const rawCount = Number(entry.image_count ?? entry.train_count ?? entry.annotation_progress?.images_total);
+        return Number.isFinite(rawCount) ? rawCount : null;
+    }
+
+    function getDataIngestionSelectedSaladHead() {
+        const headId = String(dataIngestionElements.saladHead?.value || "").trim();
+        if (!headId) return null;
+        const heads = Array.isArray(dataIngestionState.capabilities?.local_salad_heads)
+            ? dataIngestionState.capabilities.local_salad_heads
+            : [];
+        return heads.find((head) => String(head?.id || "") === headId) || null;
+    }
+
+    function dataIngestionHeadMatchesReference(head) {
+        if (!head) return false;
+        const headReferenceSource = String(head.reference_source || head.source_mode || "").trim();
+        const headDatasetId = String(head.reference_dataset_id || "").trim();
+        const selectedSource = getDataIngestionReferenceSource();
+        const selectedDatasetId = getDataIngestionReferenceDatasetId();
+        if (!headReferenceSource && !headDatasetId) {
+            return true;
+        }
+        if (selectedSource === "backend_dataset") {
+            if (headDatasetId) {
+                return headDatasetId === selectedDatasetId;
+            }
+            return headReferenceSource === "backend_dataset";
+        }
+        const activeDatasetId = String(annotationSourceState.datasetId || "").trim();
+        if (headDatasetId && activeDatasetId) {
+            return headDatasetId === activeDatasetId;
+        }
+        return headReferenceSource === "active_label_images";
+    }
+
+    function getDataIngestionReferenceLabel() {
+        if (getDataIngestionReferenceSource() === "backend_dataset") {
+            const entry = getDataIngestionReferenceDatasetEntry();
+            return String(entry?.label || entry?.id || "backend dataset");
+        }
+        return String(
+            annotationSourceState.datasetLabel ||
+            annotationSourceState.datasetId ||
+            annotationSourceState.sessionId ||
+            "current Label Images dataset"
+        );
+    }
+
+    function renderDataIngestionDatasetOptions() {
+        const selectEl = dataIngestionElements.referenceDataset;
         if (!selectEl) return;
-        const previous = selectEl.value || "pooled_top20";
-        const recipes = Array.isArray(dataIngestionState.capabilities?.data_ingestion_recipes)
-            ? dataIngestionState.capabilities.data_ingestion_recipes
-            : [
-                { id: "pooled_top20", label: "DINOv3 baseline top 20%" },
-                { id: "cradio_top20", label: "C-RADIOv4 summary top 20%" },
-                { id: "local_salad_top20", label: "Local SALAD diversity top 20%" },
-                { id: "local_salad_review50", label: "Local SALAD broad review 50%" },
-            ];
+        const previous = selectEl.value;
+        const datasets = Array.isArray(dataIngestionState.datasets) ? dataIngestionState.datasets : [];
         selectEl.innerHTML = "";
-        recipes.forEach((recipe) => {
+        if (!datasets.length) {
             const option = document.createElement("option");
-            option.value = String(recipe.id || "");
-            option.textContent = String(recipe.label || recipe.id || "");
+            option.value = "";
+            option.textContent = "No backend datasets found";
+            selectEl.appendChild(option);
+            return;
+        }
+        datasets.forEach((entry) => {
+            const option = document.createElement("option");
+            option.value = String(entry?.id || "");
+            const count = Number(entry?.image_count ?? entry?.train_count ?? 0) || 0;
+            option.textContent = `${entry?.label || entry?.id || "dataset"}${count ? ` (${count} imgs)` : ""}`;
             selectEl.appendChild(option);
         });
-        const custom = document.createElement("option");
-        custom.value = "custom";
-        custom.textContent = "Custom";
-        selectEl.appendChild(custom);
-        setSelectValueIfPresent(selectEl, previous);
+        const values = Array.from(selectEl.options || []).map((option) => option.value);
+        if (values.includes(previous)) {
+            selectEl.value = previous;
+        }
     }
 
     function refreshDataIngestionControls() {
         const candidateCount = dataIngestionElements.files?.files?.length || 0;
-        const trainCount = dataIngestionElements.trainFiles?.files?.length || 0;
-        const activeTrainingCount = getClassSplitImageKeys().length;
-        const encoder = String(dataIngestionElements.encoder?.value || "dinov3_pooled");
-        const needsHead = encoder === "local_salad";
-        const usesCradio = encoder === "cradio_pooled";
+        const source = getDataIngestionReferenceSource();
+        const activeReferenceCount = getClassSplitImageKeys().length;
+        const backendDatasetId = getDataIngestionReferenceDatasetId();
+        const backendImageCount = getDataIngestionReferenceDatasetImageCount();
+        const hasBackendReference = source !== "backend_dataset" || !!backendDatasetId;
+        const hasActiveReference = source !== "active_label_images" || activeReferenceCount > 0;
+        const hasBackendTrainingReference = source !== "backend_dataset"
+            || (!!backendDatasetId && (backendImageCount === null || backendImageCount > 1));
+        const hasTrainingReference = source === "backend_dataset" ? hasBackendTrainingReference : activeReferenceCount > 1;
         const trainingUsesCradio = String(dataIngestionElements.trainEncoder?.value || "dinov3") === "cradio";
         const hasHead = !!String(dataIngestionElements.saladHead?.value || "").trim();
-        if (dataIngestionElements.saladHead) {
-            dataIngestionElements.saladHead.disabled = dataIngestionState.active || !needsHead;
-        }
-        if (dataIngestionElements.cradioModel) dataIngestionElements.cradioModel.disabled = dataIngestionState.active || !usesCradio;
-        if (dataIngestionElements.cradioPooling) dataIngestionElements.cradioPooling.disabled = dataIngestionState.active || !usesCradio;
-        if (dataIngestionElements.trainCradioModel) dataIngestionElements.trainCradioModel.disabled = dataIngestionState.active || !trainingUsesCradio;
-        setButtonDisabled(dataIngestionElements.analyzeButton, dataIngestionState.active || candidateCount <= 0 || (needsHead && !hasHead));
-        setButtonDisabled(dataIngestionElements.trainButton, dataIngestionState.active || trainCount <= 1);
-        setButtonDisabled(dataIngestionElements.trainActiveButton, dataIngestionState.active || activeTrainingCount <= 1);
+        const selectedHead = getDataIngestionSelectedSaladHead();
+        const headMatchesReference = hasHead && dataIngestionHeadMatchesReference(selectedHead);
+        const canUseReference = hasBackendReference && hasActiveReference;
+        setButtonDisabled(dataIngestionElements.analyzeButton, dataIngestionState.active || candidateCount <= 0 || !headMatchesReference || !canUseReference);
+        setButtonDisabled(dataIngestionElements.buildProfileButton, dataIngestionState.active || !hasTrainingReference);
         setButtonDisabled(dataIngestionElements.cancelButton, !dataIngestionState.active || !dataIngestionState.activeJobId);
         [
             dataIngestionElements.files,
-            dataIngestionElements.recipe,
-            dataIngestionElements.encoder,
-            dataIngestionElements.cradioModel,
-            dataIngestionElements.cradioPooling,
+            dataIngestionElements.referenceActive,
+            dataIngestionElements.referenceBackend,
+            dataIngestionElements.referenceDataset,
+            dataIngestionElements.saladHead,
             dataIngestionElements.keepFraction,
             dataIngestionElements.frameInterval,
             dataIngestionElements.maxFrames,
-            dataIngestionElements.referenceCap,
-            dataIngestionElements.useActiveReference,
-            dataIngestionElements.trainFiles,
             dataIngestionElements.headName,
             dataIngestionElements.trainEncoder,
             dataIngestionElements.trainCradioModel,
@@ -35543,40 +35560,49 @@ async function cancelRfDetrTrainingJobRequest() {
         ].forEach((control) => {
             if (control) control.disabled = dataIngestionState.active;
         });
-        if (dataIngestionElements.saladHead) {
-            dataIngestionElements.saladHead.disabled = dataIngestionState.active || !needsHead;
-        }
-        if (dataIngestionElements.cradioModel) {
-            dataIngestionElements.cradioModel.disabled = dataIngestionState.active || !usesCradio;
-        }
-        if (dataIngestionElements.cradioPooling) {
-            dataIngestionElements.cradioPooling.disabled = dataIngestionState.active || !usesCradio;
+        if (dataIngestionElements.referenceDataset) {
+            dataIngestionElements.referenceDataset.disabled = dataIngestionState.active || source !== "backend_dataset";
         }
         if (dataIngestionElements.trainCradioModel) {
             dataIngestionElements.trainCradioModel.disabled = dataIngestionState.active || !trainingUsesCradio;
         }
     }
 
-    async function refreshDataIngestionCapabilities() {
+    async function refreshDataIngestionDatasets() {
         try {
-            const resp = await fetch(`${API_ROOT}/data_ingestion/capabilities`);
+            const resp = await fetch(`${API_ROOT}/datasets`);
             const detail = await resp.text();
             if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
-            dataIngestionState.capabilities = parseJsonObjectSafe(detail, {});
+            const parsed = JSON.parse(detail || "[]");
+            dataIngestionState.datasets = Array.isArray(parsed) ? parsed : [];
         } catch (error) {
-            console.warn("Failed to refresh Data Ingestion capabilities", error);
+            console.warn("Failed to refresh Data Ingestion datasets", error);
+            dataIngestionState.datasets = [];
+        }
+        renderDataIngestionDatasetOptions();
+    }
+
+    async function refreshDataIngestionCapabilities() {
+        const [capabilitiesResult] = await Promise.allSettled([
+            fetch(`${API_ROOT}/data_ingestion/capabilities`).then(async (resp) => {
+                const detail = await resp.text();
+                if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+                return parseJsonObjectSafe(detail, {});
+            }),
+            refreshDataIngestionDatasets(),
+        ]);
+        if (capabilitiesResult.status === "fulfilled") {
+            dataIngestionState.capabilities = capabilitiesResult.value;
+        } else {
+            console.warn("Failed to refresh Data Ingestion capabilities", capabilitiesResult.reason);
             dataIngestionState.capabilities = { local_salad_heads: [] };
         }
         populateDataIngestionSaladHeads();
-        populateDataIngestionRecipes();
         populateDataIngestionCradioModels();
         refreshDataIngestionControls();
     }
 
-    async function appendActiveWorkspaceReferenceFiles(formData, cap) {
-        if (!dataIngestionElements.useActiveReference?.checked) {
-            return 0;
-        }
+    async function appendActiveWorkspaceReferenceFiles(formData, cap, fieldName = "reference_files") {
         const keys = getClassSplitImageKeys();
         const maxCount = Math.max(0, parseInt(String(cap || "0"), 10) || 0);
         const selectedKeys = maxCount > 0 ? keys.slice(0, maxCount) : keys;
@@ -35587,14 +35613,15 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!imageRecord) continue;
             const uploadName = makeClassSplitUploadName(imageKey, usedNames);
             const blob = await getClassSplitImageBlob(imageKey, imageRecord);
-            formData.append("reference_files", blob, uploadName);
+            formData.append(fieldName, blob, uploadName);
             appended += 1;
         }
         return appended;
     }
 
-    function activeDatasetSaladHeadName() {
+    function activeDatasetSaladHeadName(label = "") {
         const raw = String(
+            label ||
             annotationSourceState.datasetLabel ||
             annotationSourceState.datasetId ||
             annotationSourceState.sessionId ||
@@ -35609,20 +35636,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function appendActiveWorkspaceTrainingFiles(formData, cap) {
-        const keys = getClassSplitImageKeys();
-        const maxCount = Math.max(0, parseInt(String(cap || "0"), 10) || 0);
-        const selectedKeys = maxCount > 0 ? keys.slice(0, maxCount) : keys;
-        const usedNames = new Set();
-        let appended = 0;
-        for (const imageKey of selectedKeys) {
-            const imageRecord = images?.[imageKey];
-            if (!imageRecord) continue;
-            const uploadName = makeClassSplitUploadName(imageKey, usedNames);
-            const blob = await getClassSplitImageBlob(imageKey, imageRecord);
-            formData.append("train_files", blob, uploadName);
-            appended += 1;
-        }
-        return appended;
+        return appendActiveWorkspaceReferenceFiles(formData, cap, "train_files");
     }
 
     async function startDataIngestionAnalysis() {
@@ -35630,6 +35644,26 @@ async function cancelRfDetrTrainingJobRequest() {
         const files = Array.from(dataIngestionElements.files?.files || []);
         if (!files.length) {
             setDataIngestionStatus("Choose candidate images or videos first.", "warn");
+            return;
+        }
+        const saladHeadId = String(dataIngestionElements.saladHead?.value || "").trim();
+        if (!saladHeadId) {
+            setDataIngestionStatus("Build or select a reference profile before analyzing candidates.", "warn");
+            return;
+        }
+        const selectedHead = getDataIngestionSelectedSaladHead();
+        if (!dataIngestionHeadMatchesReference(selectedHead)) {
+            setDataIngestionStatus("Selected reference profile does not match the chosen reference dataset. Build or choose the matching profile first.", "warn");
+            return;
+        }
+        const referenceSource = getDataIngestionReferenceSource();
+        const referenceDatasetId = getDataIngestionReferenceDatasetId();
+        if (referenceSource === "backend_dataset" && !referenceDatasetId) {
+            setDataIngestionStatus("Choose a backend reference dataset first.", "warn");
+            return;
+        }
+        if (referenceSource === "active_label_images" && getClassSplitImageKeys().length < 1) {
+            setDataIngestionStatus("Open a reference dataset in Label Images first.", "warn");
             return;
         }
         try {
@@ -35640,17 +35674,22 @@ async function cancelRfDetrTrainingJobRequest() {
             refreshDataIngestionControls();
             const formData = new FormData();
             files.forEach((file) => formData.append("candidate_files", file, file.name));
-            const referenceCount = await appendActiveWorkspaceReferenceFiles(
-                formData,
-                getDataIngestionNumber(dataIngestionElements.referenceCap, 0, { min: 0 })
-            );
+            const maxReferenceImages = Math.round(getDataIngestionNumber(dataIngestionElements.maxTrainImages, 0, { min: 0 }));
+            let referenceCount = 0;
+            if (referenceSource === "active_label_images") {
+                referenceCount = await appendActiveWorkspaceReferenceFiles(formData, maxReferenceImages);
+                if (referenceCount < 1) {
+                    throw new Error("No usable reference images were available in Label Images.");
+                }
+            }
             const manifest = {
-                encoder: String(dataIngestionElements.encoder?.value || "dinov3_pooled"),
-                encoder_model: String(dataIngestionElements.encoder?.value || "") === "cradio_pooled"
-                    ? String(dataIngestionElements.cradioModel?.value || "nvidia/C-RADIOv4-SO400M")
-                    : "",
-                cradio_pooling: String(dataIngestionElements.cradioPooling?.value || "summary"),
-                salad_head_id: String(dataIngestionElements.saladHead?.value || ""),
+                encoder: "local_salad",
+                salad_head_id: saladHeadId,
+                reference_source: referenceSource,
+                reference_dataset_id: referenceSource === "backend_dataset" ? referenceDatasetId : String(annotationSourceState.datasetId || ""),
+                reference_dataset_label: referenceSource === "backend_dataset" ? getDataIngestionReferenceLabel() : "",
+                reference_label: getDataIngestionReferenceLabel(),
+                max_reference_images: maxReferenceImages,
                 keep_fraction: getDataIngestionNumber(dataIngestionElements.keepFraction, 0.2, { min: 0.01, max: 1 }),
                 frame_interval: getDataIngestionNumber(dataIngestionElements.frameInterval, 1.0, { min: 0.1 }),
                 max_frames_per_video: Math.round(getDataIngestionNumber(dataIngestionElements.maxFrames, 200, { min: 0 })),
@@ -35675,54 +35714,53 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    async function startLocalSaladTraining(sourceMode = "files") {
+    async function startLocalSaladTraining() {
         if (dataIngestionState.active) return;
-        const useActiveDataset = String(sourceMode || "files") === "active_dataset";
-        const files = Array.from(dataIngestionElements.trainFiles?.files || []);
+        const referenceSource = getDataIngestionReferenceSource();
+        const referenceDatasetId = getDataIngestionReferenceDatasetId();
         const activeKeys = getClassSplitImageKeys();
-        if (!useActiveDataset && files.length < 2) {
-            setDataIngestionStatus("Choose at least two training images or frames, or train from the active dataset.", "warn");
+        if (referenceSource === "active_label_images" && activeKeys.length < 2) {
+            setDataIngestionStatus("Open at least two images in Label Images before training SALAD from the active dataset.", "warn");
             return;
         }
-        if (useActiveDataset && activeKeys.length < 2) {
-            setDataIngestionStatus("Open at least two images in Label Images before training SALAD from the active dataset.", "warn");
+        if (referenceSource === "backend_dataset" && !referenceDatasetId) {
+            setDataIngestionStatus("Choose a backend reference dataset before building a profile.", "warn");
             return;
         }
         try {
             dataIngestionState.active = true;
             dataIngestionState.activeJobId = "";
-            const packageMessage = useActiveDataset
-                ? "Packaging active dataset for local SALAD training ..."
-                : "Packaging local SALAD training media ...";
+            const packageMessage = referenceSource === "backend_dataset"
+                ? "Queueing backend dataset reference profile ..."
+                : "Packaging active Label Images dataset for reference profile ...";
             setDataIngestionStatus(packageMessage);
             renderDataIngestionProgress({ progress: 0, message: packageMessage });
             refreshDataIngestionControls();
             const formData = new FormData();
             const maxTrainImages = Math.round(getDataIngestionNumber(dataIngestionElements.maxTrainImages, 0, { min: 0 }));
             let packagedCount = 0;
-            if (useActiveDataset) {
+            if (referenceSource === "active_label_images") {
                 packagedCount = await appendActiveWorkspaceTrainingFiles(formData, maxTrainImages);
-            } else {
-                files.forEach((file) => {
-                    formData.append("train_files", file, file.name);
-                    packagedCount += 1;
-                });
             }
-            if (packagedCount < 2) {
+            if (referenceSource === "active_label_images" && packagedCount < 2) {
                 throw new Error("SALAD training needs at least two usable images or frames.");
             }
             const requestedHeadName = String(dataIngestionElements.headName?.value || "").trim();
-            const genericHeadName = requestedHeadName === "local_salad_head";
+            const genericHeadName = !requestedHeadName || requestedHeadName === "reference_salad_profile" || requestedHeadName === "local_salad_head";
             const manifest = {
-                head_name: (useActiveDataset && (!requestedHeadName || genericHeadName))
-                    ? activeDatasetSaladHeadName()
-                    : (requestedHeadName || "local_salad_head"),
+                head_name: genericHeadName
+                    ? activeDatasetSaladHeadName(getDataIngestionReferenceLabel())
+                    : requestedHeadName,
                 encoder_type: String(dataIngestionElements.trainEncoder?.value || "dinov3"),
                 encoder_model: String(dataIngestionElements.trainEncoder?.value || "dinov3") === "cradio"
                     ? String(dataIngestionElements.trainCradioModel?.value || "nvidia/C-RADIOv4-SO400M")
                     : "",
-                source_mode: useActiveDataset ? "active_label_images" : "uploaded_media",
-                active_image_count: useActiveDataset ? packagedCount : 0,
+                source_mode: referenceSource,
+                reference_source: referenceSource,
+                reference_dataset_id: referenceSource === "backend_dataset" ? referenceDatasetId : String(annotationSourceState.datasetId || ""),
+                reference_dataset_label: referenceSource === "backend_dataset" ? getDataIngestionReferenceLabel() : "",
+                reference_label: getDataIngestionReferenceLabel(),
+                active_image_count: referenceSource === "active_label_images" ? packagedCount : 0,
                 epochs: Math.round(getDataIngestionNumber(dataIngestionElements.epochs, 3, { min: 1 })),
                 batch_size: Math.round(getDataIngestionNumber(dataIngestionElements.batchSize, 8, { min: 2 })),
                 max_train_images: maxTrainImages,
@@ -35737,7 +35775,7 @@ async function cancelRfDetrTrainingJobRequest() {
             const jobId = String(payload.job_id || "").trim();
             if (!jobId) throw new Error("Local SALAD training did not return a job id.");
             dataIngestionState.activeJobId = jobId;
-            setDataIngestionStatus("Queued local SALAD training");
+            setDataIngestionStatus("Queued reference profile build");
             pollDataIngestionJob(jobId);
         } catch (error) {
             console.error("Local SALAD training failed to start", error);
@@ -35773,13 +35811,10 @@ async function cancelRfDetrTrainingJobRequest() {
                     const trainedHeadId = job.kind === "local_salad_train" ? String(summary.head_id || "").trim() : "";
                     if (trainedHeadId) {
                         dataIngestionState.preferredSaladHeadId = trainedHeadId;
-                        setSelectValueIfPresent(dataIngestionElements.recipe, "local_salad_top20");
-                        applyDataIngestionRecipe("local_salad_top20");
-                        setSelectValueIfPresent(dataIngestionElements.encoder, "local_salad");
                     }
                     setDataIngestionStatus(
                         job.kind === "local_salad_train"
-                            ? (trainedHeadId ? `Local SALAD training completed; selected ${trainedHeadId}.` : "Local SALAD training completed.")
+                            ? (trainedHeadId ? `Reference profile completed; selected ${trainedHeadId}.` : "Reference profile completed.")
                             : "Diversity analysis completed.",
                         "success"
                     );
@@ -35787,8 +35822,6 @@ async function cancelRfDetrTrainingJobRequest() {
                     await refreshDataIngestionCapabilities();
                     if (trainedHeadId) {
                         setSelectValueIfPresent(dataIngestionElements.saladHead, trainedHeadId);
-                        setSelectValueIfPresent(classSplitElements.saladHead, trainedHeadId);
-                        setSelectValueIfPresent(trainingElements.saladHeadSelect, trainedHeadId);
                         refreshDataIngestionControls();
                     }
                     await loadDataIngestionResult(jobId);
@@ -35834,16 +35867,17 @@ async function cancelRfDetrTrainingJobRequest() {
         if (dataIngestionElements.results) dataIngestionElements.results.hidden = false;
         if (dataIngestionElements.report) {
             const rows = [
-                ["Encoder", summary.encoder || "local_salad_train"],
+                ["Profile", summary.head_id || summary.salad_head_id || ""],
+                ["Reference", summary.reference_dataset_label || summary.reference_label || summary.source_mode || ""],
+                ["Source", summary.reference_source || summary.source_mode || ""],
+                ["Encoder", summary.encoder_type || summary.encoder || "local_salad"],
                 ["SALAD policy", summary.local_salad_policy || summary.policy || "local_training_only"],
-                ["Source", summary.source_mode || ""],
                 ["Candidates", summary.candidate_image_count ?? summary.train_image_count ?? summary.item_count ?? 0],
                 ["Reference images", summary.reference_count ?? 0],
                 ["Keep fraction", summary.keep_fraction ?? ""],
                 ["Selected", summary.selected_count ?? ""],
                 ["Mean NN distance", Number(summary.mean_nearest_neighbor_distance || 0).toFixed(3)],
                 ["Mean reference distance", summary.mean_reference_distance == null ? "n/a" : Number(summary.mean_reference_distance || 0).toFixed(3)],
-                ["Head ID", summary.head_id || summary.salad_head_id || ""],
             ];
             dataIngestionElements.report.innerHTML = `<div class="data-ingestion-report__grid">${
                 rows.map(([label, value]) => `<div class="data-ingestion-report__item"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`).join("")
@@ -35873,69 +35907,48 @@ async function cancelRfDetrTrainingJobRequest() {
         dataIngestionState.initialized = true;
         dataIngestionElements.status = document.getElementById("dataIngestionStatus");
         dataIngestionElements.files = document.getElementById("dataIngestionFiles");
-        dataIngestionElements.recipe = document.getElementById("dataIngestionRecipe");
-        dataIngestionElements.encoder = document.getElementById("dataIngestionEncoder");
-        dataIngestionElements.cradioModel = document.getElementById("dataIngestionCradioModel");
-        dataIngestionElements.cradioPooling = document.getElementById("dataIngestionCradioPooling");
+        dataIngestionElements.referenceActive = document.getElementById("dataIngestionReferenceActive");
+        dataIngestionElements.referenceBackend = document.getElementById("dataIngestionReferenceBackend");
+        dataIngestionElements.referenceDataset = document.getElementById("dataIngestionReferenceDataset");
         dataIngestionElements.saladHead = document.getElementById("dataIngestionSaladHead");
         dataIngestionElements.keepFraction = document.getElementById("dataIngestionKeepFraction");
         dataIngestionElements.frameInterval = document.getElementById("dataIngestionFrameInterval");
         dataIngestionElements.maxFrames = document.getElementById("dataIngestionMaxFrames");
-        dataIngestionElements.referenceCap = document.getElementById("dataIngestionReferenceCap");
-        dataIngestionElements.useActiveReference = document.getElementById("dataIngestionUseActiveReference");
         dataIngestionElements.analyzeButton = document.getElementById("dataIngestionAnalyzeButton");
+        dataIngestionElements.buildProfileButton = document.getElementById("dataIngestionBuildProfileButton");
         dataIngestionElements.cancelButton = document.getElementById("dataIngestionCancelButton");
         dataIngestionElements.refreshButton = document.getElementById("dataIngestionRefreshButton");
         dataIngestionElements.progress = document.getElementById("dataIngestionProgress");
         dataIngestionElements.progressFill = document.getElementById("dataIngestionProgressFill");
         dataIngestionElements.progressText = document.getElementById("dataIngestionProgressText");
-        dataIngestionElements.trainFiles = document.getElementById("dataIngestionTrainFiles");
         dataIngestionElements.headName = document.getElementById("dataIngestionHeadName");
         dataIngestionElements.trainEncoder = document.getElementById("dataIngestionTrainEncoder");
         dataIngestionElements.trainCradioModel = document.getElementById("dataIngestionTrainCradioModel");
         dataIngestionElements.epochs = document.getElementById("dataIngestionEpochs");
         dataIngestionElements.batchSize = document.getElementById("dataIngestionBatchSize");
         dataIngestionElements.maxTrainImages = document.getElementById("dataIngestionMaxTrainImages");
-        dataIngestionElements.trainButton = document.getElementById("dataIngestionTrainButton");
-        dataIngestionElements.trainActiveButton = document.getElementById("dataIngestionTrainActiveButton");
         dataIngestionElements.results = document.getElementById("dataIngestionResults");
         dataIngestionElements.report = document.getElementById("dataIngestionReport");
         dataIngestionElements.list = document.getElementById("dataIngestionList");
         [
             dataIngestionElements.files,
-            dataIngestionElements.trainFiles,
+            dataIngestionElements.referenceActive,
+            dataIngestionElements.referenceBackend,
+            dataIngestionElements.referenceDataset,
             dataIngestionElements.saladHead,
-            dataIngestionElements.cradioModel,
-            dataIngestionElements.cradioPooling,
             dataIngestionElements.trainEncoder,
             dataIngestionElements.trainCradioModel,
-            dataIngestionElements.useActiveReference,
-        ].forEach((control) => {
-            if (control) control.addEventListener("change", refreshDataIngestionControls);
-        });
-        if (dataIngestionElements.recipe) {
-            dataIngestionElements.recipe.addEventListener("change", () => {
-                applyDataIngestionRecipe(dataIngestionElements.recipe.value || "pooled_top20");
-                refreshDataIngestionControls();
-            });
-        }
-        [
-            dataIngestionElements.encoder,
-            dataIngestionElements.cradioPooling,
             dataIngestionElements.keepFraction,
             dataIngestionElements.frameInterval,
             dataIngestionElements.maxFrames,
         ].forEach((control) => {
-            if (control) control.addEventListener("change", markDataIngestionRecipeCustom);
+            if (control) control.addEventListener("change", refreshDataIngestionControls);
         });
         if (dataIngestionElements.analyzeButton) {
             dataIngestionElements.analyzeButton.addEventListener("click", startDataIngestionAnalysis);
         }
-        if (dataIngestionElements.trainButton) {
-            dataIngestionElements.trainButton.addEventListener("click", () => startLocalSaladTraining());
-        }
-        if (dataIngestionElements.trainActiveButton) {
-            dataIngestionElements.trainActiveButton.addEventListener("click", () => startLocalSaladTraining("active_dataset"));
+        if (dataIngestionElements.buildProfileButton) {
+            dataIngestionElements.buildProfileButton.addEventListener("click", () => startLocalSaladTraining());
         }
         if (dataIngestionElements.cancelButton) {
             dataIngestionElements.cancelButton.addEventListener("click", cancelDataIngestionJob);
@@ -36478,6 +36491,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 classSplitState.pointsById.set(String(point.point_id), point);
             }
         });
+        classSplitState.selectedPointId = "";
+        classSplitState.lassoPointIds = new Set();
+        classSplitState.dismissedWrongIds = new Set();
+        stopClassSplitPlotFlash();
         renderClassSplitResult();
     }
 
@@ -36550,6 +36567,143 @@ async function cancelRfDetrTrainingJobRequest() {
         };
     }
 
+    function getClassSplitThumbnailUrl(point) {
+        if (!point) {
+            return "";
+        }
+        const thumbPath = point.thumbnail_url || `/class_analysis/jobs/${encodeURIComponent(classSplitState.currentJobId)}/thumbnail/${encodeURIComponent(point.point_id)}`;
+        return `${API_ROOT}${thumbPath}`;
+    }
+
+    function getClassSplitPointById(pointId) {
+        return classSplitState.pointsById.get(String(pointId || "")) || null;
+    }
+
+    function classSplitShortHoverText(value, maxLength = 52) {
+        const raw = String(value || "").trim();
+        if (raw.length <= maxLength) {
+            return raw;
+        }
+        const keep = Math.max(8, Math.floor((maxLength - 3) / 2));
+        return `${raw.slice(0, keep)}...${raw.slice(-keep)}`;
+    }
+
+    function stopClassSplitPlotFlash({ render = false } = {}) {
+        if (classSplitState.flashTimer) {
+            window.clearInterval(classSplitState.flashTimer);
+            classSplitState.flashTimer = null;
+        }
+        if (classSplitState.flashPointId) {
+            classSplitState.flashPointId = "";
+            classSplitState.flashStartedAt = 0;
+            if (render) {
+                renderClassSplitPlot();
+            }
+        }
+    }
+
+    function startClassSplitPlotFlash(pointId) {
+        const safeId = String(pointId || "");
+        if (!safeId || !classSplitState.pointsById.has(safeId)) {
+            return;
+        }
+        stopClassSplitPlotFlash();
+        classSplitState.flashPointId = safeId;
+        classSplitState.flashStartedAt = Date.now();
+        renderClassSplitPlot();
+        classSplitState.flashTimer = window.setInterval(() => {
+            if (!classSplitState.flashPointId || Date.now() - classSplitState.flashStartedAt > 1800) {
+                stopClassSplitPlotFlash({ render: true });
+                return;
+            }
+            renderClassSplitPlot();
+        }, 180);
+    }
+
+    function buildClassSplitFlashTrace() {
+        const point = getClassSplitPointById(classSplitState.flashPointId);
+        if (!point) {
+            return null;
+        }
+        const elapsed = Math.max(0, Date.now() - classSplitState.flashStartedAt);
+        const wave = 0.5 + 0.5 * Math.sin(elapsed / 95);
+        return {
+            type: "scatter",
+            mode: "markers",
+            name: "Selected point",
+            x: [Number(point.projection?.[0]) || 0],
+            y: [Number(point.projection?.[1]) || 0],
+            hoverinfo: "skip",
+            showlegend: false,
+            marker: {
+                size: 24 + wave * 12,
+                color: `rgba(250, 204, 21, ${0.28 + wave * 0.42})`,
+                line: { color: "#f59e0b", width: 3 },
+                symbol: "circle-open",
+            },
+        };
+    }
+
+    function getClassSplitPointRange(points, axisIndex) {
+        const values = points
+            .map((point) => Number(point.projection?.[axisIndex]))
+            .filter((value) => Number.isFinite(value));
+        if (!values.length) {
+            return [-1, 1];
+        }
+        let min = Math.min(...values);
+        let max = Math.max(...values);
+        if (min === max) {
+            min -= 1;
+            max += 1;
+        }
+        const pad = Math.max((max - min) * 0.08, 1e-6);
+        return [min - pad, max + pad];
+    }
+
+    function getClassSplitAxisRange(graphEl, axisName, axisIndex) {
+        const fullRange = graphEl?._fullLayout?.[axisName]?.range;
+        if (Array.isArray(fullRange) && fullRange.length >= 2) {
+            const a = Number(fullRange[0]);
+            const b = Number(fullRange[1]);
+            if (Number.isFinite(a) && Number.isFinite(b) && a !== b) {
+                return [a, b];
+            }
+        }
+        const layoutRange = graphEl?.layout?.[axisName]?.range;
+        if (Array.isArray(layoutRange) && layoutRange.length >= 2) {
+            const a = Number(layoutRange[0]);
+            const b = Number(layoutRange[1]);
+            if (Number.isFinite(a) && Number.isFinite(b) && a !== b) {
+                return [a, b];
+            }
+        }
+        return getClassSplitPointRange(getClassSplitFilteredPoints(), axisIndex);
+    }
+
+    function focusClassSplitPlotOnPoint(pointId, { flash = true } = {}) {
+        const graphEl = classSplitElements.graph;
+        const point = getClassSplitPointById(pointId);
+        if (!graphEl || !window.Plotly || !point) {
+            return;
+        }
+        const pointX = Number(point.projection?.[0]) || 0;
+        const pointY = Number(point.projection?.[1]) || 0;
+        const xRange = getClassSplitAxisRange(graphEl, "xaxis", 0);
+        const yRange = getClassSplitAxisRange(graphEl, "yaxis", 1);
+        const fullXRange = getClassSplitPointRange(getClassSplitFilteredPoints(), 0);
+        const fullYRange = getClassSplitPointRange(getClassSplitFilteredPoints(), 1);
+        const xSpan = Math.max(Math.abs(xRange[1] - xRange[0]), Math.abs(fullXRange[1] - fullXRange[0]) * 0.18, 1e-6);
+        const ySpan = Math.max(Math.abs(yRange[1] - yRange[0]), Math.abs(fullYRange[1] - fullYRange[0]) * 0.18, 1e-6);
+        window.Plotly.relayout(graphEl, {
+            "xaxis.range": [pointX - xSpan / 2, pointX + xSpan / 2],
+            "yaxis.range": [pointY - ySpan / 2, pointY + ySpan / 2],
+        }).catch((error) => console.debug("Class Split plot focus failed", error));
+        if (flash) {
+            startClassSplitPlotFlash(pointId);
+        }
+    }
+
     function buildClassSplitTrace(points, name, suspiciousOnly = false) {
         const filtered = points.filter((point) => !!point.is_wrong_class_candidate === suspiciousOnly);
         return {
@@ -36563,9 +36717,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 const neighbor = point.suggested_neighbor_class
                     ? `Suggested by neighbors: ${point.suggested_neighbor_class}<br>`
                     : "";
+                const imageName = classSplitShortHoverText(point.image_relpath || "");
                 return [
                     `<b>${escapeHtml(point.class_name || "")}</b>`,
-                    `${escapeHtml(point.image_relpath || "")}`,
+                    `${escapeHtml(imageName)}`,
                     `Cluster ${escapeHtml(point.cluster_id ?? "")}`,
                     `${neighbor}Suspicion ${(Number(point.wrong_class_suspicion) || 0).toFixed(2)}`,
                 ].join("<br>");
@@ -36573,8 +36728,12 @@ async function cancelRfDetrTrainingJobRequest() {
             hovertemplate: "%{text}<extra></extra>",
             marker: {
                 size: filtered.map((point) => {
-                    if (String(point.point_id || "") === classSplitState.selectedPointId) {
+                    const pointId = String(point.point_id || "");
+                    if (pointId === classSplitState.selectedPointId) {
                         return suspiciousOnly ? 17 : 15;
+                    }
+                    if (classSplitState.lassoPointIds?.has(pointId)) {
+                        return suspiciousOnly ? 15 : 12;
                     }
                     return suspiciousOnly ? 12 : 8;
                 }),
@@ -36588,36 +36747,65 @@ async function cancelRfDetrTrainingJobRequest() {
         };
     }
 
-    function setClassSplitGraphPanMode(active) {
-        const graphEl = classSplitElements.graph;
-        const nextActive = !!active;
-        if (classSplitState.shiftPanActive === nextActive) {
+    function updateClassSplitBulkClassOptions() {
+        const select = classSplitElements.bulkClass;
+        if (!select) {
             return;
         }
-        classSplitState.shiftPanActive = nextActive;
-        if (graphEl) {
-            graphEl.classList.toggle("class-split-graph--pan", nextActive);
-        }
-        if (graphEl && window.Plotly && graphEl.data) {
-            window.Plotly.relayout(graphEl, { dragmode: nextActive ? "pan" : "lasso" })
-                .catch((error) => console.debug("Class Split dragmode update failed", error));
+        const previous = select.value;
+        select.innerHTML = "";
+        (Array.isArray(loadedClassList) ? loadedClassList : [])
+            .map((className) => String(className || "").trim())
+            .filter(Boolean)
+            .forEach((className) => {
+                const option = document.createElement("option");
+                option.value = className;
+                option.textContent = className;
+                select.appendChild(option);
+            });
+        if (Array.from(select.options).some((option) => option.value === previous)) {
+            select.value = previous;
         }
     }
 
-    function handleClassSplitShiftPanEvent(event, active) {
-        if (activeTab !== TAB_CLASS_SPLIT) {
-            if (classSplitState.shiftPanActive) {
-                setClassSplitGraphPanMode(false);
+    function renderClassSplitBulkPanel() {
+        const panel = classSplitElements.bulkPanel;
+        if (!panel) {
+            return;
+        }
+        const selectedIds = Array.from(classSplitState.lassoPointIds || []).filter((pointId) => classSplitState.pointsById.has(pointId));
+        classSplitState.lassoPointIds = new Set(selectedIds);
+        panel.hidden = selectedIds.length === 0;
+        if (classSplitElements.bulkCount) {
+            classSplitElements.bulkCount.textContent = `${selectedIds.length} selected`;
+        }
+        updateClassSplitBulkClassOptions();
+    }
+
+    function clearClassSplitBulkSelection({ render = false } = {}) {
+        classSplitState.lassoPointIds = new Set();
+        renderClassSplitBulkPanel();
+        if (render) {
+            renderClassSplitPlot();
+        }
+    }
+
+    function rememberClassSplitSelectionFromPlot(event) {
+        const ids = new Set();
+        (Array.isArray(event?.points) ? event.points : []).forEach((plotPoint) => {
+            const pointId = String(plotPoint?.customdata || "");
+            if (pointId && classSplitState.pointsById.has(pointId)) {
+                ids.add(pointId);
             }
-            return;
+        });
+        classSplitState.lassoPointIds = ids;
+        renderClassSplitBulkPanel();
+        const firstId = ids.values().next().value;
+        if (firstId) {
+            selectClassSplitPoint(firstId, { jump: false });
+        } else {
+            renderClassSplitPlot();
         }
-        if (isTextEditingTarget(event.target)) {
-            return;
-        }
-        if (event.key !== "Shift") {
-            return;
-        }
-        setClassSplitGraphPanMode(active);
     }
 
     function renderClassSplitPlot() {
@@ -36639,6 +36827,10 @@ async function cancelRfDetrTrainingJobRequest() {
             buildClassSplitTrace(points, "Objects", false),
             buildClassSplitTrace(points, "Likely wrong class", true),
         ].filter((trace) => trace.x.length > 0);
+        const flashTrace = buildClassSplitFlashTrace();
+        if (flashTrace) {
+            traces.push(flashTrace);
+        }
         const layout = {
             paper_bgcolor: theme.paper,
             plot_bgcolor: theme.plot,
@@ -36664,7 +36856,13 @@ async function cancelRfDetrTrainingJobRequest() {
                 x: 0,
                 bgcolor: "rgba(0,0,0,0)",
             },
-            dragmode: classSplitState.shiftPanActive ? "pan" : "lasso",
+            dragmode: "lasso",
+            uirevision: [
+                "class-split",
+                classSplitState.currentJobId || "live",
+                classSplitElements.filterClass?.value || "all",
+                points.length,
+            ].join(":"),
         };
         const config = {
             responsive: true,
@@ -36674,8 +36872,11 @@ async function cancelRfDetrTrainingJobRequest() {
         };
         window.Plotly.react(graphEl, traces, layout, config).then(() => {
             if (typeof graphEl.removeAllListeners === "function") {
-                graphEl.removeAllListeners("plotly_click");
-                graphEl.removeAllListeners("plotly_selected");
+                [
+                    "plotly_click",
+                    "plotly_selected",
+                    "plotly_deselect",
+                ].forEach((eventName) => graphEl.removeAllListeners(eventName));
             }
             graphEl.on("plotly_click", (event) => {
                 const point = event?.points?.[0];
@@ -36684,12 +36885,9 @@ async function cancelRfDetrTrainingJobRequest() {
                     selectClassSplitPoint(pointId, { jump: false });
                 }
             });
-            graphEl.on("plotly_selected", (event) => {
-                const point = event?.points?.[0];
-                const pointId = String(point?.customdata || "");
-                if (pointId) {
-                    selectClassSplitPoint(pointId, { jump: false });
-                }
+            graphEl.on("plotly_selected", rememberClassSplitSelectionFromPlot);
+            graphEl.on("plotly_deselect", () => {
+                clearClassSplitBulkSelection();
             });
         }).catch((error) => {
             console.warn("Class Split plot render failed", error);
@@ -36808,6 +37006,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (values.includes(previous)) {
             filterEl.value = previous;
         }
+        updateClassSplitBulkClassOptions();
     }
 
     function renderClassSplitWrongList() {
@@ -36818,23 +37017,44 @@ async function cancelRfDetrTrainingJobRequest() {
         const candidates = Array.isArray(classSplitState.result?.wrong_class_candidates)
             ? classSplitState.result.wrong_class_candidates
             : [];
-        if (!candidates.length) {
+        const visibleCandidates = candidates.filter((item) => {
+            const pointId = String(item?.point_id || "");
+            const point = getClassSplitPointById(pointId);
+            return pointId && !classSplitState.dismissedWrongIds.has(pointId) && (!point || !!point.is_wrong_class_candidate);
+        });
+        if (!visibleCandidates.length) {
             const suspicion = getClassSplitSuspicionStatus();
             listEl.innerHTML = `<div class="training-help">${escapeHtml(suspicion.enabled ? "No likely wrong-class objects were flagged." : suspicion.text)}</div>`;
             return;
         }
-        listEl.innerHTML = candidates.slice(0, 60).map((item) => {
+        listEl.innerHTML = visibleCandidates.slice(0, 60).map((item) => {
             const score = Number(item.wrong_class_suspicion) || 0;
             return [
                 `<div class="class-split-wrong-item" data-point-id="${escapeHtml(item.point_id || "")}">`,
                 `<strong>${escapeHtml(item.class_name || "")}</strong> → ${escapeHtml(item.suggested_neighbor_class || "neighbor class")}`,
                 `<br><span>${Math.round(score * 100)}% suspicion • ${escapeHtml(item.image_relpath || "")}</span>`,
+                `<div class="class-split-wrong-item__actions">`,
+                `<button type="button" class="training-button secondary" data-action="correct-class" data-point-id="${escapeHtml(item.point_id || "")}">Correct class</button>`,
+                `</div>`,
                 `</div>`,
             ].join("");
         }).join("");
-        listEl.querySelectorAll("[data-point-id]").forEach((node) => {
-            node.addEventListener("click", () => {
-                selectClassSplitPoint(node.getAttribute("data-point-id") || "", { jump: false });
+        listEl.querySelectorAll(".class-split-wrong-item").forEach((node) => {
+            node.addEventListener("click", (event) => {
+                if (event.target instanceof Element && event.target.closest("[data-action]")) {
+                    return;
+                }
+                selectClassSplitPoint(node.getAttribute("data-point-id") || "", {
+                    jump: false,
+                    focusPlot: true,
+                    flash: true,
+                });
+            });
+        });
+        listEl.querySelectorAll('[data-action="correct-class"]').forEach((button) => {
+            button.addEventListener("click", (event) => {
+                event.stopPropagation();
+                markClassSplitWrongCandidateCorrect(button.getAttribute("data-point-id") || "");
             });
         });
     }
@@ -36844,13 +37064,16 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!inspector) {
             return;
         }
+        if (classSplitState.cropResizeObserver) {
+            classSplitState.cropResizeObserver.disconnect();
+            classSplitState.cropResizeObserver = null;
+        }
         const point = classSplitState.pointsById.get(classSplitState.selectedPointId);
         if (!point) {
             inspector.innerHTML = `<div class="training-help">Select a point to inspect its crop.</div>`;
             return;
         }
-        const thumbPath = point.thumbnail_url || `/class_analysis/jobs/${encodeURIComponent(classSplitState.currentJobId)}/thumbnail/${encodeURIComponent(point.point_id)}`;
-        const thumbUrl = `${API_ROOT}${thumbPath}`;
+        const thumbUrl = getClassSplitThumbnailUrl(point);
         const classOptions = (Array.isArray(loadedClassList) ? loadedClassList : [])
             .map((className) => String(className || "").trim())
             .filter(Boolean)
@@ -36879,8 +37102,43 @@ async function cancelRfDetrTrainingJobRequest() {
         const jumpButton = inspector.querySelector('[data-action="jump"]');
         const changeButton = inspector.querySelector('[data-action="change"]');
         const classSelect = inspector.querySelector('[data-action="class"]');
+        const cropShell = inspector.querySelector(".class-split-inspector__crop-shell");
         const cropPreview = inspector.querySelector("[data-crop-preview]");
         const cropStatus = inspector.querySelector("[data-crop-status]");
+        if (cropShell && cropPreview) {
+            let cropZoom = 1;
+            const updateCropFitScale = () => {
+                const naturalWidth = Number(cropPreview.naturalWidth) || 0;
+                const naturalHeight = Number(cropPreview.naturalHeight) || 0;
+                const shellWidth = Number(cropShell.clientWidth) || 0;
+                const shellHeight = Number(cropShell.clientHeight) || 0;
+                if (!naturalWidth || !naturalHeight || !shellWidth || !shellHeight) {
+                    cropShell.style.setProperty("--class-split-crop-scale", cropZoom.toFixed(4));
+                    return;
+                }
+                const fitScale = Math.min(shellWidth / naturalWidth, shellHeight / naturalHeight);
+                const nextScale = Math.max(0.01, fitScale * cropZoom);
+                cropShell.style.setProperty("--class-split-crop-scale", nextScale.toFixed(4));
+                cropShell.classList.toggle("class-split-inspector__crop-shell--zoomed", Math.abs(cropZoom - 1) > 0.01);
+            };
+            updateCropFitScale();
+            cropShell.addEventListener("wheel", (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const factor = Math.exp((-(Number(event.deltaY) || 0)) * 0.0014);
+                cropZoom = Math.max(0.2, Math.min(16, cropZoom * factor));
+                updateCropFitScale();
+            }, { passive: false });
+            cropShell.addEventListener("dblclick", () => {
+                cropZoom = 1;
+                updateCropFitScale();
+            });
+            cropShell.addEventListener("class-split-crop-fit", updateCropFitScale);
+            if (typeof ResizeObserver === "function") {
+                classSplitState.cropResizeObserver = new ResizeObserver(updateCropFitScale);
+                classSplitState.cropResizeObserver.observe(cropShell);
+            }
+        }
         if (cropPreview && cropStatus) {
             cropPreview.addEventListener("error", () => {
                 cropPreview.hidden = true;
@@ -36890,7 +37148,14 @@ async function cancelRfDetrTrainingJobRequest() {
             cropPreview.addEventListener("load", () => {
                 cropPreview.hidden = false;
                 cropStatus.hidden = true;
+                const cropShellForFit = cropPreview.closest(".class-split-inspector__crop-shell");
+                if (cropShellForFit) {
+                    cropShellForFit.dispatchEvent(new Event("class-split-crop-fit"));
+                }
             });
+            if (cropPreview.complete && Number(cropPreview.naturalWidth) > 0) {
+                cropPreview.dispatchEvent(new Event("load"));
+            }
         }
         if (jumpButton) {
             jumpButton.addEventListener("click", () => {
@@ -36926,23 +37191,87 @@ async function cancelRfDetrTrainingJobRequest() {
         renderClassSplitReport();
         renderClassSplitWrongList();
         renderClassSplitInspector();
+        renderClassSplitBulkPanel();
         renderClassSplitPlot();
     }
 
-    function selectClassSplitPoint(pointId, { jump = false } = {}) {
+    function selectClassSplitPoint(pointId, { jump = false, focusPlot = false, flash = false } = {}) {
         const safeId = String(pointId || "");
         if (!safeId || !classSplitState.pointsById.has(safeId)) {
             return;
         }
+        const point = classSplitState.pointsById.get(safeId);
+        let filterChanged = false;
+        if (focusPlot && classSplitElements.filterClass?.value) {
+            classSplitElements.filterClass.value = "";
+            filterChanged = true;
+        }
         classSplitState.selectedPointId = safeId;
         renderClassSplitInspector();
         renderClassSplitPlot();
+        if (filterChanged) {
+            renderClassSplitBulkPanel();
+        }
+        if (focusPlot) {
+            window.requestAnimationFrame(() => {
+                focusClassSplitPlotOnPoint(safeId, { flash });
+            });
+        } else if (flash) {
+            startClassSplitPlotFlash(safeId);
+        }
         if (jump) {
-            const point = classSplitState.pointsById.get(safeId);
             jumpToClassSplitPoint(point).catch((error) => {
                 console.error("Class Split jump failed", error);
             });
         }
+    }
+
+    function syncClassSplitWrongCandidateSummaryCount() {
+        const summary = classSplitState.result?.summary;
+        if (!summary) {
+            return;
+        }
+        const candidates = Array.isArray(classSplitState.result?.wrong_class_candidates)
+            ? classSplitState.result.wrong_class_candidates
+            : [];
+        summary.wrong_class_candidate_count = candidates.filter((item) => {
+            const pointId = String(item?.point_id || "");
+            const point = getClassSplitPointById(pointId);
+            return pointId && !classSplitState.dismissedWrongIds.has(pointId) && (!point || !!point.is_wrong_class_candidate);
+        }).length;
+    }
+
+    function clearClassSplitWrongCandidate(pointId) {
+        const safeId = String(pointId || "");
+        if (!safeId) {
+            return;
+        }
+        classSplitState.dismissedWrongIds.add(safeId);
+        const point = getClassSplitPointById(safeId);
+        if (point) {
+            point.is_wrong_class_candidate = false;
+            point.wrong_class_suspicion = 0;
+        }
+        if (Array.isArray(classSplitState.result?.wrong_class_candidates)) {
+            classSplitState.result.wrong_class_candidates = classSplitState.result.wrong_class_candidates
+                .filter((item) => String(item?.point_id || "") !== safeId);
+        }
+        syncClassSplitWrongCandidateSummaryCount();
+    }
+
+    function markClassSplitWrongCandidateCorrect(pointId) {
+        const safeId = String(pointId || "");
+        if (!safeId) {
+            return;
+        }
+        clearClassSplitWrongCandidate(safeId);
+        if (classSplitState.selectedPointId === safeId) {
+            renderClassSplitInspector();
+        }
+        renderClassSplitWrongList();
+        renderClassSplitReport();
+        renderClassSplitPlot();
+        setClassSplitJobStatus("Marked object as correct for this review session.", "success");
     }
 
     function getClassSplitPointImageKey(point) {
@@ -36992,6 +37321,144 @@ async function cancelRfDetrTrainingJobRequest() {
             });
         });
         return best && best.score <= 0.08 ? best : null;
+    }
+
+    function ensureClassSplitPointBboxMatch(point) {
+        if (!point) {
+            throw new Error("No point selected.");
+        }
+        const imageKey = getClassSplitPointImageKey(point);
+        const imageRecord = images?.[imageKey];
+        if (!imageRecord) {
+            throw new Error(`Image is not loaded in this session: ${imageKey}`);
+        }
+        if (isDatasetBackedImageRecord(imageRecord) && !annotationSourceState.hydratedKeys.has(imageKey)) {
+            const hydrated = hydrateDatasetBboxesForImage(imageRecord);
+            if (!hydrated) {
+                throw new Error(`Annotations are not ready for ${imageKey}`);
+            }
+        }
+        const match = findClassSplitBboxMatch(point);
+        if (!match) {
+            throw new Error(`Could not find the matching bbox for ${imageKey}`);
+        }
+        return { imageKey, match };
+    }
+
+    function updateClassSplitSummaryClassCounts(previousClass, nextClass) {
+        const counts = classSplitState.result?.summary?.class_counts;
+        if (!counts || previousClass === nextClass) {
+            return;
+        }
+        if (Object.prototype.hasOwnProperty.call(counts, previousClass)) {
+            counts[previousClass] = Math.max(0, (Number(counts[previousClass]) || 0) - 1);
+        }
+        counts[nextClass] = (Number(counts[nextClass]) || 0) + 1;
+    }
+
+    function applyClassSplitPointClassLocally(point, targetClass) {
+        const nextClass = String(targetClass || "").trim();
+        if (!nextClass) {
+            throw new Error("Choose a target class.");
+        }
+        const previousClass = String(point?.class_name || "").trim();
+        if (!point || !previousClass || nextClass === previousClass) {
+            return false;
+        }
+        const knownClasses = Array.isArray(loadedClassList)
+            ? loadedClassList.map((className) => String(className || "").trim()).filter(Boolean)
+            : [];
+        if (knownClasses.length && !knownClasses.includes(nextClass)) {
+            throw new Error(`Unknown class: ${nextClass}`);
+        }
+        const { imageKey, match } = ensureClassSplitPointBboxMatch(point);
+        const buckets = bboxes[imageKey] || {};
+        bboxes[imageKey] = buckets;
+        const sourceBucket = Array.isArray(buckets[match.className]) ? buckets[match.className] : [];
+        const sourceIndex = sourceBucket.indexOf(match.bbox);
+        if (sourceIndex !== -1) {
+            sourceBucket.splice(sourceIndex, 1);
+        }
+        if (!buckets[nextClass]) {
+            buckets[nextClass] = [];
+        }
+        match.bbox.class = nextClass;
+        buckets[nextClass].push(match.bbox);
+        point.class_name = nextClass;
+        clearClassSplitWrongCandidate(point.point_id);
+        updateClassSplitSummaryClassCounts(previousClass, nextClass);
+        if (currentImage?.name === imageKey && currentBbox?.bbox === match.bbox) {
+            currentBbox = {
+                bbox: match.bbox,
+                index: buckets[nextClass].length - 1,
+                originalX: match.bbox.x,
+                originalY: match.bbox.y,
+                originalWidth: match.bbox.width,
+                originalHeight: match.bbox.height,
+                moving: false,
+                resizing: null,
+            };
+            currentClass = nextClass;
+            selectClassListOptionByName(nextClass);
+            syncQwenClassToCurrent();
+            updateSam3ClassOptions({ preserveSelection: true });
+            syncClassSplitCurrentClassSelection();
+            markOnlyBboxRecord(match.bbox);
+        }
+        captureAnnotationDirtyStateForImage(imageKey);
+        return true;
+    }
+
+    async function changeClassSplitSelectedPointsClass(newClass) {
+        const targetClass = String(newClass || "").trim();
+        if (!targetClass) {
+            setSamStatus("Choose a target class for the selected objects.", { variant: "warn", duration: 3000 });
+            return;
+        }
+        const selectedIds = Array.from(classSplitState.lassoPointIds || [])
+            .filter((pointId) => classSplitState.pointsById.has(pointId));
+        if (!selectedIds.length) {
+            setSamStatus("Lasso-select objects in the plot before changing their class.", { variant: "warn", duration: 3000 });
+            return;
+        }
+        if (!annotationEditableGuard("Changing selected classes")) {
+            return;
+        }
+        if (classSplitState.relabelInFlight) {
+            return;
+        }
+        classSplitState.relabelInFlight = true;
+        let changed = 0;
+        const failed = [];
+        try {
+            selectedIds.forEach((pointId) => {
+                const point = getClassSplitPointById(pointId);
+                try {
+                    if (applyClassSplitPointClassLocally(point, targetClass)) {
+                        changed += 1;
+                    }
+                } catch (error) {
+                    failed.push({ pointId, message: error.message || String(error) });
+                }
+            });
+            clearClassSplitBulkSelection();
+            renderClassSplitFilterOptions();
+            renderClassSplitWrongList();
+            renderClassSplitInspector();
+            renderClassSplitReport();
+            renderClassSplitPlot();
+            const suffix = failed.length ? ` ${failed.length} failed.` : " Save labels when ready.";
+            const variant = failed.length && !changed ? "error" : failed.length ? "warn" : "success";
+            setSamStatus(`Changed ${changed} selected object${changed === 1 ? "" : "s"} to ${targetClass}.${suffix}`, {
+                variant,
+                duration: failed.length ? 6000 : 4200,
+            });
+            if (failed.length) {
+                console.warn("Class Split bulk class change skipped some points", failed);
+            }
+        } finally {
+            classSplitState.relabelInFlight = false;
+        }
     }
 
     async function waitForClassSplitBbox(point, timeoutMs = 5000) {
@@ -37167,8 +37634,14 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.filterClass = document.getElementById("classSplitFilterClass");
         classSplitElements.graph = document.getElementById("classSplitGraph");
         classSplitElements.report = document.getElementById("classSplitReport");
+        classSplitElements.wrongPanel = document.getElementById("classSplitWrongPanel");
         classSplitElements.wrongList = document.getElementById("classSplitWrongList");
         classSplitElements.inspector = document.getElementById("classSplitInspector");
+        classSplitElements.bulkPanel = document.getElementById("classSplitBulkPanel");
+        classSplitElements.bulkCount = document.getElementById("classSplitBulkCount");
+        classSplitElements.bulkClass = document.getElementById("classSplitBulkClass");
+        classSplitElements.bulkApply = document.getElementById("classSplitBulkApply");
+        classSplitElements.bulkClear = document.getElementById("classSplitBulkClear");
         if (classSplitElements.scopeSelected) {
             classSplitElements.scopeSelected.addEventListener("change", refreshClassSplitControls);
         }
@@ -37245,9 +37718,17 @@ async function cancelRfDetrTrainingJobRequest() {
         if (classSplitElements.filterClass) {
             classSplitElements.filterClass.addEventListener("change", renderClassSplitPlot);
         }
-        document.addEventListener("keydown", (event) => handleClassSplitShiftPanEvent(event, true), true);
-        document.addEventListener("keyup", (event) => handleClassSplitShiftPanEvent(event, false), true);
-        window.addEventListener("blur", () => setClassSplitGraphPanMode(false));
+        if (classSplitElements.bulkApply) {
+            classSplitElements.bulkApply.addEventListener("click", () => {
+                changeClassSplitSelectedPointsClass(classSplitElements.bulkClass?.value || "").catch((error) => {
+                    console.error("Class Split bulk relabel failed", error);
+                    setSamStatus(`Bulk class change failed: ${error.message || error}`, { variant: "error", duration: 5000 });
+                });
+            });
+        }
+        if (classSplitElements.bulkClear) {
+            classSplitElements.bulkClear.addEventListener("click", () => clearClassSplitBulkSelection({ render: true }));
+        }
         applyEmbeddingRecipePresetToClassSplit(classSplitElements.recipePreset?.value || "precise");
         populateClassSplitClasses({ preserveSelection: true });
         refreshClassSplitControls();

@@ -120,26 +120,20 @@ def test_keyboard_image_navigation_shortcuts_are_documented_and_guarded():
     assert "canvas.element.focus({ preventScroll: true })" in js
 
 
-def test_embedding_aggregation_controls_include_local_salad_and_are_wired():
+def test_local_salad_is_data_ingestion_only_in_ui():
     html = _html()
     js = _js()
 
-    assert 'id="classSplitEmbeddingAggregation"' in html
     assert 'OT-SALAD [experimental]' not in html
-    assert '<option value="local_salad">Local SALAD head</option>' in html
-    assert 'id="classSplitSaladHead"' in html
-    assert 'id="trainSaladHead"' in html
-    assert 'id="trainEmbeddingAggregation"' in html
-    assert 'formData.append("embedding_aggregation"' in js
-    assert 'formData.append("embedding_salad_head_id"' in js
-    assert "embedding_aggregation:" in js
-    assert "embedding_salad_head_id:" in js
-    assert "classSplitElements.embeddingAggregation" in js
-    assert "classSplitElements.saladHead" in js
-    assert "trainingElements.embeddingAggregationSelect" in js
-    assert "trainingElements.saladHeadSelect" in js
-    assert 'Aggregation: ${escapeHtml(art.embedding_aggregation || "pooled")}' in js
-    assert 'if (!["dinov3", "cradio"].includes(currentEncoderType))' in js
+    assert 'id="dataIngestionSaladHead"' in html
+    assert 'id="classSplitEmbeddingAggregation"' not in html
+    assert 'id="classSplitSaladHead"' not in html
+    assert 'id="trainEmbeddingAggregation"' not in html
+    assert 'id="trainSaladHead"' not in html
+    assert '<option value="local_salad">Local SALAD separation</option>' not in html
+    assert '<option value="local_salad">Local SALAD head</option>' not in html
+    assert "Local SALAD requires a trained local head" not in html
+    assert "startLocalSaladTraining" in js
     assert "canvas.element.focus();" in js
     assert "const isTextEditingTarget = (target) =>" in js
     assert 'targetTag === "textarea"' in js
@@ -154,37 +148,27 @@ def test_data_ingestion_panel_contract():
     assert 'id="tabDataIngestionButton"' in html
     assert 'data-tab="data-ingestion"' in html
     assert 'id="tabDataIngestion" data-tab-panel="data-ingestion"' in html
-    assert "Train local SALAD" in html
-    assert "local SALAD runtime and training use MLX by default when available" in html
+    assert "Reference dataset profile" in html
+    assert "Candidate review" in html
+    assert "Build a reference profile from an existing dataset" in html
+    assert "Reference profiles train local SALAD from your own dataset images only" in html
     assert 'id="dataIngestionFiles"' in html
-    assert 'id="dataIngestionRecipe"' in html
-    assert 'id="dataIngestionTrainFiles"' in html
-    assert 'id="dataIngestionTrainActiveButton"' in html
+    assert 'id="dataIngestionRecipe"' not in html
+    assert 'id="dataIngestionTrainFiles"' not in html
+    assert 'id="dataIngestionTrainActiveButton"' not in html
+    assert 'id="dataIngestionReferenceActive"' in html
+    assert 'id="dataIngestionReferenceBackend"' in html
+    assert 'id="dataIngestionReferenceDataset"' in html
+    assert 'id="dataIngestionBuildProfileButton"' in html
     assert 'id="dataIngestionMaxTrainImages" min="0" max="1000000" step="1" value="0"' in html
-    assert 'id="dataIngestionReferenceCap" min="0" max="100000" step="1" value="0"' in html
+    assert 'id="dataIngestionReferenceCap"' not in html
     assert 'id="dataIngestionKeepFraction"' in html
-    assert 'id="dataIngestionUseActiveReference"' in html
+    assert 'id="dataIngestionUseActiveReference"' not in html
     assert 'id="dataIngestionSaladHead"' in html
-    assert "never loads external SALAD checkpoints" in html
-    assert "WALDO benchmarks keep DINOv3 pooled as the stable baseline" in html
-    assert "C-RADIOv4 and local SALAD are candidate modes" in html
-    assert "C-RADIOv4 on Mac now uses the local MLX backend by default" in html
-    assert "falls back to Torch CUDA/MPS/CPU" in html
     assert "WALDO encoder benchmark comparison" in html
-    assert "NN purity means: for each embedded object crop, what fraction of its nearest neighbors have the same class" in html
-    assert "This is a clustering score, not classifier accuracy" in html
-    assert "C-RADIOv4 tight+context audit" in html
-    assert "not the default summary preset" in html
-    assert "NN 0.8969 / 0.6917, size 0.0273, wrong 804, runtime 45.3s." in html
-    assert "NN 0.9078 / 0.7264, size 0.0591, wrong 851, runtime 9046.9s." in html
-    assert "no full uncapped WALDO promotion row is recorded here" in html
-    assert "The head fixes its base encoder, model, and pooling" in html
-    assert "Tator makes it unique if another head already uses the same name" in html
-    assert "Number of contrastive passes over the training images/frames" in html
-    assert '<option value="cradio_top20">C-RADIOv4 summary top 20%</option>' in html
-    assert '<option value="cradio_pooled">C-RADIOv4 pooled</option>' in html
-    assert 'id="dataIngestionCradioModel"' in html
-    assert 'id="dataIngestionCradioPooling"' in html
+    assert "Data Ingestion" in html
+    assert 'id="dataIngestionCradioModel"' not in html
+    assert 'id="dataIngestionCradioPooling"' not in html
     assert 'id="dataIngestionTrainEncoder"' in html
     assert 'id="dataIngestionTrainCradioModel"' in html
 
@@ -204,24 +188,24 @@ def test_data_ingestion_panel_contract():
     assert "function startLocalSaladTraining" in js
     assert "appendActiveWorkspaceTrainingFiles" in js
     assert "activeDatasetSaladHeadName" in js
-    assert "getDataIngestionNumber(dataIngestionElements.referenceCap, 0" in js
     assert "getDataIngestionNumber(dataIngestionElements.maxTrainImages, 0" in js
-    assert 'startLocalSaladTraining("active_dataset")' in js
+    assert 'startLocalSaladTraining("active_dataset")' not in js
     assert "preferredSaladHeadId" in js
-    assert 'setSelectValueIfPresent(dataIngestionElements.recipe, "local_salad_top20")' in js
+    assert 'setSelectValueIfPresent(dataIngestionElements.recipe, "local_salad_top20")' not in js
     assert 'fetch(`${API_ROOT}/data_ingestion/jobs`' in js
     assert 'fetch(`${API_ROOT}/data_ingestion/salad_train_jobs`' in js
+    assert 'fetch(`${API_ROOT}/datasets`' in js
     assert "appendActiveWorkspaceReferenceFiles" in js
-    assert "dataIngestionRecipeValues" in js
-    assert "cradio_top20" in js
-    assert "cradio_pooled" in js
-    assert "dataIngestionElements.cradioModel" in js
-    assert "dataIngestionElements.cradioPooling" in js
+    assert "dataIngestionRecipeValues" not in js
+    assert "dataIngestionElements.referenceDataset" in js
+    assert "reference_dataset_id" in js
+    assert "reference_source" in js
+    assert "function dataIngestionHeadMatchesReference" in js
+    assert "Selected reference profile does not match the chosen reference dataset" in js
+    assert "encoder: \"local_salad\"" in js
     assert "dataIngestionElements.trainEncoder" in js
     assert "dataIngestionElements.trainCradioModel" in js
     assert "local_salad" in js
-    assert 'trainingElements.embeddingAggregationSelect?.value === "local_salad"' in js
-    assert 'classSplitElements.embeddingAggregation?.value === "local_salad"' in js
 
     assert '"/data_ingestion/capabilities"' in router
     assert '"/data_ingestion/salad_train_jobs"' in router
@@ -337,7 +321,7 @@ def test_class_split_explorer_panel_contract():
     assert 'id="classSplitBackbone"' in html
     assert '<option value="precise" selected>Precise best</option>' in html
     assert '<option value="cradio">C-RADIOv4 summary</option>' in html
-    assert '<option value="local_salad">Local SALAD separation</option>' in html
+    assert '<option value="local_salad">Local SALAD separation</option>' not in html
     assert 'Projection<span class="help-icon"' in html
     assert 'Scope<span class="help-icon"' in html
     assert 'Class<span class="help-icon"' in html
@@ -363,18 +347,27 @@ def test_class_split_explorer_panel_contract():
     assert 'value="5000"' not in html
     assert 'id="classSplitGraph" class="class-split-graph"' in html
     assert 'id="classSplitCradioPooling"' in html
-    assert "Heads can be DINOv3- or C-RADIOv4-backed" in html
     assert "benchmark carefully before promoting any C-RADIO pooling mode" in html
     assert 'id="classSplitReport" class="class-split-report"' in html
+    assert 'id="classSplitBulkPanel" class="class-split-bulk-panel" hidden' in html
+    assert 'id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel" open' in html
     assert 'id="classSplitWrongList"' in html
     assert 'id="classSplitInspector"' in html
+    assert "Selected crop" in html
+    assert "Likely wrong class" in html
 
     assert '.tab-panel[data-tab-panel="class-split"]' in css
     assert ".class-split-workspace" in css
     assert ".class-split-panel--workspace .class-split-results" in css
+    assert ".class-split-bulk-panel" in css
     assert ".class-split-graph" in css
     assert ".class-split-report" in css
-    assert ".class-split-graph.class-split-graph--pan" in css
+    assert ".class-split-graph.class-split-graph--pan" not in css
+    assert ".class-split-review-section--inspector" in css
+    assert ".class-split-hover-card" not in css
+    assert "--class-split-crop-scale" in css
+    assert "max-width: none;" in css
+    assert "transform: scale(var(--class-split-crop-scale, 1));" in css
     assert ".embedding-recipe-note__text" in css
     assert ".class-split-review" in css
     assert "height: calc(100vh - 330px);" in css
@@ -404,7 +397,6 @@ def test_class_split_explorer_panel_contract():
     assert 'applyEmbeddingRecipePresetToClassSplit(classSplitElements.recipePreset?.value || "precise")' in js
     assert 'preprocess_mode: String(classSplitElements.preprocessMode?.value || "canonical")' in js
     assert 'embedding_adjustment: String(classSplitElements.sizeBiasMode?.value || "remove_size_bias")' in js
-    assert 'embedding_salad_head_id: String(classSplitElements.saladHead?.value || "").trim()' in js
     assert 'if (trainingElements.preprocessModeSelect) {\n            formData.append("preprocess_mode", trainingElements.preprocessModeSelect.value || "canonical");\n        }' in js
     assert 'if (trainingElements.embeddingAdjustmentSelect) {\n            formData.append("embedding_adjustment", trainingElements.embeddingAdjustmentSelect.value || "remove_size_bias");\n        }' in js
     assert 'Encoder type<span class="help-icon"' in html
@@ -421,7 +413,6 @@ def test_class_split_explorer_panel_contract():
     assert 'Embedding views<span class="help-icon"' in html
     assert 'DINOv3 pooling<span class="help-icon"' in html
     assert 'C-RADIOv4 pooling<span class="help-icon"' in html
-    assert 'Local SALAD uses a locally trained head from Data Ingestion for DINOv3 or C-RADIOv4 spatial-token descriptors. On Mac, the head runs through MLX by default when available.' in html
     assert "Active Label Images workspace" in js
     assert "function buildClassSplitActiveWorkspaceForm" in js
     assert "function getClassSplitPointImageKey" in js
@@ -430,7 +421,21 @@ def test_class_split_explorer_panel_contract():
     assert "Size-axis check" in js
     assert "Crop cache" in js
     assert "Embedding cache" in js
-    assert "function setClassSplitGraphPanMode" in js
+    assert "function setClassSplitGraphPanMode" not in js
+    assert "function panClassSplitPlotWithWheel" not in js
+    assert 'dragmode: "lasso"' in js
+    assert "function rememberClassSplitSelectionFromPlot" in js
+    assert "function changeClassSplitSelectedPointsClass" in js
+    assert "function markClassSplitWrongCandidateCorrect" in js
+    assert "function showClassSplitHoverCard" not in js
+    assert "cropPreview.naturalWidth" in js
+    assert "Math.min(shellWidth / naturalWidth, shellHeight / naturalHeight)" in js
+    assert "Math.max(0.2, Math.min(16, cropZoom * factor))" in js
+    assert "new ResizeObserver(updateCropFitScale)" in js
+    assert "function focusClassSplitPlotOnPoint" in js
+    assert "classSplitElements.bulkPanel" in js
+    assert "panClassSplitPlotWithWheel" not in js
+    assert "Correct class" in js
     assert "function drawClassSplitInstancePulse" in js
     assert "startClassSplitInstancePulse(match.bbox" in js
     assert 'fetch(`${API_ROOT}/class_analysis/jobs/active_workspace`' in js

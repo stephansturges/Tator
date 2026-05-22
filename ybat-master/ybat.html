@@ -704,74 +704,78 @@
                     <header class="data-ingestion-header">
                         <div>
                             <h2>Data Ingestion</h2>
-                            <div class="training-help">Train local SALAD heads and score new images or video frames for dataset diversity. On Mac, local SALAD runtime and training use MLX by default when available, with Torch fallback. WALDO benchmarks keep DINOv3 pooled as the stable baseline; C-RADIOv4 and local SALAD are candidate modes to compare before changing defaults.</div>
-                            <div class="training-help warn">C-RADIOv4 on Mac now uses the local MLX backend by default when <code>~/cradio_mlx</code> and its checkpoints are present; otherwise it falls back to Torch CUDA/MPS/CPU. Keep benchmarking against DINOv3 before changing dataset defaults.</div>
-                            <details class="embedding-benchmark-note" open>
-                                <summary>WALDO encoder benchmark comparison</summary>
-                                <div class="embedding-benchmark-note__intro">All-class object-crop audit, uncapped. NN purity means: for each embedded object crop, what fraction of its nearest neighbors have the same class. The first NN number is object-weighted; the second balances classes. This is a clustering score, not classifier accuracy. The C-RADIO number is the slow tight+context audit row, not the default summary preset; rerun on your dataset before promoting a slower encoder for routine ingestion.</div>
-                                <div class="embedding-benchmark-note__grid">
-                                    <div class="embedding-benchmark-note__item">
-                                        <strong>DINOv3 Precise</strong>
-                                        <span>NN 0.8969 / 0.6917, size 0.0273, wrong 804, runtime 45.3s.</span>
-                                    </div>
-                                    <div class="embedding-benchmark-note__item">
-                                        <strong>C-RADIOv4 tight+context audit</strong>
-                                        <span>NN 0.9078 / 0.7264, size 0.0591, wrong 851, runtime 9046.9s.</span>
-                                    </div>
-                                    <div class="embedding-benchmark-note__item">
-                                        <strong>CLIP</strong>
-                                        <span>Available for comparison, but no full uncapped WALDO promotion row is recorded here.</span>
-                                    </div>
-                                </div>
-                            </details>
+                            <div class="training-help">Build a reference profile from an existing dataset, then score new images or video frames by novelty against that profile before deciding what to keep.</div>
+                            <div class="training-help warn">Reference profiles train local SALAD from your own dataset images only. On Mac, SALAD and C-RADIOv4 use MLX by default when available, with Torch fallback.</div>
                         </div>
                         <span id="dataIngestionStatus" class="qwen-caption-status"></span>
                     </header>
+                    <section class="data-ingestion-panel" aria-labelledby="dataIngestionReferenceTitle">
+                        <div class="data-ingestion-panel__header">
+                            <div>
+                                <strong id="dataIngestionReferenceTitle">Reference dataset profile</strong>
+                                <div class="training-help">Choose the accepted dataset that defines what you already have, then build or select its local SALAD reference profile.</div>
+                            </div>
+                        </div>
+                        <div class="data-ingestion-grid">
+                            <div class="data-ingestion-field data-ingestion-field--wide">
+                                <label>Reference source<span class="help-icon" title="Use the dataset currently open in Label Images, or choose a registered backend dataset. Candidate diversity is measured against this reference set.">?</span></label>
+                                <div class="class-split-radio">
+                                    <label><input type="radio" name="dataIngestionReferenceSource" id="dataIngestionReferenceActive" value="active" checked /> Current Label Images dataset</label>
+                                    <label><input type="radio" name="dataIngestionReferenceSource" id="dataIngestionReferenceBackend" value="backend" /> Backend dataset</label>
+                                </div>
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionReferenceDataset">Backend dataset<span class="help-icon" title="Registered dataset to use as the accepted reference set. This avoids re-uploading reference images through the browser.">?</span></label>
+                                <select id="dataIngestionReferenceDataset"></select>
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionSaladHead">Reference profile<span class="help-icon" title="Local SALAD head trained from the selected reference dataset. Build a fresh profile when the reference dataset changes materially.">?</span></label>
+                                <select id="dataIngestionSaladHead"></select>
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionHeadName">Profile name<span class="help-icon" title="Human-readable name for the saved local SALAD profile. Tator makes it unique if another profile already uses the same name.">?</span></label>
+                                <input type="text" id="dataIngestionHeadName" value="reference_salad_profile" />
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionTrainEncoder">SALAD base encoder<span class="help-icon" title="Frozen spatial-token encoder used to train the local SALAD profile. DINOv3 is the default; C-RADIOv4 is an explicit comparison path.">?</span></label>
+                                <select id="dataIngestionTrainEncoder">
+                                    <option value="dinov3" selected>DINOv3</option>
+                                    <option value="cradio">C-RADIOv4</option>
+                                </select>
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionTrainCradioModel">Training C-RADIOv4 model<span class="help-icon" title="Used only when the SALAD base encoder is C-RADIOv4. This model id is saved into the profile metadata.">?</span></label>
+                                <select id="dataIngestionTrainCradioModel"></select>
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionMaxTrainImages">Max reference images<span class="help-icon" title="Optional safety cap while building a reference profile or scoring against a backend dataset. The default 0 uses every reference image.">?</span></label>
+                                <input type="number" id="dataIngestionMaxTrainImages" min="0" max="1000000" step="1" value="0" />
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionEpochs">Profile epochs<span class="help-icon" title="Number of contrastive passes over reference images. More epochs can improve the profile but increase runtime and overfitting risk.">?</span></label>
+                                <input type="number" id="dataIngestionEpochs" min="1" max="100" step="1" value="3" />
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionBatchSize">Batch size<span class="help-icon" title="Number of paired augmented reference images processed per SALAD optimization step. Larger batches improve contrastive signal but need more memory.">?</span></label>
+                                <input type="number" id="dataIngestionBatchSize" min="2" max="128" step="1" value="8" />
+                            </div>
+                        </div>
+                        <div class="data-ingestion-actions">
+                            <button type="button" id="dataIngestionBuildProfileButton" class="training-button">Build reference profile</button>
+                            <button type="button" id="dataIngestionRefreshButton" class="training-button secondary">Refresh datasets / profiles</button>
+                        </div>
+                    </section>
                     <section class="data-ingestion-panel" aria-labelledby="dataIngestionAnalyzeTitle">
                         <div class="data-ingestion-panel__header">
                             <div>
-                                <strong id="dataIngestionAnalyzeTitle">Diversity analysis</strong>
-                                <div class="training-help">Rank candidate media by novelty and keep the most diverse subset. Videos are sampled into frames before embedding.</div>
+                                <strong id="dataIngestionAnalyzeTitle">Candidate review</strong>
+                                <div class="training-help">Submit new media after selecting a reference profile. Videos are sampled into frames before scoring.</div>
                             </div>
                         </div>
                         <div class="data-ingestion-grid">
                             <div class="data-ingestion-field data-ingestion-field--wide">
                                 <label for="dataIngestionFiles">Candidate images / videos<span class="help-icon" title="Files to evaluate for ingestion. Video files are decoded into frames with the frame interval below.">?</span></label>
                                 <input type="file" id="dataIngestionFiles" multiple accept="image/*,video/*" />
-                            </div>
-                            <div class="data-ingestion-field">
-                                <label for="dataIngestionRecipe">Ingestion recipe<span class="help-icon" title="Applies an encoder, keep fraction, and video sampling recipe. DINOv3 pooled is the stable baseline from current internal tests. C-RADIOv4 is an explicit candidate mode; on Mac it uses local MLX by default when ~/cradio_mlx is available and falls back to Torch otherwise. Local SALAD recipes require a locally trained head.">?</span></label>
-                                <select id="dataIngestionRecipe">
-                                    <option value="pooled_top20" selected>DINOv3 baseline top 20%</option>
-                                    <option value="cradio_top20">C-RADIOv4 summary top 20%</option>
-                                    <option value="local_salad_top20">Local SALAD diversity top 20%</option>
-                                    <option value="local_salad_review50">Local SALAD broad review 50%</option>
-                                    <option value="custom">Custom</option>
-                                </select>
-                            </div>
-                            <div class="data-ingestion-field">
-                                <label for="dataIngestionEncoder">Embedding mode<span class="help-icon" title="Chooses how candidate images/frames become vectors for novelty scoring. DINOv3 pooled is the current baseline. C-RADIOv4 pooled uses the shared C-RADIO helper: local MLX on Mac when available, otherwise Torch CUDA/MPS/CPU. Local SALAD uses a Tator-trained head, runs on MLX by default on Mac, and never loads external SALAD checkpoints.">?</span></label>
-                                <select id="dataIngestionEncoder">
-                                    <option value="dinov3_pooled" selected>DINOv3 pooled baseline</option>
-                                    <option value="cradio_pooled">C-RADIOv4 pooled</option>
-                                    <option value="local_salad">Local SALAD head</option>
-                                </select>
-                            </div>
-                            <div class="data-ingestion-field">
-                                <label for="dataIngestionCradioModel">C-RADIOv4 model<span class="help-icon" title="Used only when Embedding mode is C-RADIOv4 pooled. SO400M is the practical default candidate; H is larger and should be benchmarked on your hardware before routine use. Mac auto mode uses the matching local MLX checkpoint under ~/cradio_mlx when present. Local SALAD uses the encoder saved inside the selected head.">?</span></label>
-                                <select id="dataIngestionCradioModel"></select>
-                            </div>
-                            <div class="data-ingestion-field">
-                                <label for="dataIngestionCradioPooling">C-RADIOv4 pooling<span class="help-icon" title="Used only for C-RADIOv4 pooled scoring. Summary is the global descriptor. Spatial mean averages local tokens. Summary + spatial mean concatenates both and can preserve more detail but doubles feature width. Benchmark before promoting over summary.">?</span></label>
-                                <select id="dataIngestionCradioPooling">
-                                    <option value="summary" selected>Summary</option>
-                                    <option value="spatial_mean">Spatial mean</option>
-                                    <option value="summary_spatial_concat">Summary + spatial mean</option>
-                                </select>
-                            </div>
-                            <div class="data-ingestion-field">
-                                <label for="dataIngestionSaladHead">Local SALAD head<span class="help-icon" title="A Tator-trained SALAD aggregation head saved under uploads/salad_heads/. Required only for Local SALAD mode. The head fixes its base encoder, model, and pooling; those saved settings override the C-RADIO pooled controls.">?</span></label>
-                                <select id="dataIngestionSaladHead"></select>
                             </div>
                             <div class="data-ingestion-field">
                                 <label for="dataIngestionKeepFraction">Keep fraction<span class="help-icon" title="Fraction of candidate images/frames to keep after greedy farthest-first diversity ranking. 0.2 keeps the top 20%.">?</span></label>
@@ -785,67 +789,14 @@
                                 <label for="dataIngestionMaxFrames">Max frames / video<span class="help-icon" title="Safety limit for each video. Use 0 for no per-video limit.">?</span></label>
                                 <input type="number" id="dataIngestionMaxFrames" min="0" max="100000" step="1" value="200" />
                             </div>
-                            <div class="data-ingestion-field">
-                                <label for="dataIngestionReferenceCap">Active reference cap<span class="help-icon" title="When comparing against the current Label Images workspace, upload at most this many active images as reference. The default 0 means all loaded active images.">?</span></label>
-                                <input type="number" id="dataIngestionReferenceCap" min="0" max="100000" step="1" value="0" />
-                            </div>
-                            <div class="data-ingestion-field data-ingestion-field--checkbox">
-                                <label><input type="checkbox" id="dataIngestionUseActiveReference" checked /> Compare against active Label Images workspace</label>
-                            </div>
                         </div>
                         <div class="data-ingestion-actions">
-                            <button type="button" id="dataIngestionAnalyzeButton" class="training-button">Analyze diversity</button>
+                            <button type="button" id="dataIngestionAnalyzeButton" class="training-button">Analyze candidates</button>
                             <button type="button" id="dataIngestionCancelButton" class="training-button danger" disabled>Cancel</button>
-                            <button type="button" id="dataIngestionRefreshButton" class="training-button secondary">Refresh heads</button>
                         </div>
                         <div class="data-ingestion-progress" id="dataIngestionProgress" hidden>
                             <div class="data-ingestion-progress__bar"><div id="dataIngestionProgressFill"></div></div>
                             <div id="dataIngestionProgressText" class="training-help"></div>
-                        </div>
-                    </section>
-                    <section class="data-ingestion-panel" aria-labelledby="dataIngestionTrainTitle">
-                        <div class="data-ingestion-panel__header">
-                            <div>
-                                <strong id="dataIngestionTrainTitle">Train local SALAD</strong>
-                                <div class="training-help">Train a local SALAD aggregation head from your own images/video frames with a frozen spatial-token encoder underneath. Mac auto mode trains the head with MLX when available and saves the same compatible head file.</div>
-                            </div>
-                        </div>
-                        <div class="data-ingestion-grid">
-                            <div class="data-ingestion-field data-ingestion-field--wide">
-                                <label for="dataIngestionTrainFiles">Training images / videos<span class="help-icon" title="Local data used to train the SALAD aggregation head. No external SALAD checkpoint is loaded.">?</span></label>
-                                <input type="file" id="dataIngestionTrainFiles" multiple accept="image/*,video/*" />
-                            </div>
-                            <div class="data-ingestion-field">
-                                <label for="dataIngestionHeadName">Head name<span class="help-icon" title="Human-readable name for the saved local SALAD head. Tator makes it unique if another head already uses the same name.">?</span></label>
-                                <input type="text" id="dataIngestionHeadName" value="local_salad_head" />
-                            </div>
-                            <div class="data-ingestion-field">
-                                <label for="dataIngestionTrainEncoder">SALAD base encoder<span class="help-icon" title="Frozen encoder whose spatial tokens train the local SALAD head. DINOv3 is the established baseline. C-RADIOv4 is a candidate path that trains on C-RADIO spatial tokens; on Mac the C-RADIO encoder and the SALAD head both use MLX by default when available, with Torch fallback. Benchmark the resulting head before using it as a dataset default.">?</span></label>
-                                <select id="dataIngestionTrainEncoder">
-                                    <option value="dinov3" selected>DINOv3</option>
-                                    <option value="cradio">C-RADIOv4</option>
-                                </select>
-                            </div>
-                            <div class="data-ingestion-field">
-                                <label for="dataIngestionTrainCradioModel">Training C-RADIOv4 model<span class="help-icon" title="Used only when SALAD base encoder is C-RADIOv4. This model id is saved into the head metadata and must match at scoring/inference time.">?</span></label>
-                                <select id="dataIngestionTrainCradioModel"></select>
-                            </div>
-                            <div class="data-ingestion-field">
-                                <label for="dataIngestionEpochs">Epochs<span class="help-icon" title="Number of contrastive passes over the training images/frames. More epochs can improve the local SALAD head but increase overfitting risk and runtime; smoke tests use 1, normal experiments usually start at 3.">?</span></label>
-                                <input type="number" id="dataIngestionEpochs" min="1" max="100" step="1" value="3" />
-                            </div>
-                            <div class="data-ingestion-field">
-                                <label for="dataIngestionBatchSize">Batch size<span class="help-icon" title="Number of paired augmented images processed per SALAD optimization step. Larger batches improve contrastive signal but need more VRAM/RAM.">?</span></label>
-                                <input type="number" id="dataIngestionBatchSize" min="2" max="128" step="1" value="8" />
-                            </div>
-                            <div class="data-ingestion-field">
-                                <label for="dataIngestionMaxTrainImages">Max train images<span class="help-icon" title="Optional safety cap for training. The default 0 trains on every selected image/frame, including every image in the active Label Images dataset.">?</span></label>
-                                <input type="number" id="dataIngestionMaxTrainImages" min="0" max="1000000" step="1" value="0" />
-                            </div>
-                        </div>
-                        <div class="data-ingestion-actions">
-                            <button type="button" id="dataIngestionTrainButton" class="training-button">Train local SALAD</button>
-                            <button type="button" id="dataIngestionTrainActiveButton" class="training-button secondary" title="Train a local SALAD head from every image currently loaded in Label Images, then select it for ingestion scoring. This is the intended dataset-specific SALAD workflow.">Train on active dataset</button>
                         </div>
                     </section>
                     <section class="data-ingestion-panel data-ingestion-results" id="dataIngestionResults" hidden>
@@ -904,13 +855,12 @@
                                 </div>
                             </div>
                             <div class="class-split-field">
-                                <label for="classSplitRecipePreset">Quality preset<span class="help-icon" title="Fast is a quick coarse audit. Balanced is the faster single-view DINOv3 baseline. Precise is the measured WALDO default for all-class wrong-label discovery. C-RADIOv4 is opt-in: its slowest recipe improved NN purity in full WALDO tests but leaked more size signal and produced more wrong-class candidates than DINOv3 Precise. On Mac it now uses local MLX when available. Local SALAD requires a trained local head.">?</span></label>
+                                <label for="classSplitRecipePreset">Quality preset<span class="help-icon" title="Fast is a quick coarse audit. Balanced is the faster single-view DINOv3 baseline. Precise is the measured WALDO default for all-class wrong-label discovery. C-RADIOv4 is opt-in: its slowest recipe improved NN purity in full WALDO tests but leaked more size signal and produced more wrong-class candidates than DINOv3 Precise. On Mac it now uses local MLX when available.">?</span></label>
                                 <select id="classSplitRecipePreset">
                                     <option value="balanced">Balanced faster</option>
                                     <option value="fast">Fast coarse</option>
                                     <option value="precise" selected>Precise best</option>
                                     <option value="cradio">C-RADIOv4 summary</option>
-                                    <option value="local_salad">Local SALAD separation</option>
                                     <option value="custom">Custom advanced</option>
                                 </select>
                             </div>
@@ -993,17 +943,6 @@
                                 </select>
                             </div>
                             <div class="class-split-field">
-                                <label for="classSplitEmbeddingAggregation">Embedding aggregation<span class="help-icon" title="Pooled uses the encoder's direct image descriptor and is the measured default. Local SALAD runs a selected Tator-trained aggregation head over spatial tokens. On Mac, local SALAD uses MLX by default when available and falls back to Torch. Heads can be DINOv3- or C-RADIOv4-backed; the backend rejects mismatches.">?</span></label>
-                                <select id="classSplitEmbeddingAggregation">
-                                    <option value="pooled" selected>Pooled / current best</option>
-                                    <option value="local_salad">Local SALAD head</option>
-                                </select>
-                            </div>
-                            <div class="class-split-field">
-                                <label for="classSplitSaladHead">Local SALAD head<span class="help-icon" title="Used only when Embedding aggregation is Local SALAD. Heads are trained locally in Data Ingestion, never loaded from upstream checkpoints, and carry their own encoder/model/pooling metadata.">?</span></label>
-                                <select id="classSplitSaladHead"></select>
-                            </div>
-                            <div class="class-split-field">
                                 <label for="classSplitBackgroundMode">Background<span class="help-icon" title="Controls pixels outside the bbox inside padded crops. Full crop keeps context; fill/blur/darken suppress background when scene context overwhelms small objects.">?</span></label>
                                 <select id="classSplitBackgroundMode">
                                     <option value="full_crop" selected>Full crop</option>
@@ -1049,20 +988,29 @@
                                 <label for="classSplitFilterClass">Filter</label>
                                 <select id="classSplitFilterClass"></select>
                             </div>
+                            <div id="classSplitBulkPanel" class="class-split-bulk-panel" hidden>
+                                <strong id="classSplitBulkCount">0 selected</strong>
+                                <select id="classSplitBulkClass"></select>
+                                <button type="button" id="classSplitBulkApply" class="training-button">Change class</button>
+                                <button type="button" id="classSplitBulkClear" class="training-button secondary">Clear</button>
+                            </div>
                             <div id="classSplitGraph" class="class-split-graph"></div>
                             <div class="class-split-review">
-                                <div>
+                                <div class="class-split-review-section class-split-review-section--inspector">
+                                    <strong>Selected crop</strong>
+                                    <div id="classSplitInspector" class="class-split-inspector">
+                                        <div class="training-help">Select a point to inspect its crop.</div>
+                                    </div>
+                                </div>
+                                <details id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel" open>
+                                    <summary>Likely wrong class</summary>
+                                    <div id="classSplitWrongList" class="class-split-wrong-list"></div>
+                                </details>
+                                <div class="class-split-review-section">
                                     <strong>Graph report</strong>
                                     <div id="classSplitReport" class="class-split-report">
                                         <div class="training-help">Run analysis to summarize graph shape and settings.</div>
                                     </div>
-                                </div>
-                                <div>
-                                    <strong>Likely wrong class</strong>
-                                    <div id="classSplitWrongList" class="class-split-wrong-list"></div>
-                                </div>
-                                <div id="classSplitInspector" class="class-split-inspector">
-                                    <div class="training-help">Select a point to inspect its crop.</div>
                                 </div>
                             </div>
                         </div>
@@ -1700,13 +1648,12 @@
                                 <div class="training-help">Images encoded per CLIP forward pass.</div>
                             </div>
                             <div>
-                                <label for="trainEmbeddingRecipePreset">Embedding preset<span class="help-icon" title="Applies the same recipe family used by Class Split. Balanced is the conservative auto-class baseline. Precise mirrors the strongest DINOv3 audit recipe. C-RADIOv4 and Local SALAD are candidate paths that should be benchmarked before promotion; C-RADIOv4 on Mac uses local MLX when available.">?</span></label>
+                                <label for="trainEmbeddingRecipePreset">Embedding preset<span class="help-icon" title="Applies the same recipe family used by Class Split. Balanced is the conservative auto-class baseline. Precise mirrors the strongest DINOv3 audit recipe. C-RADIOv4 remains an explicit candidate path; on Mac it uses local MLX when available.">?</span></label>
                                 <select id="trainEmbeddingRecipePreset">
                                     <option value="balanced" selected>Balanced default</option>
                                     <option value="fast">Fast coarse</option>
                                     <option value="precise">Precise slow</option>
                                     <option value="cradio">C-RADIOv4 summary</option>
-                                    <option value="local_salad">Local SALAD separation</option>
                                     <option value="custom">Custom advanced</option>
                                 </select>
                                 <div class="training-help">Applies the same fast/balanced/precise recipe family as Class Split. Custom keeps the fields below.</div>
@@ -1788,19 +1735,6 @@
                                     <option value="summary_spatial_concat">Summary + spatial mean</option>
                                 </select>
                                 <div class="training-help">C-RADIOv4-only readout saved into classifier metadata.</div>
-                            </div>
-                            <div>
-                                <label for="trainEmbeddingAggregation">Embedding aggregation<span class="help-icon" title="Pooled uses the encoder's direct descriptor. Local SALAD uses a selected Tator-trained aggregation head over spatial tokens; the saved head must match the encoder family and is reused during auto-class inference.">?</span></label>
-                                <select id="trainEmbeddingAggregation">
-                                    <option value="pooled" selected>Pooled / current best</option>
-                                    <option value="local_salad">Local SALAD head</option>
-                                </select>
-                                <div class="training-help">Local SALAD uses a locally trained head from Data Ingestion for DINOv3 or C-RADIOv4 spatial-token descriptors. On Mac, the head runs through MLX by default when available.</div>
-                            </div>
-                            <div>
-                                <label for="trainSaladHead">Local SALAD head<span class="help-icon" title="Required only for Local SALAD aggregation. The selected head stores its encoder family, model, and pooling recipe; incompatible heads are rejected instead of silently mixing embeddings.">?</span></label>
-                                <select id="trainSaladHead"></select>
-                                <div class="training-help">Required only for Local SALAD aggregation; saved into the classifier and reused during auto-class inference.</div>
                             </div>
                             <div class="logreg-only">
                                 <label for="trainMaxIter">Max Iter<span class="help-icon" title="LogReg-only cap on solver iterations. Increase if training reports convergence warnings; lower only for quick smoke runs.">?</span></label>

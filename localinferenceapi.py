@@ -15389,20 +15389,8 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
         "default_preprocess_mode": "canonical",
         "dinov3_pooling_modes": ["pooler", "cls", "patch_mean", "cls_patch_concat"],
         "default_dinov3_pooling": "pooler",
-        "embedding_aggregation_modes": ["pooled", "local_salad"],
+        "embedding_aggregation_modes": ["pooled"],
         "default_embedding_aggregation": "pooled",
-        "local_salad_heads": _list_local_salad_heads(),
-        "local_salad_policy": LOCAL_SALAD_POLICY,
-        "local_salad_trainer": LOCAL_SALAD_TRAINER,
-        "local_salad_backend": {
-            "default": "auto",
-            "auto_resolved": resolve_local_salad_backend("auto"),
-            "mlx_available": local_salad_mlx_available(),
-            "detail": (
-                "MLX local SALAD head runtime/training is the macOS auto default when available; "
-                "Torch remains the fallback and compatibility loader."
-            ),
-        },
         "class_separation_recipes": [
             {
                 "id": "balanced",
@@ -15423,17 +15411,6 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
                 "embedding_view_mode": "tight_context",
                 "dinov3_pooling": "pooler",
                 "embedding_adjustment": "remove_size_bias",
-            },
-            {
-                "id": "local_salad",
-                "label": "Local SALAD separation",
-                "embedding_aggregation": "local_salad",
-                "canonical_size": 336,
-                "padding_ratio": 0.08,
-                "embedding_view_mode": "single",
-                "dinov3_pooling": "pooler",
-                "embedding_adjustment": "remove_size_bias",
-                "requires_local_salad_head": True,
             },
             {
                 "id": "cradio_summary",
@@ -17179,6 +17156,11 @@ def _list_local_salad_heads() -> List[Dict[str, Any]]:
                     "cradio_pooling": metadata.get("cradio_pooling") or None,
                     "salad_backend": metadata.get("salad_backend") or "torch",
                     "train_image_count": metadata.get("train_image_count") or 0,
+                    "source_mode": metadata.get("source_mode") or "",
+                    "reference_source": metadata.get("reference_source") or metadata.get("source_mode") or "",
+                    "reference_dataset_id": metadata.get("reference_dataset_id") or "",
+                    "reference_dataset_label": metadata.get("reference_dataset_label") or "",
+                    "reference_label": metadata.get("reference_label") or "",
                     "descriptor_dim": int(config.get("token_dim") or 0)
                     + int(config.get("num_clusters") or 0) * int(config.get("cluster_dim") or 0),
                     "config": config,
@@ -17193,8 +17175,11 @@ def _list_local_salad_heads() -> List[Dict[str, Any]]:
 
 def _data_ingestion_capabilities() -> Dict[str, Any]:
     return {
-        "encoders": ["dinov3_pooled", "cradio_pooled", "local_salad"],
-        "default_encoder": "dinov3_pooled",
+        "encoders": ["local_salad"],
+        "default_encoder": "local_salad",
+        "analysis_encoders": ["local_salad"],
+        "reference_profile_base_encoders": ["dinov3", "cradio"],
+        "reference_profile_flow": True,
         "default_dinov3_model": CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL,
         "default_cradio_model": CRADIO_DEFAULT_MODEL,
         "cradio_models": list(CRADIO_SUPPORTED_MODELS),
@@ -17202,43 +17187,6 @@ def _data_ingestion_capabilities() -> Dict[str, Any]:
         "default_cradio_pooling": "summary",
         "cradio_backend": cradio_capabilities()["backend"],
         "local_salad_heads": _list_local_salad_heads(),
-        "data_ingestion_recipes": [
-            {
-                "id": "pooled_top20",
-                "label": "DINOv3 baseline top 20%",
-                "encoder": "dinov3_pooled",
-                "keep_fraction": 0.2,
-                "frame_interval": 1.0,
-                "max_frames_per_video": 200,
-            },
-            {
-                "id": "cradio_top20",
-                "label": "C-RADIOv4 summary top 20%",
-                "encoder": "cradio_pooled",
-                "cradio_pooling": "summary",
-                "keep_fraction": 0.2,
-                "frame_interval": 1.0,
-                "max_frames_per_video": 200,
-            },
-            {
-                "id": "local_salad_top20",
-                "label": "Local SALAD diversity top 20%",
-                "encoder": "local_salad",
-                "keep_fraction": 0.2,
-                "frame_interval": 1.0,
-                "max_frames_per_video": 200,
-                "requires_local_salad_head": True,
-            },
-            {
-                "id": "local_salad_review50",
-                "label": "Local SALAD broad review 50%",
-                "encoder": "local_salad",
-                "keep_fraction": 0.5,
-                "frame_interval": 0.5,
-                "max_frames_per_video": 400,
-                "requires_local_salad_head": True,
-            },
-        ],
         "ffmpeg_available": bool(shutil.which("ffmpeg")),
         "image_exts": sorted(DATA_INGESTION_IMAGE_EXTS),
         "video_exts": sorted(DATA_INGESTION_VIDEO_EXTS),
@@ -17296,6 +17244,53 @@ async def _data_ingestion_save_uploads(files: Sequence[Any], target_dir: Path, f
             }
         )
     return rows
+
+
+def _data_ingestion_dataset_media_rows(
+    dataset_id: str,
+    *,
+    field_name: str,
+    max_count: int = 0,
+) -> List[Dict[str, Any]]:
+    safe_id = str(dataset_id or "").strip()
+    if not safe_id:
+        return []
+    entry = _resolve_dataset_entry(safe_id)
+    label = str(entry.get("label") or entry.get("id") or safe_id)
+    image_rows = _annotation_collect_images(entry)
+    max_items = _coerce_int(max_count, 0, minimum=0)
+    if max_items > 0:
+        image_rows = image_rows[:max_items]
+    out: List[Dict[str, Any]] = []
+    for idx, image_row in enumerate(image_rows):
+        image_path = Path(str(image_row.get("image_path") or "")).resolve()
+        if not image_path.exists() or not image_path.is_file():
+            continue
+        if image_path.suffix.lower() not in DATA_INGESTION_IMAGE_EXTS:
+            continue
+        try:
+            size = image_path.stat().st_size
+        except OSError:
+            size = 0
+        if size <= 0:
+            continue
+        split = str(image_row.get("split") or "train")
+        rel = str(image_row.get("image_relpath") or image_path.name)
+        out.append(
+            {
+                "path": str(image_path),
+                "filename": f"{split}/{rel}",
+                "saved_name": image_path.name,
+                "size": size,
+                "field": field_name,
+                "source_dataset_id": safe_id,
+                "source_dataset_label": label,
+                "split": split,
+                "image_relpath": rel,
+                "dataset_index": idx,
+            }
+        )
+    return out
 
 
 def _data_ingestion_open_image(path: Path) -> Image.Image:
@@ -17552,6 +17547,8 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         reference_rows = list(request.get("reference_uploads") or [])
         if not candidate_rows:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_candidate_files")
+        if not reference_rows:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_files")
         _data_ingestion_update(job, status="running", progress=0.02, message="Preparing candidate media ...")
         frame_interval = _coerce_float(request.get("frame_interval"), 1.0, minimum=0.1)
         max_frames = _coerce_int(request.get("max_frames_per_video"), 200, minimum=0)
@@ -17566,18 +17563,18 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         )
         if not candidates:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_candidate_images")
-        references: List[Dict[str, Any]] = []
-        if reference_rows:
-            _data_ingestion_update(job, progress=0.19, message="Preparing active-workspace reference media ...")
-            references = _data_ingestion_prepare_media(
-                job,
-                reference_rows,
-                out_dir=media_dir / "references",
-                frame_interval=frame_interval,
-                max_frames_per_video=max_frames,
-                progress_start=0.19,
-                progress_end=0.28,
-            )
+        _data_ingestion_update(job, progress=0.19, message="Preparing reference dataset media ...")
+        references = _data_ingestion_prepare_media(
+            job,
+            reference_rows,
+            out_dir=media_dir / "references",
+            frame_interval=frame_interval,
+            max_frames_per_video=max_frames,
+            progress_start=0.19,
+            progress_end=0.28,
+        )
+        if not references:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_images")
         encoder = str(request.get("encoder") or "dinov3_pooled").strip().lower()
         if encoder not in {"dinov3_pooled", "cradio_pooled", "local_salad"}:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_encoder_unsupported")
@@ -17601,19 +17598,17 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             progress_start=0.30,
             progress_end=0.72,
         )
-        reference_embeddings: Optional[np.ndarray] = None
-        if references:
-            reference_embeddings = _data_ingestion_encode_prepared_images(
-                references,
-                job=job,
-                encoder=encoder,
-                model_name=model_name,
-                salad_head_id=salad_head_id,
-                cradio_pooling=cradio_pooling,
-                batch_size=batch_size,
-                progress_start=0.72,
-                progress_end=0.88,
-            )
+        reference_embeddings = _data_ingestion_encode_prepared_images(
+            references,
+            job=job,
+            encoder=encoder,
+            model_name=model_name,
+            salad_head_id=salad_head_id,
+            cradio_pooling=cradio_pooling,
+            batch_size=batch_size,
+            progress_start=0.72,
+            progress_end=0.88,
+        )
         keep_fraction = _data_ingestion_keep_fraction(request.get("keep_fraction"), 0.2)
         selected, novelty_scores = _data_ingestion_greedy_indices(
             candidate_embeddings,
@@ -17658,6 +17653,10 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             "cradio_pooling": cradio_pooling,
             "salad_head_id": salad_head_id,
             "reference_count": len(references),
+            "reference_source": str(request.get("reference_source") or request.get("source_mode") or ""),
+            "reference_dataset_id": str(request.get("reference_dataset_id") or ""),
+            "reference_dataset_label": str(request.get("reference_dataset_label") or ""),
+            "reference_label": str(request.get("reference_label") or ""),
             "candidate_upload_count": len(candidate_rows),
             "candidate_image_count": len(candidates),
             "local_salad_policy": LOCAL_SALAD_POLICY,
@@ -17932,6 +17931,10 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                 "cradio_pooling": cradio_pooling if encoder_type == "cradio" else None,
                 "train_image_count": len(prepared),
                 "source_mode": str(request.get("source_mode") or "uploaded_media"),
+                "reference_source": str(request.get("reference_source") or request.get("source_mode") or ""),
+                "reference_dataset_id": str(request.get("reference_dataset_id") or ""),
+                "reference_dataset_label": str(request.get("reference_dataset_label") or ""),
+                "reference_label": str(request.get("reference_label") or ""),
                 "active_image_count": _coerce_int(request.get("active_image_count"), 0, minimum=0),
                 "epochs": epochs,
                 "batch_size": batch_size,
@@ -17996,6 +17999,18 @@ async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files
     out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job_id, "job")
     candidate_rows = await _data_ingestion_save_uploads(candidate_files, out_dir / "uploads" / "candidates", "candidate")
     reference_rows = await _data_ingestion_save_uploads(reference_files, out_dir / "uploads" / "references", "reference")
+    reference_source = str(manifest.get("reference_source") or manifest.get("source_mode") or "").strip()
+    reference_dataset_id = str(manifest.get("reference_dataset_id") or "").strip()
+    if reference_source == "backend_dataset" and reference_dataset_id:
+        reference_rows.extend(
+            _data_ingestion_dataset_media_rows(
+                reference_dataset_id,
+                field_name="reference",
+                max_count=_coerce_int(manifest.get("max_reference_images") or manifest.get("max_train_images"), 0, minimum=0),
+            )
+        )
+    if not reference_rows:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_files")
     request_payload = {
         **manifest,
         "candidate_uploads": candidate_rows,
@@ -18004,7 +18019,7 @@ async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files
     job = DataIngestionJob(job_id=job_id, kind="analysis", request=request_payload)
     with DATA_INGESTION_JOBS_LOCK:
         DATA_INGESTION_JOBS[job_id] = job
-        _data_ingestion_log(job, f"Queued data ingestion analysis with {len(candidate_rows)} candidate uploads.")
+        _data_ingestion_log(job, f"Queued data ingestion analysis with {len(candidate_rows)} candidate uploads and {len(reference_rows)} reference images.")
     thread = threading.Thread(target=_run_data_ingestion_analysis_job, args=(job,), daemon=True, name=f"data-ingest-{job_id[:8]}")
     thread.start()
     return {"job_id": job_id}
@@ -18017,11 +18032,21 @@ async def create_local_salad_training_job(manifest_json: str, files: List[Any]) 
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="salad_train_manifest_json_invalid") from exc
     if not isinstance(manifest, dict):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="salad_train_manifest_invalid")
-    if not files:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_no_training_files")
     job_id = f"salad_{uuid.uuid4().hex[:10]}"
     out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job_id, "job")
     rows = await _data_ingestion_save_uploads(files, out_dir / "uploads" / "train", "train")
+    reference_source = str(manifest.get("reference_source") or manifest.get("source_mode") or "").strip()
+    reference_dataset_id = str(manifest.get("reference_dataset_id") or "").strip()
+    if reference_source == "backend_dataset" and reference_dataset_id:
+        rows.extend(
+            _data_ingestion_dataset_media_rows(
+                reference_dataset_id,
+                field_name="train",
+                max_count=_coerce_int(manifest.get("max_train_images"), 0, minimum=0),
+            )
+        )
+    if not rows:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_no_training_files")
     request_payload = {**manifest, "train_uploads": rows}
     job = DataIngestionJob(job_id=job_id, kind="local_salad_train", request=request_payload)
     with DATA_INGESTION_JOBS_LOCK:

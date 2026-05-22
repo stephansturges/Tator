@@ -2096,6 +2096,7 @@ body.annotation-focus-mode .class-scroll-indicator {
     grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.75fr);
     grid-template-areas:
         "toolbar toolbar"
+        "bulk bulk"
         "graph review";
     gap: 12px;
     align-items: stretch;
@@ -2105,7 +2106,32 @@ body.annotation-focus-mode .class-scroll-indicator {
     grid-area: toolbar;
 }
 
+.class-split-bulk-panel {
+    grid-area: bulk;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+    border: 1px solid #bae6fd;
+    border-radius: 8px;
+    background: #f0f9ff;
+}
+
+.class-split-bulk-panel[hidden] {
+    display: none;
+}
+
+.class-split-bulk-panel strong {
+    color: #0f172a;
+}
+
+.class-split-bulk-panel select {
+    min-width: 180px;
+}
+
 .class-split-graph {
+    position: relative;
     width: 100%;
     min-height: 430px;
     border: 1px solid #cbd5e1;
@@ -2120,10 +2146,6 @@ body.annotation-focus-mode .class-scroll-indicator {
     height: calc(100vh - 330px);
 }
 
-.class-split-graph.class-split-graph--pan {
-    cursor: grab;
-}
-
 .class-split-review {
     display: grid;
     grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
@@ -2134,6 +2156,30 @@ body.annotation-focus-mode .class-scroll-indicator {
     grid-area: review;
     grid-template-columns: 1fr;
     align-content: start;
+}
+
+.class-split-review-section {
+    min-width: 0;
+}
+
+.class-split-review-section > strong,
+.class-split-wrong-panel > summary {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.class-split-wrong-panel > summary {
+    cursor: pointer;
+}
+
+.class-split-review-section--inspector {
+    position: sticky;
+    top: 10px;
+    z-index: 2;
+    background: #f8fafc;
+    padding-bottom: 2px;
 }
 
 .class-split-report,
@@ -2208,11 +2254,25 @@ body.annotation-focus-mode .class-scroll-indicator {
     border-color: #fb923c;
 }
 
+.class-split-wrong-item__actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 6px;
+}
+
+.class-split-wrong-item__actions .training-button {
+    padding: 4px 7px;
+    font-size: 11px;
+}
+
 .class-split-inspector__crop-shell {
+    --class-split-crop-scale: 1;
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: center;
-    min-height: 220px;
+    height: min(44vh, 420px);
+    min-height: 260px;
     margin-bottom: 8px;
     border: 1px solid #cbd5e1;
     border-radius: 7px;
@@ -2224,13 +2284,27 @@ body.annotation-focus-mode .class-scroll-indicator {
     background-size: 18px 18px;
     background-position: 0 0, 0 9px, 9px -9px, -9px 0;
     overflow: hidden;
+    cursor: zoom-in;
+    touch-action: none;
+}
+
+.class-split-inspector__crop-shell--zoomed {
+    cursor: zoom-out;
 }
 
 .class-split-inspector__crop {
-    max-width: 100%;
-    max-height: 280px;
-    object-fit: contain;
+    width: auto;
+    height: auto;
+    max-width: none;
+    max-height: none;
+    flex: 0 0 auto;
     display: block;
+    transform: scale(var(--class-split-crop-scale, 1));
+    transform-origin: center center;
+    transition: transform 0.08s ease-out;
+    image-rendering: auto;
+    user-select: none;
+    -webkit-user-drag: none;
 }
 
 .class-split-inspector__crop-status {
@@ -4262,7 +4336,9 @@ html.theme-dark .data-ingestion-report,
 html.theme-dark .data-ingestion-list,
 html.theme-dark .class-split-workspace__header,
 html.theme-dark .class-split-panel,
+html.theme-dark .class-split-bulk-panel,
 html.theme-dark .class-split-graph,
+html.theme-dark .class-split-review-section--inspector,
 html.theme-dark .class-split-report,
 html.theme-dark .class-split-wrong-list,
 html.theme-dark .class-split-inspector,
@@ -4354,7 +4430,10 @@ html.theme-dark .class-split-field label,
 html.theme-dark .data-ingestion-field label,
 html.theme-dark .class-split-toolbar label,
 html.theme-dark .class-split-advanced summary,
+html.theme-dark .class-split-review-section > strong,
+html.theme-dark .class-split-wrong-panel > summary,
 html.theme-dark .class-split-report__note,
+html.theme-dark .class-split-bulk-panel strong,
 html.theme-dark .class-split-inspector__meta {
     color: #b9c5c0;
 }
@@ -4985,7 +5064,9 @@ html.theme-pipboy .data-ingestion-report,
 html.theme-pipboy .data-ingestion-list,
 html.theme-pipboy .class-split-workspace__header,
 html.theme-pipboy .class-split-panel,
+html.theme-pipboy .class-split-bulk-panel,
 html.theme-pipboy .class-split-graph,
+html.theme-pipboy .class-split-review-section--inspector,
 html.theme-pipboy .class-split-report,
 html.theme-pipboy .class-split-wrong-list,
 html.theme-pipboy .class-split-inspector,
@@ -5077,7 +5158,10 @@ html.theme-pipboy .class-split-field label,
 html.theme-pipboy .data-ingestion-field label,
 html.theme-pipboy .class-split-toolbar label,
 html.theme-pipboy .class-split-advanced summary,
+html.theme-pipboy .class-split-review-section > strong,
+html.theme-pipboy .class-split-wrong-panel > summary,
 html.theme-pipboy .class-split-report__note,
+html.theme-pipboy .class-split-bulk-panel strong,
 html.theme-pipboy .class-split-inspector__meta {
     color: var(--pip-green-muted);
 }

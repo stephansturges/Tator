@@ -62,13 +62,15 @@ def _recipe_storage_root(
     create: bool = False,
     detail: str = "agent_recipe_path_invalid",
 ) -> Path:
-    if root.is_symlink():
+    if root.is_symlink() or root.parent.is_symlink():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     if create:
         root.mkdir(parents=True, exist_ok=True)
+        if root.is_symlink() or root.parent.is_symlink():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     if root.exists() and not root.is_dir():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
-    if root.is_symlink():
+    if root.is_symlink() or root.parent.is_symlink():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     return root.resolve(strict=False)
 
@@ -1671,9 +1673,11 @@ def _prepass_recipe_dir_impl(
     safe = sanitize_id_fn(recipe_id)
     if not safe:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
-    if recipes_root.is_symlink():
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
-    root = recipes_root.resolve()
+    root = _recipe_storage_root(
+        recipes_root,
+        create=create,
+        detail="prepass_recipe_path_invalid",
+    )
     path = root / safe
     try:
         resolved_path = path.resolve(strict=False)
@@ -1820,7 +1824,15 @@ def _list_prepass_recipes_impl(
         return 0.0
 
     recipes: List[Dict[str, Any]] = []
-    root = recipes_root.resolve()
+    try:
+        root = _recipe_storage_root(
+            recipes_root,
+            detail="prepass_recipe_path_invalid",
+        )
+    except HTTPException:
+        return recipes
+    if not root.exists():
+        return recipes
     for entry in root.iterdir():
         if entry.is_symlink():
             continue

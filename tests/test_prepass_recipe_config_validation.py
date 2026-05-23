@@ -772,6 +772,35 @@ def test_list_prepass_recipes_skips_symlinked_recipe_dir_escape(tmp_path: Path) 
     assert recipes == []
 
 
+def test_list_prepass_recipes_skips_symlinked_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_recipes"
+    recipe_dir = outside / "escaped"
+    recipe_dir.mkdir(parents=True)
+    _write_prepass_recipe_meta(
+        recipe_dir,
+        {
+            "id": "escaped",
+            "schema_version": 1,
+            "name": "escaped",
+            "config": {},
+            "created_at": 1,
+            "updated_at": 1,
+        },
+    )
+    recipes_root = tmp_path / "recipes"
+    try:
+        recipes_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    recipes = _list_prepass_recipes_impl(
+        recipes_root=recipes_root,
+        meta_filename="prepass.meta.json",
+    )
+
+    assert recipes == []
+
+
 def test_delete_agent_recipe_unlinks_symlinked_recipe_dir_without_touching_target(
     tmp_path: Path,
 ) -> None:

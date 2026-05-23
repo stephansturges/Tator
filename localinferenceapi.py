@@ -984,6 +984,19 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _model_copy_update(model: Any, updates: Mapping[str, Any]) -> Any:
+    update_dict = dict(updates or {})
+    if hasattr(model, "model_copy"):
+        return model.model_copy(update=update_dict)
+    if hasattr(model, "copy"):
+        return model.copy(update=update_dict)
+    if isinstance(model, Mapping):
+        copied = dict(model)
+        copied.update(update_dict)
+        return copied
+    raise TypeError(f"model_copy_update_unsupported:{type(model).__name__}")
+
+
 MAX_PREDICTOR_SLOTS = 3
 DATASET_ZIP_MAX_BYTES = _env_int("DATASET_ZIP_MAX_BYTES", 100 * 1024 * 1024 * 1024)
 DATASET_ZIP_ENTRY_MAX_BYTES = _env_int("DATASET_ZIP_ENTRY_MAX_BYTES", 50 * 1024 * 1024 * 1024)
@@ -11984,7 +11997,7 @@ def _agent_apply_edr_package_runtime(
     if sam3_checkpoint_path:
         global active_sam3_checkpoint
         active_sam3_checkpoint = sam3_checkpoint_path
-    return payload.copy(update=updates), runtime
+    return _model_copy_update(payload, updates), runtime
 
 
 @_register_agent_tool("log_observation")
@@ -12442,18 +12455,21 @@ def _run_prepass_annotation_qwen(
     global QWEN_CAPTION_CACHE_LIMIT
     payload, edr_package_runtime = _agent_apply_edr_package_runtime(payload)
     # Prepass-only mode is enforced; no agentic review loop is executed.
-    payload = payload.copy(update={"prepass_only": True})
+    payload = _model_copy_update(payload, {"prepass_only": True})
     if payload.edr_package_id and not bool(payload.ensemble_enabled and payload.ensemble_job_id):
         # Package-backed raw/runtime evaluation should not run the legacy classifier gate
         # ahead of downstream scoring/merge logic. The canonical EDR package already
         # defines the promoted runtime contract; forcing a hard CLIP accept/reject here
         # collapses valid detector proposals before they can be fused or handed to Falcon.
-        payload = payload.copy(update={"prepass_keep_all": True})
+        payload = _model_copy_update(payload, {"prepass_keep_all": True})
     if bool(payload.ensemble_enabled and payload.ensemble_job_id):
         # Canonical EDR deployment expects the saved ensemble bundle to score the raw
         # prepass candidate pool. Do not run the legacy finalize/classifier gate first,
         # or the live runtime can diverge sharply from the promoted offline recipe.
-        payload = payload.copy(update={"prepass_keep_all": True, "prepass_finalize": False})
+        payload = _model_copy_update(
+            payload,
+            {"prepass_keep_all": True, "prepass_finalize": False},
+        )
     _require_sam3_for_prepass_impl(
         bool(payload.enable_sam3_text),
         bool(payload.enable_sam3_similarity),
@@ -33839,10 +33855,7 @@ def qwen_prepass(payload: QwenPrepassRequest):
             progress=0.05,
             message="Preparing EDR prepass request",
         )
-        if hasattr(payload, "model_copy"):
-            payload = payload.model_copy(update={"prepass_only": True})
-        else:
-            payload = payload.copy(update={"prepass_only": True})
+        payload = _model_copy_update(payload, {"prepass_only": True})
         result = _run_prepass_annotation(payload)
         _qwen_progress_finish("EDR prepass complete")
         return result

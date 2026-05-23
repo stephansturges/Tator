@@ -986,6 +986,10 @@ job-start validation, and the Mac YOLO training work.
 - Qwen prepass progress now reports the same caption token budget the EDR
   prepass caption runner will use, including light/deep defaults and clamping of
   explicit `prepass_caption_max_tokens` values.
+- Prepass request cloning now uses a Pydantic-v2-compatible copy helper across
+  direct Qwen prepass and EDR package runtime application, removing deprecated
+  `.copy(update=...)` calls while preserving fallback support for older model
+  objects.
 - Local validation for this checkpoint used:
 
 ```bash

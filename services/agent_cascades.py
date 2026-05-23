@@ -31,6 +31,23 @@ def _path_within_root(path: Path, root: Path) -> bool:
     return True
 
 
+def _agent_cascade_storage_root(
+    root: Path,
+    *,
+    create: bool = False,
+    detail: str = "agent_cascade_path_invalid",
+) -> Path:
+    if root.is_symlink():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    if root.exists() and not root.is_dir():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    if root.is_symlink():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    return root.resolve(strict=False)
+
+
 def _prepare_output_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.parent.is_symlink():
@@ -80,7 +97,7 @@ def _persist_agent_cascade_impl(
         "created_at": time.time(),
         **payload,
     }
-    root = cascades_root.resolve()
+    root = _agent_cascade_storage_root(cascades_root, create=True)
     path_raw = cascades_root / f"{cascade_id}.json"
     path = path_raw.absolute()
     if not _path_within_root(path, root):
@@ -109,7 +126,8 @@ def _load_agent_cascade_impl(
     if path_raw.is_symlink():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_cascade_not_found")
     path = path_raw.resolve(strict=False)
-    if not path_is_within_root_fn(path, cascades_root.resolve()) or not path.exists():
+    root = _agent_cascade_storage_root(cascades_root)
+    if not path_is_within_root_fn(path, root) or not path.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_cascade_not_found")
     try:
         with path.open("r", encoding="utf-8") as fp:
@@ -129,7 +147,7 @@ def _load_agent_cascade_impl(
 
 def _list_agent_cascades_impl(*, cascades_root: Path) -> List[Dict[str, Any]]:
     cascades: List[Dict[str, Any]] = []
-    root = cascades_root.resolve()
+    root = _agent_cascade_storage_root(cascades_root)
     for path in root.glob("*.json"):
         try:
             if path.is_symlink():
@@ -158,7 +176,7 @@ def _delete_agent_cascade_impl(
     cascades_root: Path,
     path_is_within_root_fn,
 ) -> None:
-    root = cascades_root.resolve()
+    root = _agent_cascade_storage_root(cascades_root)
     json_raw = cascades_root / f"{cascade_id}.json"
     zip_raw = cascades_root / f"{cascade_id}.zip"
     json_path = json_raw.resolve()
@@ -200,7 +218,9 @@ def _ensure_cascade_zip_impl(
     cascade_id_path = Path(cascade_id_text)
     if not cascade_id_text or cascade_id_path.is_absolute() or ".." in cascade_id_path.parts:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
-    root = cascades_root.resolve()
+    root = _agent_cascade_storage_root(cascades_root, create=True)
+    recipes_base = _agent_cascade_storage_root(recipes_root)
+    classifiers_base = _agent_cascade_storage_root(classifiers_root)
     zip_raw = root / f"{cascade_id_text}.zip"
     if zip_raw.is_symlink():
         try:
@@ -276,7 +296,7 @@ def _ensure_cascade_zip_impl(
                     recipe_zip_resolved = recipe_zip.resolve()
                 except Exception:
                     continue
-                if not path_is_within_root_fn(recipe_zip_resolved, recipes_root.resolve()):
+                if not path_is_within_root_fn(recipe_zip_resolved, recipes_base):
                     continue
                 if recipe_zip.exists():
                     try:
@@ -296,7 +316,7 @@ def _ensure_cascade_zip_impl(
                     resolved_path = Path(resolved).resolve()
                 except Exception:
                     continue
-                if not path_is_within_root_fn(resolved_path, classifiers_root.resolve()):
+                if not path_is_within_root_fn(resolved_path, classifiers_base):
                     continue
                 if resolved_path.exists() and resolved_path.is_file():
                     arcname = f"classifiers/{safe_classifier_rel}"
@@ -311,7 +331,7 @@ def _ensure_cascade_zip_impl(
                     meta_path_resolved = None
                 if (
                     meta_path_resolved is not None
-                    and path_is_within_root_fn(meta_path_resolved, classifiers_root.resolve())
+                    and path_is_within_root_fn(meta_path_resolved, classifiers_base)
                     and meta_path_resolved.is_file()
                 ):
                     try:
@@ -419,17 +439,26 @@ def _import_agent_cascade_zip_obj_impl(
     classifier_import_root: Optional[Path] = None
     recipe_import_tmp_root: Optional[Path] = None
     try:
+        _agent_cascade_storage_root(
+            cascades_root,
+            detail="agent_cascade_import_invalid_path",
+        )
+        classifiers_base = _agent_cascade_storage_root(
+            classifiers_root,
+            create=bool(classifier_file_names),
+            detail="agent_cascade_import_invalid_path",
+        )
         if classifier_file_names:
             import_tag = f"cascade_{uuid.uuid4().hex[:8]}"
-            classifier_import_root = (classifiers_root / "imports" / import_tag).resolve()
-            if not path_is_within_root_fn(classifier_import_root, classifiers_root.resolve()):
+            classifier_import_root = (classifiers_base / "imports" / import_tag).resolve()
+            if not path_is_within_root_fn(classifier_import_root, classifiers_base):
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
             classifier_import_root.mkdir(parents=True, exist_ok=True)
             for name in classifier_file_names:
                 arc_path = Path(name)
                 rel_inside = Path(*arc_path.parts[1:])
                 dest_path = (classifier_import_root / rel_inside).resolve()
-                if not path_is_within_root_fn(dest_path, classifiers_root.resolve()):
+                if not path_is_within_root_fn(dest_path, classifiers_base):
                     raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
                 try:

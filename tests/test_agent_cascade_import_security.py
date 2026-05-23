@@ -42,10 +42,12 @@ def _call_import(zip_bytes: bytes, tmp_path: Path, **kwargs: Any) -> Dict[str, A
     max_entry_bytes = kwargs.pop("max_entry_bytes", 1024 * 1024)
     import_recipe_fn = kwargs.pop("import_recipe_fn", _import_recipe)
     import_recipe_file_fn = kwargs.pop("import_recipe_file_fn", None)
+    cascades_root = kwargs.pop("cascades_root", tmp_path / "cascades")
+    classifiers_root = kwargs.pop("classifiers_root", tmp_path / "classifiers")
     return _import_agent_cascade_zip_bytes_impl(
         zip_bytes,
-        cascades_root=tmp_path / "cascades",
-        classifiers_root=tmp_path / "classifiers",
+        cascades_root=cascades_root,
+        classifiers_root=classifiers_root,
         max_json_bytes=1024 * 1024,
         max_entry_bytes=max_entry_bytes,
         classifier_allowed_exts=[".pkl", ".joblib"],
@@ -201,3 +203,34 @@ def test_agent_cascade_import_cleans_classifier_files_after_late_failure(tmp_pat
     assert exc_info.value.detail == "agent_cascade_import_missing_classifier"
     imports_root = tmp_path / "classifiers" / "imports"
     assert not imports_root.exists() or not any(imports_root.iterdir())
+
+
+def test_agent_cascade_import_rejects_symlinked_classifier_root_without_write(
+    tmp_path: Path,
+) -> None:
+    cascade = {
+        "label": "demo",
+        "steps": [{"recipe_id": "r1", "extra_clip_classifier_path": "safe.pkl"}],
+        "dedupe": {},
+    }
+    payload = _make_zip(
+        {
+            "cascade.json": json.dumps(cascade).encode("utf-8"),
+            "recipes/r1.zip": b"recipe-bytes",
+            "classifiers/safe.pkl": b"classifier",
+        }
+    )
+    outside = tmp_path / "outside_classifiers"
+    outside.mkdir()
+    classifiers_root = tmp_path / "classifiers"
+    try:
+        classifiers_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _call_import(payload, tmp_path, classifiers_root=classifiers_root)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_cascade_import_invalid_path"
+    assert list(outside.iterdir()) == []

@@ -431,7 +431,7 @@ def parse_args() -> argparse.Namespace:
 def _print_matrix(matrix: Sequence[Sequence[int]], labels: Sequence[str]) -> None:
     if not matrix:
         print("Confusion matrix is empty.")
-    return
+        return
     header = "\t".join(["true\\pred"] + [str(lbl) for lbl in labels])
     print(header)
     for label, row in zip(labels, matrix, strict=False):

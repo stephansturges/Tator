@@ -259,6 +259,14 @@ def _logit_adjustment_from_counts(counts: Dict[int, int], num_classes: int) -> O
     return -np.log(prior + 1e-12)
 
 
+def _labels_from_proba(classes: Sequence[object], proba: Any) -> np.ndarray:
+    classes_arr = np.asarray(list(classes), dtype=object)
+    proba_arr = np.asarray(proba, dtype=np.float32)
+    if proba_arr.ndim != 2 or proba_arr.shape[1] != classes_arr.shape[0]:
+        raise TrainingError("Probability matrix shape does not match classifier classes.")
+    return classes_arr[np.argmax(proba_arr, axis=1)]
+
+
 def _effective_number_weight_map(labels: Sequence[object], beta: float) -> Dict[object, float]:
     counts = Counter(labels)
     if not counts:
@@ -2597,7 +2605,7 @@ def train_clip_from_yolo(
                 else:
                     proba_train = clf.predict_proba(X_train)
                 train_loss = float(log_loss(y_train, proba_train, labels=clf.classes_))
-                train_pred = clf.predict(X_train)
+                train_pred = _labels_from_proba(clf.classes_, proba_train)
                 train_acc = float((train_pred == y_train).mean())
                 last_train_pred = train_pred
                 last_train_proba = proba_train
@@ -2610,7 +2618,7 @@ def train_clip_from_yolo(
                     else:
                         proba_val = clf.predict_proba(X_test)
                     val_loss = float(log_loss(y_test, proba_val, labels=clf.classes_))
-                    val_pred = clf.predict(X_test)
+                    val_pred = _labels_from_proba(clf.classes_, proba_val)
                     val_acc = float((val_pred == y_test).mean())
                     last_val_pred = val_pred
                     last_val_proba = proba_val
@@ -2703,9 +2711,12 @@ def train_clip_from_yolo(
                     for extra_iter in range(1, extra_iters + 1):
                         _check_cancel()
                         clf.fit(X_train, y_train, sample_weight=sample_weight)
-                        proba_train = clf.predict_proba(X_train)
+                        if logit_adjustment_inference_flag and logit_adjustment_vec is not None:
+                            proba_train = _predict_proba_with_adjustment(X_train)
+                        else:
+                            proba_train = clf.predict_proba(X_train)
                         train_loss = float(log_loss(y_train, proba_train, labels=clf.classes_))
-                        train_pred = clf.predict(X_train)
+                        train_pred = _labels_from_proba(clf.classes_, proba_train)
                         train_acc = float((train_pred == y_train).mean())
                         last_train_pred = train_pred
                         last_train_proba = proba_train
@@ -2713,9 +2724,12 @@ def train_clip_from_yolo(
                         val_loss = None
                         val_acc = None
                         if y_test.size:
-                            proba_val = clf.predict_proba(X_test)
+                            if logit_adjustment_inference_flag and logit_adjustment_vec is not None:
+                                proba_val = _predict_proba_with_adjustment(X_test)
+                            else:
+                                proba_val = clf.predict_proba(X_test)
                             val_loss = float(log_loss(y_test, proba_val, labels=clf.classes_))
-                            val_pred = clf.predict(X_test)
+                            val_pred = _labels_from_proba(clf.classes_, proba_val)
                             val_acc = float((val_pred == y_test).mean())
                             last_val_pred = val_pred
                             last_val_proba = proba_val
@@ -2760,14 +2774,28 @@ def train_clip_from_yolo(
 
             _safe_progress(progress_cb, 0.65, "Evaluating classifier on validation split ...")
             if y_test.size:
-                y_pred = last_val_pred if last_val_pred is not None else clf.predict(X_test)
+                if last_val_pred is not None:
+                    y_pred = last_val_pred
+                else:
+                    if logit_adjustment_inference_flag and logit_adjustment_vec is not None:
+                        proba_val_final = _predict_proba_with_adjustment(X_test)
+                    else:
+                        proba_val_final = clf.predict_proba(X_test)
+                    y_pred = _labels_from_proba(clf.classes_, proba_val_final)
                 accuracy = float((y_pred == y_test).mean())
                 report_dict = classification_report(y_test, y_pred, zero_division=0, output_dict=True)
                 report = classification_report(y_test, y_pred, zero_division=0, digits=4)
                 labels_for_cm = sorted(set(y_test) | set(y_pred))
                 matrix = confusion_matrix(y_test, y_pred, labels=labels_for_cm).tolist()
             else:
-                train_pred_final = last_train_pred if last_train_pred is not None else clf.predict(X_train)
+                if last_train_pred is not None:
+                    train_pred_final = last_train_pred
+                else:
+                    if logit_adjustment_inference_flag and logit_adjustment_vec is not None:
+                        proba_train_final = _predict_proba_with_adjustment(X_train)
+                    else:
+                        proba_train_final = clf.predict_proba(X_train)
+                    train_pred_final = _labels_from_proba(clf.classes_, proba_train_final)
                 accuracy = float((train_pred_final == y_train).mean())
                 report_dict = classification_report(y_train, train_pred_final, zero_division=0, output_dict=True)
                 report = classification_report(y_train, train_pred_final, zero_division=0, digits=4)

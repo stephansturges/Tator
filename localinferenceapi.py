@@ -8715,12 +8715,6 @@ def _clip_head_predict_proba(
             return None
     elif class_count and logits.shape[1] != class_count:
         return None
-    temp = head.get("temperature")
-    if temp:
-        try:
-            logits = logits / float(temp)
-        except Exception:
-            pass
     if head.get("logit_adjustment_inference"):
         adjust = head.get("logit_adjustment")
         if adjust is not None:
@@ -8728,8 +8722,17 @@ def _clip_head_predict_proba(
                 adj = np.asarray(adjust, dtype=np.float32).reshape(1, -1)
             except Exception:
                 adj = None
-            if adj is not None and adj.shape[1] == logits.shape[1]:
-                logits = logits + adj
+            if adj is not None:
+                if proba_mode == "binary" and logits.shape[1] == 1 and adj.shape[1] == 2:
+                    logits = logits + (adj[:, 1:2] - adj[:, 0:1])
+                elif adj.shape[1] == logits.shape[1]:
+                    logits = logits + adj
+    temp = head.get("temperature")
+    if temp:
+        try:
+            logits = logits / float(temp)
+        except Exception:
+            pass
     if proba_mode == "binary":
         if logits.shape[1] != 1:
             logits = logits[:, :1]

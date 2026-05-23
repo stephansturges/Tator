@@ -48,6 +48,23 @@ def test_logistic_regression_constructor_matches_installed_sklearn():
     assert clf.solver == "lbfgs"
 
 
+def test_labels_from_proba_uses_classifier_class_order():
+    labels = clip_training._labels_from_proba(
+        ["negative", "positive"],
+        np.asarray([[0.1, 0.9], [0.8, 0.2]], dtype=np.float32),
+    )
+
+    assert labels.tolist() == ["positive", "negative"]
+
+
+def test_labels_from_proba_rejects_shape_mismatch():
+    with pytest.raises(clip_training.TrainingError, match="Probability matrix shape"):
+        clip_training._labels_from_proba(
+            ["negative", "positive"],
+            np.asarray([[0.1], [0.8]], dtype=np.float32),
+        )
+
+
 def test_unlink_self_referential_symlink_removes_broken_artifact(tmp_path):
     artifact = tmp_path / "model.pkl"
     os.symlink(str(artifact), artifact)

@@ -1218,6 +1218,47 @@ def test_clip_head_predict_proba_normalizes_ovr_probabilities():
     assert np.allclose(actual.sum(axis=1), [1.0])
 
 
+def test_clip_head_predict_proba_applies_binary_logit_adjustment():
+    feats = np.asarray([[0.0, 0.0]], dtype=np.float32)
+    head = {
+        "classifier_type": "logreg",
+        "classes": ["negative", "positive"],
+        "coef": np.asarray([[0.0, 0.0]], dtype=np.float32),
+        "intercept": np.asarray([0.0], dtype=np.float32),
+        "proba_mode": "binary",
+        "logit_adjustment_inference": True,
+        "logit_adjustment": [0.0, 2.0],
+    }
+
+    actual = api._clip_head_predict_proba(feats, head)
+    expected_pos = 1.0 / (1.0 + np.exp(-2.0))
+
+    assert actual is not None
+    assert actual.shape == (1, 2)
+    assert np.allclose(actual[0], [1.0 - expected_pos, expected_pos], atol=1e-6)
+
+
+def test_clip_head_predict_proba_temperatures_adjusted_binary_logits():
+    feats = np.asarray([[0.0, 0.0]], dtype=np.float32)
+    head = {
+        "classifier_type": "logreg",
+        "classes": ["negative", "positive"],
+        "coef": np.asarray([[0.0, 0.0]], dtype=np.float32),
+        "intercept": np.asarray([0.0], dtype=np.float32),
+        "proba_mode": "binary",
+        "temperature": 2.0,
+        "logit_adjustment_inference": True,
+        "logit_adjustment": [0.0, 2.0],
+    }
+
+    actual = api._clip_head_predict_proba(feats, head)
+    expected_pos = 1.0 / (1.0 + np.exp(-1.0))
+
+    assert actual is not None
+    assert actual.shape == (1, 2)
+    assert np.allclose(actual[0], [1.0 - expected_pos, expected_pos], atol=1e-6)
+
+
 def test_clip_head_predict_proba_accepts_numpy_array_classes():
     feats = np.asarray([[1.0, 0.0]], dtype=np.float32)
     head = {

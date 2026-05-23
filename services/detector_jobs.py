@@ -5,21 +5,15 @@ from __future__ import annotations
 import logging
 import time
 import json
-import math
+import os
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from services.job_payloads import json_sanitize
+
 
 def _json_sanitize(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _json_sanitize(val) for key, val in value.items()}
-    if isinstance(value, list):
-        return [_json_sanitize(item) for item in value]
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            return None
-        return value
-    return value
+    return json_sanitize(value)
 
 
 def _serialize_yolo_job_impl(job) -> Dict[str, Any]:
@@ -255,9 +249,18 @@ def _yolo_head_graft_audit_impl(
         }
         if extra:
             payload["extra"] = extra
+        if not run_dir.is_dir() or run_dir.is_symlink():
+            return
         audit_path = run_dir / "head_graft_audit.jsonl"
-        with audit_path.open("a", encoding="utf-8") as handle:
+        if audit_path.is_symlink():
+            audit_path.unlink()
+        elif audit_path.exists() and not audit_path.is_file():
+            return
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(audit_path, flags, 0o644)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, sort_keys=True) + "\n")
     except Exception:
         return
-

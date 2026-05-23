@@ -6,6 +6,8 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+from services.job_payloads import json_sanitize
+
 
 def _serialize_clip_job_impl(job) -> Dict[str, Any]:
     return {
@@ -13,10 +15,10 @@ def _serialize_clip_job_impl(job) -> Dict[str, Any]:
         "status": job.status,
         "progress": job.progress,
         "message": job.message,
-        "logs": job.logs,
-        "metrics": job.metrics,
-        "artifacts": job.artifacts,
-        "error": job.error,
+        "logs": json_sanitize(job.logs),
+        "metrics": json_sanitize(job.metrics),
+        "artifacts": json_sanitize(job.artifacts),
+        "error": json_sanitize(job.error),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
@@ -67,6 +69,7 @@ def _clip_job_update_impl(
         job.error = error
     if artifacts is not None:
         job.artifacts = artifacts
+    job.updated_at = time.time()
 
 
 def _clip_job_append_metric_impl(job, metric: Dict[str, Any], *, max_points: int) -> None:

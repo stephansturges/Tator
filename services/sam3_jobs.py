@@ -6,6 +6,8 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+from services.job_payloads import json_sanitize
+
 
 def _serialize_sam3_job_impl(job) -> Dict[str, Any]:
     return {
@@ -13,10 +15,10 @@ def _serialize_sam3_job_impl(job) -> Dict[str, Any]:
         "status": job.status,
         "progress": job.progress,
         "message": job.message,
-        "logs": job.logs,
-        "metrics": job.metrics,
-        "result": job.result,
-        "error": job.error,
+        "logs": json_sanitize(job.logs),
+        "metrics": json_sanitize(job.metrics),
+        "result": json_sanitize(job.result),
+        "error": json_sanitize(job.error),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }

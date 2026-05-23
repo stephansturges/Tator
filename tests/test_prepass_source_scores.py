@@ -500,6 +500,48 @@ def test_deep_prepass_cleanup_rejects_non_finite_scoreless_iou():
     assert result["scoreless_removed"] == 0
 
 
+def test_deep_prepass_cleanup_resolves_active_classifier_head_lazily():
+    payload = SimpleNamespace(
+        iou=0.75,
+        cross_class_dedupe_enabled=False,
+        scoreless_iou=0.0,
+        prepass_keep_all=False,
+        classifier_id=None,
+        fusion_mode="primary",
+    )
+    detections = [
+        {
+            "label": "car",
+            "bbox_xyxy_px": [0.0, 0.0, 50.0, 50.0],
+            "bbox_2d": [0.0, 0.0, 50.0, 50.0],
+            "score": 0.95,
+            "source": "yolo",
+        }
+    ]
+    current_head = {"classes": ["car"], "marker": "fresh"}
+    captured = {}
+
+    result = _agent_deep_prepass_cleanup_impl(
+        payload,
+        detections=detections,
+        pil_img=Image.new("RGB", (64, 64)),
+        labelmap=["car"],
+        resolve_classifier_path_fn=lambda _classifier_id: None,
+        load_classifier_head_fn=lambda _path: None,
+        active_classifier_head=lambda: current_head,
+        background_from_head_fn=lambda head: {head.get("marker")} if isinstance(head, dict) else set(),
+        sanitize_fn=lambda dets, **kwargs: (
+            captured.__setitem__("head", kwargs.get("classifier_head")) or dets,
+            0,
+        ),
+        default_iou=0.75,
+    )
+
+    assert len(result["detections"]) == 1
+    assert captured["head"] == current_head
+    assert captured["head"] is not current_head
+
+
 def test_deep_prepass_detector_sahi_defaults_match_zero_inputs():
     calls = []
 

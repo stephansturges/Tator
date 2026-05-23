@@ -466,8 +466,12 @@ def _agent_deep_prepass_cleanup_impl(
             classifier_path = resolve_classifier_path_fn(classifier_id)
             if classifier_path is not None:
                 head = load_classifier_head_fn(classifier_path)
-        elif isinstance(active_classifier_head, dict):
-            head = dict(active_classifier_head)
+        else:
+            current_active_head = active_classifier_head
+            if callable(active_classifier_head):
+                current_active_head = active_classifier_head()
+            if isinstance(current_active_head, dict):
+                head = dict(current_active_head)
     background = background_from_head_fn(head)
     cleaned, rejected = sanitize_fn(
         merged,

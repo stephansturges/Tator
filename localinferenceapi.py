@@ -12250,7 +12250,7 @@ _agent_readable_write = lambda line: _agent_readable_write_impl(  # noqa: E731
         default_clip_model=DEFAULT_CLIP_MODEL,
         logger=logger,
     ),
-    active_classifier_head=_active_classifier_head_for_inference(),
+    active_classifier_head=_active_classifier_head_for_inference,
     background_from_head_fn=_agent_background_classes_from_head,
     sanitize_fn=_agent_sanitize_detection_items,
     default_iou=PREPASS_CLUSTER_IOU,

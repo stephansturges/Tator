@@ -798,6 +798,10 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experi
   for non-active classifier IDs without mutating the active CLIP model. The
   post-training resume path also reloads the active CLIP model name instead of
   falling back to a stale pre-training backbone.
+- Fixed active classifier propagation into deep prepass cleanup. The prepass
+  runner now resolves the active classifier head lazily when cleanup runs,
+  instead of capturing the import-time head, so active-model changes and
+  active-classifier retraining refreshes are honored by auto-label filtering.
 - Validation used:
 
 ```bash

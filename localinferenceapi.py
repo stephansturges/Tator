@@ -33376,16 +33376,41 @@ def _storage_check_payload() -> Dict[str, Any]:
     for name, root in roots.items():
         entry = {"name": name, "path": str(root), "ok": True, "error": None}
         try:
-            root.mkdir(parents=True, exist_ok=True)
-            test_path = root / f".write_test_{uuid.uuid4().hex}"
-            test_path.write_text("ok", encoding="utf-8")
-            test_path.unlink(missing_ok=True)
+            _storage_probe_root(root)
         except Exception as exc:  # noqa: BLE001
             entry["ok"] = False
             entry["error"] = str(exc)
             ok = False
         results.append(entry)
     return {"ok": ok, "roots": results}
+
+
+def _storage_probe_root(root: Path) -> None:
+    if root.is_symlink() or root.parent.is_symlink():
+        raise RuntimeError("storage_root_symlink")
+    root.mkdir(parents=True, exist_ok=True)
+    if root.is_symlink() or root.parent.is_symlink() or not root.is_dir():
+        raise RuntimeError("storage_root_invalid")
+    root_resolved = root.resolve(strict=True)
+    test_path = root_resolved / f".write_test_{uuid.uuid4().hex}"
+    try:
+        if test_path.is_symlink():
+            raise RuntimeError("storage_probe_symlink")
+        test_resolved = test_path.resolve(strict=False)
+        if not _path_is_within_root_impl(test_resolved, root_resolved):
+            raise RuntimeError("storage_probe_escape")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(test_path, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("ok")
+    finally:
+        try:
+            if test_path.is_symlink() or test_path.exists():
+                test_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _system_health_summary() -> Dict[str, Any]:

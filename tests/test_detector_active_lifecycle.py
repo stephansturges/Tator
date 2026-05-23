@@ -117,6 +117,85 @@ def test_delete_yolo_run_clears_active_and_cached_runtime(
         api._set_yolo_infer_state(None, None, [], None)
 
 
+def test_delete_yolo_run_blocks_active_training_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "active_train_run"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "best.pt").write_text("weights", encoding="utf-8")
+    monkeypatch.setattr(api, "YOLO_JOB_ROOT", tmp_path)
+    job = api.YoloTrainingJob(
+        job_id=run_id,
+        status="running",
+        config={"paths": {"run_dir": str(run_dir)}},
+    )
+    with api.YOLO_TRAINING_JOBS_LOCK:
+        api.YOLO_TRAINING_JOBS.clear()
+        api.YOLO_TRAINING_JOBS[job.job_id] = job
+
+    try:
+        with pytest.raises(api.HTTPException) as exc:
+            api.delete_yolo_run(run_id)
+        assert exc.value.status_code == 409
+        assert exc.value.detail == "yolo_run_delete_blocked_active_jobs:yolo_training"
+        assert run_dir.exists()
+    finally:
+        with api.YOLO_TRAINING_JOBS_LOCK:
+            api.YOLO_TRAINING_JOBS.clear()
+
+
+def test_delete_yolo_run_allows_blocked_nonrunning_training_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "blocked_train_run"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(api, "YOLO_JOB_ROOT", tmp_path)
+    job = api.YoloTrainingJob(
+        job_id=run_id,
+        status="blocked",
+        config={"paths": {"run_dir": str(run_dir)}},
+    )
+    with api.YOLO_TRAINING_JOBS_LOCK:
+        api.YOLO_TRAINING_JOBS.clear()
+        api.YOLO_TRAINING_JOBS[job.job_id] = job
+
+    try:
+        assert api.delete_yolo_run(run_id) == {"status": "deleted", "run_id": run_id}
+        assert not run_dir.exists()
+    finally:
+        with api.YOLO_TRAINING_JOBS_LOCK:
+            api.YOLO_TRAINING_JOBS.clear()
+
+
+def test_delete_yolo_run_blocks_active_head_graft_base_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "base_run"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(api, "YOLO_JOB_ROOT", tmp_path)
+    job = api.YoloHeadGraftJob(
+        job_id="graft_job",
+        status="queued",
+        config={"base_run_id": run_id},
+    )
+    with api.YOLO_HEAD_GRAFT_JOBS_LOCK:
+        api.YOLO_HEAD_GRAFT_JOBS.clear()
+        api.YOLO_HEAD_GRAFT_JOBS[job.job_id] = job
+
+    try:
+        with pytest.raises(api.HTTPException) as exc:
+            api.delete_yolo_run(run_id)
+        assert exc.value.status_code == 409
+        assert exc.value.detail == "yolo_run_delete_blocked_active_jobs:yolo_head_graft"
+        assert run_dir.exists()
+    finally:
+        with api.YOLO_HEAD_GRAFT_JOBS_LOCK:
+            api.YOLO_HEAD_GRAFT_JOBS.clear()
+
+
 def test_delete_yolo_run_clears_corrupt_active_marker_inside_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -178,6 +257,33 @@ def test_delete_rfdetr_run_clears_active_and_cached_runtime(
         assert api.rfdetr_infer_variant is None
     finally:
         api._set_rfdetr_infer_state(None, None, [], None, None)
+
+
+def test_delete_rfdetr_run_blocks_active_training_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "active_rfdetr_run"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(api, "RFDETR_JOB_ROOT", tmp_path)
+    job = api.RfDetrTrainingJob(
+        job_id=run_id,
+        status="queued",
+        config={"paths": {"run_dir": str(run_dir)}},
+    )
+    with api.RFDETR_TRAINING_JOBS_LOCK:
+        api.RFDETR_TRAINING_JOBS.clear()
+        api.RFDETR_TRAINING_JOBS[job.job_id] = job
+
+    try:
+        with pytest.raises(api.HTTPException) as exc:
+            api.delete_rfdetr_run(run_id)
+        assert exc.value.status_code == 409
+        assert exc.value.detail == "rfdetr_run_delete_blocked_active_jobs:rfdetr_training"
+        assert run_dir.exists()
+    finally:
+        with api.RFDETR_TRAINING_JOBS_LOCK:
+            api.RFDETR_TRAINING_JOBS.clear()
 
 
 def test_delete_rfdetr_run_clears_corrupt_active_marker_inside_run(

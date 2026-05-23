@@ -312,7 +312,9 @@ without turning the README's first layer into a development diary.
   upstream CLIP tests are not run by the default project test command.
 - **2026-05-23:** Hardened detector, classifier, recipe, cascade, and EDR ZIP
   exports so symlinked artifacts cannot pull files from outside their roots.
-- **Current validation:** project pytest reports `713 passed, 17 skipped,
+- **2026-05-23:** Blocked destructive YOLO/RF-DETR run deletion while active
+  training or head-graft jobs still own or depend on the run.
+- **Current validation:** project pytest reports `717 passed, 17 skipped,
   8 warnings`; UI endpoint map/method checks report `148` mapped UI paths and
   `248` fetches with no failures. Live smoke is healthy on the local backend;
   YOLO/RF-DETR prediction smoke returns expected `412` responses when no active

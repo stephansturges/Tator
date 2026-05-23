@@ -13742,6 +13742,7 @@ def _purge_directory(root: Path) -> int:
 
 
 _TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
+_DESTRUCTIVE_DELETE_ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 
 
 def _iter_nested_string_values(value: Any) -> Iterator[str]:
@@ -13755,6 +13756,78 @@ def _iter_nested_string_values(value: Any) -> Iterator[str]:
     if isinstance(value, (list, tuple, set)):
         for nested in value:
             yield from _iter_nested_string_values(nested)
+
+
+def _iter_nested_key_values(value: Any):
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            yield str(key), nested
+            yield from _iter_nested_key_values(nested)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for nested in value:
+            yield from _iter_nested_key_values(nested)
+
+
+def _job_payload_references_run_id(payload: Any, run_id: str) -> bool:
+    if not run_id:
+        return False
+    run_id_norm = str(run_id)
+    for key, value in _iter_nested_key_values(payload):
+        if key not in {"run_id", "base_run_id", "job_id"}:
+            continue
+        if str(value or "").strip() == run_id_norm:
+            return True
+    return False
+
+
+def _active_jobs_block_run_delete(
+    registry: Dict[str, Any],
+    lock: threading.Lock,
+    run_id: str,
+    run_dir: Path,
+) -> bool:
+    try:
+        root = run_dir.resolve(strict=False)
+    except Exception:
+        root = run_dir
+    with lock:
+        jobs = list(registry.values())
+    for job in jobs:
+        status = str(getattr(job, "status", "") or "").strip().lower()
+        if status not in _DESTRUCTIVE_DELETE_ACTIVE_STATUSES:
+            continue
+        if str(getattr(job, "job_id", "") or "") == str(run_id):
+            return True
+        payloads = [
+            getattr(job, "config", {}) or {},
+            getattr(job, "request", {}) or {},
+            getattr(job, "result", {}) or {},
+        ]
+        if any(_job_payload_references_run_id(payload, run_id) for payload in payloads):
+            return True
+        for raw_value in _iter_nested_string_values(payloads):
+            text = raw_value.strip()
+            if not text:
+                continue
+            try:
+                candidate = Path(text).expanduser().resolve(strict=False)
+            except Exception:
+                continue
+            if _path_is_within_root_impl(candidate, root):
+                return True
+    return False
+
+
+def _active_job_registry_blocking_run_delete(
+    run_id: str,
+    run_dir: Path,
+    registries: Sequence[Tuple[str, Dict[str, Any], threading.Lock]],
+) -> Optional[str]:
+    for name, registry, lock in registries:
+        if _active_jobs_block_run_delete(registry, lock, run_id, run_dir):
+            return name
+    return None
 
 
 def _active_jobs_reference_path_root(
@@ -30103,6 +30176,16 @@ def delete_rfdetr_run(run_id: str):
     )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
+    blocking_registry = _active_job_registry_blocking_run_delete(
+        run_id,
+        run_dir,
+        [("rfdetr_training", RFDETR_TRAINING_JOBS, RFDETR_TRAINING_JOBS_LOCK)],
+    )
+    if blocking_registry:
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT,
+            detail=f"rfdetr_run_delete_blocked_active_jobs:{blocking_registry}",
+        )
     active = _load_detector_active_payload_raw(RFDETR_ACTIVE_PATH)
     active_best = str(active.get("best_path") or "")
     active_matches = str(active.get("run_id") or "") == str(run_id)
@@ -30779,6 +30862,19 @@ def delete_yolo_run(run_id: str):
     )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
+    blocking_registry = _active_job_registry_blocking_run_delete(
+        run_id,
+        run_dir,
+        [
+            ("yolo_training", YOLO_TRAINING_JOBS, YOLO_TRAINING_JOBS_LOCK),
+            ("yolo_head_graft", YOLO_HEAD_GRAFT_JOBS, YOLO_HEAD_GRAFT_JOBS_LOCK),
+        ],
+    )
+    if blocking_registry:
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT,
+            detail=f"yolo_run_delete_blocked_active_jobs:{blocking_registry}",
+        )
     active = _load_detector_active_payload_raw(YOLO_ACTIVE_PATH)
     active_best = str(active.get("best_path") or "")
     active_matches = str(active.get("run_id") or "") == str(run_id)

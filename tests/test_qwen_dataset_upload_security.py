@@ -179,3 +179,83 @@ def test_qwen_chunk_rejects_duplicate_image_name(tmp_path: Path) -> None:
         assert upload2.file.closed
     finally:
         _cleanup_upload_job("job_dup")
+
+
+def test_qwen_chunk_rejects_image_symlink_without_target_write(tmp_path: Path) -> None:
+    job = _register_upload_job(tmp_path, "job_image_link")
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"external")
+    try:
+        (job.root_dir / "train" / "link.jpg").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    try:
+        upload = UploadFile(filename="link.jpg", file=BytesIO(b"img"))
+        with pytest.raises(HTTPException) as exc_info:
+            localinferenceapi.upload_qwen_dataset_chunk(
+                "job_image_link",
+                "train",
+                "link.jpg",
+                '{"id":"x"}',
+                upload,
+            )
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == "qwen_dataset_image_exists"
+        assert outside.read_bytes() == b"external"
+        assert upload.file.closed
+    finally:
+        _cleanup_upload_job("job_image_link")
+
+
+def test_qwen_chunk_rejects_annotation_symlink_without_target_write(tmp_path: Path) -> None:
+    job = _register_upload_job(tmp_path, "job_ann_link")
+    outside = tmp_path / "outside_annotations.jsonl"
+    outside.write_text("external\n", encoding="utf-8")
+    try:
+        (job.root_dir / "train" / "annotations.jsonl").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    try:
+        upload = UploadFile(filename="a.jpg", file=BytesIO(b"img"))
+        with pytest.raises(HTTPException) as exc_info:
+            localinferenceapi.upload_qwen_dataset_chunk(
+                "job_ann_link",
+                "train",
+                "a.jpg",
+                '{"id":"x"}',
+                upload,
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "qwen_dataset_annotation_path_invalid"
+        assert outside.read_text(encoding="utf-8") == "external\n"
+        assert not (job.root_dir / "train" / "a.jpg").exists()
+        assert upload.file.closed
+    finally:
+        _cleanup_upload_job("job_ann_link")
+
+
+def test_qwen_chunk_rejects_split_symlink_without_target_write(tmp_path: Path) -> None:
+    job = _register_upload_job(tmp_path, "job_split_link")
+    outside = tmp_path / "outside_split"
+    outside.mkdir()
+    (job.root_dir / "train").rmdir()
+    try:
+        (job.root_dir / "train").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    try:
+        upload = UploadFile(filename="a.jpg", file=BytesIO(b"img"))
+        with pytest.raises(HTTPException) as exc_info:
+            localinferenceapi.upload_qwen_dataset_chunk(
+                "job_split_link",
+                "train",
+                "a.jpg",
+                '{"id":"x"}',
+                upload,
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "qwen_dataset_split_path_invalid"
+        assert not (outside / "a.jpg").exists()
+        assert upload.file.closed
+    finally:
+        _cleanup_upload_job("job_split_link")

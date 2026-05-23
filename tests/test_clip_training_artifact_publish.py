@@ -238,6 +238,31 @@ def test_copy_helpers_replace_self_referential_destination(tmp_path, copy_fn):
     assert not dest.is_symlink()
 
 
+@pytest.mark.parametrize(
+    "copy_fn",
+    [
+        _api_copy2_if_different,
+        _canonical_copy2_if_different,
+        _detector_copy2_if_different,
+        _edr_copy2_if_different,
+        _prepass_copy2_if_different,
+    ],
+)
+def test_copy_helpers_replace_symlink_destination_without_target_write(tmp_path, copy_fn):
+    source = tmp_path / "source.bin"
+    dest = tmp_path / "dest.bin"
+    outside = tmp_path / "outside.bin"
+    source.write_bytes(b"payload")
+    outside.write_bytes(b"external")
+    os.symlink(str(outside), dest)
+
+    copy_fn(source, dest)
+
+    assert dest.read_bytes() == b"payload"
+    assert not dest.is_symlink()
+    assert outside.read_bytes() == b"external"
+
+
 def test_calibration_safe_link_replaces_self_referential_destination(tmp_path):
     source = tmp_path / "features.npz"
     dest = tmp_path / "cached_features.npz"

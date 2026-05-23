@@ -134,3 +134,45 @@ def test_finalize_qwen_dataset_upload_does_not_delete_existing_target(
     with api.QWEN_DATASET_UPLOADS_LOCK:
         assert api.QWEN_DATASET_UPLOADS[job.job_id] is job
         api.QWEN_DATASET_UPLOADS.clear()
+
+
+def test_finalize_qwen_dataset_upload_rejects_broken_target_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = _register_non_empty_upload(tmp_path, monkeypatch, "job_target_link")
+    target_root = api.QWEN_DATASET_ROOT / "linked"
+    try:
+        target_root.symlink_to(tmp_path / "missing_target", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "_unique_dataset_name", lambda base, *, root: "linked")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.finalize_qwen_dataset_upload(job.job_id, {}, "demo")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "qwen_dataset_target_invalid"
+    assert target_root.is_symlink()
+    assert job.root_dir.exists()
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        assert api.QWEN_DATASET_UPLOADS[job.job_id] is job
+        api.QWEN_DATASET_UPLOADS.clear()
+
+
+def test_finalize_qwen_dataset_upload_replaces_labelmap_symlink_without_target_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = _register_non_empty_upload(tmp_path, monkeypatch, "job_labelmap_link")
+    outside = tmp_path / "outside_labelmap.txt"
+    outside.write_text("external\n", encoding="utf-8")
+    try:
+        (job.root_dir / "labelmap.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    api.finalize_qwen_dataset_upload(job.job_id, {"classes": ["building"]}, "demo")
+
+    target_labelmap = api.QWEN_DATASET_ROOT / "demo" / "labelmap.txt"
+    assert target_labelmap.read_text(encoding="utf-8") == "building\n"
+    assert not target_labelmap.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "external\n"

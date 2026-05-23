@@ -14538,8 +14538,9 @@ def _copy2_if_different(src: Path, dest: Path) -> None:
     src_resolved = src.resolve()
     if src_resolved == _path_identity(dest):
         return
-    if _unlink_self_referential_symlink(dest):
-        logger.warning("Removed self-referential artifact link before copy: %s", dest)
+    if dest.is_symlink():
+        dest.unlink(missing_ok=True)
+        logger.warning("Removed artifact symlink before copy: %s", dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src_resolved, dest)
 
@@ -19019,8 +19020,25 @@ def upload_qwen_dataset_chunk(
                 raise HTTPException(
                     status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
                 )
-            split_root = job.root_dir / split
+            job_root_resolved = job.root_dir.resolve(strict=False)
+            split_root_raw = job.root_dir / split
+            if split_root_raw.is_symlink():
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="qwen_dataset_split_path_invalid",
+                )
+            split_root = split_root_raw.resolve(strict=False)
+            if not _path_is_within_root_impl(split_root, job_root_resolved):
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="qwen_dataset_split_path_invalid",
+                )
             split_root.mkdir(parents=True, exist_ok=True)
+            if split_root_raw.is_symlink():
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="qwen_dataset_split_path_invalid",
+                )
             raw_image_name = image_name or file.filename or f"{uuid.uuid4().hex}.jpg"
             image_name_safe = Path(raw_image_name).name or f"{uuid.uuid4().hex}.jpg"
             if image_name_safe.lower() == "annotations.jsonl":
@@ -19030,7 +19048,10 @@ def upload_qwen_dataset_chunk(
                 )
             annotation_payload["image"] = image_name_safe
             annotation_text = json.dumps(annotation_payload, ensure_ascii=False, separators=(",", ":"))
-            image_path = (split_root / image_name_safe).resolve()
+            image_candidate = split_root / image_name_safe
+            if image_candidate.is_symlink():
+                raise HTTPException(status_code=HTTP_409_CONFLICT, detail="qwen_dataset_image_exists")
+            image_path = image_candidate.resolve()
             if not _path_is_within_root_impl(image_path, split_root.resolve()):
                 raise HTTPException(
                     status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_image_path_invalid"
@@ -19064,6 +19085,15 @@ def upload_qwen_dataset_chunk(
                     pass
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_empty_image")
             ann_path = split_root / "annotations.jsonl"
+            if ann_path.is_symlink():
+                try:
+                    image_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="qwen_dataset_annotation_path_invalid",
+                )
             try:
                 with ann_path.open("a", encoding="utf-8") as handle:
                     handle.write(annotation_text + "\n")
@@ -19108,7 +19138,12 @@ def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name
         base_id = _sanitize_yolo_run_id_impl(str(base_id)) or str(job_id)
         classes = metadata.get("classes") or []
         labelmap = [str(c).strip() for c in classes if str(c).strip()]
-        source_root = job.root_dir
+        if job.root_dir.is_symlink():
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail="qwen_dataset_source_path_invalid",
+            )
+        source_root = job.root_dir.resolve(strict=True)
         created_at = time.time()
 
         with QWEN_DATASET_FINALIZE_LOCK:
@@ -19121,7 +19156,7 @@ def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name
                     status_code=HTTP_400_BAD_REQUEST,
                     detail="qwen_dataset_target_invalid",
                 )
-            if target_root.exists():
+            if target_root.exists() or target_root.is_symlink():
                 raise HTTPException(
                     status_code=HTTP_409_CONFLICT,
                     detail="qwen_dataset_target_exists",
@@ -19131,6 +19166,8 @@ def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name
                 for stale_name in (QWEN_METADATA_FILENAME, "dataset_meta.json"):
                     (source_root / stale_name).unlink(missing_ok=True)
                 labelmap_path = source_root / "labelmap.txt"
+                if labelmap_path.is_symlink():
+                    labelmap_path.unlink(missing_ok=True)
                 if labelmap:
                     labelmap_path.write_text("\n".join(labelmap) + "\n", encoding="utf-8")
                 else:

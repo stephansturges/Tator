@@ -41,7 +41,8 @@ def _copy2_if_different(src: Path, dest: Path) -> None:
     src_resolved = src.resolve()
     if src_resolved == _path_identity(dest):
         return
-    _unlink_self_referential_symlink(dest)
+    if dest.is_symlink():
+        dest.unlink(missing_ok=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src_resolved, dest)
 

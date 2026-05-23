@@ -926,7 +926,8 @@ def test_class_analysis_canonical_preprocess_and_embedding_cache(monkeypatch, tm
     assert stats["misses"] == 0
 
 
-def test_class_analysis_embedding_cache_rejects_invalid_arrays(tmp_path):
+def test_class_analysis_embedding_cache_rejects_invalid_arrays(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_CACHE_ROOT", tmp_path)
     bad_shape = tmp_path / "bad_shape.npy"
     bad_nan = tmp_path / "bad_nan.npy"
     good = tmp_path / "good.npy"
@@ -938,6 +939,21 @@ def test_class_analysis_embedding_cache_rejects_invalid_arrays(tmp_path):
     assert api._class_analysis_load_cached_embedding(bad_shape) is None
     assert api._class_analysis_load_cached_embedding(bad_nan) is None
     assert np.allclose(api._class_analysis_load_cached_embedding(good), [1.0, 2.0, 3.0])
+
+
+def test_class_analysis_embedding_cache_rejects_symlink_escape(tmp_path, monkeypatch):
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    outside = tmp_path / "outside.npy"
+    np.save(outside, np.asarray([1.0, 2.0, 3.0], dtype=np.float32))
+    cache_link = cache_root / "linked.npy"
+    try:
+        cache_link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_CACHE_ROOT", cache_root)
+
+    assert api._class_analysis_load_cached_embedding(cache_link) is None
 
 
 def test_class_analysis_corrupt_cache_rematerializes_real_crop(monkeypatch, tmp_path):
@@ -1003,6 +1019,79 @@ def test_class_analysis_corrupt_cache_rematerializes_real_crop(monkeypatch, tmp_
         assert records[0]["crop_cache_reused"] is False
         assert records[0]["embedding_views"]
         assert crops[0].size == (64, 64)
+    finally:
+        for crop in crops:
+            api._close_crop_item(crop)
+
+
+def test_class_analysis_thumbnail_cache_replaces_symlink_without_target_write(
+    monkeypatch, tmp_path
+):
+    workspace = tmp_path / "workspace"
+    images_dir = workspace / "images"
+    images_dir.mkdir(parents=True)
+    image_path = images_dir / "sample.jpg"
+    Image.new("RGB", (80, 60), (20, 40, 60)).save(image_path)
+    manifest_path = workspace / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset_label": "browser snapshot",
+                "labelmap": ["car"],
+                "images": [
+                    {
+                        "split": "train",
+                        "image_relpath": "sample.jpg",
+                        "frontend_image_key": "train/original/sample.jpg",
+                        "label_lines": ["0 0.5 0.5 0.25 0.25"],
+                    }
+                ],
+                "yolo_layout": "flat",
+            }
+        ),
+        encoding="utf-8",
+    )
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    outside = tmp_path / "outside_thumb.jpg"
+    outside.write_bytes(b"external")
+    cached_thumb = cache_root / "cached_thumb.jpg"
+    try:
+        cached_thumb.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_CACHE_ROOT", cache_root)
+    monkeypatch.setattr(api, "_class_analysis_thumbnail_cache_path", lambda _crop_cache_key: cached_thumb)
+    monkeypatch.setattr(api, "_class_analysis_cached_embedding_valid", lambda *_args, **_kwargs: True)
+
+    job = api.ClassAnalysisJob(job_id="ca_thumb_cache_symlink")
+    records, crops, summary = api._class_analysis_collect_records(
+        {
+            "source_mode": "active_workspace",
+            "workspace_id": "ca_test",
+            "workspace_dir": str(workspace),
+            "workspace_manifest_path": str(manifest_path),
+            "analysis_scope": "selected_class",
+            "class_name": "car",
+            "preprocess_mode": "canonical",
+            "canonical_size": 64,
+            "crop_mode": "padded_square",
+            "padding_ratio": 0.08,
+            "background_mode": "full_crop",
+            "embedding_view_mode": "single",
+            "encoder_type": "dinov3",
+            "encoder_model": "test-dino",
+            "dinov3_pooling": "pooler",
+        },
+        job=job,
+        out_dir=tmp_path / "out",
+    )
+
+    try:
+        assert summary["object_count"] == 1
+        assert records[0]["crop_cache_reused"] is False
+        assert not cached_thumb.is_symlink()
+        assert outside.read_bytes() == b"external"
     finally:
         for crop in crops:
             api._close_crop_item(crop)

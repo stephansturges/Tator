@@ -16347,6 +16347,49 @@ def _class_analysis_thumbnail_cache_path(crop_cache_key: str) -> Path:
     return CLASS_ANALYSIS_CACHE_ROOT / "thumbnails" / safe_key[:2] / f"{safe_key}.jpg"
 
 
+def _class_analysis_prepare_write_path(path: Path, root: Path) -> Optional[Path]:
+    try:
+        root_resolved = root.resolve()
+        raw_path = Path(path)
+        parent = raw_path.parent
+        if parent.is_symlink():
+            return None
+        parent_resolved = parent.resolve(strict=False)
+        if not _path_is_within_root_impl(parent_resolved, root_resolved):
+            return None
+        parent.mkdir(parents=True, exist_ok=True)
+        if raw_path.is_symlink():
+            raw_path.unlink(missing_ok=True)
+        elif raw_path.exists() and raw_path.is_dir():
+            return None
+        target_resolved = raw_path.resolve(strict=False)
+    except Exception:
+        return None
+    if not _path_is_within_root_impl(target_resolved, root_resolved):
+        return None
+    return raw_path
+
+
+def _class_analysis_copy_file_within_roots(
+    src: Path,
+    dest: Path,
+    *,
+    source_root: Path,
+    dest_root: Path,
+) -> bool:
+    src_path = _safe_existing_regular_file_within_root_impl(src, source_root)
+    if src_path is None:
+        return False
+    dest_path = _class_analysis_prepare_write_path(dest, dest_root)
+    if dest_path is None:
+        return False
+    try:
+        shutil.copyfile(src_path, dest_path)
+    except Exception:
+        return False
+    return True
+
+
 def _class_analysis_embedding_cache_key(crop_cache_key: str, head: Dict[str, Any]) -> str:
     encoder_type = str(head.get("encoder_type") or "dinov3").strip().lower()
     encoder_model = str(head.get("encoder_model") or head.get("clip_model") or "").strip()
@@ -16366,8 +16409,13 @@ def _class_analysis_embedding_cache_key(crop_cache_key: str, head: Dict[str, Any
 
 
 def _class_analysis_load_cached_embedding(cache_path: Path) -> Optional[np.ndarray]:
+    safe_cache_path = _safe_existing_regular_file_within_root_impl(
+        cache_path, CLASS_ANALYSIS_CACHE_ROOT
+    )
+    if safe_cache_path is None:
+        return None
     try:
-        cached = np.load(cache_path)
+        cached = np.load(safe_cache_path)
         arr = np.asarray(cached, dtype=np.float32)
     except Exception:
         return None
@@ -16384,8 +16432,6 @@ def _class_analysis_cached_embedding_valid(crop_cache_key: str, head: Dict[str, 
         return False
     cache_key = _class_analysis_embedding_cache_key(crop_key, head)
     cache_path = _class_analysis_embedding_cache_path(cache_key)
-    if not cache_path.exists():
-        return False
     return _class_analysis_load_cached_embedding(cache_path) is not None
 
 
@@ -16680,10 +16726,19 @@ def _class_analysis_encode_crops(
             if cache_key:
                 cache_path = _class_analysis_embedding_cache_path(cache_key)
                 try:
-                    cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    tmp_path = cache_path.with_suffix(".tmp.npy")
+                    cache_write_path = _class_analysis_prepare_write_path(
+                        cache_path, CLASS_ANALYSIS_CACHE_ROOT
+                    )
+                    if cache_write_path is None:
+                        raise OSError("class_analysis_cache_path_forbidden")
+                    tmp_path = _class_analysis_prepare_write_path(
+                        cache_write_path.with_suffix(".tmp.npy"),
+                        CLASS_ANALYSIS_CACHE_ROOT,
+                    )
+                    if tmp_path is None:
+                        raise OSError("class_analysis_cache_tmp_path_forbidden")
                     np.save(tmp_path, feature)
-                    tmp_path.replace(cache_path)
+                    tmp_path.replace(cache_write_path)
                 except Exception:
                     cache_errors += 1
         for crop in [crops[idx] for idx in batch_indices]:
@@ -16783,8 +16838,13 @@ def _class_analysis_collect_records(
         )
         if can_reuse:
             try:
-                thumb_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(cached_thumb, thumb_path)
+                if not _class_analysis_copy_file_within_roots(
+                    cached_thumb,
+                    thumb_path,
+                    source_root=CLASS_ANALYSIS_CACHE_ROOT,
+                    dest_root=out_dir,
+                ):
+                    raise OSError("class_analysis_thumbnail_cache_forbidden")
                 return Image.new("RGB", (1, 1), (0, 0, 0)), [], True
             except Exception:
                 can_reuse = False
@@ -16818,10 +16878,17 @@ def _class_analysis_collect_records(
             thumb = pil_for_crop.crop(selected_crop_bounds).copy()
             thumb.thumbnail((256, 256))
             try:
-                thumb.save(thumb_path, format="JPEG", quality=86)
+                thumb_write_path = _class_analysis_prepare_write_path(thumb_path, out_dir)
+                if thumb_write_path is None:
+                    raise OSError("class_analysis_thumbnail_path_forbidden")
+                thumb.save(thumb_write_path, format="JPEG", quality=86)
                 if crop_cache_key:
-                    cached_thumb.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(thumb_path, cached_thumb)
+                    _class_analysis_copy_file_within_roots(
+                        thumb_write_path,
+                        cached_thumb,
+                        source_root=out_dir,
+                        dest_root=CLASS_ANALYSIS_CACHE_ROOT,
+                    )
             finally:
                 try:
                     thumb.close()
@@ -16937,8 +17004,13 @@ def _class_analysis_collect_records(
                     view_metadata = []
                 elif can_reuse_crop:
                     try:
-                        thumb_path.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copyfile(cached_thumb, thumb_path)
+                        if not _class_analysis_copy_file_within_roots(
+                            cached_thumb,
+                            thumb_path,
+                            source_root=CLASS_ANALYSIS_CACHE_ROOT,
+                            dest_root=out_dir,
+                        ):
+                            raise OSError("class_analysis_thumbnail_cache_forbidden")
                     except Exception:
                         can_reuse_crop = False
                 if can_reuse_crop:
@@ -16959,9 +17031,16 @@ def _class_analysis_collect_records(
                     thumb = pil_img.crop(crop_bounds).copy()
                     thumb.thumbnail((256, 256))
                     try:
-                        thumb.save(thumb_path, format="JPEG", quality=86)
-                        cached_thumb.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copyfile(thumb_path, cached_thumb)
+                        thumb_write_path = _class_analysis_prepare_write_path(thumb_path, out_dir)
+                        if thumb_write_path is None:
+                            raise OSError("class_analysis_thumbnail_path_forbidden")
+                        thumb.save(thumb_write_path, format="JPEG", quality=86)
+                        _class_analysis_copy_file_within_roots(
+                            thumb_write_path,
+                            cached_thumb,
+                            source_root=out_dir,
+                            dest_root=CLASS_ANALYSIS_CACHE_ROOT,
+                        )
                     except Exception:
                         pass
                     try:

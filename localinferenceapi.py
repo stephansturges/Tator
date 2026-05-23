@@ -22538,21 +22538,57 @@ def _qwen_train_float(
     return parsed
 
 
-def _qwen_training_split_root(job_id: str) -> Path:
-    split_parent = (QWEN_JOB_ROOT / "splits").resolve()
-    split_root = (split_parent / str(job_id)).resolve()
+def _training_split_paths(job_root: Path, job_id: str, *, detail: str) -> Tuple[Path, Path, Path]:
+    raw_id = str(job_id or "").strip()
+    if (
+        not raw_id
+        or raw_id in {".", ".."}
+        or "/" in raw_id
+        or "\\" in raw_id
+        or Path(raw_id).is_absolute()
+    ):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    split_parent = (job_root / "splits").resolve(strict=False)
+    raw_split = split_parent / raw_id
+    try:
+        split_root = raw_split.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
     if not _path_is_within_root_impl(split_root, split_parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    return split_parent, raw_split, split_root
+
+
+def _cleanup_training_split(job_root: Path, job_id: str, *, detail: str) -> None:
+    try:
+        _, raw_split, split_root = _training_split_paths(job_root, job_id, detail=detail)
+    except HTTPException:
+        return
+    try:
+        if raw_split.is_symlink():
+            raw_split.unlink(missing_ok=True)
+            return
+        if not split_root.exists():
+            return
+        if split_root.is_dir():
+            shutil.rmtree(split_root, ignore_errors=True)
+        else:
+            split_root.unlink(missing_ok=True)
+    except Exception:
+        return
+
+
+def _qwen_training_split_root(job_id: str) -> Path:
+    _, raw_split, split_root = _training_split_paths(
+        QWEN_JOB_ROOT, job_id, detail="qwen_split_path_invalid"
+    )
+    if raw_split.is_symlink():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_split_path_invalid")
     return split_root
 
 
 def _cleanup_qwen_training_split(job_id: str) -> None:
-    try:
-        split_root = _qwen_training_split_root(job_id)
-    except HTTPException:
-        return
-    if split_root.exists():
-        shutil.rmtree(split_root, ignore_errors=True)
+    _cleanup_training_split(QWEN_JOB_ROOT, job_id, detail="qwen_split_path_invalid")
 
 
 def _prepare_qwen_training_split(
@@ -26127,20 +26163,16 @@ def _rfdetr_ddp_worker(
 
 
 def _sam3_training_split_root(job_id: str) -> Path:
-    split_parent = (SAM3_JOB_ROOT / "splits").resolve()
-    split_root = (split_parent / str(job_id)).resolve()
-    if not _path_is_within_root_impl(split_root, split_parent):
+    _, raw_split, split_root = _training_split_paths(
+        SAM3_JOB_ROOT, job_id, detail="sam3_split_path_invalid"
+    )
+    if raw_split.is_symlink():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_split_path_invalid")
     return split_root
 
 
 def _cleanup_sam3_training_split(job_id: str) -> None:
-    try:
-        split_root = _sam3_training_split_root(job_id)
-    except HTTPException:
-        return
-    if split_root.exists():
-        shutil.rmtree(split_root, ignore_errors=True)
+    _cleanup_training_split(SAM3_JOB_ROOT, job_id, detail="sam3_split_path_invalid")
 
 
 def _prepare_sam3_training_split(

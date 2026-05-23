@@ -386,9 +386,30 @@ def _yolo_run_dir_impl(
     return candidate
 
 
-def _yolo_load_run_meta_impl(run_dir: Path, *, meta_name: str) -> Dict[str, Any]:
+def _safe_run_meta_file_impl(run_dir: Path, *, meta_name: str) -> Optional[Path]:
+    if run_dir.is_symlink():
+        return None
+    try:
+        run_root = run_dir.resolve()
+    except Exception:
+        return None
     meta_path = run_dir / meta_name
-    if not meta_path.exists():
+    if meta_path.is_symlink():
+        return None
+    try:
+        resolved = meta_path.resolve(strict=True)
+    except Exception:
+        return None
+    if not _path_is_within_root_impl(resolved, run_root):
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
+def _yolo_load_run_meta_impl(run_dir: Path, *, meta_name: str) -> Dict[str, Any]:
+    meta_path = _safe_run_meta_file_impl(run_dir, meta_name=meta_name)
+    if meta_path is None:
         return {}
     try:
         return json.loads(meta_path.read_text())
@@ -471,8 +492,8 @@ def _rfdetr_run_dir_impl(
 
 
 def _rfdetr_load_run_meta_impl(run_dir: Path, *, meta_name: str) -> Dict[str, Any]:
-    meta_path = run_dir / meta_name
-    if not meta_path.exists():
+    meta_path = _safe_run_meta_file_impl(run_dir, meta_name=meta_name)
+    if meta_path is None:
         return {}
     try:
         return json.loads(meta_path.read_text())
@@ -1675,26 +1696,38 @@ def _list_yolo_runs_impl(
 ) -> List[Dict[str, Any]]:
     runs: List[Dict[str, Any]] = []
     active_id = active_payload.get("run_id") if isinstance(active_payload, dict) else None
+    try:
+        job_root_resolved = job_root.resolve()
+    except Exception:
+        return runs
+    dataset_cache_resolved = dataset_cache_root.resolve(strict=False)
     for entry in job_root.iterdir():
-        if not entry.is_dir():
+        if entry.is_symlink():
             continue
-        if entry == dataset_cache_root:
+        try:
+            run_dir = entry.resolve()
+        except Exception:
             continue
-        meta_path = entry / meta_name
-        if not meta_path.exists():
+        if not _path_is_within_root_impl(run_dir, job_root_resolved):
             continue
-        meta = load_meta_fn(entry)
-        run_id = meta.get("job_id") or entry.name
+        if not run_dir.is_dir():
+            continue
+        if run_dir == dataset_cache_resolved:
+            continue
+        if _safe_run_meta_file_impl(run_dir, meta_name=meta_name) is None:
+            continue
+        meta = load_meta_fn(run_dir)
+        run_id = meta.get("job_id") or run_dir.name
         config = meta.get("config") or {}
         dataset = config.get("dataset") or {}
         run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
         created_at = meta.get("created_at")
         if not created_at:
             try:
-                created_at = entry.stat().st_mtime
+                created_at = run_dir.stat().st_mtime
             except Exception:
                 created_at = None
-        artifacts = collect_artifacts_fn(entry)
+        artifacts = collect_artifacts_fn(run_dir)
         status = meta.get("status")
         message = meta.get("message")
         if status not in {"succeeded", "failed", "cancelled"} and artifacts.get("best_pt"):
@@ -1729,24 +1762,35 @@ def _list_rfdetr_runs_impl(
 ) -> List[Dict[str, Any]]:
     runs: List[Dict[str, Any]] = []
     active_id = active_payload.get("run_id") if isinstance(active_payload, dict) else None
+    try:
+        job_root_resolved = job_root.resolve()
+    except Exception:
+        return runs
     for entry in job_root.iterdir():
-        if not entry.is_dir():
+        if entry.is_symlink():
             continue
-        meta_path = entry / meta_name
-        if not meta_path.exists():
+        try:
+            run_dir = entry.resolve()
+        except Exception:
             continue
-        meta = load_meta_fn(entry)
-        run_id = meta.get("job_id") or entry.name
+        if not _path_is_within_root_impl(run_dir, job_root_resolved):
+            continue
+        if not run_dir.is_dir():
+            continue
+        if _safe_run_meta_file_impl(run_dir, meta_name=meta_name) is None:
+            continue
+        meta = load_meta_fn(run_dir)
+        run_id = meta.get("job_id") or run_dir.name
         config = meta.get("config") or {}
         dataset = config.get("dataset") or {}
         run_name = config.get("run_name") or dataset.get("label") or dataset.get("id") or run_id
         created_at = meta.get("created_at")
         if not created_at:
             try:
-                created_at = entry.stat().st_mtime
+                created_at = run_dir.stat().st_mtime
             except Exception:
                 created_at = None
-        artifacts = collect_artifacts_fn(entry)
+        artifacts = collect_artifacts_fn(run_dir)
         status = meta.get("status")
         message = meta.get("message")
         if status not in {"succeeded", "failed", "cancelled"} and (

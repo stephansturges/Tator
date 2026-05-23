@@ -282,8 +282,8 @@ but unhelpful for the dataset.
   fallback; SALAD stays out of crop-level class presets.
 - **Backend hardening:** job rollback/cleanup, checkpoint containment, EDR/RF-DETR
   staging, package import/export paths, cache pruning, annotation overlays, CLIP
-  sidecars, and calibration job paths now fail closed.
-- **Validation:** `771 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
+  sidecars, calibration job paths, and detector run registries now fail closed.
+- **Validation:** `775 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
   and local backend smoke are clean.
 
 </details>

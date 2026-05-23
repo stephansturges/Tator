@@ -9,10 +9,14 @@ import pytest
 
 import localinferenceapi as api
 from services.detectors import (
+    _list_rfdetr_runs_impl,
+    _list_yolo_runs_impl,
     _load_yolo_active_impl,
+    _rfdetr_load_run_meta_impl,
     _rfdetr_prune_run_dir_impl,
     _rfdetr_best_checkpoint_impl,
     _rfdetr_prepare_dataset_impl,
+    _yolo_load_run_meta_impl,
     _yolo_prune_run_dir_impl,
 )
 
@@ -57,6 +61,81 @@ def test_load_yolo_active_ignores_best_symlink_escape(tmp_path: Path) -> None:
     )
 
     assert _load_yolo_active_impl(active_path) == {}
+
+
+def test_yolo_load_run_meta_skips_symlink_escape(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    outside = tmp_path / "outside_meta.json"
+    outside.write_text('{"job_id":"escaped"}', encoding="utf-8")
+    try:
+        (run_dir / "run_meta.json").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert _yolo_load_run_meta_impl(run_dir, meta_name="run_meta.json") == {}
+
+
+def test_rfdetr_load_run_meta_skips_symlink_escape(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    outside = tmp_path / "outside_meta.json"
+    outside.write_text('{"job_id":"escaped"}', encoding="utf-8")
+    try:
+        (run_dir / "run_meta.json").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert _rfdetr_load_run_meta_impl(run_dir, meta_name="run_meta.json") == {}
+
+
+def test_list_yolo_runs_skips_symlinked_run_dir_escape(tmp_path: Path) -> None:
+    job_root = tmp_path / "yolo_runs"
+    job_root.mkdir()
+    outside = tmp_path / "outside_run"
+    outside.mkdir()
+    (outside / "run_meta.json").write_text('{"job_id":"escaped"}', encoding="utf-8")
+    try:
+        (job_root / "linked_run").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    runs = _list_yolo_runs_impl(
+        job_root=job_root,
+        dataset_cache_root=job_root / "datasets",
+        active_payload={},
+        load_meta_fn=lambda run_dir: _yolo_load_run_meta_impl(
+            run_dir, meta_name="run_meta.json"
+        ),
+        collect_artifacts_fn=lambda _run_dir: {},
+        meta_name="run_meta.json",
+    )
+
+    assert runs == []
+
+
+def test_list_rfdetr_runs_skips_symlinked_run_dir_escape(tmp_path: Path) -> None:
+    job_root = tmp_path / "rfdetr_runs"
+    job_root.mkdir()
+    outside = tmp_path / "outside_run"
+    outside.mkdir()
+    (outside / "run_meta.json").write_text('{"job_id":"escaped"}', encoding="utf-8")
+    try:
+        (job_root / "linked_run").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    runs = _list_rfdetr_runs_impl(
+        job_root=job_root,
+        active_payload={},
+        load_meta_fn=lambda run_dir: _rfdetr_load_run_meta_impl(
+            run_dir, meta_name="run_meta.json"
+        ),
+        collect_artifacts_fn=lambda _run_dir: {},
+        meta_name="run_meta.json",
+    )
+
+    assert runs == []
 
 
 def test_download_yolo_run_skips_symlink_keep_file_escape(

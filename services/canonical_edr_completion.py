@@ -90,7 +90,19 @@ def canonical_deployment_job_id(dataset_id: str, recipe_fingerprint: str) -> str
 
 def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise ValueError("canonical_json_parent_symlink")
     tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    parent_resolved = path.parent.resolve(strict=True)
+    for candidate in (tmp_path, path):
+        if candidate.is_symlink():
+            candidate.unlink(missing_ok=True)
+        elif candidate.exists() and candidate.is_dir():
+            raise ValueError("canonical_json_target_is_directory")
+        try:
+            candidate.resolve(strict=False).relative_to(parent_resolved)
+        except Exception as exc:
+            raise ValueError("canonical_json_path_not_allowed") from exc
     tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     os.replace(tmp_path, path)
     return path

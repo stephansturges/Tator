@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 from services.calibration_recipe_registry import (
+    _atomic_write_json,
     build_recipe_fingerprint,
     build_recipe_fingerprint_payload,
     find_matching_recipe,
@@ -95,6 +99,82 @@ def test_register_promoted_recipe_persists_registry_entry(tmp_path: Path) -> Non
     assert find_matching_recipe(cache_root, fingerprint)["fingerprint"] == fingerprint
     registry = load_registry(cache_root)
     assert fingerprint in registry["entries"]
+
+
+def test_recipe_registry_atomic_write_replaces_symlink_targets_without_target_write(
+    tmp_path: Path,
+) -> None:
+    json_path = tmp_path / "registry" / "index.json"
+    json_path.parent.mkdir()
+    outside_tmp = tmp_path / "outside_tmp.json"
+    outside_final = tmp_path / "outside_final.json"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    tmp_link = json_path.with_suffix(json_path.suffix + f".tmp.{os.getpid()}")
+    try:
+        tmp_link.symlink_to(outside_tmp)
+        json_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _atomic_write_json(json_path, {"version": 1, "entries": {}})
+
+    assert not tmp_link.exists()
+    assert not json_path.is_symlink()
+    assert json.loads(json_path.read_text(encoding="utf-8"))["version"] == 1
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
+
+
+def test_register_promoted_recipe_replaces_symlinked_recipe_dir_without_target_write(
+    tmp_path: Path,
+) -> None:
+    cache_root = tmp_path / "cache"
+    fingerprint_payload = _sample_payload()
+    fingerprint = build_recipe_fingerprint(fingerprint_payload)
+    registry_root = cache_root / "recipe_registry"
+    registry_root.mkdir(parents=True)
+    outside = tmp_path / "outside_recipe"
+    outside.mkdir()
+    (outside / "canonical_edr.json").write_text("external", encoding="utf-8")
+    try:
+        (registry_root / fingerprint).symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    canonical_json = tmp_path / "canonical_edr.json"
+    canonical_json.write_text(json.dumps({"canonical_windowed_recipe": {"winner_lane": "window"}}))
+
+    entry = register_promoted_recipe(
+        cache_root,
+        fingerprint=fingerprint,
+        fingerprint_payload=fingerprint_payload,
+        dataset_id="demo",
+        canonical_recipe_json=canonical_json,
+        canonical_recipe_md=None,
+        report_bundle_json=None,
+        discovery_run_root=None,
+    )
+
+    recipe_dir = Path(entry["recipe_root"])
+    assert not recipe_dir.is_symlink()
+    assert (recipe_dir / "canonical_edr.json").exists()
+    assert (outside / "canonical_edr.json").read_text(encoding="utf-8") == "external"
+
+
+def test_load_registry_skips_symlinked_index_escape(tmp_path: Path) -> None:
+    cache_root = tmp_path / "cache"
+    registry_root = cache_root / "recipe_registry"
+    registry_root.mkdir(parents=True)
+    outside = tmp_path / "outside_index.json"
+    outside.write_text(json.dumps({"version": 1, "entries": {"escaped": {}}}), encoding="utf-8")
+    try:
+        (registry_root / "index.json").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    registry = load_registry(cache_root)
+
+    assert registry["entries"] == {}
 
 
 def test_register_promoted_recipe_is_safe_under_concurrent_writes(tmp_path: Path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from services.canonical_edr_completion import (
     persist_canonical_edr_completion,
     repair_persisted_canonical_completion,
     rewrite_canonical_deployment_bundle_metadata,
+    _write_json_atomic,
 )
 from tools import run_canonical_prepass_discovery as runner
 
@@ -24,6 +26,31 @@ from tools import run_canonical_prepass_discovery as runner
 def _write_json(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_canonical_write_json_atomic_replaces_symlink_targets_without_target_write(
+    tmp_path: Path,
+) -> None:
+    json_path = tmp_path / "job" / "summary.json"
+    json_path.parent.mkdir()
+    outside_tmp = tmp_path / "outside_tmp.json"
+    outside_final = tmp_path / "outside_final.json"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    tmp_link = json_path.with_suffix(json_path.suffix + f".tmp.{os.getpid()}")
+    try:
+        tmp_link.symlink_to(outside_tmp)
+        json_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _write_json_atomic(json_path, {"status": "ok"})
+
+    assert not tmp_link.exists()
+    assert not json_path.is_symlink()
+    assert json.loads(json_path.read_text(encoding="utf-8"))["status"] == "ok"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
 
 
 def _write_deployment_source_bundle(

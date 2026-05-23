@@ -273,17 +273,6 @@ but unhelpful for the dataset.
 
 </details>
 
-<details>
-<summary>Update Tracking</summary>
-
-Latest checkpoint: Qwen captions/training, SAM3, Class Split Explorer, Data
-Ingestion, detector training, and registry/package paths have been stabilized.
-
-Validation: `827 passed, 17 skipped, 8 warnings`; UI endpoint checks and local
-backend smoke are clean.
-
-</details>
-
 ## Training and Model Management
 
 Tator keeps helper models close to the annotation workflow:
@@ -577,6 +566,14 @@ python -m pytest tests/test_macos_acceleration.py tests/test_detector_sahi_resil
 Broader suites are organized by feature area under `tests/`. UI tests live in
 `tests/ui/e2e/` and are marked so they can be run separately when Playwright and
 the backend are available.
+
+<details>
+<summary>Update Tracking</summary>
+
+Current validation: `833 passed, 17 skipped, 8 warnings`, UI endpoint checks,
+and local backend smoke.
+
+</details>
 
 ## Runtime Artifacts
 

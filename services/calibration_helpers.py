@@ -108,7 +108,19 @@ def _calibration_safe_link(src: Path, dest: Path) -> None:
 
 def _calibration_write_record_atomic(path: Path, record: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise ValueError("calibration_record_parent_symlink")
+    parent_resolved = path.parent.resolve(strict=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
+    for candidate in (tmp_path, path):
+        if candidate.is_symlink():
+            candidate.unlink(missing_ok=True)
+        elif candidate.exists() and candidate.is_dir():
+            raise ValueError("calibration_record_target_is_directory")
+        try:
+            candidate.resolve(strict=False).relative_to(parent_resolved)
+        except Exception as exc:
+            raise ValueError("calibration_record_path_not_allowed") from exc
     tmp_path.write_text(json.dumps(record, ensure_ascii=False))
     tmp_path.replace(path)
 

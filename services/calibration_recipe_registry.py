@@ -84,10 +84,84 @@ def discovery_runs_root(cache_root: Path) -> Path:
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise ValueError("recipe_registry_json_parent_symlink")
+    parent_resolved = path.parent.resolve(strict=True)
     tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    for candidate in (tmp_path, path):
+        if candidate.is_symlink():
+            candidate.unlink(missing_ok=True)
+        elif candidate.exists() and candidate.is_dir():
+            raise ValueError("recipe_registry_json_target_is_directory")
+        try:
+            candidate.resolve(strict=False).relative_to(parent_resolved)
+        except Exception as exc:
+            raise ValueError("recipe_registry_json_path_not_allowed") from exc
     tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     os.replace(tmp_path, path)
     return path
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _write_text_within_parent(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise ValueError("recipe_registry_text_parent_symlink")
+    parent_resolved = path.parent.resolve(strict=True)
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+    elif path.exists() and path.is_dir():
+        raise ValueError("recipe_registry_text_target_is_directory")
+    try:
+        path.resolve(strict=False).relative_to(parent_resolved)
+    except Exception as exc:
+        raise ValueError("recipe_registry_text_path_not_allowed") from exc
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _prepare_recipe_registry_root(cache_root: Path) -> Path:
+    if cache_root.is_symlink():
+        raise ValueError("recipe_registry_cache_root_symlink")
+    cache_root.mkdir(parents=True, exist_ok=True)
+    if cache_root.is_symlink():
+        raise ValueError("recipe_registry_cache_root_symlink")
+    cache_resolved = cache_root.resolve(strict=True)
+    root = registry_root(cache_root)
+    if root.is_symlink():
+        raise ValueError("recipe_registry_root_symlink")
+    root.mkdir(parents=True, exist_ok=True)
+    if root.is_symlink():
+        raise ValueError("recipe_registry_root_symlink")
+    try:
+        root_resolved = root.resolve(strict=True)
+    except Exception as exc:
+        raise ValueError("recipe_registry_root_not_allowed") from exc
+    if not _path_within(root_resolved, cache_resolved):
+        raise ValueError("recipe_registry_root_not_allowed")
+    return root
+
+
+def _prepare_recipe_dir(root: Path, fingerprint: str) -> Path:
+    recipe_dir = root / str(fingerprint)
+    if recipe_dir.is_symlink():
+        recipe_dir.unlink(missing_ok=True)
+    elif recipe_dir.exists() and not recipe_dir.is_dir():
+        raise ValueError("recipe_registry_entry_path_not_directory")
+    recipe_dir.mkdir(parents=True, exist_ok=True)
+    root_resolved = root.resolve(strict=True)
+    try:
+        recipe_dir.resolve(strict=True).relative_to(root_resolved)
+    except Exception as exc:
+        raise ValueError("recipe_registry_entry_path_not_allowed") from exc
+    return recipe_dir
 
 
 @contextmanager
@@ -110,11 +184,23 @@ def discovery_lock(cache_root: Path, fingerprint: str) -> Iterator[None]:
 
 def load_registry(cache_root: Path) -> Dict[str, Any]:
     root = registry_root(cache_root)
-    index_path = root / "index.json"
-    if not index_path.exists():
+    if root.is_symlink():
         return {"version": CALIBRATION_RECIPE_REGISTRY_VERSION, "entries": {}}
     try:
-        payload = json.loads(index_path.read_text(encoding="utf-8"))
+        cache_resolved = cache_root.resolve(strict=False)
+        root_resolved = root.resolve(strict=False)
+    except Exception:
+        return {"version": CALIBRATION_RECIPE_REGISTRY_VERSION, "entries": {}}
+    if not _path_within(root_resolved, cache_resolved):
+        return {"version": CALIBRATION_RECIPE_REGISTRY_VERSION, "entries": {}}
+    index_path = root / "index.json"
+    if index_path.is_symlink() or not index_path.exists():
+        return {"version": CALIBRATION_RECIPE_REGISTRY_VERSION, "entries": {}}
+    try:
+        index_resolved = index_path.resolve(strict=True)
+        if not _path_within(index_resolved, root_resolved):
+            return {"version": CALIBRATION_RECIPE_REGISTRY_VERSION, "entries": {}}
+        payload = json.loads(index_resolved.read_text(encoding="utf-8"))
     except Exception:
         return {"version": CALIBRATION_RECIPE_REGISTRY_VERSION, "entries": {}}
     if not isinstance(payload, dict):
@@ -127,8 +213,7 @@ def load_registry(cache_root: Path) -> Dict[str, Any]:
 
 
 def save_registry(cache_root: Path, payload: Dict[str, Any]) -> Path:
-    root = registry_root(cache_root)
-    root.mkdir(parents=True, exist_ok=True)
+    root = _prepare_recipe_registry_root(cache_root)
     index_path = root / "index.json"
     return _atomic_write_json(index_path, payload)
 
@@ -160,30 +245,36 @@ def register_promoted_recipe(
     canonical_deployment: Optional[Dict[str, Any]] = None,
     edr_package: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    root = registry_root(cache_root)
-    recipe_dir = root / str(fingerprint)
-    recipe_dir.mkdir(parents=True, exist_ok=True)
+    root = _prepare_recipe_registry_root(cache_root)
+    recipe_dir = _prepare_recipe_dir(root, str(fingerprint))
 
     canonical_dst = recipe_dir / "canonical_edr.json"
-    canonical_dst.write_text(canonical_recipe_json.read_text(encoding="utf-8"), encoding="utf-8")
+    _write_text_within_parent(canonical_dst, canonical_recipe_json.read_text(encoding="utf-8"))
     legacy_canonical_dst = recipe_dir / "canonical_prepass_recipe.json"
-    legacy_canonical_dst.write_text(canonical_recipe_json.read_text(encoding="utf-8"), encoding="utf-8")
+    _write_text_within_parent(
+        legacy_canonical_dst, canonical_recipe_json.read_text(encoding="utf-8")
+    )
 
     canonical_md_dst: Optional[Path] = None
     if canonical_recipe_md is not None and canonical_recipe_md.exists():
         canonical_md_dst = recipe_dir / "canonical_edr.md"
-        canonical_md_dst.write_text(canonical_recipe_md.read_text(encoding="utf-8"), encoding="utf-8")
-        (recipe_dir / "canonical_prepass_recipe.md").write_text(
-            canonical_recipe_md.read_text(encoding="utf-8"), encoding="utf-8"
+        md_text = canonical_recipe_md.read_text(encoding="utf-8")
+        _write_text_within_parent(canonical_md_dst, md_text)
+        _write_text_within_parent(
+            recipe_dir / "canonical_prepass_recipe.md",
+            md_text,
         )
 
     report_dst: Optional[Path] = None
     if report_bundle_json is not None and report_bundle_json.exists():
         report_dst = recipe_dir / "report_bundle.json"
-        report_dst.write_text(report_bundle_json.read_text(encoding="utf-8"), encoding="utf-8")
+        _write_text_within_parent(report_dst, report_bundle_json.read_text(encoding="utf-8"))
 
     fingerprint_payload_path = recipe_dir / "fingerprint.json"
-    fingerprint_payload_path.write_text(json.dumps(fingerprint_payload, indent=2), encoding="utf-8")
+    _write_text_within_parent(
+        fingerprint_payload_path,
+        json.dumps(fingerprint_payload, indent=2),
+    )
     normalized_origin = str(origin_kind or CANONICAL_EDR_ORIGIN_DISCOVERY_BACKED).strip().lower()
     if normalized_origin not in {
         CANONICAL_EDR_ORIGIN_DISCOVERY_BACKED,

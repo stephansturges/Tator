@@ -7,7 +7,11 @@ from typing import Any, Dict
 
 import pytest
 
-from services.prepass_recipes import _copy_tree_filtered_impl, _ensure_recipe_zip_impl
+from services.prepass_recipes import (
+    _copy2_if_different,
+    _copy_tree_filtered_impl,
+    _ensure_recipe_zip_impl,
+)
 
 
 def test_ensure_recipe_zip_rebuilds_corrupt_existing_zip(tmp_path: Path) -> None:
@@ -53,6 +57,46 @@ def test_ensure_recipe_zip_skips_symlink_artifact_escape(tmp_path: Path) -> None
     assert "recipe.json" in names
     assert "crops/escape.png" not in names
     assert "clip_head/meta.json" not in names
+
+
+def test_ensure_recipe_zip_replaces_symlinked_existing_zip_without_target_write(
+    tmp_path: Path,
+) -> None:
+    recipes_root = tmp_path / "recipes"
+    recipes_root.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.zip"
+    outside.write_bytes(b"external")
+    zip_path = recipes_root / "r3.zip"
+    try:
+        zip_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    result = _ensure_recipe_zip_impl(
+        {"id": "r3", "label": "demo", "config": {"x": 1}},
+        recipes_root=recipes_root,
+    )
+
+    assert result == zip_path
+    assert not zip_path.is_symlink()
+    assert outside.read_bytes() == b"external"
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        assert "recipe.json" in set(zf.namelist())
+
+
+def test_prepass_copy2_if_different_replaces_symlink_to_source(tmp_path: Path) -> None:
+    src = tmp_path / "source.bin"
+    src.write_text("source", encoding="utf-8")
+    dest = tmp_path / "dest.bin"
+    try:
+        dest.symlink_to(src)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _copy2_if_different(src, dest)
+
+    assert not dest.is_symlink()
+    assert dest.read_text(encoding="utf-8") == "source"
 
 
 def test_copy_tree_filtered_skips_symlink_escape(tmp_path: Path) -> None:

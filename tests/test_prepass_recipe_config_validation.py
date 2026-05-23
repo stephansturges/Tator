@@ -1,4 +1,5 @@
 import json
+import os
 import zipfile
 from pathlib import Path
 
@@ -92,6 +93,61 @@ def test_save_prepass_recipe_preserves_created_at(tmp_path):
     )
     assert updated["created_at"] == first["created_at"]
     assert updated["updated_at"] >= first["updated_at"]
+
+
+def test_write_prepass_recipe_meta_replaces_symlink_targets_without_target_write(tmp_path):
+    recipe_dir = tmp_path / "recipe"
+    recipe_dir.mkdir()
+    meta_path = recipe_dir / "prepass.meta.json"
+    outside_tmp = tmp_path / "outside_tmp.json"
+    outside_final = tmp_path / "outside_final.json"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    tmp_link = meta_path.with_suffix(meta_path.suffix + f".tmp.{os.getpid()}")
+    try:
+        tmp_link.symlink_to(outside_tmp)
+        meta_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _write_prepass_recipe_meta(recipe_dir, {"id": "recipe"})
+
+    assert not tmp_link.exists()
+    assert not meta_path.is_symlink()
+    assert json.loads(meta_path.read_text(encoding="utf-8"))["id"] == "recipe"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
+
+
+def test_save_prepass_recipe_replaces_symlinked_meta_without_target_write(tmp_path):
+    recipe_dir = tmp_path / "recipe_a"
+    recipe_dir.mkdir()
+    outside = tmp_path / "outside_meta.json"
+    outside.write_text(json.dumps({"created_at": 123.0}), encoding="utf-8")
+    try:
+        (recipe_dir / "prepass.meta.json").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    saved = _save_prepass_recipe_impl(
+        {
+            "name": "Recipe A",
+            "description": "safe",
+            "config": {"enable_yolo": True},
+            "glossary": "",
+        },
+        recipe_id="recipe_a",
+        prepass_schema_version=1,
+        recipes_root=tmp_path,
+        sanitize_run_id_fn=lambda value: value,
+        normalize_glossary_fn=lambda value: value or "",
+        write_meta_fn=_write_prepass_recipe_meta,
+    )
+
+    meta_path = recipe_dir / "prepass.meta.json"
+    assert not meta_path.is_symlink()
+    assert outside.read_text(encoding="utf-8") == json.dumps({"created_at": 123.0})
+    assert saved["created_at"] != 123.0
 
 
 def test_save_prepass_recipe_rejects_invalid_config_before_directory_create(tmp_path):

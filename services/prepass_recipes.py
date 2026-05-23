@@ -56,6 +56,45 @@ def _path_within_root(path: Path, root: Path) -> bool:
     return True
 
 
+def _prepare_output_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
+    parent_resolved = path.parent.resolve(strict=True)
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+    elif path.exists() and path.is_dir():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
+    try:
+        path.resolve(strict=False).relative_to(parent_resolved)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid") from exc
+
+
+def _prepare_atomic_output_file(path: Path) -> Path:
+    _prepare_output_file(path)
+    tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    _prepare_output_file(tmp_path)
+    return tmp_path
+
+
+def _write_json_file(path: Path, payload: Dict[str, Any]) -> Path:
+    tmp_path = _prepare_atomic_output_file(path)
+    try:
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+    return path
+
+
+def _write_text_file(path: Path, text: str) -> Path:
+    _prepare_output_file(path)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 def _zip_write_safe_file(zf: zipfile.ZipFile, path: Path, root: Path, arcname: str) -> bool:
     if not _safe_regular_file_within_root(path, root):
         return False
@@ -65,14 +104,14 @@ def _zip_write_safe_file(zf: zipfile.ZipFile, path: Path, root: Path, arcname: s
 
 def _write_prepass_recipe_meta(recipe_dir: Path, payload: Dict[str, Any]) -> None:
     meta_path = recipe_dir / "prepass.meta.json"
-    meta_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _write_json_file(meta_path, payload)
 
 
 def _load_prepass_recipe_meta(recipe_dir: Path) -> Dict[str, Any]:
     primary_meta_path = recipe_dir / "prepass.meta.json"
     legacy_meta_path = recipe_dir / "recipe.json"
     for meta_path in (primary_meta_path, legacy_meta_path):
-        if not meta_path.exists():
+        if meta_path.is_symlink() or not meta_path.exists():
             continue
         try:
             return json.loads(meta_path.read_text())
@@ -1386,6 +1425,8 @@ def _ensure_recipe_zip_impl(
     crops_dir = recipe_dir / "crops"
     clip_head_dir = recipe_dir / "clip_head"
     temp_zip_path = zip_raw.with_suffix(f"{zip_raw.suffix}.{uuid.uuid4().hex}.tmp")
+    _prepare_output_file(zip_raw)
+    _prepare_output_file(temp_zip_path)
     try:
         # Never embed crop_base64 blobs inside the portable zip JSON; the PNGs are included separately.
         def _strip_unportable_fields(obj: Any) -> None:
@@ -1425,7 +1466,7 @@ def _ensure_recipe_zip_impl(
                         )
                     except Exception:
                         continue
-        temp_zip_path.replace(zip_raw)
+        os.replace(temp_zip_path, zip_raw)
     except Exception as exc:  # noqa: BLE001
         try:
             temp_zip_path.unlink()
@@ -1606,6 +1647,8 @@ def _prepass_recipe_dir_impl(
     safe = sanitize_id_fn(recipe_id)
     if not safe:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
+    if recipes_root.is_symlink():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     root = recipes_root.resolve()
     path = root / safe
     try:
@@ -1616,6 +1659,8 @@ def _prepass_recipe_dir_impl(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     if create:
         path.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     return path
 
 
@@ -1651,11 +1696,9 @@ def _unlink_self_referential_symlink(path: Path) -> bool:
 
 def _copy2_if_different(src: Path, dest: Path) -> None:
     src_resolved = src.resolve()
-    if src_resolved == _path_identity(dest):
+    _prepare_output_file(dest)
+    if dest.exists() and src_resolved == _path_identity(dest):
         return
-    if dest.is_symlink():
-        dest.unlink(missing_ok=True)
-    dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src_resolved, dest)
 
 
@@ -1675,7 +1718,11 @@ def _copy_tree_filtered_impl(
     root_resolved = source_root.resolve(strict=False) if source_root is not None else src_resolved
     if not _path_within_root(src_resolved, root_resolved):
         return copied
+    if dest.is_symlink():
+        dest.unlink(missing_ok=True)
     dest.mkdir(parents=True, exist_ok=True)
+    if dest.is_symlink():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     for item in src_resolved.iterdir():
         try:
             item_resolved = item.resolve(strict=True)
@@ -1822,7 +1869,7 @@ def _collect_recipe_assets_impl(
     glossary_text = recipe_meta.get("glossary") or ""
     if glossary_text:
         glossary_path = temp_dir / "glossary.json"
-        glossary_path.write_text(json.dumps({"glossary": glossary_text}, indent=2), encoding="utf-8")
+        _write_json_file(glossary_path, {"glossary": glossary_text})
         assets["copied"].append(
             {
                 "path": "glossary.json",
@@ -1845,7 +1892,7 @@ def _collect_recipe_assets_impl(
             labelmap_lines = []
     if labelmap_lines:
         labelmap_path = temp_dir / "labelmap.txt"
-        labelmap_path.write_text("\n".join(labelmap_lines) + "\n", encoding="utf-8")
+        _write_text_file(labelmap_path, "\n".join(labelmap_lines) + "\n")
         assets["copied"].append(
             {
                 "path": "labelmap.txt",
@@ -1985,7 +2032,7 @@ def _collect_recipe_assets_impl(
                     "canonical_deployment_job_id": config.get("canonical_deployment_job_id"),
                 }
             registry_path = canonical_root / "registry_entry.json"
-            registry_path.write_text(json.dumps(registry_payload, indent=2), encoding="utf-8")
+            _write_json_file(registry_path, registry_payload)
             assets["copied"].append(
                 {
                     "path": str(registry_path.relative_to(temp_dir)),
@@ -1995,7 +2042,7 @@ def _collect_recipe_assets_impl(
             )
             if fingerprint_payload:
                 fingerprint_path = canonical_root / "fingerprint.json"
-                fingerprint_path.write_text(json.dumps(fingerprint_payload, indent=2), encoding="utf-8")
+                _write_json_file(fingerprint_path, fingerprint_payload)
                 assets["copied"].append(
                     {
                         "path": str(fingerprint_path.relative_to(temp_dir)),
@@ -2195,7 +2242,7 @@ def _import_prepass_recipe_from_zip_impl(
                     except Exception:
                         payload = {}
                     payload["id"] = new_id
-                    meta_dest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                    _write_json_file(meta_dest, payload)
                 qwen_id_map[old_id] = new_id
 
         if qwen_id_map:
@@ -2455,7 +2502,7 @@ def _export_prepass_recipe_impl(
         config_copy.pop("dataset_id", None)
         meta_copy["config"] = config_copy
     meta_path = temp_dir / prepass_recipe_meta
-    meta_path.write_text(json.dumps(meta_copy, indent=2), encoding="utf-8")
+    _write_json_file(meta_path, meta_copy)
     assets = collect_assets_fn(meta_copy, temp_dir)
     manifest = {
         "schema_version": prepass_schema_version,
@@ -2464,7 +2511,7 @@ def _export_prepass_recipe_impl(
         "assets": assets,
     }
     manifest_path = temp_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    _write_json_file(manifest_path, manifest)
     zip_path = temp_dir.with_suffix(".zip")
     shutil.make_archive(zip_path.with_suffix("").as_posix(), "zip", temp_dir.as_posix())
     return zip_path
@@ -2492,12 +2539,12 @@ def _save_prepass_recipe_impl(
     existing = {}
     meta_path = recipe_dir / "prepass.meta.json"
     legacy_meta_path = recipe_dir / "recipe.json"
-    if meta_path.exists():
+    if not meta_path.is_symlink() and meta_path.exists():
         try:
             existing = json.loads(meta_path.read_text())
         except Exception:
             existing = {}
-    elif legacy_meta_path.exists():
+    elif not legacy_meta_path.is_symlink() and legacy_meta_path.exists():
         try:
             existing = json.loads(legacy_meta_path.read_text())
         except Exception:

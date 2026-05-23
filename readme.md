@@ -764,6 +764,58 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experi
   to the local SALAD Data Ingestion profile/scoring path while preserving Torch
   fallback for DINOv3/Torch and non-Mac environments.
 
+### 2026-05-23: Class Comparison and Auto-Class Debug Closure
+
+- Cleaned up the Class Split / Class Analysis UI contract after the crop-review
+  pass. The selected-crop assigner stays at the top of the right-side stack,
+  crop previews scale to the available viewer area, hover tooltips no longer
+  inject file-input artifacts into the plot, and the likely-wrong-class review
+  panel is collapsible. Shift-scroll panning was removed from the plot instead
+  of keeping the jittery shortcut.
+- Kept the SALAD boundary explicit. Class comparison capabilities now expose
+  pooled recipes only (`balanced`, `precise`, and `cradio_summary`) with
+  `embedding_aggregation_modes=["pooled"]`; local SALAD remains in Data
+  Ingestion reference-profile scoring and training, not in crop-level Class
+  Split or auto-class presets.
+- Fixed binary logistic-regression replay for trained auto-class heads. Runtime
+  inference now applies saved logit adjustment before calibration temperature,
+  and training metrics / hard-mining predictions use the same adjusted
+  probability path instead of mixing raw `predict()` labels with adjusted
+  probabilities.
+- Fixed retraining of the currently active classifier. When a training job
+  overwrites the active classifier artifact, the backend refreshes the in-memory
+  classifier, labelmap, metadata, active encoder, and normalized runtime head.
+  Active C-RADIO classifiers also resume through the C-RADIO backbone path
+  rather than the CLIP/DINO-only reload path.
+- Hardened active classifier activation. MLP heads now fail closed when layer
+  input widths, layer-norm widths, or final output width do not match the saved
+  class list. `set_active_model` validates the normalized runtime head before
+  mutating active globals, so a malformed classifier cannot replace a working
+  active model with a stale or unavailable head.
+- Validation used:
+
+```bash
+.venv-macos/bin/pytest -q tests/test_class_analysis.py
+.venv-macos/bin/pytest -q \
+  tests/test_class_analysis.py \
+  tests/test_clip_training_artifact_publish.py \
+  tests/test_train_clip_regression_cli.py \
+  tests/test_classifier_batching.py \
+  tests/test_classifier_infer_clip_model_signature.py \
+  tests/test_clip_model_infer_dim.py
+.venv-macos/bin/pytest -q tests --ignore=tests/ui/e2e
+.venv-macos/bin/python -m py_compile localinferenceapi.py services/classifier.py tools/clip_training.py
+node --check ybat-master/ybat.js
+git diff --check
+```
+
+- Latest local backend smoke after restart:
+
+```bash
+curl -sS http://127.0.0.1:8000/clip/active_model
+curl -sS http://127.0.0.1:8000/class_analysis/capabilities
+```
+
 ## Training and Model Management
 
 Tator keeps helper models close to the annotation workflow:

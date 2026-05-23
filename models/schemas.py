@@ -563,6 +563,9 @@ class ActiveModelResponse(BaseModel):
     classifier_path: Optional[str]
     labelmap_path: Optional[str]
     clip_ready: bool
+    clip_error: Optional[str] = None
+    encoder_ready: Optional[bool] = None
+    encoder_error: Optional[str] = None
     labelmap_entries: List[str] = []
     logit_adjustment_inference: Optional[bool] = None
 

@@ -2753,7 +2753,7 @@ try:
 
     if active_classifier_path and os.path.isfile(active_classifier_path):
         src = Path(active_classifier_path).resolve()
-        if not str(src).startswith(str(_classifiers_root_early)):
+        if not _path_is_within_root_impl(src, _classifiers_root_early):
             dst = _classifiers_root_early / src.name
             try:
                 if (
@@ -2768,7 +2768,7 @@ try:
 
     if active_labelmap_path and os.path.isfile(active_labelmap_path):
         src = Path(active_labelmap_path).resolve()
-        if not str(src).startswith(str(_labelmaps_root_early)):
+        if not _path_is_within_root_impl(src, _labelmaps_root_early):
             dst = _labelmaps_root_early / src.name
             try:
                 if (
@@ -8688,9 +8688,17 @@ def _active_classifier_head_for_inference() -> Optional[Dict[str, Any]]:
     global active_classifier_head
 
     classifier_path = str(active_classifier_path or "").strip()
-    if not classifier_path or not os.path.isfile(classifier_path):
-        if isinstance(active_classifier_head, dict):
+    if not classifier_path:
+        if (
+            clf is not None
+            or active_labelmap_path
+            or active_label_list
+            or isinstance(active_classifier_head, dict)
+        ):
             _clear_active_classifier_state("classifier_not_found")
+        return None
+    if not os.path.isfile(classifier_path):
+        _clear_active_classifier_state("classifier_not_found")
         return None
     if isinstance(active_classifier_head, dict):
         return active_classifier_head
@@ -25047,7 +25055,7 @@ def _plan_segmentation_build(
     suggested_name = f"{source_id}_seg"
     output_id = _safe_run_name(request.output_name, suggested_name)
     output_root = (SAM3_DATASET_ROOT / output_id).resolve()
-    if not str(output_root).startswith(str(SAM3_DATASET_ROOT.resolve())):
+    if not _path_is_within_root_impl(output_root, SAM3_DATASET_ROOT.resolve()):
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="segmentation_output_path_invalid"
         )
@@ -26850,7 +26858,7 @@ async def _save_upload_file(
 ) -> Path:
     rel_path = _normalise_relative_path(upload.filename)
     dest = (root / rel_path).resolve()
-    if not str(dest).startswith(str(root.resolve())):
+    if not _path_is_within_root_impl(dest, root.resolve()):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
     if dest.exists():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="upload_exists")
@@ -27060,9 +27068,9 @@ def _refresh_active_classifier_if_current(artifacts: TrainingArtifacts) -> bool:
 
 
 def _current_active_payload() -> Dict[str, Any]:
+    head = _active_classifier_head_for_inference()
     encoder_ready = _active_encoder_ready()
     encoder_error = clip_last_error
-    head = _active_classifier_head_for_inference()
     return {
         "clip_model": clip_model_name,
         "classifier_path": active_classifier_path,
@@ -27084,6 +27092,10 @@ def _current_active_payload() -> Dict[str, Any]:
 
 def _active_encoder_ready() -> bool:
     if clf is None:
+        return False
+    classifier_path = str(active_classifier_path or "").strip()
+    if not classifier_path or not os.path.isfile(classifier_path):
+        _clear_active_classifier_state("classifier_not_found")
         return False
     if str(active_encoder_type or "").strip().lower() == "dinov3":
         return bool(
@@ -27465,6 +27477,8 @@ def download_clip_labelmap(rel_path: str = Query(...), root: Optional[str] = Que
 
 
 def delete_clip_labelmap(rel_path: str = Query(...), root: Optional[str] = Query(None)):
+    global active_labelmap_path, active_label_list
+
     labelmap_path = _resolve_clip_labelmap_path_impl(
         rel_path,
         root_hint=root,
@@ -27480,6 +27494,13 @@ def delete_clip_labelmap(rel_path: str = Query(...), root: Optional[str] = Query
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found") from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    try:
+        if active_labelmap_path and Path(active_labelmap_path).resolve() == labelmap_path.resolve():
+            active_labelmap_path = None
+            active_label_list = []
+    except Exception:
+        active_labelmap_path = None
+        active_label_list = []
     return {"status": "deleted", "rel_path": rel_path}
 
 
@@ -33307,7 +33328,7 @@ def _validate_prepass_recipe_manifest(manifest: Dict[str, Any], extract_dir: Pat
         if not rel:
             continue
         target = (extract_dir / rel).resolve()
-        if not str(target).startswith(str(extract_dir.resolve())):
+        if not _path_is_within_root_impl(target, extract_dir.resolve()):
             raise HTTPException(
                 status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_manifest_path"
             )

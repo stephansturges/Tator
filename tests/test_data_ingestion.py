@@ -62,6 +62,7 @@ class _FakeUpload:
         self.filename = filename
         self._payload = payload
         self._read = False
+        self.closed = False
 
     async def read(self, _size: int = -1):
         if self._read:
@@ -70,6 +71,7 @@ class _FakeUpload:
         return self._payload
 
     async def close(self):
+        self.closed = True
         return None
 
 
@@ -154,6 +156,16 @@ def test_write_upload_file_overwrite_unlinks_symlink_destination(tmp_path):
     assert not dest.is_symlink()
     assert dest.read_bytes() == b"payload"
     assert not outside.exists()
+
+
+def test_data_ingestion_save_uploads_closes_upload_handles(tmp_path):
+    upload = _FakeUpload("candidate.jpg", b"payload")
+
+    rows = asyncio.run(api._data_ingestion_save_uploads([upload], tmp_path, "candidate"))
+
+    assert upload.closed is True
+    assert len(rows) == 1
+    assert Path(rows[0]["path"]).read_bytes() == b"payload"
 
 
 def test_local_salad_training_rejects_bad_encoder_before_saving_uploads(tmp_path, monkeypatch):

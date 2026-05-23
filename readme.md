@@ -304,8 +304,8 @@ without turning the README's first layer into a development diary.
 - **2026-05-23:** Hardened backend job starts, dataset/upload path containment,
   EDR/prepass/agent package imports, Qwen caption/training paths, Mac YOLO MPS
   training, schema compatibility, active-model warnings, and failed-start
-  cleanup for Data Ingestion analysis uploads.
-- **Current validation:** full pytest currently reports `702 passed, 17 skipped,
+  cleanup plus upload-handle closure for Data Ingestion analysis uploads.
+- **Current validation:** full pytest currently reports `703 passed, 17 skipped,
   7 warnings`; UI endpoint map/method checks report `148` mapped UI paths and
   `248` fetches with no failures. Live smoke is healthy on the local backend;
   YOLO/RF-DETR prediction smoke returns expected `412` responses when no active

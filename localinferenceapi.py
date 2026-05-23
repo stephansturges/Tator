@@ -17698,13 +17698,20 @@ async def _data_ingestion_save_uploads(files: Sequence[Any], target_dir: Path, f
         used.add(safe_name)
         target = target_dir / safe_name
         size = 0
-        with target.open("wb") as handle:
-            while True:
-                chunk = await upload.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                handle.write(chunk)
+        try:
+            with target.open("wb") as handle:
+                while True:
+                    chunk = await upload.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    handle.write(chunk)
+        finally:
+            close_fn = getattr(upload, "close", None)
+            if callable(close_fn):
+                close_result = close_fn()
+                if hasattr(close_result, "__await__"):
+                    await close_result
         if size <= 0:
             try:
                 target.unlink()

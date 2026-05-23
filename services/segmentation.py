@@ -6,17 +6,19 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+from services.job_payloads import json_sanitize
+
 
 def _serialize_seg_job_impl(job) -> Dict[str, Any]:
     return {
         "job_id": job.job_id,
         "status": job.status,
-        "progress": job.progress,
+        "progress": json_sanitize(job.progress),
         "message": job.message,
-        "result": job.result,
-        "logs": job.logs,
-        "error": job.error,
-        "config": job.config,
+        "result": json_sanitize(job.result),
+        "logs": json_sanitize(job.logs),
+        "error": json_sanitize(job.error),
+        "config": json_sanitize(job.config),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }

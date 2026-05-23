@@ -38,6 +38,7 @@ from services.calibration_recipe_registry import (
     discovery_runs_root,
     find_matching_recipe,
 )
+from services.job_payloads import json_sanitize
 from utils.io import _path_is_within_root_impl
 from utils.pydantic_compat import model_copy_update, model_dump_compat
 
@@ -304,7 +305,7 @@ def _serialize_calibration_job(job: Any) -> Dict[str, Any]:
         eval_path = serialized_result.get("eval")
         if eval_path:
             try:
-                eval_metrics = json.loads(Path(eval_path).read_text())
+                eval_metrics = json.loads(Path(eval_path).read_text(encoding="utf-8"))
                 if isinstance(eval_metrics, dict):
                     serialized_result = dict(serialized_result)
                     serialized_result["metrics"] = _normalize_eval_metrics_for_api(eval_metrics)
@@ -315,7 +316,7 @@ def _serialize_calibration_job(job: Any) -> Dict[str, Any]:
         "status": job.status,
         "message": job.message,
         "phase": job.phase,
-        "progress": job.progress,
+        "progress": json_sanitize(job.progress),
         "processed": job.processed,
         "total": job.total,
         "step_current": getattr(job, "step_current", 0),
@@ -326,9 +327,9 @@ def _serialize_calibration_job(job: Any) -> Dict[str, Any]:
         "substep_label": getattr(job, "substep_label", ""),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
-        "request": job.request,
-        "result": serialized_result,
-        "error": job.error,
+        "request": json_sanitize(job.request),
+        "result": json_sanitize(serialized_result),
+        "error": json_sanitize(job.error),
     }
 
 

@@ -285,6 +285,7 @@ from services.prompt_helper_presets import (
     _load_prompt_helper_preset_impl as _load_prompt_helper_preset_impl,
     _save_prompt_helper_preset_impl as _save_prompt_helper_preset_impl,
 )
+from services.job_payloads import json_sanitize
 from services.prompt_helper import (
     _serialize_prompt_helper_job_impl as _serialize_prompt_helper_job_impl,
 )
@@ -16143,12 +16144,14 @@ def _serialize_class_analysis_job(job: ClassAnalysisJob) -> Dict[str, Any]:
     return {
         "job_id": job.job_id,
         "status": job.status,
-        "progress": job.progress,
+        "progress": json_sanitize(job.progress),
         "message": job.message,
-        "request": job.request,
-        "logs": job.logs,
-        "summary": (job.result or {}).get("summary") if isinstance(job.result, dict) else None,
-        "error": job.error,
+        "request": json_sanitize(job.request),
+        "logs": json_sanitize(job.logs),
+        "summary": json_sanitize(
+            (job.result or {}).get("summary") if isinstance(job.result, dict) else None
+        ),
+        "error": json_sanitize(job.error),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
@@ -17859,12 +17862,14 @@ def _serialize_data_ingestion_job(job: DataIngestionJob) -> Dict[str, Any]:
         "job_id": job.job_id,
         "kind": job.kind,
         "status": job.status,
-        "progress": job.progress,
+        "progress": json_sanitize(job.progress),
         "message": job.message,
-        "request": job.request,
-        "logs": job.logs,
-        "summary": (job.result or {}).get("summary") if isinstance(job.result, dict) else None,
-        "error": job.error,
+        "request": json_sanitize(job.request),
+        "logs": json_sanitize(job.logs),
+        "summary": json_sanitize(
+            (job.result or {}).get("summary") if isinstance(job.result, dict) else None
+        ),
+        "error": json_sanitize(job.error),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
     }
@@ -20500,13 +20505,13 @@ def _serialize_agent_mining_job(job: AgentMiningJob) -> Dict[str, Any]:
         "job_id": job.job_id,
         "status": job.status,
         "message": job.message,
-        "progress": job.progress,
+        "progress": json_sanitize(job.progress),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
-        "request": job.request,
-        "result": job.result,
-        "logs": job.logs,
-        "error": job.error,
+        "request": json_sanitize(job.request),
+        "result": json_sanitize(job.result),
+        "logs": json_sanitize(job.logs),
+        "error": json_sanitize(job.error),
     }
 
 
@@ -20515,13 +20520,13 @@ def _serialize_auto_label_job(job: AutoLabelJob) -> Dict[str, Any]:
         "job_id": job.job_id,
         "status": job.status,
         "message": job.message,
-        "progress": job.progress,
+        "progress": json_sanitize(job.progress),
         "created_at": job.created_at,
         "updated_at": job.updated_at,
-        "request": job.request,
-        "result": job.result,
-        "logs": job.logs,
-        "error": job.error,
+        "request": json_sanitize(job.request),
+        "result": json_sanitize(job.result),
+        "logs": json_sanitize(job.logs),
+        "error": json_sanitize(job.error),
     }
 
 

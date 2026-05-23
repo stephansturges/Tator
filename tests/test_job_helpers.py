@@ -1,10 +1,16 @@
 import json
 from types import SimpleNamespace
 
+import numpy as np
+
 from services.classifier_jobs import _clip_job_update_impl, _serialize_clip_job_impl
+from services.calibration import _serialize_calibration_job
 from services.detector_jobs import _serialize_yolo_job_impl, _yolo_head_graft_audit_impl
+from services.job_payloads import json_sanitize
+from services.prompt_helper import _serialize_prompt_helper_job_impl
 from services.qwen_jobs import _serialize_qwen_job_impl
 from services.sam3_jobs import _serialize_sam3_job_impl
+from services.segmentation import _serialize_seg_job_impl
 
 
 def _job(**overrides):
@@ -51,6 +57,51 @@ def test_job_serializers_replace_nonfinite_payload_values():
     assert _serialize_yolo_job_impl(_job(metrics=[metric]))["metrics"] == [
         {"loss": None, "nested": [None, 0.25]}
     ]
+
+
+def test_shared_json_sanitize_handles_numpy_arrays_and_scalars():
+    assert json_sanitize({"values": np.array([1.0, float("nan")]), "count": np.int64(3)}) == {
+        "values": [1.0, None],
+        "count": 3,
+    }
+
+
+def test_remaining_service_job_serializers_sanitize_payloads():
+    job = _job(
+        progress=float("nan"),
+        request={"temperature": float("inf")},
+        result={"score": float("-inf")},
+        logs=[{"value": float("nan")}],
+        config={"threshold": float("inf")},
+    )
+    job.total_steps = 1
+    job.completed_steps = 0
+    job.phase = "running"
+    job.processed = 0
+    job.total = 1
+
+    assert _serialize_seg_job_impl(job)["config"] == {"threshold": None}
+    assert _serialize_seg_job_impl(job)["progress"] is None
+    assert _serialize_prompt_helper_job_impl(job)["request"] == {"temperature": None}
+    assert _serialize_calibration_job(job)["result"] == {"score": None}
+
+
+def test_local_job_serializers_sanitize_nested_status_payloads():
+    import localinferenceapi as api
+
+    job = _job(
+        progress=float("nan"),
+        request={"temperature": float("inf")},
+        result={"summary": {"series": np.array([0.1, float("nan")])}},
+        logs=[{"value": float("-inf")}],
+    )
+    job.kind = "analysis"
+
+    assert api._serialize_class_analysis_job(job)["summary"] == {"series": [0.1, None]}
+    assert api._serialize_class_analysis_job(job)["request"] == {"temperature": None}
+    assert api._serialize_data_ingestion_job(job)["summary"] == {"series": [0.1, None]}
+    assert api._serialize_agent_mining_job(job)["logs"] == [{"value": None}]
+    assert api._serialize_auto_label_job(job)["progress"] is None
 
 
 def test_yolo_head_graft_audit_replaces_symlinked_log(tmp_path):

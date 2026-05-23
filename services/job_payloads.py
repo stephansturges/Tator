@@ -15,6 +15,11 @@ def json_sanitize(value: Any) -> Any:
         return [json_sanitize(item) for item in value]
     if value is None or isinstance(value, (bool, str)):
         return value
+    if hasattr(value, "tolist"):
+        try:
+            return json_sanitize(value.tolist())
+        except Exception:
+            pass
     if hasattr(value, "item"):
         try:
             return json_sanitize(value.item())

@@ -242,6 +242,25 @@ def test_data_ingestion_save_uploads_closes_upload_handles(tmp_path):
     assert Path(rows[0]["path"]).read_bytes() == b"payload"
 
 
+def test_data_ingestion_save_uploads_rejects_symlink_destination(tmp_path):
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"external")
+    link = tmp_path / "00000_candidate.jpg"
+    try:
+        link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    upload = _FakeUpload("candidate.jpg", b"payload")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(api._data_ingestion_save_uploads([upload], tmp_path, "candidate"))
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "upload_exists"
+    assert upload.closed is True
+    assert outside.read_bytes() == b"external"
+
+
 def test_local_salad_training_rejects_bad_encoder_before_saving_uploads(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "DATA_INGESTION_ROOT", tmp_path)
 

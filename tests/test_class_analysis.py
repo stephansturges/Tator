@@ -750,6 +750,36 @@ def test_class_analysis_active_workspace_rejects_symlinked_root_before_upload(
     assert list(outside.iterdir()) == []
 
 
+def test_class_analysis_active_workspace_rejects_symlinked_root_parent_before_upload(
+    tmp_path, monkeypatch
+):
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", linked_parent / "class_analysis")
+    manifest = {
+        "labelmap": ["car"],
+        "images": [
+            {
+                "upload_name": "present.jpg",
+                "label_lines": ["0 0.5 0.5 0.2 0.2"],
+            }
+        ],
+    }
+    upload = UploadFile(filename="present.jpg", file=BytesIO(b"image-bytes"))
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(api.create_class_analysis_active_workspace_job(json.dumps(manifest), [upload]))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "class_analysis_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_class_analysis_active_workspace_cleans_partial_upload_on_bad_manifest(
     tmp_path,
     monkeypatch,
@@ -799,6 +829,21 @@ def test_class_analysis_active_workspace_rejects_oversize_upload(
     assert exc_info.value.detail == "active_workspace_upload_too_large"
     assert list(tmp_path.iterdir()) == []
     assert upload.file.closed
+
+
+def test_class_analysis_prepare_write_path_rejects_symlinked_parent_without_write(tmp_path):
+    root = tmp_path / "class_analysis"
+    root.mkdir()
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = root / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert api._class_analysis_prepare_write_path(linked_parent / "result.json", root) is None
+    assert list(outside.iterdir()) == []
 
 
 def test_class_analysis_result_rejects_symlinked_result_escape(tmp_path, monkeypatch):

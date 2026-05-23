@@ -754,6 +754,7 @@ from services.detectors import (
     _list_rfdetr_runs_impl as _list_rfdetr_runs_impl,
     _write_json_atomic as _write_detector_json_atomic,
     _write_text_file as _write_detector_text_file,
+    _path_has_symlink_component as _storage_path_has_symlink_component,
 )
 from collections import OrderedDict
 from segment_anything import sam_model_registry, SamPredictor
@@ -16459,10 +16460,12 @@ def _class_analysis_storage_root(
 ) -> Path:
     try:
         raw_root = CLASS_ANALYSIS_ROOT
-        if raw_root.is_symlink():
+        if _storage_path_has_symlink_component(raw_root):
             raise ValueError("class analysis root is a symlink")
         if create:
             raw_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("class analysis root is a symlink")
         if raw_root.exists() and not raw_root.is_dir():
             raise ValueError("class analysis root is not a directory")
         return raw_root.resolve(strict=False)
@@ -16480,10 +16483,12 @@ def _class_analysis_job_dir(
     try:
         root = _class_analysis_storage_root(create=True, detail=detail)
         candidate = root / safe_job_id
-        if candidate.is_symlink():
+        if _storage_path_has_symlink_component(candidate):
             raise ValueError("class analysis job dir is a symlink")
         if create:
             candidate.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(candidate):
+            raise ValueError("class analysis job dir is a symlink")
         if candidate.exists() and not candidate.is_dir():
             raise ValueError("class analysis job path is not a directory")
         resolved = candidate.resolve(strict=False)
@@ -16506,7 +16511,7 @@ def _class_analysis_active_workspace_paths(
             detail="active_workspace_path_invalid",
         )
         workspace_raw = Path(str(workspace_dir_value or "")).expanduser()
-        if workspace_raw.is_symlink():
+        if _storage_path_has_symlink_component(workspace_raw):
             raise ValueError("active workspace dir is a symlink")
         workspace_dir = workspace_raw.resolve(strict=True)
         if not workspace_dir.is_dir() or not _path_is_within_root_impl(workspace_dir, class_root):
@@ -16515,7 +16520,7 @@ def _class_analysis_active_workspace_paths(
         manifest_raw_value = str(manifest_path_value or "").strip()
         if manifest_raw_value:
             manifest_raw = Path(manifest_raw_value).expanduser()
-            if manifest_raw.is_symlink():
+            if _storage_path_has_symlink_component(manifest_raw):
                 raise ValueError("active workspace manifest is a symlink")
             manifest_path = manifest_raw.resolve(strict=True)
             if (
@@ -16697,14 +16702,18 @@ def _class_analysis_thumbnail_cache_path(crop_cache_key: str) -> Path:
 def _class_analysis_prepare_write_path(path: Path, root: Path) -> Optional[Path]:
     try:
         root_resolved = root.resolve()
+        if _storage_path_has_symlink_component(root):
+            return None
         raw_path = Path(path)
         parent = raw_path.parent
-        if parent.is_symlink():
+        if _storage_path_has_symlink_component(parent):
             return None
         parent_resolved = parent.resolve(strict=False)
         if not _path_is_within_root_impl(parent_resolved, root_resolved):
             return None
         parent.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(parent):
+            return None
         if raw_path.is_symlink():
             raw_path.unlink(missing_ok=True)
         elif raw_path.exists() and raw_path.is_dir():
@@ -16715,6 +16724,17 @@ def _class_analysis_prepare_write_path(path: Path, root: Path) -> Optional[Path]
     if not _path_is_within_root_impl(target_resolved, root_resolved):
         return None
     return raw_path
+
+
+def _class_analysis_write_json(path: Path, root: Path, value: Any) -> Path:
+    write_path = _class_analysis_prepare_write_path(path, root)
+    if write_path is None:
+        raise OSError("class_analysis_write_path_forbidden")
+    write_path.write_text(
+        json.dumps(_class_analysis_json_safe(value), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return write_path
 
 
 def _class_analysis_copy_file_within_roots(
@@ -17826,8 +17846,14 @@ def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
             records,
             mode=embedding_adjustment,
         )
-        np.savez_compressed(out_dir / "embeddings.npz", embeddings=embeddings, raw_embeddings=raw_embeddings)
-        with (out_dir / "metadata.jsonl").open("w", encoding="utf-8") as handle:
+        embeddings_path = _class_analysis_prepare_write_path(out_dir / "embeddings.npz", out_dir)
+        if embeddings_path is None:
+            raise OSError("class_analysis_embeddings_path_forbidden")
+        np.savez_compressed(embeddings_path, embeddings=embeddings, raw_embeddings=raw_embeddings)
+        metadata_path = _class_analysis_prepare_write_path(out_dir / "metadata.jsonl", out_dir)
+        if metadata_path is None:
+            raise OSError("class_analysis_metadata_path_forbidden")
+        with metadata_path.open("w", encoding="utf-8") as handle:
             for record in records:
                 handle.write(json.dumps(_class_analysis_json_safe(record), ensure_ascii=False) + "\n")
         with CLASS_ANALYSIS_JOBS_LOCK:
@@ -17853,14 +17879,8 @@ def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
             seed=_coerce_int(job.request.get("seed"), 42),
         )
         result_path = out_dir / "result.json"
-        result_path.write_text(
-            json.dumps(_class_analysis_json_safe(result), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        (out_dir / "config.json").write_text(
-            json.dumps(_class_analysis_json_safe(job.request), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _class_analysis_write_json(result_path, out_dir, result)
+        _class_analysis_write_json(out_dir / "config.json", out_dir, job.request)
         with CLASS_ANALYSIS_JOBS_LOCK:
             job.result_path = str(result_path)
             _class_analysis_update(
@@ -17978,7 +17998,6 @@ async def create_class_analysis_active_workspace_job(manifest_json: str, files: 
         out_dir = _class_analysis_job_dir(job_id, create=True)
         workspace_dir = out_dir / "active_workspace"
         images_dir = workspace_dir / "images"
-        images_dir.mkdir(parents=True, exist_ok=True)
 
         saved_uploads: Dict[str, str] = {}
         total_written = 0
@@ -17991,10 +18010,12 @@ async def create_class_analysis_active_workspace_job(manifest_json: str, files: 
             if safe_name in saved_uploads:
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_duplicate_upload")
             target = images_dir / safe_rel
-            target.parent.mkdir(parents=True, exist_ok=True)
+            target_path = _class_analysis_prepare_write_path(target, workspace_dir)
+            if target_path is None:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_path_invalid")
             size = 0
             try:
-                with target.open("wb") as handle:
+                with target_path.open("wb") as handle:
                     while True:
                         chunk = await upload.read(1024 * 1024)
                         if not chunk:
@@ -18023,7 +18044,7 @@ async def create_class_analysis_active_workspace_job(manifest_json: str, files: 
                         await close_result
             if size <= 0:
                 try:
-                    target.unlink()
+                    target_path.unlink()
                 except OSError:
                     pass
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_empty_upload")
@@ -18070,10 +18091,7 @@ async def create_class_analysis_active_workspace_job(manifest_json: str, files: 
             "source_mode": "active_workspace",
         }
         manifest_path = workspace_dir / "manifest.json"
-        manifest_path.write_text(
-            json.dumps(_class_analysis_json_safe(manifest_out), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _class_analysis_write_json(manifest_path, workspace_dir, manifest_out)
 
         request_options = manifest_payload.get("request") if isinstance(manifest_payload.get("request"), dict) else {}
         request_payload = _normalize_class_analysis_request(

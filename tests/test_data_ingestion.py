@@ -325,6 +325,7 @@ def test_data_ingestion_rejects_mismatched_local_salad_profile_before_queue(tmp_
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "local_salad_head_reference_mismatch"
+    assert list(jobs_root.iterdir()) == []
 
 
 def test_data_ingestion_runtime_rejects_mismatched_local_salad_profile(tmp_path, monkeypatch):
@@ -377,7 +378,8 @@ def test_data_ingestion_runtime_requires_local_salad_encoder(tmp_path, monkeypat
 
 
 def test_data_ingestion_analysis_requires_reference_profile_by_default(tmp_path, monkeypatch):
-    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", tmp_path / "jobs")
+    jobs_root = tmp_path / "jobs"
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
     with pytest.raises(api.HTTPException) as exc_info:
         asyncio.run(
             api.create_data_ingestion_analysis_job(
@@ -389,6 +391,53 @@ def test_data_ingestion_analysis_requires_reference_profile_by_default(tmp_path,
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "local_salad_head_required"
+    assert not jobs_root.exists()
+
+
+def test_data_ingestion_analysis_cleans_saved_uploads_if_backend_reference_empty(tmp_path, monkeypatch):
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    jobs_root = tmp_path / "jobs"
+    heads_root = tmp_path / "heads"
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "empty_dataset",
+            "label": "Empty Dataset",
+            "dataset_root": str(dataset_root),
+            "yolo_layout": "flat",
+        },
+    )
+    _write_unit_local_salad_head(
+        heads_root,
+        "empty_dataset_head",
+        {
+            "reference_source": "backend_dataset",
+            "reference_dataset_id": "empty_dataset",
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(
+            api.create_data_ingestion_analysis_job(
+                json.dumps({
+                    "reference_source": "backend_dataset",
+                    "reference_dataset_id": "empty_dataset",
+                    "salad_head_id": "empty_dataset_head",
+                    "encoder": "local_salad",
+                }),
+                [_FakeUpload("candidate.jpg", b"candidate")],
+                [],
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "data_ingestion_no_reference_files"
+    assert list(jobs_root.iterdir()) == []
 
 
 def test_data_ingestion_cradio_pooled_uses_requested_pooling(tmp_path, monkeypatch):

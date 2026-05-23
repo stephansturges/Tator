@@ -18477,23 +18477,25 @@ async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files
     reference_dataset_id = str(manifest.get("reference_dataset_id") or "").strip()
     if not reference_files and not (reference_source == "backend_dataset" and reference_dataset_id):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_files")
+    _validate_local_salad_head_reference(str(manifest.get("salad_head_id") or "").strip(), manifest)
     job_id = f"di_{uuid.uuid4().hex[:10]}"
     out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job_id, "job")
-    candidate_rows = await _data_ingestion_save_uploads(candidate_files, out_dir / "uploads" / "candidates", "candidate")
-    reference_rows = await _data_ingestion_save_uploads(reference_files, out_dir / "uploads" / "references", "reference")
-    if reference_source == "backend_dataset" and reference_dataset_id:
-        _validate_local_salad_head_reference(str(manifest.get("salad_head_id") or "").strip(), manifest)
-        reference_rows.extend(
-            _data_ingestion_dataset_media_rows(
-                reference_dataset_id,
-                field_name="reference",
-                max_count=_coerce_int(manifest.get("max_reference_images") or manifest.get("max_train_images"), 0, minimum=0),
+    try:
+        candidate_rows = await _data_ingestion_save_uploads(candidate_files, out_dir / "uploads" / "candidates", "candidate")
+        reference_rows = await _data_ingestion_save_uploads(reference_files, out_dir / "uploads" / "references", "reference")
+        if reference_source == "backend_dataset" and reference_dataset_id:
+            reference_rows.extend(
+                _data_ingestion_dataset_media_rows(
+                    reference_dataset_id,
+                    field_name="reference",
+                    max_count=_coerce_int(manifest.get("max_reference_images") or manifest.get("max_train_images"), 0, minimum=0),
+                )
             )
-        )
-    if not reference_rows:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_files")
-    if not (reference_source == "backend_dataset" and reference_dataset_id):
-        _validate_local_salad_head_reference(str(manifest.get("salad_head_id") or "").strip(), manifest)
+        if not reference_rows:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_files")
+    except Exception:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        raise
     request_payload = {
         **manifest,
         "candidate_uploads": candidate_rows,

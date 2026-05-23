@@ -188,9 +188,21 @@ def canonical_edr_package_id(dataset_id: str, recipe_fingerprint: str) -> str:
     return f"canonical_edr_pkg_{dataset_slug}_{fingerprint_slug}"
 
 
+def _edr_packages_storage_root(packages_root: Path, *, create: bool = False) -> Path:
+    if packages_root.is_symlink():
+        raise ValueError("edr_package_path_invalid")
+    if create:
+        packages_root.mkdir(parents=True, exist_ok=True)
+    if packages_root.exists() and not packages_root.is_dir():
+        raise ValueError("edr_package_path_invalid")
+    if packages_root.is_symlink():
+        raise ValueError("edr_package_path_invalid")
+    return packages_root.resolve(strict=False)
+
+
 def edr_package_dir(packages_root: Path, package_id: str, *, create: bool = False) -> Path:
     safe_id = _validate_edr_package_id(package_id)
-    root = packages_root.resolve(strict=False)
+    root = _edr_packages_storage_root(packages_root, create=create)
     raw_path = packages_root / safe_id
     if raw_path.is_symlink():
         raise ValueError("edr_package_path_invalid")
@@ -198,7 +210,6 @@ def edr_package_dir(packages_root: Path, package_id: str, *, create: bool = Fals
     if not _path_within_root(path, root):
         raise ValueError("edr_package_path_invalid")
     if create:
-        packages_root.mkdir(parents=True, exist_ok=True)
         if raw_path.is_symlink():
             raise ValueError("edr_package_path_invalid")
         raw_path.mkdir(parents=True, exist_ok=True)
@@ -848,6 +859,12 @@ def _stage_tree_if_needed(
     package_sha256: str,
     kind: str,
 ) -> None:
+    stage_root = dest.parent
+    if stage_root.is_symlink():
+        raise RuntimeError("edr_package_path_invalid")
+    stage_root.mkdir(parents=True, exist_ok=True)
+    if stage_root.is_symlink() or not stage_root.is_dir():
+        raise RuntimeError("edr_package_path_invalid")
     if dest.is_symlink():
         dest.unlink(missing_ok=True)
     if dest.exists() and _stage_meta_matches(

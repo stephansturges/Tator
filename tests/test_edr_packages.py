@@ -327,6 +327,21 @@ def test_edr_package_dir_rejects_traversal_package_id(tmp_path: Path) -> None:
     assert not (tmp_path / "edr_packages_evil").exists()
 
 
+def test_edr_package_dir_rejects_symlinked_packages_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_packages"
+    outside.mkdir()
+    packages_root = tmp_path / "edr_packages"
+    try:
+        packages_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(ValueError, match="edr_package_path_invalid"):
+        edr_package_dir(packages_root, "pkg1", create=True)
+
+    assert list(outside.iterdir()) == []
+
+
 def test_edr_package_dir_rejects_symlink_package_dir_escape(tmp_path: Path) -> None:
     packages_root = tmp_path / "edr_packages"
     packages_root.mkdir()
@@ -494,6 +509,32 @@ def test_stage_tree_replaces_symlinked_destination_without_using_target(
     assert not dest.is_symlink()
     assert (dest / "safe.txt").read_text(encoding="utf-8") == "safe"
     assert not (outside / "safe.txt").exists()
+
+
+def test_stage_tree_rejects_symlinked_stage_root_without_target_write(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "safe.txt").write_text("safe", encoding="utf-8")
+    outside = tmp_path / "outside_stage"
+    outside.mkdir()
+    stage_root = tmp_path / "stage_root"
+    try:
+        stage_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(RuntimeError, match="edr_package_path_invalid"):
+        _stage_tree_if_needed(
+            src,
+            stage_root / "pkg1__yolo",
+            package_id="pkg1",
+            package_sha256="sha",
+            kind="yolo_run",
+        )
+
+    assert list(outside.iterdir()) == []
 
 
 def test_zip_payload_skips_symlink_escape(tmp_path: Path) -> None:

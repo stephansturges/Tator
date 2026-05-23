@@ -197,6 +197,55 @@ def test_load_registry_skips_symlinked_cache_root(tmp_path: Path) -> None:
     assert registry["entries"] == {}
 
 
+def test_load_registry_skips_symlinked_cache_parent(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_parent"
+    registry_root = outside / "cache" / "recipe_registry"
+    registry_root.mkdir(parents=True)
+    (registry_root / "index.json").write_text(
+        json.dumps({"version": 1, "entries": {"escaped": {}}}),
+        encoding="utf-8",
+    )
+    cache_parent = tmp_path / "linked_parent"
+    try:
+        cache_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    registry = load_registry(cache_parent / "cache")
+
+    assert registry["entries"] == {}
+
+
+def test_register_promoted_recipe_rejects_symlinked_cache_parent_without_target_write(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    cache_parent = tmp_path / "linked_parent"
+    try:
+        cache_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    fingerprint_payload = _sample_payload()
+    fingerprint = build_recipe_fingerprint(fingerprint_payload)
+    canonical_json = tmp_path / "canonical_edr.json"
+    canonical_json.write_text(json.dumps({"canonical_windowed_recipe": {"winner_lane": "window"}}))
+
+    with pytest.raises(ValueError, match="recipe_registry_cache_root_symlink"):
+        register_promoted_recipe(
+            cache_parent / "cache",
+            fingerprint=fingerprint,
+            fingerprint_payload=fingerprint_payload,
+            dataset_id="demo",
+            canonical_recipe_json=canonical_json,
+            canonical_recipe_md=None,
+            report_bundle_json=None,
+            discovery_run_root=None,
+        )
+
+    assert list(outside.iterdir()) == []
+
+
 def test_discovery_lock_replaces_symlink_target_without_target_write(tmp_path: Path) -> None:
     cache_root = tmp_path / "cache"
     lock_root = cache_root / "discovery_runs"
@@ -214,6 +263,24 @@ def test_discovery_lock_replaces_symlink_target_without_target_write(tmp_path: P
         assert not lock_path.is_symlink()
 
     assert outside.read_text(encoding="utf-8") == "external"
+
+
+def test_discovery_lock_rejects_symlinked_cache_parent_without_target_write(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    cache_parent = tmp_path / "linked_parent"
+    try:
+        cache_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(ValueError, match="recipe_discovery_cache_root_symlink"):
+        with discovery_lock(cache_parent / "cache", "abc"):
+            pass
+
+    assert list(outside.iterdir()) == []
 
 
 def test_discovery_lock_rejects_pathlike_fingerprint_before_escape_creation(

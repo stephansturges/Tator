@@ -570,7 +570,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current checkpoint: `945 passed, 17 skipped`; live UI/API smoke passes. Change
+Current checkpoint: `948 passed, 17 skipped`; live UI/API smoke passes. Change
 history lives in commits and focused docs.
 
 </details>

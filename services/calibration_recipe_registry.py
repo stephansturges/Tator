@@ -135,10 +135,10 @@ def _write_text_within_parent(path: Path, text: str) -> Path:
 
 
 def _prepare_recipe_registry_root(cache_root: Path) -> Path:
-    if cache_root.is_symlink():
+    if cache_root.is_symlink() or cache_root.parent.is_symlink():
         raise ValueError("recipe_registry_cache_root_symlink")
     cache_root.mkdir(parents=True, exist_ok=True)
-    if cache_root.is_symlink():
+    if cache_root.is_symlink() or cache_root.parent.is_symlink():
         raise ValueError("recipe_registry_cache_root_symlink")
     cache_resolved = cache_root.resolve(strict=True)
     root = registry_root(cache_root)
@@ -157,10 +157,10 @@ def _prepare_recipe_registry_root(cache_root: Path) -> Path:
 
 
 def _prepare_discovery_runs_root(cache_root: Path) -> Path:
-    if cache_root.is_symlink():
+    if cache_root.is_symlink() or cache_root.parent.is_symlink():
         raise ValueError("recipe_discovery_cache_root_symlink")
     cache_root.mkdir(parents=True, exist_ok=True)
-    if cache_root.is_symlink():
+    if cache_root.is_symlink() or cache_root.parent.is_symlink():
         raise ValueError("recipe_discovery_cache_root_symlink")
     cache_resolved = cache_root.resolve(strict=True)
     root = discovery_runs_root(cache_root)
@@ -232,7 +232,7 @@ def discovery_lock(cache_root: Path, fingerprint: str) -> Iterator[None]:
 
 
 def load_registry(cache_root: Path) -> Dict[str, Any]:
-    if cache_root.is_symlink():
+    if cache_root.is_symlink() or cache_root.parent.is_symlink():
         return {"version": CALIBRATION_RECIPE_REGISTRY_VERSION, "entries": {}}
     root = registry_root(cache_root)
     if root.is_symlink():

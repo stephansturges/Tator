@@ -96,3 +96,94 @@ def test_glossary_library_list_skips_symlink_escape(
     monkeypatch.setattr(api, "GLOSSARY_LIBRARY_ROOT", root)
 
     assert api.list_glossary_library() == []
+
+
+def test_glossary_library_list_skips_symlinked_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outside = tmp_path / "outside_glossaries"
+    outside.mkdir()
+    (outside / "External.json").write_text(
+        json.dumps({"name": "External", "glossary": "external"}),
+        encoding="utf-8",
+    )
+    root = tmp_path / "glossaries"
+    try:
+        root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "GLOSSARY_LIBRARY_ROOT", root)
+
+    assert api.list_glossary_library() == []
+
+
+def test_glossary_library_get_rejects_symlinked_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outside = tmp_path / "outside_glossaries"
+    outside.mkdir()
+    (outside / "External.json").write_text(
+        json.dumps({"name": "External", "glossary": "external"}),
+        encoding="utf-8",
+    )
+    root = tmp_path / "glossaries"
+    try:
+        root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "GLOSSARY_LIBRARY_ROOT", root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.get_glossary_entry("External")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "glossary_path_invalid"
+
+
+def test_glossary_library_save_rejects_symlinked_root_without_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outside = tmp_path / "outside_glossaries"
+    outside.mkdir()
+    root = tmp_path / "glossaries"
+    try:
+        root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "GLOSSARY_LIBRARY_ROOT", root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.save_glossary_entry("External", "local")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "glossary_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_glossary_library_delete_rejects_symlinked_root_without_unlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outside = tmp_path / "outside_glossaries"
+    outside.mkdir()
+    target = outside / "External.json"
+    target.write_text(
+        json.dumps({"name": "External", "glossary": "external"}),
+        encoding="utf-8",
+    )
+    root = tmp_path / "glossaries"
+    try:
+        root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "GLOSSARY_LIBRARY_ROOT", root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.delete_glossary_entry("External")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "glossary_path_invalid"
+    assert target.exists()

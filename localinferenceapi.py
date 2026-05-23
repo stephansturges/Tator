@@ -19351,8 +19351,13 @@ def cancel_data_ingestion_job(job_id: str) -> Dict[str, Any]:
 
 def list_glossary_library():
     entries = []
-    root = GLOSSARY_LIBRARY_ROOT.resolve(strict=False)
-    for path in sorted(GLOSSARY_LIBRARY_ROOT.glob("*.json")):
+    try:
+        root = _glossary_library_root(create=False)
+    except HTTPException:
+        return entries
+    if not root.exists():
+        return entries
+    for path in sorted(root.glob("*.json")):
         try:
             if path.is_symlink():
                 continue
@@ -19374,6 +19379,24 @@ def list_glossary_library():
     return entries
 
 
+def _glossary_library_root(*, create: bool = False) -> Path:
+    try:
+        raw_root = GLOSSARY_LIBRARY_ROOT
+        if raw_root.is_symlink() or raw_root.parent.is_symlink():
+            raise RuntimeError("glossary root is a symlink")
+        if create:
+            raw_root.mkdir(parents=True, exist_ok=True)
+        if raw_root.exists() and not raw_root.is_dir():
+            raise RuntimeError("glossary root is not a directory")
+        if raw_root.is_symlink() or raw_root.parent.is_symlink():
+            raise RuntimeError("glossary root is a symlink")
+        return raw_root.resolve(strict=False)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_path_invalid") from exc
+
+
 def _glossary_library_safe_name(name: str) -> str:
     raw = str(name or "").strip()
     if not raw:
@@ -19388,8 +19411,8 @@ def _glossary_library_safe_name(name: str) -> str:
 
 def _glossary_library_path(name: str) -> Tuple[Path, str]:
     safe = _glossary_library_safe_name(name)
-    root = GLOSSARY_LIBRARY_ROOT.resolve(strict=False)
-    path = GLOSSARY_LIBRARY_ROOT / f"{safe}.json"
+    root = _glossary_library_root(create=False)
+    path = root / f"{safe}.json"
     try:
         parent = path.parent.resolve(strict=False)
     except Exception as exc:
@@ -19416,6 +19439,7 @@ def get_glossary_entry(name: str):
 
 
 def save_glossary_entry(name: str, glossary: str):
+    _glossary_library_root(create=True)
     path, _safe = _glossary_library_path(name)
     if path.is_symlink():
         path.unlink(missing_ok=True)

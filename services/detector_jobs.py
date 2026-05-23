@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from services.job_payloads import json_sanitize
+from services.job_payloads import clamp_progress, json_sanitize
 
 
 def _json_sanitize(value: Any) -> Any:
@@ -77,7 +77,7 @@ def _yolo_job_update_impl(
     if message is not None:
         job.message = message
     if progress is not None:
-        job.progress = max(0.0, min(1.0, progress))
+        job.progress = clamp_progress(progress, fallback=job.progress)
     if error is not None:
         job.error = error
     if result is not None:
@@ -154,7 +154,7 @@ def _rfdetr_job_update_impl(
     if message is not None:
         job.message = message
     if progress is not None:
-        job.progress = max(0.0, min(1.0, progress))
+        job.progress = clamp_progress(progress, fallback=job.progress)
     if error is not None:
         job.error = error
     if result is not None:
@@ -207,7 +207,7 @@ def _yolo_head_graft_job_update_impl(
     if message is not None:
         job.message = message
     if progress is not None:
-        job.progress = max(0.0, min(1.0, progress))
+        job.progress = clamp_progress(progress, fallback=job.progress)
     if error is not None:
         job.error = error
     if result is not None:

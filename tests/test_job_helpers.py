@@ -5,12 +5,18 @@ import numpy as np
 
 from services.classifier_jobs import _clip_job_update_impl, _serialize_clip_job_impl
 from services.calibration import _serialize_calibration_job
-from services.detector_jobs import _serialize_yolo_job_impl, _yolo_head_graft_audit_impl
-from services.job_payloads import json_sanitize
+from services.detector_jobs import (
+    _rfdetr_job_update_impl,
+    _serialize_yolo_job_impl,
+    _yolo_head_graft_audit_impl,
+    _yolo_head_graft_job_update_impl,
+    _yolo_job_update_impl,
+)
+from services.job_payloads import clamp_progress, json_sanitize
 from services.prompt_helper import _serialize_prompt_helper_job_impl
-from services.qwen_jobs import _serialize_qwen_job_impl
-from services.sam3_jobs import _serialize_sam3_job_impl
-from services.segmentation import _serialize_seg_job_impl
+from services.qwen_jobs import _qwen_job_update_impl, _serialize_qwen_job_impl
+from services.sam3_jobs import _sam3_job_update_impl, _serialize_sam3_job_impl
+from services.segmentation import _seg_job_update_impl, _serialize_seg_job_impl
 
 
 def _job(**overrides):
@@ -66,6 +72,29 @@ def test_shared_json_sanitize_handles_numpy_arrays_and_scalars():
     }
 
 
+def test_clamp_progress_does_not_promote_nonfinite_values_to_complete():
+    assert clamp_progress(float("nan"), fallback=0.4) == 0.4
+    assert clamp_progress(float("inf"), fallback=0.4) == 0.4
+    assert clamp_progress(1.5) == 1.0
+    assert clamp_progress(-0.5) == 0.0
+
+
+def test_job_updates_ignore_nonfinite_progress():
+    update_calls = [
+        lambda job: _clip_job_update_impl(job, progress=float("nan"), max_logs=10),
+        lambda job: _yolo_job_update_impl(job, progress=float("nan")),
+        lambda job: _rfdetr_job_update_impl(job, progress=float("nan")),
+        lambda job: _yolo_head_graft_job_update_impl(job, progress=float("nan")),
+        lambda job: _qwen_job_update_impl(job, progress=float("nan"), max_logs=10),
+        lambda job: _sam3_job_update_impl(job, progress=float("nan"), max_logs=10),
+        lambda job: _seg_job_update_impl(job, progress=float("nan"), max_logs=10),
+    ]
+    for call in update_calls:
+        job = _job(progress=0.4)
+        call(job)
+        assert job.progress == 0.4
+
+
 def test_remaining_service_job_serializers_sanitize_payloads():
     job = _job(
         progress=float("nan"),
@@ -102,6 +131,18 @@ def test_local_job_serializers_sanitize_nested_status_payloads():
     assert api._serialize_data_ingestion_job(job)["summary"] == {"series": [0.1, None]}
     assert api._serialize_agent_mining_job(job)["logs"] == [{"value": None}]
     assert api._serialize_auto_label_job(job)["progress"] is None
+
+
+def test_local_job_updates_ignore_nonfinite_progress():
+    import localinferenceapi as api
+
+    class_job = _job(progress=0.35)
+    data_job = _job(progress=0.35)
+    api._class_analysis_update(class_job, progress=float("nan"))
+    api._data_ingestion_update(data_job, progress=float("inf"))
+
+    assert class_job.progress == 0.35
+    assert data_job.progress == 0.35
 
 
 def test_yolo_head_graft_audit_replaces_symlinked_log(tmp_path):

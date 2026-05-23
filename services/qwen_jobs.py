@@ -8,7 +8,7 @@ import math
 import time
 from typing import Any, Dict, Optional, Sequence
 
-from services.job_payloads import json_sanitize
+from services.job_payloads import clamp_progress, json_sanitize
 
 
 def _serialize_qwen_job_impl(job) -> Dict[str, Any]:
@@ -95,7 +95,7 @@ def _qwen_job_update_impl(
         else:
             job.message = message
     if progress is not None:
-        job.progress = max(0.0, min(1.0, progress))
+        job.progress = clamp_progress(progress, fallback=job.progress)
     if error is not None:
         job.error = error
     if result is not None:

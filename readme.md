@@ -570,7 +570,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current validation: `867 passed, 17 skipped, 8 warnings`, UI endpoint checks,
+Current validation: `870 passed, 17 skipped, 8 warnings`, UI endpoint checks,
 and local backend smoke.
 
 </details>

@@ -33,3 +33,24 @@ def json_sanitize(value: Any) -> Any:
             return None
         return value
     return value
+
+
+def clamp_progress(
+    value: Any,
+    *,
+    minimum: float = 0.0,
+    maximum: float = 1.0,
+    fallback: float | None = None,
+) -> float | None:
+    """Clamp finite progress values without promoting NaN/inf to completion."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+    if not math.isfinite(parsed):
+        return fallback
+    lower = float(minimum)
+    upper = float(maximum)
+    if upper < lower:
+        lower, upper = upper, lower
+    return max(lower, min(upper, parsed))

@@ -285,7 +285,7 @@ from services.prompt_helper_presets import (
     _load_prompt_helper_preset_impl as _load_prompt_helper_preset_impl,
     _save_prompt_helper_preset_impl as _save_prompt_helper_preset_impl,
 )
-from services.job_payloads import json_sanitize
+from services.job_payloads import clamp_progress, json_sanitize
 from services.prompt_helper import (
     _serialize_prompt_helper_job_impl as _serialize_prompt_helper_job_impl,
 )
@@ -2351,10 +2351,10 @@ def _qwen_progress_update(
         if phase_label is not None:
             qwen_progress_state["phase_label"] = phase_label
         if progress is not None:
-            try:
-                qwen_progress_state["progress"] = max(0.0, min(1.0, float(progress)))
-            except Exception:
-                pass
+            qwen_progress_state["progress"] = clamp_progress(
+                progress,
+                fallback=qwen_progress_state.get("progress", 0.0),
+            )
         if message is not None:
             qwen_progress_state["message"] = message
         if model_id is not None:
@@ -16126,7 +16126,7 @@ def _class_analysis_update(
     if status is not None:
         job.status = status
     if progress is not None:
-        job.progress = max(0.0, min(1.0, float(progress)))
+        job.progress = clamp_progress(progress, fallback=job.progress)
     if message is not None:
         if str(message or "") != str(job.message or ""):
             _class_analysis_log(job, str(message or ""))
@@ -17843,7 +17843,7 @@ def _data_ingestion_update(
     if status is not None:
         job.status = status
     if progress is not None:
-        job.progress = max(0.0, min(1.0, float(progress)))
+        job.progress = clamp_progress(progress, fallback=job.progress)
     if message is not None:
         if str(message or "") != str(job.message or ""):
             _data_ingestion_log(job, str(message or ""))
@@ -18540,7 +18540,7 @@ def _data_ingestion_train_view(img: Image.Image, rng: random.Random) -> Image.Im
 
 
 def _local_salad_training_stage(progress: float) -> str:
-    pct = max(0.0, min(1.0, float(progress or 0.0)))
+    pct = clamp_progress(progress, fallback=0.0) or 0.0
     if pct < 0.18:
         return "Preparing reference media"
     if pct < 0.35:
@@ -29776,7 +29776,7 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
             progress_val = payload.get("progress")
             progress = None
             if isinstance(progress_val, (int, float)):
-                progress = max(0.0, min(float(progress_val), 0.999))
+                progress = clamp_progress(progress_val, maximum=0.999)
             message = _summarize_qwen_metric_impl(payload)
             _qwen_job_update(
                 job, status="running", message=message, progress=progress, log_message=False

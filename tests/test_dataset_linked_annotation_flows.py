@@ -1175,6 +1175,55 @@ def test_resolve_rfdetr_training_dataset_materializes_annotation_overlay_for_lin
     assert not (dataset_root / "train").exists()
 
 
+def test_prompt_helper_suggest_materializes_annotation_overlay_for_linked_flat_yolo(
+    tmp_path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "linked_source"
+    _write_test_image(dataset_root / "images" / "nested" / "img.jpg")
+    (dataset_root / "labels" / "nested").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "labels" / "nested" / "img.txt").write_text(
+        "0 0.5 0.5 0.2 0.2\n", encoding="utf-8"
+    )
+    (dataset_root / "labelmap.txt").write_text("old\nnew\n", encoding="utf-8")
+
+    registry_root = tmp_path / "registry" / "ds"
+    overlay_root = registry_root / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    (overlay_root / "labels" / "train" / "nested").mkdir(parents=True, exist_ok=True)
+    (overlay_root / "labels" / "train" / "nested" / "img.txt").write_text(
+        "1 0.5 0.5 0.4 0.4\n", encoding="utf-8"
+    )
+    registry_root.mkdir(parents=True, exist_ok=True)
+    (registry_root / api.DATASET_META_NAME).write_text(json.dumps({"id": "ds"}), encoding="utf-8")
+
+    entry = {
+        "id": "ds",
+        "label": "ds",
+        "dataset_root": str(dataset_root),
+        "registry_root": str(registry_root),
+        "storage_mode": "linked",
+        "linked_root": str(dataset_root),
+        "yolo_layout": "flat",
+        "yolo_ready": True,
+        "classes": ["old", "new"],
+    }
+    monkeypatch.setattr(api, "_list_all_datasets", lambda: [entry])
+
+    out = api.prompt_helper_suggest(
+        api.PromptHelperSuggestRequest(dataset_id="ds", max_synonyms=0, use_qwen=False)
+    )
+
+    assert any(row["class_id"] == 2 and row["class_name"] == "new" for row in out["classes"])
+    materialized_root = (
+        registry_root / api.DATASET_ANNOTATION_OVERLAY_DIRNAME / "sam3_materialized"
+    )
+    coco_train = json.loads(
+        (materialized_root / "train" / "_annotations.coco.json").read_text(encoding="utf-8")
+    )
+    assert coco_train["annotations"][0]["category_id"] == 2
+    assert coco_train["annotations"][0]["bbox"] == [30.0, 30.0, 40.0, 40.0]
+    assert not (dataset_root / "train").exists()
+
+
 def test_register_path_dedupes_existing_linked_entry(tmp_path, monkeypatch) -> None:
     dataset_root = tmp_path / "linked_ds"
     (dataset_root / "images").mkdir(parents=True, exist_ok=True)

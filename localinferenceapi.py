@@ -19085,6 +19085,32 @@ def _resolve_rfdetr_training_dataset(payload) -> Dict[str, Any]:
     return _rfdetr_training_dataset_base_resolver(payload)
 
 
+def _resolve_coco_index_dataset_root(dataset_id: str) -> Path:
+    dataset_id_clean = str(dataset_id or "").strip()
+    if not dataset_id_clean:
+        return _resolve_sam3_or_qwen_dataset(dataset_id_clean)
+    entry = _resolve_dataset_entry_impl(
+        dataset_id_clean,
+        list_all_datasets_fn=_list_all_datasets,
+    )
+    if entry and entry.get("yolo_ready"):
+        if _sam3_entry_needs_annotation_materialized_view(entry):
+            meta = _materialize_sam3_annotation_view(entry)
+        else:
+            dataset_root = _dataset_effective_root_from_entry(entry)
+            meta = _convert_yolo_dataset_to_coco_impl(dataset_root)
+        root_raw = meta.get("dataset_root")
+        if root_raw:
+            return Path(str(root_raw)).resolve()
+    if entry and entry.get("qwen_ready"):
+        dataset_root = _dataset_effective_root_from_entry(entry)
+        meta = _convert_qwen_dataset_to_coco_impl(dataset_root)
+        root_raw = meta.get("dataset_root")
+        if root_raw:
+            return Path(str(root_raw)).resolve()
+    return _resolve_sam3_or_qwen_dataset(dataset_id_clean)
+
+
 ## NOTE: RF‑DETR helpers use *_impl directly to avoid wrapper drift.
 
 
@@ -19757,7 +19783,7 @@ _persist_agent_recipe = functools.partial(
     max_clip_head_bytes=AGENT_RECIPE_MAX_CLIP_HEAD_BYTES,
     max_crops=AGENT_RECIPE_MAX_CROPS,
     max_crop_bytes=AGENT_RECIPE_MAX_CROP_BYTES,
-    resolve_dataset_fn=_resolve_sam3_or_qwen_dataset,
+    resolve_dataset_fn=_resolve_coco_index_dataset_root,
     load_coco_index_fn=_load_coco_index_impl,
     compute_dataset_signature_fn=_compute_dataset_signature_impl,
     compute_labelmap_hash_fn=_compute_labelmap_hash_impl,
@@ -20700,17 +20726,7 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
     job.request = payload.dict()
     job.updated_at = time.time()
     try:
-        dataset_root = _resolve_sam3_or_qwen_dataset_impl(
-            payload.dataset_id,
-            list_all_datasets_fn=_list_all_datasets,
-            resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
-                dataset_id,
-                qwen_root=QWEN_DATASET_ROOT,
-                sam3_root=SAM3_DATASET_ROOT,
-                registry_root=DATASET_REGISTRY_ROOT,
-                http_exception_cls=HTTPException,
-            ),
-        )
+        dataset_root = _resolve_coco_index_dataset_root(payload.dataset_id)
         coco, gt_by_image_cat, images = _load_coco_index_impl(dataset_root)
         categories = coco.get("categories") or []
         cat_to_images: Dict[int, set[int]] = {}
@@ -20841,17 +20857,7 @@ def _run_prompt_helper_search_job(job: PromptHelperJob, payload: PromptHelperSea
     job.request = {"mode": "search", **payload.dict()}
     job.updated_at = time.time()
     try:
-        dataset_root = _resolve_sam3_or_qwen_dataset_impl(
-            payload.dataset_id,
-            list_all_datasets_fn=_list_all_datasets,
-            resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
-                dataset_id,
-                qwen_root=QWEN_DATASET_ROOT,
-                sam3_root=SAM3_DATASET_ROOT,
-                registry_root=DATASET_REGISTRY_ROOT,
-                http_exception_cls=HTTPException,
-            ),
-        )
+        dataset_root = _resolve_coco_index_dataset_root(payload.dataset_id)
         coco, gt_by_image_cat, images = _load_coco_index_impl(dataset_root)
         categories = coco.get("categories") or []
         target_class_id = payload.class_id
@@ -21818,17 +21824,7 @@ def _apply_agent_recipe_to_image(
 
 
 def _suggest_prompts_for_dataset(payload: PromptHelperSuggestRequest) -> Dict[str, Any]:
-    dataset_root = _resolve_sam3_or_qwen_dataset_impl(
-        payload.dataset_id,
-        list_all_datasets_fn=_list_all_datasets,
-        resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
-            dataset_id,
-            qwen_root=QWEN_DATASET_ROOT,
-            sam3_root=SAM3_DATASET_ROOT,
-            registry_root=DATASET_REGISTRY_ROOT,
-            http_exception_cls=HTTPException,
-        ),
-    )
+    dataset_root = _resolve_coco_index_dataset_root(payload.dataset_id)
     coco, _, _ = _load_coco_index_impl(dataset_root)
     classes: List[Dict[str, Any]] = []
     for idx, cat in enumerate(coco.get("categories") or []):
@@ -22997,17 +22993,7 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
     try:
         if not payload.prompts:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="recipe_prompts_required")
-        dataset_root = _resolve_sam3_or_qwen_dataset_impl(
-            payload.dataset_id,
-            list_all_datasets_fn=_list_all_datasets,
-            resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
-                dataset_id,
-                qwen_root=QWEN_DATASET_ROOT,
-                sam3_root=SAM3_DATASET_ROOT,
-                registry_root=DATASET_REGISTRY_ROOT,
-                http_exception_cls=HTTPException,
-            ),
-        )
+        dataset_root = _resolve_coco_index_dataset_root(payload.dataset_id)
         coco, gt_by_image_cat, images = _load_coco_index_impl(dataset_root)
         categories = coco.get("categories") or []
         cat_entry = next(
@@ -23198,17 +23184,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
     try:
         _enforce_agent_mining_cache_limits(AGENT_MINING_DET_CACHE_ROOT, allow_when_running=False)
 
-        dataset_root = _resolve_sam3_or_qwen_dataset_impl(
-            payload.dataset_id,
-            list_all_datasets_fn=_list_all_datasets,
-            resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
-                dataset_id,
-                qwen_root=QWEN_DATASET_ROOT,
-                sam3_root=SAM3_DATASET_ROOT,
-                registry_root=DATASET_REGISTRY_ROOT,
-                http_exception_cls=HTTPException,
-            ),
-        )
+        dataset_root = _resolve_coco_index_dataset_root(payload.dataset_id)
         _log(f"Dataset resolved at {dataset_root}")
         _log(
             "Request: "
@@ -25406,17 +25382,7 @@ def prompt_helper_suggest(payload: PromptHelperSuggestRequest):
 
 
 def prompt_helper_expand(payload: PromptRecipeExpandRequest):
-    dataset_root = _resolve_sam3_or_qwen_dataset_impl(
-        payload.dataset_id,
-        list_all_datasets_fn=_list_all_datasets,
-        resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
-            dataset_id,
-            qwen_root=QWEN_DATASET_ROOT,
-            sam3_root=SAM3_DATASET_ROOT,
-            registry_root=DATASET_REGISTRY_ROOT,
-            http_exception_cls=HTTPException,
-        ),
-    )
+    dataset_root = _resolve_coco_index_dataset_root(payload.dataset_id)
     coco, _, _ = _load_coco_index_impl(dataset_root)
     categories = coco.get("categories") or []
     cat_entry = next(

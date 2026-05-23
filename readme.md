@@ -976,6 +976,10 @@ job-start validation, and the Mac YOLO training work.
 - RF-DETR training now routes linked, flat, or overlay-edited YOLO datasets
   through the same materialized annotation view before COCO conversion, keeping
   RF-DETR train/val JSONs aligned with the current annotation overlay state.
+- Prompt-helper and agent-mining COCO consumers now resolve datasets through
+  that annotation-effective COCO view as well, so prompt suggestions, prompt
+  search, recipe building, and recipe persistence see corrected linked/flat
+  YOLO labels.
 - Local validation for this checkpoint used:
 
 ```bash

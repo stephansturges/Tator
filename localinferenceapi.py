@@ -29190,10 +29190,10 @@ def _validate_upload_extension(filename: str, allowed_exts: set[str], detail: st
 def _safe_upload_write_root(root: Path, *, detail: str) -> Path:
     try:
         raw_root = Path(root)
-        if raw_root.is_symlink() or raw_root.parent.is_symlink():
+        if _storage_path_has_symlink_component(raw_root):
             raise RuntimeError("upload_root_symlink")
         raw_root.mkdir(parents=True, exist_ok=True)
-        if raw_root.is_symlink() or raw_root.parent.is_symlink() or not raw_root.is_dir():
+        if _storage_path_has_symlink_component(raw_root) or not raw_root.is_dir():
             raise RuntimeError("upload_root_invalid")
         return raw_root.resolve(strict=True)
     except HTTPException:
@@ -29204,17 +29204,17 @@ def _safe_upload_write_root(root: Path, *, detail: str) -> Path:
 
 def _safe_upload_subdir(subdir: str, *, detail: str) -> Path:
     try:
-        if UPLOAD_ROOT.is_symlink():
+        if _storage_path_has_symlink_component(UPLOAD_ROOT):
             raise RuntimeError("upload_root_symlink")
         UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
-        if UPLOAD_ROOT.is_symlink() or not UPLOAD_ROOT.is_dir():
+        if _storage_path_has_symlink_component(UPLOAD_ROOT) or not UPLOAD_ROOT.is_dir():
             raise RuntimeError("upload_root_invalid")
         upload_root = UPLOAD_ROOT.resolve(strict=True)
         raw_dir = UPLOAD_ROOT / subdir
-        if raw_dir.is_symlink():
+        if _storage_path_has_symlink_component(raw_dir):
             raise RuntimeError("upload_subdir_symlink")
         raw_dir.mkdir(parents=True, exist_ok=True)
-        if raw_dir.is_symlink() or not raw_dir.is_dir():
+        if _storage_path_has_symlink_component(raw_dir) or not raw_dir.is_dir():
             raise RuntimeError("upload_subdir_invalid")
         resolved_dir = raw_dir.resolve(strict=True)
         if not _path_is_within_root_impl(resolved_dir, upload_root):

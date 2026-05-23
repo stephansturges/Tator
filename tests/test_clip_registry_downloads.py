@@ -525,3 +525,44 @@ def test_upload_classifier_rejects_symlinked_registry_root_without_write(
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "classifiers_root_invalid"
     assert list(outside.iterdir()) == []
+
+
+def test_upload_classifier_rejects_symlinked_upload_root_parent_without_write(
+    tmp_path, monkeypatch
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", linked_parent / "uploads")
+    upload = UploadFile(filename="head.pkl", file=io.BytesIO(b"model"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(localinferenceapi.upload_classifier(file=upload))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "classifiers_root_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_save_upload_file_rejects_symlinked_write_root_parent_without_write(
+    tmp_path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    upload = UploadFile(filename="head.pkl", file=io.BytesIO(b"model"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(localinferenceapi._save_upload_file(upload, linked_parent / "classifiers"))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_relative_path"
+    assert list(outside.iterdir()) == []

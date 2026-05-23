@@ -10,8 +10,10 @@ import pytest
 import localinferenceapi as api
 from services.detectors import (
     _load_yolo_active_impl,
+    _rfdetr_prune_run_dir_impl,
     _rfdetr_best_checkpoint_impl,
     _rfdetr_prepare_dataset_impl,
+    _yolo_prune_run_dir_impl,
 )
 
 
@@ -155,6 +157,55 @@ def test_rfdetr_prepare_dataset_copy_fallback_skips_symlink_escape(
 
     assert (prepared / "train" / "safe.jpg").read_text(encoding="utf-8") == "safe"
     assert not (prepared / "train" / "escape.jpg").exists()
+
+
+def test_yolo_prune_run_dir_unlinks_symlink_directory_without_target_delete(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    outside = tmp_path / "outside_dir"
+    outside.mkdir()
+    (outside / "payload.bin").write_bytes(b"external")
+    try:
+        (run_dir / "linked").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    result = _yolo_prune_run_dir_impl(
+        run_dir,
+        keep_files=set(),
+        keep_files_default=[],
+        dir_size_fn=lambda _path: 999,
+        meta_name="meta.json",
+    )
+
+    assert result["deleted"] == ["linked"]
+    assert result["freed_bytes"] == 0
+    assert not (run_dir / "linked").exists()
+    assert (outside / "payload.bin").read_bytes() == b"external"
+
+
+def test_rfdetr_prune_run_dir_unlinks_symlink_directory_without_target_delete(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    outside = tmp_path / "outside_dir"
+    outside.mkdir()
+    (outside / "payload.bin").write_bytes(b"external")
+    try:
+        (run_dir / "linked").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    result = _rfdetr_prune_run_dir_impl(
+        run_dir,
+        keep_files=set(),
+        keep_files_default=[],
+        dir_size_fn=lambda _path: 999,
+    )
+
+    assert result["deleted"] == ["linked"]
+    assert result["freed_bytes"] == 0
+    assert not (run_dir / "linked").exists()
+    assert (outside / "payload.bin").read_bytes() == b"external"
 
 
 def test_rfdetr_detector_runtime_rejects_best_symlink_escape(

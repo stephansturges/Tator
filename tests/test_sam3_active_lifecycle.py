@@ -165,6 +165,30 @@ def test_sam3_train_cache_purge_reports_bytes_and_entries(tmp_path: Path, monkey
     assert not split_root.exists()
 
 
+def test_sam3_train_cache_purge_unlinks_symlink_directory_without_target_delete(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sam3_root = tmp_path / "sam3_training"
+    split_parent = sam3_root / "splits"
+    split_parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside_split"
+    outside.mkdir()
+    (outside / "payload.bin").write_bytes(b"external")
+    try:
+        (split_parent / "linked").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", sam3_root)
+    with api.SAM3_TRAINING_JOBS_LOCK:
+        api.SAM3_TRAINING_JOBS.clear()
+
+    out = api.sam3_train_cache_purge()
+
+    assert out == {"status": "ok", "deleted_bytes": 0, "deleted_entries": 1}
+    assert not (split_parent / "linked").exists()
+    assert (outside / "payload.bin").read_bytes() == b"external"
+
+
 def test_sam3_training_job_cleans_split_when_config_build_fails(
     tmp_path: Path, monkeypatch
 ) -> None:

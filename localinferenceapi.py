@@ -13746,7 +13746,9 @@ def _purge_directory(root: Path) -> int:
             return 0
         for entry in root.iterdir():
             try:
-                if entry.is_dir():
+                if entry.is_symlink():
+                    entry.unlink(missing_ok=True)
+                elif entry.is_dir():
                     shutil.rmtree(entry, ignore_errors=True)
                 else:
                     entry.unlink(missing_ok=True)

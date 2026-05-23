@@ -69,6 +69,19 @@ def _copy_tree_within_root(src: Path, dest: Path) -> None:
         shutil.copy2(item_resolved, target)
 
 
+def _delete_run_child(child: Path, dir_size_fn: Callable[[Path], int]) -> int:
+    if child.is_symlink():
+        child.unlink()
+        return 0
+    if child.is_dir():
+        size = dir_size_fn(child)
+        shutil.rmtree(child)
+        return size
+    size = child.stat().st_size
+    child.unlink()
+    return size
+
+
 def _set_yolo_infer_state_impl(
     model: Any,
     path: Optional[str],
@@ -429,12 +442,7 @@ def _yolo_prune_run_dir_impl(
             kept.append(child.name)
             continue
         try:
-            if child.is_dir():
-                freed += dir_size_fn(child)
-                shutil.rmtree(child)
-            else:
-                freed += child.stat().st_size
-                child.unlink()
+            freed += _delete_run_child(child, dir_size_fn)
             deleted.append(child.name)
         except Exception:
             continue
@@ -505,12 +513,7 @@ def _rfdetr_prune_run_dir_impl(
             kept.append(child.name)
             continue
         try:
-            if child.is_dir():
-                freed += dir_size_fn(child)
-                shutil.rmtree(child)
-            else:
-                freed += child.stat().st_size
-                child.unlink()
+            freed += _delete_run_child(child, dir_size_fn)
             deleted.append(child.name)
         except Exception:
             continue

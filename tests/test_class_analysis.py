@@ -685,6 +685,7 @@ def test_class_analysis_active_workspace_cleans_partial_upload_on_bad_manifest(
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "active_workspace_image_upload_missing"
     assert list(tmp_path.iterdir()) == []
+    assert upload.file.closed
 
 
 def test_class_analysis_active_workspace_rejects_oversize_upload(
@@ -710,6 +711,7 @@ def test_class_analysis_active_workspace_rejects_oversize_upload(
     assert exc_info.value.status_code == 413
     assert exc_info.value.detail == "active_workspace_upload_too_large"
     assert list(tmp_path.iterdir()) == []
+    assert upload.file.closed
 
 
 def test_class_analysis_encode_crops_reports_batch_progress(monkeypatch):

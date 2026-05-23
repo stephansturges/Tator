@@ -125,3 +125,27 @@ def test_upload_dataset_zip_rejects_invalid_zip() -> None:
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "dataset_zip_invalid"
+    assert upload.file.closed
+
+
+def test_import_prepass_recipe_closes_upload_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    upload = UploadFile(filename="recipe.zip", file=BytesIO(b"zip-bytes"))
+    monkeypatch.setattr(api, "_import_prepass_recipe_from_zip", lambda _path: {"status": "ok"})
+
+    assert api.import_prepass_recipe(upload) == {"status": "ok"}
+    assert upload.file.closed
+
+
+def test_import_edr_package_closes_upload_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    upload = UploadFile(filename="package.edr.zip", file=BytesIO(b"zip-bytes"))
+    monkeypatch.setattr(
+        api,
+        "_import_edr_package_bundle",
+        lambda _path: ({"id": "pkg"}, {"name": "recipe"}),
+    )
+
+    response = api.import_edr_package(upload)
+
+    assert response["package"] == {"id": "pkg"}
+    assert response["saved_prepass_recipe"] == {"name": "recipe"}
+    assert upload.file.closed

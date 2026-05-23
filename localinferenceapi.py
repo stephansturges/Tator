@@ -14789,6 +14789,10 @@ def upload_dataset_zip(
         _persist_dataset_meta(target_root, meta)
         return meta
     finally:
+        try:
+            file.file.close()
+        except Exception:
+            pass
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -17325,27 +17329,34 @@ async def create_class_analysis_active_workspace_job(manifest_json: str, files: 
             target = images_dir / safe_rel
             target.parent.mkdir(parents=True, exist_ok=True)
             size = 0
-            with target.open("wb") as handle:
-                while True:
-                    chunk = await upload.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    total_written += len(chunk)
-                    if CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES and size > CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES:
-                        raise HTTPException(
-                            status_code=HTTP_413_CONTENT_TOO_LARGE,
-                            detail="active_workspace_upload_too_large",
-                        )
-                    if (
-                        CLASS_ANALYSIS_ACTIVE_UPLOAD_QUOTA_BYTES
-                        and total_written > CLASS_ANALYSIS_ACTIVE_UPLOAD_QUOTA_BYTES
-                    ):
-                        raise HTTPException(
-                            status_code=HTTP_413_CONTENT_TOO_LARGE,
-                            detail="active_workspace_upload_quota_exceeded",
-                        )
-                    handle.write(chunk)
+            try:
+                with target.open("wb") as handle:
+                    while True:
+                        chunk = await upload.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        total_written += len(chunk)
+                        if CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES and size > CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES:
+                            raise HTTPException(
+                                status_code=HTTP_413_CONTENT_TOO_LARGE,
+                                detail="active_workspace_upload_too_large",
+                            )
+                        if (
+                            CLASS_ANALYSIS_ACTIVE_UPLOAD_QUOTA_BYTES
+                            and total_written > CLASS_ANALYSIS_ACTIVE_UPLOAD_QUOTA_BYTES
+                        ):
+                            raise HTTPException(
+                                status_code=HTTP_413_CONTENT_TOO_LARGE,
+                                detail="active_workspace_upload_quota_exceeded",
+                            )
+                        handle.write(chunk)
+            finally:
+                close_fn = getattr(upload, "close", None)
+                if callable(close_fn):
+                    close_result = close_fn()
+                    if hasattr(close_result, "__await__"):
+                        await close_result
             if size <= 0:
                 try:
                     target.unlink()
@@ -18678,86 +18689,87 @@ def init_qwen_dataset_upload(run_name: Optional[str]) -> Dict[str, Any]:
 def upload_qwen_dataset_chunk(
     job_id: str, split: str, image_name: str, annotation_line: str, file: UploadFile
 ):
-    with QWEN_DATASET_UPLOADS_LOCK:
-        job = QWEN_DATASET_UPLOADS.get(job_id)
-    if not job:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_job_not_found")
-    split = split.lower()
-    if split not in {"train", "val"}:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_split_invalid")
-    annotation_text = str(annotation_line or "").strip()
-    if "\n" in annotation_text or "\r" in annotation_text:
-        raise HTTPException(
-            status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
-        )
     try:
-        annotation_payload = json.loads(annotation_text)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
-        ) from exc
-    if not isinstance(annotation_payload, dict):
-        raise HTTPException(
-            status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
-        )
-    split_root = job.root_dir / split
-    split_root.mkdir(parents=True, exist_ok=True)
-    raw_image_name = image_name or file.filename or f"{uuid.uuid4().hex}.jpg"
-    image_name_safe = Path(raw_image_name).name or f"{uuid.uuid4().hex}.jpg"
-    annotation_payload["image"] = image_name_safe
-    annotation_text = json.dumps(annotation_payload, ensure_ascii=False, separators=(",", ":"))
-    image_path = (split_root / image_name_safe).resolve()
-    if not _path_is_within_root_impl(image_path, split_root.resolve()):
-        raise HTTPException(
-            status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_image_path_invalid"
-        )
-    if image_path.exists():
-        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="qwen_dataset_image_exists")
-    written = 0
-    try:
-        with image_path.open("wb") as handle:
-            while True:
-                chunk = file.file.read(1024 * 1024)
-                if not chunk:
-                    break
-                written += len(chunk)
-                if QWEN_DATASET_CHUNK_MAX_BYTES and written > QWEN_DATASET_CHUNK_MAX_BYTES:
-                    raise HTTPException(
-                        status_code=HTTP_413_CONTENT_TOO_LARGE,
-                        detail="qwen_dataset_chunk_too_large",
-                    )
-                handle.write(chunk)
-    except Exception:
+        with QWEN_DATASET_UPLOADS_LOCK:
+            job = QWEN_DATASET_UPLOADS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_job_not_found")
+        split = split.lower()
+        if split not in {"train", "val"}:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_split_invalid")
+        annotation_text = str(annotation_line or "").strip()
+        if "\n" in annotation_text or "\r" in annotation_text:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
+            )
         try:
-            image_path.unlink(missing_ok=True)
+            annotation_payload = json.loads(annotation_text)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
+            ) from exc
+        if not isinstance(annotation_payload, dict):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
+            )
+        split_root = job.root_dir / split
+        split_root.mkdir(parents=True, exist_ok=True)
+        raw_image_name = image_name or file.filename or f"{uuid.uuid4().hex}.jpg"
+        image_name_safe = Path(raw_image_name).name or f"{uuid.uuid4().hex}.jpg"
+        annotation_payload["image"] = image_name_safe
+        annotation_text = json.dumps(annotation_payload, ensure_ascii=False, separators=(",", ":"))
+        image_path = (split_root / image_name_safe).resolve()
+        if not _path_is_within_root_impl(image_path, split_root.resolve()):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_image_path_invalid"
+            )
+        if image_path.exists():
+            raise HTTPException(status_code=HTTP_409_CONFLICT, detail="qwen_dataset_image_exists")
+        written = 0
+        try:
+            with image_path.open("wb") as handle:
+                while True:
+                    chunk = file.file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if QWEN_DATASET_CHUNK_MAX_BYTES and written > QWEN_DATASET_CHUNK_MAX_BYTES:
+                        raise HTTPException(
+                            status_code=HTTP_413_CONTENT_TOO_LARGE,
+                            detail="qwen_dataset_chunk_too_large",
+                        )
+                    handle.write(chunk)
         except Exception:
-            pass
-        raise
+            try:
+                image_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+        if written <= 0:
+            try:
+                image_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_empty_image")
+        ann_path = split_root / "annotations.jsonl"
+        with ann_path.open("a", encoding="utf-8") as handle:
+            handle.write(annotation_text + "\n")
+        if split == "train":
+            job.train_count += 1
+        else:
+            job.val_count += 1
+        job.updated_at = time.time()
+        return {
+            "status": "ok",
+            "job_id": job_id,
+            "train_count": job.train_count,
+            "val_count": job.val_count,
+        }
     finally:
         try:
             file.file.close()
         except Exception:
             pass
-    if written <= 0:
-        try:
-            image_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_empty_image")
-    ann_path = split_root / "annotations.jsonl"
-    with ann_path.open("a", encoding="utf-8") as handle:
-        handle.write(annotation_text + "\n")
-    if split == "train":
-        job.train_count += 1
-    else:
-        job.val_count += 1
-    job.updated_at = time.time()
-    return {
-        "status": "ok",
-        "job_id": job_id,
-        "train_count": job.train_count,
-        "val_count": job.val_count,
-    }
 
 
 def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name: Optional[str]):
@@ -34399,6 +34411,10 @@ def import_prepass_recipe(file: UploadFile = File(...)):  # noqa: B008
                 f.write(chunk)
         return _import_prepass_recipe_from_zip(zip_path)
     finally:
+        try:
+            file.file.close()
+        except Exception:
+            pass
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -34448,6 +34464,10 @@ def import_edr_package(file: UploadFile = File(...)):  # noqa: B008
             "saved_prepass_recipe": model_dump_compat(saved_recipe),
         }
     finally:
+        try:
+            file.file.close()
+        except Exception:
+            pass
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 

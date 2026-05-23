@@ -19704,17 +19704,48 @@ def _sam3_entry_needs_annotation_materialized_view(entry: Dict[str, Any]) -> boo
     return any(path.is_file() for path in overlay_root.rglob("*.txt"))
 
 
+def _reset_materialized_dataset_root(raw_root: Path, allowed_root: Path, *, detail: str) -> Path:
+    try:
+        if allowed_root.is_symlink():
+            raise ValueError("materialization allowed root is a symlink")
+        allowed_resolved = allowed_root.resolve(strict=False)
+        if raw_root.is_symlink():
+            raise ValueError("materialization target is a symlink")
+        raw_parent = raw_root.parent
+        if raw_parent.is_symlink():
+            raise ValueError("materialization parent is a symlink")
+        parent_resolved = raw_parent.resolve(strict=False)
+        if not _path_is_within_root_impl(parent_resolved, allowed_resolved):
+            raise ValueError("materialization parent escapes root")
+        target_resolved = raw_root.resolve(strict=False)
+        if not _path_is_within_root_impl(target_resolved, allowed_resolved):
+            raise ValueError("materialization target escapes root")
+        if raw_root.exists():
+            if not raw_root.is_dir():
+                raise ValueError("materialization target is not a directory")
+            shutil.rmtree(raw_root)
+        if raw_root.exists() or raw_root.is_symlink():
+            raise ValueError("materialization target cleanup failed")
+        raw_root.mkdir(parents=True, exist_ok=False)
+        created = raw_root.resolve(strict=True)
+        if not _path_is_within_root_impl(created, allowed_resolved):
+            raise ValueError("materialization target escapes root after create")
+        return created
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
 def _materialize_sam3_annotation_view(entry: Dict[str, Any]) -> Dict[str, Any]:
     dataset_root = _dataset_effective_root_from_entry(entry)
     storage_root = _dataset_meta_storage_root_from_entry(entry)
-    materialized_root = (
+    materialized_root_raw = (
         storage_root / DATASET_ANNOTATION_OVERLAY_DIRNAME / "sam3_materialized"
-    ).resolve()
-    storage_root_resolved = storage_root.resolve()
-    if not _path_is_within_root_impl(materialized_root, storage_root_resolved):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_materialize_path_invalid")
-    if materialized_root.exists():
-        shutil.rmtree(materialized_root, ignore_errors=True)
+    )
+    materialized_root = _reset_materialized_dataset_root(
+        materialized_root_raw,
+        storage_root,
+        detail="sam3_materialize_path_invalid",
+    )
     for split in ("train", "val"):
         (materialized_root / split / "images").mkdir(parents=True, exist_ok=True)
         (materialized_root / split / "labels").mkdir(parents=True, exist_ok=True)
@@ -19853,12 +19884,11 @@ def _materialize_yolo_training_annotation_view(
     target_root: Path,
 ) -> Dict[str, Any]:
     dataset_root = _dataset_effective_root_from_entry(entry)
-    target_root = target_root.resolve()
-    cache_root = YOLO_DATASET_CACHE_ROOT.resolve()
-    if not _path_is_within_root_impl(target_root, cache_root):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_cache_path_invalid")
-    if target_root.exists():
-        shutil.rmtree(target_root, ignore_errors=True)
+    target_root = _reset_materialized_dataset_root(
+        target_root,
+        YOLO_DATASET_CACHE_ROOT,
+        detail="yolo_cache_path_invalid",
+    )
     for split in ("train", "val"):
         (target_root / split / "images").mkdir(parents=True, exist_ok=True)
         (target_root / split / "labels").mkdir(parents=True, exist_ok=True)

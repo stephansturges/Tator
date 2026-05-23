@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from services.detectors import _path_has_symlink_component
 from services.job_payloads import clamp_progress, json_sanitize
 
 
@@ -240,6 +241,8 @@ def _yolo_head_graft_audit_impl(
             return
         run_dir = Path(run_dir_value)
         if not run_dir.exists():
+            return
+        if _path_has_symlink_component(run_dir):
             return
         payload = {
             "timestamp": time_fn(),

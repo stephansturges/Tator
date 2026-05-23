@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from services.classifier_jobs import _clip_job_update_impl, _serialize_clip_job_impl
 from services.calibration import _serialize_calibration_job
@@ -162,3 +163,19 @@ def test_yolo_head_graft_audit_replaces_symlinked_log(tmp_path):
     assert rows == [
         {"event": "log", "level": "info", "message": "hello", "timestamp": 123.0}
     ]
+
+
+def test_yolo_head_graft_audit_rejects_symlinked_run_parent_without_target_write(tmp_path):
+    outside = tmp_path / "outside_parent"
+    outside_run = outside / "run"
+    outside_run.mkdir(parents=True)
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    job = _job(config={"paths": {"run_dir": str(linked_parent / "run")}})
+
+    _yolo_head_graft_audit_impl(job, "hello", time_fn=lambda: 123.0)
+
+    assert not (outside_run / "head_graft_audit.jsonl").exists()

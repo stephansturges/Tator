@@ -570,7 +570,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-- Validation: `961 passed, 17 skipped`
+- Validation: `962 passed, 17 skipped`
 - Live smoke: UI endpoint map/method checks and OpenAPI sanity passing
 - Details: commit history plus focused notes under `docs/`
 

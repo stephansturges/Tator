@@ -752,6 +752,8 @@ from services.detectors import (
     _clean_metric_summary_impl as _clean_metric_summary_impl,
     _list_yolo_runs_impl as _list_yolo_runs_impl,
     _list_rfdetr_runs_impl as _list_rfdetr_runs_impl,
+    _write_json_atomic as _write_detector_json_atomic,
+    _write_text_file as _write_detector_text_file,
 )
 from collections import OrderedDict
 from segment_anything import sam_model_registry, SamPredictor
@@ -28128,7 +28130,7 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             cfg_payload = yaml.safe_load(base_cfg.read_text())
             cfg_payload["scale"] = p2_scale
             p2_cfg = run_dir / f"yolov8{p2_scale}-p2.yaml"
-            p2_cfg.write_text(yaml.safe_dump(cfg_payload, sort_keys=False))
+            _write_detector_text_file(p2_cfg, yaml.safe_dump(cfg_payload, sort_keys=False))
             model_source = str(p2_cfg)
             if base_weights:
                 train_kwargs["pretrained"] = base_weights
@@ -28179,7 +28181,7 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
                 metrics_series = _yolo_parse_results_csv_impl(run_dir / "results.csv")
                 if metrics_series:
                     try:
-                        series_path.write_text(json.dumps(metrics_series, indent=2, sort_keys=True))
+                        _write_detector_json_atomic(series_path, metrics_series, sort_keys=True)
                         job.metrics = metrics_series
                     except Exception:
                         pass
@@ -28189,8 +28191,8 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             except Exception:
                 metrics_payload = {}
             if metrics_payload:
-                (run_dir / "metrics.json").write_text(
-                    json.dumps(metrics_payload, indent=2, sort_keys=True)
+                _write_detector_json_atomic(
+                    run_dir / "metrics.json", metrics_payload, sort_keys=True
                 )
             _yolo_prune_run_dir_impl(
                 run_dir,
@@ -28600,7 +28602,7 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                 merged_detects[1].load_state_dict(new_detects[0].state_dict(), strict=False)
                 merged_labelmap = list(base_labelmap) + list(new_labelmap)
                 labelmap_path = run_dir / "labelmap.txt"
-                labelmap_path.write_text("\n".join(merged_labelmap) + "\n")
+                _write_detector_text_file(labelmap_path, "\n".join(merged_labelmap) + "\n")
                 merged_names = {idx: name for idx, name in enumerate(merged_labelmap)}
                 merged.model.names = merged_names
                 try:
@@ -28814,7 +28816,7 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 json_load_fn=json.loads,
             )
             if labelmap:
-                (run_dir / "labelmap.txt").write_text("\n".join(labelmap) + "\n")
+                _write_detector_text_file(run_dir / "labelmap.txt", "\n".join(labelmap) + "\n")
             model_kwargs: Dict[str, Any] = {}
             if config.get("resolution"):
                 try:
@@ -28976,8 +28978,8 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                     job.metrics = metrics_series
             if metrics_series:
                 try:
-                    (run_dir / "metrics_series.json").write_text(
-                        json.dumps(metrics_series, indent=2, sort_keys=True)
+                    _write_detector_json_atomic(
+                        run_dir / "metrics_series.json", metrics_series, sort_keys=True
                     )
                 except Exception:
                     pass

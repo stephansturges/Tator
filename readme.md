@@ -570,7 +570,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Latest validation: `892 passed, 17 skipped, 8 warnings`, UI endpoint
+Latest validation: `895 passed, 17 skipped, 8 warnings`, UI endpoint
 contracts, and local backend smoke.
 
 Keep the detailed audit trail in commits and focused docs, not in this

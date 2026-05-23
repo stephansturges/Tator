@@ -445,6 +445,63 @@ def test_sam3_training_config_rejects_symlinked_run_dir(
     assert (outside / "payload.bin").read_bytes() == b"external"
 
 
+def test_save_sam3_config_writes_inside_generated_config_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_root = tmp_path / "generated"
+    monkeypatch.setattr(api, "SAM3_GENERATED_CONFIG_DIR", config_root)
+    cfg = api.OmegaConf.create({"paths": {"experiment_log_dir": str(tmp_path / "run")}})
+
+    config_name, config_path = api._save_sam3_config(cfg, "job-safe")
+
+    assert config_name == "configs/generated/job-safe.yaml"
+    assert config_path == config_root / "job-safe.yaml"
+    assert config_path.read_text(encoding="utf-8").startswith("# @package _global_\n")
+
+
+def test_save_sam3_config_rejects_symlinked_generated_config_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outside = tmp_path / "outside_generated"
+    outside.mkdir()
+    config_root = tmp_path / "generated"
+    try:
+        config_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "SAM3_GENERATED_CONFIG_DIR", config_root)
+    cfg = api.OmegaConf.create({"paths": {"experiment_log_dir": str(tmp_path / "run")}})
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._save_sam3_config(cfg, "job-root-link")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "sam3_config_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_save_sam3_config_rejects_symlinked_config_file_without_target_overwrite(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config_root = tmp_path / "generated"
+    config_root.mkdir()
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("external", encoding="utf-8")
+    try:
+        (config_root / "job-link.yaml").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "SAM3_GENERATED_CONFIG_DIR", config_root)
+    cfg = api.OmegaConf.create({"paths": {"experiment_log_dir": str(tmp_path / "run")}})
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._save_sam3_config(cfg, "job-link")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "sam3_config_path_invalid"
+    assert outside.read_text(encoding="utf-8") == "external"
+
+
 def test_sam3_training_job_cleans_split_when_config_build_fails(
     tmp_path: Path, monkeypatch
 ) -> None:

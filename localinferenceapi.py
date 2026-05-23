@@ -27205,11 +27205,68 @@ def _latest_checkpoint_in_dir(checkpoint_dir: Path) -> Optional[str]:
     return None
 
 
+def _sam3_generated_config_path(job_id: str) -> Tuple[Path, Path]:
+    raw_id = str(job_id or "").strip()
+    if (
+        not raw_id
+        or raw_id in {".", ".."}
+        or "/" in raw_id
+        or "\\" in raw_id
+        or Path(raw_id).is_absolute()
+        or raw_id != _safe_run_name(raw_id, raw_id)
+    ):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_config_path_invalid")
+    try:
+        raw_root = SAM3_GENERATED_CONFIG_DIR
+        if raw_root.is_symlink():
+            raise ValueError("SAM3 generated config root is a symlink")
+        raw_root.mkdir(parents=True, exist_ok=True)
+        if raw_root.is_symlink() or not raw_root.is_dir():
+            raise ValueError("SAM3 generated config root is not a directory")
+        root = raw_root.resolve(strict=True)
+        raw_config = raw_root / f"{raw_id}.yaml"
+        if raw_config.is_symlink():
+            raise ValueError("SAM3 generated config path is a symlink")
+        if raw_config.exists() and not raw_config.is_file():
+            raise ValueError("SAM3 generated config path is not a file")
+        config_file = raw_config.resolve(strict=False)
+        if not _path_is_within_root_impl(config_file, root) or config_file.parent != root:
+            raise ValueError("SAM3 generated config path escapes root")
+        return root, config_file
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_config_path_invalid") from exc
+
+
+def _write_sam3_generated_config(config_file: Path, root: Path, text: str) -> None:
+    tmp_path = root / f".{config_file.name}.{uuid.uuid4().hex}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        if tmp_path.is_symlink():
+            raise ValueError("SAM3 generated config temp path is a symlink")
+        fd = os.open(tmp_path, flags, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        if config_file.is_symlink():
+            raise ValueError("SAM3 generated config path became a symlink")
+        os.replace(tmp_path, config_file)
+    except Exception as exc:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_config_path_invalid") from exc
+
+
 def _save_sam3_config(cfg: OmegaConf, job_id: str) -> Tuple[str, Path]:
-    SAM3_GENERATED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    config_file = SAM3_GENERATED_CONFIG_DIR / f"{job_id}.yaml"
+    root, config_file = _sam3_generated_config_path(job_id)
     yaml_text = OmegaConf.to_yaml(cfg)
-    config_file.write_text("# @package _global_\n" + yaml_text, encoding="utf-8")
+    _write_sam3_generated_config(config_file, root, "# @package _global_\n" + yaml_text)
     return f"configs/generated/{config_file.name}", config_file
 
 

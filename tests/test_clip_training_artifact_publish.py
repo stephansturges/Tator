@@ -167,6 +167,15 @@ def test_split_train_test_can_preserve_all_classes_with_empty_test_split():
     assert test_idx.tolist() == []
 
 
+def test_require_two_training_classes_rejects_single_class():
+    with pytest.raises(clip_training.TrainingError, match="at least two classes"):
+        clip_training._require_two_training_classes(["car", "car"])
+
+
+def test_require_two_training_classes_accepts_two_classes():
+    clip_training._require_two_training_classes(["car", "boat"])
+
+
 def test_split_embedding_matrix_allows_zero_rows(tmp_path):
     matrix_path = tmp_path / "test_embeddings.dat"
 

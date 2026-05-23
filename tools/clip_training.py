@@ -641,6 +641,11 @@ def _split_train_test_indices(
     return train_idx, test_idx, use_group_split
 
 
+def _require_two_training_classes(labels: Sequence[object]) -> None:
+    if len({str(label) for label in labels}) < 2:
+        raise TrainingError("Need at least two classes to train classifier.")
+
+
 def _make_split_embedding_matrix(path: str, rows: int, embedding_dim: int) -> np.ndarray:
     shape = (int(rows), int(embedding_dim))
     if rows <= 0:
@@ -2056,6 +2061,7 @@ def train_clip_from_yolo(
                 X_test = X_test / embedding_std_values
     y_train = y_class_names_arr[train_idx]
     y_test = y_class_names_arr[test_idx]
+    _require_two_training_classes(y_train)
 
     def _calibrate_temperature(
         logits: np.ndarray,

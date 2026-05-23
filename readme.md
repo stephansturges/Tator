@@ -955,6 +955,9 @@ job-start validation, and the Mac YOLO training work.
   reference those split directories, report actual freed bytes plus deleted
   entry counts, and dataset deletion now refuses to remove a managed or Qwen
   dataset that any active backend job still references.
+- Dataset deletion also refuses to remove linked or managed dataset metadata while
+  an annotation session lock is active, so deleting a dataset cannot silently
+  discard in-progress overlay labels, text labels, cursor state, or lock state.
 - Local validation for this checkpoint used:
 
 ```bash

@@ -14500,6 +14500,16 @@ def _require_annotation_lock_owner(
     return existing_lock
 
 
+def _dataset_entry_has_active_annotation_lock(entry: Dict[str, Any]) -> bool:
+    try:
+        meta_path = _dataset_meta_path_for_entry(entry)
+    except Exception:
+        return False
+    meta = _load_json_metadata(meta_path) or {}
+    lock = meta.get("annotation_lock") if isinstance(meta, dict) else {}
+    return _annotation_lock_is_active(lock if isinstance(lock, dict) else {})
+
+
 def _annotation_requested_status(payload: Dict[str, Any]) -> Optional[str]:
     if "status" not in payload:
         return None
@@ -14755,6 +14765,10 @@ def delete_dataset_entry(dataset_id: str):
     storage_mode = str(entry.get("storage_mode") or "managed").strip().lower()
     registry_root_raw = entry.get("registry_root")
     registry_root = Path(str(registry_root_raw)).resolve() if registry_root_raw else None
+    if _dataset_entry_has_active_annotation_lock(entry):
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT, detail="dataset_delete_blocked_annotation_lock"
+        )
 
     # Linked entries should remove only the registry record + overlay metadata, never the source dataset itself.
     if storage_mode == "linked":

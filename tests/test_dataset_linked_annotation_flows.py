@@ -42,6 +42,82 @@ def test_delete_linked_dataset_only_removes_registry_record(tmp_path, monkeypatc
     assert not record_root.exists(), "registry record should be removed"
 
 
+def test_delete_linked_dataset_blocks_active_annotation_lock(tmp_path, monkeypatch) -> None:
+    source_root = tmp_path / "linked_source"
+    source_root.mkdir(parents=True, exist_ok=True)
+
+    registry_root = tmp_path / "registry"
+    registry_root.mkdir(parents=True, exist_ok=True)
+    record_root = registry_root / "ds_linked"
+    record_root.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "id": "ds_linked",
+        "annotation_lock": {
+            "holder": "annotator",
+            "session_id": "sess-active",
+            "expires_at": time.time() + 300.0,
+        },
+    }
+    (record_root / api.DATASET_META_NAME).write_text(json.dumps(meta), encoding="utf-8")
+
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds_linked",
+            "dataset_root": str(source_root),
+            "registry_root": str(record_root),
+            "storage_mode": "linked",
+            "linked_root": str(source_root),
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.delete_dataset_entry("ds_linked")
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "dataset_delete_blocked_annotation_lock"
+    assert record_root.exists()
+    assert source_root.exists()
+
+
+def test_delete_managed_dataset_blocks_active_annotation_lock(tmp_path, monkeypatch) -> None:
+    registry_root = tmp_path / "registry"
+    dataset_root = registry_root / "managed_ds"
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "id": "managed_ds",
+        "annotation_lock": {
+            "holder": "annotator",
+            "session_id": "sess-active",
+            "expires_at": time.time() + 300.0,
+        },
+    }
+    (dataset_root / api.DATASET_META_NAME).write_text(json.dumps(meta), encoding="utf-8")
+
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "sam3")
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", tmp_path / "qwen")
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "managed_ds",
+            "dataset_root": str(dataset_root),
+            "registry_root": str(dataset_root),
+            "storage_mode": "managed",
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.delete_dataset_entry("managed_ds")
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "dataset_delete_blocked_annotation_lock"
+    assert dataset_root.exists()
+
+
 def test_save_transient_dataset_persists_overlay_content(tmp_path, monkeypatch) -> None:
     source_root = tmp_path / "linked_source"
     source_root.mkdir(parents=True, exist_ok=True)

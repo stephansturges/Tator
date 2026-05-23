@@ -283,7 +283,7 @@ but unhelpful for the dataset.
 - **Backend hardening:** registries, package imports/exports, job artifacts,
   uploads, copy destinations, caches, annotation overlays, sidecars, and
   checkpoints now fail closed on path/symlink escapes.
-- **Validation:** `803 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
+- **Validation:** `806 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
   and local backend smoke are clean.
 
 </details>

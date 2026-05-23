@@ -13755,20 +13755,30 @@ def _enforce_agent_mining_cache_limits(cache_root: Path, allow_when_running: boo
     def _iter_entries():
         for entry in cache_root.iterdir():
             try:
-                stat = entry.stat()
+                stat = entry.lstat()
             except Exception:
                 continue
             yield entry, stat.st_mtime
+
+    def _remove_cache_entry(entry: Path) -> int:
+        if entry.is_symlink():
+            size = entry.lstat().st_size
+            entry.unlink(missing_ok=True)
+            return size
+        if entry.is_dir():
+            size = _dir_size_bytes_impl(entry)
+            shutil.rmtree(entry, ignore_errors=True)
+            return size
+        size = entry.stat().st_size
+        entry.unlink(missing_ok=True)
+        return size
 
     # TTL purge
     if ttl_seconds > 0:
         for entry, mtime in list(_iter_entries()):
             if now - mtime > ttl_seconds:
                 try:
-                    if entry.is_dir():
-                        shutil.rmtree(entry, ignore_errors=True)
-                    else:
-                        entry.unlink(missing_ok=True)
+                    _remove_cache_entry(entry)
                 except Exception:
                     pass
 
@@ -13787,12 +13797,7 @@ def _enforce_agent_mining_cache_limits(cache_root: Path, allow_when_running: boo
         if total <= max_bytes:
             break
         try:
-            if entry.is_dir():
-                size = _dir_size_bytes_impl(entry)
-                shutil.rmtree(entry, ignore_errors=True)
-            else:
-                size = entry.stat().st_size
-                entry.unlink(missing_ok=True)
+            size = _remove_cache_entry(entry)
             total = max(0, total - size)
         except Exception:
             continue
@@ -25421,6 +25426,8 @@ def agent_mining_cache_size():
     try:
         for p in cache_root.rglob("*"):
             try:
+                if p.is_symlink():
+                    continue
                 if p.is_file():
                     total += p.stat().st_size
                     files += 1
@@ -25449,7 +25456,10 @@ def agent_mining_cache_purge():
     paths = sorted(cache_root.rglob("*"), key=lambda x: len(x.parts), reverse=True)
     for p in paths:
         try:
-            if p.is_file():
+            if p.is_symlink():
+                p.unlink(missing_ok=True)
+                deleted_files += 1
+            elif p.is_file():
                 deleted += p.stat().st_size
                 deleted_files += 1
                 p.unlink()

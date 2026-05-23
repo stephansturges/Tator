@@ -10,10 +10,12 @@ from fastapi import HTTPException
 from services.detectors import (
     _copy2_if_different,
     _load_detector_default_impl,
+    _load_rfdetr_active_impl,
     _load_yolo_active_impl,
     _rfdetr_remap_coco_ids_impl,
     _rfdetr_write_run_meta_impl,
     _save_detector_default_impl,
+    _save_rfdetr_active_impl,
     _save_yolo_active_impl,
     _strip_checkpoint_optimizer_impl,
     _yolo_write_run_meta_impl,
@@ -56,6 +58,77 @@ def test_load_yolo_active_skips_symlink_escape(tmp_path: Path) -> None:
         pytest.skip(f"symlink unsupported: {exc}")
 
     assert _load_yolo_active_impl(active_path) == {}
+
+
+def test_load_yolo_active_skips_symlinked_labelmap_escape(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    best = run_dir / "best.pt"
+    best.write_text("weights", encoding="utf-8")
+    outside_labelmap = tmp_path / "outside_labelmap.txt"
+    outside_labelmap.write_text("escaped\n", encoding="utf-8")
+    labelmap = run_dir / "labelmap.txt"
+    try:
+        labelmap.symlink_to(outside_labelmap)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    active_path = tmp_path / "yolo_active.json"
+    active_path.write_text(
+        json.dumps({"run_id": "run", "best_path": str(best), "labelmap_path": str(labelmap)}),
+        encoding="utf-8",
+    )
+
+    assert _load_yolo_active_impl(active_path) == {}
+
+
+def test_load_rfdetr_active_skips_symlinked_best_escape(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    outside = tmp_path / "outside.pth"
+    outside.write_text("secret", encoding="utf-8")
+    best = run_dir / "checkpoint_best_total.pth"
+    try:
+        best.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    active_path = tmp_path / "rfdetr_active.json"
+    active_path.write_text(
+        json.dumps({"run_id": "run", "best_path": str(best)}),
+        encoding="utf-8",
+    )
+
+    assert (
+        _load_rfdetr_active_impl(
+            active_path,
+            tmp_path / "rfdetr_runs",
+            save_active_fn=lambda payload: _save_rfdetr_active_impl(payload, active_path),
+        )
+        == {}
+    )
+
+
+def test_save_rfdetr_active_replaces_symlink_targets_without_target_write(tmp_path: Path) -> None:
+    active_path = tmp_path / "detectors" / "rfdetr_active.json"
+    active_path.parent.mkdir()
+    outside_tmp = tmp_path / "rfdetr_outside_tmp.json"
+    outside_final = tmp_path / "rfdetr_outside_final.json"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    tmp_link = active_path.with_suffix(active_path.suffix + f".tmp.{os.getpid()}")
+    try:
+        tmp_link.symlink_to(outside_tmp)
+        active_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    saved = _save_rfdetr_active_impl({"run_id": "r1"}, active_path)
+
+    assert saved["run_id"] == "r1"
+    assert not tmp_link.exists()
+    assert not active_path.is_symlink()
+    assert json.loads(active_path.read_text(encoding="utf-8"))["run_id"] == "r1"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
 
 
 def test_detector_default_replaces_symlink_without_target_write(tmp_path: Path) -> None:

@@ -61,6 +61,35 @@ def _write_text_file(path: Path, text: str) -> Path:
     return path
 
 
+def _active_regular_file(path_value: Any) -> Optional[Path]:
+    raw = str(path_value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if path.is_symlink():
+        return None
+    try:
+        parent_root = path.parent.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+    except Exception:
+        return None
+    if not resolved.is_file():
+        return None
+    if not _path_is_within_root_impl(resolved, parent_root):
+        return None
+    return path
+
+
+def _active_payload_has_valid_files(payload: Dict[str, Any]) -> bool:
+    best_path = _active_regular_file(payload.get("best_path"))
+    if best_path is None:
+        return False
+    labelmap_path = str(payload.get("labelmap_path") or "").strip()
+    if labelmap_path and _active_regular_file(labelmap_path) is None:
+        return False
+    return True
+
+
 def _unlink_self_referential_symlink(path: Path) -> bool:
     if not path.is_symlink():
         return False
@@ -172,6 +201,8 @@ def _ensure_yolo_inference_runtime_impl(
     best_path = active.get("best_path")
     if not best_path:
         raise http_exception_cls(status_code=412, detail="yolo_active_missing")
+    if _active_regular_file(best_path) is None:
+        raise http_exception_cls(status_code=412, detail="yolo_active_missing_weights")
     run_id = active.get("run_id")
     try:
         run_dir = Path(best_path).parent
@@ -227,7 +258,7 @@ def _ensure_rfdetr_inference_runtime_impl(
     best_path = active.get("best_path")
     if not best_path:
         raise http_exception_cls(status_code=412, detail="rfdetr_active_missing")
-    if not Path(best_path).exists():
+    if _active_regular_file(best_path) is None:
         raise http_exception_cls(status_code=412, detail="rfdetr_active_missing_weights")
     labelmap_path = active.get("labelmap_path")
     task = active.get("task") or "detect"
@@ -309,16 +340,8 @@ def _load_yolo_active_impl(yolo_active_path: Path) -> Dict[str, Any]:
         payload = json.loads(yolo_active_path.read_text())
         if not isinstance(payload, dict):
             return {}
-        best_path = str(payload.get("best_path") or "")
-        if best_path:
-            best = Path(best_path)
-            if not best.exists():
-                return {}
-            try:
-                if not _path_is_within_root_impl(best.resolve(), best.parent.resolve()):
-                    return {}
-            except Exception:
-                return {}
+        if not _active_payload_has_valid_files(payload):
+            return {}
         return payload
     except Exception:
         return {}
@@ -348,14 +371,12 @@ def _load_rfdetr_active_impl(
             return {}
 
     active = _load_from(rfdetr_active_path)
-    best_path = str(active.get("best_path") or "")
-    if best_path and Path(best_path).exists():
+    if _active_payload_has_valid_files(active):
         return active
 
     fallback_path = rfdetr_job_root / "active.json"
     fallback = _load_from(fallback_path)
-    fallback_best = str(fallback.get("best_path") or "")
-    if fallback_best and Path(fallback_best).exists():
+    if _active_payload_has_valid_files(fallback):
         try:
             save_active_fn(fallback)
         except Exception:
@@ -1157,8 +1178,10 @@ def _yolo_load_labelmap_impl(labelmap_path: Path | str | None) -> List[str]:
     if not labelmap_path:
         return []
     path = Path(labelmap_path)
+    if _active_regular_file(path) is None:
+        return []
     try:
-        return [line.strip() for line in path.read_text().splitlines() if line.strip()]
+        return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     except Exception:
         return []
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import zipfile
 from pathlib import Path
 
@@ -180,6 +181,50 @@ def test_yolo_detector_runtime_rejects_best_symlink_escape(
 
     assert exc.value.status_code == 412
     assert exc.value.detail == "yolo_best_missing"
+
+
+def test_set_yolo_active_rejects_symlinked_best_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_root = tmp_path / "yolo_runs"
+    run_dir = job_root / "run1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.pt"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (run_dir / "best.pt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "YOLO_JOB_ROOT", job_root)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.set_yolo_active(api.YoloActiveRequest(run_id="run1"))
+
+    assert exc.value.status_code == 412
+    assert exc.value.detail == "yolo_best_missing"
+
+
+def test_set_yolo_active_omits_symlinked_labelmap_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_root = tmp_path / "yolo_runs"
+    run_dir = job_root / "run1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "best.pt").write_text("weights", encoding="utf-8")
+    outside = tmp_path / "outside_labelmap.txt"
+    outside.write_text("escaped\n", encoding="utf-8")
+    try:
+        (run_dir / "labelmap.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    active_path = tmp_path / "models" / "yolo" / "active.json"
+    monkeypatch.setattr(api, "YOLO_JOB_ROOT", job_root)
+    monkeypatch.setattr(api, "YOLO_ACTIVE_PATH", active_path)
+
+    payload = api.set_yolo_active(api.YoloActiveRequest(run_id="run1"))
+
+    assert payload["labelmap_path"] is None
+    assert json.loads(active_path.read_text(encoding="utf-8"))["labelmap_path"] is None
 
 
 def test_download_rfdetr_run_skips_symlink_keep_file_escape(

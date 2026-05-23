@@ -30670,7 +30670,9 @@ def set_rfdetr_active(payload: RfDetrActiveRequest):
         "run_name": config.get("run_name") or dataset.get("label") or payload.run_id,
         "best_path": best_path,
         "labelmap_path": (
-            str(run_dir / "labelmap.txt") if (run_dir / "labelmap.txt").exists() else None
+            str(run_dir / "labelmap.txt")
+            if _safe_regular_file_within_root(run_dir / "labelmap.txt", run_dir)
+            else None
         ),
         "task": config.get("task") or dataset.get("task"),
         "variant": config.get("variant"),
@@ -30852,7 +30854,7 @@ def set_yolo_active(payload: YoloActiveRequest):
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
     best_path = run_dir / "best.pt"
-    if not best_path.exists():
+    if not _safe_regular_file_within_root(best_path, run_dir):
         raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="yolo_best_missing")
     meta = _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
     config = meta.get("config") or {}
@@ -30862,7 +30864,9 @@ def set_yolo_active(payload: YoloActiveRequest):
         "run_name": config.get("run_name") or dataset.get("label") or payload.run_id,
         "best_path": str(best_path),
         "labelmap_path": (
-            str(run_dir / "labelmap.txt") if (run_dir / "labelmap.txt").exists() else None
+            str(run_dir / "labelmap.txt")
+            if _safe_regular_file_within_root(run_dir / "labelmap.txt", run_dir)
+            else None
         ),
         "task": config.get("task"),
         "variant": config.get("variant"),

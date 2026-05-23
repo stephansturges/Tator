@@ -68,6 +68,28 @@ def _path_within_root(path: Path, root: Path) -> bool:
     return True
 
 
+def _prepare_output_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise RuntimeError("edr_package_path_invalid")
+    parent_resolved = path.parent.resolve(strict=True)
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+    elif path.exists() and path.is_dir():
+        raise RuntimeError("edr_package_path_invalid")
+    try:
+        path.resolve(strict=False).relative_to(parent_resolved)
+    except Exception as exc:
+        raise RuntimeError("edr_package_path_invalid") from exc
+
+
+def _prepare_atomic_output_file(path: Path) -> Path:
+    _prepare_output_file(path)
+    tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    _prepare_output_file(tmp_path)
+    return tmp_path
+
+
 def _safe_child_dir_within_root(path: Path, root: Path) -> bool:
     if path.is_symlink():
         return False
@@ -197,12 +219,25 @@ def edr_package_meta_path(packages_root: Path, package_id: str) -> Path:
 
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp_path = _prepare_atomic_output_file(path)
+    try:
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+    return path
+
+
+def _write_text(path: Path, text: str) -> Path:
+    _prepare_output_file(path)
+    path.write_text(text, encoding="utf-8")
     return path
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
+    if path.is_symlink():
+        return {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -234,11 +269,9 @@ def _unlink_self_referential_symlink(path: Path) -> bool:
 
 def _copy2_if_different(src: Path, dest: Path) -> None:
     src_resolved = src.resolve()
-    if src_resolved == _path_identity(dest):
+    _prepare_output_file(dest)
+    if dest.exists() and src_resolved == _path_identity(dest):
         return
-    if dest.is_symlink():
-        dest.unlink(missing_ok=True)
-    dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src_resolved, dest)
 
 
@@ -506,7 +539,7 @@ def _repair_feature_contract_if_needed(
         labelmap = _normalize_string_list(repaired.get("labelmap"))
         if labelmap:
             try:
-                (payload_root / "labelmap.txt").write_text("\n".join(labelmap) + "\n", encoding="utf-8")
+                _write_text(payload_root / "labelmap.txt", "\n".join(labelmap) + "\n")
             except Exception:
                 pass
     return repaired
@@ -546,11 +579,17 @@ def _build_package_summary(
 
 
 def _zip_payload(payload_dir: Path, zip_path: Path) -> None:
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for item in sorted(payload_dir.rglob("*")):
-            if not _safe_regular_file_within_root(item, payload_dir):
-                continue
-            zf.write(item.resolve(strict=True), arcname=str(item.relative_to(payload_dir)))
+    tmp_path = _prepare_atomic_output_file(zip_path)
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for item in sorted(payload_dir.rglob("*")):
+                if not _safe_regular_file_within_root(item, payload_dir):
+                    continue
+                zf.write(item.resolve(strict=True), arcname=str(item.relative_to(payload_dir)))
+        os.replace(tmp_path, zip_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _extract_zip_safely(
@@ -639,7 +678,7 @@ def materialize_canonical_edr_package(
     if not labelmap_lines and dataset_id:
         labelmap_lines = [str(x).strip() for x in load_labelmap_fn(dataset_id) if str(x).strip()]
     labelmap_path = payload_root / "labelmap.txt"
-    labelmap_path.write_text("\n".join(labelmap_lines) + ("\n" if labelmap_lines else ""), encoding="utf-8")
+    _write_text(labelmap_path, "\n".join(labelmap_lines) + ("\n" if labelmap_lines else ""))
     assets.append({"kind": "labelmap", "path": "labelmap.txt", "size": int(labelmap_path.stat().st_size), "sha256": _sha256_path(labelmap_path)})
 
     glossary_text = str(saved_recipe.get("glossary") or "").strip()
@@ -920,7 +959,7 @@ def resolve_edr_package_runtime(
                 break
 
     labelmap_lines: List[str] = []
-    if labelmap_path.exists():
+    if _safe_regular_file_within_root(labelmap_path, payload_root):
         labelmap_lines = [line.strip() for line in labelmap_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     if not labelmap_lines:
         labelmap_lines = _normalize_string_list(
@@ -928,14 +967,11 @@ def resolve_edr_package_runtime(
         )
         if labelmap_lines:
             try:
-                labelmap_path.write_text(
-                    "\n".join(labelmap_lines) + "\n",
-                    encoding="utf-8",
-                )
+                _write_text(labelmap_path, "\n".join(labelmap_lines) + "\n")
             except Exception:
                 pass
     glossary_text = ""
-    if glossary_path.exists():
+    if _safe_regular_file_within_root(glossary_path, payload_root):
         glossary_payload = _load_json(glossary_path)
         glossary_text = str(glossary_payload.get("glossary") or "").strip()
 

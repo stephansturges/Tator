@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import zipfile
 from pathlib import Path
@@ -13,8 +14,10 @@ from services.edr_packages import (
     EDR_PACKAGE_PAYLOAD_DIRNAME,
     EDR_PACKAGE_STAGE_META_NAME,
     EDR_PACKAGE_ZIP_NAME,
+    _copy2_if_different,
     _copy_tree,
     _stage_tree_if_needed,
+    _write_json,
     edr_package_dir,
     export_edr_package,
     get_edr_package,
@@ -86,6 +89,51 @@ def test_resolve_edr_package_runtime_falls_back_to_runtime_labelmap(tmp_path: Pa
         "car",
         "person",
     ]
+
+
+def test_resolve_edr_package_runtime_replaces_symlinked_labelmap_without_target_write(
+    tmp_path: Path,
+) -> None:
+    packages_root = tmp_path / "edr_packages"
+    package_root = packages_root / "pkg1"
+    payload_root = package_root / EDR_PACKAGE_PAYLOAD_DIRNAME
+    payload_root.mkdir(parents=True, exist_ok=True)
+
+    (package_root / EDR_PACKAGE_META_NAME).write_text(
+        json.dumps({"package_sha256": "dummy"}),
+        encoding="utf-8",
+    )
+    (payload_root / EDR_PACKAGE_MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "package_id": "pkg1",
+                "runtime_contract": {"config": {"labelmap": ["car", "person"]}},
+                "feature_contract": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside_labelmap.txt"
+    outside.write_text("external\n", encoding="utf-8")
+    try:
+        (payload_root / "labelmap.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    (payload_root / "glossary.json").write_text(json.dumps({"glossary": ""}), encoding="utf-8")
+
+    runtime = resolve_edr_package_runtime(
+        packages_root=packages_root,
+        package_id="pkg1",
+        upload_root=tmp_path / "uploads",
+        yolo_job_root=tmp_path / "yolo_runs",
+        rfdetr_job_root=tmp_path / "rfdetr_runs",
+        calibration_root=tmp_path / "calibration_jobs",
+        classifiers_root=tmp_path / "classifiers",
+    )
+
+    assert runtime["labelmap"] == ["car", "person"]
+    assert not (payload_root / "labelmap.txt").is_symlink()
+    assert outside.read_text(encoding="utf-8") == "external\n"
 
 
 def test_resolve_edr_package_runtime_stages_classifier_not_meta(tmp_path: Path) -> None:
@@ -471,6 +519,29 @@ def test_zip_payload_skips_symlink_escape(tmp_path: Path) -> None:
     assert "escape.txt" not in names
 
 
+def test_zip_payload_replaces_existing_zip_symlink_without_target_write(tmp_path: Path) -> None:
+    payload_root = tmp_path / "payload"
+    payload_root.mkdir(parents=True, exist_ok=True)
+    (payload_root / EDR_PACKAGE_MANIFEST_NAME).write_text(
+        json.dumps({"package_id": "pkg1"}),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside.edr.zip"
+    outside.write_bytes(b"external")
+    zip_path = tmp_path / "package.edr.zip"
+    try:
+        zip_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _zip_payload(payload_root, zip_path)
+
+    assert not zip_path.is_symlink()
+    assert outside.read_bytes() == b"external"
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        assert EDR_PACKAGE_MANIFEST_NAME in set(zf.namelist())
+
+
 def test_copy_tree_skips_symlink_escape(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
@@ -489,6 +560,44 @@ def test_copy_tree_skips_symlink_escape(tmp_path: Path) -> None:
     assert (dest / "safe.txt").read_text(encoding="utf-8") == "safe"
     assert not (dest / "escape.txt").exists()
     assert [asset["path"] for asset in assets] == [str((dest / "safe.txt").as_posix())]
+
+
+def test_copy2_if_different_replaces_symlink_to_source(tmp_path: Path) -> None:
+    src = tmp_path / "source.bin"
+    src.write_text("source", encoding="utf-8")
+    dest = tmp_path / "dest.bin"
+    try:
+        dest.symlink_to(src)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _copy2_if_different(src, dest)
+
+    assert not dest.is_symlink()
+    assert dest.read_text(encoding="utf-8") == "source"
+
+
+def test_write_json_replaces_symlink_targets_without_target_write(tmp_path: Path) -> None:
+    json_path = tmp_path / "package" / EDR_PACKAGE_META_NAME
+    json_path.parent.mkdir()
+    outside_tmp = tmp_path / "outside_tmp.json"
+    outside_final = tmp_path / "outside_final.json"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    tmp_link = json_path.with_suffix(json_path.suffix + f".tmp.{os.getpid()}")
+    try:
+        tmp_link.symlink_to(outside_tmp)
+        json_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _write_json(json_path, {"id": "pkg1"})
+
+    assert not tmp_link.exists()
+    assert not json_path.is_symlink()
+    assert json.loads(json_path.read_text(encoding="utf-8"))["id"] == "pkg1"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
 
 
 def test_import_edr_package_rejects_invalid_zip(tmp_path: Path) -> None:

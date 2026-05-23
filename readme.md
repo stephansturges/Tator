@@ -973,6 +973,9 @@ job-start validation, and the Mac YOLO training work.
   flat, or overlay-edited YOLO datasets into the YOLO cache before writing
   `data.yaml`, so detector training consumes the same corrected labels as the
   annotation viewer instead of stale source labels.
+- RF-DETR training now routes linked, flat, or overlay-edited YOLO datasets
+  through the same materialized annotation view before COCO conversion, keeping
+  RF-DETR train/val JSONs aligned with the current annotation overlay state.
 - Local validation for this checkpoint used:
 
 ```bash

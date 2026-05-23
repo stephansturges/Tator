@@ -19024,7 +19024,7 @@ def _resolve_yolo_training_dataset(payload) -> Dict[str, Any]:
     return dataset_info
 
 
-_resolve_rfdetr_training_dataset = functools.partial(
+_rfdetr_training_dataset_base_resolver = functools.partial(
     _resolve_rfdetr_training_dataset_impl,
     resolve_dataset_entry_fn=lambda dataset_id: _resolve_dataset_entry_impl(
         dataset_id,
@@ -19054,6 +19054,35 @@ _resolve_rfdetr_training_dataset = functools.partial(
     ensure_coco_supercategory_fn=_ensure_coco_supercategory_impl,
     http_exception_cls=HTTPException,
 )
+
+
+def _resolve_rfdetr_training_dataset(payload) -> Dict[str, Any]:
+    dataset_id = str(getattr(payload, "dataset_id", None) or "").strip()
+    task = str(getattr(payload, "task", None) or "detect").strip().lower() or "detect"
+    if dataset_id:
+        entry = _resolve_dataset_entry_impl(dataset_id, list_all_datasets_fn=_list_all_datasets)
+        if entry and entry.get("yolo_ready") and _sam3_entry_needs_annotation_materialized_view(entry):
+            meta = _materialize_sam3_annotation_view(entry)
+            dataset_type = str(meta.get("type") or entry.get("type") or "bbox")
+            if task == "segment" and dataset_type != "seg":
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_seg_requires_polygons")
+            coco_train = meta.get("coco_train_json")
+            coco_val = meta.get("coco_val_json")
+            if not coco_train or not coco_val:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_not_ready")
+            _ensure_coco_supercategory_impl(Path(coco_train))
+            _ensure_coco_supercategory_impl(Path(coco_val))
+            return {
+                "dataset_id": entry.get("id") or dataset_id,
+                "dataset_root": meta.get("dataset_root"),
+                "dataset_label": entry.get("label") or meta.get("label") or dataset_id,
+                "task": task,
+                "coco_train_json": coco_train,
+                "coco_val_json": coco_val,
+                "type": dataset_type,
+                "source": "annotation_overlay",
+            }
+    return _rfdetr_training_dataset_base_resolver(payload)
 
 
 ## NOTE: RF‑DETR helpers use *_impl directly to avoid wrapper drift.

@@ -156,7 +156,7 @@ def _resolve_coco_image_path_impl(
 
 def _label_relpath_for_image_impl(file_name: str) -> Path:
     rel_path = Path(file_name)
-    if rel_path.is_absolute():
+    if rel_path.is_absolute() or ".." in rel_path.parts:
         rel_path = Path(rel_path.name)
     if "images" in rel_path.parts:
         idx = rel_path.parts.index("images")

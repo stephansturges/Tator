@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -33,6 +34,53 @@ logger = logging.getLogger(__name__)
 
 QWEN_METADATA_FILENAME = "metadata.json"
 SAM3_DATASET_META_NAME = "sam3_dataset.json"
+
+
+def _path_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except Exception:
+        return False
+    return True
+
+
+def _prepare_output_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise RuntimeError("dataset_path_invalid")
+    parent_resolved = path.parent.resolve(strict=True)
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+    elif path.exists() and path.is_dir():
+        raise RuntimeError("dataset_path_invalid")
+    try:
+        path.resolve(strict=False).relative_to(parent_resolved)
+    except Exception as exc:
+        raise RuntimeError("dataset_path_invalid") from exc
+
+
+def _prepare_atomic_output_file(path: Path) -> Path:
+    _prepare_output_file(path)
+    tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    _prepare_output_file(tmp_path)
+    return tmp_path
+
+
+def _write_json_file(path: Path, payload: Dict[str, Any]) -> Path:
+    tmp_path = _prepare_atomic_output_file(path)
+    try:
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+    return path
+
+
+def _write_text_file(path: Path, text: str) -> Path:
+    _prepare_output_file(path)
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 def _load_qwen_labelmap(dataset_root: Path, *, load_qwen_meta, collect_labels) -> list[str]:
@@ -84,8 +132,7 @@ def _persist_dataset_metadata_impl(
 ) -> None:
     meta_path = dataset_dir / meta_name
     try:
-        with meta_path.open("w", encoding="utf-8") as handle:
-            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+        _write_json_file(meta_path, metadata)
     except Exception as exc:
         if logger is not None:
             logger.warning("Failed to write dataset metadata for %s: %s", dataset_dir, exc)
@@ -215,8 +262,7 @@ def _persist_sam3_dataset_metadata_impl(
 ) -> None:
     meta_path = dataset_dir / meta_name
     try:
-        with meta_path.open("w", encoding="utf-8") as handle:
-            json.dump(metadata, handle, ensure_ascii=False, indent=2)
+        _write_json_file(meta_path, metadata)
     except Exception as exc:
         if logger is not None:
             logger.warning("Failed to write SAM3 dataset metadata for %s: %s", dataset_dir, exc)
@@ -1489,13 +1535,16 @@ def _convert_coco_dataset_to_yolo_impl(
     sorted_ids = sorted(category_map.keys())
     labelmap = [category_map[cid] for cid in sorted_ids]
     labelmap_path = dataset_root / "labelmap.txt"
-    labelmap_path.write_text("\n".join(labelmap) + "\n", encoding="utf-8")
+    _write_text_file(labelmap_path, "\n".join(labelmap) + "\n")
     cat_id_to_idx = {cid: idx for idx, cid in enumerate(sorted_ids)}
 
     dataset_type = "seg" if has_segmentation else "bbox"
     for split_name, ann_path, images_dir in ann_paths:
         labels_dir = dataset_root / split_name / "labels"
         labels_dir.mkdir(parents=True, exist_ok=True)
+        if labels_dir.is_symlink():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_label_path_invalid")
+        labels_root = labels_dir.resolve(strict=True)
         try:
             data = json.loads(ann_path.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
@@ -1536,7 +1585,16 @@ def _convert_coco_dataset_to_yolo_impl(
                     continue
             label_rel = _label_relpath_for_image_impl(file_name)
             label_path = labels_dir / label_rel
+            try:
+                if not _path_within_root(label_path.resolve(strict=False), labels_root):
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_label_path_invalid")
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_label_path_invalid") from exc
             label_path.parent.mkdir(parents=True, exist_ok=True)
+            if label_path.parent.is_symlink():
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_label_path_invalid")
             lines: List[str] = []
             for ann in ann_by_image.get(img_id, []):
                 try:
@@ -1576,7 +1634,7 @@ def _convert_coco_dataset_to_yolo_impl(
                             continue
                 lines.append(f"{class_idx} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
             if lines:
-                label_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                _write_text_file(label_path, "\n".join(lines) + "\n")
 
     meta = load_sam3_meta_fn(dataset_root) if load_sam3_meta_fn else {}
     if meta is None:

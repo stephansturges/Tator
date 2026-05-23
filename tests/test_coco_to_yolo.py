@@ -5,9 +5,10 @@ import math
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 import localinferenceapi as api
-from utils.image import _resolve_coco_image_path_impl
+from utils.image import _label_relpath_for_image_impl, _resolve_coco_image_path_impl
 
 
 def _write_image(path: Path, size: tuple[int, int]) -> None:
@@ -48,6 +49,54 @@ def test_convert_coco_to_yolo_bbox(tmp_path: Path) -> None:
     assert math.isclose(cy, 0.2, rel_tol=1e-3)
     assert math.isclose(bw, 0.2, rel_tol=1e-3)
     assert math.isclose(bh, 0.2, rel_tol=1e-3)
+
+
+def test_convert_coco_to_yolo_replaces_symlinked_labelmap_without_target_write(
+    tmp_path: Path,
+) -> None:
+    dataset_root = tmp_path / "dataset"
+    images_dir = dataset_root / "train" / "images"
+    _write_image(images_dir / "img1.jpg", (100, 50))
+    _write_coco(
+        dataset_root / "train" / "_annotations.coco.json",
+        {
+            "images": [{"id": 1, "file_name": "img1.jpg", "width": 100, "height": 50}],
+            "annotations": [{"id": 1, "image_id": 1, "category_id": 1, "bbox": [10, 5, 20, 10]}],
+            "categories": [{"id": 1, "name": "car"}],
+        },
+    )
+    outside = tmp_path / "outside_labelmap.txt"
+    outside.write_text("external\n", encoding="utf-8")
+    try:
+        (dataset_root / "labelmap.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    api._convert_coco_dataset_to_yolo(dataset_root)
+
+    assert not (dataset_root / "labelmap.txt").is_symlink()
+    assert (dataset_root / "labelmap.txt").read_text(encoding="utf-8") == "car\n"
+    assert outside.read_text(encoding="utf-8") == "external\n"
+
+
+def test_convert_coco_to_yolo_sanitizes_parent_traversal_label_path(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset"
+    images_dir = dataset_root / "train" / "images"
+    _write_image(images_dir / "escape.jpg", (100, 50))
+    _write_coco(
+        dataset_root / "train" / "_annotations.coco.json",
+        {
+            "images": [{"id": 1, "file_name": "../escape.jpg", "width": 100, "height": 50}],
+            "annotations": [{"id": 1, "image_id": 1, "category_id": 1, "bbox": [10, 5, 20, 10]}],
+            "categories": [{"id": 1, "name": "car"}],
+        },
+    )
+
+    api._convert_coco_dataset_to_yolo(dataset_root)
+
+    assert (dataset_root / "train" / "labels" / "escape.txt").exists()
+    assert not (dataset_root / "train" / "escape.txt").exists()
+    assert _label_relpath_for_image_impl("../escape.jpg") == Path("escape.txt")
 
 
 def test_convert_coco_to_yolo_segmentation(tmp_path: Path) -> None:

@@ -30,7 +30,7 @@ def _ensure_directory(path: str) -> str:
 
 
 def _load_json_metadata(path: Path) -> Optional[Dict[str, Any]]:
-    if not path.exists():
+    if path.is_symlink() or not path.exists():
         return None
     try:
         with path.open("r", encoding="utf-8") as handle:

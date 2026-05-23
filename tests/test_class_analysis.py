@@ -1143,6 +1143,162 @@ def test_classifier_loader_preserves_mlp_gelu_activation(tmp_path):
     assert head["classes"] == ["car", "boat"]
 
 
+def test_classifier_loader_rejects_mlp_layer_width_mismatch(tmp_path):
+    classifier_path = tmp_path / "bad_head.pkl"
+    meta_path = tmp_path / "bad_head.meta.pkl"
+    classifier_path.write_bytes(b"classifier")
+    meta_path.write_bytes(b"meta")
+
+    clf_obj = {
+        "classifier_type": "mlp",
+        "classes": np.asarray(["car", "boat"], dtype=object),
+        "embedding_dim": 2,
+        "layers": [
+            {
+                "weight": np.eye(2, dtype=np.float32),
+                "bias": np.zeros(2, dtype=np.float32),
+                "activation": "gelu",
+            },
+            {
+                "weight": np.zeros((2, 3), dtype=np.float32),
+                "bias": np.zeros(2, dtype=np.float32),
+                "activation": "linear",
+            },
+        ],
+    }
+
+    def fake_joblib_load(path):
+        if path.endswith(".meta.pkl"):
+            return {
+                "encoder_type": "dinov3",
+                "encoder_model": "facebook/dinov3-vitb16-pretrain-lvd1689m",
+                "mlp_normalize_embeddings": True,
+            }
+        return clf_obj
+
+    class HttpError(Exception):
+        def __init__(self, *, status_code, detail):
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
+
+    with pytest.raises(HttpError) as exc:
+        _load_clip_head_from_classifier_impl(
+            classifier_path,
+            joblib_load_fn=fake_joblib_load,
+            http_exception_cls=HttpError,
+            clip_head_background_indices_fn=lambda classes: [],
+            resolve_head_normalize_embeddings_fn=lambda clf, default: default,
+            infer_clip_model_fn=lambda dim, default: default,
+            active_clip_model_name=None,
+            default_clip_model="ViT-B/32",
+            logger=type("Logger", (), {"warning": lambda *args, **kwargs: None})(),
+        )
+
+    assert exc.value.detail == "agent_clip_classifier_invalid_shape"
+
+
+def test_classifier_loader_rejects_mlp_output_width_mismatch(tmp_path):
+    classifier_path = tmp_path / "bad_output_head.pkl"
+    meta_path = tmp_path / "bad_output_head.meta.pkl"
+    classifier_path.write_bytes(b"classifier")
+    meta_path.write_bytes(b"meta")
+
+    clf_obj = {
+        "classifier_type": "mlp",
+        "classes": np.asarray(["car", "boat"], dtype=object),
+        "embedding_dim": 2,
+        "layers": [
+            {
+                "weight": np.zeros((3, 2), dtype=np.float32),
+                "bias": np.zeros(3, dtype=np.float32),
+                "activation": "linear",
+            }
+        ],
+    }
+
+    def fake_joblib_load(path):
+        if path.endswith(".meta.pkl"):
+            return {
+                "encoder_type": "clip",
+                "encoder_model": "ViT-B/32",
+                "mlp_normalize_embeddings": True,
+            }
+        return clf_obj
+
+    class HttpError(Exception):
+        def __init__(self, *, status_code, detail):
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
+
+    with pytest.raises(HttpError) as exc:
+        _load_clip_head_from_classifier_impl(
+            classifier_path,
+            joblib_load_fn=fake_joblib_load,
+            http_exception_cls=HttpError,
+            clip_head_background_indices_fn=lambda classes: [],
+            resolve_head_normalize_embeddings_fn=lambda clf, default: default,
+            infer_clip_model_fn=lambda dim, default: default,
+            active_clip_model_name=None,
+            default_clip_model="ViT-B/32",
+            logger=type("Logger", (), {"warning": lambda *args, **kwargs: None})(),
+        )
+
+    assert exc.value.detail == "agent_clip_classifier_invalid_shape"
+
+
+def test_classifier_loader_rejects_mlp_layer_norm_width_mismatch(tmp_path):
+    classifier_path = tmp_path / "bad_layer_norm_head.pkl"
+    meta_path = tmp_path / "bad_layer_norm_head.meta.pkl"
+    classifier_path.write_bytes(b"classifier")
+    meta_path.write_bytes(b"meta")
+
+    clf_obj = {
+        "classifier_type": "mlp",
+        "classes": np.asarray(["car", "boat"], dtype=object),
+        "embedding_dim": 2,
+        "layers": [
+            {
+                "weight": np.eye(2, dtype=np.float32),
+                "bias": np.zeros(2, dtype=np.float32),
+                "layer_norm_weight": np.ones(3, dtype=np.float32),
+                "activation": "linear",
+            }
+        ],
+    }
+
+    def fake_joblib_load(path):
+        if path.endswith(".meta.pkl"):
+            return {
+                "encoder_type": "clip",
+                "encoder_model": "ViT-B/32",
+                "mlp_normalize_embeddings": True,
+            }
+        return clf_obj
+
+    class HttpError(Exception):
+        def __init__(self, *, status_code, detail):
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
+
+    with pytest.raises(HttpError) as exc:
+        _load_clip_head_from_classifier_impl(
+            classifier_path,
+            joblib_load_fn=fake_joblib_load,
+            http_exception_cls=HttpError,
+            clip_head_background_indices_fn=lambda classes: [],
+            resolve_head_normalize_embeddings_fn=lambda clf, default: default,
+            infer_clip_model_fn=lambda dim, default: default,
+            active_clip_model_name=None,
+            default_clip_model="ViT-B/32",
+            logger=type("Logger", (), {"warning": lambda *args, **kwargs: None})(),
+        )
+
+    assert exc.value.detail == "agent_clip_classifier_invalid_shape"
+
+
 def test_clip_head_predict_proba_replays_mlp_gelu_activation():
     head = {
         "classifier_type": "mlp",
@@ -1537,6 +1693,69 @@ def test_set_active_model_accepts_multiview_clip_embedding_width(tmp_path, monke
     assert payload["encoder_ready"] is True
     assert api.active_classifier_head["embedding_dim"] == 1536
     assert api.active_classifier_head["embedding_view_mode"] == "tight_context"
+
+
+def test_set_active_model_rejects_invalid_mlp_head_before_activation(tmp_path, monkeypatch):
+    classifiers_root = tmp_path / "classifiers"
+    labelmaps_root = tmp_path / "labelmaps"
+    classifiers_root.mkdir()
+    labelmaps_root.mkdir()
+    classifier_path = classifiers_root / "bad_mlp.pkl"
+    meta_path = classifiers_root / "bad_mlp.meta.pkl"
+    labelmap_path = labelmaps_root / "labels.pkl"
+    classifier = {
+        "classifier_type": "mlp",
+        "classes": np.asarray(["car", "boat"], dtype=object),
+        "embedding_dim": 2,
+        "layers": [
+            {
+                "weight": np.eye(2, dtype=np.float32),
+                "bias": np.zeros(2, dtype=np.float32),
+                "activation": "relu",
+            },
+            {
+                "weight": np.zeros((2, 3), dtype=np.float32),
+                "bias": np.zeros(2, dtype=np.float32),
+                "activation": "linear",
+            },
+        ],
+    }
+    api.joblib.dump(classifier, classifier_path)
+    api.joblib.dump(
+        {
+            "clip_model": "ViT-B/32",
+            "encoder_type": "clip",
+            "encoder_model": "ViT-B/32",
+            "embedding_dim": 2,
+        },
+        meta_path,
+    )
+    api.joblib.dump(["car", "boat"], labelmap_path)
+
+    class FakeClipModel:
+        visual = types.SimpleNamespace(output_dim=2)
+
+    previous_path = "/tmp/old-classifier.pkl"
+    previous_head = {"classes": ["old"]}
+    monkeypatch.setattr(api, "UPLOAD_ROOT", tmp_path)
+    monkeypatch.setattr(api, "clip_model", None)
+    monkeypatch.setattr(api, "clip_preprocess", None)
+    monkeypatch.setattr(api, "clip_model_name", "ViT-B/32")
+    monkeypatch.setattr(api, "active_classifier_path", previous_path)
+    monkeypatch.setattr(api, "active_classifier_head", previous_head)
+    monkeypatch.setattr(api.clip, "load", lambda name, device=None: (FakeClipModel(), object()))
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.set_active_model(
+            api.ActiveModelRequest(
+                classifier_path=str(classifier_path),
+                labelmap_path=str(labelmap_path),
+            )
+        )
+
+    assert exc.value.detail == "agent_clip_classifier_invalid_shape"
+    assert api.active_classifier_path == previous_path
+    assert api.active_classifier_head is previous_head
 
 
 def test_set_active_model_accepts_multiview_dinov3_embedding_width(tmp_path, monkeypatch):

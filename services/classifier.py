@@ -196,6 +196,8 @@ def _load_clip_head_from_classifier_impl(
         layers: List[Dict[str, Any]] = []
         embedding_dim = int(clf_obj.get("embedding_dim") or 0)
         total_layers = len(layers_raw)
+        expected_input_dim = embedding_dim if embedding_dim > 0 else None
+        previous_output_dim: Optional[int] = None
         for idx, layer in enumerate(layers_raw):
             try:
                 weight = np.asarray(layer.get("weight"), dtype=np.float32)
@@ -204,8 +206,17 @@ def _load_clip_head_from_classifier_impl(
                 raise http_exception_cls(status_code=400, detail=f"agent_clip_classifier_invalid:{exc}") from exc
             if weight.ndim != 2 or bias.ndim != 1 or weight.shape[0] != bias.shape[0]:
                 raise http_exception_cls(status_code=400, detail="agent_clip_classifier_invalid_shape")
-            if embedding_dim <= 0:
+            layer_input_dim = int(weight.shape[1])
+            layer_output_dim = int(weight.shape[0])
+            if idx == 0 and embedding_dim <= 0:
                 embedding_dim = int(weight.shape[1])
+                expected_input_dim = embedding_dim
+            if idx == 0:
+                if expected_input_dim is not None and layer_input_dim != int(expected_input_dim):
+                    raise http_exception_cls(status_code=400, detail="agent_clip_classifier_invalid_shape")
+            elif previous_output_dim is None or layer_input_dim != int(previous_output_dim):
+                raise http_exception_cls(status_code=400, detail="agent_clip_classifier_invalid_shape")
+            previous_output_dim = layer_output_dim
             activation = str(layer.get("activation") or "").strip().lower()
             if not activation:
                 activation = "linear" if idx == total_layers - 1 else "relu"
@@ -217,9 +228,22 @@ def _load_clip_head_from_classifier_impl(
                 "activation": activation,
             }
             if layer.get("layer_norm_weight") is not None:
-                layer_entry["layer_norm_weight"] = np.asarray(layer.get("layer_norm_weight"), dtype=np.float32)
+                try:
+                    ln_weight = np.asarray(layer.get("layer_norm_weight"), dtype=np.float32)
+                    ln_bias = (
+                        np.asarray(layer.get("layer_norm_bias"), dtype=np.float32)
+                        if layer.get("layer_norm_bias") is not None
+                        else None
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    raise http_exception_cls(status_code=400, detail=f"agent_clip_classifier_invalid:{exc}") from exc
+                if ln_weight.shape != (layer_output_dim,):
+                    raise http_exception_cls(status_code=400, detail="agent_clip_classifier_invalid_shape")
+                if ln_bias is not None and ln_bias.shape != (layer_output_dim,):
+                    raise http_exception_cls(status_code=400, detail="agent_clip_classifier_invalid_shape")
+                layer_entry["layer_norm_weight"] = ln_weight
                 if layer.get("layer_norm_bias") is not None:
-                    layer_entry["layer_norm_bias"] = np.asarray(layer.get("layer_norm_bias"), dtype=np.float32)
+                    layer_entry["layer_norm_bias"] = ln_bias
                 if layer.get("layer_norm_eps") is not None:
                     try:
                         layer_entry["layer_norm_eps"] = float(layer.get("layer_norm_eps"))
@@ -227,6 +251,8 @@ def _load_clip_head_from_classifier_impl(
                         pass
             layers.append(layer_entry)
         if embedding_dim <= 0:
+            raise http_exception_cls(status_code=400, detail="agent_clip_classifier_invalid_shape")
+        if previous_output_dim is None or int(previous_output_dim) != len(classes):
             raise http_exception_cls(status_code=400, detail="agent_clip_classifier_invalid_shape")
         bg_indices = clip_head_background_indices_fn(classes)
         bg_classes = [classes[idx] for idx in bg_indices] if bg_indices else []

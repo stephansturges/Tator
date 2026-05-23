@@ -30506,6 +30506,25 @@ def set_active_model(payload: ActiveModelRequest):
                 status_code=HTTP_400_BAD_REQUEST, detail="labelmap_classifier_class_mismatch"
             )
 
+    try:
+        new_classifier_head = _load_clip_head_from_classifier_impl(
+            Path(classifier_path_abs),
+            joblib_load_fn=joblib.load,
+            http_exception_cls=HTTPException,
+            clip_head_background_indices_fn=_clip_head_background_indices,
+            resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+            infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
+            active_clip_model_name=encoder_model_for_active or clip_model_name,
+            default_clip_model=DEFAULT_CLIP_MODEL,
+            logger=logger,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail=f"classifier_head_load_failed:{exc}"
+        ) from exc
+
     with clip_lock:
         clf = new_clf
         if encoder_type_norm == "clip":
@@ -30527,20 +30546,7 @@ def set_active_model(payload: ActiveModelRequest):
             default=True,
             resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
         )
-        try:
-            active_classifier_head = _load_clip_head_from_classifier_impl(
-                Path(classifier_path_abs),
-                joblib_load_fn=joblib.load,
-                http_exception_cls=HTTPException,
-                clip_head_background_indices_fn=_clip_head_background_indices,
-                resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
-                infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
-                active_clip_model_name=clip_model_name,
-                default_clip_model=DEFAULT_CLIP_MODEL,
-                logger=logger,
-            )
-        except Exception:
-            active_classifier_head = None
+        active_classifier_head = new_classifier_head
         if payload.logit_adjustment_inference is not None and isinstance(
             active_classifier_head, dict
         ):

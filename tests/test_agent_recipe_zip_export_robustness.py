@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import pytest
+from fastapi import HTTPException
 
 from services.prepass_recipes import (
     _copy2_if_different,
@@ -82,6 +83,28 @@ def test_ensure_recipe_zip_replaces_symlinked_existing_zip_without_target_write(
     assert outside.read_bytes() == b"external"
     with zipfile.ZipFile(zip_path, "r") as zf:
         assert "recipe.json" in set(zf.namelist())
+
+
+def test_ensure_recipe_zip_rejects_symlinked_recipe_root_without_write(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_recipes"
+    outside.mkdir()
+    recipes_root = tmp_path / "recipes"
+    try:
+        recipes_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _ensure_recipe_zip_impl(
+            {"id": "r4", "label": "demo", "config": {"x": 1}},
+            recipes_root=recipes_root,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_recipe_path_invalid"
+    assert list(outside.iterdir()) == []
 
 
 def test_prepass_copy2_if_different_replaces_symlink_to_source(tmp_path: Path) -> None:

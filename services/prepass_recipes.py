@@ -56,6 +56,23 @@ def _path_within_root(path: Path, root: Path) -> bool:
     return True
 
 
+def _recipe_storage_root(
+    root: Path,
+    *,
+    create: bool = False,
+    detail: str = "agent_recipe_path_invalid",
+) -> Path:
+    if root.is_symlink():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    if root.exists() and not root.is_dir():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    if root.is_symlink():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    return root.resolve(strict=False)
+
+
 def _prepare_output_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.parent.is_symlink():
@@ -660,10 +677,10 @@ def _delete_agent_recipe_impl(
     path_is_within_root_fn,
     http_exception_cls,
 ) -> None:
-    root = recipes_root.resolve()
-    json_raw = recipes_root / f"{recipe_id}.json"
-    zip_raw = recipes_root / f"{recipe_id}.zip"
-    recipe_dir_raw = recipes_root / recipe_id
+    root = _recipe_storage_root(recipes_root)
+    json_raw = root / f"{recipe_id}.json"
+    zip_raw = root / f"{recipe_id}.zip"
+    recipe_dir_raw = root / recipe_id
     json_path = json_raw.resolve()
     if not path_is_within_root_fn(json_path, root):
         raise http_exception_cls(status_code=400, detail="agent_recipe_path_invalid")
@@ -710,7 +727,7 @@ def _list_agent_recipes_impl(
     dataset_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     recipes: List[Dict[str, Any]] = []
-    root = recipes_root.resolve()
+    root = _recipe_storage_root(recipes_root)
     for path in root.glob("*.json"):
         try:
             if path.is_symlink():
@@ -723,7 +740,7 @@ def _list_agent_recipes_impl(
             if dataset_id and data.get("dataset_id") != dataset_id:
                 continue
             data["_path"] = str(path)
-            zip_path = (recipes_root / f"{data.get('id','')}.zip").resolve()
+            zip_path = (root / f"{data.get('id','')}.zip").resolve()
             if zip_path.exists():
                 data["_zip"] = str(zip_path)
             recipes.append(data)
@@ -840,7 +857,8 @@ def _persist_agent_recipe_impl(
     is_greedy = bool(recipe_body.get("mode") == "sam3_greedy" or text_prompts or positives_list)
     if not (steps_raw or text_prompts or positives_list):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_empty")
-    recipe_dir = recipes_root / recipe_id
+    root = _recipe_storage_root(recipes_root, create=True)
+    recipe_dir = root / recipe_id
     cleanup_recipe_dir = True
     try:
         crops_dir = recipe_dir / "crops"
@@ -1225,15 +1243,15 @@ def _persist_agent_recipe_impl(
                 "summary": recipe_body.get("summary") or recipe.get("summary"),
             },
         }
-        path = (recipes_root / f"{recipe_id}.json").resolve()
+        path = (root / f"{recipe_id}.json").resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
-        if not path_is_within_root_fn(path, recipes_root.resolve()):
+        if not path_is_within_root_fn(path, root):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
         try:
             with path.open("w", encoding="utf-8") as fp:
                 json.dump(payload, fp, ensure_ascii=False, indent=2)
             # Persist a portable zip alongside the JSON for download.
-            zip_path = (recipes_root / f"{recipe_id}.zip").resolve()
+            zip_path = (root / f"{recipe_id}.zip").resolve()
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr("recipe.json", json.dumps(payload, ensure_ascii=False, indent=2))
                 if crops_dir.exists():
@@ -1263,7 +1281,7 @@ def _persist_agent_recipe_impl(
                 detail=f"agent_recipe_save_failed:{exc}",
             ) from exc
         payload["_path"] = str(path)
-        payload["_zip"] = str((recipes_root / f"{recipe_id}.zip").resolve())
+        payload["_zip"] = str((root / f"{recipe_id}.zip").resolve())
         cleanup_recipe_dir = False
         return payload
     finally:
@@ -1280,8 +1298,9 @@ def _load_agent_recipe_impl(
     recipes_root: Path,
     path_is_within_root_fn,
 ) -> Dict[str, Any]:
-    path = (recipes_root / f"{recipe_id}.json").resolve()
-    if not path_is_within_root_fn(path, recipes_root.resolve()) or not path.exists():
+    root = _recipe_storage_root(recipes_root)
+    path = (root / f"{recipe_id}.json").resolve()
+    if not path_is_within_root_fn(path, root) or not path.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_recipe_not_found")
     try:
         with path.open("r", encoding="utf-8") as fp:
@@ -1292,14 +1311,14 @@ def _load_agent_recipe_impl(
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
         _validate_agent_recipe_structure(data.get("recipe") or {})
         data["_path"] = str(path)
-        zip_path = (recipes_root / f"{recipe_id}.zip").resolve()
+        zip_path = (root / f"{recipe_id}.zip").resolve()
         if zip_path.exists():
             data["_zip"] = str(zip_path)
         # Inline a small number of crop previews if present on disk (kept small so
         # /agent_mining/apply_image payloads don't explode when the UI forwards recipes).
         recipe_block = data.get("recipe") or {}
-        recipe_dir = (recipes_root / recipe_id).resolve()
-        if not path_is_within_root_fn(recipe_dir, recipes_root.resolve()):
+        recipe_dir = (root / recipe_id).resolve()
+        if not path_is_within_root_fn(recipe_dir, root):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
         crop_dir = (recipe_dir / "crops").resolve()
         if not path_is_within_root_fn(crop_dir, recipe_dir):
@@ -1365,8 +1384,9 @@ def _load_agent_recipe_json_only_impl(
     path_is_within_root_fn,
 ) -> Dict[str, Any]:
     """Load an agent recipe payload without inlining crop_base64 blobs (suitable for inference/export)."""
-    path = (recipes_root / f"{recipe_id}.json").resolve()
-    if not path_is_within_root_fn(path, recipes_root.resolve()) or not path.exists():
+    root = _recipe_storage_root(recipes_root)
+    path = (root / f"{recipe_id}.json").resolve()
+    if not path_is_within_root_fn(path, root) or not path.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_recipe_not_found")
     try:
         with path.open("r", encoding="utf-8") as fp:
@@ -1374,7 +1394,7 @@ def _load_agent_recipe_json_only_impl(
         if not isinstance(data, dict):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_invalid_schema")
         data["_path"] = str(path)
-        zip_path = (recipes_root / f"{recipe_id}.zip").resolve()
+        zip_path = (root / f"{recipe_id}.zip").resolve()
         if zip_path.exists():
             data["_zip"] = str(zip_path)
         return data
@@ -1396,7 +1416,7 @@ def _ensure_recipe_zip_impl(
     recipe_id_path = Path(recipe_id_text)
     if not recipe_id_text or recipe_id_path.is_absolute() or ".." in recipe_id_path.parts:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
-    root = recipes_root.resolve()
+    root = _recipe_storage_root(recipes_root, create=True)
     zip_raw = root / f"{recipe_id_text}.zip"
     if zip_raw.is_symlink():
         try:
@@ -1549,6 +1569,10 @@ def _import_agent_recipe_zip_obj_impl(
     persist_recipe_fn,
     max_entry_bytes: Optional[int] = None,
 ) -> Tuple[Optional[str], Dict[str, Any]]:
+    _recipe_storage_root(
+        recipes_root,
+        detail="agent_recipe_import_invalid_path",
+    )
     data: Dict[str, Any] = {}
     crops: Dict[str, bytes] = {}
     clip_head_files: Dict[str, bytes] = {}

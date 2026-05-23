@@ -46,9 +46,10 @@ def _call_import(zip_bytes: bytes, tmp_path: Path, **kwargs: Any):
         }
 
     max_entry_bytes = kwargs.pop("max_entry_bytes", 1024 * 1024)
+    recipes_root = kwargs.pop("recipes_root", tmp_path / "recipes")
     return _import_agent_recipe_zip_bytes_impl(
         zip_bytes,
-        recipes_root=tmp_path / "recipes",
+        recipes_root=recipes_root,
         max_json_bytes=1024 * 1024,
         max_clip_head_bytes=1024 * 1024,
         max_crops=100,
@@ -105,3 +106,27 @@ def test_agent_recipe_import_rejects_oversize_entry(tmp_path: Path) -> None:
 
     assert exc_info.value.status_code == 413
     assert exc_info.value.detail == "agent_recipe_import_entry_too_large"
+
+
+def test_agent_recipe_import_rejects_symlinked_recipe_root_before_persist(
+    tmp_path: Path,
+) -> None:
+    payload = _make_zip(
+        {
+            "recipe.json": json.dumps({"id": "r1", "label": "demo"}).encode("utf-8"),
+        }
+    )
+    outside = tmp_path / "outside_recipes"
+    outside.mkdir()
+    recipes_root = tmp_path / "recipes"
+    try:
+        recipes_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _call_import(payload, tmp_path, recipes_root=recipes_root)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_recipe_import_invalid_path"
+    assert list(outside.iterdir()) == []

@@ -14217,6 +14217,60 @@ def _unique_dataset_name(base: str, *, root: Path) -> str:
     return candidate
 
 
+def _qwen_dataset_storage_root(
+    *,
+    create: bool = True,
+    detail: str = "qwen_dataset_path_invalid",
+) -> Path:
+    try:
+        raw_root = QWEN_DATASET_ROOT
+        if raw_root == QWEN_JOB_ROOT / "datasets" and QWEN_JOB_ROOT.is_symlink():
+            raise ValueError("qwen job root is a symlink")
+        if raw_root.is_symlink():
+            raise ValueError("qwen dataset root is a symlink")
+        if create:
+            raw_root.mkdir(parents=True, exist_ok=True)
+        if raw_root.exists() and not raw_root.is_dir():
+            raise ValueError("qwen dataset root is not a directory")
+        return raw_root.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+def _qwen_dataset_child_dir(
+    dataset_id: str,
+    *,
+    create: bool = False,
+    detail: str = "qwen_dataset_target_invalid",
+) -> Path:
+    raw_id = str(dataset_id or "").strip()
+    if (
+        not raw_id
+        or raw_id in {".", ".."}
+        or "/" in raw_id
+        or "\\" in raw_id
+        or Path(raw_id).is_absolute()
+    ):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    try:
+        root = _qwen_dataset_storage_root(create=True, detail=detail)
+        candidate = root / raw_id
+        if candidate.is_symlink():
+            raise ValueError("qwen dataset child is a symlink")
+        if create:
+            candidate.mkdir(parents=True, exist_ok=False)
+        if candidate.exists() and not candidate.is_dir():
+            raise ValueError("qwen dataset child is not a directory")
+        resolved = candidate.resolve(strict=False)
+        if not _path_is_within_root_impl(resolved, root) or resolved.parent != root:
+            raise ValueError("qwen dataset child escapes root")
+        return resolved
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
 def _unwrap_single_root_dir(extract_root: Path) -> Path:
     entries = [p for p in extract_root.iterdir() if p.name not in {"__MACOSX"}]
     if len(entries) == 1 and entries[0].is_dir():
@@ -15298,9 +15352,16 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
                     break
             if glossary:
                 break
-    qwen_id = _unique_dataset_name(dataset_id, root=QWEN_DATASET_ROOT)
-    target_root = QWEN_DATASET_ROOT / qwen_id
-    target_root.mkdir(parents=True, exist_ok=True)
+    qwen_root = _qwen_dataset_storage_root(
+        create=True, detail="qwen_dataset_target_invalid"
+    )
+    qwen_id = _unique_dataset_name(
+        _sanitize_yolo_run_id_impl(str(dataset_id or "")) or "qwen_dataset",
+        root=qwen_root,
+    )
+    target_root = _qwen_dataset_child_dir(
+        qwen_id, create=True, detail="qwen_dataset_target_invalid"
+    )
     (target_root / "train").mkdir(parents=True, exist_ok=True)
     (target_root / "val").mkdir(parents=True, exist_ok=True)
     (target_root / "train").joinpath("annotations.jsonl").write_text("", encoding="utf-8")
@@ -19273,7 +19334,10 @@ def delete_qwen_dataset(dataset_id: str):
         or Path(raw_id).is_absolute()
     ):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_id_invalid")
-    dataset_path = QWEN_DATASET_ROOT / raw_id
+    qwen_root = _qwen_dataset_storage_root(
+        create=False, detail="qwen_dataset_delete_forbidden"
+    )
+    dataset_path = qwen_root / raw_id
     if dataset_path.is_symlink():
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_delete_forbidden"
@@ -19284,7 +19348,7 @@ def delete_qwen_dataset(dataset_id: str):
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_not_found") from None
     if not dataset_root.exists() or not dataset_root.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_not_found")
-    if not _path_is_within_root_impl(dataset_root, QWEN_DATASET_ROOT.resolve()):
+    if not _path_is_within_root_impl(dataset_root, qwen_root):
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_delete_forbidden"
         )
@@ -19471,11 +19535,13 @@ def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name
         created_at = time.time()
 
         with QWEN_DATASET_FINALIZE_LOCK:
-            dataset_id_final = _unique_dataset_name(base_id, root=QWEN_DATASET_ROOT)
-            target_root = QWEN_DATASET_ROOT / dataset_id_final
+            qwen_root = _qwen_dataset_storage_root(
+                create=True, detail="qwen_dataset_target_invalid"
+            )
+            dataset_id_final = _unique_dataset_name(base_id, root=qwen_root)
+            target_root = qwen_root / dataset_id_final
             target_resolved = target_root.resolve(strict=False)
-            qwen_root_resolved = QWEN_DATASET_ROOT.resolve(strict=False)
-            if not _path_is_within_root_impl(target_resolved, qwen_root_resolved):
+            if not _path_is_within_root_impl(target_resolved, qwen_root):
                 raise HTTPException(
                     status_code=HTTP_400_BAD_REQUEST,
                     detail="qwen_dataset_target_invalid",

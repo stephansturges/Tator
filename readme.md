@@ -570,7 +570,7 @@ the backend are available.
 <details>
 <summary><strong>Update Tracking</strong></summary>
 
-Current checkpoint: `901 passed, 17 skipped, 8 warnings`, UI endpoint
+Current checkpoint: `903 passed, 17 skipped, 8 warnings`, UI endpoint
 contracts, and backend smoke pass. Detailed history lives in commits and
 focused docs.
 

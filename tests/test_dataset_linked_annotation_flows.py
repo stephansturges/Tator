@@ -1157,6 +1157,46 @@ def test_build_qwen_dataset_from_yolo_uses_flat_annotation_overlay_and_registry_
     assert (qwen_root / out["id"] / "train" / "nested" / "img.jpg").exists()
 
 
+def test_build_qwen_dataset_from_yolo_rejects_symlinked_qwen_root_before_write(
+    tmp_path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "linked_source"
+    _write_test_image(dataset_root / "images" / "img.jpg")
+    (dataset_root / "labels").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "labels" / "img.txt").write_text(
+        "0 0.5 0.5 0.2 0.2\n", encoding="utf-8"
+    )
+    (dataset_root / "labelmap.txt").write_text("building\n", encoding="utf-8")
+    outside = tmp_path / "outside_qwen"
+    outside.mkdir()
+    qwen_root = tmp_path / "qwen"
+    try:
+        qwen_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", qwen_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds",
+            "label": "ds",
+            "dataset_root": str(dataset_root),
+            "yolo_layout": "flat",
+            "yolo_ready": True,
+            "yolo_labelmap_path": str(dataset_root / "labelmap.txt"),
+            "classes": ["building"],
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.build_qwen_dataset_from_yolo("ds")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "qwen_dataset_target_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_resolve_sam3_dataset_meta_materializes_annotation_overlay_for_linked_flat_yolo(
     tmp_path, monkeypatch
 ) -> None:

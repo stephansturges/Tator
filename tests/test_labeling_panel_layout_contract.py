@@ -428,6 +428,13 @@ def test_class_split_explorer_panel_contract():
     assert 'id="trainEmbeddingAdjustment"' in html
     assert "Auto-class crop preprocessing" in html
     assert "diagonal standardization, not full PCA/ZCA whitening" in html
+    assert "function getTrainingEmbeddingDimMultiplier" in js
+    assert 'if (encoderType === "cradio")' in js
+    assert 'if (lower.includes("so400m")) return 1152;' in js
+    assert 'if (lower.includes("c-radiov4-h") || lower.endsWith("/h")) return 1280;' in js
+    assert 'pooling === "summary_spatial_concat"' in js
+    assert 'pooling === "cls_patch_concat"' in js
+    assert "baseDim * getTrainingEmbeddingDimMultiplier(encoderType)" in js
     assert 'Crop geometry<span class="help-icon"' in html
     assert 'Background<span class="help-icon"' in html
     assert 'Embedding views<span class="help-icon"' in html
@@ -472,6 +479,7 @@ def test_class_split_explorer_panel_contract():
     assert "cropPreview.style.height = `${Math.max(1, Math.round(naturalHeight * nextScale))}px`" in js
     assert "Math.max(0.2, Math.min(16, cropZoom * factor))" in js
     assert "new ResizeObserver(updateCropFitScale)" in js
+    assert 'if (/^https?:\\/\\//i.test(String(thumbPath))) {' in js
     assert "transition: width 0.08s ease-out, height 0.08s ease-out;" in css
     assert "function focusClassSplitPlotOnPoint" in js
     assert "classSplitElements.bulkPanel" in js

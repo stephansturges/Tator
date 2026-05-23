@@ -9504,6 +9504,11 @@ function ensureAutomationAvailable(actionLabel) {
             return null;
         }
         const lower = name.toLowerCase();
+        if (encoderType === "cradio") {
+            if (lower.includes("so400m")) return 1152;
+            if (lower.includes("c-radiov4-h") || lower.endsWith("/h")) return 1280;
+            return null;
+        }
         const dimMap = [
             { key: "vits16plus", dim: 384 },
             { key: "vits16", dim: 384 },
@@ -9533,6 +9538,26 @@ function ensureAutomationAvailable(actionLabel) {
         return "1536,768";
     }
 
+    function getTrainingEmbeddingDimMultiplier(encoderType) {
+        let multiplier = 1;
+        const viewMode = String(trainingElements.embeddingViewModeSelect?.value || "single").toLowerCase().trim();
+        if (viewMode && viewMode !== "single") {
+            multiplier *= 2;
+        }
+        if (encoderType === "dinov3") {
+            const pooling = String(trainingElements.dinov3PoolingSelect?.value || "pooler").toLowerCase().trim();
+            if (pooling === "cls_patch_concat") {
+                multiplier *= 2;
+            }
+        } else if (encoderType === "cradio") {
+            const pooling = String(trainingElements.cradioPoolingSelect?.value || "summary").toLowerCase().trim();
+            if (pooling === "summary_spatial_concat") {
+                multiplier *= 2;
+            }
+        }
+        return multiplier;
+    }
+
     function getRecommendedMlpHiddenSizes() {
         const rawType = trainingElements.classifierTypeSelect ? trainingElements.classifierTypeSelect.value : "logreg";
         const classifierType = rawType ? String(rawType).toLowerCase().trim() : "logreg";
@@ -9543,7 +9568,8 @@ function ensureAutomationAvailable(actionLabel) {
             : (encoderType === "cradio"
                 ? (trainingElements.cradioBackboneSelect ? trainingElements.cradioBackboneSelect.value : null)
                 : (trainingElements.clipBackboneSelect ? trainingElements.clipBackboneSelect.value : null));
-        const dim = inferEmbeddingDimFromEncoder(encoderType, modelName);
+        const baseDim = inferEmbeddingDimFromEncoder(encoderType, modelName);
+        const dim = baseDim ? baseDim * getTrainingEmbeddingDimMultiplier(encoderType) : null;
         return recommendedHiddenSizesForDim(dim);
     }
 
@@ -36547,6 +36573,9 @@ async function cancelRfDetrTrainingJobRequest() {
             return "";
         }
         const thumbPath = point.thumbnail_url || `/class_analysis/jobs/${encodeURIComponent(classSplitState.currentJobId)}/thumbnail/${encodeURIComponent(point.point_id)}`;
+        if (/^https?:\/\//i.test(String(thumbPath))) {
+            return thumbPath;
+        }
         return `${API_ROOT}${thumbPath}`;
     }
 

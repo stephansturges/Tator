@@ -5,6 +5,7 @@ import io
 import warnings
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -70,6 +71,109 @@ def test_download_clip_classifier_zip_skips_symlink_meta_escape(tmp_path, monkey
     assert payloads["head.pkl"] == b"model"
 
 
+def test_load_clip_head_skips_symlink_meta_escape(tmp_path) -> None:
+    classifier_path = tmp_path / "head.pkl"
+    classifier_path.write_bytes(b"model")
+    outside = tmp_path / "outside.meta.pkl"
+    outside.write_bytes(b"secret")
+    try:
+        (tmp_path / "head.meta.pkl").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    classifier = SimpleNamespace(
+        classes_=["car", "boat"],
+        coef_=[[0.0] * 512, [0.0] * 512],
+        intercept_=[0.0, 0.0],
+        solver="lbfgs",
+        multi_class="auto",
+    )
+    loaded_paths = []
+
+    def fake_load(path):
+        loaded_paths.append(Path(path))
+        if Path(path) == classifier_path:
+            return classifier
+        raise AssertionError(f"unexpected metadata load: {path}")
+
+    head = localinferenceapi._load_clip_head_from_classifier_impl(
+        classifier_path,
+        joblib_load_fn=fake_load,
+        http_exception_cls=HTTPException,
+        clip_head_background_indices_fn=lambda _classes: [],
+        resolve_head_normalize_embeddings_fn=lambda _head, default=True: default,
+        infer_clip_model_fn=lambda _dim, active_name=None: active_name,
+        active_clip_model_name="ViT-B/32",
+        default_clip_model="ViT-B/32",
+        logger=localinferenceapi.logger,
+    )
+
+    assert head["classes"] == ["car", "boat"]
+    assert loaded_paths == [classifier_path]
+
+
+def test_find_labelmap_for_classifier_skips_symlink_meta_escape(tmp_path) -> None:
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    classifiers_root.mkdir(parents=True)
+    classifier_path = classifiers_root / "head.pkl"
+    classifier_path.write_bytes(b"model")
+    outside = tmp_path / "outside.meta.pkl"
+    outside.write_bytes(b"secret")
+    try:
+        (classifiers_root / "head.meta.pkl").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    def fail_load(path):
+        raise AssertionError(f"unsafe metadata should not be loaded: {path}")
+
+    found = localinferenceapi._find_labelmap_for_classifier_impl(
+        classifier_path,
+        upload_root=upload_root,
+        labelmap_exts=localinferenceapi.LABELMAP_ALLOWED_EXTS,
+        path_is_within_root_fn=localinferenceapi._path_is_within_root_impl,
+        joblib_load_fn=fail_load,
+        resolve_clip_labelmap_path_fn=lambda _path, _root_hint=None: None,
+    )
+
+    assert found is None
+
+
+def test_list_clip_classifiers_skips_symlink_meta_escape(tmp_path) -> None:
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    classifiers_root.mkdir(parents=True)
+    classifier_path = classifiers_root / "head.pkl"
+    classifier_path.write_bytes(b"model")
+    outside = tmp_path / "outside.meta.pkl"
+    outside.write_bytes(b"secret")
+    try:
+        (classifiers_root / "head.meta.pkl").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    loaded_paths = []
+
+    def fake_load(path):
+        loaded_paths.append(Path(path))
+        if Path(path).name == "head.pkl":
+            return {"classes": ["car", "boat"], "classifier_type": "logreg"}
+        raise AssertionError(f"unsafe metadata should not be loaded: {path}")
+
+    entries = localinferenceapi._list_clip_classifiers_impl(
+        upload_root=upload_root,
+        classifier_exts=localinferenceapi.CLASSIFIER_ALLOWED_EXTS,
+        labelmap_exts=localinferenceapi.LABELMAP_ALLOWED_EXTS,
+        path_is_within_root_fn=localinferenceapi._path_is_within_root_impl,
+        joblib_load_fn=fake_load,
+        resolve_clip_labelmap_path_fn=lambda _path, _root_hint=None: None,
+    )
+
+    assert len(entries) == 1
+    assert entries[0]["rel_path"] == "head.pkl"
+    assert entries[0]["n_classes"] == 2
+    assert loaded_paths == [classifier_path]
+
+
 def test_download_clip_classifier_not_found(monkeypatch) -> None:
     monkeypatch.setattr(
         localinferenceapi,
@@ -117,6 +221,28 @@ def test_delete_active_clip_classifier_clears_active_state(tmp_path, monkeypatch
     assert localinferenceapi.active_head_normalize_embeddings is True
     assert localinferenceapi.active_classifier_head is None
     assert localinferenceapi.clip_last_error == "classifier_deleted"
+
+
+def test_delete_clip_classifier_unlinks_broken_meta_symlink(tmp_path, monkeypatch) -> None:
+    classifier_path = tmp_path / "head.pkl"
+    classifier_path.write_bytes(b"model")
+    meta_path = tmp_path / "head.meta.pkl"
+    try:
+        meta_path.symlink_to(tmp_path / "missing.meta.pkl")
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_resolve_agent_clip_classifier_path_impl",
+        lambda *args, **kwargs: classifier_path,
+    )
+    monkeypatch.setattr(localinferenceapi, "active_classifier_path", None)
+
+    response = localinferenceapi.delete_clip_classifier(rel_path="head.pkl")
+
+    assert response == {"status": "deleted", "rel_path": "head.pkl"}
+    assert not classifier_path.exists()
+    assert not meta_path.is_symlink()
 
 
 def test_active_classifier_head_for_inference_drops_missing_cached_head(tmp_path, monkeypatch) -> None:

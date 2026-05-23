@@ -276,24 +276,15 @@ but unhelpful for the dataset.
 <details>
 <summary>Update Tracking</summary>
 
-- **2026-05-19 to 2026-05-21:** Stabilized Qwen captioning and SAM3 prompting,
-  added Class Split Explorer, and rebuilt Data Ingestion around reference-first
-  diversity analysis.
-- **2026-05-22:** Added macOS MLX support for C-RADIOv4 and local SALAD heads,
-  with Torch fallback.
-- **2026-05-23:** Closed the Class Split / auto-class UI debug pass and kept
-  SALAD out of crop-level class presets.
-- **2026-05-23:** Hardened backend job lifecycles across Qwen, SAM3,
-  YOLO/RF-DETR, Class Analysis, Data Ingestion, Prompt Helper, Agent Mining, and
-  Auto Labeling, including failed-start rollback, staged-upload cleanup,
-  checkpoint containment, EDR package staging containment, and RF-DETR dataset
-  copy fallback containment. Local SALAD training now also cleans staged uploads
-  on pre-queue reference failures, and cache/run pruning unlinks symlinked
-  directories without touching their targets. Annotation overlays now use
-  contained reads/writes for labels and text.
-- **Current validation:** `756 passed, 17 skipped, 8 warnings`; UI endpoint
-  checks cover `148` mapped paths and `248` fetches with no failures. Local
-  backend smoke is healthy.
+- **Product:** Qwen captions, SAM3 prompting, Class Split Explorer, and
+  reference-first Data Ingestion were stabilized.
+- **Acceleration:** C-RADIOv4 and local SALAD heads can use macOS MLX with Torch
+  fallback; SALAD stays out of crop-level class presets.
+- **Backend hardening:** job rollback/cleanup, checkpoint containment, EDR and
+  RF-DETR staging containment, cache pruning, annotation overlays, and CLIP
+  sidecars now fail closed.
+- **Validation:** `760 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
+  and local backend smoke are clean.
 
 </details>
 

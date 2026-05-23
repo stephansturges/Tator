@@ -541,6 +541,8 @@ from services.classifier import (
     _infer_clip_model_from_embedding_dim_impl as _infer_clip_model_from_embedding_dim_impl,
     _load_labelmap_simple_impl as _load_labelmap_simple_impl,
     _validate_clip_dataset_impl as _validate_clip_dataset_impl,
+    _safe_classifier_meta_path_impl as _safe_classifier_meta_path_impl,
+    _safe_existing_regular_file_within_root_impl as _safe_existing_regular_file_within_root_impl,
     _resolve_clip_labelmap_path_impl as _resolve_clip_labelmap_path_impl,
     _find_labelmap_for_classifier_impl as _find_labelmap_for_classifier_impl,
     _list_clip_labelmaps_impl as _list_clip_labelmaps_impl,
@@ -2790,9 +2792,9 @@ if active_labelmap_path:
 
 try:
     if active_classifier_path and os.path.isfile(active_classifier_path):
-        meta_path = os.path.splitext(active_classifier_path)[0] + ".meta.pkl"
-        if os.path.exists(meta_path):
-            meta_obj = _joblib_load(meta_path)
+        meta_path = _safe_classifier_meta_path_impl(Path(active_classifier_path))
+        if meta_path is not None:
+            meta_obj = _joblib_load(str(meta_path))
             if isinstance(meta_obj, dict):
                 active_classifier_meta = dict(meta_obj)
                 active_encoder_type = meta_obj.get("encoder_type") or "clip"
@@ -28244,10 +28246,13 @@ def _refresh_active_classifier_if_current(artifacts: TrainingArtifacts) -> bool:
 
     new_clf = _joblib_load(str(model_path))
     meta_obj: Dict[str, Any] = {}
-    meta_path = Path(artifacts.meta_path) if artifacts.meta_path else Path(
-        os.path.splitext(str(model_path))[0] + ".meta.pkl"
+    explicit_meta_path = Path(artifacts.meta_path) if artifacts.meta_path else None
+    meta_path = (
+        _safe_existing_regular_file_within_root_impl(explicit_meta_path, model_path.parent)
+        if explicit_meta_path is not None and explicit_meta_path.name.endswith(".meta.pkl")
+        else _safe_classifier_meta_path_impl(model_path)
     )
-    if meta_path.exists():
+    if meta_path is not None:
         loaded_meta = _joblib_load(str(meta_path))
         if isinstance(loaded_meta, dict):
             meta_obj = dict(loaded_meta)
@@ -28526,7 +28531,7 @@ def download_clip_classifier_zip(rel_path: str = Query(...)):
     if classifier_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
     buffer = io.BytesIO()
-    meta_path = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
+    meta_path = _safe_classifier_meta_path_impl(classifier_path)
     labelmap_path = _find_labelmap_for_classifier_impl(
         classifier_path,
         upload_root=UPLOAD_ROOT,
@@ -28545,7 +28550,7 @@ def download_clip_classifier_zip(rel_path: str = Query(...)):
         classifiers_root = (UPLOAD_ROOT / "classifiers").resolve()
         if not _zip_write_safe_file(zf, classifier_path, classifiers_root, classifier_path.name):
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
-        if meta_path.exists():
+        if meta_path is not None:
             _zip_write_safe_file(zf, meta_path, classifiers_root, meta_path.name)
         if labelmap_path is not None:
             _zip_write_safe_file(zf, labelmap_path, UPLOAD_ROOT.resolve(), labelmap_path.name)
@@ -28575,7 +28580,7 @@ def delete_clip_classifier(rel_path: str = Query(...)):
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
     meta_path = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
     try:
-        if meta_path.exists():
+        if meta_path.exists() or meta_path.is_symlink():
             meta_path.unlink()
     except Exception:
         pass
@@ -28655,8 +28660,9 @@ def rename_clip_classifier(
     old_meta = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
     new_meta = Path(os.path.splitext(str(target_path))[0] + ".meta.pkl")
     try:
-        if old_meta.exists():
-            if new_meta.exists():
+        old_meta_safe = _safe_classifier_meta_path_impl(classifier_path)
+        if old_meta_safe is not None and old_meta_safe == old_meta.resolve():
+            if new_meta.exists() or new_meta.is_symlink():
                 try:
                     new_meta.unlink()
                 except Exception:
@@ -31798,10 +31804,10 @@ def set_active_model(payload: ActiveModelRequest):
     meta_encoder_model = None
     meta_found = False
     meta_obj: Optional[Dict[str, Any]] = None
-    meta_path = os.path.splitext(classifier_path_abs)[0] + ".meta.pkl"
-    if os.path.exists(meta_path):
+    meta_path = _safe_classifier_meta_path_impl(Path(classifier_path_abs))
+    if meta_path is not None:
         try:
-            meta_candidate = _joblib_load(meta_path)
+            meta_candidate = _joblib_load(str(meta_path))
             if isinstance(meta_candidate, dict):
                 meta_obj = meta_candidate
                 meta_found = True

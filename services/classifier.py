@@ -59,6 +59,30 @@ def _resolve_agent_clip_classifier_path_impl(
     return candidate
 
 
+def _safe_existing_regular_file_within_root_impl(path: Path, root: Path) -> Optional[Path]:
+    """Return a resolved regular file only when the path itself is contained."""
+    try:
+        if path.is_symlink():
+            return None
+        resolved_root = root.resolve()
+        resolved_path = path.resolve(strict=True)
+    except Exception:
+        return None
+    if not _path_is_within_root(resolved_path, resolved_root):
+        return None
+    try:
+        if not resolved_path.is_file():
+            return None
+    except OSError:
+        return None
+    return resolved_path
+
+
+def _safe_classifier_meta_path_impl(classifier_path: Path) -> Optional[Path]:
+    meta_path = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
+    return _safe_existing_regular_file_within_root_impl(meta_path, classifier_path.parent)
+
+
 def _load_clip_head_from_classifier_impl(
     classifier_path: Path,
     *,
@@ -102,10 +126,10 @@ def _load_clip_head_from_classifier_impl(
     arcface_enabled: bool = False
     arcface_margin: Optional[float] = None
     arcface_scale: Optional[float] = None
-    meta_path = os.path.splitext(str(classifier_path))[0] + ".meta.pkl"
-    if os.path.exists(meta_path):
+    meta_path = _safe_classifier_meta_path_impl(classifier_path)
+    if meta_path is not None:
         try:
-            meta_obj = joblib_load_fn(meta_path)
+            meta_obj = joblib_load_fn(str(meta_path))
             if isinstance(meta_obj, dict):
                 meta_found = True
                 clip_model_used = meta_obj.get("clip_model")
@@ -616,8 +640,8 @@ def _find_labelmap_for_classifier_impl(
     joblib_load_fn: Callable[[str], Any],
     resolve_clip_labelmap_path_fn: Callable[[Optional[str], Optional[str]], Optional[Path]],
 ) -> Optional[Path]:
-    meta_path = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
-    if meta_path.exists():
+    meta_path = _safe_classifier_meta_path_impl(classifier_path)
+    if meta_path is not None:
         try:
             meta_obj = joblib_load_fn(str(meta_path))
             if isinstance(meta_obj, dict):
@@ -628,6 +652,10 @@ def _find_labelmap_for_classifier_impl(
         except Exception:
             pass
     stem = classifier_path.stem
+    try:
+        classifier_resolved = classifier_path.resolve()
+    except Exception:
+        classifier_resolved = classifier_path
     roots = [
         (upload_root / "labelmaps").resolve(),
         (upload_root / "classifiers").resolve(),
@@ -637,7 +665,13 @@ def _find_labelmap_for_classifier_impl(
             continue
         for ext in labelmap_exts:
             candidate = (root / f"{stem}{ext}").resolve()
-            if candidate.exists() and candidate.is_file() and path_is_within_root_fn(candidate, root):
+            if candidate == classifier_resolved or candidate.name.endswith(".meta.pkl"):
+                continue
+            if (
+                path_is_within_root_fn(candidate, root)
+                and candidate.exists()
+                and candidate.is_file()
+            ):
                 return candidate
     return None
 
@@ -655,10 +689,16 @@ def _list_clip_labelmaps_impl(
     if not root.exists():
         return entries
     for path in sorted(root.rglob("*")):
-        if not path.is_file():
+        try:
+            resolved_path = path.resolve()
+        except Exception:
             continue
-        resolved_path = path.resolve()
         if not path_is_within_root_fn(resolved_path, root):
+            continue
+        try:
+            if not resolved_path.is_file():
+                continue
+        except OSError:
             continue
         if path.suffix.lower() not in labelmap_exts:
             continue
@@ -705,25 +745,32 @@ def _list_clip_classifiers_impl(
         return classifiers
 
     for path in sorted(root.rglob("*")):
-        if not path.is_file():
+        try:
+            resolved_path = path.resolve()
+        except Exception:
+            continue
+        if not path_is_within_root_fn(resolved_path, root):
+            continue
+        try:
+            if not resolved_path.is_file():
+                continue
+        except OSError:
             continue
         if path.suffix.lower() not in classifier_exts:
             continue
         if path.name.endswith(".meta.pkl"):
             continue
-        if not path_is_within_root_fn(path.resolve(), root):
-            continue
 
         entry: Dict[str, Any] = {
             "filename": path.name,
-            "path": str(path.resolve()),
+            "path": str(resolved_path),
             "rel_path": str(path.relative_to(root)),
         }
 
-        meta_path = os.path.splitext(str(path))[0] + ".meta.pkl"
-        if os.path.exists(meta_path):
+        meta_path = _safe_classifier_meta_path_impl(path)
+        if meta_path is not None:
             try:
-                meta_obj = joblib_load_fn(meta_path)
+                meta_obj = joblib_load_fn(str(meta_path))
                 if isinstance(meta_obj, dict):
                     entry["clip_model"] = meta_obj.get("clip_model")
                     entry["encoder_type"] = meta_obj.get("encoder_type") or "clip"
@@ -772,7 +819,7 @@ def _list_clip_classifiers_impl(
             stem = path.stem
             for ext in labelmap_exts:
                 candidate = (labelmaps_root / f"{stem}{ext}").resolve()
-                if candidate.exists() and path_is_within_root_fn(candidate, labelmaps_root):
+                if path_is_within_root_fn(candidate, labelmaps_root) and candidate.exists():
                     entry["labelmap_guess"] = str(candidate)
                     entry["labelmap_guess_rel"] = str(candidate.relative_to(labelmaps_root))
                     break

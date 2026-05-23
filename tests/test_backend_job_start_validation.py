@@ -415,6 +415,55 @@ def test_calibration_rolls_back_persisted_state_when_thread_start_fails(monkeypa
     assert not any(tmp_path.iterdir())
 
 
+def test_calibration_start_rejects_symlinked_root_without_target_write_and_rollback(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    calibration_root = tmp_path / "calibration_jobs"
+    try:
+        calibration_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    jobs = {}
+    jobs_lock = calibration_service.threading.Lock()
+
+    with pytest.raises(ValueError, match="calibration_root_symlink"):
+        calibration_service._start_calibration_job(
+            api.CalibrationRequest(dataset_id="dataset_1"),
+            job_cls=calibration_service.CalibrationJob,
+            jobs=jobs,
+            jobs_lock=jobs_lock,
+            run_job_fn=lambda *_args, **_kwargs: None,
+            calibration_root=calibration_root,
+        )
+
+    assert jobs == {}
+    assert list(outside.iterdir()) == []
+
+
+def test_calibration_report_bundle_rejects_symlinked_root_without_target_read(
+    monkeypatch,
+    tmp_path,
+):
+    outside = tmp_path / "outside"
+    report_dir = outside / "cal_report"
+    report_dir.mkdir(parents=True)
+    (report_dir / "report_bundle.json").write_text('{"escaped": true}', encoding="utf-8")
+    calibration_root = tmp_path / "calibration_jobs"
+    try:
+        calibration_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "CALIBRATION_ROOT", calibration_root)
+    with api.CALIBRATION_JOBS_LOCK:
+        api.CALIBRATION_JOBS.clear()
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.get_calibration_report_bundle("cal_report")
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "calibration_job_not_found"
+
+
 def test_yolo_train_missing_dataset_rejects_before_run_dir(monkeypatch, tmp_path):
     with api.YOLO_TRAINING_JOBS_LOCK:
         api.YOLO_TRAINING_JOBS.clear()

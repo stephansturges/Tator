@@ -125,6 +125,23 @@ CALIBRATION_JOB_STATE_VERSION = 1
 CALIBRATION_JOB_INTERRUPTED_ERROR = "calibration_job_interrupted_after_backend_restart"
 
 
+def _resolve_calibration_storage_root(
+    root_path: Path,
+    *,
+    create: bool = False,
+    error_prefix: str = "calibration_root",
+) -> Path:
+    raw_root = Path(root_path)
+    if raw_root.is_symlink() or raw_root.parent.is_symlink():
+        raise ValueError(f"{error_prefix}_symlink")
+    if create:
+        raw_root.mkdir(parents=True, exist_ok=True)
+        if raw_root.is_symlink() or raw_root.parent.is_symlink():
+            raise ValueError(f"{error_prefix}_symlink")
+        return raw_root.resolve(strict=True)
+    return raw_root.resolve(strict=False)
+
+
 def _repo_tool_subprocess_env(root_dir: Path, base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Ensure repo-root tool scripts can import local packages when spawned as subprocesses."""
     env = dict(base_env or os.environ)
@@ -158,8 +175,11 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
 
 
 def _calibration_job_state_path(calibration_root: Path, job_id: str) -> Path:
-    root = calibration_root.resolve()
-    job_dir = (root / str(job_id)).resolve()
+    root = _resolve_calibration_storage_root(calibration_root)
+    raw_job_dir = root / str(job_id)
+    if raw_job_dir.is_symlink():
+        raise ValueError("calibration_job_path_not_allowed")
+    job_dir = raw_job_dir.resolve(strict=False)
     if not _path_is_within_root_impl(job_dir, root):
         raise ValueError("calibration_job_path_not_allowed")
     return job_dir / CALIBRATION_JOB_STATE_FILENAME
@@ -168,7 +188,8 @@ def _calibration_job_state_path(calibration_root: Path, job_id: str) -> Path:
 def _persist_calibration_job_state(job: Any, calibration_root: Path) -> Dict[str, Any]:
     payload = dict(_serialize_calibration_job(job))
     payload["state_schema_version"] = CALIBRATION_JOB_STATE_VERSION
-    _write_json_atomic(_calibration_job_state_path(calibration_root, str(job.job_id)), payload)
+    root = _resolve_calibration_storage_root(calibration_root, create=True)
+    _write_json_atomic(_calibration_job_state_path(root, str(job.job_id)), payload)
     return payload
 
 
@@ -220,7 +241,10 @@ def _list_persisted_calibration_job_payloads(
     mark_interrupted: bool = False,
 ) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
-    root = calibration_root.resolve()
+    try:
+        root = _resolve_calibration_storage_root(calibration_root)
+    except ValueError:
+        return out
     if not root.exists():
         return out
     for entry in sorted(root.iterdir()):
@@ -982,7 +1006,13 @@ def _start_calibration_job(
         job.request = request_payload
     with jobs_lock:
         jobs[job.job_id] = job
-    _persist_calibration_job_state(job, calibration_root)
+    try:
+        _persist_calibration_job_state(job, calibration_root)
+    except Exception:
+        with jobs_lock:
+            if jobs.get(job.job_id) is job:
+                jobs.pop(job.job_id, None)
+        raise
     try:
         thread = threading.Thread(target=run_job_fn, args=(job, payload), daemon=True)
         thread.start()
@@ -1471,13 +1501,14 @@ def _run_calibration_job(
 ) -> None:
     with jobs_lock:
         jobs[job.job_id] = job
-    output_dir = calibration_root / job.job_id
+    calibration_root_resolved = _resolve_calibration_storage_root(calibration_root, create=True)
+    output_dir = calibration_root_resolved / job.job_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
     def _persisting_update_fn(inner_job: Any, **kwargs: Any) -> None:
         update_fn(inner_job, **kwargs)
         try:
-            _persist_calibration_job_state(inner_job, calibration_root)
+            _persist_calibration_job_state(inner_job, calibration_root_resolved)
         except Exception:
             pass
 
@@ -1669,7 +1700,11 @@ def _run_calibration_job(
         _persisting_update_fn(job, total=total, processed=0, progress=0.0)
 
         prepass_path = output_dir / "prepass.jsonl"
-        calibration_cache_root.mkdir(parents=True, exist_ok=True)
+        calibration_cache_root = _resolve_calibration_storage_root(
+            calibration_cache_root,
+            create=True,
+            error_prefix="calibration_cache_root",
+        )
         classifier_id_resolved = str(payload.classifier_id or "").strip()
         if not classifier_id_resolved and callable(default_classifier_for_dataset_fn):
             try:
@@ -1691,7 +1726,7 @@ def _run_calibration_job(
                 req = dict(job.request or {})
                 req["classifier_id_resolved"] = classifier_id_resolved
                 job.request = req
-                _persist_calibration_job_state(job, calibration_root)
+                _persist_calibration_job_state(job, calibration_root_resolved)
             except Exception:
                 pass
         use_yolo = payload.enable_yolo is not False

@@ -593,6 +593,7 @@ from services.calibration import (
     _cancel_calibration_job as _cancel_calibration_job_impl,
     _list_persisted_calibration_job_payloads as _list_persisted_calibration_job_payloads_impl,
     _load_persisted_calibration_job_payload as _load_persisted_calibration_job_payload_impl,
+    _resolve_calibration_storage_root as _resolve_calibration_storage_root_impl,
 )
 from services.canonical_edr_completion import (
     get_canonical_deployment_job as _get_canonical_deployment_job_impl,
@@ -35578,8 +35579,12 @@ def get_calibration_report_bundle(job_id: str):
     safe_job_id = _sanitize_yolo_run_id_impl(str(job_id)) or str(job_id)
     if safe_job_id != str(job_id):
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
-    path = (CALIBRATION_ROOT / safe_job_id / "report_bundle.json").resolve()
-    if not _path_is_within_root_impl(path, CALIBRATION_ROOT.resolve()):
+    try:
+        calibration_root = _resolve_calibration_storage_root_impl(CALIBRATION_ROOT)
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found") from exc
+    path = (calibration_root / safe_job_id / "report_bundle.json").resolve()
+    if not _path_is_within_root_impl(path, calibration_root):
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
     if not path.exists():
         with CALIBRATION_JOBS_LOCK:
@@ -35589,7 +35594,7 @@ def get_calibration_report_bundle(job_id: str):
         result = job.result if isinstance(job.result, dict) else {}
         report_path = result.get("report_bundle_json")
         path = Path(str(report_path)).resolve() if report_path else path
-        if not _path_is_within_root_impl(path, CALIBRATION_ROOT.resolve()):
+        if not _path_is_within_root_impl(path, calibration_root):
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
     if not path.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_report_bundle_not_found")

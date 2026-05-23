@@ -16271,16 +16271,95 @@ def _class_analysis_safe_relpath(value: str, fallback: str = "image.jpg") -> Pat
     return Path(*parts)
 
 
+def _class_analysis_storage_root(
+    *,
+    create: bool = True,
+    detail: str = "class_analysis_path_invalid",
+) -> Path:
+    try:
+        raw_root = CLASS_ANALYSIS_ROOT
+        if raw_root.is_symlink():
+            raise ValueError("class analysis root is a symlink")
+        if create:
+            raw_root.mkdir(parents=True, exist_ok=True)
+        if raw_root.exists() and not raw_root.is_dir():
+            raise ValueError("class analysis root is not a directory")
+        return raw_root.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+def _class_analysis_job_dir(
+    job_id: str,
+    *,
+    create: bool = False,
+    detail: str = "class_analysis_path_invalid",
+) -> Path:
+    safe_job_id = _class_analysis_safe_slug(str(job_id or ""), "job")
+    try:
+        root = _class_analysis_storage_root(create=True, detail=detail)
+        candidate = root / safe_job_id
+        if candidate.is_symlink():
+            raise ValueError("class analysis job dir is a symlink")
+        if create:
+            candidate.mkdir(parents=True, exist_ok=True)
+        if candidate.exists() and not candidate.is_dir():
+            raise ValueError("class analysis job path is not a directory")
+        resolved = candidate.resolve(strict=False)
+        if not _path_is_within_root_impl(resolved, root) or resolved.parent != root:
+            raise ValueError("class analysis job path escapes root")
+        return resolved
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+def _class_analysis_active_workspace_paths(
+    workspace_dir_value: Any,
+    manifest_path_value: Any,
+) -> Tuple[Path, Optional[Path]]:
+    try:
+        class_root = _class_analysis_storage_root(
+            create=True,
+            detail="active_workspace_path_invalid",
+        )
+        workspace_raw = Path(str(workspace_dir_value or "")).expanduser()
+        if workspace_raw.is_symlink():
+            raise ValueError("active workspace dir is a symlink")
+        workspace_dir = workspace_raw.resolve(strict=True)
+        if not workspace_dir.is_dir() or not _path_is_within_root_impl(workspace_dir, class_root):
+            raise ValueError("active workspace dir is outside class analysis root")
+        manifest_path: Optional[Path] = None
+        manifest_raw_value = str(manifest_path_value or "").strip()
+        if manifest_raw_value:
+            manifest_raw = Path(manifest_raw_value).expanduser()
+            if manifest_raw.is_symlink():
+                raise ValueError("active workspace manifest is a symlink")
+            manifest_path = manifest_raw.resolve(strict=True)
+            if (
+                not manifest_path.is_file()
+                or not _path_is_within_root_impl(manifest_path, workspace_dir)
+            ):
+                raise ValueError("active workspace manifest is outside workspace")
+        return workspace_dir, manifest_path
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_path_invalid") from exc
+
+
 def _class_analysis_source(payload: Dict[str, Any]) -> Dict[str, Any]:
     source_mode = str(payload.get("source_mode") or payload.get("mode") or "linked").strip().lower()
     if source_mode in {"active_workspace", "workspace"}:
-        workspace_dir = Path(str(payload.get("workspace_dir") or "")).expanduser().resolve()
+        workspace_dir, manifest_path = _class_analysis_active_workspace_paths(
+            payload.get("workspace_dir"),
+            payload.get("workspace_manifest_path"),
+        )
         manifest_path_raw = str(payload.get("workspace_manifest_path") or "").strip()
         manifest = payload.get("workspace_manifest") if isinstance(payload.get("workspace_manifest"), dict) else None
-        if manifest is None and manifest_path_raw:
-            manifest = _load_json_metadata(Path(manifest_path_raw).expanduser().resolve()) or {}
-        if not workspace_dir.exists() or not workspace_dir.is_dir():
-            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="active_workspace_missing")
+        if manifest is None and manifest_path_raw and manifest_path is not None:
+            manifest = _load_json_metadata(manifest_path) or {}
         if not isinstance(manifest, dict):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_manifest_invalid")
         labelmap = [str(x) for x in manifest.get("labelmap") or payload.get("labelmap") or []]
@@ -17509,10 +17588,9 @@ def _class_analysis_build_result(
 
 
 def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
-    out_dir = CLASS_ANALYSIS_ROOT / _class_analysis_safe_slug(job.job_id, "job")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    job.thumbnail_dir = str(out_dir / "thumbnails")
     try:
+        out_dir = _class_analysis_job_dir(job.job_id, create=True)
+        job.thumbnail_dir = str(out_dir / "thumbnails")
         with CLASS_ANALYSIS_JOBS_LOCK:
             _class_analysis_update(job, status="running", progress=0.02, message="Collecting crops ...")
         records, crops, summary = _class_analysis_collect_records(job.request, job=job, out_dir=out_dir)
@@ -17713,11 +17791,12 @@ async def create_class_analysis_active_workspace_job(manifest_json: str, files: 
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_images_required")
 
     job_id = f"ca_{uuid.uuid4().hex[:10]}"
-    out_dir = CLASS_ANALYSIS_ROOT / _class_analysis_safe_slug(job_id, "job")
-    workspace_dir = out_dir / "active_workspace"
-    images_dir = workspace_dir / "images"
+    out_dir: Optional[Path] = None
     queued = False
     try:
+        out_dir = _class_analysis_job_dir(job_id, create=True)
+        workspace_dir = out_dir / "active_workspace"
+        images_dir = workspace_dir / "images"
         images_dir.mkdir(parents=True, exist_ok=True)
 
         saved_uploads: Dict[str, str] = {}
@@ -17834,7 +17913,7 @@ async def create_class_analysis_active_workspace_job(manifest_json: str, files: 
             _class_analysis_log(job, f"Active workspace snapshot queued with {len(rows)} images.")
         return result
     except Exception:
-        if not queued:
+        if not queued and out_dir is not None:
             shutil.rmtree(out_dir, ignore_errors=True)
         raise
 

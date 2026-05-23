@@ -625,8 +625,9 @@ def test_class_split_experiment_metrics_use_absolute_leakage_and_macro_purity(tm
     assert all(run["sample_cap"] == 11 for run in cradio_runs)
 
 
-def test_class_analysis_source_reads_active_workspace_manifest(tmp_path):
-    workspace = tmp_path / "workspace"
+def test_class_analysis_source_reads_active_workspace_manifest(tmp_path, monkeypatch):
+    class_root = tmp_path / "class_analysis"
+    workspace = class_root / "workspace"
     (workspace / "images").mkdir(parents=True)
     manifest_path = workspace / "manifest.json"
     manifest_path.write_text(
@@ -647,7 +648,7 @@ def test_class_analysis_source_reads_active_workspace_manifest(tmp_path):
         ),
         encoding="utf-8",
     )
-
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
     source = api._class_analysis_source(
         {
             "source_mode": "active_workspace",
@@ -662,6 +663,91 @@ def test_class_analysis_source_reads_active_workspace_manifest(tmp_path):
     assert source["dataset_root"] == workspace.resolve()
     assert source["labelmap"] == ["car", "boat"]
     assert source["manifest"]["images"][0]["frontend_image_key"] == "train/original/example.jpg"
+
+
+def test_class_analysis_source_rejects_active_workspace_outside_class_root(
+    tmp_path, monkeypatch
+):
+    class_root = tmp_path / "class_analysis"
+    class_root.mkdir()
+    workspace = tmp_path / "outside_workspace"
+    (workspace / "images").mkdir(parents=True)
+    manifest_path = workspace / "manifest.json"
+    manifest_path.write_text(
+        json.dumps({"labelmap": ["car"], "images": [], "yolo_layout": "flat"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._class_analysis_source(
+            {
+                "source_mode": "active_workspace",
+                "workspace_id": "ca_outside",
+                "workspace_dir": str(workspace),
+                "workspace_manifest_path": str(manifest_path),
+            }
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "active_workspace_path_invalid"
+
+
+def test_class_analysis_source_rejects_active_workspace_manifest_escape(
+    tmp_path, monkeypatch
+):
+    class_root = tmp_path / "class_analysis"
+    workspace = class_root / "workspace"
+    workspace.mkdir(parents=True)
+    outside_manifest = class_root / "outside_manifest.json"
+    outside_manifest.write_text(
+        json.dumps({"labelmap": ["car"], "images": [], "yolo_layout": "flat"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._class_analysis_source(
+            {
+                "source_mode": "active_workspace",
+                "workspace_id": "ca_manifest_escape",
+                "workspace_dir": str(workspace),
+                "workspace_manifest_path": str(outside_manifest),
+            }
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "active_workspace_path_invalid"
+
+
+def test_class_analysis_active_workspace_rejects_symlinked_root_before_upload(
+    tmp_path, monkeypatch
+):
+    outside = tmp_path / "outside_class_analysis"
+    outside.mkdir()
+    class_root = tmp_path / "class_analysis"
+    try:
+        class_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    manifest = {
+        "labelmap": ["car"],
+        "images": [
+            {
+                "upload_name": "present.jpg",
+                "label_lines": ["0 0.5 0.5 0.2 0.2"],
+            }
+        ],
+    }
+    upload = UploadFile(filename="present.jpg", file=BytesIO(b"image-bytes"))
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(api.create_class_analysis_active_workspace_job(json.dumps(manifest), [upload]))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "class_analysis_path_invalid"
+    assert list(outside.iterdir()) == []
 
 
 def test_class_analysis_active_workspace_cleans_partial_upload_on_bad_manifest(
@@ -957,7 +1043,8 @@ def test_class_analysis_embedding_cache_rejects_symlink_escape(tmp_path, monkeyp
 
 
 def test_class_analysis_corrupt_cache_rematerializes_real_crop(monkeypatch, tmp_path):
-    workspace = tmp_path / "workspace"
+    class_root = tmp_path / "class_analysis"
+    workspace = class_root / "workspace"
     images_dir = workspace / "images"
     images_dir.mkdir(parents=True)
     image_path = images_dir / "sample.jpg"
@@ -988,6 +1075,7 @@ def test_class_analysis_corrupt_cache_rematerializes_real_crop(monkeypatch, tmp_
 
     monkeypatch.setattr(api, "_class_analysis_embedding_cache_path", lambda _cache_key: corrupt_embedding)
     monkeypatch.setattr(api, "_class_analysis_thumbnail_cache_path", lambda _crop_cache_key: cached_thumb)
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
 
     job = api.ClassAnalysisJob(job_id="ca_corrupt_cache")
     records, crops, summary = api._class_analysis_collect_records(
@@ -1027,7 +1115,8 @@ def test_class_analysis_corrupt_cache_rematerializes_real_crop(monkeypatch, tmp_
 def test_class_analysis_thumbnail_cache_replaces_symlink_without_target_write(
     monkeypatch, tmp_path
 ):
-    workspace = tmp_path / "workspace"
+    class_root = tmp_path / "class_analysis"
+    workspace = class_root / "workspace"
     images_dir = workspace / "images"
     images_dir.mkdir(parents=True)
     image_path = images_dir / "sample.jpg"
@@ -1061,6 +1150,7 @@ def test_class_analysis_thumbnail_cache_replaces_symlink_without_target_write(
     except OSError as exc:
         pytest.skip(f"symlink unsupported: {exc}")
     monkeypatch.setattr(api, "CLASS_ANALYSIS_CACHE_ROOT", cache_root)
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
     monkeypatch.setattr(api, "_class_analysis_thumbnail_cache_path", lambda _crop_cache_key: cached_thumb)
     monkeypatch.setattr(api, "_class_analysis_cached_embedding_valid", lambda *_args, **_kwargs: True)
 
@@ -1098,7 +1188,8 @@ def test_class_analysis_thumbnail_cache_replaces_symlink_without_target_write(
 
 
 def test_class_analysis_cache_validation_uses_cradio_recipe(monkeypatch, tmp_path):
-    workspace = tmp_path / "workspace"
+    class_root = tmp_path / "class_analysis"
+    workspace = class_root / "workspace"
     images_dir = workspace / "images"
     images_dir.mkdir(parents=True)
     image_path = images_dir / "sample.jpg"
@@ -1127,6 +1218,7 @@ def test_class_analysis_cache_validation_uses_cradio_recipe(monkeypatch, tmp_pat
     captured_heads = []
 
     monkeypatch.setattr(api, "_class_analysis_thumbnail_cache_path", lambda _crop_cache_key: cached_thumb)
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
 
     def fake_cached_valid(_crop_cache_key, head):
         captured_heads.append(dict(head))

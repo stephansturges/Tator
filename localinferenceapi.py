@@ -18775,12 +18775,103 @@ def list_sam3_datasets():
     return _list_all_datasets()
 
 
+def _sam3_entry_needs_annotation_materialized_view(entry: Dict[str, Any]) -> bool:
+    storage_mode = str(entry.get("storage_mode") or "managed").strip().lower()
+    yolo_layout = str(entry.get("yolo_layout") or "").strip().lower()
+    if storage_mode == "linked" or yolo_layout != "split":
+        return True
+    try:
+        overlay_root = _dataset_overlay_root_from_entry(entry, ensure=False)
+    except Exception:
+        return False
+    if not overlay_root.exists():
+        return False
+    return any(path.is_file() for path in overlay_root.rglob("*.txt"))
+
+
+def _materialize_sam3_annotation_view(entry: Dict[str, Any]) -> Dict[str, Any]:
+    dataset_root = _dataset_effective_root_from_entry(entry)
+    storage_root = _dataset_meta_storage_root_from_entry(entry)
+    materialized_root = (
+        storage_root / DATASET_ANNOTATION_OVERLAY_DIRNAME / "sam3_materialized"
+    ).resolve()
+    storage_root_resolved = storage_root.resolve()
+    if not _path_is_within_root_impl(materialized_root, storage_root_resolved):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_materialize_path_invalid")
+    if materialized_root.exists():
+        shutil.rmtree(materialized_root, ignore_errors=True)
+    for split in ("train", "val"):
+        (materialized_root / split / "images").mkdir(parents=True, exist_ok=True)
+        (materialized_root / split / "labels").mkdir(parents=True, exist_ok=True)
+
+    labelmap = [str(item).strip() for item in (entry.get("classes") or []) if str(item).strip()]
+    if not labelmap:
+        labelmap = _dataset_labelmap_from_root(dataset_root)
+    if not labelmap:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_labelmap_missing")
+    (materialized_root / "labelmap.txt").write_text(
+        "\n".join(labelmap) + "\n", encoding="utf-8"
+    )
+
+    yolo_layout = str(entry.get("yolo_layout") or "flat")
+    counts = {"train": 0, "val": 0}
+    dataset_root_resolved = dataset_root.resolve()
+    for row in _annotation_collect_images(entry):
+        try:
+            split = _annotation_normalise_split(row.get("split"))
+            image_relpath = _annotation_normalise_image_relpath(row.get("image_relpath"))
+        except HTTPException:
+            continue
+        image_path_raw = row.get("image_path")
+        if image_path_raw is None:
+            continue
+        try:
+            image_source = Path(str(image_path_raw)).resolve()
+        except Exception:
+            continue
+        if not _path_is_within_root_impl(image_source, dataset_root_resolved):
+            continue
+        lines = _annotation_effective_label_lines(entry, split, image_relpath)
+        overlay_label_path = _annotation_overlay_label_path(entry, split, image_relpath)
+        source_label_path = _annotation_source_label_path(
+            dataset_root, yolo_layout, split, image_relpath
+        )
+        if not lines and not overlay_label_path.exists() and not source_label_path.exists():
+            continue
+        target_image = materialized_root / split / "images" / image_relpath
+        target_label = materialized_root / split / "labels" / image_relpath.with_suffix(".txt")
+        _copy2_if_different(image_source, target_image)
+        target_label.parent.mkdir(parents=True, exist_ok=True)
+        target_label.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        counts[split] += 1
+
+    meta = _convert_yolo_dataset_to_coco_impl(materialized_root)
+    meta["id"] = str(entry.get("id") or meta.get("id") or materialized_root.name)
+    meta["label"] = str(entry.get("label") or meta.get("label") or meta["id"])
+    meta["source"] = "annotation_overlay"
+    meta["source_dataset_root"] = str(dataset_root)
+    meta["annotation_storage_root"] = str(storage_root)
+    meta["classes"] = labelmap
+    meta["train_count"] = counts["train"]
+    meta["val_count"] = counts["val"]
+    meta["image_count"] = counts["train"] + counts["val"]
+    _persist_sam3_dataset_metadata_impl(
+        materialized_root, meta, meta_name=SAM3_DATASET_META_NAME, logger=logger
+    )
+    return meta
+
+
 def _resolve_sam3_dataset_meta(dataset_id: str) -> Dict[str, Any]:
+    entry = _resolve_dataset_entry_impl(dataset_id, list_all_datasets_fn=_list_all_datasets)
     dataset_root = _resolve_sam3_or_qwen_dataset(dataset_id)
     annotations_path = dataset_root / "train" / "annotations.jsonl"
     train_images = dataset_root / "train" / "images"
     train_labels = dataset_root / "train" / "labels"
-    if annotations_path.exists():
+    if entry and entry.get("qwen_ready"):
+        meta = _convert_qwen_dataset_to_coco_impl(dataset_root)
+    elif entry and entry.get("yolo_ready") and _sam3_entry_needs_annotation_materialized_view(entry):
+        meta = _materialize_sam3_annotation_view(entry)
+    elif annotations_path.exists():
         meta = _convert_qwen_dataset_to_coco_impl(dataset_root)
     elif train_images.exists() and train_labels.exists():
         meta = _convert_yolo_dataset_to_coco_impl(dataset_root)
@@ -18788,7 +18879,8 @@ def _resolve_sam3_dataset_meta(dataset_id: str) -> Dict[str, Any]:
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="sam3_dataset_type_unsupported"
         )
-    meta["dataset_root"] = str(dataset_root)
+    if not meta.get("dataset_root"):
+        meta["dataset_root"] = str(dataset_root)
     return meta
 
 

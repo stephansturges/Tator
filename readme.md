@@ -965,6 +965,10 @@ job-start validation, and the Mac YOLO training work.
   view instead of raw label files only, so linked-dataset overlay edits, flat
   YOLO layouts, nested image paths, and registry-stored glossary metadata carry
   into the generated Qwen `annotations.jsonl`.
+- SAM3 dataset conversion now follows the same annotation-effective contract for
+  linked or flat YOLO datasets by materializing an internal split YOLO view under
+  the registry overlay before converting to COCO, avoiding mutation of the linked
+  source tree while preserving corrected overlay labels.
 - Local validation for this checkpoint used:
 
 ```bash

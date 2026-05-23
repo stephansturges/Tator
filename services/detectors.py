@@ -22,6 +22,45 @@ def _path_identity(path: Path) -> Path:
         return path.absolute()
 
 
+def _prepare_output_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise RuntimeError("detector_path_invalid")
+    parent_resolved = path.parent.resolve(strict=True)
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+    elif path.exists() and path.is_dir():
+        raise RuntimeError("detector_path_invalid")
+    try:
+        path.resolve(strict=False).relative_to(parent_resolved)
+    except Exception as exc:
+        raise RuntimeError("detector_path_invalid") from exc
+
+
+def _prepare_atomic_output_file(path: Path) -> Path:
+    _prepare_output_file(path)
+    tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    _prepare_output_file(tmp_path)
+    return tmp_path
+
+
+def _write_json_atomic(path: Path, payload: Dict[str, Any], *, sort_keys: bool = False) -> Path:
+    tmp_path = _prepare_atomic_output_file(path)
+    try:
+        tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=sort_keys), encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+    return path
+
+
+def _write_text_file(path: Path, text: str) -> Path:
+    _prepare_output_file(path)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 def _unlink_self_referential_symlink(path: Path) -> bool:
     if not path.is_symlink():
         return False
@@ -39,11 +78,9 @@ def _unlink_self_referential_symlink(path: Path) -> bool:
 
 def _copy2_if_different(src: Path, dest: Path) -> None:
     src_resolved = src.resolve()
-    if src_resolved == _path_identity(dest):
+    _prepare_output_file(dest)
+    if dest.exists() and src_resolved == _path_identity(dest):
         return
-    if dest.is_symlink():
-        dest.unlink(missing_ok=True)
-    dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src_resolved, dest)
 
 
@@ -52,6 +89,8 @@ def _copy_tree_within_root(src: Path, dest: Path) -> None:
     if dest.is_symlink():
         dest.unlink(missing_ok=True)
     dest.mkdir(parents=True, exist_ok=True)
+    if dest.is_symlink():
+        raise RuntimeError("detector_path_invalid")
     dest_root = dest.resolve(strict=False)
     for item in sorted(src.rglob("*")):
         try:
@@ -264,7 +303,7 @@ def _ensure_rfdetr_inference_runtime_impl(
 
 
 def _load_yolo_active_impl(yolo_active_path: Path) -> Dict[str, Any]:
-    if not yolo_active_path.exists():
+    if yolo_active_path.is_symlink() or not yolo_active_path.exists():
         return {}
     try:
         payload = json.loads(yolo_active_path.read_text())
@@ -286,12 +325,11 @@ def _load_yolo_active_impl(yolo_active_path: Path) -> Dict[str, Any]:
 
 
 def _save_yolo_active_impl(payload: Dict[str, Any], yolo_active_path: Path) -> Dict[str, Any]:
-    yolo_active_path.parent.mkdir(parents=True, exist_ok=True)
     data = dict(payload or {})
     data["updated_at"] = time.time()
     if "created_at" not in data:
         data["created_at"] = data["updated_at"]
-    yolo_active_path.write_text(json.dumps(data, indent=2, sort_keys=True))
+    _write_json_atomic(yolo_active_path, data, sort_keys=True)
     return data
 
 
@@ -301,7 +339,7 @@ def _load_rfdetr_active_impl(
     save_active_fn: Callable[[Dict[str, Any]], Dict[str, Any]],
 ) -> Dict[str, Any]:
     def _load_from(path: Path) -> Dict[str, Any]:
-        if not path.exists():
+        if path.is_symlink() or not path.exists():
             return {}
         try:
             payload = json.loads(path.read_text())
@@ -327,17 +365,16 @@ def _load_rfdetr_active_impl(
 
 
 def _save_rfdetr_active_impl(payload: Dict[str, Any], rfdetr_active_path: Path) -> Dict[str, Any]:
-    rfdetr_active_path.parent.mkdir(parents=True, exist_ok=True)
     data = dict(payload or {})
     data["updated_at"] = time.time()
     if "created_at" not in data:
         data["created_at"] = data["updated_at"]
-    rfdetr_active_path.write_text(json.dumps(data, indent=2, sort_keys=True))
+    _write_json_atomic(rfdetr_active_path, data, sort_keys=True)
     return data
 
 
 def _load_detector_default_impl(detector_default_path: Path) -> Dict[str, Any]:
-    if not detector_default_path.exists():
+    if detector_default_path.is_symlink() or not detector_default_path.exists():
         return {"mode": "rfdetr"}
     try:
         payload = json.loads(detector_default_path.read_text())
@@ -355,7 +392,6 @@ def _save_detector_default_impl(
     detector_default_path: Path,
     http_exception_cls: Any,
 ) -> Dict[str, Any]:
-    detector_default_path.parent.mkdir(parents=True, exist_ok=True)
     data = dict(payload or {})
     mode = str(data.get("mode") or "").strip().lower()
     if mode not in {"yolo", "rfdetr"}:
@@ -364,7 +400,7 @@ def _save_detector_default_impl(
     data["updated_at"] = time.time()
     if "created_at" not in data:
         data["created_at"] = data["updated_at"]
-    detector_default_path.write_text(json.dumps(data, indent=2, sort_keys=True))
+    _write_json_atomic(detector_default_path, data, sort_keys=True)
     return data
 
 
@@ -434,11 +470,13 @@ def _yolo_write_run_meta_impl(
     time_fn: Callable[[], float],
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
+    if run_dir.is_symlink():
+        raise RuntimeError("detector_path_invalid")
     payload = dict(meta or {})
     now = time_fn()
     payload.setdefault("created_at", now)
     payload["updated_at"] = now
-    (run_dir / meta_name).write_text(json.dumps(payload, indent=2, sort_keys=True))
+    _write_json_atomic(run_dir / meta_name, payload, sort_keys=True)
 
 
 def _yolo_prune_run_dir_impl(
@@ -1089,6 +1127,8 @@ def _strip_checkpoint_optimizer_impl(
     torch_module: Any,
 ) -> Tuple[bool, int, int]:
     """Remove optimizer/scheduler state from a torch checkpoint to shrink size."""
+    if ckpt_path.is_symlink():
+        return False, 0, 0
     before = ckpt_path.stat().st_size if ckpt_path.exists() else 0
     if not ckpt_path.exists() or before == 0:
         return False, before, before
@@ -1102,9 +1142,10 @@ def _strip_checkpoint_optimizer_impl(
         if not removed:
             return False, before, before
         tmp_path = ckpt_path.with_suffix(ckpt_path.suffix + ".tmp")
+        _prepare_output_file(tmp_path)
         torch_module.save(payload, tmp_path)
         tmp_size = tmp_path.stat().st_size
-        tmp_path.replace(ckpt_path)
+        os.replace(tmp_path, ckpt_path)
         return True, before, tmp_size
     except Exception:
         return False, before, before
@@ -1201,8 +1242,7 @@ def _rfdetr_remap_coco_ids_impl(src_path: Path, dest_path: Path) -> None:
         new_annotations.append(ann)
     data["categories"] = new_categories
     data["annotations"] = new_annotations
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    dest_path.write_text(json.dumps(data))
+    _write_json_atomic(dest_path, data)
 
 
 def _rfdetr_prepare_dataset_impl(
@@ -1276,7 +1316,7 @@ def _yolo_write_data_yaml_impl(
         "names": names,
     }
     data_path = run_dir / "data.yaml"
-    data_path.write_text(yaml_dump_fn(data))
+    _write_text_file(data_path, yaml_dump_fn(data))
     if labelmap_path:
         try:
             copy_file_fn(Path(labelmap_path), run_dir / "labelmap.txt")
@@ -1331,7 +1371,7 @@ def _yolo_variant_base_yaml_impl(
         cfg_payload["scale"] = p2_scale
         target_dir = run_dir or Path(tempfile.mkdtemp(prefix="yolo_p2_cfg_", dir=str(upload_root)))
         target = target_dir / f"yolov8{p2_scale}-p2.yaml"
-        target.write_text(yaml_dump_fn(cfg_payload))
+        _write_text_file(target, yaml_dump_fn(cfg_payload))
         return target
     suffix = "-seg" if task == "segment" and "seg" not in model_id else ""
     base_cfg = base_cfg_dir / f"{model_id}{suffix}.yaml"
@@ -1354,7 +1394,7 @@ def _yolo_write_variant_yaml_impl(
     cfg_payload = yaml_load_fn(base_cfg.read_text())
     cfg_payload["nc"] = int(nc)
     target = run_dir / f"{Path(base_cfg).stem}_nc{nc}.yaml"
-    target.write_text(yaml_dump_fn(cfg_payload))
+    _write_text_file(target, yaml_dump_fn(cfg_payload))
     return target
 
 
@@ -1395,7 +1435,7 @@ def _yolo_write_head_graft_yaml_impl(
     cfg_payload["head"] = head
     cfg_payload["nc"] = int(base_nc + new_nc)
     target = run_dir / f"{Path(base_cfg).stem}_2xhead.yaml"
-    target.write_text(yaml_dump_fn(cfg_payload))
+    _write_text_file(target, yaml_dump_fn(cfg_payload))
     return target
 
 

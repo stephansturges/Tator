@@ -20044,15 +20044,19 @@ def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
     if run_dir.resolve() in active_paths:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="sam3_run_active")
     ckpt_dir = run_dir / "checkpoints"
-    if not ckpt_dir.exists():
+    if ckpt_dir.is_symlink():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_checkpoint_dir_missing")
+    if not ckpt_dir.exists() or not ckpt_dir.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_checkpoint_dir_missing")
     ckpt_root = ckpt_dir.resolve()
+    if not _path_is_within_root_impl(ckpt_root, run_dir.resolve()):
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_checkpoint_dir_missing")
     ckpts = []
     for p in ckpt_dir.iterdir():
-        if not p.is_file() or p.suffix not in {".ckpt", ".pth", ".pt"}:
+        if p.is_symlink() or not p.is_file() or p.suffix not in {".ckpt", ".pth", ".pt"}:
             continue
         try:
-            if not _path_is_within_root_impl(p.resolve(), ckpt_root):
+            if not _path_is_within_root_impl(p.resolve(strict=True), ckpt_root):
                 continue
         except Exception:
             continue
@@ -20086,6 +20090,8 @@ def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
     freed += max(0, before - after)
     marker = run_dir / ".promoted"
     try:
+        if marker.is_symlink():
+            marker.unlink(missing_ok=True)
         marker.write_text(
             json.dumps({"timestamp": time.time(), "keep": str(keep)}), encoding="utf-8"
         )

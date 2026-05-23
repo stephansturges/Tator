@@ -94,6 +94,30 @@ def test_list_sam3_models_skips_checkpoint_symlink_escape(
     assert all(model.get("id") != "run_symlink" for model in models)
 
 
+def test_list_sam3_models_skips_symlinked_run_dir_escape(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runs_root = tmp_path / "runs"
+    runs_root.mkdir()
+    outside_run = tmp_path / "outside_run"
+    checkpoint_dir = outside_run / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "last.ckpt").write_text("weights", encoding="utf-8")
+    try:
+        (runs_root / "linked_run").symlink_to(outside_run, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", runs_root)
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", runs_root / "datasets")
+    monkeypatch.setattr(api, "SAM3_CHECKPOINT_PATH", None)
+    monkeypatch.setattr(api, "active_sam3_checkpoint", None)
+
+    models = api.list_sam3_available_models()
+
+    assert all(model.get("id") != "linked_run" for model in models)
+
+
 def test_promote_sam3_run_rejects_checkpoint_symlink_escape(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -116,6 +140,58 @@ def test_promote_sam3_run_rejects_checkpoint_symlink_escape(
     assert excinfo.value.status_code == 404
     assert excinfo.value.detail == "sam3_checkpoints_missing"
     assert outside.read_text(encoding="utf-8") == "weights"
+
+
+def test_promote_sam3_run_rejects_checkpoint_dir_symlink_escape(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "run_checkpoint_dir_symlink"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    outside = tmp_path / "outside_checkpoints"
+    outside.mkdir()
+    (outside / "last.ckpt").write_text("weights", encoding="utf-8")
+    (outside / "extra.ckpt").write_text("extra", encoding="utf-8")
+    try:
+        (run_dir / "checkpoints").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", tmp_path)
+    monkeypatch.setattr(
+        api,
+        "_strip_checkpoint_optimizer_impl",
+        lambda *args, **kwargs: (False, 0, 0),
+    )
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.promote_sam3_run(run_id)
+
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.detail == "sam3_checkpoint_dir_missing"
+    assert (outside / "last.ckpt").read_text(encoding="utf-8") == "weights"
+    assert (outside / "extra.ckpt").read_text(encoding="utf-8") == "extra"
+
+
+def test_delete_sam3_run_rejects_symlink_run_id_without_target_delete(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target_run = tmp_path / "target_run"
+    target_run.mkdir()
+    (target_run / "payload.bin").write_bytes(b"target")
+    try:
+        (tmp_path / "linked_run").symlink_to(target_run, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", tmp_path)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.delete_sam3_run("linked_run", scope="all")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "invalid_run_id"
+    assert (target_run / "payload.bin").read_bytes() == b"target"
 
 
 def test_sam3_train_cache_purge_blocks_active_split_job(tmp_path: Path, monkeypatch) -> None:

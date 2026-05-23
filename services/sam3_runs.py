@@ -9,6 +9,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from utils.io import _path_is_within_root_impl
 
 
+def _safe_path_mtime_impl(path: Path) -> float:
+    if path.is_symlink():
+        return 0.0
+    try:
+        return path.stat().st_mtime
+    except Exception:
+        return 0.0
+
+
 def _active_run_paths_for_variant_impl(
     *,
     variant: str,
@@ -41,6 +50,7 @@ def _describe_run_dir_impl(
     active_paths: set[Path],
     dir_size_fn: Callable[[Path], int],
 ) -> Dict[str, Any]:
+    run_root = run_dir.resolve()
     checkpoints_dir = run_dir / "checkpoints"
     logs_dir = run_dir / "logs"
     tensorboard_dir = run_dir / "tensorboard"
@@ -48,24 +58,34 @@ def _describe_run_dir_impl(
     marker_path = run_dir / ".promoted"
     promoted = False
     promoted_at: Optional[float] = None
-    if marker_path.exists():
+    if marker_path.exists() and not marker_path.is_symlink():
         promoted = True
         try:
+            marker_resolved = marker_path.resolve(strict=True)
+            if not _path_is_within_root_impl(marker_resolved, run_root):
+                raise ValueError("promoted marker escaped run root")
             meta = json.loads(marker_path.read_text())
             promoted_at = meta.get("timestamp")
         except Exception:
             promoted_at = None
     checkpoints: List[Dict[str, Any]] = []
-    if checkpoints_dir.exists():
+    if checkpoints_dir.exists() and not checkpoints_dir.is_symlink():
         checkpoints_root = checkpoints_dir.resolve()
+        if not _path_is_within_root_impl(checkpoints_root, run_root):
+            checkpoints_root = None
+    else:
+        checkpoints_root = None
+    if checkpoints_root is not None:
         for ckpt in sorted(
             checkpoints_dir.iterdir(),
-            key=lambda p: p.stat().st_mtime if p.exists() else 0,
+            key=_safe_path_mtime_impl,
             reverse=True,
         ):
+            if ckpt.is_symlink():
+                continue
             if ckpt.is_file():
                 try:
-                    if not _path_is_within_root_impl(ckpt.resolve(), checkpoints_root):
+                    if not _path_is_within_root_impl(ckpt.resolve(strict=True), checkpoints_root):
                         continue
                     stat = ckpt.stat()
                     checkpoints.append(
@@ -115,17 +135,30 @@ def _list_sam3_runs_impl(
     root = job_root
     if not root.exists():
         return []
+    try:
+        root_resolved = root.resolve()
+    except Exception:
+        return []
+    dataset_root_resolved = dataset_root.resolve(strict=False)
     active_paths = active_paths_fn(variant)
     runs: List[Dict[str, Any]] = []
-    for child in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True):
-        if not child.is_dir():
-            continue
-        if variant == "sam3" and child.resolve() == dataset_root.resolve():
-            continue
-        if child.name.lower() == "datasets":
+    for child in sorted(root.iterdir(), key=_safe_path_mtime_impl, reverse=True):
+        if child.is_symlink():
             continue
         try:
-            runs.append(describe_fn(child, variant, active_paths))
+            run_dir = child.resolve()
+        except Exception:
+            continue
+        if not _path_is_within_root_impl(run_dir, root_resolved):
+            continue
+        if not run_dir.is_dir():
+            continue
+        if variant == "sam3" and run_dir == dataset_root_resolved:
+            continue
+        if run_dir.name.lower() == "datasets":
+            continue
+        try:
+            runs.append(describe_fn(run_dir, variant, active_paths))
         except Exception:
             continue
     return runs
@@ -141,11 +174,23 @@ def _run_dir_for_request_impl(
     http_404: int,
 ) -> Path:
     root = job_root
+    raw_id = str(run_id or "").strip()
+    if (
+        not raw_id
+        or raw_id in {".", ".."}
+        or "/" in raw_id
+        or "\\" in raw_id
+        or Path(raw_id).is_absolute()
+    ):
+        raise http_exception_cls(status_code=http_400, detail="invalid_run_id")
+    requested = root / raw_id
+    if requested.is_symlink():
+        raise http_exception_cls(status_code=http_400, detail="invalid_run_id")
     root_resolved = root.resolve()
-    candidate = (root / run_id).resolve()
+    candidate = requested.resolve()
     if not _path_is_within_root_impl(candidate, root_resolved):
         raise http_exception_cls(status_code=http_400, detail="invalid_run_id")
-    if not candidate.exists():
+    if not candidate.exists() or not candidate.is_dir():
         raise http_exception_cls(status_code=http_404, detail="sam3_run_not_found")
     return candidate
 
@@ -172,8 +217,22 @@ def _delete_run_scope_impl(
             targets.append(target)
     deleted: List[str] = []
     freed = 0
+    run_root = run_dir.resolve()
     for target in targets:
         if not target.exists():
+            continue
+        if target.is_symlink():
+            try:
+                target.unlink(missing_ok=True)
+                deleted.append(str(target))
+            except Exception:
+                continue
+            continue
+        try:
+            target_resolved = target.resolve()
+        except Exception:
+            continue
+        if not _path_is_within_root_impl(target_resolved, run_root):
             continue
         freed += dir_size_fn(target)
         try:

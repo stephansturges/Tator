@@ -222,6 +222,48 @@ def test_save_transient_dataset_persists_overlay_content(tmp_path, monkeypatch) 
     assert meta["annotation_notes"] == "notes"
 
 
+def test_save_transient_dataset_rejects_symlinked_registry_root(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "linked_source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside_registry"
+    outside.mkdir()
+    registry_root = tmp_path / "registry"
+    try:
+        registry_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(api, "_validate_linked_dataset_path", lambda _p: source_root)
+
+    with api.DATASET_TRANSIENT_LOCK:
+        api.DATASET_TRANSIENT_SESSIONS.clear()
+        api.DATASET_TRANSIENT_SESSIONS["sess1"] = {
+            "session_id": "sess1",
+            "dataset_root": str(source_root),
+            "label": "Transient DS",
+            "classes": ["car"],
+            "yolo_layout": "flat",
+            "annotation_status": "in_progress",
+            "overlay_labels": {"train:img1.jpg": ["0 0.5 0.5 0.2 0.2"]},
+            "overlay_text": {"train:img1.jpg": "car in frame"},
+        }
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.save_transient_dataset(
+            "sess1",
+            dataset_id="saved_linked",
+            label="Saved Linked",
+            context="context",
+            notes="notes",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "dataset_register_target_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_download_dataset_entry_applies_overlay_files(tmp_path, monkeypatch) -> None:
     source_root = tmp_path / "linked_source"
     (source_root / "images").mkdir(parents=True, exist_ok=True)
@@ -1598,6 +1640,74 @@ def test_register_path_dedupes_existing_linked_entry(tmp_path, monkeypatch) -> N
         str(dataset_root), None, None, None, None, force_new=False, strict=True
     )
     assert out["id"] == "existing"
+
+
+def test_register_path_rejects_symlinked_registry_root(tmp_path, monkeypatch) -> None:
+    dataset_root = tmp_path / "linked_ds"
+    (dataset_root / "images").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "labels").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "labelmap.txt").write_text("car\n", encoding="utf-8")
+    outside = tmp_path / "outside_registry"
+    outside.mkdir()
+    registry_root = tmp_path / "registry"
+    try:
+        registry_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "DATASET_LINK_ROOTS", [tmp_path.resolve()])
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.register_dataset_path(
+            str(dataset_root),
+            "linked_ds",
+            None,
+            None,
+            None,
+            force_new=True,
+            strict=True,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "dataset_register_target_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_register_path_rejects_target_symlink_without_target_write(
+    tmp_path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "linked_ds"
+    (dataset_root / "images").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "labels").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "labelmap.txt").write_text("car\n", encoding="utf-8")
+    registry_root = tmp_path / "registry"
+    registry_root.mkdir()
+    outside = tmp_path / "outside_registry"
+    outside.mkdir()
+    outside_target = outside / "ghost"
+    try:
+        (registry_root / "linked_ds").symlink_to(outside_target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "DATASET_LINK_ROOTS", [tmp_path.resolve()])
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.register_dataset_path(
+            str(dataset_root),
+            "linked_ds",
+            None,
+            None,
+            None,
+            force_new=True,
+            strict=True,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "dataset_register_target_invalid"
+    assert not outside_target.exists()
 
 
 def test_open_path_strict_requires_labelmap(tmp_path, monkeypatch) -> None:

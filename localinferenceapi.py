@@ -15742,8 +15742,15 @@ def register_dataset_path(
             ):
                 return candidate
     base_id = _sanitize_yolo_run_id_impl(dataset_id or dataset_root.name) or "linked_dataset"
-    dataset_id_final = _unique_dataset_name(base_id, root=DATASET_REGISTRY_ROOT)
-    registry_dir = (DATASET_REGISTRY_ROOT / dataset_id_final).resolve()
+    registry_root = _dataset_registry_storage_root(
+        create=True, detail="dataset_register_target_invalid"
+    )
+    dataset_id_final = _unique_dataset_name(base_id, root=registry_root)
+    registry_dir = _dataset_registry_child_dir(
+        dataset_id_final, detail="dataset_register_target_invalid"
+    )
+    if registry_dir.exists() or registry_dir.is_symlink():
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="dataset_register_target_exists")
     registry_dir.mkdir(parents=True, exist_ok=True)
     meta = _build_linked_dataset_metadata(
         dataset_id=dataset_id_final,
@@ -15893,8 +15900,15 @@ def save_transient_dataset(
     session = _resolve_transient_session(session_id)
     dataset_root = _validate_linked_dataset_path(str(session.get("dataset_root") or ""))
     base_id = _sanitize_yolo_run_id_impl(dataset_id or dataset_root.name) or "linked_dataset"
-    dataset_id_final = _unique_dataset_name(base_id, root=DATASET_REGISTRY_ROOT)
-    registry_dir = (DATASET_REGISTRY_ROOT / dataset_id_final).resolve()
+    registry_root = _dataset_registry_storage_root(
+        create=True, detail="dataset_register_target_invalid"
+    )
+    dataset_id_final = _unique_dataset_name(base_id, root=registry_root)
+    registry_dir = _dataset_registry_child_dir(
+        dataset_id_final, detail="dataset_register_target_invalid"
+    )
+    if registry_dir.exists() or registry_dir.is_symlink():
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="dataset_register_target_exists")
     registry_dir.mkdir(parents=True, exist_ok=True)
     meta = _build_linked_dataset_metadata(
         dataset_id=dataset_id_final,

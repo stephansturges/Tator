@@ -286,8 +286,9 @@ but unhelpful for the dataset.
 - **2026-05-23:** Hardened backend job lifecycles across Qwen, SAM3,
   YOLO/RF-DETR, Class Analysis, Data Ingestion, Prompt Helper, Agent Mining, and
   Auto Labeling, including failed-start rollback, staged-upload cleanup,
-  checkpoint containment, and EDR package staging containment.
-- **Current validation:** `747 passed, 17 skipped, 8 warnings`; UI endpoint
+  checkpoint containment, EDR package staging containment, and RF-DETR dataset
+  copy fallback containment.
+- **Current validation:** `748 passed, 17 skipped, 8 warnings`; UI endpoint
   checks cover `148` mapped paths and `248` fetches with no failures. Local
   backend smoke is healthy.
 

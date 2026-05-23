@@ -46,6 +46,29 @@ def _copy2_if_different(src: Path, dest: Path) -> None:
     shutil.copy2(src_resolved, dest)
 
 
+def _copy_tree_within_root(src: Path, dest: Path) -> None:
+    src_resolved = src.resolve(strict=True)
+    dest_root = dest.resolve(strict=False)
+    dest.mkdir(parents=True, exist_ok=True)
+    for item in sorted(src.rglob("*")):
+        try:
+            item_resolved = item.resolve(strict=True)
+        except Exception:
+            continue
+        if not _path_is_within_root_impl(item_resolved, src_resolved):
+            continue
+        if not item_resolved.is_file():
+            continue
+        rel = item.relative_to(src)
+        target = dest / rel
+        try:
+            target.resolve(strict=False).relative_to(dest_root)
+        except Exception:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(item_resolved, target)
+
+
 def _set_yolo_infer_state_impl(
     model: Any,
     path: Optional[str],
@@ -1177,7 +1200,7 @@ def _rfdetr_prepare_dataset_impl(
         try:
             dest.symlink_to(source_resolved, target_is_directory=True)
         except Exception:
-            shutil.copytree(source_resolved, dest)
+            _copy_tree_within_root(source_resolved, dest)
 
     _link_split("train", train_src)
     _link_split("valid", valid_src)

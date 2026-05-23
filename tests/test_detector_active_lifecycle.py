@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 import localinferenceapi as api
-from services.detectors import _load_yolo_active_impl, _rfdetr_best_checkpoint_impl
+from services.detectors import (
+    _load_yolo_active_impl,
+    _rfdetr_best_checkpoint_impl,
+    _rfdetr_prepare_dataset_impl,
+)
 
 
 async def _stream_body(response) -> bytes:
@@ -116,6 +120,41 @@ def test_download_rfdetr_run_skips_symlink_keep_file_escape(
 
     assert "labelmap.txt" in names
     assert "checkpoint_best_total.pth" not in names
+
+
+def test_rfdetr_prepare_dataset_copy_fallback_skips_symlink_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset_root = tmp_path / "dataset"
+    train_root = dataset_root / "train"
+    train_root.mkdir(parents=True, exist_ok=True)
+    (train_root / "safe.jpg").write_text("safe", encoding="utf-8")
+    outside = tmp_path / "outside.jpg"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (train_root / "escape.jpg").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    def _disable_symlink(*_args, **_kwargs):
+        raise OSError("symlink disabled")
+
+    def _write_remapped(_src: Path, dest: Path) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text('{"images":[],"annotations":[],"categories":[]}', encoding="utf-8")
+
+    monkeypatch.setattr(Path, "symlink_to", _disable_symlink)
+
+    prepared = _rfdetr_prepare_dataset_impl(
+        dataset_root,
+        tmp_path / "run",
+        str(train_root / "_annotations.coco.json"),
+        str(train_root / "_annotations.coco.json"),
+        remap_ids_fn=_write_remapped,
+    )
+
+    assert (prepared / "train" / "safe.jpg").read_text(encoding="utf-8") == "safe"
+    assert not (prepared / "train" / "escape.jpg").exists()
 
 
 def test_rfdetr_detector_runtime_rejects_best_symlink_escape(

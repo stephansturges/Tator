@@ -18038,6 +18038,50 @@ def _serialize_data_ingestion_job(job: DataIngestionJob) -> Dict[str, Any]:
     }
 
 
+def _data_ingestion_storage_root(
+    *,
+    create: bool = True,
+    detail: str = "data_ingestion_path_invalid",
+) -> Path:
+    try:
+        raw_root = DATA_INGESTION_ROOT
+        if raw_root.is_symlink():
+            raise ValueError("data ingestion root is a symlink")
+        if create:
+            raw_root.mkdir(parents=True, exist_ok=True)
+        if raw_root.exists() and not raw_root.is_dir():
+            raise ValueError("data ingestion root is not a directory")
+        return raw_root.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+def _data_ingestion_job_dir(
+    job_id: str,
+    *,
+    create: bool = False,
+    detail: str = "data_ingestion_path_invalid",
+) -> Path:
+    safe_job_id = _class_analysis_safe_slug(str(job_id or ""), "job")
+    try:
+        root = _data_ingestion_storage_root(create=True, detail=detail)
+        candidate = root / safe_job_id
+        if candidate.is_symlink():
+            raise ValueError("data ingestion job dir is a symlink")
+        if create:
+            candidate.mkdir(parents=True, exist_ok=True)
+        if candidate.exists() and not candidate.is_dir():
+            raise ValueError("data ingestion job path is not a directory")
+        resolved = candidate.resolve(strict=False)
+        if not _path_is_within_root_impl(resolved, root) or resolved.parent != root:
+            raise ValueError("data ingestion job path escapes root")
+        return resolved
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
 def _local_salad_head_path(head_id: str) -> Path:
     safe = _class_analysis_safe_slug(str(head_id or ""), "")
     if not safe:
@@ -18539,10 +18583,9 @@ def _data_ingestion_encode_prepared_images(
 
 
 def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
-    out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job.job_id, "job")
-    media_dir = out_dir / "media"
-    out_dir.mkdir(parents=True, exist_ok=True)
     try:
+        out_dir = _data_ingestion_job_dir(job.job_id, create=True)
+        media_dir = out_dir / "media"
         request = dict(job.request or {})
         candidate_rows = list(request.get("candidate_uploads") or [])
         reference_rows = list(request.get("reference_uploads") or [])
@@ -18735,10 +18778,9 @@ def _data_ingestion_dinov3_tokens(
 
 
 def _run_local_salad_training_job(job: DataIngestionJob) -> None:
-    out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job.job_id, "job")
-    media_dir = out_dir / "train_media"
-    out_dir.mkdir(parents=True, exist_ok=True)
     try:
+        out_dir = _data_ingestion_job_dir(job.job_id, create=True)
+        media_dir = out_dir / "train_media"
         request = dict(job.request or {})
         upload_rows = list(request.get("train_uploads") or [])
         if not upload_rows:
@@ -19003,8 +19045,9 @@ async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_files")
     _validate_local_salad_head_reference(str(manifest.get("salad_head_id") or "").strip(), manifest)
     job_id = f"di_{uuid.uuid4().hex[:10]}"
-    out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job_id, "job")
+    out_dir: Optional[Path] = None
     try:
+        out_dir = _data_ingestion_job_dir(job_id, create=True)
         candidate_rows = await _data_ingestion_save_uploads(candidate_files, out_dir / "uploads" / "candidates", "candidate")
         reference_rows = await _data_ingestion_save_uploads(reference_files, out_dir / "uploads" / "references", "reference")
         if reference_source == "backend_dataset" and reference_dataset_id:
@@ -19018,7 +19061,8 @@ async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files
         if not reference_rows:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_files")
     except Exception:
-        shutil.rmtree(out_dir, ignore_errors=True)
+        if out_dir is not None:
+            shutil.rmtree(out_dir, ignore_errors=True)
         raise
     request_payload = {
         **manifest,
@@ -19038,7 +19082,8 @@ async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files
             name=f"data-ingest-{job_id[:8]}",
         )
     except Exception:
-        shutil.rmtree(out_dir, ignore_errors=True)
+        if out_dir is not None:
+            shutil.rmtree(out_dir, ignore_errors=True)
         raise
     return {"job_id": job_id}
 
@@ -19054,8 +19099,9 @@ async def create_local_salad_training_job(manifest_json: str, files: List[Any]) 
     if encoder_type not in {"dinov3", "cradio"}:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_encoder_unsupported")
     job_id = f"salad_{uuid.uuid4().hex[:10]}"
-    out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job_id, "job")
+    out_dir: Optional[Path] = None
     try:
+        out_dir = _data_ingestion_job_dir(job_id, create=True)
         rows = await _data_ingestion_save_uploads(files, out_dir / "uploads" / "train", "train")
         reference_source = str(manifest.get("reference_source") or manifest.get("source_mode") or "").strip()
         reference_dataset_id = str(manifest.get("reference_dataset_id") or "").strip()
@@ -19070,7 +19116,8 @@ async def create_local_salad_training_job(manifest_json: str, files: List[Any]) 
         if not rows:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_no_training_files")
     except Exception:
-        shutil.rmtree(out_dir, ignore_errors=True)
+        if out_dir is not None:
+            shutil.rmtree(out_dir, ignore_errors=True)
         raise
     request_payload = {**manifest, "train_uploads": rows}
     job = DataIngestionJob(job_id=job_id, kind="local_salad_train", request=request_payload)
@@ -19086,7 +19133,8 @@ async def create_local_salad_training_job(manifest_json: str, files: List[Any]) 
             name=f"local-salad-{job_id[:8]}",
         )
     except Exception:
-        shutil.rmtree(out_dir, ignore_errors=True)
+        if out_dir is not None:
+            shutil.rmtree(out_dir, ignore_errors=True)
         raise
     return {"job_id": job_id}
 

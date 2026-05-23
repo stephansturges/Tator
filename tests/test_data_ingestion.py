@@ -160,6 +160,56 @@ def test_data_ingestion_analysis_cleans_staging_when_thread_start_fails(tmp_path
     assert reference.closed is True
 
 
+def test_data_ingestion_analysis_rejects_symlinked_root_before_upload(tmp_path, monkeypatch):
+    outside = tmp_path / "outside_data_ingestion"
+    outside.mkdir()
+    ingestion_root = tmp_path / "data_ingestion"
+    try:
+        ingestion_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    monkeypatch.setattr(api, "_validate_local_salad_head_reference", lambda *_args, **_kwargs: None)
+    candidate = _FakeUpload("candidate.jpg", b"candidate")
+    reference = _FakeUpload("reference.jpg", b"reference")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(
+            api.create_data_ingestion_analysis_job(
+                json.dumps({
+                    "encoder": "local_salad",
+                    "salad_head_id": "unit_head",
+                    "reference_source": "active_label_images",
+                }),
+                [candidate],
+                [reference],
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "data_ingestion_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_data_ingestion_job_dir_rejects_symlinked_existing_job_dir(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "data_ingestion"
+    ingestion_root.mkdir()
+    outside_job = tmp_path / "outside_job"
+    outside_job.mkdir()
+    try:
+        (ingestion_root / "job_link").symlink_to(outside_job, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._data_ingestion_job_dir("job_link", create=True)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "data_ingestion_path_invalid"
+    assert list(outside_job.iterdir()) == []
+
+
 def test_local_salad_training_cleans_staging_when_thread_start_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "DATA_INGESTION_ROOT", tmp_path)
     monkeypatch.setattr(api.threading, "Thread", _FailStartThread)
@@ -173,6 +223,24 @@ def test_local_salad_training_cleans_staging_when_thread_start_fails(tmp_path, m
     assert api.DATA_INGESTION_JOBS == {}
     assert not any(tmp_path.iterdir())
     assert upload.closed is True
+
+
+def test_local_salad_training_rejects_symlinked_root_before_upload(tmp_path, monkeypatch):
+    outside = tmp_path / "outside_data_ingestion"
+    outside.mkdir()
+    ingestion_root = tmp_path / "data_ingestion"
+    try:
+        ingestion_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(api.create_local_salad_training_job("{}", [_FakeUpload("train.jpg", b"train")]))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "data_ingestion_path_invalid"
+    assert list(outside.iterdir()) == []
 
 
 def test_local_salad_training_cleans_saved_uploads_if_backend_reference_lookup_fails(tmp_path, monkeypatch):

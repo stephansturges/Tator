@@ -191,6 +191,47 @@ def test_qwen_caption_cancel_marks_progress_and_new_run_clears_event():
     assert api.qwen_progress()["cancel_requested"] is False
 
 
+def test_qwen_prepass_progress_uses_caption_token_budget(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setattr(
+        api,
+        "_run_prepass_annotation",
+        lambda payload: {"detections": [], "warnings": [], "image_token": payload.image_token},
+    )
+
+    api.qwen_prepass(
+        api.QwenPrepassRequest(
+            image_base64="stub",
+            prepass_caption=True,
+            prepass_caption_profile="deep",
+            prepass_caption_max_tokens=99999,
+        )
+    )
+
+    progress = api.qwen_progress()
+    assert progress["max_new_tokens"] == 2000
+    assert progress["phase"] == "complete"
+
+
+def test_qwen_prepass_progress_uses_caption_profile_default(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setattr(
+        api,
+        "_run_prepass_annotation",
+        lambda payload: {"detections": [], "warnings": [], "image_token": payload.image_token},
+    )
+
+    api.qwen_prepass(
+        api.QwenPrepassRequest(
+            image_base64="stub",
+            prepass_caption=True,
+            prepass_caption_profile="light",
+        )
+    )
+
+    assert api.qwen_progress()["max_new_tokens"] == 512
+
+
 def test_qwen_caption_io_input_does_not_fail_on_bad_token_count(monkeypatch, tmp_path):
     _reset_qwen_progress()
     monkeypatch.setattr(api, "LOG_ROOT", tmp_path)

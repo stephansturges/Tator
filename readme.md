@@ -983,6 +983,9 @@ job-start validation, and the Mac YOLO training work.
 - Segmentation-build planning now accepts linked or flat YOLO bbox datasets by
   materializing the same annotation-effective split view before checking source
   metadata and planning the generated segmentation dataset.
+- Qwen prepass progress now reports the same caption token budget the EDR
+  prepass caption runner will use, including light/deep defaults and clamping of
+  explicit `prepass_caption_max_tokens` values.
 - Local validation for this checkpoint used:
 
 ```bash
@@ -1006,7 +1009,7 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_ui_smoke.py \
   --base-url http://127.0.0.1:8000
 ```
 
-  Latest results: full pytest `688 passed, 17 skipped`; endpoint map check
+  Latest results: full pytest `700 passed, 17 skipped`; endpoint map check
   `148` UI paths with no missing OpenAPI paths; endpoint method check `248`
   fetches with no failures; live backend smoke after restart reported MPS via
   `/system/gpu`, `accelerator` in both YOLO OpenAPI request schemas, and normal

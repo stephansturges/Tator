@@ -33793,6 +33793,31 @@ app.include_router(
 )
 
 
+def _qwen_prepass_progress_token_budget(payload: QwenPrepassRequest) -> int:
+    def _clean_token_budget(value: Any, default: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            parsed = int(default)
+        return max(32, min(parsed, int(maximum)))
+
+    if bool(getattr(payload, "prepass_caption", False)):
+        caption_profile = str(
+            getattr(payload, "prepass_caption_profile", None) or "light"
+        ).strip().lower()
+        default_caption_tokens = 512 if caption_profile != "deep" else 1024
+        return _clean_token_budget(
+            getattr(payload, "prepass_caption_max_tokens", None),
+            default_caption_tokens,
+            2000,
+        )
+    return _clean_token_budget(
+        getattr(payload, "max_new_tokens", None),
+        QWEN_MAX_NEW_TOKENS,
+        max(QWEN_MAX_NEW_TOKENS, 4096),
+    )
+
+
 def qwen_prepass(payload: QwenPrepassRequest):
     base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
     platform_name = _resolve_qwen_runtime_platform(
@@ -33805,7 +33830,7 @@ def qwen_prepass(payload: QwenPrepassRequest):
         model_id=str(base_model_id),
         platform=platform_name,
         message="Preparing EDR prepass",
-        max_new_tokens=getattr(payload, "caption_max_tokens", None) or QWEN_MAX_NEW_TOKENS,
+        max_new_tokens=_qwen_prepass_progress_token_budget(payload),
     )
     try:
         _qwen_progress_update(
@@ -33814,7 +33839,10 @@ def qwen_prepass(payload: QwenPrepassRequest):
             progress=0.05,
             message="Preparing EDR prepass request",
         )
-        payload = payload.copy(update={"prepass_only": True})
+        if hasattr(payload, "model_copy"):
+            payload = payload.model_copy(update={"prepass_only": True})
+        else:
+            payload = payload.copy(update={"prepass_only": True})
         result = _run_prepass_annotation(payload)
         _qwen_progress_finish("EDR prepass complete")
         return result

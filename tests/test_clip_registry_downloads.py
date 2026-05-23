@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from sklearn.exceptions import InconsistentVersionWarning
 from starlette.responses import FileResponse
 
 import localinferenceapi
@@ -151,6 +153,7 @@ def test_active_model_response_preserves_readiness_error_fields() -> None:
         labelmap_path=None,
         clip_ready=False,
         clip_error="classifier_not_found",
+        clip_warnings=["legacy sklearn artifact"],
         encoder_ready=False,
         encoder_error="classifier_not_found",
         labelmap_entries=[],
@@ -158,8 +161,34 @@ def test_active_model_response_preserves_readiness_error_fields() -> None:
     payload = response.model_dump() if hasattr(response, "model_dump") else response.dict()
 
     assert payload["clip_error"] == "classifier_not_found"
+    assert payload["clip_warnings"] == ["legacy sklearn artifact"]
     assert payload["encoder_ready"] is False
     assert payload["encoder_error"] == "classifier_not_found"
+
+
+def test_joblib_load_records_sklearn_version_warning(monkeypatch) -> None:
+    localinferenceapi.classifier_artifact_warnings.clear()
+    localinferenceapi._classifier_artifact_warning_keys.clear()
+
+    def fake_load(_path):
+        warnings.warn(
+            InconsistentVersionWarning(
+                estimator_name="LogisticRegression",
+                current_sklearn_version="1.8.0",
+                original_sklearn_version="1.7.2",
+            )
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(localinferenceapi.joblib, "load", fake_load)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        loaded = localinferenceapi._joblib_load("legacy.pkl")
+
+    assert loaded == {"ok": True}
+    assert not captured
+    assert localinferenceapi.classifier_artifact_warnings
+    assert "legacy.pkl" in localinferenceapi.classifier_artifact_warnings[-1]
 
 
 def test_predict_base64_skips_decode_when_classifier_path_disappeared(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue, functools, math, stat, importlib
+import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue, functools, math, stat, importlib, warnings
 from contextvars import ContextVar
 from pathlib import Path
 import numpy as np
@@ -760,6 +760,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.decomposition import PCA
+from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.metrics import silhouette_score
 from sklearn.neighbors import NearestNeighbors
 from utils.embedding_recipe import (
@@ -1010,6 +1011,35 @@ ASSET_MAX_BYTES = _env_int("ASSET_MAX_BYTES", 10 * 1024 * 1024 * 1024)
 ASSET_UPLOAD_QUOTA_BYTES = _env_int("ASSET_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
 CLASSIFIER_ALLOWED_EXTS = {".pkl", ".joblib"}
 LABELMAP_ALLOWED_EXTS = {".txt", ".pkl"}
+classifier_artifact_warnings: deque[str] = deque(maxlen=20)
+_classifier_artifact_warning_keys: Set[Tuple[str, str]] = set()
+
+
+def _record_classifier_artifact_warning(path: Any, message: Any) -> None:
+    try:
+        path_label = str(Path(str(path)).resolve())
+    except Exception:
+        path_label = str(path)
+    first_line = str(message).splitlines()[0] if str(message).splitlines() else str(message)
+    key = (path_label, first_line)
+    if key in _classifier_artifact_warning_keys:
+        return
+    _classifier_artifact_warning_keys.add(key)
+    display = f"{Path(path_label).name}: {first_line}"
+    classifier_artifact_warnings.append(display)
+    logger.warning("Classifier artifact compatibility warning for %s: %s", path_label, first_line)
+
+
+def _joblib_load(path: Any) -> Any:
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        loaded = joblib.load(path)
+    for warning in captured:
+        if issubclass(warning.category, InconsistentVersionWarning):
+            _record_classifier_artifact_warning(path, warning.message)
+        else:
+            warnings.warn(warning.message, warning.category, stacklevel=2)
+    return loaded
 
 SAM_PRELOAD_MAX_BYTES = _env_int("SAM_PRELOAD_MAX_BYTES", 2 * 1024 * 1024 * 1024)
 MAX_RESPONSE_DETECTIONS = _env_int("MAX_RESPONSE_DETECTIONS", 5000)
@@ -2704,7 +2734,7 @@ clf = None
 if os.path.exists(MODEL_PATH):
     try:
         print("Loading logistic regression...")
-        clf = joblib.load(MODEL_PATH)
+        clf = _joblib_load(MODEL_PATH)
         clip_last_error = None
     except Exception as e:
         print(f"Failed to load logistic regression model: {e}")
@@ -2729,7 +2759,7 @@ active_classifier_head: Optional[Dict[str, Any]] = None
 if active_labelmap_path:
     try:
         if active_labelmap_path.lower().endswith(".pkl"):
-            loaded = joblib.load(active_labelmap_path)
+            loaded = _joblib_load(active_labelmap_path)
             if isinstance(loaded, list):
                 active_label_list = [str(item) for item in loaded]
             else:
@@ -2746,7 +2776,7 @@ try:
     if active_classifier_path and os.path.isfile(active_classifier_path):
         meta_path = os.path.splitext(active_classifier_path)[0] + ".meta.pkl"
         if os.path.exists(meta_path):
-            meta_obj = joblib.load(meta_path)
+            meta_obj = _joblib_load(meta_path)
             if isinstance(meta_obj, dict):
                 active_classifier_meta = dict(meta_obj)
                 active_encoder_type = meta_obj.get("encoder_type") or "clip"
@@ -7703,7 +7733,7 @@ def _agent_classifier_classes_for_path(path: Path) -> List[str]:
     cached = _AGENT_CLASSIFIER_CLASS_CACHE.get(key)
     if cached is not None:
         return cached
-    classes = _classifier_classes_for_path(path, load_model_fn=joblib.load)
+    classes = _classifier_classes_for_path(path, load_model_fn=_joblib_load)
     _AGENT_CLASSIFIER_CLASS_CACHE[key] = classes
     return classes
 
@@ -7712,7 +7742,7 @@ def _agent_classifier_matches_labelmap(path: Path, labelmap: Sequence[str]) -> b
     return _classifier_matches_labelmap(
         path,
         labelmap,
-        load_model_fn=joblib.load,
+        load_model_fn=_joblib_load,
         normalize_label_fn=_normalize_class_name_for_match,
         bg_indices_fn=_clip_head_background_indices,
     )
@@ -8786,7 +8816,7 @@ def _active_classifier_head_for_inference() -> Optional[Dict[str, Any]]:
     try:
         head = _load_clip_head_from_classifier_impl(
             Path(classifier_path),
-            joblib_load_fn=joblib.load,
+            joblib_load_fn=_joblib_load,
             http_exception_cls=HTTPException,
             clip_head_background_indices_fn=_clip_head_background_indices,
             resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
@@ -10776,7 +10806,7 @@ def _agent_tool_classify_crop(
         if classifier_path is not None:
             head = _load_clip_head_from_classifier_impl(
                 classifier_path,
-                joblib_load_fn=joblib.load,
+                joblib_load_fn=_joblib_load,
                 http_exception_cls=HTTPException,
                 clip_head_background_indices_fn=_clip_head_background_indices,
                 resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
@@ -11357,7 +11387,7 @@ def _agent_tool_get_labelmap(
         if classifier_path is not None:
             head = _load_clip_head_from_classifier_impl(
                 classifier_path,
-                joblib_load_fn=joblib.load,
+                joblib_load_fn=_joblib_load,
                 http_exception_cls=HTTPException,
                 clip_head_background_indices_fn=_clip_head_background_indices,
                 resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
@@ -11557,7 +11587,7 @@ def _agent_tool_submit_annotations(
         if classifier_path is not None:
             head = _load_clip_head_from_classifier_impl(
                 classifier_path,
-                joblib_load_fn=joblib.load,
+                joblib_load_fn=_joblib_load,
                 http_exception_cls=HTTPException,
                 clip_head_background_indices_fn=_clip_head_background_indices,
                 resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
@@ -12352,7 +12382,7 @@ _agent_readable_write = lambda line: _agent_readable_write_impl(  # noqa: E731
     ),
     load_classifier_head_fn=lambda classifier_path: _load_clip_head_from_classifier_impl(
         classifier_path,
-        joblib_load_fn=joblib.load,
+        joblib_load_fn=_joblib_load,
         http_exception_cls=HTTPException,
         clip_head_background_indices_fn=_clip_head_background_indices,
         resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
@@ -12674,7 +12704,7 @@ def _run_prepass_annotation_qwen(
         if classifier_path is not None:
             head = _load_clip_head_from_classifier_impl(
                 classifier_path,
-                joblib_load_fn=joblib.load,
+                joblib_load_fn=_joblib_load,
                 http_exception_cls=HTTPException,
                 clip_head_background_indices_fn=_clip_head_background_indices,
                 resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
@@ -19804,7 +19834,7 @@ _persist_agent_recipe = functools.partial(
     ),
     load_clip_head_fn=lambda classifier_path: _load_clip_head_from_classifier_impl(
         classifier_path,
-        joblib_load_fn=joblib.load,
+        joblib_load_fn=_joblib_load,
         http_exception_cls=HTTPException,
         clip_head_background_indices_fn=_clip_head_background_indices,
         resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
@@ -22891,7 +22921,7 @@ def _infer_clip_model_from_embedding_dim(
 def _load_clip_head_from_classifier(path: Path) -> Optional[Dict[str, Any]]:
     return _load_clip_head_from_classifier_impl(
         path,
-        joblib_load_fn=joblib.load,
+        joblib_load_fn=_joblib_load,
         http_exception_cls=HTTPException,
         clip_head_background_indices_fn=_clip_head_background_indices,
         resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
@@ -23275,7 +23305,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             )
         clip_head = _load_clip_head_from_classifier_impl(
             clip_head_path,
-            joblib_load_fn=joblib.load,
+            joblib_load_fn=_joblib_load,
             http_exception_cls=HTTPException,
             clip_head_background_indices_fn=_clip_head_background_indices,
             resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
@@ -24259,7 +24289,7 @@ def _start_agent_mining_job(payload: AgentMiningRequest) -> AgentMiningJob:
     # Validate early so we fail fast (no background job created).
     _load_clip_head_from_classifier_impl(
         clip_head_path,
-        joblib_load_fn=joblib.load,
+        joblib_load_fn=_joblib_load,
         http_exception_cls=HTTPException,
         clip_head_background_indices_fn=_clip_head_background_indices,
         resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
@@ -27846,13 +27876,13 @@ def _refresh_active_classifier_if_current(artifacts: TrainingArtifacts) -> bool:
     if model_path != current_path:
         return False
 
-    new_clf = joblib.load(str(model_path))
+    new_clf = _joblib_load(str(model_path))
     meta_obj: Dict[str, Any] = {}
     meta_path = Path(artifacts.meta_path) if artifacts.meta_path else Path(
         os.path.splitext(str(model_path))[0] + ".meta.pkl"
     )
     if meta_path.exists():
-        loaded_meta = joblib.load(str(meta_path))
+        loaded_meta = _joblib_load(str(meta_path))
         if isinstance(loaded_meta, dict):
             meta_obj = dict(loaded_meta)
 
@@ -27860,7 +27890,7 @@ def _refresh_active_classifier_if_current(artifacts: TrainingArtifacts) -> bool:
     labelmap_entries = _load_labelmap_file(labelmap_path, strict=True) if labelmap_path else []
     new_head = _load_clip_head_from_classifier_impl(
         model_path,
-        joblib_load_fn=joblib.load,
+        joblib_load_fn=_joblib_load,
         http_exception_cls=HTTPException,
         clip_head_background_indices_fn=_clip_head_background_indices,
         resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
@@ -27904,6 +27934,7 @@ def _current_active_payload() -> Dict[str, Any]:
         "labelmap_path": active_labelmap_path,
         "clip_ready": encoder_ready,
         "clip_error": clip_last_error,
+        "clip_warnings": list(classifier_artifact_warnings),
         "labelmap_entries": list(active_label_list),
         "encoder_type": active_encoder_type,
         "encoder_model": active_encoder_model,
@@ -28135,7 +28166,7 @@ def download_clip_classifier_zip(rel_path: str = Query(...)):
         upload_root=UPLOAD_ROOT,
         labelmap_exts=LABELMAP_ALLOWED_EXTS,
         path_is_within_root_fn=_path_is_within_root_impl,
-        joblib_load_fn=joblib.load,
+        joblib_load_fn=_joblib_load,
         resolve_clip_labelmap_path_fn=lambda path_str, root_hint=None: _resolve_clip_labelmap_path_impl(
             path_str,
             root_hint=root_hint,
@@ -28339,7 +28370,7 @@ app.include_router(
             classifier_exts=CLASSIFIER_ALLOWED_EXTS,
             labelmap_exts=LABELMAP_ALLOWED_EXTS,
             path_is_within_root_fn=_path_is_within_root_impl,
-            joblib_load_fn=joblib.load,
+            joblib_load_fn=_joblib_load,
             resolve_clip_labelmap_path_fn=lambda path_str, root_hint=None: _resolve_clip_labelmap_path_impl(
                 path_str,
                 root_hint=root_hint,
@@ -31293,7 +31324,7 @@ def set_active_model(payload: ActiveModelRequest):
     )
 
     try:
-        new_clf = joblib.load(classifier_path_abs)
+        new_clf = _joblib_load(classifier_path_abs)
     except Exception as exc:  # noqa: BLE001
         clip_last_error = str(exc)
         raise HTTPException(
@@ -31308,7 +31339,7 @@ def set_active_model(payload: ActiveModelRequest):
     meta_path = os.path.splitext(classifier_path_abs)[0] + ".meta.pkl"
     if os.path.exists(meta_path):
         try:
-            meta_candidate = joblib.load(meta_path)
+            meta_candidate = _joblib_load(meta_path)
             if isinstance(meta_candidate, dict):
                 meta_obj = meta_candidate
                 meta_found = True
@@ -31532,7 +31563,7 @@ def set_active_model(payload: ActiveModelRequest):
     try:
         new_classifier_head = _load_clip_head_from_classifier_impl(
             Path(classifier_path_abs),
-            joblib_load_fn=joblib.load,
+            joblib_load_fn=_joblib_load,
             http_exception_cls=HTTPException,
             clip_head_background_indices_fn=_clip_head_background_indices,
             resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
@@ -31877,7 +31908,7 @@ def _system_health_summary() -> Dict[str, Any]:
                 classifier_exts=CLASSIFIER_ALLOWED_EXTS,
                 labelmap_exts=LABELMAP_ALLOWED_EXTS,
                 path_is_within_root_fn=_path_is_within_root_impl,
-                joblib_load_fn=joblib.load,
+                joblib_load_fn=_joblib_load,
                 resolve_clip_labelmap_path_fn=lambda path_str, root_hint=None: _resolve_clip_labelmap_path_impl(
                     path_str,
                     root_hint=root_hint,

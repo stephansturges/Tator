@@ -638,6 +638,7 @@ class ActiveModelResponse(BaseModel):
     labelmap_path: Optional[str]
     clip_ready: bool
     clip_error: Optional[str] = None
+    clip_warnings: List[str] = Field(default_factory=list)
     encoder_ready: Optional[bool] = None
     encoder_error: Optional[str] = None
     labelmap_entries: List[str] = []

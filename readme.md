@@ -999,6 +999,10 @@ job-start validation, and the Mac YOLO training work.
   wrapper, and HTTP status constants now resolve new Starlette names before
   touching legacy aliases. Importing the backend schemas and status shim is
   warning-clean under the current Pydantic and Starlette versions.
+- Backend joblib classifier loads now capture scikit-learn
+  `InconsistentVersionWarning` messages from legacy CLIP heads, log them once,
+  and expose them through `/clip/active_model` as `clip_warnings` instead of
+  leaking a process-level warning during backend import or test collection.
 - Local validation for this checkpoint used:
 
 ```bash
@@ -1023,7 +1027,7 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_ui_smoke.py \
   --base-url http://127.0.0.1:8000
 ```
 
-  Latest results: full pytest `700 passed, 17 skipped, 8 warnings`; endpoint map check
+  Latest results: full pytest `701 passed, 17 skipped, 7 warnings`; endpoint map check
   `148` UI paths with no missing OpenAPI paths; endpoint method check `248`
   fetches with no failures; live backend smoke after restart reported MPS via
   `/system/gpu`, `accelerator` in both YOLO OpenAPI request schemas, and normal

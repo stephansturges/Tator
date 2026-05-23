@@ -14,13 +14,15 @@ from starlette.status import HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND, HTTP_500_
 
 def _safe_presets_root(presets_root: Path, *, create: bool = False) -> Path | None:
     try:
-        if presets_root.is_symlink():
+        if presets_root.is_symlink() or presets_root.parent.is_symlink():
             return None
         if create:
             presets_root.mkdir(parents=True, exist_ok=True)
+            if presets_root.is_symlink() or presets_root.parent.is_symlink():
+                return None
         if presets_root.exists() and not presets_root.is_dir():
             return None
-        if presets_root.is_symlink():
+        if presets_root.is_symlink() or presets_root.parent.is_symlink():
             return None
         return presets_root.resolve(strict=False)
     except Exception:

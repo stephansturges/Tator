@@ -122,6 +122,20 @@ def test_list_prompt_helper_presets_skips_symlinked_root(tmp_path: Path) -> None
     assert _list_prompt_helper_presets_impl(presets_root=presets_root) == []
 
 
+def test_list_prompt_helper_presets_skips_symlinked_parent(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_parent"
+    presets_dir = outside / "presets"
+    presets_dir.mkdir(parents=True)
+    (presets_dir / "phset_escape.json").write_text('{"id":"escape","created_at":1}', encoding="utf-8")
+    presets_parent = tmp_path / "linked_parent"
+    try:
+        presets_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert _list_prompt_helper_presets_impl(presets_root=presets_parent / "presets") == []
+
+
 def test_load_prompt_helper_preset_rejects_symlinked_root(tmp_path: Path) -> None:
     outside = tmp_path / "outside_presets"
     outside.mkdir()
@@ -158,6 +172,29 @@ def test_save_prompt_helper_preset_rejects_symlinked_root_without_write(tmp_path
             "dataset",
             {0: ["prompt"]},
             presets_root=presets_root,
+            path_is_within_root_fn=_path_within_root,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prompt_helper_preset_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_save_prompt_helper_preset_rejects_symlinked_parent_without_write(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    presets_parent = tmp_path / "linked_parent"
+    try:
+        presets_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _save_prompt_helper_preset_impl(
+            "demo",
+            "dataset",
+            {0: ["prompt"]},
+            presets_root=presets_parent / "presets",
             path_is_within_root_fn=_path_within_root,
         )
 

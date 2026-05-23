@@ -283,8 +283,9 @@ but unhelpful for the dataset.
 - **Backend hardening:** job rollback/cleanup, checkpoint containment, EDR/RF-DETR
   staging, package import/export paths, cache pruning, annotation overlays, CLIP
   sidecars, calibration job paths, detector run registries, and SAM3 model
-  registry paths now fail closed.
-- **Validation:** `778 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
+  registry paths now fail closed; Qwen adapters/datasets now reject symlinked
+  registry escapes.
+- **Validation:** `782 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
   and local backend smoke are clean.
 
 </details>

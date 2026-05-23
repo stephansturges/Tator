@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 import localinferenceapi as api
 
 
@@ -134,6 +136,89 @@ def test_list_qwen_model_entries_rejects_checkpoints_outside_run(
             "latest_checkpoint": "missing",
             "checkpoints": [str(outside)],
             "created_at": 100.0,
+        },
+    )
+
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", root)
+
+    assert api._list_qwen_model_entries() == []
+
+
+def test_list_qwen_model_entries_skips_symlinked_run_dir_escape(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "qwen_runs"
+    runs = root / "runs"
+    runs.mkdir(parents=True)
+    outside_run = tmp_path / "outside_run"
+    _write_transformers_adapter(outside_run / "latest")
+    _write_meta(
+        outside_run,
+        {
+            "id": "escaped",
+            "latest_checkpoint": str(outside_run / "latest"),
+            "created_at": 200.0,
+        },
+    )
+    try:
+        (runs / "linked_run").symlink_to(outside_run, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", root)
+
+    assert api._list_qwen_model_entries() == []
+
+
+def test_list_qwen_model_entries_ignores_symlinked_metadata_escape(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "qwen_runs"
+    run = root / "runs" / "run_meta_link"
+    _write_transformers_adapter(run / "latest")
+    outside_meta = tmp_path / "outside_metadata.json"
+    outside_meta.write_text(
+        json.dumps(
+            {
+                "id": "escaped",
+                "latest_checkpoint": str(run / "latest"),
+                "created_at": 200.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        (run / api.QWEN_METADATA_FILENAME).symlink_to(outside_meta)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", root)
+
+    entries = api._list_qwen_model_entries()
+    assert len(entries) == 1
+    assert entries[0]["id"] == "run_meta_link"
+
+
+def test_list_qwen_model_entries_rejects_adapter_file_symlink_escape(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "qwen_runs"
+    run = root / "runs" / "run_adapter_link"
+    latest = run / "latest"
+    latest.mkdir(parents=True)
+    (latest / "adapter_config.json").write_text("{}", encoding="utf-8")
+    outside_adapter = tmp_path / "outside_adapter.safetensors"
+    outside_adapter.write_bytes(b"adapter")
+    try:
+        (latest / "adapter_model.safetensors").symlink_to(outside_adapter)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    _write_meta(
+        run,
+        {
+            "id": "adapter_link",
+            "latest_checkpoint": str(latest),
+            "created_at": 200.0,
         },
     )
 

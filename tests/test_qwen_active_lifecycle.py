@@ -159,6 +159,29 @@ def test_delete_qwen_dataset_blocks_active_training_reference(
             api.QWEN_TRAINING_JOBS.clear()
 
 
+def test_delete_qwen_dataset_rejects_symlinked_dataset_id_without_target_delete(
+    tmp_path: Path, monkeypatch
+) -> None:
+    qwen_root = tmp_path / "qwen_datasets"
+    qwen_root.mkdir()
+    target_root = qwen_root / "target"
+    target_root.mkdir()
+    (target_root / "payload.bin").write_bytes(b"target")
+    try:
+        (qwen_root / "linked").symlink_to(target_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", qwen_root)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.delete_qwen_dataset("linked")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "qwen_dataset_delete_forbidden"
+    assert (target_root / "payload.bin").read_bytes() == b"target"
+
+
 def test_delete_dataset_entry_blocks_active_training_reference(
     tmp_path: Path, monkeypatch
 ) -> None:

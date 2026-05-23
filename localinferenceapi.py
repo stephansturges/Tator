@@ -1458,19 +1458,49 @@ def _clear_unusable_active_qwen_model_path() -> None:
     _set_active_qwen_model_default()
 
 
+def _safe_qwen_path_mtime(path: Path) -> float:
+    if path.is_symlink():
+        return 0.0
+    try:
+        return path.stat().st_mtime
+    except Exception:
+        return 0.0
+
+
+def _safe_qwen_checkpoint_dir(checkpoint_path: Path) -> Optional[Path]:
+    if checkpoint_path.is_symlink():
+        return None
+    try:
+        resolved = checkpoint_path.resolve(strict=True)
+    except Exception:
+        return None
+    if not resolved.is_dir():
+        return None
+    return resolved
+
+
+def _safe_qwen_checkpoint_file(checkpoint_root: Path, name: str) -> bool:
+    return (
+        _safe_existing_regular_file_within_root_impl(checkpoint_root / name, checkpoint_root)
+        is not None
+    )
+
+
 def _qwen_checkpoint_is_usable(checkpoint_path: Path, metadata: Dict[str, Any]) -> bool:
+    checkpoint_root = _safe_qwen_checkpoint_dir(checkpoint_path)
+    if checkpoint_root is None:
+        return False
     platform_name = normalize_qwen_platform((metadata or {}).get("runtime_platform"))
     if platform_name == QWEN_PLATFORM_AUTO and is_qwen_mlx_model_id(
         (metadata or {}).get("model_id") or (metadata or {}).get("requested_model_id")
     ):
         platform_name = QWEN_PLATFORM_MLX
     if platform_name == QWEN_PLATFORM_MLX:
-        return (
-            (checkpoint_path / "adapters.safetensors").exists()
-            and (checkpoint_path / "adapter_config.json").exists()
-        )
-    return (checkpoint_path / "adapter_config.json").exists() and any(
-        (checkpoint_path / name).exists()
+        return _safe_qwen_checkpoint_file(
+            checkpoint_root, "adapters.safetensors"
+        ) and _safe_qwen_checkpoint_file(checkpoint_root, "adapter_config.json")
+    return _safe_qwen_checkpoint_file(checkpoint_root, "adapter_config.json") and any(
+        _safe_qwen_checkpoint_file(checkpoint_root, name)
         for name in ("adapter_model.safetensors", "adapter_model.bin")
     )
 
@@ -1479,15 +1509,22 @@ def _resolve_qwen_run_checkpoint_path(run_dir: Path, raw_path: Any) -> Optional[
     raw = str(raw_path or "").strip()
     if not raw:
         return None
-    run_root = run_dir.resolve()
+    try:
+        run_root = run_dir.resolve(strict=True)
+    except Exception:
+        return None
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
         candidate = run_root / candidate
+    if candidate.is_symlink():
+        return None
     try:
-        resolved = candidate.resolve()
+        resolved = candidate.resolve(strict=True)
     except Exception:
         return None
     if not _path_is_within_root_impl(resolved, run_root):
+        return None
+    if not resolved.is_dir():
         return None
     return resolved
 
@@ -1498,15 +1535,26 @@ def _list_qwen_model_entries() -> List[Dict[str, Any]]:
     if not runs_root.exists():
         return []
     candidates: List[Dict[str, Any]] = []
-    run_dirs = sorted(
-        [path for path in runs_root.iterdir() if path.is_dir()],
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
+    run_dirs: List[Path] = []
+    for path in runs_root.iterdir():
+        if path.is_symlink():
+            continue
+        try:
+            run_dir = path.resolve(strict=True)
+        except Exception:
+            continue
+        if not _path_is_within_root_impl(run_dir, runs_root):
+            continue
+        if not run_dir.is_dir():
+            continue
+        run_dirs.append(run_dir)
+    run_dirs = sorted(run_dirs, key=_safe_qwen_path_mtime, reverse=True)
     for run_dir in run_dirs:
-        meta_path = run_dir / QWEN_METADATA_FILENAME
+        meta_path = _safe_existing_regular_file_within_root_impl(
+            run_dir / QWEN_METADATA_FILENAME, run_dir
+        )
         metadata: Dict[str, Any] = {}
-        if meta_path.exists():
+        if meta_path is not None:
             try:
                 loaded = json.loads(meta_path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
@@ -18852,10 +18900,27 @@ def list_qwen_datasets():
 
 
 def delete_qwen_dataset(dataset_id: str):
-    dataset_root = QWEN_DATASET_ROOT / dataset_id
-    if not dataset_root.exists():
+    raw_id = str(dataset_id or "").strip()
+    if (
+        not raw_id
+        or raw_id in {".", ".."}
+        or "/" in raw_id
+        or "\\" in raw_id
+        or Path(raw_id).is_absolute()
+    ):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_id_invalid")
+    dataset_path = QWEN_DATASET_ROOT / raw_id
+    if dataset_path.is_symlink():
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_delete_forbidden"
+        )
+    try:
+        dataset_root = dataset_path.resolve(strict=True)
+    except Exception:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_not_found") from None
+    if not dataset_root.exists() or not dataset_root.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_not_found")
-    if not _path_is_within_root_impl(dataset_root.resolve(), QWEN_DATASET_ROOT.resolve()):
+    if not _path_is_within_root_impl(dataset_root, QWEN_DATASET_ROOT.resolve()):
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_delete_forbidden"
         )
@@ -31742,7 +31807,9 @@ def activate_qwen_model(payload: QwenModelActivateRequest):
             if not entry:
                 raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_model_not_found")
             latest = entry.get("path")
-            if not latest or not Path(latest).exists():
+            if not latest or not _qwen_checkpoint_is_usable(
+                Path(latest), entry.get("metadata") or {}
+            ):
                 raise HTTPException(
                     status_code=HTTP_404_NOT_FOUND, detail="qwen_model_missing_checkpoint"
                 )

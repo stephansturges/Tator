@@ -11,11 +11,31 @@ from services.edr_packages import (
     EDR_PACKAGE_MANIFEST_NAME,
     EDR_PACKAGE_META_NAME,
     EDR_PACKAGE_PAYLOAD_DIRNAME,
+    _copy_tree,
     edr_package_dir,
     import_edr_package_from_zip,
     resolve_edr_package_runtime,
     _zip_payload,
 )
+
+
+def _write_min_runtime_payload(package_root: Path, payload_root: Path) -> None:
+    (package_root / EDR_PACKAGE_META_NAME).write_text(
+        json.dumps({"package_sha256": "dummy"}),
+        encoding="utf-8",
+    )
+    (payload_root / EDR_PACKAGE_MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "package_id": package_root.name,
+                "runtime_contract": {"config": {}},
+                "feature_contract": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (payload_root / "labelmap.txt").write_text("person\n", encoding="utf-8")
+    (payload_root / "glossary.json").write_text(json.dumps({"glossary": ""}), encoding="utf-8")
 
 
 def test_resolve_edr_package_runtime_falls_back_to_runtime_labelmap(tmp_path: Path) -> None:
@@ -96,6 +116,66 @@ def test_resolve_edr_package_runtime_stages_classifier_not_meta(tmp_path: Path) 
     assert runtime["staged_classifier_id"] == "pkg1__demo.pkl"
     assert (classifiers_root / "pkg1__demo.pkl").read_text(encoding="utf-8") == "model"
     assert (classifiers_root / "pkg1__demo.meta.pkl").read_text(encoding="utf-8") == "meta"
+
+
+def test_resolve_edr_package_runtime_skips_classifier_symlink_escape(tmp_path: Path) -> None:
+    packages_root = tmp_path / "edr_packages"
+    package_root = packages_root / "pkg1"
+    payload_root = package_root / EDR_PACKAGE_PAYLOAD_DIRNAME
+    classifier_root = payload_root / "models" / "classifier"
+    classifier_root.mkdir(parents=True, exist_ok=True)
+    _write_min_runtime_payload(package_root, payload_root)
+
+    outside = tmp_path / "outside.pkl"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (classifier_root / "escape.pkl").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    classifiers_root = tmp_path / "classifiers"
+    runtime = resolve_edr_package_runtime(
+        packages_root=packages_root,
+        package_id="pkg1",
+        upload_root=tmp_path / "uploads",
+        yolo_job_root=tmp_path / "yolo_runs",
+        rfdetr_job_root=tmp_path / "rfdetr_runs",
+        calibration_root=tmp_path / "calibration_jobs",
+        classifiers_root=classifiers_root,
+    )
+
+    assert runtime["staged_classifier_id"] is None
+    assert not (classifiers_root / "pkg1__escape.pkl").exists()
+
+
+def test_resolve_edr_package_runtime_skips_run_symlink_dir_escape(tmp_path: Path) -> None:
+    packages_root = tmp_path / "edr_packages"
+    package_root = packages_root / "pkg1"
+    payload_root = package_root / EDR_PACKAGE_PAYLOAD_DIRNAME
+    yolo_root = payload_root / "models" / "yolo_run"
+    yolo_root.mkdir(parents=True, exist_ok=True)
+    _write_min_runtime_payload(package_root, payload_root)
+
+    outside_run = tmp_path / "outside_run"
+    outside_run.mkdir()
+    (outside_run / "best.pt").write_text("secret", encoding="utf-8")
+    try:
+        (yolo_root / "escape_run").symlink_to(outside_run, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    runtime = resolve_edr_package_runtime(
+        packages_root=packages_root,
+        package_id="pkg1",
+        upload_root=tmp_path / "uploads",
+        yolo_job_root=tmp_path / "yolo_runs",
+        rfdetr_job_root=tmp_path / "rfdetr_runs",
+        calibration_root=tmp_path / "calibration_jobs",
+        classifiers_root=tmp_path / "classifiers",
+    )
+
+    assert runtime["staged_yolo_id"] is None
+    assert not (tmp_path / "yolo_runs" / "pkg1__yolo" / "best.pt").exists()
 
 
 def test_resolve_edr_package_runtime_repairs_feature_contract_from_source_features(tmp_path: Path) -> None:
@@ -243,6 +323,26 @@ def test_zip_payload_skips_symlink_escape(tmp_path: Path) -> None:
         names = set(zf.namelist())
     assert EDR_PACKAGE_MANIFEST_NAME in names
     assert "escape.txt" not in names
+
+
+def test_copy_tree_skips_symlink_escape(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "safe.txt").write_text("safe", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (src / "escape.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assets = []
+    dest = tmp_path / "dest"
+    _copy_tree(src, dest, assets=assets, kind="demo")
+
+    assert (dest / "safe.txt").read_text(encoding="utf-8") == "safe"
+    assert not (dest / "escape.txt").exists()
+    assert [asset["path"] for asset in assets] == [str((dest / "safe.txt").as_posix())]
 
 
 def test_import_edr_package_rejects_invalid_zip(tmp_path: Path) -> None:

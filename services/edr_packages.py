@@ -60,6 +60,43 @@ def _safe_regular_file_within_root(path: Path, root: Path) -> bool:
     return resolved_path.is_file()
 
 
+def _safe_child_dir_within_root(path: Path, root: Path) -> bool:
+    if path.is_symlink():
+        return False
+    try:
+        resolved_path = path.resolve(strict=True)
+        resolved_root = root.resolve(strict=False)
+    except Exception:
+        return False
+    try:
+        resolved_path.relative_to(resolved_root)
+    except Exception:
+        return False
+    return resolved_path.is_dir()
+
+
+def _copy_tree_filtered(src: Path, dest: Path) -> List[Path]:
+    if not src.exists():
+        raise FileNotFoundError(str(src))
+    copied: List[Path] = []
+    src_root = src.resolve(strict=False)
+    dest_root = dest.resolve(strict=False)
+    for item in sorted(src.rglob("*")):
+        if not _safe_regular_file_within_root(item, src_root):
+            continue
+        rel = item.relative_to(src)
+        target = dest / rel
+        try:
+            target_resolved = target.resolve(strict=False)
+            target_resolved.relative_to(dest_root)
+        except Exception:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(item.resolve(strict=True), target)
+        copied.append(target)
+    return copied
+
+
 def _slug(value: Any, *, fallback: str) -> str:
     text = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(value or "").strip())
     text = text.strip("_")
@@ -198,8 +235,9 @@ def _copy_file(src: Path, dest: Path, *, assets: List[Dict[str, Any]], kind: str
 def _copy_tree(src: Path, dest: Path, *, assets: List[Dict[str, Any]], kind: str) -> None:
     if not src.exists():
         raise FileNotFoundError(str(src))
+    src_root = src.resolve(strict=False)
     for item in sorted(src.rglob("*")):
-        if not item.is_file():
+        if not _safe_regular_file_within_root(item, src_root):
             continue
         rel = item.relative_to(src)
         target = dest / rel
@@ -695,7 +733,7 @@ def _find_single_child_dir(parent: Path) -> Optional[Path]:
     if not parent.exists():
         return None
     for item in sorted(parent.iterdir()):
-        if item.is_dir():
+        if _safe_child_dir_within_root(item, parent):
             return item
     return None
 
@@ -737,7 +775,8 @@ def _stage_tree_if_needed(
         return
     if dest.exists():
         shutil.rmtree(dest)
-    shutil.copytree(src, dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    _copy_tree_filtered(src, dest)
     _write_stage_meta(
         dest,
         package_id=package_id,
@@ -776,8 +815,9 @@ def resolve_edr_package_runtime(
     classifier_dir = payload_root / "models" / "classifier"
     if classifier_dir.exists():
         classifiers_root.mkdir(parents=True, exist_ok=True)
+        classifier_dir_resolved = classifier_dir.resolve(strict=False)
         for item in sorted(classifier_dir.iterdir()):
-            if not item.is_file():
+            if not _safe_regular_file_within_root(item, classifier_dir_resolved):
                 continue
             if item.name.endswith(".meta.pkl"):
                 continue
@@ -788,7 +828,7 @@ def resolve_edr_package_runtime(
                     _copy2_if_different(item, dest)
                 meta_src = item.with_suffix(".meta.pkl")
                 meta_dest = dest.with_suffix(".meta.pkl")
-                if meta_src.exists():
+                if _safe_regular_file_within_root(meta_src, classifier_dir_resolved):
                     if not meta_dest.exists() or _sha256_path(meta_dest) != _sha256_path(meta_src):
                         _copy2_if_different(meta_src, meta_dest)
                 staged_classifier_id = staged_name
@@ -829,8 +869,9 @@ def resolve_edr_package_runtime(
     sam3_checkpoint_path = None
     sam3_dir = payload_root / "models" / "sam3"
     if sam3_dir.exists():
+        sam3_dir_resolved = sam3_dir.resolve(strict=False)
         for item in sorted(sam3_dir.iterdir()):
-            if item.is_file():
+            if _safe_regular_file_within_root(item, sam3_dir_resolved):
                 sam3_checkpoint_path = str(item.resolve())
                 break
 

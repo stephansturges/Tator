@@ -65,6 +65,44 @@ def test_labels_from_proba_rejects_shape_mismatch():
         )
 
 
+def test_trained_classifier_labelmap_drops_filtered_and_background_classes():
+    labelmap = ["car", "boat", "plane"]
+
+    trained = clip_training._trained_classifier_labelmap(
+        labelmap,
+        [0, 1, 2],
+        ["boat", "__bg_0", "car"],
+    )
+
+    assert trained == ["car", "boat"]
+
+
+def test_trained_classifier_labelmap_synthesizes_missing_class_labels():
+    trained = clip_training._trained_classifier_labelmap(
+        None,
+        [0, 2, 3],
+        ["class_2", "__bg_0", "custom_extra"],
+    )
+
+    assert trained == ["class_2", "custom_extra"]
+
+
+def test_split_train_test_falls_back_when_group_split_loses_class():
+    labels = np.asarray(["car", "car", "boat", "boat"], dtype=object)
+    groups = np.asarray(["car_group", "car_group", "boat_group", "boat_group"], dtype=object)
+
+    train_idx, test_idx, used_group_split = clip_training._split_train_test_indices(
+        labels,
+        groups,
+        test_size=0.5,
+        random_seed=0,
+    )
+
+    assert used_group_split is False
+    assert {str(labels[idx]) for idx in train_idx} == {"car", "boat"}
+    assert set(train_idx).isdisjoint(set(test_idx))
+
+
 def test_unlink_self_referential_symlink_removes_broken_artifact(tmp_path):
     artifact = tmp_path / "model.pkl"
     os.symlink(str(artifact), artifact)

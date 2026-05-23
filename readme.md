@@ -809,6 +809,13 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experi
   also uses strict root-relative path checks for classifiers and labelmaps, so
   sibling directories with matching path prefixes cannot be treated as upload
   roots.
+- Fixed auto-class training artifacts after class filtering. The saved
+  classifier labelmap now contains the non-background classes that actually
+  remain in the trained head, so low-frequency classes filtered out by
+  `min_per_class` cannot make the newly trained model fail active-model
+  activation. Train/test splitting also falls back from grouped validation when
+  a grouped split would leave a class only in validation, and the CLI confusion
+  matrix now reports labels that match the matrix rows/columns.
 - Validation used:
 
 ```bash

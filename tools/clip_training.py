@@ -50,6 +50,7 @@ from utils.embedding_recipe import (
     normalize_rows as _embedding_normalize_rows,
     preprocess_crop as _embedding_preprocess_crop,
 )
+from utils.classifier_utils import _is_background_class_name
 from utils.local_salad import load_local_salad_head_file
 from utils.local_salad_mlx import (
     encode_local_salad_mlx,
@@ -57,6 +58,7 @@ from utils.local_salad_mlx import (
     load_mlx_local_salad_head_file,
     resolve_local_salad_backend,
 )
+from utils.labels import _normalize_class_name_for_match
 from utils.cradio_embedding import (
     encode_cradio_images,
     load_cradio_backbone,
@@ -511,6 +513,114 @@ def _load_labelmap(path: Optional[str]) -> Optional[List[str]]:
     if not entries:
         raise TrainingError("Labelmap text file is empty.")
     return entries
+
+
+def _trained_classifier_labelmap(
+    labelmap_list: Optional[Sequence[str]],
+    encountered_cids: Sequence[int],
+    trained_classes: Sequence[str],
+) -> List[str]:
+    """Build the published labelmap from classes that actually remain in the head."""
+    trained_positive = [
+        str(name)
+        for name in trained_classes
+        if str(name or "").strip() and not _is_background_class_name(str(name))
+    ]
+    if not trained_positive:
+        return []
+    trained_norm = {
+        _normalize_class_name_for_match(name)
+        for name in trained_positive
+        if _normalize_class_name_for_match(name)
+    }
+    label_list: List[str] = []
+    seen_norm: set[str] = set()
+
+    def append_if_trained(label: str) -> None:
+        norm = _normalize_class_name_for_match(label)
+        if not norm or norm not in trained_norm or norm in seen_norm:
+            return
+        label_list.append(str(label))
+        seen_norm.add(norm)
+
+    if labelmap_list:
+        for label in labelmap_list:
+            append_if_trained(str(label))
+    else:
+        for cid in sorted({int(cid) for cid in encountered_cids}):
+            append_if_trained(f"class_{cid}")
+
+    for label in trained_positive:
+        append_if_trained(str(label))
+    return label_list
+
+
+def _split_train_test_indices(
+    y_class_names: Sequence[str],
+    groups: Sequence[str],
+    *,
+    test_size: float,
+    random_seed: int,
+) -> Tuple[np.ndarray, np.ndarray, bool]:
+    labels = np.asarray([str(name) for name in y_class_names], dtype=object)
+    group_arr = np.asarray([str(group) for group in groups], dtype=object)
+    all_indices = np.arange(labels.shape[0])
+    all_classes = {str(name) for name in labels.tolist()}
+    use_group_split = False
+
+    def train_covers_classes(train_idx: Sequence[int]) -> bool:
+        train_classes = {str(labels[int(idx)]) for idx in train_idx}
+        return len(train_classes) >= min(2, len(all_classes)) and all_classes.issubset(train_classes)
+
+    unique_groups = np.unique(group_arr)
+    if len(unique_groups) >= 2:
+        try:
+            splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_seed)
+            train_idx, test_idx = next(splitter.split(all_indices, labels, groups=group_arr))
+            if train_covers_classes(train_idx):
+                use_group_split = True
+                return np.asarray(train_idx, dtype=np.int64), np.asarray(test_idx, dtype=np.int64), use_group_split
+        except Exception:
+            pass
+
+    stratify: Optional[np.ndarray]
+    counts = Counter(str(name) for name in labels.tolist())
+    min_count = min(counts.values()) if counts else 0
+    stratify = labels if len(all_classes) > 1 and min_count >= 2 else None
+    try:
+        train_idx, test_idx = train_test_split(
+            all_indices,
+            test_size=test_size,
+            random_state=random_seed,
+            stratify=stratify,
+        )
+    except Exception:
+        train_idx, test_idx = train_test_split(
+            all_indices,
+            test_size=test_size,
+            random_state=random_seed,
+            stratify=None,
+        )
+
+    train_idx = np.asarray(train_idx, dtype=np.int64)
+    test_idx = np.asarray(test_idx, dtype=np.int64)
+    train_classes = {str(labels[int(idx)]) for idx in train_idx}
+    missing_classes = [name for name in sorted(all_classes) if name not in train_classes]
+    if missing_classes:
+        train_list = [int(idx) for idx in train_idx.tolist()]
+        test_list = [int(idx) for idx in test_idx.tolist()]
+        for missing in missing_classes:
+            move_idx = next((idx for idx in test_list if str(labels[idx]) == missing), None)
+            if move_idx is None:
+                continue
+            test_list.remove(move_idx)
+            train_list.append(move_idx)
+        train_idx = np.asarray(sorted(train_list), dtype=np.int64)
+        test_idx = np.asarray(sorted(test_list), dtype=np.int64)
+
+    if len({str(labels[int(idx)]) for idx in train_idx}) < min(2, len(all_classes)):
+        raise TrainingError("Need at least two classes in the training split.")
+    return train_idx, test_idx, use_group_split
 
 
 def _resolve_device(requested: Optional[str]) -> str:
@@ -1784,32 +1894,21 @@ def train_clip_from_yolo(
 
     _safe_progress(progress_cb, 0.38, f"Retained {len(y_numeric_np)} samples across {len(set(y_class_names_arr))} classes; building train/test split ...")
 
-    unique_groups = np.unique(groups_np)
-    use_group_split = len(unique_groups) >= 2
-    if use_group_split:
-        try:
-            _check_cancel()
-            splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_seed)
-            train_idx, test_idx = next(splitter.split(np.arange(len(y_numeric_np)), y_class_names_arr, groups=groups_np))
-        except Exception:
-            use_group_split = False
-    if not use_group_split:
-        stratify = y_class_names_arr if len(set(y_class_names_arr)) > 1 else None
-        _check_cancel()
-        train_idx, test_idx = train_test_split(
-            np.arange(len(y_numeric_np)),
-            test_size=test_size,
-            random_state=random_seed,
-            stratify=stratify,
-        )
+    _check_cancel()
+    train_idx, test_idx, _use_group_split = _split_train_test_indices(
+        y_class_names_arr,
+        groups_np,
+        test_size=test_size,
+        random_seed=random_seed,
+    )
 
     train_size = len(train_idx)
-    test_size = len(test_idx)
+    test_count = len(test_idx)
 
     train_positions = np.full(len(y_numeric_np), -1, dtype=np.int64)
     train_positions[train_idx] = np.arange(train_size, dtype=np.int64)
     test_positions = np.full(len(y_numeric_np), -1, dtype=np.int64)
-    test_positions[test_idx] = np.arange(test_size, dtype=np.int64)
+    test_positions[test_idx] = np.arange(test_count, dtype=np.int64)
 
     train_memmap_path = os.path.join(chunk_dir, "train_embeddings.dat")
     test_memmap_path = os.path.join(chunk_dir, "test_embeddings.dat")
@@ -1826,7 +1925,7 @@ def train_clip_from_yolo(
     if embedding_dim is None:
         raise TrainingError("No embeddings available to build train/test split.")
     X_train_mm = np.memmap(train_memmap_path, dtype=np.float64, mode="w+", shape=(train_size, embedding_dim))
-    X_test_mm = np.memmap(test_memmap_path, dtype=np.float64, mode="w+", shape=(test_size, embedding_dim))
+    X_test_mm = np.memmap(test_memmap_path, dtype=np.float64, mode="w+", shape=(test_count, embedding_dim))
 
     for chunk_path, old_start, count in chunk_records:
         _check_cancel()
@@ -2846,19 +2945,16 @@ def train_clip_from_yolo(
         joblib.dump(clf, model_output, compress=3)
 
         encountered_sorted = sorted(encountered_cids)
-        if labelmap_list:
-            label_list = list(labelmap_list)
-            max_cid = max(encountered_sorted) if encountered_sorted else -1
-            while len(label_list) <= max_cid:
-                label_list.append(f"unused_cid_{len(label_list)}")
+        if isinstance(clf, dict):
+            trained_class_names = [str(name) for name in clf.get("classes") or []]
         else:
-            max_cid = max(encountered_sorted) if encountered_sorted else -1
-            label_list = [f"class_{i}" for i in range(max_cid + 1)] if max_cid >= 0 else []
-            for cid in encountered_sorted:
-                if cid < len(label_list):
-                    label_list[cid] = f"class_{cid}"
-                else:
-                    label_list.append(f"class_{cid}")
+            raw_classes = getattr(clf, "classes_", [])
+            trained_class_names = [str(name) for name in list(raw_classes)]
+        label_list = _trained_classifier_labelmap(
+            labelmap_list,
+            encountered_sorted,
+            trained_class_names,
+        )
 
         joblib.dump(label_list, labelmap_output, compress=3)
         n_train = int(X_train.shape[0])
@@ -2992,7 +3088,7 @@ def train_clip_from_yolo(
             device=resolved_device,
             classification_report=report,
             confusion_matrix=matrix,
-            label_order=label_list,
+            label_order=list(labels_for_cm),
             iterations_run=iterations_run,
             converged=converged,
             convergence_trace=convergence_trace,

@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
         "--labelmap_output",
         type=str,
         default="my_label_list.pkl",
-        help="Where to save the YOLO-ordered label list.",
+        help="Where to save the trained classifier label list.",
     )
     parser.add_argument(
         "--input_labelmap",

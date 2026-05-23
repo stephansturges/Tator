@@ -16,10 +16,12 @@ from services.detectors import (
     _load_yolo_active_impl,
     _rfdetr_load_run_meta_impl,
     _rfdetr_prune_run_dir_impl,
+    _rfdetr_run_dir_impl,
     _rfdetr_best_checkpoint_impl,
     _rfdetr_prepare_dataset_impl,
     _yolo_load_run_meta_impl,
     _yolo_prune_run_dir_impl,
+    _yolo_run_dir_impl,
 )
 
 
@@ -138,6 +140,52 @@ def test_list_rfdetr_runs_skips_symlinked_run_dir_escape(tmp_path: Path) -> None
     )
 
     assert runs == []
+
+
+def test_yolo_run_dir_rejects_symlinked_job_root_before_create(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_yolo_runs"
+    outside.mkdir()
+    job_root = tmp_path / "yolo_runs"
+    try:
+        job_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        _yolo_run_dir_impl(
+            "run1",
+            create=True,
+            job_root=job_root,
+            sanitize_fn=lambda value: value,
+            http_exception_cls=api.HTTPException,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_run_id"
+    assert list(outside.iterdir()) == []
+
+
+def test_rfdetr_run_dir_rejects_symlinked_job_root_before_create(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_rfdetr_runs"
+    outside.mkdir()
+    job_root = tmp_path / "rfdetr_runs"
+    try:
+        job_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        _rfdetr_run_dir_impl(
+            "run1",
+            create=True,
+            job_root=job_root,
+            sanitize_fn=lambda value: value,
+            http_exception_cls=api.HTTPException,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_run_id"
+    assert list(outside.iterdir()) == []
 
 
 def test_download_yolo_run_skips_symlink_keep_file_escape(

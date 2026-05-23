@@ -140,6 +140,18 @@ def _copy_tree_within_root(src: Path, dest: Path) -> None:
         _copy2_if_different(item_resolved, target)
 
 
+def _detector_job_root(job_root: Path, *, create: bool = False) -> Path:
+    if job_root.is_symlink():
+        raise RuntimeError("detector_path_invalid")
+    if create:
+        job_root.mkdir(parents=True, exist_ok=True)
+    if job_root.exists() and not job_root.is_dir():
+        raise RuntimeError("detector_path_invalid")
+    if job_root.is_symlink():
+        raise RuntimeError("detector_path_invalid")
+    return job_root.resolve(strict=False)
+
+
 def _delete_run_child(child: Path, dir_size_fn: Callable[[Path], int]) -> int:
     if child.is_symlink():
         child.unlink()
@@ -437,8 +449,11 @@ def _yolo_run_dir_impl(
     safe_id = sanitize_fn(raw_id)
     if not create and (not raw_id or safe_id != raw_id):
         raise http_exception_cls(status_code=400, detail="invalid_run_id")
-    job_root_resolved = job_root.resolve(strict=False)
-    raw_candidate = job_root / safe_id
+    try:
+        job_root_resolved = _detector_job_root(job_root, create=create)
+    except RuntimeError as exc:
+        raise http_exception_cls(status_code=400, detail="invalid_run_id") from exc
+    raw_candidate = job_root_resolved / safe_id
     if raw_candidate.is_symlink():
         raise http_exception_cls(status_code=400, detail="invalid_run_id")
     candidate = raw_candidate.resolve(strict=False)
@@ -550,8 +565,11 @@ def _rfdetr_run_dir_impl(
     safe_id = sanitize_fn(raw_id)
     if not create and (not raw_id or safe_id != raw_id):
         raise http_exception_cls(status_code=400, detail="invalid_run_id")
-    job_root_resolved = job_root.resolve(strict=False)
-    raw_candidate = job_root / safe_id
+    try:
+        job_root_resolved = _detector_job_root(job_root, create=create)
+    except RuntimeError as exc:
+        raise http_exception_cls(status_code=400, detail="invalid_run_id") from exc
+    raw_candidate = job_root_resolved / safe_id
     if raw_candidate.is_symlink():
         raise http_exception_cls(status_code=400, detail="invalid_run_id")
     candidate = raw_candidate.resolve(strict=False)
@@ -1777,7 +1795,7 @@ def _list_yolo_runs_impl(
     runs: List[Dict[str, Any]] = []
     active_id = active_payload.get("run_id") if isinstance(active_payload, dict) else None
     try:
-        job_root_resolved = job_root.resolve()
+        job_root_resolved = _detector_job_root(job_root)
     except Exception:
         return runs
     dataset_cache_resolved = dataset_cache_root.resolve(strict=False)
@@ -1843,7 +1861,7 @@ def _list_rfdetr_runs_impl(
     runs: List[Dict[str, Any]] = []
     active_id = active_payload.get("run_id") if isinstance(active_payload, dict) else None
     try:
-        job_root_resolved = job_root.resolve()
+        job_root_resolved = _detector_job_root(job_root)
     except Exception:
         return runs
     for entry in job_root.iterdir():

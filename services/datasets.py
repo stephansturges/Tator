@@ -298,7 +298,19 @@ def _list_all_datasets_impl(
     for source, root, loader in sources:
         if not root.exists():
             continue
-        for path in root.iterdir():
+        try:
+            root_resolved = root.resolve()
+        except Exception:
+            continue
+        for raw_path in root.iterdir():
+            if raw_path.is_symlink():
+                continue
+            try:
+                path = raw_path.resolve(strict=True)
+            except Exception:
+                continue
+            if not _path_is_within_root_impl(path, root_resolved):
+                continue
             if not path.is_dir():
                 continue
             raw_meta = loader(path)

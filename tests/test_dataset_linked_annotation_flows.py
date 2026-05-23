@@ -43,6 +43,44 @@ def test_delete_linked_dataset_only_removes_registry_record(tmp_path, monkeypatc
     assert not record_root.exists(), "registry record should be removed"
 
 
+def test_delete_linked_dataset_unlinks_registry_symlink_without_target_delete(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "linked_source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    registry_root = tmp_path / "registry"
+    registry_root.mkdir(parents=True, exist_ok=True)
+    target_record = registry_root / "target_record"
+    target_record.mkdir(parents=True, exist_ok=True)
+    (target_record / "payload.bin").write_bytes(b"target")
+    record_link = registry_root / "ds_linked"
+    try:
+        record_link.symlink_to(target_record, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds_linked",
+            "dataset_root": str(source_root),
+            "registry_root": str(record_link),
+            "storage_mode": "linked",
+            "linked_root": str(source_root),
+        },
+    )
+
+    out = api.delete_dataset_entry("ds_linked")
+
+    assert out["status"] == "deleted"
+    assert not record_link.exists()
+    assert not record_link.is_symlink()
+    assert (target_record / "payload.bin").read_bytes() == b"target"
+    assert source_root.exists()
+
+
 def test_delete_linked_dataset_blocks_active_annotation_lock(tmp_path, monkeypatch) -> None:
     source_root = tmp_path / "linked_source"
     source_root.mkdir(parents=True, exist_ok=True)

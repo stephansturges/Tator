@@ -14757,6 +14757,31 @@ def _dataset_entry_has_active_annotation_lock(entry: Dict[str, Any]) -> bool:
     return _annotation_lock_is_active(lock if isinstance(lock, dict) else {})
 
 
+def _dataset_delete_raw_path_contained(path: Path, allowed_roots: Sequence[Path]) -> bool:
+    try:
+        parent = path.parent.resolve(strict=False)
+    except Exception:
+        return False
+    return any(_path_is_within_root_impl(parent, root.resolve()) for root in allowed_roots)
+
+
+def _delete_dataset_tree_or_link(path: Path, allowed_roots: Sequence[Path]) -> None:
+    if not _dataset_delete_raw_path_contained(path, allowed_roots):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+        return
+    try:
+        resolved = path.resolve(strict=True)
+    except Exception:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing") from None
+    if not resolved.exists() or not resolved.is_dir():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
+    if not any(_path_is_within_root_impl(resolved, root.resolve()) for root in allowed_roots):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
+    shutil.rmtree(resolved, ignore_errors=True)
+
+
 def _annotation_requested_status(payload: Dict[str, Any]) -> Optional[str]:
     if "status" not in payload:
         return None
@@ -15023,7 +15048,7 @@ def delete_dataset_entry(dataset_id: str):
     entry = _resolve_dataset_entry(dataset_id)
     storage_mode = str(entry.get("storage_mode") or "managed").strip().lower()
     registry_root_raw = entry.get("registry_root")
-    registry_root = Path(str(registry_root_raw)).resolve() if registry_root_raw else None
+    registry_path = Path(str(registry_root_raw)) if registry_root_raw else None
     if _dataset_entry_has_active_annotation_lock(entry):
         raise HTTPException(
             status_code=HTTP_409_CONFLICT, detail="dataset_delete_blocked_annotation_lock"
@@ -15031,35 +15056,30 @@ def delete_dataset_entry(dataset_id: str):
 
     # Linked entries should remove only the registry record + overlay metadata, never the source dataset itself.
     if storage_mode == "linked":
-        if registry_root is None:
+        if registry_path is None:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
-        if not _path_is_within_root_impl(registry_root, DATASET_REGISTRY_ROOT.resolve()):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
-        if registry_root.exists():
-            shutil.rmtree(registry_root, ignore_errors=True)
+        if registry_path.exists() or registry_path.is_symlink():
+            _delete_dataset_tree_or_link(registry_path, [DATASET_REGISTRY_ROOT])
         return {"status": "deleted", "id": dataset_id, "storage_mode": "linked"}
 
-    target_root = (
-        registry_root
-        if registry_root is not None
-        else Path(entry.get("dataset_root") or "").resolve()
-    )
-    if not target_root.exists():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
+    target_path = registry_path if registry_path is not None else Path(entry.get("dataset_root") or "")
     allowed_roots = [
-        DATASET_REGISTRY_ROOT.resolve(),
-        SAM3_DATASET_ROOT.resolve(),
-        QWEN_DATASET_ROOT.resolve(),
+        DATASET_REGISTRY_ROOT,
+        SAM3_DATASET_ROOT,
+        QWEN_DATASET_ROOT,
     ]
-    if not any(_path_is_within_root_impl(target_root, root) for root in allowed_roots):
+    if not target_path.exists() and not target_path.is_symlink():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
+    if not _dataset_delete_raw_path_contained(target_path, allowed_roots):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
+    target_root = target_path.resolve(strict=False)
     blocking_registry = _active_job_registry_referencing_path_root(target_root)
     if blocking_registry:
         raise HTTPException(
             status_code=HTTP_409_CONFLICT,
             detail=f"dataset_delete_blocked_active_jobs:{blocking_registry}",
         )
-    shutil.rmtree(target_root, ignore_errors=True)
+    _delete_dataset_tree_or_link(target_path, allowed_roots)
     return {"status": "deleted", "id": dataset_id, "storage_mode": storage_mode or "managed"}
 
 

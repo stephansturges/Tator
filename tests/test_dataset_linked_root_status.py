@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from services import datasets as datasets_service
 
 
@@ -100,3 +102,26 @@ def test_linked_root_status_ok_for_available_link(tmp_path) -> None:
     assert entry["linked_root"] == str(linked_source.resolve())
     assert entry["dataset_root"] == str(linked_source.resolve())
     assert entry["yolo_ready"] is True
+
+
+def test_dataset_listing_skips_symlinked_registry_record(tmp_path) -> None:
+    registry_root = tmp_path / "registry"
+    registry_root.mkdir(parents=True, exist_ok=True)
+    outside_record = tmp_path / "outside_record"
+    outside_record.mkdir(parents=True, exist_ok=True)
+    (outside_record / "dataset_meta.json").write_text(
+        json.dumps(
+            {
+                "id": "escaped",
+                "label": "escaped",
+                "storage_mode": "managed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        (registry_root / "linked_record").symlink_to(outside_record, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert _list_entries(registry_root) == []

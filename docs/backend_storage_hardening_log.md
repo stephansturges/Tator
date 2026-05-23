@@ -50,3 +50,12 @@ preserving the exact validation story for storage and artifact-write fixes.
   symlinked parent directories.
 - Validation: `982 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Glossary Library Root
+
+- Rejected symlink components anywhere in the glossary library root before and
+  after root creation.
+- Added a regression that blocks glossary saves through a symlinked root parent
+  without writing to the target directory.
+- Validation: `983 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

@@ -19519,13 +19519,13 @@ def list_glossary_library():
 def _glossary_library_root(*, create: bool = False) -> Path:
     try:
         raw_root = GLOSSARY_LIBRARY_ROOT
-        if raw_root.is_symlink() or raw_root.parent.is_symlink():
+        if _storage_path_has_symlink_component(raw_root):
             raise RuntimeError("glossary root is a symlink")
         if create:
             raw_root.mkdir(parents=True, exist_ok=True)
         if raw_root.exists() and not raw_root.is_dir():
             raise RuntimeError("glossary root is not a directory")
-        if raw_root.is_symlink() or raw_root.parent.is_symlink():
+        if _storage_path_has_symlink_component(raw_root):
             raise RuntimeError("glossary root is a symlink")
         return raw_root.resolve(strict=False)
     except HTTPException:

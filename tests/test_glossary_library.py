@@ -163,6 +163,27 @@ def test_glossary_library_save_rejects_symlinked_root_without_write(
     assert list(outside.iterdir()) == []
 
 
+def test_glossary_library_save_rejects_symlinked_root_parent_without_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outside = tmp_path / "outside_glossaries"
+    outside.mkdir()
+    link_parent = tmp_path / "linked_parent"
+    try:
+        link_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "GLOSSARY_LIBRARY_ROOT", link_parent / "glossaries")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.save_glossary_entry("External", "local")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "glossary_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_glossary_library_delete_rejects_symlinked_root_without_unlink(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

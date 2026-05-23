@@ -463,6 +463,37 @@ def test_data_ingestion_runtime_requires_local_salad_encoder(tmp_path, monkeypat
     assert job.error == "data_ingestion_encoder_unsupported"
 
 
+def test_data_ingestion_result_rejects_symlinked_result_escape(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "data_ingestion"
+    job_root = ingestion_root / "job_escape"
+    job_root.mkdir(parents=True)
+    outside = tmp_path / "outside_result.json"
+    outside.write_text('{"escaped":true}', encoding="utf-8")
+    result_link = job_root / "result.json"
+    try:
+        result_link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    job = api.DataIngestionJob(
+        job_id="job_escape",
+        status="completed",
+        result_path=str(result_link),
+    )
+    with api.DATA_INGESTION_JOBS_LOCK:
+        api.DATA_INGESTION_JOBS.clear()
+        api.DATA_INGESTION_JOBS[job.job_id] = job
+
+    try:
+        with pytest.raises(api.HTTPException) as exc_info:
+            api.get_data_ingestion_result(job.job_id)
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == "result_not_found"
+    finally:
+        with api.DATA_INGESTION_JOBS_LOCK:
+            api.DATA_INGESTION_JOBS.clear()
+
+
 def test_data_ingestion_analysis_requires_reference_profile_by_default(tmp_path, monkeypatch):
     jobs_root = tmp_path / "jobs"
     monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)

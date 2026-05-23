@@ -17688,12 +17688,19 @@ def get_class_analysis_job(job_id: str) -> Dict[str, Any]:
     return _serialize_class_analysis_job(_get_class_analysis_job(job_id))
 
 
+def _safe_job_result_json_path(raw_path: Optional[str], root: Path) -> Optional[Path]:
+    if not raw_path:
+        return None
+    return _safe_existing_regular_file_within_root_impl(Path(str(raw_path)), root)
+
+
 def get_class_analysis_result(job_id: str) -> Dict[str, Any]:
     job = _get_class_analysis_job(job_id)
     if isinstance(job.result, dict):
         return job.result
-    if job.result_path and Path(job.result_path).exists():
-        return _load_json_metadata(Path(job.result_path)) or {}
+    result_path = _safe_job_result_json_path(job.result_path, CLASS_ANALYSIS_ROOT)
+    if result_path is not None:
+        return _load_json_metadata(result_path) or {}
     if job.status in {"queued", "running", "cancelling"}:
         raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_finished")
     raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="result_not_found")
@@ -17704,9 +17711,20 @@ def get_class_analysis_thumbnail(job_id: str, point_id: str):
     point_clean = _class_analysis_safe_slug(point_id, "")
     if not point_clean:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="thumbnail_not_found")
-    thumb_dir = Path(job.thumbnail_dir or "")
-    thumb_path = thumb_dir / f"{point_clean}.jpg"
-    if not thumb_path.exists():
+    thumb_dir_raw = Path(job.thumbnail_dir or "")
+    if thumb_dir_raw.is_symlink():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="thumbnail_not_found")
+    try:
+        thumb_dir = thumb_dir_raw.resolve(strict=True)
+        class_root = CLASS_ANALYSIS_ROOT.resolve()
+    except Exception:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="thumbnail_not_found") from None
+    if not _path_is_within_root_impl(thumb_dir, class_root):
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="thumbnail_not_found")
+    thumb_path = _safe_existing_regular_file_within_root_impl(
+        thumb_dir / f"{point_clean}.jpg", thumb_dir
+    )
+    if thumb_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="thumbnail_not_found")
     return FileResponse(str(thumb_path), media_type="image/jpeg")
 
@@ -18842,8 +18860,9 @@ def get_data_ingestion_result(job_id: str) -> Dict[str, Any]:
     job = _get_data_ingestion_job(job_id)
     if isinstance(job.result, dict):
         return job.result
-    if job.result_path and Path(job.result_path).exists():
-        return _load_json_metadata(Path(job.result_path)) or {}
+    result_path = _safe_job_result_json_path(job.result_path, DATA_INGESTION_ROOT)
+    if result_path is not None:
+        return _load_json_metadata(result_path) or {}
     if job.status in {"queued", "running", "cancelling"}:
         raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_finished")
     raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="result_not_found")

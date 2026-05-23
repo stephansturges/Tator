@@ -285,8 +285,8 @@ but unhelpful for the dataset.
   sidecars, calibration job paths, detector run registries, and SAM3 model
   registry paths now fail closed; Qwen adapters/datasets now reject symlinked
   registry escapes; dataset registries no longer follow symlinked records on
-  list/delete.
-- **Validation:** `784 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
+  list/delete; class-analysis and data-ingestion job artifacts are contained.
+- **Validation:** `787 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
   and local backend smoke are clean.
 
 </details>

@@ -714,6 +714,71 @@ def test_class_analysis_active_workspace_rejects_oversize_upload(
     assert upload.file.closed
 
 
+def test_class_analysis_result_rejects_symlinked_result_escape(tmp_path, monkeypatch):
+    class_root = tmp_path / "class_analysis"
+    job_root = class_root / "job_escape"
+    job_root.mkdir(parents=True)
+    outside = tmp_path / "outside_result.json"
+    outside.write_text('{"escaped":true}', encoding="utf-8")
+    result_link = job_root / "result.json"
+    try:
+        result_link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    job = api.ClassAnalysisJob(
+        job_id="job_escape",
+        status="completed",
+        result_path=str(result_link),
+    )
+    with api.CLASS_ANALYSIS_JOBS_LOCK:
+        api.CLASS_ANALYSIS_JOBS.clear()
+        api.CLASS_ANALYSIS_JOBS[job.job_id] = job
+
+    try:
+        with pytest.raises(api.HTTPException) as exc_info:
+            api.get_class_analysis_result(job.job_id)
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == "result_not_found"
+    finally:
+        with api.CLASS_ANALYSIS_JOBS_LOCK:
+            api.CLASS_ANALYSIS_JOBS.clear()
+
+
+def test_class_analysis_thumbnail_rejects_symlinked_thumbnail_dir_escape(
+    tmp_path, monkeypatch
+):
+    class_root = tmp_path / "class_analysis"
+    job_root = class_root / "job_thumb"
+    job_root.mkdir(parents=True)
+    outside = tmp_path / "outside_thumbs"
+    outside.mkdir()
+    (outside / "pt1.jpg").write_bytes(b"jpeg")
+    thumb_link = job_root / "thumbnails"
+    try:
+        thumb_link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    job = api.ClassAnalysisJob(
+        job_id="job_thumb",
+        status="completed",
+        thumbnail_dir=str(thumb_link),
+    )
+    with api.CLASS_ANALYSIS_JOBS_LOCK:
+        api.CLASS_ANALYSIS_JOBS.clear()
+        api.CLASS_ANALYSIS_JOBS[job.job_id] = job
+
+    try:
+        with pytest.raises(api.HTTPException) as exc_info:
+            api.get_class_analysis_thumbnail(job.job_id, "pt1")
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == "thumbnail_not_found"
+    finally:
+        with api.CLASS_ANALYSIS_JOBS_LOCK:
+            api.CLASS_ANALYSIS_JOBS.clear()
+
+
 def test_class_analysis_encode_crops_reports_batch_progress(monkeypatch):
     calls = []
 

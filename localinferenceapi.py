@@ -14271,6 +14271,52 @@ def _qwen_dataset_child_dir(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
+def _qwen_dataset_upload_storage_root(
+    *,
+    create: bool = True,
+    detail: str = "qwen_dataset_upload_path_invalid",
+) -> Path:
+    try:
+        raw_root = DATASET_UPLOAD_ROOT
+        if raw_root == UPLOAD_ROOT / "dataset_uploads" and UPLOAD_ROOT.is_symlink():
+            raise ValueError("upload root is a symlink")
+        if raw_root.is_symlink():
+            raise ValueError("dataset upload root is a symlink")
+        if create:
+            raw_root.mkdir(parents=True, exist_ok=True)
+        if raw_root.exists() and not raw_root.is_dir():
+            raise ValueError("dataset upload root is not a directory")
+        return raw_root.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+def _qwen_dataset_upload_job_dir(
+    job_id: str,
+    *,
+    create: bool = False,
+    detail: str = "qwen_dataset_upload_path_invalid",
+) -> Path:
+    safe_job_id = _sanitize_yolo_run_id_impl(str(job_id or "")) or uuid.uuid4().hex
+    try:
+        root = _qwen_dataset_upload_storage_root(create=True, detail=detail)
+        candidate = root / f"qwen_upload_{safe_job_id}"
+        if candidate.is_symlink():
+            raise ValueError("qwen dataset upload job dir is a symlink")
+        if create:
+            candidate.mkdir(parents=True, exist_ok=False)
+        if candidate.exists() and not candidate.is_dir():
+            raise ValueError("qwen dataset upload job path is not a directory")
+        resolved = candidate.resolve(strict=False)
+        if not _path_is_within_root_impl(resolved, root) or resolved.parent != root:
+            raise ValueError("qwen dataset upload job path escapes root")
+        return resolved
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
 def _unwrap_single_root_dir(extract_root: Path) -> Path:
     entries = [p for p in extract_root.iterdir() if p.name not in {"__MACOSX"}]
     if len(entries) == 1 and entries[0].is_dir():
@@ -19364,8 +19410,7 @@ def delete_qwen_dataset(dataset_id: str):
 
 def init_qwen_dataset_upload(run_name: Optional[str]) -> Dict[str, Any]:
     job_id = uuid.uuid4().hex
-    root_dir = DATASET_UPLOAD_ROOT / f"qwen_upload_{job_id}"
-    root_dir.mkdir(parents=True, exist_ok=True)
+    root_dir = _qwen_dataset_upload_job_dir(job_id, create=True)
     (root_dir / "train").mkdir(parents=True, exist_ok=True)
     (root_dir / "val").mkdir(parents=True, exist_ok=True)
     job = QwenDatasetUploadJob(job_id=job_id, root_dir=root_dir, run_name=run_name)
@@ -19408,7 +19453,23 @@ def upload_qwen_dataset_chunk(
                 raise HTTPException(
                     status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
                 )
-            job_root_resolved = job.root_dir.resolve(strict=False)
+            if job.root_dir.is_symlink():
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="qwen_dataset_source_path_invalid",
+                )
+            try:
+                job_root_resolved = job.root_dir.resolve(strict=True)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="qwen_dataset_source_path_invalid",
+                ) from exc
+            if not job_root_resolved.is_dir():
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="qwen_dataset_source_path_invalid",
+                )
             split_root_raw = job.root_dir / split
             if split_root_raw.is_symlink():
                 raise HTTPException(
@@ -19532,6 +19593,11 @@ def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name
                 detail="qwen_dataset_source_path_invalid",
             )
         source_root = job.root_dir.resolve(strict=True)
+        if not source_root.is_dir():
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail="qwen_dataset_source_path_invalid",
+            )
         created_at = time.time()
 
         with QWEN_DATASET_FINALIZE_LOCK:
@@ -19610,7 +19676,13 @@ def cancel_qwen_dataset_upload(job_id: str):
             if QWEN_DATASET_UPLOADS.get(job_id) is not job:
                 return {"status": "missing", "job_id": job_id}
             QWEN_DATASET_UPLOADS.pop(job_id, None)
-        shutil.rmtree(job.root_dir, ignore_errors=True)
+        if job.root_dir.is_symlink():
+            try:
+                job.root_dir.unlink(missing_ok=True)
+            except Exception:
+                pass
+        else:
+            shutil.rmtree(job.root_dir, ignore_errors=True)
         return {"status": "cancelled", "job_id": job_id}
 
 

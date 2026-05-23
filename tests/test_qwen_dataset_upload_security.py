@@ -259,3 +259,32 @@ def test_qwen_chunk_rejects_split_symlink_without_target_write(tmp_path: Path) -
         assert upload.file.closed
     finally:
         _cleanup_upload_job("job_split_link")
+
+
+def test_qwen_chunk_rejects_symlinked_job_root_without_target_write(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_upload_job"
+    outside.mkdir()
+    root_link = tmp_path / "qwen_upload_job_root_link"
+    try:
+        root_link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    job = localinferenceapi.QwenDatasetUploadJob(job_id="job_root_link", root_dir=root_link)
+    with localinferenceapi.QWEN_DATASET_UPLOADS_LOCK:
+        localinferenceapi.QWEN_DATASET_UPLOADS[job.job_id] = job
+    try:
+        upload = UploadFile(filename="a.jpg", file=BytesIO(b"img"))
+        with pytest.raises(HTTPException) as exc_info:
+            localinferenceapi.upload_qwen_dataset_chunk(
+                job.job_id,
+                "train",
+                "a.jpg",
+                '{"id":"x"}',
+                upload,
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "qwen_dataset_source_path_invalid"
+        assert list(outside.iterdir()) == []
+        assert upload.file.closed
+    finally:
+        _cleanup_upload_job(job.job_id)

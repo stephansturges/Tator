@@ -57,6 +57,30 @@ def test_finalize_qwen_dataset_upload_rejects_empty_before_pop_or_move(
     assert list(qwen_root.iterdir()) == []
 
 
+def test_init_qwen_dataset_upload_rejects_symlinked_staging_root_before_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside_uploads"
+    outside.mkdir()
+    upload_root = tmp_path / "dataset_uploads"
+    try:
+        upload_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATASET_UPLOAD_ROOT", upload_root)
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        api.QWEN_DATASET_UPLOADS.clear()
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.init_qwen_dataset_upload("demo")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "qwen_dataset_upload_path_invalid"
+    assert list(outside.iterdir()) == []
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        assert api.QWEN_DATASET_UPLOADS == {}
+
+
 def test_finalize_qwen_dataset_upload_moves_only_after_metadata_is_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -216,3 +240,29 @@ def test_finalize_qwen_dataset_upload_replaces_labelmap_symlink_without_target_w
     assert target_labelmap.read_text(encoding="utf-8") == "building\n"
     assert not target_labelmap.is_symlink()
     assert outside.read_text(encoding="utf-8") == "external\n"
+
+
+def test_cancel_qwen_dataset_upload_unlinks_symlinked_staging_job_without_target_delete(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_upload_job"
+    outside.mkdir()
+    marker = outside / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    upload_link = tmp_path / "qwen_upload_link"
+    try:
+        upload_link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    job = api.QwenDatasetUploadJob(job_id="job_cancel_link", root_dir=upload_link)
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        api.QWEN_DATASET_UPLOADS.clear()
+        api.QWEN_DATASET_UPLOADS[job.job_id] = job
+
+    out = api.cancel_qwen_dataset_upload(job.job_id)
+
+    assert out == {"status": "cancelled", "job_id": job.job_id}
+    assert not upload_link.exists()
+    assert marker.read_text(encoding="utf-8") == "keep"
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        assert job.job_id not in api.QWEN_DATASET_UPLOADS

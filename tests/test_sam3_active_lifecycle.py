@@ -369,6 +369,27 @@ def test_sam3_training_split_root_rejects_symlinked_split_root(
     assert list(outside.iterdir()) == []
 
 
+def test_sam3_training_split_root_rejects_symlinked_job_root_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outside = tmp_path / "outside_jobs"
+    outside.mkdir()
+    link_parent = tmp_path / "linked_parent"
+    try:
+        link_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    sam3_root = link_parent / "sam3_training"
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", sam3_root)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._sam3_training_split_root("job-parent-link")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "sam3_split_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_sam3_training_config_rejects_symlinked_job_root_for_run_dir(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -386,6 +407,32 @@ def test_sam3_training_config_rejects_symlinked_job_root_for_run_dir(
             api.Sam3TrainRequest(dataset_id="demo", random_split=False),
             _make_sam3_config_meta(tmp_path),
             "job-root-link",
+            [],
+        )
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "sam3_run_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_sam3_training_config_rejects_symlinked_job_root_parent_for_run_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outside = tmp_path / "outside_sam3_jobs"
+    outside.mkdir()
+    link_parent = tmp_path / "linked_parent"
+    try:
+        link_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    sam3_root = link_parent / "sam3_training"
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", sam3_root)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._build_sam3_config(
+            api.Sam3TrainRequest(dataset_id="demo", random_split=False),
+            _make_sam3_config_meta(tmp_path),
+            "job-root-parent-link",
             [],
         )
 
@@ -474,6 +521,28 @@ def test_save_sam3_config_rejects_symlinked_generated_config_root(
 
     with pytest.raises(api.HTTPException) as excinfo:
         api._save_sam3_config(cfg, "job-root-link")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "sam3_config_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_save_sam3_config_rejects_symlinked_generated_config_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outside = tmp_path / "outside_generated"
+    outside.mkdir()
+    link_parent = tmp_path / "linked_parent"
+    try:
+        link_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    config_root = link_parent / "generated"
+    monkeypatch.setattr(api, "SAM3_GENERATED_CONFIG_DIR", config_root)
+    cfg = api.OmegaConf.create({"paths": {"experiment_log_dir": str(tmp_path / "run")}})
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._save_sam3_config(cfg, "job-parent-link")
 
     assert excinfo.value.status_code == 400
     assert excinfo.value.detail == "sam3_config_path_invalid"

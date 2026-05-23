@@ -23243,18 +23243,22 @@ def _qwen_train_float(
 
 def _training_splits_root(job_root: Path, *, create: bool, detail: str) -> Path:
     try:
-        if job_root.is_symlink():
+        if _storage_path_has_symlink_component(job_root):
             raise ValueError("job root is symlink")
         if create:
             job_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(job_root):
+            raise ValueError("job root is symlink")
         if job_root.exists() and not job_root.is_dir():
             raise ValueError("job root is not a directory")
         job_root_resolved = job_root.resolve(strict=False)
         split_parent_raw = job_root / "splits"
-        if split_parent_raw.is_symlink():
+        if _storage_path_has_symlink_component(split_parent_raw):
             raise ValueError("split root is symlink")
         if create:
             split_parent_raw.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(split_parent_raw):
+            raise ValueError("split root is symlink")
         if split_parent_raw.exists() and not split_parent_raw.is_dir():
             raise ValueError("split root is not a directory")
         split_parent = split_parent_raw.resolve(strict=False)
@@ -26945,10 +26949,12 @@ def _cleanup_sam3_training_split(job_id: str) -> None:
 def _sam3_training_runs_root(*, create: bool, detail: str = "sam3_run_path_invalid") -> Path:
     try:
         raw_root = SAM3_JOB_ROOT
-        if raw_root.is_symlink():
+        if _storage_path_has_symlink_component(raw_root):
             raise ValueError("SAM3 job root is a symlink")
         if create:
             raw_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("SAM3 job root is a symlink")
         if raw_root.exists() and not raw_root.is_dir():
             raise ValueError("SAM3 job root is not a directory")
         return raw_root.resolve(strict=False)
@@ -26979,7 +26985,7 @@ def _sam3_training_run_dir(
     ):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     try:
-        if raw_candidate.is_symlink() or raw_candidate.parent.is_symlink():
+        if _storage_path_has_symlink_component(raw_candidate):
             raise ValueError("SAM3 run path is a symlink")
         parent = raw_candidate.parent.resolve(strict=False)
         if parent != runs_root:
@@ -27673,14 +27679,14 @@ def _sam3_generated_config_path(job_id: str) -> Tuple[Path, Path]:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_config_path_invalid")
     try:
         raw_root = SAM3_GENERATED_CONFIG_DIR
-        if raw_root.is_symlink():
+        if _storage_path_has_symlink_component(raw_root):
             raise ValueError("SAM3 generated config root is a symlink")
         raw_root.mkdir(parents=True, exist_ok=True)
-        if raw_root.is_symlink() or not raw_root.is_dir():
+        if _storage_path_has_symlink_component(raw_root) or not raw_root.is_dir():
             raise ValueError("SAM3 generated config root is not a directory")
         root = raw_root.resolve(strict=True)
         raw_config = raw_root / f"{raw_id}.yaml"
-        if raw_config.is_symlink():
+        if _storage_path_has_symlink_component(raw_config):
             raise ValueError("SAM3 generated config path is a symlink")
         if raw_config.exists() and not raw_config.is_file():
             raise ValueError("SAM3 generated config path is not a file")

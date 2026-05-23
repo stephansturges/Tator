@@ -149,6 +149,26 @@ def test_qwen_train_cache_size_ignores_symlinked_split_root(
     assert api.qwen_train_cache_size() == {"bytes": 0}
 
 
+def test_qwen_training_split_root_rejects_symlinked_job_root_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outside = tmp_path / "outside_jobs"
+    outside.mkdir()
+    link_parent = tmp_path / "linked_parent"
+    try:
+        link_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", link_parent / "qwen_training")
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._qwen_training_split_root("job-parent-link")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "qwen_split_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_qwen_train_cache_purge_unlinks_symlinked_split_root_without_target_delete(
     tmp_path: Path, monkeypatch
 ) -> None:

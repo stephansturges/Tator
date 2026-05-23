@@ -77,3 +77,12 @@ preserving the exact validation story for storage and artifact-write fixes.
   `linked_parent/nested/presets`.
 - Validation: `985 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Qwen Prepass Trace Roots
+
+- Rejected symlink components anywhere in Qwen prepass trace roots and trace
+  parent directories before writing trace logs.
+- Added a regression for nested symlinked parent paths such as
+  `trace_parent/nested/prepass_traces`.
+- Validation: `986 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

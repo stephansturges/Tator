@@ -13373,10 +13373,12 @@ class QwenDatasetUploadJob:
     val_count: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 QWEN_DATASET_UPLOADS: Dict[str, QwenDatasetUploadJob] = {}
 QWEN_DATASET_UPLOADS_LOCK = threading.Lock()
+QWEN_DATASET_FINALIZE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -18767,77 +18769,97 @@ def upload_qwen_dataset_chunk(
             job = QWEN_DATASET_UPLOADS.get(job_id)
         if not job:
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_job_not_found")
-        split = split.lower()
-        if split not in {"train", "val"}:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_split_invalid")
-        annotation_text = str(annotation_line or "").strip()
-        if "\n" in annotation_text or "\r" in annotation_text:
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
-            )
-        try:
-            annotation_payload = json.loads(annotation_text)
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
-            ) from exc
-        if not isinstance(annotation_payload, dict):
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
-            )
-        split_root = job.root_dir / split
-        split_root.mkdir(parents=True, exist_ok=True)
-        raw_image_name = image_name or file.filename or f"{uuid.uuid4().hex}.jpg"
-        image_name_safe = Path(raw_image_name).name or f"{uuid.uuid4().hex}.jpg"
-        annotation_payload["image"] = image_name_safe
-        annotation_text = json.dumps(annotation_payload, ensure_ascii=False, separators=(",", ":"))
-        image_path = (split_root / image_name_safe).resolve()
-        if not _path_is_within_root_impl(image_path, split_root.resolve()):
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_image_path_invalid"
-            )
-        if image_path.exists():
-            raise HTTPException(status_code=HTTP_409_CONFLICT, detail="qwen_dataset_image_exists")
-        written = 0
-        try:
-            with image_path.open("wb") as handle:
-                while True:
-                    chunk = file.file.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    written += len(chunk)
-                    if QWEN_DATASET_CHUNK_MAX_BYTES and written > QWEN_DATASET_CHUNK_MAX_BYTES:
-                        raise HTTPException(
-                            status_code=HTTP_413_CONTENT_TOO_LARGE,
-                            detail="qwen_dataset_chunk_too_large",
-                        )
-                    handle.write(chunk)
-        except Exception:
+        with job.lock:
+            with QWEN_DATASET_UPLOADS_LOCK:
+                if QWEN_DATASET_UPLOADS.get(job_id) is not job:
+                    raise HTTPException(
+                        status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_job_not_found"
+                    )
+            split = split.lower()
+            if split not in {"train", "val"}:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_split_invalid"
+                )
+            annotation_text = str(annotation_line or "").strip()
+            if "\n" in annotation_text or "\r" in annotation_text:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
+                )
             try:
-                image_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            raise
-        if written <= 0:
+                annotation_payload = json.loads(annotation_text)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
+                ) from exc
+            if not isinstance(annotation_payload, dict):
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
+                )
+            split_root = job.root_dir / split
+            split_root.mkdir(parents=True, exist_ok=True)
+            raw_image_name = image_name or file.filename or f"{uuid.uuid4().hex}.jpg"
+            image_name_safe = Path(raw_image_name).name or f"{uuid.uuid4().hex}.jpg"
+            if image_name_safe.lower() == "annotations.jsonl":
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="qwen_dataset_image_name_reserved",
+                )
+            annotation_payload["image"] = image_name_safe
+            annotation_text = json.dumps(annotation_payload, ensure_ascii=False, separators=(",", ":"))
+            image_path = (split_root / image_name_safe).resolve()
+            if not _path_is_within_root_impl(image_path, split_root.resolve()):
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_image_path_invalid"
+                )
+            if image_path.exists():
+                raise HTTPException(status_code=HTTP_409_CONFLICT, detail="qwen_dataset_image_exists")
+            written = 0
             try:
-                image_path.unlink(missing_ok=True)
+                with image_path.open("wb") as handle:
+                    while True:
+                        chunk = file.file.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if QWEN_DATASET_CHUNK_MAX_BYTES and written > QWEN_DATASET_CHUNK_MAX_BYTES:
+                            raise HTTPException(
+                                status_code=HTTP_413_CONTENT_TOO_LARGE,
+                                detail="qwen_dataset_chunk_too_large",
+                            )
+                        handle.write(chunk)
             except Exception:
-                pass
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_empty_image")
-        ann_path = split_root / "annotations.jsonl"
-        with ann_path.open("a", encoding="utf-8") as handle:
-            handle.write(annotation_text + "\n")
-        if split == "train":
-            job.train_count += 1
-        else:
-            job.val_count += 1
-        job.updated_at = time.time()
-        return {
-            "status": "ok",
-            "job_id": job_id,
-            "train_count": job.train_count,
-            "val_count": job.val_count,
-        }
+                try:
+                    image_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+            if written <= 0:
+                try:
+                    image_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_empty_image")
+            ann_path = split_root / "annotations.jsonl"
+            try:
+                with ann_path.open("a", encoding="utf-8") as handle:
+                    handle.write(annotation_text + "\n")
+            except Exception:
+                try:
+                    image_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+            if split == "train":
+                job.train_count += 1
+            else:
+                job.val_count += 1
+            job.updated_at = time.time()
+            return {
+                "status": "ok",
+                "job_id": job_id,
+                "train_count": job.train_count,
+                "val_count": job.val_count,
+            }
     finally:
         try:
             file.file.close()
@@ -18850,58 +18872,95 @@ def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name
         job = QWEN_DATASET_UPLOADS.get(job_id)
     if not job:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_job_not_found")
-    if job.train_count + job.val_count <= 0:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_empty")
-    if not isinstance(metadata, dict):
-        metadata = {}
-    base_id = run_name or metadata.get("id") or job.run_name or job_id
-    base_id = _sanitize_yolo_run_id_impl(str(base_id)) or str(job_id)
-    dataset_id_final = _unique_dataset_name(base_id, root=QWEN_DATASET_ROOT)
-    target_root = QWEN_DATASET_ROOT / dataset_id_final
-    with QWEN_DATASET_UPLOADS_LOCK:
-        job = QWEN_DATASET_UPLOADS.pop(job_id, None)
-    if not job:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_job_not_found")
-    if target_root.exists():
-        shutil.rmtree(target_root, ignore_errors=True)
-    shutil.move(str(job.root_dir), target_root)
-    classes = metadata.get("classes") or []
-    labelmap = [str(c).strip() for c in classes if str(c).strip()]
-    if labelmap:
-        (target_root / "labelmap.txt").write_text("\n".join(labelmap) + "\n", encoding="utf-8")
-    meta = {
-        "id": dataset_id_final,
-        "label": dataset_id_final,
-        "classes": labelmap,
-        "context": metadata.get("context") or "",
-        "created_at": time.time(),
-        "train_count": job.train_count,
-        "val_count": job.val_count,
-        "image_count": job.train_count + job.val_count,
-        "signature": _compute_dir_signature_impl(target_root),
-        "type": "bbox",
-    }
-    (target_root / "metadata.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    dataset_meta = {
-        "context": meta["context"],
-        "classes": labelmap,
-        "created_at": int(time.time() * 1000),
-    }
-    (target_root / "dataset_meta.json").write_text(
-        json.dumps(dataset_meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    return meta
+    with job.lock:
+        with QWEN_DATASET_UPLOADS_LOCK:
+            if QWEN_DATASET_UPLOADS.get(job_id) is not job:
+                raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_job_not_found")
+        if job.train_count + job.val_count <= 0:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_empty")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        base_id = run_name or metadata.get("id") or job.run_name or job_id
+        base_id = _sanitize_yolo_run_id_impl(str(base_id)) or str(job_id)
+        classes = metadata.get("classes") or []
+        labelmap = [str(c).strip() for c in classes if str(c).strip()]
+        source_root = job.root_dir
+        created_at = time.time()
+
+        with QWEN_DATASET_FINALIZE_LOCK:
+            dataset_id_final = _unique_dataset_name(base_id, root=QWEN_DATASET_ROOT)
+            target_root = QWEN_DATASET_ROOT / dataset_id_final
+            target_resolved = target_root.resolve(strict=False)
+            qwen_root_resolved = QWEN_DATASET_ROOT.resolve(strict=False)
+            if not _path_is_within_root_impl(target_resolved, qwen_root_resolved):
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="qwen_dataset_target_invalid",
+                )
+            if target_root.exists():
+                raise HTTPException(
+                    status_code=HTTP_409_CONFLICT,
+                    detail="qwen_dataset_target_exists",
+                )
+
+            try:
+                for stale_name in (QWEN_METADATA_FILENAME, "dataset_meta.json"):
+                    (source_root / stale_name).unlink(missing_ok=True)
+                labelmap_path = source_root / "labelmap.txt"
+                if labelmap:
+                    labelmap_path.write_text("\n".join(labelmap) + "\n", encoding="utf-8")
+                else:
+                    labelmap_path.unlink(missing_ok=True)
+                meta = {
+                    "id": dataset_id_final,
+                    "label": dataset_id_final,
+                    "classes": labelmap,
+                    "context": metadata.get("context") or "",
+                    "created_at": created_at,
+                    "train_count": job.train_count,
+                    "val_count": job.val_count,
+                    "image_count": job.train_count + job.val_count,
+                    "signature": _compute_dir_signature_impl(source_root),
+                    "type": "bbox",
+                }
+                (source_root / "metadata.json").write_text(
+                    json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                dataset_meta = {
+                    "context": meta["context"],
+                    "classes": labelmap,
+                    "created_at": int(created_at * 1000),
+                }
+                (source_root / "dataset_meta.json").write_text(
+                    json.dumps(dataset_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                shutil.move(str(source_root), target_root)
+            except Exception as exc:  # noqa: BLE001
+                if target_root.exists():
+                    shutil.rmtree(target_root, ignore_errors=True)
+                raise HTTPException(
+                    status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"qwen_dataset_finalize_failed:{exc}",
+                ) from exc
+
+        with QWEN_DATASET_UPLOADS_LOCK:
+            if QWEN_DATASET_UPLOADS.get(job_id) is job:
+                QWEN_DATASET_UPLOADS.pop(job_id, None)
+        return meta
 
 
 def cancel_qwen_dataset_upload(job_id: str):
     with QWEN_DATASET_UPLOADS_LOCK:
-        job = QWEN_DATASET_UPLOADS.pop(job_id, None)
+        job = QWEN_DATASET_UPLOADS.get(job_id)
     if not job:
         return {"status": "missing", "job_id": job_id}
-    shutil.rmtree(job.root_dir, ignore_errors=True)
-    return {"status": "cancelled", "job_id": job_id}
+    with job.lock:
+        with QWEN_DATASET_UPLOADS_LOCK:
+            if QWEN_DATASET_UPLOADS.get(job_id) is not job:
+                return {"status": "missing", "job_id": job_id}
+            QWEN_DATASET_UPLOADS.pop(job_id, None)
+        shutil.rmtree(job.root_dir, ignore_errors=True)
+        return {"status": "cancelled", "job_id": job_id}
 
 
 def list_sam3_datasets():

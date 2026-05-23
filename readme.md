@@ -273,52 +273,30 @@ but unhelpful for the dataset.
 
 </details>
 
-## Update Tracking
-
 <details>
 <summary>Implementation log</summary>
 
-This log is intentionally short. It records the major product/backend milestones
-without turning the README's first layer into a development diary.
+This collapsed log tracks recent implementation work without turning the README
+front page into a development diary.
 
-- **2026-05-19:** Stabilized Qwen captioning, editable caption glossaries,
-  windowed caption grounding, progress reporting, and output cleanup guards.
-- **2026-05-19:** Added SAM3 text-prompt windowing, labelmap extension from the
-  labeling panel, safer mask handling, and closed-by-default advanced panels.
-- **2026-05-20:** Improved caption-panel ergonomics and Label Images keyboard
-  navigation.
-- **2026-05-20:** Added Class Split Explorer for embedding-based class review,
-  wrong-class discovery, crop inspection/reassignment, and measured crop-recipe
-  defaults for Class Split and auto-class.
-- **2026-05-21:** Rebuilt Data Ingestion around a reference-first local SALAD
-  flow: choose an existing accepted dataset, build/select its local reference
-  profile, then rank new images or video frames by novelty/diversity.
-- **2026-05-21:** Added C-RADIOv4 as an experimental encoder for Class Split,
-  Data Ingestion, local SALAD reference profiles, and auto-class metadata.
-- **2026-05-22:** Added local MLX runtime support for C-RADIOv4 and Tator-owned
-  local SALAD heads on macOS, with Torch fallback.
-- **2026-05-23:** Closed the Class Split / auto-class debug pass: fixed crop
-  preview behavior, removed jittery shift-scroll panning, kept SALAD out of
-  crop-level presets, hardened active classifier lifecycle/replay, and aligned
-  auto-class training artifacts with active-model validation.
-- **2026-05-23:** Hardened backend job starts, dataset/upload path containment,
-  EDR/prepass/agent package imports, Qwen caption/training paths, Mac YOLO MPS
-  training, schema compatibility, active-model warnings, and failed-start
-  cleanup.
-- **2026-05-23:** Closed upload handles consistently across active-workspace
-  class analysis, Data Ingestion, Qwen dataset chunks, dataset ZIP imports,
-  prepass recipe imports, and EDR package imports.
-- **2026-05-23:** Pinned pytest collection to Tator's `tests/` tree so vendored
-  upstream CLIP tests are not run by the default project test command.
-- **2026-05-23:** Hardened detector, classifier, recipe, cascade, and EDR ZIP
-  exports so symlinked artifacts cannot pull files from outside their roots.
-- **2026-05-23:** Blocked destructive YOLO/RF-DETR run deletion while active
-  training or head-graft jobs still own or depend on the run.
-- **Current validation:** project pytest reports `717 passed, 17 skipped,
+- **2026-05-19 to 2026-05-20:** Stabilized Qwen captioning, detection-informed
+  caption cleanup, SAM3 text-prompt windowing, and Label Images ergonomics.
+- **2026-05-20 to 2026-05-21:** Added Class Split Explorer and rebuilt Data
+  Ingestion around reference-first local SALAD diversity analysis.
+- **2026-05-22:** Added local MLX support for C-RADIOv4 and Tator-owned local
+  SALAD heads on macOS, with Torch fallback.
+- **2026-05-23:** Closed the Class Split / auto-class debug pass, including crop
+  preview behavior, active-model validation, and keeping SALAD out of crop-level
+  class presets.
+- **2026-05-23:** Hardened backend job starts, upload handles, dataset and model
+  path containment, ZIP exports, active run deletion, Qwen paths, and Mac YOLO
+  MPS training setup.
+- **2026-05-23:** Hardened Qwen dataset uploads so chunk writes are serialized,
+  reserved annotation filenames are rejected, and finalize keeps the upload job
+  retryable until metadata and dataset promotion succeed.
+- **Current validation:** project pytest reports `721 passed, 17 skipped,
   8 warnings`; UI endpoint map/method checks report `148` mapped UI paths and
-  `248` fetches with no failures. Live smoke is healthy on the local backend;
-  YOLO/RF-DETR prediction smoke returns expected `412` responses when no active
-  detector runs are selected.
+  `248` fetches with no failures. Live smoke is healthy on the local backend.
 
 </details>
 

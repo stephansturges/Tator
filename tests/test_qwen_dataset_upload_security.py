@@ -131,6 +131,26 @@ def test_qwen_chunk_sanitizes_image_name_to_split_root(tmp_path: Path) -> None:
         _cleanup_upload_job("job_path")
 
 
+def test_qwen_chunk_rejects_reserved_annotation_filename(tmp_path: Path) -> None:
+    job = _register_upload_job(tmp_path, "job_reserved")
+    try:
+        upload = UploadFile(filename="annotations.jsonl", file=BytesIO(b"img"))
+        with pytest.raises(HTTPException) as exc_info:
+            localinferenceapi.upload_qwen_dataset_chunk(
+                "job_reserved",
+                "train",
+                "annotations.jsonl",
+                '{"id":"x"}',
+                upload,
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "qwen_dataset_image_name_reserved"
+        assert not (job.root_dir / "train" / "annotations.jsonl").exists()
+        assert upload.file.closed
+    finally:
+        _cleanup_upload_job("job_reserved")
+
+
 def test_qwen_chunk_rejects_duplicate_image_name(tmp_path: Path) -> None:
     job = _register_upload_job(tmp_path, "job_dup")
     try:

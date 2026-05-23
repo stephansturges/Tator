@@ -18916,7 +18916,7 @@ _convert_coco_dataset_to_yolo = functools.partial(
 )
 
 
-_resolve_yolo_training_dataset = functools.partial(
+_yolo_training_dataset_base_resolver = functools.partial(
     _resolve_yolo_training_dataset_impl,
     resolve_dataset_entry_fn=lambda dataset_id: _resolve_dataset_entry_impl(
         dataset_id,
@@ -18931,6 +18931,97 @@ _resolve_yolo_training_dataset = functools.partial(
     yolo_cache_root=YOLO_DATASET_CACHE_ROOT,
     http_exception_cls=HTTPException,
 )
+
+
+def _materialize_yolo_training_annotation_view(
+    entry: Dict[str, Any],
+    target_root: Path,
+) -> Dict[str, Any]:
+    dataset_root = _dataset_effective_root_from_entry(entry)
+    target_root = target_root.resolve()
+    cache_root = YOLO_DATASET_CACHE_ROOT.resolve()
+    if not _path_is_within_root_impl(target_root, cache_root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_cache_path_invalid")
+    if target_root.exists():
+        shutil.rmtree(target_root, ignore_errors=True)
+    for split in ("train", "val"):
+        (target_root / split / "images").mkdir(parents=True, exist_ok=True)
+        (target_root / split / "labels").mkdir(parents=True, exist_ok=True)
+
+    labelmap = [str(item).strip() for item in (entry.get("classes") or []) if str(item).strip()]
+    if not labelmap:
+        labelmap = _dataset_labelmap_from_root(dataset_root)
+    if not labelmap:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_missing")
+    labelmap_path = target_root / "labelmap.txt"
+    labelmap_path.write_text("\n".join(labelmap) + "\n", encoding="utf-8")
+
+    yolo_layout = str(entry.get("yolo_layout") or "flat")
+    counts = {"train": 0, "val": 0}
+    dataset_root_resolved = dataset_root.resolve()
+    for row in _annotation_collect_images(entry):
+        try:
+            split = _annotation_normalise_split(row.get("split"))
+            image_relpath = _annotation_normalise_image_relpath(row.get("image_relpath"))
+        except HTTPException:
+            continue
+        image_path_raw = row.get("image_path")
+        if image_path_raw is None:
+            continue
+        try:
+            image_source = Path(str(image_path_raw)).resolve()
+        except Exception:
+            continue
+        if not _path_is_within_root_impl(image_source, dataset_root_resolved):
+            continue
+        lines = _annotation_effective_label_lines(entry, split, image_relpath)
+        overlay_label_path = _annotation_overlay_label_path(entry, split, image_relpath)
+        source_label_path = _annotation_source_label_path(
+            dataset_root, yolo_layout, split, image_relpath
+        )
+        if not lines and not overlay_label_path.exists() and not source_label_path.exists():
+            continue
+        target_image = target_root / split / "images" / image_relpath
+        target_label = target_root / split / "labels" / image_relpath.with_suffix(".txt")
+        _copy2_if_different(image_source, target_image)
+        target_label.parent.mkdir(parents=True, exist_ok=True)
+        target_label.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        counts[split] += 1
+
+    train_labels = target_root / "train" / "labels"
+    val_labels = target_root / "val" / "labels"
+    yolo_seg_ready = _yolo_labels_have_polygons_impl(train_labels) or _yolo_labels_have_polygons_impl(
+        val_labels
+    )
+    return {
+        "prepared_root": str(target_root),
+        "yolo_ready": True,
+        "yolo_seg_ready": yolo_seg_ready,
+        "yolo_images_dir": str(target_root / "train" / "images"),
+        "yolo_labels_dir": str(train_labels),
+        "yolo_labelmap_path": str(labelmap_path),
+        "yolo_layout": "split",
+        "source": "annotation_overlay_cache",
+        "train_count": counts["train"],
+        "val_count": counts["val"],
+        "image_count": counts["train"] + counts["val"],
+    }
+
+
+def _resolve_yolo_training_dataset(payload) -> Dict[str, Any]:
+    dataset_info = _yolo_training_dataset_base_resolver(payload)
+    dataset_id = str(getattr(payload, "dataset_id", None) or "").strip()
+    if not dataset_id:
+        return dataset_info
+    entry = _resolve_dataset_entry_impl(dataset_id, list_all_datasets_fn=_list_all_datasets)
+    if not entry or not entry.get("yolo_ready"):
+        return dataset_info
+    if not _sam3_entry_needs_annotation_materialized_view(entry):
+        return dataset_info
+    cache_root = Path(str(dataset_info.get("cache_root") or ""))
+    materialized = _materialize_yolo_training_annotation_view(entry, cache_root)
+    dataset_info.update(materialized)
+    return dataset_info
 
 
 _resolve_rfdetr_training_dataset = functools.partial(

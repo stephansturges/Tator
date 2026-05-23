@@ -1065,6 +1065,68 @@ def test_resolve_sam3_dataset_meta_materializes_annotation_overlay_for_linked_fl
     assert (materialized_root / "train" / "images" / "nested" / "img.jpg").exists()
 
 
+def test_resolve_yolo_training_dataset_materializes_annotation_overlay_for_linked_flat_yolo(
+    tmp_path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "linked_source"
+    _write_test_image(dataset_root / "images" / "nested" / "img.jpg")
+    (dataset_root / "labels" / "nested").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "labels" / "nested" / "img.txt").write_text(
+        "0 0.5 0.5 0.2 0.2\n", encoding="utf-8"
+    )
+    (dataset_root / "labelmap.txt").write_text("old\nnew\n", encoding="utf-8")
+
+    registry_root = tmp_path / "registry" / "ds"
+    overlay_root = registry_root / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    (overlay_root / "labels" / "train" / "nested").mkdir(parents=True, exist_ok=True)
+    (overlay_root / "labels" / "train" / "nested" / "img.txt").write_text(
+        "1 0.5 0.5 0.4 0.4\n", encoding="utf-8"
+    )
+    registry_root.mkdir(parents=True, exist_ok=True)
+    (registry_root / api.DATASET_META_NAME).write_text(json.dumps({"id": "ds"}), encoding="utf-8")
+
+    entry = {
+        "id": "ds",
+        "label": "ds",
+        "dataset_root": str(dataset_root),
+        "registry_root": str(registry_root),
+        "storage_mode": "linked",
+        "linked_root": str(dataset_root),
+        "yolo_layout": "flat",
+        "yolo_ready": True,
+        "classes": ["old", "new"],
+    }
+    cache_root = tmp_path / "yolo_cache"
+    prepared_root = cache_root / "ds_cache"
+    monkeypatch.setattr(api, "YOLO_DATASET_CACHE_ROOT", cache_root)
+    monkeypatch.setattr(api, "_list_all_datasets", lambda: [entry])
+    monkeypatch.setattr(
+        api,
+        "_yolo_training_dataset_base_resolver",
+        lambda _payload: {
+            "dataset_id": "ds",
+            "dataset_root": str(dataset_root),
+            "prepared_root": str(dataset_root),
+            "cache_root": str(prepared_root),
+            "yolo_ready": True,
+            "yolo_layout": "flat",
+            "yolo_labelmap_path": str(dataset_root / "labelmap.txt"),
+            "source": "registry",
+        },
+    )
+
+    out = api._resolve_yolo_training_dataset(api.YoloTrainRequest(dataset_id="ds", accept_tos=True))
+
+    assert out["source"] == "annotation_overlay_cache"
+    assert out["prepared_root"] == str(prepared_root.resolve())
+    assert out["yolo_layout"] == "split"
+    assert Path(out["yolo_labelmap_path"]).read_text(encoding="utf-8") == "old\nnew\n"
+    label_path = prepared_root / "train" / "labels" / "nested" / "img.txt"
+    assert label_path.read_text(encoding="utf-8") == "1 0.5 0.5 0.4 0.4\n"
+    assert (prepared_root / "train" / "images" / "nested" / "img.jpg").exists()
+    assert not (dataset_root / "train").exists()
+
+
 def test_register_path_dedupes_existing_linked_entry(tmp_path, monkeypatch) -> None:
     dataset_root = tmp_path / "linked_ds"
     (dataset_root / "images").mkdir(parents=True, exist_ok=True)

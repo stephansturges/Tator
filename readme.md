@@ -969,6 +969,10 @@ job-start validation, and the Mac YOLO training work.
   linked or flat YOLO datasets by materializing an internal split YOLO view under
   the registry overlay before converting to COCO, avoiding mutation of the linked
   source tree while preserving corrected overlay labels.
+- YOLO training and head-graft dataset preflight now also materialize linked,
+  flat, or overlay-edited YOLO datasets into the YOLO cache before writing
+  `data.yaml`, so detector training consumes the same corrected labels as the
+  annotation viewer instead of stale source labels.
 - Local validation for this checkpoint used:
 
 ```bash

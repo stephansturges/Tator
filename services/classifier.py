@@ -30,6 +30,32 @@ def _predict_proba_batched_impl(
         return predict_proba_fn(feats, head)
 
 
+def _safe_classifier_registry_root(root: Path) -> Optional[Path]:
+    try:
+        if root.is_symlink() or root.parent.is_symlink():
+            return None
+        if root.exists() and not root.is_dir():
+            return None
+        if not root.exists():
+            return root.resolve(strict=False)
+        if root.is_symlink():
+            return None
+        return root.resolve(strict=True)
+    except Exception:
+        return None
+
+
+def _path_has_symlink_component(path: Path, root: Path) -> bool:
+    try:
+        rel_path = path.relative_to(root)
+    except Exception:
+        return True
+    current = root
+    for part in rel_path.parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
 
 
 def _resolve_agent_clip_classifier_path_impl(
@@ -43,15 +69,26 @@ def _resolve_agent_clip_classifier_path_impl(
     if not path_str:
         return None
     raw = Path(str(path_str))
-    candidate = Path(os.path.abspath(str(path_str))).resolve()
-    if not path_is_within_root_fn(candidate, allowed_root):
+    root = _safe_classifier_registry_root(allowed_root)
+    if root is None:
+        raise http_exception_cls(status_code=400, detail="agent_clip_classifier_path_not_allowed")
+    primary_raw = Path(os.path.abspath(str(path_str)))
+    candidate_raw = primary_raw
+    try:
+        candidate = primary_raw.resolve(strict=False)
+    except Exception:
+        candidate = primary_raw
+    if not path_is_within_root_fn(candidate, root):
         try:
-            candidate_alt = (allowed_root / raw).resolve()
+            candidate_raw = root / raw
+            candidate_alt = candidate_raw.resolve(strict=False)
         except Exception:
             candidate_alt = None
-        if candidate_alt is None or not path_is_within_root_fn(candidate_alt, allowed_root):
+        if candidate_alt is None or not path_is_within_root_fn(candidate_alt, root):
             raise http_exception_cls(status_code=400, detail="agent_clip_classifier_path_not_allowed")
         candidate = candidate_alt
+    if _path_has_symlink_component(candidate_raw, root):
+        raise http_exception_cls(status_code=400, detail="agent_clip_classifier_path_not_allowed")
     if candidate.suffix.lower() not in allowed_exts:
         raise http_exception_cls(status_code=400, detail="agent_clip_classifier_ext_not_allowed")
     if not candidate.exists() or not candidate.is_file():
@@ -609,17 +646,22 @@ def _resolve_clip_labelmap_path_impl(
     if not raw:
         return None
     roots: List[Path] = []
-    labelmaps_root = (upload_root / "labelmaps").resolve()
-    classifiers_root = (upload_root / "classifiers").resolve()
+    if upload_root.is_symlink():
+        return None
+    labelmaps_root = _safe_classifier_registry_root(upload_root / "labelmaps")
+    classifiers_root = _safe_classifier_registry_root(upload_root / "classifiers")
     if root_hint == "classifiers":
-        roots = [classifiers_root]
+        roots = [root for root in [classifiers_root] if root is not None]
     elif root_hint == "labelmaps":
-        roots = [labelmaps_root]
+        roots = [root for root in [labelmaps_root] if root is not None]
     else:
-        roots = [labelmaps_root, classifiers_root]
+        roots = [root for root in [labelmaps_root, classifiers_root] if root is not None]
     for root in roots:
         try:
-            candidate = (root / raw).resolve()
+            raw_candidate = root / raw
+            if _path_has_symlink_component(raw_candidate, root):
+                continue
+            candidate = raw_candidate.resolve(strict=False)
         except Exception:
             continue
         if not path_is_within_root_fn(candidate, root):
@@ -656,15 +698,24 @@ def _find_labelmap_for_classifier_impl(
         classifier_resolved = classifier_path.resolve()
     except Exception:
         classifier_resolved = classifier_path
+    if upload_root.is_symlink():
+        return None
     roots = [
-        (upload_root / "labelmaps").resolve(),
-        (upload_root / "classifiers").resolve(),
+        root
+        for root in [
+            _safe_classifier_registry_root(upload_root / "labelmaps"),
+            _safe_classifier_registry_root(upload_root / "classifiers"),
+        ]
+        if root is not None
     ]
     for root in roots:
         if not root.exists():
             continue
         for ext in labelmap_exts:
-            candidate = (root / f"{stem}{ext}").resolve()
+            raw_candidate = root / f"{stem}{ext}"
+            if _path_has_symlink_component(raw_candidate, root):
+                continue
+            candidate = raw_candidate.resolve()
             if candidate == classifier_resolved or candidate.name.endswith(".meta.pkl"):
                 continue
             if (
@@ -683,13 +734,17 @@ def _list_clip_labelmaps_impl(
     load_labelmap_file_fn: Callable[[Path], Sequence[str]],
     path_is_within_root_fn: Callable[[Path, Path], bool],
 ) -> List[Dict[str, Any]]:
-    labelmaps_root = (upload_root / "labelmaps").resolve()
+    if upload_root.is_symlink():
+        return []
+    labelmaps_root = _safe_classifier_registry_root(upload_root / "labelmaps")
     entries: List[Dict[str, Any]] = []
     root = labelmaps_root
-    if not root.exists():
+    if root is None or not root.exists():
         return entries
     for path in sorted(root.rglob("*")):
         try:
+            if _path_has_symlink_component(path, root):
+                continue
             resolved_path = path.resolve()
         except Exception:
             continue
@@ -738,14 +793,18 @@ def _list_clip_classifiers_impl(
     resolve_clip_labelmap_path_fn: Callable[[Optional[str], Optional[str]], Optional[Path]],
 ) -> List[Dict[str, Any]]:
     """List classifier heads available for CLIP filtering (typically trained via the CLIP training tab)."""
-    root = (upload_root / "classifiers").resolve()
-    labelmaps_root = (upload_root / "labelmaps").resolve()
+    if upload_root.is_symlink():
+        return []
+    root = _safe_classifier_registry_root(upload_root / "classifiers")
+    labelmaps_root = _safe_classifier_registry_root(upload_root / "labelmaps")
     classifiers: List[Dict[str, Any]] = []
-    if not root.exists():
+    if root is None or not root.exists():
         return classifiers
 
     for path in sorted(root.rglob("*")):
         try:
+            if _path_has_symlink_component(path, root):
+                continue
             resolved_path = path.resolve()
         except Exception:
             continue
@@ -785,7 +844,8 @@ def _list_clip_classifiers_impl(
                         resolved = resolve_clip_labelmap_path_fn(labelmap_hint, "labelmaps")
                         if resolved is not None:
                             entry["labelmap_guess"] = str(resolved)
-                            entry["labelmap_guess_rel"] = str(resolved.relative_to(labelmaps_root))
+                            if labelmaps_root is not None:
+                                entry["labelmap_guess_rel"] = str(resolved.relative_to(labelmaps_root))
             except Exception:
                 pass
 
@@ -816,9 +876,14 @@ def _list_clip_classifiers_impl(
         except Exception:
             entry["modified_at"] = None
         try:
+            if labelmaps_root is None:
+                raise RuntimeError("labelmaps_root_unavailable")
             stem = path.stem
             for ext in labelmap_exts:
-                candidate = (labelmaps_root / f"{stem}{ext}").resolve()
+                raw_candidate = labelmaps_root / f"{stem}{ext}"
+                if _path_has_symlink_component(raw_candidate, labelmaps_root):
+                    continue
+                candidate = raw_candidate.resolve()
                 if path_is_within_root_fn(candidate, labelmaps_root) and candidate.exists():
                     entry["labelmap_guess"] = str(candidate)
                     entry["labelmap_guess_rel"] = str(candidate.relative_to(labelmaps_root))

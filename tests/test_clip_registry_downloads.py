@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 from sklearn.exceptions import InconsistentVersionWarning
+from starlette.datastructures import UploadFile
 from starlette.responses import FileResponse
 
 import localinferenceapi
@@ -245,6 +246,30 @@ def test_delete_clip_classifier_unlinks_broken_meta_symlink(tmp_path, monkeypatc
     assert not meta_path.is_symlink()
 
 
+def test_delete_clip_classifier_rejects_symlink_alias_without_target_unlink(
+    tmp_path, monkeypatch
+) -> None:
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    classifiers_root.mkdir(parents=True)
+    target = classifiers_root / "target.pkl"
+    target.write_bytes(b"model")
+    alias = classifiers_root / "alias.pkl"
+    try:
+        alias.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", upload_root)
+
+    with pytest.raises(HTTPException) as exc_info:
+        localinferenceapi.delete_clip_classifier(rel_path="alias.pkl")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_clip_classifier_path_not_allowed"
+    assert target.read_bytes() == b"model"
+    assert alias.is_symlink()
+
+
 def test_active_classifier_head_for_inference_drops_missing_cached_head(tmp_path, monkeypatch) -> None:
     missing_path = tmp_path / "missing.pkl"
     stale_head = {"classes": ["car"]}
@@ -437,6 +462,30 @@ def test_list_clip_labelmaps_skips_symlink_escape(tmp_path) -> None:
     assert entries == []
 
 
+def test_delete_clip_labelmap_rejects_symlink_alias_without_target_unlink(
+    tmp_path, monkeypatch
+) -> None:
+    upload_root = tmp_path / "uploads"
+    labelmaps_root = upload_root / "labelmaps"
+    labelmaps_root.mkdir(parents=True)
+    target = labelmaps_root / "target.txt"
+    target.write_text("car\n", encoding="utf-8")
+    alias = labelmaps_root / "alias.txt"
+    try:
+        alias.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", upload_root)
+
+    with pytest.raises(HTTPException) as exc_info:
+        localinferenceapi.delete_clip_labelmap(rel_path="alias.txt", root="labelmaps")
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "labelmap_not_found"
+    assert target.read_text(encoding="utf-8") == "car\n"
+    assert alias.is_symlink()
+
+
 def test_delete_active_clip_labelmap_clears_active_label_state(tmp_path, monkeypatch) -> None:
     labelmap_path = tmp_path / "labelmap.pkl"
     labelmap_path.write_bytes(b"labels")
@@ -454,3 +503,25 @@ def test_delete_active_clip_labelmap_clears_active_label_state(tmp_path, monkeyp
     assert not labelmap_path.exists()
     assert localinferenceapi.active_labelmap_path is None
     assert localinferenceapi.active_label_list == []
+
+
+def test_upload_classifier_rejects_symlinked_registry_root_without_write(
+    tmp_path, monkeypatch
+) -> None:
+    upload_root = tmp_path / "uploads"
+    outside = tmp_path / "outside_classifiers"
+    upload_root.mkdir()
+    outside.mkdir()
+    try:
+        (upload_root / "classifiers").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", upload_root)
+    upload = UploadFile(filename="head.pkl", file=io.BytesIO(b"model"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(localinferenceapi.upload_classifier(file=upload))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "classifiers_root_invalid"
+    assert list(outside.iterdir()) == []

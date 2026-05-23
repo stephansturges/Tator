@@ -544,6 +544,7 @@ from services.classifier import (
     _validate_clip_dataset_impl as _validate_clip_dataset_impl,
     _safe_classifier_meta_path_impl as _safe_classifier_meta_path_impl,
     _safe_existing_regular_file_within_root_impl as _safe_existing_regular_file_within_root_impl,
+    _path_has_symlink_component as _classifier_path_has_symlink_component,
     _resolve_clip_labelmap_path_impl as _resolve_clip_labelmap_path_impl,
     _find_labelmap_for_classifier_impl as _find_labelmap_for_classifier_impl,
     _list_clip_labelmaps_impl as _list_clip_labelmaps_impl,
@@ -10893,7 +10894,7 @@ def _agent_tool_classify_crop(
     if classifier_id:
         classifier_path = _resolve_agent_clip_classifier_path_impl(
             classifier_id,
-            allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+            allowed_root=UPLOAD_ROOT / "classifiers",
             allowed_exts=CLASSIFIER_ALLOWED_EXTS,
             path_is_within_root_fn=_path_is_within_root_impl,
             http_exception_cls=HTTPException,
@@ -11474,7 +11475,7 @@ def _agent_tool_get_labelmap(
     if classifier_id:
         classifier_path = _resolve_agent_clip_classifier_path_impl(
             classifier_id,
-            allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+            allowed_root=UPLOAD_ROOT / "classifiers",
             allowed_exts=CLASSIFIER_ALLOWED_EXTS,
             path_is_within_root_fn=_path_is_within_root_impl,
             http_exception_cls=HTTPException,
@@ -11674,7 +11675,7 @@ def _agent_tool_submit_annotations(
     if classifier_id:
         classifier_path = _resolve_agent_clip_classifier_path_impl(
             classifier_id,
-            allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+            allowed_root=UPLOAD_ROOT / "classifiers",
             allowed_exts=CLASSIFIER_ALLOWED_EXTS,
             path_is_within_root_fn=_path_is_within_root_impl,
             http_exception_cls=HTTPException,
@@ -11845,7 +11846,7 @@ def _agent_apply_ensemble_filter(
     if classifier_id:
         classifier_path = _resolve_agent_clip_classifier_path_impl(
             classifier_id,
-            allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+            allowed_root=UPLOAD_ROOT / "classifiers",
             allowed_exts=CLASSIFIER_ALLOWED_EXTS,
             path_is_within_root_fn=_path_is_within_root_impl,
             http_exception_cls=HTTPException,
@@ -12480,7 +12481,7 @@ _agent_readable_write = lambda line: _agent_readable_write_impl(  # noqa: E731
     grid_overlap_ratio_default=PREPASS_GRID_OVERLAP_RATIO,
     resolve_classifier_path_fn=lambda path_str: _resolve_agent_clip_classifier_path_impl(
         path_str,
-        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_root=UPLOAD_ROOT / "classifiers",
         allowed_exts=CLASSIFIER_ALLOWED_EXTS,
         path_is_within_root_fn=_path_is_within_root_impl,
         http_exception_cls=HTTPException,
@@ -12853,7 +12854,7 @@ def _run_prepass_annotation_qwen(
     if classifier_id_for_run:
         classifier_path = _resolve_agent_clip_classifier_path_impl(
             classifier_id_for_run,
-            allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+            allowed_root=UPLOAD_ROOT / "classifiers",
             allowed_exts=CLASSIFIER_ALLOWED_EXTS,
             path_is_within_root_fn=_path_is_within_root_impl,
             http_exception_cls=HTTPException,
@@ -20822,7 +20823,7 @@ _persist_agent_recipe = functools.partial(
     compute_labelmap_hash_fn=_compute_labelmap_hash_impl,
     resolve_clip_classifier_fn=lambda path_str: _resolve_agent_clip_classifier_path_impl(
         path_str,
-        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_root=UPLOAD_ROOT / "classifiers",
         allowed_exts=CLASSIFIER_ALLOWED_EXTS,
         path_is_within_root_fn=_path_is_within_root_impl,
         http_exception_cls=HTTPException,
@@ -20924,7 +20925,7 @@ _ensure_cascade_zip = functools.partial(
     ),
     resolve_classifier_fn=lambda path_str: _resolve_agent_clip_classifier_path_impl(
         path_str,
-        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_root=UPLOAD_ROOT / "classifiers",
         allowed_exts=CLASSIFIER_ALLOWED_EXTS,
         path_is_within_root_fn=_path_is_within_root_impl,
         http_exception_cls=HTTPException,
@@ -24459,7 +24460,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         # Pretrained CLIP head (LogReg) is required for Agent Mining (recipe mining).
         clip_head_path = _resolve_agent_clip_classifier_path_impl(
             payload.clip_head_classifier_path,
-            allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+            allowed_root=UPLOAD_ROOT / "classifiers",
             allowed_exts=CLASSIFIER_ALLOWED_EXTS,
             path_is_within_root_fn=_path_is_within_root_impl,
             http_exception_cls=HTTPException,
@@ -25466,7 +25467,7 @@ def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
 def _start_agent_mining_job(payload: AgentMiningRequest) -> AgentMiningJob:
     clip_head_path = _resolve_agent_clip_classifier_path_impl(
         payload.clip_head_classifier_path,
-        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_root=UPLOAD_ROOT / "classifiers",
         allowed_exts=CLASSIFIER_ALLOWED_EXTS,
         path_is_within_root_fn=_path_is_within_root_impl,
         http_exception_cls=HTTPException,
@@ -29091,6 +29092,30 @@ def _validate_upload_extension(filename: str, allowed_exts: set[str], detail: st
         raise HTTPException(status_code=HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=detail)
 
 
+def _safe_upload_subdir(subdir: str, *, detail: str) -> Path:
+    try:
+        if UPLOAD_ROOT.is_symlink():
+            raise RuntimeError("upload_root_symlink")
+        UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+        if UPLOAD_ROOT.is_symlink() or not UPLOAD_ROOT.is_dir():
+            raise RuntimeError("upload_root_invalid")
+        upload_root = UPLOAD_ROOT.resolve(strict=True)
+        raw_dir = UPLOAD_ROOT / subdir
+        if raw_dir.is_symlink():
+            raise RuntimeError("upload_subdir_symlink")
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        if raw_dir.is_symlink() or not raw_dir.is_dir():
+            raise RuntimeError("upload_subdir_invalid")
+        resolved_dir = raw_dir.resolve(strict=True)
+        if not _path_is_within_root_impl(resolved_dir, upload_root):
+            raise RuntimeError("upload_subdir_escape")
+        return resolved_dir
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
 async def _save_asset(
     upload: UploadFile,
     *,
@@ -29099,13 +29124,12 @@ async def _save_asset(
     max_bytes: Optional[int] = None,
     quota_bytes: Optional[int] = None,
 ) -> str:
-    dest_dir = UPLOAD_ROOT / subdir
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_dir = _safe_upload_subdir(subdir, detail=f"{subdir}_root_invalid")
     rel_name = Path(upload.filename or f"asset_{uuid.uuid4().hex}").name
     dest_path = dest_dir / rel_name
     if allowed_exts:
         _validate_upload_extension(rel_name, allowed_exts, "upload_extension_not_allowed")
-    if dest_path.exists():
+    if dest_path.exists() or dest_path.is_symlink():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="upload_exists")
     _validate_upload_size(upload, max_bytes=max_bytes or ASSET_MAX_BYTES)
     await _write_upload_file(
@@ -29175,10 +29199,8 @@ def _cleanup_job(job: ClipTrainingJob) -> None:
 
 
 def _publish_clip_training_artifacts(artifacts: TrainingArtifacts) -> TrainingArtifacts:
-    classifiers_root = (UPLOAD_ROOT / "classifiers").resolve()
-    labelmaps_root = (UPLOAD_ROOT / "labelmaps").resolve()
-    classifiers_root.mkdir(parents=True, exist_ok=True)
-    labelmaps_root.mkdir(parents=True, exist_ok=True)
+    classifiers_root = _safe_upload_subdir("classifiers", detail="classifiers_root_invalid")
+    labelmaps_root = _safe_upload_subdir("labelmaps", detail="labelmaps_root_invalid")
 
     model_src = Path(artifacts.model_path).resolve()
     labelmap_src = Path(artifacts.labelmap_path).resolve()
@@ -29487,7 +29509,7 @@ def list_clip_backbones():
 def download_clip_classifier(rel_path: str = Query(...)):
     classifier_path = _resolve_agent_clip_classifier_path_impl(
         rel_path,
-        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_root=UPLOAD_ROOT / "classifiers",
         allowed_exts=CLASSIFIER_ALLOWED_EXTS,
         path_is_within_root_fn=_path_is_within_root_impl,
         http_exception_cls=HTTPException,
@@ -29504,7 +29526,7 @@ def download_clip_classifier(rel_path: str = Query(...)):
 def download_clip_classifier_zip(rel_path: str = Query(...)):
     classifier_path = _resolve_agent_clip_classifier_path_impl(
         rel_path,
-        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_root=UPLOAD_ROOT / "classifiers",
         allowed_exts=CLASSIFIER_ALLOWED_EXTS,
         path_is_within_root_fn=_path_is_within_root_impl,
         http_exception_cls=HTTPException,
@@ -29546,7 +29568,7 @@ def delete_clip_classifier(rel_path: str = Query(...)):
 
     classifier_path = _resolve_agent_clip_classifier_path_impl(
         rel_path,
-        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_root=UPLOAD_ROOT / "classifiers",
         allowed_exts=CLASSIFIER_ALLOWED_EXTS,
         path_is_within_root_fn=_path_is_within_root_impl,
         http_exception_cls=HTTPException,
@@ -29582,7 +29604,7 @@ def rename_clip_classifier(
 ):
     classifier_path = _resolve_agent_clip_classifier_path_impl(
         rel_path,
-        allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+        allowed_root=UPLOAD_ROOT / "classifiers",
         allowed_exts=CLASSIFIER_ALLOWED_EXTS,
         path_is_within_root_fn=_path_is_within_root_impl,
         http_exception_cls=HTTPException,
@@ -30159,8 +30181,8 @@ async def start_clip_training(
         if not labels:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labels_required")
 
-    classifiers_dir = _ensure_directory(str((UPLOAD_ROOT / "classifiers").resolve()))
-    labelmaps_dir = _ensure_directory(str((UPLOAD_ROOT / "labelmaps").resolve()))
+    classifiers_dir = str(_safe_upload_subdir("classifiers", detail="classifiers_root_invalid"))
+    labelmaps_dir = str(_safe_upload_subdir("labelmaps", detail="labelmaps_root_invalid"))
     if output_dir and output_dir not in {".", classifiers_dir}:
         logger.info("Ignoring CLIP output_dir=%s; saving under %s", output_dir, classifiers_dir)
 
@@ -30333,8 +30355,9 @@ async def start_clip_training(
     meta_output_path = Path(os.path.splitext(str(model_output_path))[0] + ".meta.pkl")
     labelmap_output_path = Path(labelmaps_dir) / labelmap_filename
     for artifact_path in (model_output_path, meta_output_path, labelmap_output_path):
-        if _unlink_self_referential_symlink(artifact_path):
-            logger.warning("Removed self-referential training artifact link: %s", artifact_path)
+        if artifact_path.is_symlink():
+            artifact_path.unlink(missing_ok=True)
+            logger.warning("Removed training artifact symlink before write: %s", artifact_path)
 
     extras = [solver_name]
     extras.append(classifier_type_norm)
@@ -32763,8 +32786,16 @@ def set_active_model(payload: ActiveModelRequest):
     classifier_path_abs = os.path.abspath(classifier_path)
     if not os.path.isfile(classifier_path_abs):
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
-    allowed_root = (UPLOAD_ROOT / "classifiers").resolve()
-    if not _path_is_within_root_impl(Path(classifier_path_abs).resolve(), allowed_root):
+    allowed_root = _safe_upload_subdir("classifiers", detail="classifiers_root_invalid")
+    classifier_path_raw = Path(classifier_path_abs)
+    try:
+        classifier_path_resolved = classifier_path_raw.resolve()
+    except Exception:
+        classifier_path_resolved = classifier_path_raw
+    if (
+        not _path_is_within_root_impl(classifier_path_resolved, allowed_root)
+        or _classifier_path_has_symlink_component(classifier_path_raw, allowed_root)
+    ):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_path_not_allowed")
     _validate_upload_extension(
         classifier_path_abs, CLASSIFIER_ALLOWED_EXTS, "classifier_extension_not_allowed"
@@ -32970,12 +33001,24 @@ def set_active_model(payload: ActiveModelRequest):
     if labelmap_path is not None:
         labelmap_path_abs = os.path.abspath(labelmap_path)
         allowed_label_roots = [
-            (UPLOAD_ROOT / "labelmaps").resolve(),
-            (UPLOAD_ROOT / "classifiers").resolve(),
+            _safe_upload_subdir("labelmaps", detail="labelmaps_root_invalid"),
+            _safe_upload_subdir("classifiers", detail="classifiers_root_invalid"),
         ]
-        if not any(
-            _path_is_within_root_impl(Path(labelmap_path_abs).resolve(), root)
-            for root in allowed_label_roots
+        labelmap_path_raw = Path(labelmap_path_abs)
+        try:
+            labelmap_path_resolved = labelmap_path_raw.resolve()
+        except Exception:
+            labelmap_path_resolved = labelmap_path_raw
+        matching_label_root = next(
+            (
+                root
+                for root in allowed_label_roots
+                if _path_is_within_root_impl(labelmap_path_resolved, root)
+            ),
+            None,
+        )
+        if matching_label_root is None or _classifier_path_has_symlink_component(
+            labelmap_path_raw, matching_label_root
         ):
             raise HTTPException(
                 status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_not_allowed"
@@ -35588,7 +35631,7 @@ def export_prepass_recipe(recipe_id: str):
             get_qwen_model_entry_fn=_get_qwen_model_entry,
             resolve_classifier_path_fn=lambda path_str: _resolve_agent_clip_classifier_path_impl(
                 path_str,
-                allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
+                allowed_root=UPLOAD_ROOT / "classifiers",
                 allowed_exts=CLASSIFIER_ALLOWED_EXTS,
                 path_is_within_root_fn=_path_is_within_root_impl,
                 http_exception_cls=HTTPException,

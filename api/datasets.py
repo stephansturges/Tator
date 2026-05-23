@@ -17,7 +17,7 @@ def build_datasets_router(
     set_glossary_fn: Callable[[str, str], Any],
     get_text_label_fn: Callable[[str, str], Any],
     get_text_labels_fn: Callable[[str, list[str]], Any],
-    set_text_label_fn: Callable[[str, str, str], Any],
+    set_text_label_fn: Callable[[str, str, dict], Any],
     register_path_fn: Callable[
         [
             str,
@@ -104,8 +104,7 @@ def build_datasets_router(
 
     @router.post("/datasets/{dataset_id}/text_labels/{image_name}")
     def set_text_label(dataset_id: str, image_name: str, payload: dict = Body(...)):  # noqa: B008
-        caption = str((payload or {}).get("caption") or "")
-        return set_text_label_fn(dataset_id, image_name, caption)
+        return set_text_label_fn(dataset_id, image_name, payload or {})
 
     @router.post("/datasets/register_path")
     def register_dataset_path(payload: dict = Body(...)):  # noqa: B008

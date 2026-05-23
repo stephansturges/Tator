@@ -15136,16 +15136,27 @@ def get_text_labels(dataset_id: str, image_names: Sequence[str]):
     return {"captions": captions, "missing": missing}
 
 
-def set_text_label(dataset_id: str, image_name: str, caption: str):
+def set_text_label(dataset_id: str, image_name: str, payload: Dict[str, Any]):
+    payload = payload or {}
     entry = _resolve_dataset_entry(dataset_id)
+    try:
+        meta_path = _dataset_meta_path_for_entry(entry)
+    except Exception:
+        meta_path = None
+    meta = _load_json_metadata(meta_path) if meta_path is not None else None
+    meta = meta if isinstance(meta, dict) else {}
+    lock = meta.get("annotation_lock") if isinstance(meta.get("annotation_lock"), dict) else {}
+    if _annotation_lock_is_active(lock):
+        _require_annotation_lock_owner(meta, payload)
     image_relpath = _annotation_normalise_image_relpath(
         image_name if "." in image_name else f"{image_name}.jpg"
     )
+    caption = str(payload.get("caption") or "").strip()
     text_path = _annotation_overlay_text_path(entry, image_relpath)
     text_dir = text_path.parent
     text_dir.mkdir(parents=True, exist_ok=True)
-    text_path.write_text(str(caption or "").strip(), encoding="utf-8")
-    return {"status": "saved", "caption": str(caption or "").strip()}
+    text_path.write_text(caption, encoding="utf-8")
+    return {"status": "saved", "caption": caption}
 
 
 def register_dataset_path(

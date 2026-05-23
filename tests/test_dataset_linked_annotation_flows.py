@@ -896,6 +896,61 @@ def test_get_text_labels_batch_reads_overlay_source_and_legacy(tmp_path, monkeyp
     assert result["missing"] == ["missing.jpg"]
 
 
+def test_set_text_label_requires_active_lock_owner_when_locked(tmp_path, monkeypatch) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    meta = {
+        "id": "ds",
+        "annotation_lock": _active_lock("sess-lock"),
+    }
+    meta_path = Path(entry["registry_root"]) / api.DATASET_META_NAME
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.set_text_label("ds", "sub/img.jpg", {"caption": "blocked"})
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "annotation_lock_session_required"
+
+    with pytest.raises(api.HTTPException) as exc2:
+        api.set_text_label("ds", "sub/img.jpg", {"session_id": "wrong", "caption": "blocked"})
+    assert exc2.value.status_code == 409
+    assert exc2.value.detail == "annotation_lock_active"
+
+    out = api.set_text_label(
+        "ds",
+        "sub/img.jpg",
+        {"session_id": "sess-lock", "caption": "saved"},
+    )
+
+    assert out == {"status": "saved", "caption": "saved"}
+    overlay_text = (
+        Path(entry["registry_root"])
+        / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+        / "text_labels"
+        / "sub"
+        / "img.txt"
+    )
+    assert overlay_text.read_text(encoding="utf-8") == "saved"
+
+
+def test_set_text_label_allows_direct_write_without_active_lock(tmp_path, monkeypatch) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    meta_path = Path(entry["registry_root"]) / api.DATASET_META_NAME
+    meta_path.write_text(json.dumps({"id": "ds", "annotation_lock": {}}), encoding="utf-8")
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+
+    out = api.set_text_label("ds", "img.jpg", {"caption": "direct caption"})
+
+    assert out == {"status": "saved", "caption": "direct caption"}
+    overlay_text = (
+        Path(entry["registry_root"])
+        / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+        / "text_labels"
+        / "img.txt"
+    )
+    assert overlay_text.read_text(encoding="utf-8") == "direct caption"
+
+
 def test_register_path_dedupes_existing_linked_entry(tmp_path, monkeypatch) -> None:
     dataset_root = tmp_path / "linked_ds"
     (dataset_root / "images").mkdir(parents=True, exist_ok=True)

@@ -958,6 +958,9 @@ job-start validation, and the Mac YOLO training work.
 - Dataset deletion also refuses to remove linked or managed dataset metadata while
   an annotation session lock is active, so deleting a dataset cannot silently
   discard in-progress overlay labels, text labels, cursor state, or lock state.
+- Direct caption/text-label writes now share the same lock contract: they remain
+  available for datasets with no active annotation session, but require the
+  matching annotation session ID while an annotation lock is active.
 - Local validation for this checkpoint used:
 
 ```bash

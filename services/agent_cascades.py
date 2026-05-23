@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import stat
 import tempfile
@@ -30,6 +31,39 @@ def _path_within_root(path: Path, root: Path) -> bool:
     return True
 
 
+def _prepare_output_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    parent_resolved = path.parent.resolve(strict=True)
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+    elif path.exists() and path.is_dir():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    try:
+        path.resolve(strict=False).relative_to(parent_resolved)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid") from exc
+
+
+def _prepare_atomic_output_file(path: Path) -> Path:
+    _prepare_output_file(path)
+    tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    _prepare_output_file(tmp_path)
+    return tmp_path
+
+
+def _write_json_file(path: Path, payload: Dict[str, Any]) -> Path:
+    tmp_path = _prepare_atomic_output_file(path)
+    try:
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+    return path
+
+
 def _persist_agent_cascade_impl(
     label: str,
     payload: Dict[str, Any],
@@ -46,17 +80,20 @@ def _persist_agent_cascade_impl(
         "created_at": time.time(),
         **payload,
     }
-    path = (cascades_root / f"{cascade_id}.json").resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path_is_within_root_fn(path, cascades_root.resolve()):
+    root = cascades_root.resolve()
+    path_raw = cascades_root / f"{cascade_id}.json"
+    path = path_raw.absolute()
+    if not _path_within_root(path, root):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
     try:
-        with path.open("w", encoding="utf-8") as fp:
-            json.dump(record, fp, ensure_ascii=False, indent=2)
+        _write_json_file(path_raw, record)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_cascade_save_failed:{exc}") from exc
-    record["_path"] = str(path)
-    zip_path = (cascades_root / f"{cascade_id}.zip").resolve()
+    record["_path"] = str(path_raw.resolve(strict=True))
+    zip_path_raw = cascades_root / f"{cascade_id}.zip"
+    zip_path = zip_path_raw.resolve(strict=False)
     if zip_path.exists():
         record["_zip"] = str(zip_path)
     return record
@@ -68,7 +105,10 @@ def _load_agent_cascade_impl(
     cascades_root: Path,
     path_is_within_root_fn,
 ) -> Dict[str, Any]:
-    path = (cascades_root / f"{cascade_id}.json").resolve()
+    path_raw = cascades_root / f"{cascade_id}.json"
+    if path_raw.is_symlink():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_cascade_not_found")
+    path = path_raw.resolve(strict=False)
     if not path_is_within_root_fn(path, cascades_root.resolve()) or not path.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_cascade_not_found")
     try:
@@ -210,6 +250,8 @@ def _ensure_cascade_zip_impl(
 
     # Build zip bundle.
     temp_zip_path = zip_raw.with_suffix(f"{zip_raw.suffix}.{uuid.uuid4().hex}.tmp")
+    _prepare_output_file(zip_raw)
+    _prepare_output_file(temp_zip_path)
     try:
         clean_cascade = json.loads(json.dumps(cascade))
         for key in list(clean_cascade.keys()):
@@ -277,7 +319,7 @@ def _ensure_cascade_zip_impl(
                         zf.write(meta_path_resolved, arcname=meta_rel)
                     except Exception:
                         pass
-        temp_zip_path.replace(zip_raw)
+        os.replace(temp_zip_path, zip_raw)
     except Exception as exc:  # noqa: BLE001
         try:
             temp_zip_path.unlink()

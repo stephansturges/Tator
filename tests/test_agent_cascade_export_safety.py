@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 from pathlib import Path
 from typing import Any, Dict
 
 import pytest
+from fastapi import HTTPException
 
 from services.agent_cascades import (
     _delete_agent_cascade_impl,
     _ensure_cascade_zip_impl,
     _list_agent_cascades_impl,
+    _load_agent_cascade_impl,
+    _persist_agent_cascade_impl,
 )
 
 
@@ -242,3 +246,62 @@ def test_ensure_cascade_zip_replaces_symlinked_existing_zip(tmp_path: Path) -> N
     assert outside.read_bytes() == b"keep"
     with zipfile.ZipFile(zip_path, "r") as zf:
         assert "cascade.json" in zf.namelist()
+
+
+def test_persist_agent_cascade_replaces_symlink_targets_without_target_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cascades_root = tmp_path / "cascades"
+    cascades_root.mkdir()
+    cascade_id = "ac_deadbeef"
+    json_path = cascades_root / f"{cascade_id}.json"
+    outside_tmp = tmp_path / "outside_tmp.json"
+    outside_final = tmp_path / "outside_final.json"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    tmp_link = json_path.with_suffix(json_path.suffix + f".tmp.{os.getpid()}")
+    try:
+        tmp_link.symlink_to(outside_tmp)
+        json_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    class FixedUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    monkeypatch.setattr("services.agent_cascades.uuid.uuid4", lambda: FixedUUID())
+
+    record = _persist_agent_cascade_impl(
+        "demo",
+        {"steps": [{"recipe_id": "r1"}], "dedupe": {}},
+        cascades_root=cascades_root,
+        path_is_within_root_fn=_within_root,
+    )
+
+    assert record["id"] == cascade_id
+    assert not tmp_link.exists()
+    assert not json_path.is_symlink()
+    assert json.loads(json_path.read_text(encoding="utf-8"))["id"] == cascade_id
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
+
+
+def test_load_agent_cascade_rejects_symlinked_json_escape(tmp_path: Path) -> None:
+    cascades_root = tmp_path / "cascades"
+    cascades_root.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"id": "ac_link", "steps": []}), encoding="utf-8")
+    try:
+        (cascades_root / "ac_link.json").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _load_agent_cascade_impl(
+            "ac_link",
+            cascades_root=cascades_root,
+            path_is_within_root_fn=_within_root,
+        )
+
+    assert getattr(exc_info.value, "detail", None) == "agent_cascade_not_found"

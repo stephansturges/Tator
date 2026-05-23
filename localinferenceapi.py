@@ -12570,6 +12570,52 @@ def _agent_select_similarity_exemplars(
     )
 
 
+def _qwen_prepass_trace_prepare_file(path: Path, root: Path) -> Optional[Path]:
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        if root.is_symlink():
+            return None
+        root_resolved = root.resolve(strict=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.parent.is_symlink():
+            return None
+        path.parent.resolve(strict=True).relative_to(root_resolved)
+        if path.is_symlink():
+            path.unlink(missing_ok=True)
+        elif path.exists() and not path.is_file():
+            return None
+        path.resolve(strict=False).relative_to(root_resolved)
+        return path
+    except Exception:
+        return None
+
+
+def _qwen_prepass_trace_write_file(path: Path, root: Path, text: str, *, append: bool) -> bool:
+    safe_path = _qwen_prepass_trace_prepare_file(path, root)
+    if safe_path is None:
+        return False
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(safe_path, flags, 0o644)
+    mode = "a" if append else "w"
+    with os.fdopen(fd, mode, encoding="utf-8") as handle:
+        handle.write(text)
+    return True
+
+
+def _qwen_prepass_trace_prepare_path(path: Path, root: Path, *, reset: bool = False) -> Optional[str]:
+    try:
+        if reset:
+            if not _qwen_prepass_trace_write_file(path, root, "", append=False):
+                return None
+            return str(path)
+        safe_path = _qwen_prepass_trace_prepare_file(path, root)
+        return str(safe_path) if safe_path is not None else None
+    except Exception:
+        return None
+
+
 def _run_prepass_annotation_qwen(
     payload: QwenPrepassRequest,
     *,
@@ -12604,10 +12650,6 @@ def _run_prepass_annotation_qwen(
     if int(QWEN_CAPTION_CACHE_LIMIT or 0) < 1:
         QWEN_CAPTION_CACHE_LIMIT = 1
     pil_img, _, token = resolve_image_payload(payload.image_base64, payload.image_token, None)
-    trace_path: Optional[str] = None
-    full_trace_path: Optional[str] = None
-    readable_trace_path: Optional[str] = None
-    latest_readable_path: Optional[str] = None
     trace_file = (
         QWEN_PREPASS_TRACE_ROOT / f"prepass_{int(time.time())}_{uuid.uuid4().hex[:8]}.jsonl"
     )
@@ -12619,46 +12661,40 @@ def _run_prepass_annotation_qwen(
         QWEN_PREPASS_READABLE_TRACE_ROOT
         / f"prepass_readable_{int(time.time())}_{uuid.uuid4().hex[:8]}.log"
     )
-    try:
-        trace_file.parent.mkdir(parents=True, exist_ok=True)
-        trace_path = str(trace_file)
-    except Exception:
-        trace_path = None
-    try:
-        full_trace_file.parent.mkdir(parents=True, exist_ok=True)
-        full_trace_path = str(full_trace_file)
-    except Exception:
-        full_trace_path = None
-    try:
-        readable_trace_file.parent.mkdir(parents=True, exist_ok=True)
-        readable_trace_path = str(readable_trace_file)
-    except Exception:
-        readable_trace_path = None
-    latest_full_path: Optional[str] = None
-    try:
-        latest_full_file = QWEN_PREPASS_FULL_TRACE_LATEST
-        latest_full_file.parent.mkdir(parents=True, exist_ok=True)
-        if not latest_full_file.exists():
-            latest_full_file.write_text("", encoding="utf-8")
-        latest_full_path = str(latest_full_file)
-    except Exception:
-        latest_full_path = None
-    try:
-        latest_readable_file = QWEN_PREPASS_READABLE_TRACE_LATEST
-        latest_readable_file.parent.mkdir(parents=True, exist_ok=True)
-        if not latest_readable_file.exists():
-            latest_readable_file.write_text("", encoding="utf-8")
-        latest_readable_path = str(latest_readable_file)
-    except Exception:
-        latest_readable_path = None
+    trace_path: Optional[str] = _qwen_prepass_trace_prepare_path(
+        trace_file,
+        QWEN_PREPASS_TRACE_ROOT,
+    )
+    full_trace_path: Optional[str] = _qwen_prepass_trace_prepare_path(
+        full_trace_file,
+        QWEN_PREPASS_FULL_TRACE_ROOT,
+    )
+    readable_trace_path: Optional[str] = _qwen_prepass_trace_prepare_path(
+        readable_trace_file,
+        QWEN_PREPASS_READABLE_TRACE_ROOT,
+    )
+    latest_full_path: Optional[str] = _qwen_prepass_trace_prepare_path(
+        QWEN_PREPASS_FULL_TRACE_LATEST,
+        QWEN_PREPASS_FULL_TRACE_ROOT,
+        reset=True,
+    )
+    latest_readable_path: Optional[str] = _qwen_prepass_trace_prepare_path(
+        QWEN_PREPASS_READABLE_TRACE_LATEST,
+        QWEN_PREPASS_READABLE_TRACE_ROOT,
+        reset=True,
+    )
 
     def _trace_write(record: Dict[str, Any]) -> None:
         if not trace_path:
             return
         record["ts"] = record.get("ts") or time.time()
         try:
-            with open(trace_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+            _qwen_prepass_trace_write_file(
+                Path(trace_path),
+                QWEN_PREPASS_TRACE_ROOT,
+                json.dumps(record, ensure_ascii=True) + "\n",
+                append=True,
+            )
         except Exception:
             pass
 
@@ -12672,14 +12708,22 @@ def _run_prepass_annotation_qwen(
             payload = {"error": "trace_encode_failed", "record": str(record)}
         if full_trace_path:
             try:
-                with open(full_trace_path, "a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                _qwen_prepass_trace_write_file(
+                    Path(full_trace_path),
+                    QWEN_PREPASS_FULL_TRACE_ROOT,
+                    json.dumps(payload, ensure_ascii=False) + "\n",
+                    append=True,
+                )
             except Exception:
                 pass
         if latest_full_path and latest_full_path != full_trace_path:
             try:
-                with open(latest_full_path, "a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                _qwen_prepass_trace_write_file(
+                    Path(latest_full_path),
+                    QWEN_PREPASS_FULL_TRACE_ROOT,
+                    json.dumps(payload, ensure_ascii=False) + "\n",
+                    append=True,
+                )
             except Exception:
                 pass
 
@@ -12690,14 +12734,22 @@ def _run_prepass_annotation_qwen(
         text = f"{stamp} {line}\n"
         if readable_trace_path:
             try:
-                with open(readable_trace_path, "a", encoding="utf-8") as handle:
-                    handle.write(text)
+                _qwen_prepass_trace_write_file(
+                    Path(readable_trace_path),
+                    QWEN_PREPASS_READABLE_TRACE_ROOT,
+                    text,
+                    append=True,
+                )
             except Exception:
                 pass
         if latest_readable_path and latest_readable_path != readable_trace_path:
             try:
-                with open(latest_readable_path, "a", encoding="utf-8") as handle:
-                    handle.write(text)
+                _qwen_prepass_trace_write_file(
+                    Path(latest_readable_path),
+                    QWEN_PREPASS_READABLE_TRACE_ROOT,
+                    text,
+                    append=True,
+                )
             except Exception:
                 pass
         if PREPASS_READABLE_TO_CONSOLE:
@@ -12755,7 +12807,7 @@ def _run_prepass_annotation_qwen(
     _AGENT_ACTIVE_IMAGE_TOKEN = token
     _AGENT_ACTIVE_IMAGE_BASE64 = payload.image_base64
     _AGENT_ACTIVE_DATASET_ID = payload.dataset_id
-    _AGENT_TRACE_FULL_WRITER = _trace_write_full if full_trace_path else None
+    _AGENT_TRACE_FULL_WRITER = _trace_write_full if full_trace_path or latest_full_path else None
     _AGENT_TRACE_READABLE_WRITER = (
         _trace_write_readable if readable_trace_path or latest_readable_path else None
     )

@@ -359,3 +359,84 @@ def test_qwen_caption_io_append_replaces_symlinked_run_log(monkeypatch, tmp_path
     assert not run_jsonl.is_symlink()
     records = [json.loads(line) for line in run_jsonl.read_text(encoding="utf-8").splitlines()]
     assert records[-1]["event"] == "input"
+
+
+def test_qwen_prepass_trace_reset_replaces_symlinked_latest_logs(tmp_path):
+    full_root = tmp_path / "prepass_full"
+    readable_root = tmp_path / "prepass_readable"
+    full_root.mkdir()
+    readable_root.mkdir()
+    outside_jsonl = tmp_path / "outside_latest.jsonl"
+    outside_log = tmp_path / "outside_latest.log"
+    outside_jsonl.write_text("external jsonl\n", encoding="utf-8")
+    outside_log.write_text("external log\n", encoding="utf-8")
+    latest_jsonl = full_root / "latest.jsonl"
+    latest_log = readable_root / "latest.log"
+    try:
+        latest_jsonl.symlink_to(outside_jsonl)
+        latest_log.symlink_to(outside_log)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert api._qwen_prepass_trace_prepare_path(latest_jsonl, full_root, reset=True) == str(
+        latest_jsonl
+    )
+    assert api._qwen_prepass_trace_prepare_path(latest_log, readable_root, reset=True) == str(
+        latest_log
+    )
+    api._qwen_prepass_trace_write_file(
+        latest_jsonl,
+        full_root,
+        "{\"event\":\"start\"}\n",
+        append=True,
+    )
+    api._qwen_prepass_trace_write_file(latest_log, readable_root, "started\n", append=True)
+
+    assert outside_jsonl.read_text(encoding="utf-8") == "external jsonl\n"
+    assert outside_log.read_text(encoding="utf-8") == "external log\n"
+    assert not latest_jsonl.is_symlink()
+    assert not latest_log.is_symlink()
+    assert latest_jsonl.read_text(encoding="utf-8") == "{\"event\":\"start\"}\n"
+    assert latest_log.read_text(encoding="utf-8") == "started\n"
+
+
+def test_qwen_prepass_trace_append_replaces_symlinked_run_log(tmp_path):
+    trace_root = tmp_path / "prepass_traces"
+    trace_root.mkdir()
+    trace_path = trace_root / "prepass_run.jsonl"
+    outside_path = tmp_path / "outside_run.jsonl"
+    outside_path.write_text("external run\n", encoding="utf-8")
+    try:
+        trace_path.symlink_to(outside_path)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    api._qwen_prepass_trace_write_file(
+        trace_path,
+        trace_root,
+        "{\"event\":\"run\"}\n",
+        append=True,
+    )
+
+    assert outside_path.read_text(encoding="utf-8") == "external run\n"
+    assert not trace_path.is_symlink()
+    assert trace_path.read_text(encoding="utf-8") == "{\"event\":\"run\"}\n"
+
+
+def test_qwen_prepass_trace_rejects_symlinked_root(tmp_path):
+    outside_root = tmp_path / "outside_root"
+    outside_root.mkdir()
+    trace_root = tmp_path / "prepass_traces"
+    try:
+        trace_root.symlink_to(outside_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    api._qwen_prepass_trace_write_file(
+        trace_root / "latest.jsonl",
+        trace_root,
+        "{\"event\":\"escaped\"}\n",
+        append=True,
+    )
+
+    assert not (outside_root / "latest.jsonl").exists()

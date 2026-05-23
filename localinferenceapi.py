@@ -1003,6 +1003,12 @@ QWEN_DATASET_CHUNK_MAX_BYTES = _env_int("QWEN_DATASET_CHUNK_MAX_BYTES", 10 * 102
 QWEN_DATASET_UPLOAD_QUOTA_BYTES = _env_int(
     "QWEN_DATASET_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024
 )
+DATA_INGESTION_UPLOAD_MAX_BYTES = _env_int(
+    "DATA_INGESTION_UPLOAD_MAX_BYTES", 10 * 1024 * 1024 * 1024
+)
+DATA_INGESTION_UPLOAD_QUOTA_BYTES = _env_int(
+    "DATA_INGESTION_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024
+)
 CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES = _env_int(
     "CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES", 10 * 1024 * 1024 * 1024
 )
@@ -17969,7 +17975,13 @@ async def _data_ingestion_save_uploads(files: Sequence[Any], target_dir: Path, f
         used.add(safe_name)
         target = target_dir / safe_name
         try:
-            await _write_upload_file(upload, target)
+            await _write_upload_file(
+                upload,
+                target,
+                max_bytes=DATA_INGESTION_UPLOAD_MAX_BYTES,
+                quota_root=target_dir,
+                quota_limit=DATA_INGESTION_UPLOAD_QUOTA_BYTES,
+            )
         finally:
             close_fn = getattr(upload, "close", None)
             if callable(close_fn):

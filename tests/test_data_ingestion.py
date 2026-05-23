@@ -261,6 +261,35 @@ def test_data_ingestion_save_uploads_rejects_symlink_destination(tmp_path):
     assert outside.read_bytes() == b"external"
 
 
+def test_data_ingestion_save_uploads_enforces_file_size_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "DATA_INGESTION_UPLOAD_MAX_BYTES", 3)
+    upload = _FakeUpload("candidate.jpg", b"payload")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(api._data_ingestion_save_uploads([upload], tmp_path, "candidate"))
+
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.detail == "upload_too_large"
+    assert upload.closed is True
+    assert not (tmp_path / "00000_candidate.jpg").exists()
+
+
+def test_data_ingestion_save_uploads_enforces_quota(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "DATA_INGESTION_UPLOAD_MAX_BYTES", 100)
+    monkeypatch.setattr(api, "DATA_INGESTION_UPLOAD_QUOTA_BYTES", 8)
+    (tmp_path / "existing.bin").write_bytes(b"12345")
+    upload = _FakeUpload("candidate.jpg", b"payload")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(api._data_ingestion_save_uploads([upload], tmp_path, "candidate"))
+
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.detail == "upload_quota_exceeded"
+    assert upload.closed is True
+    assert (tmp_path / "existing.bin").read_bytes() == b"12345"
+    assert not (tmp_path / "00000_candidate.jpg").exists()
+
+
 def test_local_salad_training_rejects_bad_encoder_before_saving_uploads(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "DATA_INGESTION_ROOT", tmp_path)
 

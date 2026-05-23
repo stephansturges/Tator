@@ -13,6 +13,7 @@ import queue
 import re
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -322,7 +323,19 @@ class CalibrationJob:
     error: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
-    cancel_event: Any = field(default_factory=__import__("threading").Event)
+    cancel_event: Any = field(default_factory=threading.Event)
+
+
+def _remove_calibration_job_state(calibration_root: Path, job_id: str) -> None:
+    state_path = _calibration_job_state_path(calibration_root, job_id)
+    try:
+        state_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        state_path.parent.rmdir()
+    except Exception:
+        pass
 
 
 def _build_calibration_step_plan(
@@ -937,8 +950,15 @@ def _start_calibration_job(
     with jobs_lock:
         jobs[job.job_id] = job
     _persist_calibration_job_state(job, calibration_root)
-    thread = __import__("threading").Thread(target=run_job_fn, args=(job, payload), daemon=True)
-    thread.start()
+    try:
+        thread = threading.Thread(target=run_job_fn, args=(job, payload), daemon=True)
+        thread.start()
+    except Exception:
+        with jobs_lock:
+            if jobs.get(job.job_id) is job:
+                jobs.pop(job.job_id, None)
+        _remove_calibration_job_state(calibration_root, job.job_id)
+        raise
     return job
 
 

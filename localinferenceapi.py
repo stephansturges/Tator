@@ -26141,8 +26141,6 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
             "planned_layout": planned_layout,
         },
     )
-    with SEGMENTATION_BUILD_JOBS_LOCK:
-        SEGMENTATION_BUILD_JOBS[job_id] = job
 
     def worker() -> None:
         try:
@@ -26521,7 +26519,14 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
         except Exception as exc:  # noqa: BLE001
             _seg_job_update(job, status="failed", message=str(exc), error=str(exc))
 
-    threading.Thread(target=worker, daemon=True, name=f"seg-build-{job_id[:8]}").start()
+    _register_job_and_start_thread(
+        job=job,
+        registry=SEGMENTATION_BUILD_JOBS,
+        lock=SEGMENTATION_BUILD_JOBS_LOCK,
+        target=worker,
+        args=(),
+        name=f"seg-build-{job_id[:8]}",
+    )
     return job
 
 
@@ -28926,7 +28931,18 @@ def _start_training_worker(
             )
             _cleanup_job(job)
 
-    threading.Thread(target=worker, name=f"clip-train-{job.job_id[:8]}", daemon=True).start()
+    try:
+        _register_job_and_start_thread(
+            job=job,
+            registry=TRAINING_JOBS,
+            lock=TRAINING_JOBS_LOCK,
+            target=worker,
+            args=(),
+            name=f"clip-train-{job.job_id[:8]}",
+        )
+    except Exception:
+        _cleanup_job(job)
+        raise
 
 
 async def start_clip_training(
@@ -29250,9 +29266,6 @@ async def start_clip_training(
         extras.append(f"salad={embedding_salad_head_id_norm}")
     job_message += f" [{', '.join(extras)}]"
     _job_log(job, job_message)
-
-    with TRAINING_JOBS_LOCK:
-        TRAINING_JOBS[job_id] = job
 
     _start_training_worker(
         job,

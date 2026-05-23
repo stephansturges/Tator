@@ -1,6 +1,7 @@
 import pytest
 
 import localinferenceapi as api
+from services import calibration as calibration_service
 
 
 class _NoThread:
@@ -281,6 +282,137 @@ def test_auto_label_rolls_back_when_thread_start_fails(monkeypatch):
         )
 
     assert api.AUTO_LABEL_JOBS == {}
+
+
+def test_segmentation_build_rolls_back_when_thread_start_fails(monkeypatch, tmp_path):
+    with api.SEGMENTATION_BUILD_JOBS_LOCK:
+        api.SEGMENTATION_BUILD_JOBS.clear()
+
+    monkeypatch.setattr(
+        api,
+        "_plan_segmentation_build",
+        lambda _request: (
+            {"id": "seg_out"},
+            {"dataset_root": str(tmp_path / "seg_out"), "log_dir": str(tmp_path / "logs")},
+        ),
+    )
+    monkeypatch.setattr(api.threading, "Thread", _FailStartThread)
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        api._start_segmentation_build_job(
+            api.SegmentationBuildRequest(source_dataset_id="dataset_1")
+        )
+
+    assert api.SEGMENTATION_BUILD_JOBS == {}
+
+
+def test_clip_training_worker_rolls_back_when_thread_start_fails(monkeypatch, tmp_path):
+    with api.TRAINING_JOBS_LOCK:
+        api.TRAINING_JOBS.clear()
+
+    temp_dir = tmp_path / "clip_train_staging"
+    temp_dir.mkdir()
+    job = api.ClipTrainingJob(job_id="clip_fail", temp_dir=str(temp_dir))
+    monkeypatch.setattr(api.threading, "Thread", _FailStartThread)
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        api._start_training_worker(
+            job,
+            images_dir=str(tmp_path / "images"),
+            labels_dir=str(tmp_path / "labels"),
+            labelmap_path=None,
+            clip_name=api.DEFAULT_CLIP_MODEL,
+            encoder_type="clip",
+            encoder_model=None,
+            output_dir=str(tmp_path / "classifiers"),
+            labelmap_dir=str(tmp_path / "labelmaps"),
+            model_filename="model.pkl",
+            labelmap_filename="labelmap.pkl",
+            test_size=0.2,
+            random_seed=42,
+            batch_size=64,
+            max_iter=1000,
+            min_per_class=2,
+            class_weight="none",
+            effective_beta=0.9999,
+            C=1.0,
+            device_override=None,
+            solver="saga",
+            classifier_type="logreg",
+            mlp_hidden_sizes="256",
+            mlp_dropout=0.1,
+            mlp_epochs=50,
+            mlp_lr=1e-3,
+            mlp_weight_decay=1e-4,
+            mlp_label_smoothing=0.05,
+            mlp_loss_type="ce",
+            mlp_focal_gamma=2.0,
+            mlp_focal_alpha=None,
+            mlp_sampler="balanced",
+            mlp_mixup_alpha=0.1,
+            mlp_normalize_embeddings=True,
+            mlp_patience=6,
+            mlp_activation="relu",
+            mlp_layer_norm=False,
+            mlp_hard_mining_epochs=5,
+            logit_adjustment_mode="none",
+            logit_adjustment_inference=None,
+            arcface_enabled=False,
+            arcface_margin=0.2,
+            arcface_scale=30.0,
+            supcon_weight=0.0,
+            supcon_temperature=0.07,
+            supcon_projection_dim=128,
+            supcon_projection_hidden=0,
+            embedding_center=False,
+            embedding_standardize=False,
+            preprocess_mode="canonical",
+            canonical_size=336,
+            embedding_crop_mode="padded_square",
+            embedding_crop_padding_ratio=0.08,
+            background_mode="full_crop",
+            embedding_view_mode="single",
+            embedding_adjustment="remove_size_bias",
+            dinov3_pooling="pooler",
+            cradio_pooling="summary",
+            embedding_aggregation="pooled",
+            embedding_salad_head_id="",
+            calibration_mode="none",
+            calibration_max_iters=50,
+            calibration_min_temp=0.5,
+            calibration_max_temp=5.0,
+            reuse_embeddings=False,
+            hard_example_mining=False,
+            hard_mining_misclassified_weight=3.0,
+            hard_mining_low_conf_weight=2.0,
+            hard_mining_low_conf_threshold=0.65,
+            hard_mining_margin_threshold=0.15,
+            convergence_tol=1e-4,
+            bg_class_count=2,
+            cancel_event=job.cancel_event,
+        )
+
+    assert api.TRAINING_JOBS == {}
+    assert not temp_dir.exists()
+
+
+def test_calibration_rolls_back_persisted_state_when_thread_start_fails(monkeypatch, tmp_path):
+    jobs = {}
+    jobs_lock = calibration_service.threading.Lock()
+    monkeypatch.setattr(calibration_service.threading, "Thread", _FailStartThread)
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        calibration_service._start_calibration_job(
+            api.CalibrationRequest(dataset_id="dataset_1"),
+            job_cls=calibration_service.CalibrationJob,
+            jobs=jobs,
+            jobs_lock=jobs_lock,
+            run_job_fn=lambda *_args, **_kwargs: None,
+            calibration_root=tmp_path,
+        )
+
+    assert jobs == {}
+    assert not any(tmp_path.iterdir())
 
 
 def test_yolo_train_missing_dataset_rejects_before_run_dir(monkeypatch, tmp_path):

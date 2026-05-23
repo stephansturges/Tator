@@ -188,6 +188,52 @@ def test_rfdetr_run_dir_rejects_symlinked_job_root_before_create(tmp_path: Path)
     assert list(outside.iterdir()) == []
 
 
+def test_yolo_run_dir_rejects_symlinked_job_parent_before_create(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        _yolo_run_dir_impl(
+            "run1",
+            create=True,
+            job_root=linked_parent / "yolo_runs",
+            sanitize_fn=lambda value: value,
+            http_exception_cls=api.HTTPException,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_run_id"
+    assert list(outside.iterdir()) == []
+
+
+def test_rfdetr_run_dir_rejects_symlinked_job_parent_before_create(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        _rfdetr_run_dir_impl(
+            "run1",
+            create=True,
+            job_root=linked_parent / "rfdetr_runs",
+            sanitize_fn=lambda value: value,
+            http_exception_cls=api.HTTPException,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_run_id"
+    assert list(outside.iterdir()) == []
+
+
 def test_download_yolo_run_skips_symlink_keep_file_escape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -373,6 +419,26 @@ def test_detector_copy_tree_replaces_symlinked_file_destination_without_target_w
     assert not (dest / "safe.txt").is_symlink()
     assert (dest / "safe.txt").read_text(encoding="utf-8") == "safe"
     assert outside.read_text(encoding="utf-8") == "external"
+
+
+def test_detector_copy_tree_rejects_symlinked_dest_parent_without_target_write(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "safe.txt").write_text("safe", encoding="utf-8")
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(RuntimeError, match="detector_path_invalid"):
+        _copy_tree_within_root(src, linked_parent / "dest")
+
+    assert list(outside.iterdir()) == []
 
 
 def test_yolo_prune_run_dir_unlinks_symlink_directory_without_target_delete(tmp_path: Path) -> None:

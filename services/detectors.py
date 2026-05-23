@@ -22,10 +22,53 @@ def _path_identity(path: Path) -> Path:
         return path.absolute()
 
 
-def _prepare_output_file(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.is_symlink():
+def _is_platform_root_symlink(path: Path) -> bool:
+    """Allow macOS tempfile paths that traverse /var -> /private/var."""
+    try:
+        resolved = path.resolve(strict=False)
+    except Exception:
+        return False
+    return (path == Path("/var") and resolved == Path("/private/var")) or (
+        path == Path("/tmp") and resolved == Path("/private/tmp")
+    )
+
+
+def _path_has_symlink_component(path: Path, *, include_leaf: bool = True) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    checks = [candidate] if include_leaf else []
+    checks.extend(candidate.parents)
+    for component in checks:
+        if component == component.parent:
+            continue
+        if _is_platform_root_symlink(component):
+            continue
+        if component.is_symlink():
+            return True
+    return False
+
+
+def _ensure_no_symlink_components(path: Path, *, include_leaf: bool = True) -> None:
+    if _path_has_symlink_component(path, include_leaf=include_leaf):
         raise RuntimeError("detector_path_invalid")
+
+
+def _prepare_detector_dir(path: Path, *, replace_leaf_symlink: bool = False) -> Path:
+    _ensure_no_symlink_components(path.parent)
+    if path.is_symlink():
+        if not replace_leaf_symlink:
+            raise RuntimeError("detector_path_invalid")
+        path.unlink(missing_ok=True)
+    path.mkdir(parents=True, exist_ok=True)
+    _ensure_no_symlink_components(path)
+    if not path.is_dir():
+        raise RuntimeError("detector_path_invalid")
+    return path.resolve(strict=False)
+
+
+def _prepare_output_file(path: Path) -> None:
+    _ensure_no_symlink_components(path.parent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_no_symlink_components(path.parent)
     parent_resolved = path.parent.resolve(strict=True)
     if path.is_symlink():
         path.unlink(missing_ok=True)
@@ -115,11 +158,7 @@ def _copy2_if_different(src: Path, dest: Path) -> None:
 
 def _copy_tree_within_root(src: Path, dest: Path) -> None:
     src_resolved = src.resolve(strict=True)
-    if dest.is_symlink():
-        dest.unlink(missing_ok=True)
-    dest.mkdir(parents=True, exist_ok=True)
-    if dest.is_symlink():
-        raise RuntimeError("detector_path_invalid")
+    _prepare_detector_dir(dest, replace_leaf_symlink=True)
     dest_root = dest.resolve(strict=False)
     for item in sorted(src.rglob("*")):
         try:
@@ -141,13 +180,10 @@ def _copy_tree_within_root(src: Path, dest: Path) -> None:
 
 
 def _detector_job_root(job_root: Path, *, create: bool = False) -> Path:
-    if job_root.is_symlink():
-        raise RuntimeError("detector_path_invalid")
     if create:
-        job_root.mkdir(parents=True, exist_ok=True)
+        return _prepare_detector_dir(job_root)
+    _ensure_no_symlink_components(job_root)
     if job_root.exists() and not job_root.is_dir():
-        raise RuntimeError("detector_path_invalid")
-    if job_root.is_symlink():
         raise RuntimeError("detector_path_invalid")
     return job_root.resolve(strict=False)
 
@@ -505,9 +541,7 @@ def _yolo_write_run_meta_impl(
     meta_name: str,
     time_fn: Callable[[], float],
 ) -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    if run_dir.is_symlink():
-        raise RuntimeError("detector_path_invalid")
+    _prepare_detector_dir(run_dir)
     payload = dict(meta or {})
     now = time_fn()
     payload.setdefault("created_at", now)
@@ -600,9 +634,7 @@ def _rfdetr_write_run_meta_impl(
     meta_name: str,
     time_fn: Callable[[], float],
 ) -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    if run_dir.is_symlink():
-        raise RuntimeError("detector_path_invalid")
+    _prepare_detector_dir(run_dir)
     payload = dict(meta or {})
     now = time_fn()
     payload.setdefault("created_at", now)
@@ -1298,7 +1330,7 @@ def _rfdetr_prepare_dataset_impl(
 ) -> Path:
     """Prepare a RF-DETR-compatible dataset layout with 0-based category ids."""
     dataset_dir = run_dir / "dataset"
-    dataset_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_detector_dir(dataset_dir)
     train_src = dataset_root / "train"
     valid_src = dataset_root / "valid"
     val_src = dataset_root / "val"

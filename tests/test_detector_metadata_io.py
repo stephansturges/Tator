@@ -46,6 +46,21 @@ def test_save_yolo_active_replaces_symlink_targets_without_target_write(tmp_path
     assert outside_final.read_text(encoding="utf-8") == "external final"
 
 
+def test_save_yolo_active_rejects_symlinked_parent_without_write(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(RuntimeError, match="detector_path_invalid"):
+        _save_yolo_active_impl({"run_id": "r1"}, linked_parent / "active.json")
+
+    assert list(outside.iterdir()) == []
+
+
 def test_load_yolo_active_skips_symlink_escape(tmp_path: Path) -> None:
     active_path = tmp_path / "yolo_active.json"
     outside = tmp_path / "outside.json"
@@ -172,6 +187,26 @@ def test_yolo_write_run_meta_replaces_symlink_targets_without_target_write(tmp_p
     assert outside_final.read_text(encoding="utf-8") == "external final"
 
 
+def test_yolo_write_run_meta_rejects_symlinked_parent_without_write(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(RuntimeError, match="detector_path_invalid"):
+        _yolo_write_run_meta_impl(
+            linked_parent / "runs" / "r1",
+            {"status": "ok"},
+            meta_name="run.json",
+            time_fn=lambda: 42.0,
+        )
+
+    assert list(outside.iterdir()) == []
+
+
 def test_rfdetr_write_run_meta_replaces_symlink_targets_without_target_write(tmp_path: Path) -> None:
     run_dir = tmp_path / "rfdetr" / "r1"
     run_dir.mkdir(parents=True)
@@ -194,6 +229,26 @@ def test_rfdetr_write_run_meta_replaces_symlink_targets_without_target_write(tmp
     assert json.loads(meta_path.read_text(encoding="utf-8"))["status"] == "ok"
     assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
     assert outside_final.read_text(encoding="utf-8") == "external final"
+
+
+def test_rfdetr_write_run_meta_rejects_symlinked_parent_without_write(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(RuntimeError, match="detector_path_invalid"):
+        _rfdetr_write_run_meta_impl(
+            linked_parent / "rfdetr" / "r1",
+            {"status": "ok"},
+            meta_name="run.json",
+            time_fn=lambda: 42.0,
+        )
+
+    assert list(outside.iterdir()) == []
 
 
 def test_detector_copy2_if_different_replaces_symlink_to_source(tmp_path: Path) -> None:

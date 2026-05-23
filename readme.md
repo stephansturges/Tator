@@ -570,7 +570,7 @@ the backend are available.
 <details>
 <summary>Update Tracking (maintainers)</summary>
 
-Latest: `880 passed, 17 skipped, 8 warnings`; UI endpoint contracts; local
+Latest: `883 passed, 17 skipped, 8 warnings`; UI endpoint contracts; local
 backend smoke. Detailed rationale lives in commits and focused docs.
 
 </details>

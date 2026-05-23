@@ -1538,7 +1538,10 @@ def _resolve_qwen_run_checkpoint_path(run_dir: Path, raw_path: Any) -> Optional[
 
 def _list_qwen_model_entries() -> List[Dict[str, Any]]:
     """Return registry entries for custom Qwen fine-tunes (if any)."""
-    runs_root = (QWEN_JOB_ROOT / "runs").resolve()
+    try:
+        runs_root = _qwen_training_runs_root(create=False, detail="qwen_run_path_invalid")
+    except HTTPException:
+        return []
     if not runs_root.exists():
         return []
     candidates: List[Dict[str, Any]] = []
@@ -22680,15 +22683,71 @@ def _persist_qwen_run_metadata(
     result_metadata = getattr(result, "metadata", None)
     if isinstance(result_metadata, dict):
         metadata.update(result_metadata)
-    try:
-        result_path.mkdir(parents=True, exist_ok=True)
-        (result_path / QWEN_METADATA_FILENAME).write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
+    _write_qwen_run_metadata_file(result_path, metadata)
     return metadata
+
+
+def _write_qwen_run_metadata_file(result_path: Path, metadata: Dict[str, Any]) -> bool:
+    tmp_path: Optional[Path] = None
+    try:
+        if result_path.is_symlink():
+            return False
+        result_path.mkdir(parents=True, exist_ok=True)
+        if result_path.is_symlink():
+            return False
+        run_root = result_path.resolve(strict=True)
+        if not run_root.is_dir():
+            return False
+        meta_path = run_root / QWEN_METADATA_FILENAME
+        if meta_path.is_symlink():
+            meta_path.unlink(missing_ok=True)
+        elif meta_path.exists() and not meta_path.is_file():
+            return False
+        try:
+            meta_path.resolve(strict=False).relative_to(run_root)
+        except Exception:
+            return False
+        tmp_path = run_root / f".{QWEN_METADATA_FILENAME}.{uuid.uuid4().hex}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp_path, flags, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(metadata, ensure_ascii=False, indent=2))
+        os.replace(tmp_path, meta_path)
+        return True
+    except Exception:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return False
+
+
+def _qwen_training_runs_root(*, create: bool, detail: str) -> Path:
+    job_root_raw = QWEN_JOB_ROOT
+    try:
+        if job_root_raw.is_symlink():
+            raise ValueError("job root is symlink")
+        if create:
+            job_root_raw.mkdir(parents=True, exist_ok=True)
+        if job_root_raw.exists() and not job_root_raw.is_dir():
+            raise ValueError("job root is not a directory")
+        job_root = job_root_raw.resolve(strict=False)
+        runs_raw = job_root_raw / "runs"
+        if runs_raw.is_symlink():
+            raise ValueError("runs root is symlink")
+        if create:
+            runs_raw.mkdir(parents=True, exist_ok=True)
+        if runs_raw.exists() and not runs_raw.is_dir():
+            raise ValueError("runs root is not a directory")
+        runs_root = runs_raw.resolve(strict=False)
+        if not _path_is_within_root_impl(runs_root, job_root):
+            raise ValueError("runs root escapes job root")
+        return runs_root
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
 def _qwen_train_int(
@@ -22955,8 +23014,8 @@ def _build_qwen_config(
     if not val_jsonl.exists():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_val_split_missing")
     run_name = _safe_run_name(payload.run_name, f"qwen_{payload.dataset_id}_{job_id[:8]}")
-    result_path = (QWEN_JOB_ROOT / "runs" / run_name).resolve()
-    runs_root = (QWEN_JOB_ROOT / "runs").resolve()
+    runs_root = _qwen_training_runs_root(create=True, detail="qwen_run_path_invalid")
+    result_path = (runs_root / run_name).resolve(strict=False)
     if not _path_is_within_root_impl(result_path, runs_root):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_run_path_invalid")
     if result_path.exists():

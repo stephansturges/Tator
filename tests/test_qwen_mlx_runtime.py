@@ -421,6 +421,93 @@ def test_qwen_training_metadata_preserves_requested_abliterated_source(tmp_path)
     assert metadata["quantization_backend"] == "awq"
 
 
+def test_qwen_training_config_rejects_symlinked_runs_root(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_dataset(tmp_path, monkeypatch)
+    api.QWEN_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+    outside_runs = tmp_path / "outside_runs"
+    outside_runs.mkdir()
+    try:
+        (api.QWEN_JOB_ROOT / "runs").symlink_to(outside_runs, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    payload = api.QwenTrainRequest(dataset_id="demo", run_name="escaped")
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._build_qwen_config(payload, "job-runs-link")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "qwen_run_path_invalid"
+    assert list(outside_runs.iterdir()) == []
+
+
+def test_qwen_training_metadata_replaces_symlinked_metadata_file(tmp_path):
+    if api.QwenTrainingConfig is None or api.QwenTrainingResult is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    result_path = tmp_path / "run"
+    result_path.mkdir()
+    outside_meta = tmp_path / "outside_metadata.json"
+    outside_meta.write_text("external", encoding="utf-8")
+    metadata_path = result_path / api.QWEN_METADATA_FILENAME
+    try:
+        metadata_path.symlink_to(outside_meta)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    config = api.QwenTrainingConfig(
+        dataset_root=str(tmp_path / "dataset"),
+        result_path=str(result_path),
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        run_name="safe-meta",
+    )
+    result = api.QwenTrainingResult(
+        config=config,
+        checkpoints=[str(result_path / "latest")],
+        latest_checkpoint=str(result_path / "latest"),
+        epochs_ran=1,
+    )
+
+    metadata = api._persist_qwen_run_metadata(result_path, config, result)
+
+    assert outside_meta.read_text(encoding="utf-8") == "external"
+    assert not metadata_path.is_symlink()
+    persisted = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert persisted["id"] == metadata["id"] == "safe-meta"
+
+
+def test_qwen_training_metadata_skips_symlinked_result_dir_without_target_write(tmp_path):
+    if api.QwenTrainingConfig is None or api.QwenTrainingResult is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    outside_run = tmp_path / "outside_run"
+    outside_run.mkdir()
+    result_path = tmp_path / "linked_run"
+    try:
+        result_path.symlink_to(outside_run, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    config = api.QwenTrainingConfig(
+        dataset_root=str(tmp_path / "dataset"),
+        result_path=str(result_path),
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        run_name="linked-run",
+    )
+    result = api.QwenTrainingResult(
+        config=config,
+        checkpoints=[str(result_path / "latest")],
+        latest_checkpoint=str(result_path / "latest"),
+        epochs_ran=1,
+    )
+
+    metadata = api._persist_qwen_run_metadata(result_path, config, result)
+
+    assert metadata["id"] == "linked-run"
+    assert not (outside_run / api.QWEN_METADATA_FILENAME).exists()
+
+
 def test_qwen_model_registry_skips_transformers_runs_without_adapter_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "QWEN_JOB_ROOT", tmp_path / "qwen_jobs")
     broken_latest = api.QWEN_JOB_ROOT / "runs" / "broken" / "latest"

@@ -189,13 +189,15 @@ def canonical_edr_package_id(dataset_id: str, recipe_fingerprint: str) -> str:
 
 
 def _edr_packages_storage_root(packages_root: Path, *, create: bool = False) -> Path:
-    if packages_root.is_symlink():
+    if packages_root.is_symlink() or packages_root.parent.is_symlink():
         raise ValueError("edr_package_path_invalid")
     if create:
         packages_root.mkdir(parents=True, exist_ok=True)
+        if packages_root.is_symlink() or packages_root.parent.is_symlink():
+            raise ValueError("edr_package_path_invalid")
     if packages_root.exists() and not packages_root.is_dir():
         raise ValueError("edr_package_path_invalid")
-    if packages_root.is_symlink():
+    if packages_root.is_symlink() or packages_root.parent.is_symlink():
         raise ValueError("edr_package_path_invalid")
     return packages_root.resolve(strict=False)
 
@@ -1026,10 +1028,13 @@ def load_edr_package_payload(packages_root: Path, package_id: str) -> Dict[str, 
 
 def list_edr_packages(packages_root: Path) -> List[Dict[str, Any]]:
     packages: List[Dict[str, Any]] = []
-    if not packages_root.exists():
+    try:
+        root = _edr_packages_storage_root(packages_root)
+    except ValueError:
         return packages
-    root = packages_root.resolve(strict=False)
-    for entry in sorted(packages_root.iterdir()):
+    if not root.exists():
+        return packages
+    for entry in sorted(root.iterdir()):
         if entry.is_symlink():
             continue
         try:

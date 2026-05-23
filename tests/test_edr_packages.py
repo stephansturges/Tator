@@ -342,6 +342,23 @@ def test_edr_package_dir_rejects_symlinked_packages_root(tmp_path: Path) -> None
     assert list(outside.iterdir()) == []
 
 
+def test_edr_package_dir_rejects_symlinked_packages_parent_without_write(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    packages_parent = tmp_path / "linked_parent"
+    try:
+        packages_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(ValueError, match="edr_package_path_invalid"):
+        edr_package_dir(packages_parent / "edr_packages", "pkg1", create=True)
+
+    assert list(outside.iterdir()) == []
+
+
 def test_edr_package_dir_rejects_symlink_package_dir_escape(tmp_path: Path) -> None:
     packages_root = tmp_path / "edr_packages"
     packages_root.mkdir()
@@ -369,6 +386,25 @@ def test_list_edr_packages_skips_symlinked_package_dir_escape(tmp_path: Path) ->
     )
     try:
         (packages_root / "pkg1").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert list_edr_packages(packages_root) == []
+
+
+def test_list_edr_packages_skips_symlinked_packages_root(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_packages"
+    package_root = outside / "pkg1"
+    package_root.mkdir(parents=True)
+    (package_root / EDR_PACKAGE_META_NAME).write_text(
+        json.dumps({"id": "pkg1", "updated_at": 1}),
+        encoding="utf-8",
+    )
+    packages_root = tmp_path / "edr_packages"
+    try:
+        packages_root.symlink_to(outside, target_is_directory=True)
     except OSError as exc:
         pytest.skip(f"symlink unsupported: {exc}")
 

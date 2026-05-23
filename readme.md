@@ -961,6 +961,10 @@ job-start validation, and the Mac YOLO training work.
 - Direct caption/text-label writes now share the same lock contract: they remain
   available for datasets with no active annotation session, but require the
   matching annotation session ID while an annotation lock is active.
+- Qwen dataset generation from YOLO now uses the annotation-effective dataset
+  view instead of raw label files only, so linked-dataset overlay edits, flat
+  YOLO layouts, nested image paths, and registry-stored glossary metadata carry
+  into the generated Qwen `annotations.jsonl`.
 - Local validation for this checkpoint used:
 
 ```bash

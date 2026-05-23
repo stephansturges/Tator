@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 import localinferenceapi as api
 
@@ -353,6 +354,12 @@ def _active_lock(session_id: str = "sess-1") -> dict:
         "session_id": session_id,
         "expires_at": time.time() + 300.0,
     }
+
+
+def _write_test_image(path: Path, size: tuple[int, int] = (100, 100)) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.new("RGB", size, color=(20, 40, 80))
+    image.save(path)
 
 
 def test_manifest_does_not_expose_meta_path(tmp_path, monkeypatch) -> None:
@@ -949,6 +956,62 @@ def test_set_text_label_allows_direct_write_without_active_lock(tmp_path, monkey
         / "img.txt"
     )
     assert overlay_text.read_text(encoding="utf-8") == "direct caption"
+
+
+def test_build_qwen_dataset_from_yolo_uses_flat_annotation_overlay_and_registry_glossary(
+    tmp_path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "linked_source"
+    _write_test_image(dataset_root / "images" / "nested" / "img.jpg")
+    (dataset_root / "labels" / "nested").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "labels" / "nested" / "img.txt").write_text(
+        "0 0.5 0.5 0.2 0.2\n", encoding="utf-8"
+    )
+    (dataset_root / "labelmap.txt").write_text("old\nnew\n", encoding="utf-8")
+
+    registry_root = tmp_path / "registry" / "ds"
+    overlay_root = registry_root / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    (overlay_root / "labels" / "train" / "nested").mkdir(parents=True, exist_ok=True)
+    (overlay_root / "labels" / "train" / "nested" / "img.txt").write_text(
+        "1 0.5 0.5 0.4 0.4\n", encoding="utf-8"
+    )
+    registry_root.mkdir(parents=True, exist_ok=True)
+    (registry_root / api.DATASET_META_NAME).write_text(
+        json.dumps({"id": "ds", "labelmap_glossary": "new: overlay class"}),
+        encoding="utf-8",
+    )
+
+    qwen_root = tmp_path / "qwen"
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", qwen_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds",
+            "label": "ds",
+            "dataset_root": str(dataset_root),
+            "registry_root": str(registry_root),
+            "storage_mode": "linked",
+            "linked_root": str(dataset_root),
+            "yolo_layout": "flat",
+            "yolo_ready": True,
+            "yolo_labelmap_path": str(dataset_root / "labelmap.txt"),
+            "classes": ["old", "new"],
+            "context": "site imagery",
+        },
+    )
+
+    out = api.build_qwen_dataset_from_yolo("ds")
+
+    assert out["train_count"] == 1
+    assert out["val_count"] == 0
+    assert out["labelmap_glossary"] == "new: overlay class"
+    ann_path = qwen_root / out["id"] / "train" / "annotations.jsonl"
+    annotation = json.loads(ann_path.read_text(encoding="utf-8").strip())
+    assert annotation["image"] == "nested/img.jpg"
+    assert annotation["detections"][0]["label"] == "new"
+    assert annotation["detections"][0]["bbox"] == [30, 30, 70, 70]
+    assert (qwen_root / out["id"] / "train" / "nested" / "img.jpg").exists()
 
 
 def test_register_path_dedupes_existing_linked_entry(tmp_path, monkeypatch) -> None:

@@ -14882,18 +14882,21 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
     entry = _resolve_dataset_entry(dataset_id)
     if not entry.get("yolo_ready"):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_not_yolo_ready")
-    dataset_root = Path(entry["dataset_root"])
+    dataset_root = _dataset_effective_root_from_entry(entry)
+    storage_root = _dataset_meta_storage_root_from_entry(entry)
     labelmap_path = Path(entry.get("yolo_labelmap_path") or dataset_root / "labelmap.txt")
-    if not labelmap_path.exists():
+    labelmap = [str(item).strip() for item in (entry.get("classes") or []) if str(item).strip()]
+    if labelmap_path.exists():
+        labelmap = [
+            line.strip()
+            for line in labelmap_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    if not labelmap:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_missing")
-    labelmap = [
-        line.strip()
-        for line in labelmap_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
     context = entry.get("context") or ""
     glossary = _load_dataset_glossary(
-        dataset_root,
+        storage_root,
         load_sam3_meta=lambda dataset_dir: _load_sam3_dataset_metadata_impl(
             dataset_dir,
             meta_name=SAM3_DATASET_META_NAME,
@@ -14906,11 +14909,33 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
             dataset_dir, meta_name=QWEN_METADATA_FILENAME, load_json_metadata_fn=_load_json_metadata
         ),
     )
+    if not glossary and storage_root != dataset_root:
+        glossary = _load_dataset_glossary(
+            dataset_root,
+            load_sam3_meta=lambda dataset_dir: _load_sam3_dataset_metadata_impl(
+                dataset_dir,
+                meta_name=SAM3_DATASET_META_NAME,
+                load_json_metadata_fn=_load_json_metadata,
+                persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
+                    dataset_dir_inner, metadata, meta_name=SAM3_DATASET_META_NAME, logger=logger
+                ),
+            ),
+            load_qwen_meta=lambda dataset_dir: _load_qwen_dataset_metadata_impl(
+                dataset_dir, meta_name=QWEN_METADATA_FILENAME, load_json_metadata_fn=_load_json_metadata
+            ),
+        )
     if not glossary:
-        for _path, meta in _load_dataset_meta_candidates(dataset_root):
-            raw = meta.get("labelmap_glossary")
-            if raw:
-                glossary = _normalize_labelmap_glossary(raw)
+        seen_roots: Set[Path] = set()
+        for root in (storage_root, dataset_root):
+            if root in seen_roots:
+                continue
+            seen_roots.add(root)
+            for _path, meta in _load_dataset_meta_candidates(root):
+                raw = meta.get("labelmap_glossary")
+                if raw:
+                    glossary = _normalize_labelmap_glossary(raw)
+                    break
+            if glossary:
                 break
     qwen_id = _unique_dataset_name(dataset_id, root=QWEN_DATASET_ROOT)
     target_root = QWEN_DATASET_ROOT / qwen_id
@@ -14923,62 +14948,70 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
     context_line = _build_qwen_context(labelmap, context)
     counts = {"train": 0, "val": 0}
 
-    def _process_split(split: str):
-        images_dir = dataset_root / split / "images"
-        labels_dir = dataset_root / split / "labels"
-        if not images_dir.exists() or not labels_dir.exists():
-            return
+    def _process_image(split: str, image_relpath: Path, image_path: Path):
         ann_path = target_root / split / "annotations.jsonl"
-        with ann_path.open("a", encoding="utf-8") as ann_handle:
-            for label_path in labels_dir.rglob("*.txt"):
-                image_path = _image_path_for_label_impl(label_path, images_dir)
-                if image_path is None or not image_path.exists():
-                    continue
-                try:
-                    img = Image.open(image_path)
-                    img_w, img_h = img.size
-                    img.close()
-                except Exception:
-                    continue
-                detections = []
-                lines = label_path.read_text(encoding="utf-8").splitlines()
-                for line in lines:
-                    parts = line.strip().split()
-                    if len(parts) < 5:
-                        continue
-                    try:
-                        cls_idx = int(float(parts[0]))
-                    except Exception:
-                        continue
-                    if cls_idx < 0 or cls_idx >= len(labelmap):
-                        continue
-                    bbox = _yolo_label_to_bbox(line, img_w=img_w, img_h=img_h)
-                    if not bbox:
-                        continue
-                    x1, y1, x2, y2 = bbox
-                    detections.append(
-                        {
-                            "label": labelmap[cls_idx],
-                            "bbox": [x1, y1, x2, y2],
-                            "point": [int(round((x1 + x2) / 2)), int(round((y1 + y2) / 2))],
-                        }
-                    )
-                if not detections:
-                    continue
-                rel_name = image_path.name
-                target_image = target_root / split / rel_name
-                if not target_image.exists():
-                    _copy2_if_different(image_path, target_image)
-                payload = {
-                    "image": rel_name,
-                    "context": context_line,
-                    "detections": detections,
+        try:
+            image_resolved = image_path.resolve()
+        except Exception:
+            return
+        if not _path_is_within_root_impl(image_resolved, dataset_root.resolve()):
+            return
+        try:
+            img = Image.open(image_resolved)
+            img_w, img_h = img.size
+            img.close()
+        except Exception:
+            return
+        detections = []
+        lines = _annotation_effective_label_lines(entry, split, image_relpath)
+        for line in lines:
+            parts = line.strip().split()
+            if len(parts) < 5:
+                continue
+            try:
+                cls_idx = int(float(parts[0]))
+            except Exception:
+                continue
+            if cls_idx < 0 or cls_idx >= len(labelmap):
+                continue
+            bbox = _yolo_label_to_bbox(line, img_w=img_w, img_h=img_h)
+            if not bbox:
+                continue
+            x1, y1, x2, y2 = bbox
+            detections.append(
+                {
+                    "label": labelmap[cls_idx],
+                    "bbox": [x1, y1, x2, y2],
+                    "point": [int(round((x1 + x2) / 2)), int(round((y1 + y2) / 2))],
                 }
-                ann_handle.write(json.dumps(payload) + "\n")
-                counts[split] += 1
+            )
+        if not detections:
+            return
+        rel_name = image_relpath.as_posix()
+        target_image = (target_root / split / image_relpath).resolve()
+        if not _path_is_within_root_impl(target_image, (target_root / split).resolve()):
+            return
+        if not target_image.exists():
+            _copy2_if_different(image_resolved, target_image)
+        payload = {
+            "image": rel_name,
+            "context": context_line,
+            "detections": detections,
+        }
+        with ann_path.open("a", encoding="utf-8") as ann_handle:
+            ann_handle.write(json.dumps(payload) + "\n")
+        counts[split] += 1
 
-    _process_split("train")
-    _process_split("val")
+    for row in _annotation_collect_images(entry):
+        try:
+            split = _annotation_normalise_split(row.get("split"))
+            image_relpath = _annotation_normalise_image_relpath(row.get("image_relpath"))
+        except HTTPException:
+            continue
+        image_path_raw = row.get("image_path")
+        if image_path_raw is None:
+            continue
+        _process_image(split, image_relpath, Path(str(image_path_raw)))
 
     (target_root / "labelmap.txt").write_text("\n".join(labelmap) + "\n", encoding="utf-8")
     metadata = {

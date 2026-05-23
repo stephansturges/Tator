@@ -406,6 +406,52 @@ def test_cradio_head_encoding_uses_saved_pooling(monkeypatch):
     assert np.allclose(np.linalg.norm(feats, axis=1), 1.0)
 
 
+def test_clip_head_encoding_uses_saved_clip_model_without_mutating_active(monkeypatch):
+    loaded = []
+    encoded = []
+
+    class ActiveClipModel:
+        def encode_image(self, _batch):
+            raise AssertionError("active CLIP backbone should not be used")
+
+    class SavedClipModel:
+        def __init__(self, name):
+            self.name = name
+
+        def encode_image(self, batch):
+            encoded.append(self.name)
+            return torch.full((int(batch.shape[0]), 2), 3.0, dtype=torch.float32)
+
+    def fake_load(name, device=None):
+        loaded.append((name, device))
+        return SavedClipModel(name), lambda _img: torch.zeros(3, 8, 8)
+
+    monkeypatch.setattr(api, "clip_model", ActiveClipModel())
+    monkeypatch.setattr(api, "clip_preprocess", lambda _img: torch.ones(3, 8, 8))
+    monkeypatch.setattr(api, "clip_model_name", "ViT-B/32")
+    monkeypatch.setattr(api, "_clip_reload_needed", False)
+    api._agent_clip_backbones.clear()
+    api._agent_clip_locks.clear()
+    monkeypatch.setattr(api.clip, "load", fake_load)
+
+    feats = api._encode_pil_batch_for_head(
+        [Image.new("RGB", (8, 8), (10, 20, 30))],
+        head={
+            "encoder_type": "clip",
+            "encoder_model": "ViT-L/14",
+            "normalize_embeddings": False,
+        },
+        device_override="cpu",
+    )
+
+    assert loaded == [("ViT-L/14", "cpu")]
+    assert encoded == ["ViT-L/14"]
+    assert feats.shape == (1, 2)
+    assert np.allclose(feats, np.asarray([[3.0, 3.0]], dtype=np.float32))
+    assert api.clip_model_name == "ViT-B/32"
+    assert isinstance(api.clip_model, ActiveClipModel)
+
+
 def test_class_analysis_capabilities_expose_only_normal_recipe_controls():
     caps = api._class_analysis_capabilities()
 

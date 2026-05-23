@@ -255,6 +255,38 @@ def test_resume_classifier_backbone_reloads_active_cradio(monkeypatch):
     assert api._clip_reload_needed is False
 
 
+def test_resume_classifier_backbone_reloads_active_clip_model_name(monkeypatch):
+    loaded = []
+    fake_model = object()
+    fake_preprocess = object()
+
+    monkeypatch.setattr(api, "active_encoder_type", "clip")
+    monkeypatch.setattr(api, "active_encoder_model", "ViT-L/14")
+    monkeypatch.setattr(api, "clip_model", None)
+    monkeypatch.setattr(api, "clip_preprocess", None)
+    monkeypatch.setattr(api, "clip_model_name", "ViT-B/32")
+    monkeypatch.setattr(api, "clip_initialized", False)
+    monkeypatch.setattr(api, "_clip_reload_needed", True)
+    monkeypatch.setattr(api, "clf", object())
+    monkeypatch.setattr(
+        api.clip,
+        "load",
+        lambda name, device=None: (
+            loaded.append((name, device)) or fake_model,
+            fake_preprocess,
+        ),
+    )
+
+    api._resume_classifier_backbone()
+
+    assert loaded == [("ViT-L/14", api.device)]
+    assert api.clip_model is fake_model
+    assert api.clip_preprocess is fake_preprocess
+    assert api.clip_model_name == "ViT-L/14"
+    assert api.clip_initialized is True
+    assert api._clip_reload_needed is False
+
+
 def test_auto_class_local_salad_runtime_prefers_mlx_when_requested(tmp_path, monkeypatch):
     if not local_salad_mlx_available():
         pytest.skip("MLX is not available in this environment")

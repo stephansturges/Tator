@@ -2901,8 +2901,10 @@ def _suspend_clip_backbone() -> None:
     _clip_reload_needed = state["_clip_reload_needed"]
 
 
-def _resume_clip_backbone() -> None:
-    global clip_model, clip_preprocess, clip_initialized, _clip_reload_needed
+def _resume_clip_backbone(target_model_name: Optional[str] = None) -> None:
+    global clip_model, clip_preprocess, clip_initialized, clip_model_name, _clip_reload_needed
+    if target_model_name:
+        clip_model_name = str(target_model_name).strip() or clip_model_name
     state = {
         "clip_model": clip_model,
         "clip_preprocess": clip_preprocess,
@@ -2922,6 +2924,7 @@ def _resume_clip_backbone() -> None:
     clip_model = state["clip_model"]
     clip_preprocess = state["clip_preprocess"]
     clip_initialized = state["clip_initialized"]
+    clip_model_name = state["clip_model_name"]
     _clip_reload_needed = state["_clip_reload_needed"]
 
 
@@ -2970,6 +2973,11 @@ def _resume_classifier_backbone() -> None:
         "active_encoder_type": active_encoder_type,
         "active_encoder_model": active_encoder_model,
     }
+
+    def _resume_clip_from_state() -> None:
+        _resume_clip_backbone(state.get("clip_model_name"))
+        state["_clip_reload_needed"] = _clip_reload_needed
+
     _resume_classifier_backbone_impl(
         state=state,
         device=device,
@@ -2979,7 +2987,7 @@ def _resume_classifier_backbone() -> None:
             device, cuda_disabled=dinov3_cuda_disabled
         ),
         load_dinov3_fn=_load_dinov3_backbone,
-        resume_clip_fn=_resume_clip_backbone,
+        resume_clip_fn=_resume_clip_from_state,
     )
     dinov3_model = state["dinov3_model"]
     dinov3_processor = state["dinov3_processor"]
@@ -8364,6 +8372,31 @@ def _postprocess_features_for_head(
     return feats_np.astype(np.float32, copy=False)
 
 
+def _cached_clip_backbone_for_head(
+    clip_name: str,
+    device_name: str,
+) -> Tuple[Optional[Any], Optional[Any]]:
+    model_name = str(clip_name or DEFAULT_CLIP_MODEL).strip() or DEFAULT_CLIP_MODEL
+    device_key = str(device_name or device)
+    key = (model_name, device_key)
+    with _agent_clip_backbones_lock:
+        lock = _agent_clip_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _agent_clip_locks[key] = lock
+    with lock:
+        cached = _agent_clip_backbones.get(key)
+        if cached is not None:
+            return cached
+        try:
+            model_obj, preprocess_obj = clip.load(model_name, device=device_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load CLIP backbone %s for classifier head: %s", model_name, exc)
+            return None, None
+        _agent_clip_backbones[key] = (model_obj, preprocess_obj)
+        return model_obj, preprocess_obj
+
+
 def _encode_pil_batch_for_head(
     images: Sequence[Image.Image],
     *,
@@ -8463,16 +8496,43 @@ def _encode_pil_batch_for_head(
             )
             features.append(np.asarray(feats_np, dtype=np.float32))
     else:
-        if clip_model is None or clip_preprocess is None or _clip_reload_needed:
+        requested_clip_name = str(
+            head.get("encoder_model") or head.get("clip_model") or clip_model_name or DEFAULT_CLIP_MODEL
+        ).strip() or DEFAULT_CLIP_MODEL
+        device_name = str(device_override or device)
+        model_obj = None
+        preprocess_obj = None
+        if (
+            clip_model is not None
+            and clip_preprocess is not None
+            and not _clip_reload_needed
+            and clip_model_name == requested_clip_name
+        ):
+            model_obj = clip_model
+            preprocess_obj = clip_preprocess
+        elif clip_model_name == requested_clip_name and (
+            clip_model is None or clip_preprocess is None or _clip_reload_needed
+        ):
             _resume_clip_backbone()
-        if clip_model is None or clip_preprocess is None:
+            if (
+                clip_model is not None
+                and clip_preprocess is not None
+                and clip_model_name == requested_clip_name
+            ):
+                model_obj = clip_model
+                preprocess_obj = clip_preprocess
+        if model_obj is None or preprocess_obj is None:
+            model_obj, preprocess_obj = _cached_clip_backbone_for_head(
+                requested_clip_name,
+                device_name,
+            )
+        if model_obj is None or preprocess_obj is None:
             return None
-        device_name = device_override or device
         for idx in range(0, len(images), batch_size):
             batch = images[idx : idx + batch_size]
-            batch_tensor = torch.stack([clip_preprocess(img) for img in batch]).to(device_name)
+            batch_tensor = torch.stack([preprocess_obj(img) for img in batch]).to(device_name)
             with torch.no_grad():
-                feats = clip_model.encode_image(batch_tensor).float()
+                feats = model_obj.encode_image(batch_tensor).float()
             feats_np = feats.detach().cpu().numpy()
             features.append(feats_np)
     if not features:

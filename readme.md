@@ -792,6 +792,12 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experi
   class list. `set_active_model` validates the normalized runtime head before
   mutating active globals, so a malformed classifier cannot replace a working
   active model with a stale or unavailable head.
+- Hardened CLIP backbone replay for explicit classifier heads. DINOv3 and
+  C-RADIO already reload the encoder recorded in the classifier metadata; CLIP
+  scoring now does the same by using the saved `encoder_model` / `clip_model`
+  for non-active classifier IDs without mutating the active CLIP model. The
+  post-training resume path also reloads the active CLIP model name instead of
+  falling back to a stale pre-training backbone.
 - Validation used:
 
 ```bash

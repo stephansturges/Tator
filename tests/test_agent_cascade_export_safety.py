@@ -7,7 +7,11 @@ from typing import Any, Dict
 
 import pytest
 
-from services.agent_cascades import _ensure_cascade_zip_impl
+from services.agent_cascades import (
+    _delete_agent_cascade_impl,
+    _ensure_cascade_zip_impl,
+    _list_agent_cascades_impl,
+)
 
 
 def _within_root(path: Path, root: Path) -> bool:
@@ -166,5 +170,75 @@ def test_ensure_cascade_zip_rebuilds_corrupt_existing_zip(tmp_path: Path) -> Non
     )
 
     assert zip_path == corrupt_zip
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        assert "cascade.json" in zf.namelist()
+
+
+def test_delete_agent_cascade_unlinks_symlinked_zip_without_touching_target(
+    tmp_path: Path,
+) -> None:
+    cascades_root = tmp_path / "cascades"
+    outside = tmp_path / "outside.zip"
+    cascades_root.mkdir()
+    outside.write_bytes(b"keep")
+    link_path = cascades_root / "ac_link.zip"
+    try:
+        link_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _delete_agent_cascade_impl(
+        "ac_link",
+        cascades_root=cascades_root,
+        path_is_within_root_fn=_within_root,
+    )
+
+    assert not link_path.is_symlink()
+    assert outside.read_bytes() == b"keep"
+
+
+def test_list_agent_cascades_skips_symlinked_json_escape(tmp_path: Path) -> None:
+    cascades_root = tmp_path / "cascades"
+    outside = tmp_path / "outside.json"
+    cascades_root.mkdir()
+    outside.write_text(json.dumps({"id": "outside", "created_at": 1}), encoding="utf-8")
+    try:
+        (cascades_root / "outside.json").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    cascades = _list_agent_cascades_impl(cascades_root=cascades_root)
+
+    assert cascades == []
+
+
+def test_ensure_cascade_zip_replaces_symlinked_existing_zip(tmp_path: Path) -> None:
+    cascades_root = tmp_path / "cascades"
+    recipes_root = tmp_path / "recipes"
+    classifiers_root = tmp_path / "classifiers"
+    outside = tmp_path / "outside.zip"
+    cascades_root.mkdir()
+    recipes_root.mkdir()
+    classifiers_root.mkdir()
+    outside.write_bytes(b"keep")
+    link_path = cascades_root / "ac_symlink.zip"
+    try:
+        link_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    zip_path = _ensure_cascade_zip_impl(
+        {"id": "ac_symlink", "label": "demo", "steps": [], "dedupe": {}},
+        cascades_root=cascades_root,
+        recipes_root=recipes_root,
+        classifiers_root=classifiers_root,
+        path_is_within_root_fn=_within_root,
+        ensure_recipe_zip_fn=lambda _recipe: recipes_root / "noop.zip",
+        load_recipe_fn=lambda _rid: {"id": _rid},
+        resolve_classifier_fn=lambda _rel: None,
+    )
+
+    assert zip_path == link_path
+    assert outside.read_bytes() == b"keep"
     with zipfile.ZipFile(zip_path, "r") as zf:
         assert "cascade.json" in zf.namelist()

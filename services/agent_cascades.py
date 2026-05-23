@@ -22,6 +22,14 @@ from starlette.status import (
 from utils.status_compat import HTTP_413_CONTENT_TOO_LARGE
 
 
+def _path_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except Exception:
+        return False
+    return True
+
+
 def _persist_agent_cascade_impl(
     label: str,
     payload: Dict[str, Any],
@@ -81,8 +89,14 @@ def _load_agent_cascade_impl(
 
 def _list_agent_cascades_impl(*, cascades_root: Path) -> List[Dict[str, Any]]:
     cascades: List[Dict[str, Any]] = []
-    for path in cascades_root.glob("*.json"):
+    root = cascades_root.resolve()
+    for path in root.glob("*.json"):
         try:
+            if path.is_symlink():
+                continue
+            resolved_path = path.resolve()
+            if not _path_within_root(resolved_path, root) or not resolved_path.is_file():
+                continue
             with path.open("r", encoding="utf-8") as fp:
                 data = json.load(fp)
             if not isinstance(data, dict):
@@ -104,15 +118,23 @@ def _delete_agent_cascade_impl(
     cascades_root: Path,
     path_is_within_root_fn,
 ) -> None:
-    json_path = (cascades_root / f"{cascade_id}.json").resolve()
-    zip_path = (cascades_root / f"{cascade_id}.zip").resolve()
-    if not path_is_within_root_fn(json_path, cascades_root.resolve()):
+    root = cascades_root.resolve()
+    json_raw = cascades_root / f"{cascade_id}.json"
+    zip_raw = cascades_root / f"{cascade_id}.zip"
+    json_path = json_raw.resolve()
+    if not path_is_within_root_fn(json_path, root):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
     removed_any = False
-    for path in (json_path, zip_path):
-        if path.exists():
+    for raw_path in (json_raw, zip_raw):
+        try:
+            resolved_path = raw_path.resolve()
+        except Exception:
+            resolved_path = raw_path
+        if not raw_path.is_symlink() and not path_is_within_root_fn(resolved_path, root):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+        if raw_path.exists() or raw_path.is_symlink():
             try:
-                path.unlink()
+                raw_path.unlink()
                 removed_any = True
             except Exception:
                 pass
@@ -134,15 +156,28 @@ def _ensure_cascade_zip_impl(
     cascade_id = cascade.get("id")
     if not cascade_id:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_missing_id")
-    zip_path = (cascades_root / f"{cascade_id}.zip").resolve()
-    if zip_path.exists():
+    cascade_id_text = str(cascade_id).strip()
+    cascade_id_path = Path(cascade_id_text)
+    if not cascade_id_text or cascade_id_path.is_absolute() or ".." in cascade_id_path.parts:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    root = cascades_root.resolve()
+    zip_raw = root / f"{cascade_id_text}.zip"
+    if zip_raw.is_symlink():
         try:
-            with zipfile.ZipFile(zip_path, "r") as zf:
+            zip_raw.unlink()
+        except Exception:
+            pass
+    zip_path = zip_raw.resolve(strict=False)
+    if not path_is_within_root_fn(zip_path, root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    if zip_raw.exists():
+        try:
+            with zipfile.ZipFile(zip_raw, "r") as zf:
                 if zf.testzip() is None:
-                    return zip_path
+                    return zip_raw
         except Exception:
             try:
-                zip_path.unlink()
+                zip_raw.unlink()
             except Exception:
                 pass
 
@@ -174,7 +209,7 @@ def _ensure_cascade_zip_impl(
         return rel
 
     # Build zip bundle.
-    temp_zip_path = zip_path.with_suffix(f"{zip_path.suffix}.{uuid.uuid4().hex}.tmp")
+    temp_zip_path = zip_raw.with_suffix(f"{zip_raw.suffix}.{uuid.uuid4().hex}.tmp")
     try:
         clean_cascade = json.loads(json.dumps(cascade))
         for key in list(clean_cascade.keys()):
@@ -242,14 +277,14 @@ def _ensure_cascade_zip_impl(
                         zf.write(meta_path_resolved, arcname=meta_rel)
                     except Exception:
                         pass
-        temp_zip_path.replace(zip_path)
+        temp_zip_path.replace(zip_raw)
     except Exception as exc:  # noqa: BLE001
         try:
             temp_zip_path.unlink()
         except Exception:
             pass
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_cascade_zip_failed:{exc}") from exc
-    return zip_path
+    return zip_raw
 
 
 def _import_agent_cascade_zip_obj_impl(

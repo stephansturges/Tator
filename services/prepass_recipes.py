@@ -621,25 +621,46 @@ def _delete_agent_recipe_impl(
     path_is_within_root_fn,
     http_exception_cls,
 ) -> None:
-    json_path = (recipes_root / f"{recipe_id}.json").resolve()
-    zip_path = (recipes_root / f"{recipe_id}.zip").resolve()
-    recipe_dir = (recipes_root / recipe_id).resolve()
-    if not path_is_within_root_fn(json_path, recipes_root.resolve()):
+    root = recipes_root.resolve()
+    json_raw = recipes_root / f"{recipe_id}.json"
+    zip_raw = recipes_root / f"{recipe_id}.zip"
+    recipe_dir_raw = recipes_root / recipe_id
+    json_path = json_raw.resolve()
+    if not path_is_within_root_fn(json_path, root):
         raise http_exception_cls(status_code=400, detail="agent_recipe_path_invalid")
     removed_any = False
-    for path in (json_path, zip_path):
-        if path.exists():
+    for raw_path in (json_raw, zip_raw):
+        try:
+            resolved_path = raw_path.resolve()
+        except Exception:
+            resolved_path = raw_path
+        if not raw_path.is_symlink() and not path_is_within_root_fn(resolved_path, root):
+            raise http_exception_cls(status_code=400, detail="agent_recipe_path_invalid")
+        if raw_path.exists() or raw_path.is_symlink():
             try:
-                path.unlink()
+                raw_path.unlink()
                 removed_any = True
             except Exception:
                 pass
-    if recipe_dir.exists() and recipe_dir.is_dir():
+    if recipe_dir_raw.is_symlink():
         try:
-            shutil.rmtree(recipe_dir)
+            recipe_dir_raw.unlink()
             removed_any = True
         except Exception:
             pass
+    else:
+        try:
+            recipe_dir = recipe_dir_raw.resolve()
+        except Exception:
+            recipe_dir = recipe_dir_raw
+        if not path_is_within_root_fn(recipe_dir, root):
+            raise http_exception_cls(status_code=400, detail="agent_recipe_path_invalid")
+        if recipe_dir.exists() and recipe_dir.is_dir():
+            try:
+                shutil.rmtree(recipe_dir)
+                removed_any = True
+            except Exception:
+                pass
     if not removed_any:
         raise http_exception_cls(status_code=404, detail="agent_recipe_not_found")
 
@@ -650,8 +671,14 @@ def _list_agent_recipes_impl(
     dataset_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     recipes: List[Dict[str, Any]] = []
-    for path in recipes_root.glob("*.json"):
+    root = recipes_root.resolve()
+    for path in root.glob("*.json"):
         try:
+            if path.is_symlink():
+                continue
+            resolved_path = path.resolve()
+            if not _path_within_root(resolved_path, root) or not resolved_path.is_file():
+                continue
             with path.open("r", encoding="utf-8") as fp:
                 data = json.load(fp)
             if dataset_id and data.get("dataset_id") != dataset_id:
@@ -1326,21 +1353,39 @@ def _ensure_recipe_zip_impl(
     recipe_id = recipe.get("id")
     if not recipe_id:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_missing_id")
-    zip_path = (recipes_root / f"{recipe_id}.zip").resolve()
-    if zip_path.exists():
+    recipe_id_text = str(recipe_id).strip()
+    recipe_id_path = Path(recipe_id_text)
+    if not recipe_id_text or recipe_id_path.is_absolute() or ".." in recipe_id_path.parts:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
+    root = recipes_root.resolve()
+    zip_raw = root / f"{recipe_id_text}.zip"
+    if zip_raw.is_symlink():
         try:
-            with zipfile.ZipFile(zip_path, "r") as zf:
+            zip_raw.unlink()
+        except Exception:
+            pass
+    zip_path = zip_raw.resolve(strict=False)
+    if not _path_within_root(zip_path, root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
+    if zip_raw.exists():
+        try:
+            with zipfile.ZipFile(zip_raw, "r") as zf:
                 if zf.testzip() is None:
-                    return zip_path
+                    return zip_raw
         except Exception:
             try:
-                zip_path.unlink()
+                zip_raw.unlink()
             except Exception:
                 pass
-    recipe_dir = recipes_root / recipe_id
+    recipe_dir = root / recipe_id_text
+    if recipe_dir.is_symlink():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
+    recipe_dir_resolved = recipe_dir.resolve(strict=False)
+    if not _path_within_root(recipe_dir_resolved, root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
     crops_dir = recipe_dir / "crops"
     clip_head_dir = recipe_dir / "clip_head"
-    temp_zip_path = zip_path.with_suffix(f"{zip_path.suffix}.{uuid.uuid4().hex}.tmp")
+    temp_zip_path = zip_raw.with_suffix(f"{zip_raw.suffix}.{uuid.uuid4().hex}.tmp")
     try:
         # Never embed crop_base64 blobs inside the portable zip JSON; the PNGs are included separately.
         def _strip_unportable_fields(obj: Any) -> None:
@@ -1380,14 +1425,14 @@ def _ensure_recipe_zip_impl(
                         )
                     except Exception:
                         continue
-        temp_zip_path.replace(zip_path)
+        temp_zip_path.replace(zip_raw)
     except Exception as exc:  # noqa: BLE001
         try:
             temp_zip_path.unlink()
         except Exception:
             pass
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"agent_recipe_zip_failed:{exc}") from exc
-    return zip_path
+    return zip_raw
 
 
 def _import_agent_recipe_zip_bytes_impl(
@@ -1559,7 +1604,16 @@ def _prepass_recipe_dir_impl(
     sanitize_id_fn,
 ) -> Path:
     safe = sanitize_id_fn(recipe_id)
-    path = recipes_root / safe
+    if not safe:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
+    root = recipes_root.resolve()
+    path = root / safe
+    try:
+        resolved_path = path.resolve(strict=False)
+    except Exception:
+        resolved_path = path
+    if not _path_within_root(resolved_path, root) or path.is_symlink():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path
@@ -1694,8 +1748,15 @@ def _list_prepass_recipes_impl(
         return 0.0
 
     recipes: List[Dict[str, Any]] = []
-    for entry in recipes_root.iterdir():
-        if not entry.is_dir():
+    root = recipes_root.resolve()
+    for entry in root.iterdir():
+        if entry.is_symlink():
+            continue
+        try:
+            resolved_entry = entry.resolve()
+        except Exception:
+            continue
+        if not _path_within_root(resolved_entry, root) or not resolved_entry.is_dir():
             continue
         meta = None
         primary_meta_path = entry / meta_filename

@@ -8,9 +8,12 @@ from fastapi import HTTPException
 
 from services.prepass_recipes import (
     _collect_recipe_assets_impl,
+    _delete_agent_recipe_impl,
     _delete_prepass_recipe_impl,
+    _ensure_recipe_zip_impl,
     _export_prepass_recipe_impl,
     _import_prepass_recipe_from_zip_impl,
+    _list_agent_recipes_impl,
     _list_prepass_recipes_impl,
     _load_prepass_recipe_meta,
     _persist_agent_recipe_impl,
@@ -19,6 +22,14 @@ from services.prepass_recipes import (
     _write_prepass_recipe_meta,
     upsert_canonical_edr_saved_recipe_impl,
 )
+
+
+def _within_root(path: Path, root: Path) -> bool:
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def test_prepass_recipe_config_rejects_legacy_cross_iou():
@@ -674,3 +685,91 @@ def test_export_keeps_dataset_id_for_canonical_recipe(tmp_path):
     with zipfile.ZipFile(zip_path) as zf:
         exported_meta = json.loads(zf.read("prepass.meta.json").decode("utf-8"))
     assert exported_meta["config"]["dataset_id"] == "qwen_dataset"
+
+
+def test_list_prepass_recipes_skips_symlinked_recipe_dir_escape(tmp_path: Path) -> None:
+    recipes_root = tmp_path / "recipes"
+    outside = tmp_path / "outside_recipe"
+    recipes_root.mkdir()
+    outside.mkdir()
+    _write_prepass_recipe_meta(
+        outside,
+        {
+            "id": "escaped",
+            "schema_version": 1,
+            "name": "escaped",
+            "config": {},
+            "created_at": 1,
+            "updated_at": 1,
+        },
+    )
+    try:
+        (recipes_root / "escaped").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    recipes = _list_prepass_recipes_impl(
+        recipes_root=recipes_root,
+        meta_filename="prepass.meta.json",
+    )
+
+    assert recipes == []
+
+
+def test_delete_agent_recipe_unlinks_symlinked_recipe_dir_without_touching_target(
+    tmp_path: Path,
+) -> None:
+    recipes_root = tmp_path / "recipes"
+    outside = tmp_path / "outside_recipe"
+    recipes_root.mkdir()
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    link_path = recipes_root / "agent_recipe"
+    try:
+        link_path.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _delete_agent_recipe_impl(
+        "agent_recipe",
+        recipes_root=recipes_root,
+        path_is_within_root_fn=_within_root,
+        http_exception_cls=HTTPException,
+    )
+
+    assert not link_path.is_symlink()
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
+def test_list_agent_recipes_skips_symlinked_json_escape(tmp_path: Path) -> None:
+    recipes_root = tmp_path / "recipes"
+    outside = tmp_path / "outside.json"
+    recipes_root.mkdir()
+    outside.write_text(json.dumps({"id": "outside", "created_at": 1}), encoding="utf-8")
+    try:
+        (recipes_root / "outside.json").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    recipes = _list_agent_recipes_impl(recipes_root=recipes_root)
+
+    assert recipes == []
+
+
+def test_ensure_recipe_zip_rejects_symlinked_recipe_dir_escape(tmp_path: Path) -> None:
+    recipes_root = tmp_path / "recipes"
+    outside = tmp_path / "outside_recipe"
+    recipes_root.mkdir()
+    outside.mkdir()
+    (outside / "crops").mkdir()
+    (outside / "crops" / "secret.png").write_bytes(b"secret")
+    try:
+        (recipes_root / "recipe_a").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _ensure_recipe_zip_impl({"id": "recipe_a"}, recipes_root=recipes_root)
+
+    assert exc_info.value.detail == "agent_recipe_path_invalid"

@@ -562,11 +562,13 @@ def _rfdetr_write_run_meta_impl(
     time_fn: Callable[[], float],
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
+    if run_dir.is_symlink():
+        raise RuntimeError("detector_path_invalid")
     payload = dict(meta or {})
     now = time_fn()
     payload.setdefault("created_at", now)
     payload["updated_at"] = now
-    (run_dir / meta_name).write_text(json.dumps(payload, indent=2, sort_keys=True))
+    _write_json_atomic(run_dir / meta_name, payload, sort_keys=True)
 
 
 def _rfdetr_prune_run_dir_impl(

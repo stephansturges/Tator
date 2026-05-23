@@ -12,6 +12,7 @@ from services.detectors import (
     _load_detector_default_impl,
     _load_yolo_active_impl,
     _rfdetr_remap_coco_ids_impl,
+    _rfdetr_write_run_meta_impl,
     _save_detector_default_impl,
     _save_yolo_active_impl,
     _strip_checkpoint_optimizer_impl,
@@ -90,6 +91,30 @@ def test_yolo_write_run_meta_replaces_symlink_targets_without_target_write(tmp_p
         pytest.skip(f"symlink unsupported: {exc}")
 
     _yolo_write_run_meta_impl(run_dir, {"status": "ok"}, meta_name="run.json", time_fn=lambda: 42.0)
+
+    assert not tmp_link.exists()
+    assert not meta_path.is_symlink()
+    assert json.loads(meta_path.read_text(encoding="utf-8"))["status"] == "ok"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
+
+
+def test_rfdetr_write_run_meta_replaces_symlink_targets_without_target_write(tmp_path: Path) -> None:
+    run_dir = tmp_path / "rfdetr" / "r1"
+    run_dir.mkdir(parents=True)
+    meta_path = run_dir / "run.json"
+    outside_tmp = tmp_path / "rfdetr_outside_tmp.json"
+    outside_final = tmp_path / "rfdetr_outside_final.json"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    tmp_link = meta_path.with_suffix(meta_path.suffix + f".tmp.{os.getpid()}")
+    try:
+        tmp_link.symlink_to(outside_tmp)
+        meta_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _rfdetr_write_run_meta_impl(run_dir, {"status": "ok"}, meta_name="run.json", time_fn=lambda: 42.0)
 
     assert not tmp_link.exists()
     assert not meta_path.is_symlink()

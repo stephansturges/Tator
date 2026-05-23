@@ -154,6 +154,107 @@ def test_clip_auto_predict_loads_legacy_active_classifier_head(tmp_path, monkeyp
     assert isinstance(api.active_classifier_head, dict)
 
 
+def test_refresh_active_classifier_reloads_overwritten_training_artifact(tmp_path, monkeypatch):
+    model_path = tmp_path / "head.pkl"
+    meta_path = tmp_path / "head.meta.pkl"
+    labelmap_path = tmp_path / "labels.pkl"
+    old_clf = SimpleNamespace(
+        classes_=np.asarray(["negative", "positive"], dtype=object),
+        coef_=np.asarray([[0.0, 0.0]], dtype=np.float32),
+        intercept_=np.asarray([0.0], dtype=np.float32),
+        solver="lbfgs",
+        multi_class="auto",
+    )
+    new_clf = SimpleNamespace(
+        classes_=np.asarray(["negative", "positive"], dtype=object),
+        coef_=np.asarray([[2.0, 0.0]], dtype=np.float32),
+        intercept_=np.asarray([0.5], dtype=np.float32),
+        solver="lbfgs",
+        multi_class="auto",
+    )
+    api.joblib.dump(new_clf, model_path)
+    api.joblib.dump(
+        {
+            "encoder_type": "clip",
+            "encoder_model": "ViT-B/32",
+            "clip_model": "ViT-B/32",
+            "logit_adjustment_inference": True,
+            "logit_adjustment": [0.0, 1.0],
+            "calibration_temperature": 2.0,
+        },
+        meta_path,
+    )
+    api.joblib.dump(["negative", "positive"], labelmap_path)
+    stale_head = {
+        "classifier_type": "logreg",
+        "classes": ["negative", "positive"],
+        "coef": np.asarray([[0.0, 0.0]], dtype=np.float32),
+        "intercept": np.asarray([0.0], dtype=np.float32),
+        "proba_mode": "binary",
+    }
+    monkeypatch.setattr(api, "clf", old_clf)
+    monkeypatch.setattr(api, "active_classifier_path", str(model_path))
+    monkeypatch.setattr(api, "active_labelmap_path", str(labelmap_path))
+    monkeypatch.setattr(api, "active_label_list", ["old"])
+    monkeypatch.setattr(api, "active_classifier_meta", {})
+    monkeypatch.setattr(api, "active_encoder_type", "clip")
+    monkeypatch.setattr(api, "active_encoder_model", None)
+    monkeypatch.setattr(api, "active_classifier_head", stale_head)
+
+    refreshed = api._refresh_active_classifier_if_current(
+        SimpleNamespace(
+            model_path=str(model_path),
+            meta_path=str(meta_path),
+            labelmap_path=str(labelmap_path),
+        )
+    )
+
+    assert refreshed is True
+    assert api.clf.coef_.tolist() == [[2.0, 0.0]]
+    assert api.active_classifier_head is not stale_head
+    assert api.active_label_list == ["negative", "positive"]
+    assert api.active_encoder_model == "ViT-B/32"
+    assert api.active_classifier_head["logit_adjustment_inference"] is True
+    actual = api._clip_head_predict_proba(
+        np.asarray([[1.0, 0.0]], dtype=np.float32),
+        api.active_classifier_head,
+    )
+    expected_pos = 1.0 / (1.0 + np.exp(-((2.0 + 0.5 + 1.0) / 2.0)))
+    assert np.allclose(actual[0], [1.0 - expected_pos, expected_pos], atol=1e-6)
+
+
+def test_resume_classifier_backbone_reloads_active_cradio(monkeypatch):
+    fake_model = object()
+    monkeypatch.setattr(api, "active_encoder_type", "cradio")
+    monkeypatch.setattr(api, "active_encoder_model", api.CRADIO_DEFAULT_MODEL)
+    monkeypatch.setattr(api, "cradio_model", None)
+    monkeypatch.setattr(api, "cradio_processor", None)
+    monkeypatch.setattr(api, "cradio_model_name", None)
+    monkeypatch.setattr(api, "cradio_model_device", None)
+    monkeypatch.setattr(api, "cradio_initialized", False)
+    monkeypatch.setattr(api, "_clip_reload_needed", True)
+    monkeypatch.setattr(api, "resolve_cradio_torch_device", lambda **_kwargs: "mlx")
+    monkeypatch.setattr(
+        api,
+        "_load_cradio_backbone_cached",
+        lambda model_name, target_device, raise_on_error=False: (
+            fake_model,
+            None,
+            model_name,
+            target_device,
+        ),
+    )
+
+    api._resume_classifier_backbone()
+
+    assert api.cradio_model is fake_model
+    assert api.cradio_processor is None
+    assert api.cradio_model_name == api.CRADIO_DEFAULT_MODEL
+    assert api.cradio_model_device == "mlx"
+    assert api.cradio_initialized is True
+    assert api._clip_reload_needed is False
+
+
 def test_auto_class_local_salad_runtime_prefers_mlx_when_requested(tmp_path, monkeypatch):
     if not local_salad_mlx_available():
         pytest.skip("MLX is not available in this environment")

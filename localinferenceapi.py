@@ -2928,7 +2928,37 @@ def _resume_clip_backbone() -> None:
 def _resume_classifier_backbone() -> None:
     """Reload the active encoder backbone after training, based on user-selected classifier."""
     global dinov3_model, dinov3_processor, dinov3_model_name, dinov3_initialized, dinov3_model_device
+    global cradio_model, cradio_processor, cradio_model_name, cradio_model_device, cradio_initialized
     global clip_model_name, _clip_reload_needed
+    if str(active_encoder_type or "").strip().lower() == "cradio":
+        model_name = normalize_cradio_model(active_encoder_model or CRADIO_DEFAULT_MODEL)
+        try:
+            target_device = resolve_cradio_torch_device(model_name=model_name)
+            model_obj, processor_obj, resolved_model, resolved_device = _load_cradio_backbone_cached(
+                model_name,
+                target_device,
+                raise_on_error=True,
+            )
+            with cradio_lock:
+                cradio_model = model_obj
+                cradio_processor = processor_obj
+                cradio_model_name = resolved_model
+                cradio_model_device = resolved_device
+                cradio_initialized = _cradio_runtime_ready(
+                    cradio_model,
+                    cradio_processor,
+                    cradio_model_device,
+                )
+        except RuntimeError as exc:
+            with cradio_lock:
+                cradio_model = None
+                cradio_processor = None
+                cradio_model_name = None
+                cradio_model_device = None
+                cradio_initialized = False
+            logger.warning("Failed to reload C-RADIO backbone %s after training: %s", model_name, exc)
+        _clip_reload_needed = False
+        return
     state = {
         "dinov3_model": dinov3_model,
         "dinov3_processor": dinov3_processor,
@@ -26888,6 +26918,69 @@ def _publish_clip_training_artifacts(artifacts: TrainingArtifacts) -> TrainingAr
     return artifacts
 
 
+def _refresh_active_classifier_if_current(artifacts: TrainingArtifacts) -> bool:
+    global clf, active_classifier_path, active_labelmap_path, active_label_list, clip_last_error
+    global active_encoder_type, active_encoder_model
+    global active_classifier_meta, active_head_normalize_embeddings, active_classifier_head
+
+    if not active_classifier_path:
+        return False
+    try:
+        model_path = Path(artifacts.model_path).resolve()
+        current_path = Path(active_classifier_path).resolve()
+    except Exception:
+        return False
+    if model_path != current_path:
+        return False
+
+    new_clf = joblib.load(str(model_path))
+    meta_obj: Dict[str, Any] = {}
+    meta_path = Path(artifacts.meta_path) if artifacts.meta_path else Path(
+        os.path.splitext(str(model_path))[0] + ".meta.pkl"
+    )
+    if meta_path.exists():
+        loaded_meta = joblib.load(str(meta_path))
+        if isinstance(loaded_meta, dict):
+            meta_obj = dict(loaded_meta)
+
+    labelmap_path = Path(artifacts.labelmap_path) if artifacts.labelmap_path else None
+    labelmap_entries = _load_labelmap_file(labelmap_path, strict=True) if labelmap_path else []
+    new_head = _load_clip_head_from_classifier_impl(
+        model_path,
+        joblib_load_fn=joblib.load,
+        http_exception_cls=HTTPException,
+        clip_head_background_indices_fn=_clip_head_background_indices,
+        resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+        infer_clip_model_fn=_infer_clip_model_from_embedding_dim_impl,
+        active_clip_model_name=clip_model_name,
+        default_clip_model=DEFAULT_CLIP_MODEL,
+        logger=logger,
+    )
+
+    with clip_lock:
+        clf = new_clf
+        active_classifier_path = str(model_path)
+        if labelmap_path is not None:
+            active_labelmap_path = str(labelmap_path.resolve())
+            active_label_list = list(labelmap_entries)
+        active_classifier_meta = meta_obj
+        active_encoder_type = str(meta_obj.get("encoder_type") or "clip").strip().lower() or "clip"
+        active_encoder_model = (
+            str(meta_obj.get("encoder_model") or meta_obj.get("clip_model") or "").strip()
+            or None
+        )
+        active_head_normalize_embeddings = _resolve_active_head_normalize_embeddings_impl(
+            meta_obj,
+            new_clf,
+            default=True,
+            resolve_head_normalize_embeddings_fn=_resolve_head_normalize_embeddings_impl,
+        )
+        active_classifier_head = new_head if isinstance(new_head, dict) else None
+        clip_last_error = None
+    logger.info("Refreshed active classifier artifacts from completed training: %s", model_path)
+    return True
+
+
 def _current_active_payload() -> Dict[str, Any]:
     encoder_ready = _active_encoder_ready()
     encoder_error = clip_last_error
@@ -27572,6 +27665,7 @@ def _start_training_worker(
                 should_cancel=cancel_event.is_set,
             )
             artifacts = _publish_clip_training_artifacts(artifacts)
+            _refresh_active_classifier_if_current(artifacts)
             payload = _artifacts_to_payload(artifacts)
             with TRAINING_JOBS_LOCK:
                 _job_update(

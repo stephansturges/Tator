@@ -108,6 +108,29 @@ def test_qwen_training_image_resolver_rejects_traversal(tmp_path):
     assert training._resolve_image_path(dataset_root, "train", str(outside_image)) is None
 
 
+def test_qwen_training_image_resolver_handles_bad_entries(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    image_dir = dataset_root / "train" / "images"
+    nested_dir = image_dir / "nested"
+    nested_dir.mkdir(parents=True)
+    safe_image = nested_dir / "sample.png"
+    safe_image.write_bytes(b"safe")
+    directory_image = image_dir / "directory.png"
+    directory_image.mkdir()
+    loop = image_dir / "loop.png"
+    try:
+        loop.symlink_to(loop)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert (
+        training._resolve_image_path(dataset_root, "train", "nested\\sample.png")
+        == safe_image.resolve()
+    )
+    assert training._resolve_image_path(dataset_root, "train", "directory.png") is None
+    assert training._resolve_image_path(dataset_root, "train", "loop.png") is None
+
+
 def test_qwen_conversation_collator_masks_prompt_vision_and_padding_tokens():
     class FakeTokenizer:
         pad_token_id = 0

@@ -261,8 +261,9 @@ def _select_eval_strategy_key(cls) -> Optional[str]:
 
 
 def _resolve_image_path(dataset_root: Path, split: str, image_rel: str) -> Optional[Path]:
-    rel_path = Path(image_rel)
-    if rel_path.is_absolute() or not str(image_rel or "").strip():
+    raw = str(image_rel or "").replace("\\", "/").strip()
+    rel_path = Path(raw)
+    if rel_path.is_absolute() or not raw:
         return None
     if any(part == ".." for part in rel_path.parts):
         return None
@@ -273,12 +274,17 @@ def _resolve_image_path(dataset_root: Path, split: str, image_rel: str) -> Optio
         dataset_root,
     ]
     for root in roots:
-        candidate = (root / rel_path).resolve()
         try:
-            candidate.relative_to(root.resolve())
-        except ValueError:
+            root_resolved = root.resolve(strict=False)
+            candidate = (root / rel_path).resolve(strict=False)
+            candidate.relative_to(root_resolved)
+        except (OSError, RuntimeError, ValueError):
             continue
-        if candidate.exists():
+        try:
+            is_file = candidate.is_file()
+        except OSError:
+            is_file = False
+        if is_file:
             return candidate
     return None
 

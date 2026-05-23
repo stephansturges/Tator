@@ -1406,6 +1406,20 @@ def _set_active_qwen_model_custom(model_id: str, ckpt_path: Path, metadata: Dict
     _reset_qwen_runtime()
 
 
+def _clear_unusable_active_qwen_model_path() -> None:
+    if active_qwen_model_path is None:
+        return
+    try:
+        checkpoint_path = Path(active_qwen_model_path)
+        if checkpoint_path.exists() and _qwen_checkpoint_is_usable(
+            checkpoint_path, active_qwen_metadata or {}
+        ):
+            return
+    except Exception:
+        pass
+    _set_active_qwen_model_default()
+
+
 def _qwen_checkpoint_is_usable(checkpoint_path: Path, metadata: Dict[str, Any]) -> bool:
     platform_name = normalize_qwen_platform((metadata or {}).get("runtime_platform"))
     if platform_name == QWEN_PLATFORM_AUTO and is_qwen_mlx_model_id(
@@ -3091,6 +3105,36 @@ def _reset_sam3_runtime() -> None:
     sam3_text_device = state["sam3_text_device"]
 
 
+def _set_active_sam3_model_default() -> None:
+    global active_sam3_checkpoint, active_sam3_model_id, active_sam3_metadata, active_sam3_enable_segmentation
+    active_sam3_checkpoint = SAM3_CHECKPOINT_PATH
+    active_sam3_model_id = "default"
+    active_sam3_enable_segmentation = True
+    active_sam3_metadata = {
+        "id": "default",
+        "label": "Base SAM3",
+        "checkpoint": SAM3_CHECKPOINT_PATH,
+        "source": (
+            "env"
+            if os.environ.get("SAM3_CHECKPOINT_PATH")
+            else ("hf_cache" if SAM3_CHECKPOINT_PATH else "env")
+        ),
+        "enable_segmentation": True,
+    }
+    _reset_sam3_runtime()
+
+
+def _clear_missing_active_sam3_checkpoint() -> None:
+    if not active_sam3_checkpoint or active_sam3_checkpoint == SAM3_CHECKPOINT_PATH:
+        return
+    try:
+        if Path(active_sam3_checkpoint).exists():
+            return
+    except Exception:
+        pass
+    _set_active_sam3_model_default()
+
+
 def _resolve_sam1_devices() -> List[torch.device]:
     devices: List[torch.device] = []
     if torch.cuda.is_available():
@@ -3129,6 +3173,7 @@ class _Sam3Backend:
     def __init__(self):
         if SAM3_NATIVE_IMAGE_IMPORT_ERROR is not None or build_sam3_image_model is None:
             raise RuntimeError(f"sam3_unavailable:{SAM3_NATIVE_IMAGE_IMPORT_ERROR}")
+        _clear_missing_active_sam3_checkpoint()
         self.device = _resolve_sam3_device_impl(
             SAM3_DEVICE_PREF,
             torch_module=torch,
@@ -5492,6 +5537,7 @@ def _ensure_qwen_mlx_ready_for_caption(model_id_override: str) -> QwenRuntime:
 def _ensure_qwen_ready():
     global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
     global qwen_runtime_platform, qwen_loaded_effective_model_id, qwen_runtime_config
+    _clear_unusable_active_qwen_model_path()
     metadata = active_qwen_metadata or {}
     adapter_path = active_qwen_model_path
     base_model_id = metadata.get("model_id") or QWEN_MODEL_NAME
@@ -13094,6 +13140,26 @@ def _set_yolo_infer_state(
     yolo_infer_task = state["task"]
 
 
+def _clear_yolo_infer_state() -> None:
+    with YOLO_INFER_LOCK:
+        _set_yolo_infer_state(None, None, [], None)
+
+
+def _clear_rfdetr_infer_state() -> None:
+    with RFDETR_INFER_LOCK:
+        _set_rfdetr_infer_state(None, None, [], None, None)
+
+
+def _load_detector_active_payload_raw(path: Path) -> Dict[str, Any]:
+    try:
+        if not path.exists():
+            return {}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
 def _set_rfdetr_infer_state(
     model: Any,
     path: Optional[str],
@@ -13634,6 +13700,74 @@ def _purge_directory(root: Path) -> int:
     except Exception:
         return removed
     return removed
+
+
+_TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
+
+
+def _iter_nested_string_values(value: Any) -> Iterator[str]:
+    if isinstance(value, str):
+        yield value
+        return
+    if isinstance(value, dict):
+        for nested in value.values():
+            yield from _iter_nested_string_values(nested)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for nested in value:
+            yield from _iter_nested_string_values(nested)
+
+
+def _active_jobs_reference_path_root(
+    registry: Dict[str, Any], lock: threading.Lock, path_root: Path
+) -> bool:
+    try:
+        root = path_root.resolve(strict=False)
+    except Exception:
+        root = path_root
+    with lock:
+        jobs = list(registry.values())
+    for job in jobs:
+        status = str(getattr(job, "status", "") or "").strip().lower()
+        if status in _TERMINAL_JOB_STATUSES:
+            continue
+        payloads = [
+            getattr(job, "config", {}) or {},
+            getattr(job, "request", {}) or {},
+        ]
+        for raw_value in _iter_nested_string_values(payloads):
+            text = raw_value.strip()
+            if not text:
+                continue
+            try:
+                candidate = Path(text).expanduser().resolve(strict=False)
+            except Exception:
+                continue
+            if _path_is_within_root_impl(candidate, root):
+                return True
+    return False
+
+
+def _active_job_registry_referencing_path_root(path_root: Path) -> Optional[str]:
+    registries = [
+        ("clip_training", TRAINING_JOBS, TRAINING_JOBS_LOCK),
+        ("qwen_training", QWEN_TRAINING_JOBS, QWEN_TRAINING_JOBS_LOCK),
+        ("sam3_training", SAM3_TRAINING_JOBS, SAM3_TRAINING_JOBS_LOCK),
+        ("yolo_training", YOLO_TRAINING_JOBS, YOLO_TRAINING_JOBS_LOCK),
+        ("yolo_head_graft", YOLO_HEAD_GRAFT_JOBS, YOLO_HEAD_GRAFT_JOBS_LOCK),
+        ("rfdetr_training", RFDETR_TRAINING_JOBS, RFDETR_TRAINING_JOBS_LOCK),
+        ("segmentation_build", SEGMENTATION_BUILD_JOBS, SEGMENTATION_BUILD_JOBS_LOCK),
+        ("prompt_helper", PROMPT_HELPER_JOBS, PROMPT_HELPER_JOBS_LOCK),
+        ("agent_mining", AGENT_MINING_JOBS, AGENT_MINING_JOBS_LOCK),
+        ("auto_label", AUTO_LABEL_JOBS, AUTO_LABEL_JOBS_LOCK),
+        ("class_analysis", CLASS_ANALYSIS_JOBS, CLASS_ANALYSIS_JOBS_LOCK),
+        ("data_ingestion", DATA_INGESTION_JOBS, DATA_INGESTION_JOBS_LOCK),
+        ("calibration", CALIBRATION_JOBS, CALIBRATION_JOBS_LOCK),
+    ]
+    for name, registry, lock in registries:
+        if _active_jobs_reference_path_root(registry, lock, path_root):
+            return name
+    return None
 
 
 def _agent_cache_running_jobs() -> bool:
@@ -14646,6 +14780,12 @@ def delete_dataset_entry(dataset_id: str):
     ]
     if not any(_path_is_within_root_impl(target_root, root) for root in allowed_roots):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
+    blocking_registry = _active_job_registry_referencing_path_root(target_root)
+    if blocking_registry:
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT,
+            detail=f"dataset_delete_blocked_active_jobs:{blocking_registry}",
+        )
     shutil.rmtree(target_root, ignore_errors=True)
     return {"status": "deleted", "id": dataset_id, "storage_mode": storage_mode or "managed"}
 
@@ -18406,6 +18546,12 @@ def delete_qwen_dataset(dataset_id: str):
     if not _path_is_within_root_impl(dataset_root.resolve(), QWEN_DATASET_ROOT.resolve()):
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_delete_forbidden"
+        )
+    blocking_registry = _active_job_registry_referencing_path_root(dataset_root)
+    if blocking_registry:
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT,
+            detail=f"qwen_dataset_delete_blocked_active_jobs:{blocking_registry}",
         )
     shutil.rmtree(dataset_root, ignore_errors=True)
     return {"status": "deleted", "id": dataset_id}
@@ -29067,8 +29213,13 @@ def sam3_train_cache_size():
 
 def sam3_train_cache_purge():
     cache_root = SAM3_JOB_ROOT / "splits"
-    deleted = _purge_directory(cache_root)
-    return {"status": "ok", "deleted_bytes": deleted}
+    if _active_jobs_reference_path_root(SAM3_TRAINING_JOBS, SAM3_TRAINING_JOBS_LOCK, cache_root):
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT, detail="sam3_cache_purge_blocked_active_jobs"
+        )
+    deleted_bytes = _dir_size_bytes_impl(cache_root)
+    deleted_entries = _purge_directory(cache_root)
+    return {"status": "ok", "deleted_bytes": deleted_bytes, "deleted_entries": deleted_entries}
 
 
 app.include_router(
@@ -29623,10 +29774,27 @@ def delete_rfdetr_run(run_id: str):
     )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
+    active = _load_detector_active_payload_raw(RFDETR_ACTIVE_PATH)
+    active_best = str(active.get("best_path") or "")
+    active_matches = str(active.get("run_id") or "") == str(run_id)
+    if not active_matches and active_best:
+        try:
+            active_matches = _path_is_within_root_impl(
+                Path(active_best).resolve(strict=False),
+                run_dir.resolve(strict=False),
+            )
+        except Exception:
+            active_matches = False
     try:
         shutil.rmtree(run_dir)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    if active_matches:
+        try:
+            RFDETR_ACTIVE_PATH.unlink(missing_ok=True)
+        except Exception:
+            pass
+        _clear_rfdetr_infer_state()
     return {"status": "deleted", "run_id": run_id}
 
 
@@ -30279,10 +30447,27 @@ def delete_yolo_run(run_id: str):
     )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
+    active = _load_detector_active_payload_raw(YOLO_ACTIVE_PATH)
+    active_best = str(active.get("best_path") or "")
+    active_matches = str(active.get("run_id") or "") == str(run_id)
+    if not active_matches and active_best:
+        try:
+            active_matches = _path_is_within_root_impl(
+                Path(active_best).resolve(strict=False),
+                run_dir.resolve(strict=False),
+            )
+        except Exception:
+            active_matches = False
     try:
         shutil.rmtree(run_dir)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+    if active_matches:
+        try:
+            YOLO_ACTIVE_PATH.unlink(missing_ok=True)
+        except Exception:
+            pass
+        _clear_yolo_infer_state()
     return {"status": "deleted", "run_id": run_id}
 
 
@@ -30339,12 +30524,24 @@ def delete_sam3_run(run_id: str, variant: str = Query("sam3"), scope: str = Quer
     )
     if run_dir.resolve() in active_paths:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="sam3_run_active")
+    active_checkpoint_removed = False
+    delete_root = run_dir if scope == "all" else run_dir / "checkpoints" if scope == "checkpoints" else None
+    if delete_root is not None and active_sam3_checkpoint:
+        try:
+            active_checkpoint_removed = _path_is_within_root_impl(
+                Path(active_sam3_checkpoint).resolve(strict=False),
+                delete_root.resolve(strict=False),
+            )
+        except Exception:
+            active_checkpoint_removed = False
     deleted, freed = _delete_run_scope_impl(
         run_dir=run_dir,
         scope=scope,
         dir_size_fn=_dir_size_bytes,
         rmtree_fn=shutil.rmtree,
     )
+    if active_checkpoint_removed:
+        _set_active_sam3_model_default()
     return {"deleted": deleted, "freed_bytes": freed}
 
 
@@ -30357,6 +30554,7 @@ def list_sam3_available_models(
     promoted_only: bool = Query(False),
 ):
     """List run checkpoints for prompt model selection."""
+    _clear_missing_active_sam3_checkpoint()
     runs = _list_sam3_runs_impl(
         variant="sam3",
         job_root=SAM3_JOB_ROOT,
@@ -30566,8 +30764,13 @@ def qwen_train_cache_size():
 
 def qwen_train_cache_purge():
     cache_root = QWEN_JOB_ROOT / "splits"
-    deleted = _purge_directory(cache_root)
-    return {"status": "ok", "deleted_bytes": deleted}
+    if _active_jobs_reference_path_root(QWEN_TRAINING_JOBS, QWEN_TRAINING_JOBS_LOCK, cache_root):
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT, detail="qwen_cache_purge_blocked_active_jobs"
+        )
+    deleted_bytes = _dir_size_bytes_impl(cache_root)
+    deleted_entries = _purge_directory(cache_root)
+    return {"status": "ok", "deleted_bytes": deleted_bytes, "deleted_entries": deleted_entries}
 
 
 def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
@@ -30673,6 +30876,7 @@ def _get_builtin_qwen_model_entry(model_id: str) -> Optional[Dict[str, Any]]:
 
 
 def list_qwen_models():
+    _clear_unusable_active_qwen_model_path()
     entries = _list_qwen_model_entries()
     data = []
     for entry in _builtin_qwen_model_entries():
@@ -31444,6 +31648,7 @@ app.include_router(
 
 
 def qwen_status():
+    _clear_unusable_active_qwen_model_path()
     effective_mlx_model_id = _effective_qwen_mlx_settings_model_id()
     platform_name = _resolve_qwen_runtime_platform(
         (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME,

@@ -228,7 +228,13 @@ def _load_yolo_active_impl(yolo_active_path: Path) -> Dict[str, Any]:
     if not yolo_active_path.exists():
         return {}
     try:
-        return json.loads(yolo_active_path.read_text())
+        payload = json.loads(yolo_active_path.read_text())
+        if not isinstance(payload, dict):
+            return {}
+        best_path = str(payload.get("best_path") or "")
+        if best_path and not Path(best_path).exists():
+            return {}
+        return payload
     except Exception:
         return {}
 

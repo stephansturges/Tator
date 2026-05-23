@@ -943,6 +943,18 @@ job-start validation, and the Mac YOLO training work.
   dataset linked annotation flows, EDR package import/export, prepass recipe
   security, active Class Analysis workspace uploads, and YOLO Mac accelerator
   resolution.
+- Follow-up active-model lifecycle hardening now clears stale YOLO and RF-DETR
+  active selections when an active run is deleted, drops missing YOLO active
+  payloads before inference, clears cached detector runtimes with the active
+  marker, removes corrupt detector active markers even when their weight files
+  were already missing, resets SAM3 to the base model when a deleted run or
+  missing custom checkpoint would otherwise leave the active checkpoint pointing
+  at removed files, and resets Qwen to the base model when the active custom
+  adapter directory is missing or no longer contains usable adapter artifacts.
+  Training split-cache purge endpoints now block while live SAM3/Qwen jobs still
+  reference those split directories, report actual freed bytes plus deleted
+  entry counts, and dataset deletion now refuses to remove a managed or Qwen
+  dataset that any active backend job still references.
 - Local validation for this checkpoint used:
 
 ```bash
@@ -966,7 +978,7 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_ui_smoke.py \
   --base-url http://127.0.0.1:8000
 ```
 
-  Latest results: full pytest `672 passed, 17 skipped`; endpoint map check
+  Latest results: full pytest `688 passed, 17 skipped`; endpoint map check
   `148` UI paths with no missing OpenAPI paths; endpoint method check `248`
   fetches with no failures; live backend smoke after restart reported MPS via
   `/system/gpu`, `accelerator` in both YOLO OpenAPI request schemas, and normal

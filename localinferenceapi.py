@@ -22786,7 +22786,37 @@ def _qwen_train_float(
     return parsed
 
 
-def _training_split_paths(job_root: Path, job_id: str, *, detail: str) -> Tuple[Path, Path, Path]:
+def _training_splits_root(job_root: Path, *, create: bool, detail: str) -> Path:
+    try:
+        if job_root.is_symlink():
+            raise ValueError("job root is symlink")
+        if create:
+            job_root.mkdir(parents=True, exist_ok=True)
+        if job_root.exists() and not job_root.is_dir():
+            raise ValueError("job root is not a directory")
+        job_root_resolved = job_root.resolve(strict=False)
+        split_parent_raw = job_root / "splits"
+        if split_parent_raw.is_symlink():
+            raise ValueError("split root is symlink")
+        if create:
+            split_parent_raw.mkdir(parents=True, exist_ok=True)
+        if split_parent_raw.exists() and not split_parent_raw.is_dir():
+            raise ValueError("split root is not a directory")
+        split_parent = split_parent_raw.resolve(strict=False)
+        if not _path_is_within_root_impl(split_parent, job_root_resolved):
+            raise ValueError("split root escapes job root")
+        return split_parent
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+def _training_split_paths(
+    job_root: Path,
+    job_id: str,
+    *,
+    detail: str,
+    create_parent: bool = False,
+) -> Tuple[Path, Path, Path]:
     raw_id = str(job_id or "").strip()
     if (
         not raw_id
@@ -22796,7 +22826,7 @@ def _training_split_paths(job_root: Path, job_id: str, *, detail: str) -> Tuple[
         or Path(raw_id).is_absolute()
     ):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
-    split_parent = (job_root / "splits").resolve(strict=False)
+    split_parent = _training_splits_root(job_root, create=create_parent, detail=detail)
     raw_split = split_parent / raw_id
     try:
         split_root = raw_split.resolve(strict=False)
@@ -22826,9 +22856,43 @@ def _cleanup_training_split(job_root: Path, job_id: str, *, detail: str) -> None
         return
 
 
+def _training_split_cache_size(job_root: Path, *, detail: str) -> Dict[str, int]:
+    try:
+        cache_root = _training_splits_root(job_root, create=False, detail=detail)
+    except HTTPException:
+        return {"bytes": 0}
+    return {"bytes": _dir_size_bytes_impl(cache_root)}
+
+
+def _training_split_cache_purge(
+    job_root: Path,
+    registry: Dict[str, Any],
+    lock: threading.Lock,
+    *,
+    blocked_detail: str,
+    invalid_detail: str,
+) -> Dict[str, Any]:
+    cache_root_raw = job_root / "splits"
+    if _active_jobs_reference_path_root(registry, lock, cache_root_raw):
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail=blocked_detail)
+    if cache_root_raw.is_symlink():
+        cache_root_raw.unlink(missing_ok=True)
+        return {"status": "ok", "deleted_bytes": 0, "deleted_entries": 1}
+    try:
+        cache_root = _training_splits_root(job_root, create=False, detail=invalid_detail)
+    except HTTPException:
+        return {"status": "ok", "deleted_bytes": 0, "deleted_entries": 0}
+    deleted_bytes = _dir_size_bytes_impl(cache_root)
+    deleted_entries = _purge_directory(cache_root)
+    return {"status": "ok", "deleted_bytes": deleted_bytes, "deleted_entries": deleted_entries}
+
+
 def _qwen_training_split_root(job_id: str) -> Path:
     _, raw_split, split_root = _training_split_paths(
-        QWEN_JOB_ROOT, job_id, detail="qwen_split_path_invalid"
+        QWEN_JOB_ROOT,
+        job_id,
+        detail="qwen_split_path_invalid",
+        create_parent=True,
     )
     if raw_split.is_symlink():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_split_path_invalid")
@@ -30335,19 +30399,17 @@ def cancel_sam3_training_job(job_id: str):
 
 
 def sam3_train_cache_size():
-    cache_root = SAM3_JOB_ROOT / "splits"
-    return {"bytes": _dir_size_bytes_impl(cache_root)}
+    return _training_split_cache_size(SAM3_JOB_ROOT, detail="sam3_split_path_invalid")
 
 
 def sam3_train_cache_purge():
-    cache_root = SAM3_JOB_ROOT / "splits"
-    if _active_jobs_reference_path_root(SAM3_TRAINING_JOBS, SAM3_TRAINING_JOBS_LOCK, cache_root):
-        raise HTTPException(
-            status_code=HTTP_409_CONFLICT, detail="sam3_cache_purge_blocked_active_jobs"
-        )
-    deleted_bytes = _dir_size_bytes_impl(cache_root)
-    deleted_entries = _purge_directory(cache_root)
-    return {"status": "ok", "deleted_bytes": deleted_bytes, "deleted_entries": deleted_entries}
+    return _training_split_cache_purge(
+        SAM3_JOB_ROOT,
+        SAM3_TRAINING_JOBS,
+        SAM3_TRAINING_JOBS_LOCK,
+        blocked_detail="sam3_cache_purge_blocked_active_jobs",
+        invalid_detail="sam3_split_path_invalid",
+    )
 
 
 app.include_router(
@@ -31965,19 +32027,17 @@ def cancel_qwen_training_job(job_id: str):
 
 
 def qwen_train_cache_size():
-    cache_root = QWEN_JOB_ROOT / "splits"
-    return {"bytes": _dir_size_bytes_impl(cache_root)}
+    return _training_split_cache_size(QWEN_JOB_ROOT, detail="qwen_split_path_invalid")
 
 
 def qwen_train_cache_purge():
-    cache_root = QWEN_JOB_ROOT / "splits"
-    if _active_jobs_reference_path_root(QWEN_TRAINING_JOBS, QWEN_TRAINING_JOBS_LOCK, cache_root):
-        raise HTTPException(
-            status_code=HTTP_409_CONFLICT, detail="qwen_cache_purge_blocked_active_jobs"
-        )
-    deleted_bytes = _dir_size_bytes_impl(cache_root)
-    deleted_entries = _purge_directory(cache_root)
-    return {"status": "ok", "deleted_bytes": deleted_bytes, "deleted_entries": deleted_entries}
+    return _training_split_cache_purge(
+        QWEN_JOB_ROOT,
+        QWEN_TRAINING_JOBS,
+        QWEN_TRAINING_JOBS_LOCK,
+        blocked_detail="qwen_cache_purge_blocked_active_jobs",
+        invalid_detail="qwen_split_path_invalid",
+    )
 
 
 def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:

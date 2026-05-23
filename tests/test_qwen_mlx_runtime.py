@@ -270,6 +270,28 @@ def test_qwen_training_random_split_copies_when_hardlink_unavailable(tmp_path, m
     assert all(not path.is_symlink() for path in images)
 
 
+def test_qwen_training_random_split_rejects_symlinked_split_root(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_only_dataset(tmp_path, monkeypatch)
+    api.QWEN_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+    outside_split_root = tmp_path / "outside_split_root"
+    outside_split_root.mkdir()
+    try:
+        (api.QWEN_JOB_ROOT / "splits").symlink_to(outside_split_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    payload = api.QwenTrainRequest(dataset_id="demo", random_split=True, val_percent=0.5)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._build_qwen_config(payload, "job-split-link", [])
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "qwen_split_path_invalid"
+    assert list(outside_split_root.iterdir()) == []
+
+
 def test_qwen_training_config_rejects_existing_run_name(tmp_path, monkeypatch):
     if api.QwenTrainingConfig is None:
         pytest.skip("Qwen training dependencies are not importable in this environment")

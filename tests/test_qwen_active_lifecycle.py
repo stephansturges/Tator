@@ -132,6 +132,47 @@ def test_qwen_train_cache_purge_unlinks_symlink_directory_without_target_delete(
     assert (outside / "payload.bin").read_bytes() == b"external"
 
 
+def test_qwen_train_cache_size_ignores_symlinked_split_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    qwen_root = tmp_path / "qwen_training"
+    qwen_root.mkdir()
+    outside = tmp_path / "outside_split_root"
+    outside.mkdir()
+    (outside / "payload.bin").write_bytes(b"external")
+    try:
+        (qwen_root / "splits").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", qwen_root)
+
+    assert api.qwen_train_cache_size() == {"bytes": 0}
+
+
+def test_qwen_train_cache_purge_unlinks_symlinked_split_root_without_target_delete(
+    tmp_path: Path, monkeypatch
+) -> None:
+    qwen_root = tmp_path / "qwen_training"
+    qwen_root.mkdir()
+    outside = tmp_path / "outside_split_root"
+    outside.mkdir()
+    (outside / "payload.bin").write_bytes(b"external")
+    split_root = qwen_root / "splits"
+    try:
+        split_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", qwen_root)
+    with api.QWEN_TRAINING_JOBS_LOCK:
+        api.QWEN_TRAINING_JOBS.clear()
+
+    out = api.qwen_train_cache_purge()
+
+    assert out == {"status": "ok", "deleted_bytes": 0, "deleted_entries": 1}
+    assert not split_root.exists()
+    assert (outside / "payload.bin").read_bytes() == b"external"
+
+
 def test_qwen_training_split_cleanup_unlinks_symlink_without_target_delete(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -265,6 +265,47 @@ def test_sam3_train_cache_purge_unlinks_symlink_directory_without_target_delete(
     assert (outside / "payload.bin").read_bytes() == b"external"
 
 
+def test_sam3_train_cache_size_ignores_symlinked_split_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sam3_root = tmp_path / "sam3_training"
+    sam3_root.mkdir()
+    outside = tmp_path / "outside_split_root"
+    outside.mkdir()
+    (outside / "payload.bin").write_bytes(b"external")
+    try:
+        (sam3_root / "splits").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", sam3_root)
+
+    assert api.sam3_train_cache_size() == {"bytes": 0}
+
+
+def test_sam3_train_cache_purge_unlinks_symlinked_split_root_without_target_delete(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sam3_root = tmp_path / "sam3_training"
+    sam3_root.mkdir()
+    outside = tmp_path / "outside_split_root"
+    outside.mkdir()
+    (outside / "payload.bin").write_bytes(b"external")
+    split_root = sam3_root / "splits"
+    try:
+        split_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", sam3_root)
+    with api.SAM3_TRAINING_JOBS_LOCK:
+        api.SAM3_TRAINING_JOBS.clear()
+
+    out = api.sam3_train_cache_purge()
+
+    assert out == {"status": "ok", "deleted_bytes": 0, "deleted_entries": 1}
+    assert not split_root.exists()
+    assert (outside / "payload.bin").read_bytes() == b"external"
+
+
 def test_sam3_training_split_cleanup_unlinks_symlink_without_target_delete(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -286,6 +327,27 @@ def test_sam3_training_split_cleanup_unlinks_symlink_without_target_delete(
     assert not link.exists()
     assert not link.is_symlink()
     assert (target / "payload.bin").read_bytes() == b"target"
+
+
+def test_sam3_training_split_root_rejects_symlinked_split_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sam3_root = tmp_path / "sam3_training"
+    sam3_root.mkdir()
+    outside = tmp_path / "outside_split_root"
+    outside.mkdir()
+    try:
+        (sam3_root / "splits").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", sam3_root)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._sam3_training_split_root("job-link")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "sam3_split_path_invalid"
+    assert list(outside.iterdir()) == []
 
 
 def test_sam3_training_job_cleans_split_when_config_build_fails(

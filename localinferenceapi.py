@@ -1021,11 +1021,12 @@ def _record_classifier_artifact_warning(path: Any, message: Any) -> None:
     except Exception:
         path_label = str(path)
     first_line = str(message).splitlines()[0] if str(message).splitlines() else str(message)
-    key = (path_label, first_line)
+    display_name = Path(path_label).name
+    key = (display_name, first_line)
     if key in _classifier_artifact_warning_keys:
         return
     _classifier_artifact_warning_keys.add(key)
-    display = f"{Path(path_label).name}: {first_line}"
+    display = f"{display_name}: {first_line}"
     classifier_artifact_warnings.append(display)
     logger.warning("Classifier artifact compatibility warning for %s: %s", path_label, first_line)
 

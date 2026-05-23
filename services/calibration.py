@@ -37,6 +37,7 @@ from services.calibration_recipe_registry import (
     discovery_runs_root,
     find_matching_recipe,
 )
+from utils.pydantic_compat import model_copy_update, model_dump_compat
 
 DEFAULT_EMBED_PROJ_DIM = 1024
 DEFAULT_IMAGE_EMBED_PROJ_SEED = 4242
@@ -841,13 +842,12 @@ def _apply_canonical_recipe_to_payload(payload: Any, canonical_recipe: Dict[str,
         updates["sam3_text_window_extension"] = True
         updates["similarity_window_extension"] = True
 
-    if hasattr(payload, "copy"):
-        try:
-            return payload.copy(update=updates, deep=True)
-        except Exception:
-            pass
+    try:
+        return model_copy_update(payload, updates, deep=True)
+    except Exception:
+        pass
     if hasattr(payload, "dict"):
-        base = payload.dict()
+        base = model_dump_compat(payload)
     elif hasattr(payload, "__dict__"):
         base = dict(vars(payload))
     else:
@@ -929,7 +929,7 @@ def _start_calibration_job(
     job_id = f"cal_{uuid.uuid4().hex[:8]}"
     job = job_cls(job_id=job_id)
     try:
-        request_payload = payload.dict()
+        request_payload = model_dump_compat(payload)
     except Exception:
         request_payload = {}
     if isinstance(request_payload, dict):
@@ -1097,7 +1097,7 @@ def _ensure_prepass_jsonl(
             mp_cancel = ctx.Event()
             progress_queue = ctx.Queue()
             workers = []
-            prepass_payload_dict = prepass_payload.dict()
+            prepass_payload_dict = model_dump_compat(prepass_payload)
             for worker_idx in range(worker_count):
                 device_index = devices[worker_idx]
                 bucket = buckets[worker_idx]
@@ -1448,7 +1448,7 @@ def _run_calibration_job(
         phase="select_images",
         message="Selecting images…",
         status="running",
-        request=payload.dict(),
+        request=model_dump_compat(payload),
     )
     try:
         def _terminate_process(proc: subprocess.Popen[Any]) -> None:

@@ -990,6 +990,11 @@ job-start validation, and the Mac YOLO training work.
   direct Qwen prepass and EDR package runtime application, removing deprecated
   `.copy(update=...)` calls while preserving fallback support for older model
   objects.
+- Auto-label, prompt-helper, recipe, YOLO/RF-DETR training, calibration, and
+  prepass serialization now share the same Pydantic compatibility helpers for
+  request dumping and validation, eliminating deprecated `.dict()` and
+  `.parse_obj()` calls from backend runtime paths while keeping Pydantic v1
+  fallback support.
 - Local validation for this checkpoint used:
 
 ```bash

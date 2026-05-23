@@ -174,6 +174,11 @@ from utils.io import (
     _dir_size_bytes as _dir_size_bytes_impl,
     _path_is_within_root_impl as _path_is_within_root_impl,
 )
+from utils.pydantic_compat import (
+    model_copy_update,
+    model_dump_compat,
+    model_validate_compat,
+)
 from utils.status_compat import HTTP_413_CONTENT_TOO_LARGE, HTTP_422_UNPROCESSABLE_CONTENT
 
 _sanitize_rfdetr_run_id_impl = _sanitize_yolo_run_id_impl
@@ -982,19 +987,6 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except (TypeError, ValueError):
         return default
-
-
-def _model_copy_update(model: Any, updates: Mapping[str, Any]) -> Any:
-    update_dict = dict(updates or {})
-    if hasattr(model, "model_copy"):
-        return model.model_copy(update=update_dict)
-    if hasattr(model, "copy"):
-        return model.copy(update=update_dict)
-    if isinstance(model, Mapping):
-        copied = dict(model)
-        copied.update(update_dict)
-        return copied
-    raise TypeError(f"model_copy_update_unsupported:{type(model).__name__}")
 
 
 MAX_PREDICTOR_SLOTS = 3
@@ -11997,7 +11989,7 @@ def _agent_apply_edr_package_runtime(
     if sam3_checkpoint_path:
         global active_sam3_checkpoint
         active_sam3_checkpoint = sam3_checkpoint_path
-    return _model_copy_update(payload, updates), runtime
+    return model_copy_update(payload, updates), runtime
 
 
 @_register_agent_tool("log_observation")
@@ -12455,18 +12447,18 @@ def _run_prepass_annotation_qwen(
     global QWEN_CAPTION_CACHE_LIMIT
     payload, edr_package_runtime = _agent_apply_edr_package_runtime(payload)
     # Prepass-only mode is enforced; no agentic review loop is executed.
-    payload = _model_copy_update(payload, {"prepass_only": True})
+    payload = model_copy_update(payload, {"prepass_only": True})
     if payload.edr_package_id and not bool(payload.ensemble_enabled and payload.ensemble_job_id):
         # Package-backed raw/runtime evaluation should not run the legacy classifier gate
         # ahead of downstream scoring/merge logic. The canonical EDR package already
         # defines the promoted runtime contract; forcing a hard CLIP accept/reject here
         # collapses valid detector proposals before they can be fused or handed to Falcon.
-        payload = _model_copy_update(payload, {"prepass_keep_all": True})
+        payload = model_copy_update(payload, {"prepass_keep_all": True})
     if bool(payload.ensemble_enabled and payload.ensemble_job_id):
         # Canonical EDR deployment expects the saved ensemble bundle to score the raw
         # prepass candidate pool. Do not run the legacy finalize/classifier gate first,
         # or the live runtime can diverge sharply from the promoted offline recipe.
-        payload = _model_copy_update(
+        payload = model_copy_update(
             payload,
             {"prepass_keep_all": True, "prepass_finalize": False},
         )
@@ -12747,7 +12739,7 @@ def _run_prepass_annotation_qwen(
     background = _agent_background_classes_from_head(head)
     _trace_write({"type": "start", "payload": _agent_trace_sanitize_payload(payload, token)})
     try:
-        _trace_write_full({"type": "start", "payload": payload.dict()})
+        _trace_write_full({"type": "start", "payload": model_dump_compat(payload)})
     except Exception:
         _trace_write_full({"type": "start", "payload": str(payload)})
     readable_model_id = (
@@ -20313,7 +20305,7 @@ def _auto_label_parse_planner_decision(
         normalized_cell_classes.append({"cell": cell, "classes": classes})
     payload["cell_classes"] = normalized_cell_classes
     try:
-        return AutoLabelPlannerDecision.parse_obj(payload)
+        return model_validate_compat(AutoLabelPlannerDecision, payload)
     except Exception:
         return None
 
@@ -20419,7 +20411,7 @@ def _auto_label_run_planner(
         "raw_attempts": raw_attempts,
         "attempt_count": attempt_count,
         "retry_count": max(0, attempt_count - 1),
-        "parsed": parsed.dict() if parsed is not None else None,
+        "parsed": model_dump_compat(parsed) if parsed is not None else None,
         "grid_windows": grid_windows,
     }
 
@@ -20739,7 +20731,7 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
         PROMPT_HELPER_JOBS[job.job_id] = job
     job.status = "running"
     job.message = "Loading dataset…"
-    job.request = payload.dict()
+    job.request = model_dump_compat(payload)
     job.updated_at = time.time()
     try:
         dataset_root = _resolve_coco_index_dataset_root(payload.dataset_id)
@@ -20853,7 +20845,7 @@ def _run_prompt_helper_job(job: PromptHelperJob, payload: PromptHelperRequest) -
         job.message = "Done"
         job.result = {
             "classes": results,
-            "config": payload.dict(),
+            "config": model_dump_compat(payload),
             "dataset_id": payload.dataset_id,
         }
     except Exception as exc:  # noqa: BLE001
@@ -20870,7 +20862,7 @@ def _run_prompt_helper_search_job(job: PromptHelperJob, payload: PromptHelperSea
         PROMPT_HELPER_JOBS[job.job_id] = job
     job.status = "running"
     job.message = "Loading dataset…"
-    job.request = {"mode": "search", **payload.dict()}
+    job.request = {"mode": "search", **model_dump_compat(payload)}
     job.updated_at = time.time()
     try:
         dataset_root = _resolve_coco_index_dataset_root(payload.dataset_id)
@@ -21022,7 +21014,7 @@ def _run_prompt_helper_search_job(job: PromptHelperJob, payload: PromptHelperSea
         job.message = "Done"
         job.result = {
             "classes": results,
-            "config": payload.dict(),
+            "config": model_dump_compat(payload),
             "dataset_id": payload.dataset_id,
             "mode": "search",
         }
@@ -23004,7 +22996,7 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
         PROMPT_HELPER_JOBS[job.job_id] = job
     job.status = "running"
     job.message = "Loading dataset…"
-    job.request = {"mode": "recipe", **payload.dict()}
+    job.request = {"mode": "recipe", **model_dump_compat(payload)}
     job.updated_at = time.time()
     try:
         if not payload.prompts:
@@ -23142,7 +23134,7 @@ def _run_prompt_recipe_job(job: PromptHelperJob, payload: PromptRecipeRequest) -
             "negative_image_ids": neg_ids,
             "evaluated_image_ids": eval_ids,
             "gt_count": len(all_gt_keys),
-            "config": payload.dict(),
+            "config": model_dump_compat(payload),
             "candidates": [
                 {
                     **{
@@ -23180,7 +23172,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         AGENT_MINING_JOBS[job.job_id] = job
     job.status = "running"
     job.message = "Preparing image sample…"
-    job.request = payload.dict()
+    job.request = model_dump_compat(payload)
     job.updated_at = time.time()
     start_ts = time.time()
     compute_estimate_info: Optional[Dict[str, Any]] = None
@@ -24198,7 +24190,7 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
             },
             "compute_estimate": compute_estimate_info,
             "classes": results,
-            "config": eval_payload.dict(),
+            "config": model_dump_compat(eval_payload),
             "note": "Agent mining completed (steps mode).",
         }
         if compute_estimate_info and total_units_per_class:
@@ -24305,7 +24297,7 @@ def _run_auto_label_job(job: AutoLabelJob, payload: AutoLabelRequest) -> None:
         AUTO_LABEL_JOBS[job.job_id] = job
     job.status = "running"
     job.message = "Preparing dataset…"
-    job.request = payload.dict()
+    job.request = model_dump_compat(payload)
     job.updated_at = time.time()
     session_id = str(payload.annotation_session_id or "").strip() or uuid.uuid4().hex
     lock_started = False
@@ -25293,8 +25285,8 @@ def agent_mining_delete_recipe(recipe_id: str):
 
 def agent_mining_save_cascade(payload: AgentCascadeSaveRequest):
     cascade_payload = {
-        "steps": [s.dict() for s in payload.steps],
-        "dedupe": payload.dedupe.dict(),
+        "steps": [model_dump_compat(s) for s in payload.steps],
+        "dedupe": model_dump_compat(payload.dedupe),
     }
     return _persist_agent_cascade(payload.label, cascade_payload)
 
@@ -29510,7 +29502,7 @@ def create_yolo_training_job(payload: YoloTrainRequest):
         and not dataset_info.get("yolo_seg_ready")
     ):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_seg_requires_polygons")
-    config = payload.dict(exclude_none=True)
+    config = model_dump_compat(payload, exclude_none=True)
     _resolve_yolo_training_device_config(config)
     job_id = uuid.uuid4().hex
     run_dir = _yolo_run_dir_impl(
@@ -29625,7 +29617,7 @@ def create_yolo_head_graft_job(payload: YoloHeadGraftRequest):
     )
     if run_dir.exists():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="yolo_run_exists")
-    config = payload.dict(exclude_none=True)
+    config = model_dump_compat(payload, exclude_none=True)
     _resolve_yolo_training_device_config(config)
     job = YoloHeadGraftJob(job_id=job_id, config=config, message="Queued (head graft not started)")
     with YOLO_HEAD_GRAFT_JOBS_LOCK:
@@ -29814,7 +29806,7 @@ def create_rfdetr_training_job(payload: RfDetrTrainRequest):
         sanitize_fn=_sanitize_rfdetr_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    config = payload.dict(exclude_none=True)
+    config = model_dump_compat(payload, exclude_none=True)
     config["paths"] = {"run_dir": str(run_dir)}
     config["dataset"] = dataset_info
     message = "Queued (training not started)"
@@ -33855,7 +33847,7 @@ def qwen_prepass(payload: QwenPrepassRequest):
             progress=0.05,
             message="Preparing EDR prepass request",
         )
-        payload = _model_copy_update(payload, {"prepass_only": True})
+        payload = model_copy_update(payload, {"prepass_only": True})
         result = _run_prepass_annotation(payload)
         _qwen_progress_finish("EDR prepass complete")
         return result
@@ -34061,7 +34053,7 @@ def get_prepass_recipe(recipe_id: str):
 def save_prepass_recipe(payload: PrepassRecipeRequest):
     recipe_id = payload.recipe_id or uuid.uuid4().hex
     data = _save_prepass_recipe_impl(
-        payload.dict(),
+        model_dump_compat(payload),
         recipe_id=recipe_id,
         prepass_schema_version=PREPASS_RECIPE_SCHEMA_VERSION,
         recipes_root=PREPASS_RECIPE_ROOT,
@@ -34412,7 +34404,7 @@ def import_edr_package(file: UploadFile = File(...)):  # noqa: B008
         package_summary, saved_recipe = _import_edr_package_bundle(zip_path)
         return {
             "package": package_summary,
-            "saved_prepass_recipe": saved_recipe.dict(),
+            "saved_prepass_recipe": model_dump_compat(saved_recipe),
         }
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -34440,7 +34432,7 @@ async def import_edr_package_raw(request: Request):
         package_summary, saved_recipe = _import_edr_package_bundle(zip_path)
         return {
             "package": package_summary,
-            "saved_prepass_recipe": saved_recipe.dict(),
+            "saved_prepass_recipe": model_dump_compat(saved_recipe),
         }
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)

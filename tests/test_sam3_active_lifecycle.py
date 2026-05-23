@@ -1,10 +1,29 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 import localinferenceapi as api
+
+
+def _make_sam3_config_meta(tmp_path: Path) -> dict:
+    dataset_root = tmp_path / "dataset"
+    train_json = dataset_root / "train" / "_annotations.coco.json"
+    val_json = dataset_root / "val" / "_annotations.coco.json"
+    train_json.parent.mkdir(parents=True, exist_ok=True)
+    val_json.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"images": [], "annotations": [], "categories": [{"id": 1, "name": "object"}]}
+    train_json.write_text(json.dumps(payload), encoding="utf-8")
+    val_json.write_text(json.dumps(payload), encoding="utf-8")
+    return {
+        "id": "demo",
+        "dataset_root": str(dataset_root),
+        "classes": ["object"],
+        "coco_train_json": str(train_json),
+        "coco_val_json": str(val_json),
+    }
 
 
 def test_delete_sam3_run_resets_active_checkpoint_when_deleted(tmp_path: Path, monkeypatch) -> None:
@@ -348,6 +367,82 @@ def test_sam3_training_split_root_rejects_symlinked_split_root(
     assert excinfo.value.status_code == 400
     assert excinfo.value.detail == "sam3_split_path_invalid"
     assert list(outside.iterdir()) == []
+
+
+def test_sam3_training_config_rejects_symlinked_job_root_for_run_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outside = tmp_path / "outside_sam3_jobs"
+    outside.mkdir()
+    sam3_root = tmp_path / "sam3_training"
+    try:
+        sam3_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", sam3_root)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._build_sam3_config(
+            api.Sam3TrainRequest(dataset_id="demo", random_split=False),
+            _make_sam3_config_meta(tmp_path),
+            "job-root-link",
+            [],
+        )
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "sam3_run_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_sam3_training_config_rejects_experiment_log_dir_outside_job_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sam3_root = tmp_path / "sam3_training"
+    outside = tmp_path / "outside_run"
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", sam3_root)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._build_sam3_config(
+            api.Sam3TrainRequest(
+                dataset_id="demo",
+                random_split=False,
+                experiment_log_dir=str(outside),
+            ),
+            _make_sam3_config_meta(tmp_path),
+            "job-outside-run",
+            [],
+        )
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "sam3_run_path_invalid"
+    assert not outside.exists()
+
+
+def test_sam3_training_config_rejects_symlinked_run_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sam3_root = tmp_path / "sam3_training"
+    sam3_root.mkdir()
+    outside = tmp_path / "outside_run"
+    outside.mkdir()
+    (outside / "payload.bin").write_bytes(b"external")
+    try:
+        (sam3_root / "linked_run").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", sam3_root)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._build_sam3_config(
+            api.Sam3TrainRequest(dataset_id="demo", run_name="linked_run", random_split=False),
+            _make_sam3_config_meta(tmp_path),
+            "job-linked-run",
+            [],
+        )
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "sam3_run_path_invalid"
+    assert (outside / "payload.bin").read_bytes() == b"external"
 
 
 def test_sam3_training_job_cleans_split_when_config_build_fails(

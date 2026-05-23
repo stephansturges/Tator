@@ -26487,6 +26487,56 @@ def _cleanup_sam3_training_split(job_id: str) -> None:
     _cleanup_training_split(SAM3_JOB_ROOT, job_id, detail="sam3_split_path_invalid")
 
 
+def _sam3_training_runs_root(*, create: bool, detail: str = "sam3_run_path_invalid") -> Path:
+    try:
+        raw_root = SAM3_JOB_ROOT
+        if raw_root.is_symlink():
+            raise ValueError("SAM3 job root is a symlink")
+        if create:
+            raw_root.mkdir(parents=True, exist_ok=True)
+        if raw_root.exists() and not raw_root.is_dir():
+            raise ValueError("SAM3 job root is not a directory")
+        return raw_root.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+def _sam3_training_run_dir(
+    run_name: str,
+    experiment_log_dir: Optional[str],
+    *,
+    detail: str = "sam3_run_path_invalid",
+) -> Path:
+    runs_root = _sam3_training_runs_root(create=True, detail=detail)
+    raw_candidate = (
+        Path(experiment_log_dir).expanduser()
+        if experiment_log_dir
+        else (runs_root / run_name)
+    )
+    if not raw_candidate.is_absolute():
+        raw_candidate = runs_root / raw_candidate
+    candidate_name = raw_candidate.name
+    if (
+        not candidate_name
+        or candidate_name in {".", ".."}
+        or candidate_name.lower() == "datasets"
+        or candidate_name != _safe_run_name(candidate_name, candidate_name)
+    ):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    try:
+        if raw_candidate.is_symlink() or raw_candidate.parent.is_symlink():
+            raise ValueError("SAM3 run path is a symlink")
+        parent = raw_candidate.parent.resolve(strict=False)
+        if parent != runs_root:
+            raise ValueError("SAM3 run path must be a direct child of the job root")
+        candidate = raw_candidate.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+    if not _path_is_within_root_impl(candidate, runs_root) or candidate.parent != runs_root:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    return candidate
+
+
 def _prepare_sam3_training_split(
     dataset_root: Path,
     meta: Dict[str, Any],
@@ -30113,14 +30163,10 @@ def _build_sam3_config(
     cfg.paths.val_img_folder = str(val_ann.parent)
     cfg.paths.val_ann_file = str(val_ann)
     run_name = _safe_run_name(payload.run_name, f"sam3_run_{job_id}")
-    exp_dir = (
-        Path(payload.experiment_log_dir)
-        if payload.experiment_log_dir
-        else (SAM3_JOB_ROOT / run_name)
-    )
+    exp_dir = _sam3_training_run_dir(run_name, payload.experiment_log_dir)
     if exp_dir.exists():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="run_name_exists")
-    cfg.paths.experiment_log_dir = str(exp_dir.resolve())
+    cfg.paths.experiment_log_dir = str(exp_dir)
     cfg.paths.bpe_path = str(SAM3_BPE_PATH)
     cfg.launcher.experiment_log_dir = cfg.paths.experiment_log_dir
     cfg.launcher.gpus_per_node = max(1, int(payload.num_gpus or cfg.launcher.gpus_per_node or 1))

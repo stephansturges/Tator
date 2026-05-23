@@ -568,10 +568,13 @@ Broader suites are organized by feature area under `tests/`. UI tests live in
 the backend are available.
 
 <details>
-<summary>Update Tracking (maintainers)</summary>
+<summary>Update Tracking</summary>
 
-Latest: `889 passed, 17 skipped, 8 warnings`; UI endpoint contracts; local
-backend smoke. Detailed rationale lives in commits and focused docs.
+Latest validation: `892 passed, 17 skipped, 8 warnings`, UI endpoint
+contracts, and local backend smoke.
+
+Keep the detailed audit trail in commits and focused docs, not in this
+getting-started README.
 
 </details>
 

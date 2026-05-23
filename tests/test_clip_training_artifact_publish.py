@@ -87,6 +87,54 @@ def test_trained_classifier_labelmap_synthesizes_missing_class_labels():
     assert trained == ["class_2", "custom_extra"]
 
 
+def test_scan_yolo_label_files_returns_raw_class_counts(tmp_path):
+    labels_root = tmp_path / "labels"
+    labels_root.mkdir()
+    nested = labels_root / "nested"
+    nested.mkdir()
+    (labels_root / "a.txt").write_text(
+        "1 0.5 0.5 0.2 0.2\nbad\n2 0.5 0.5 0.2 0.2\n",
+        encoding="utf-8",
+    )
+    (nested / "b.TXT").write_text("2 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+
+    label_map, raw_counts = clip_training._scan_yolo_label_files(
+        ["a.jpg", "nested/b.png", "missing.jpg"],
+        str(labels_root),
+    )
+
+    assert label_map["a.jpg"].endswith("a.txt")
+    assert label_map["nested/b.png"].lower().endswith(os.path.join("nested", "b.txt"))
+    assert label_map["missing.jpg"] is None
+    assert dict(raw_counts) == {1: 1, 2: 2}
+
+
+def test_embedding_cache_metadata_preserves_raw_counts(tmp_path, monkeypatch):
+    monkeypatch.setattr(clip_training, "EMBED_CACHE_ROOT", tmp_path)
+    signature = "cache_sig"
+    cache_dir = tmp_path / signature
+    cache_dir.mkdir()
+    chunk_path = cache_dir / "embeddings_0000.dat"
+    chunk_path.write_bytes(b"chunk")
+
+    clip_training._write_cache_metadata(
+        signature,
+        cache_dir,
+        [(str(chunk_path), 0, 1)],
+        ["car"],
+        [0],
+        ["image-a"],
+        [[0.0, 0.0, 1.0, 1.0]],
+        {0},
+        raw_counts={0: 3, 2: 1},
+    )
+
+    loaded = clip_training._load_cached_embeddings(signature)
+
+    assert loaded is not None
+    assert loaded["raw_counts"] == {0: 3, 2: 1}
+
+
 def test_split_train_test_falls_back_when_group_split_loses_class():
     labels = np.asarray(["car", "car", "boat", "boat"], dtype=object)
     groups = np.asarray(["car_group", "car_group", "boat_group", "boat_group"], dtype=object)
@@ -101,6 +149,32 @@ def test_split_train_test_falls_back_when_group_split_loses_class():
     assert used_group_split is False
     assert {str(labels[idx]) for idx in train_idx} == {"car", "boat"}
     assert set(train_idx).isdisjoint(set(test_idx))
+
+
+def test_split_train_test_can_preserve_all_classes_with_empty_test_split():
+    labels = np.asarray(["car", "boat"], dtype=object)
+    groups = np.asarray(["car_group", "boat_group"], dtype=object)
+
+    train_idx, test_idx, used_group_split = clip_training._split_train_test_indices(
+        labels,
+        groups,
+        test_size=0.5,
+        random_seed=0,
+    )
+
+    assert used_group_split is False
+    assert {str(labels[idx]) for idx in train_idx} == {"car", "boat"}
+    assert test_idx.tolist() == []
+
+
+def test_split_embedding_matrix_allows_zero_rows(tmp_path):
+    matrix_path = tmp_path / "test_embeddings.dat"
+
+    matrix = clip_training._make_split_embedding_matrix(str(matrix_path), 0, 512)
+    clip_training._flush_split_embedding_matrix(matrix)
+
+    assert matrix.shape == (0, 512)
+    assert not matrix_path.exists()
 
 
 def test_unlink_self_referential_symlink_removes_broken_artifact(tmp_path):

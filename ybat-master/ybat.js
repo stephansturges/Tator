@@ -16316,6 +16316,9 @@ async function cancelRfDetrTrainingJobRequest() {
                 const bgCount = Number.isFinite(art.background_class_count)
                     ? art.background_class_count
                     : (Array.isArray(art.background_classes) ? art.background_classes.length : null);
+                const encounteredClasses = Number.isFinite(art.classes_encountered)
+                    ? art.classes_encountered
+                    : null;
                 const augInfo = art.augmentation_policy ? "on (albumentations)" : "off";
                 const classifierType = art.classifier_type ? String(art.classifier_type) : "logreg";
                 const summaryLines = [
@@ -16324,7 +16327,10 @@ async function cancelRfDetrTrainingJobRequest() {
                     `Accuracy: ${accuracyPct}`,
                     `Train samples: ${art.samples_train}`,
                     `Test samples: ${art.samples_test}`,
-                    `Classes seen: ${art.classes_seen}`,
+                    `Classes trained: ${art.classes_seen}`,
+                    ...(encounteredClasses !== null && encounteredClasses !== art.classes_seen
+                        ? [`Classes encountered: ${escapeHtml(String(encounteredClasses))}`]
+                        : []),
                     ...(bgCount !== null ? [`Background classes: ${escapeHtml(String(bgCount))} (hidden negatives)`] : []),
                     `Augmentations: ${escapeHtml(augInfo)}`,
                     `Classifier head: ${escapeHtml(classifierType)}`,

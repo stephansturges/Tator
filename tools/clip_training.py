@@ -123,6 +123,7 @@ class TrainingArtifacts:
     meta_path: str
     accuracy: float
     classes_seen: int
+    classes_encountered: int
     samples_train: int
     samples_test: int
     clip_model: str
@@ -410,6 +411,18 @@ def _compute_dataset_signature(
     return digest
 
 
+def _coerce_int_counts(raw_counts: Any) -> Dict[int, int]:
+    if not isinstance(raw_counts, dict):
+        return {}
+    coerced: Dict[int, int] = {}
+    for key, value in raw_counts.items():
+        try:
+            coerced[int(key)] = int(value)
+        except Exception:
+            continue
+    return coerced
+
+
 def _load_cached_embeddings(signature: str) -> Optional[Dict[str, object]]:
     cache_dir = EMBED_CACHE_ROOT / signature
     meta_path = cache_dir / "metadata.joblib"
@@ -437,6 +450,8 @@ def _load_cached_embeddings(signature: str) -> Optional[Dict[str, object]]:
     if not chunk_records:
         return None
 
+    cached_raw_counts = _coerce_int_counts(meta.get("raw_counts"))
+
     return {
         "chunk_dir": cache_dir,
         "chunk_records": chunk_records,
@@ -449,6 +464,7 @@ def _load_cached_embeddings(signature: str) -> Optional[Dict[str, object]]:
         "aug_policy": meta.get("aug_policy"),
         "oversample_policy": meta.get("oversample_policy"),
         "background_classes": meta.get("background_classes", []),
+        "raw_counts": cached_raw_counts,
         "embed_norm": meta.get("embed_norm"),
     }
 
@@ -466,6 +482,7 @@ def _write_cache_metadata(signature: str,
                           aug_policy: Optional[Dict[str, float]] = None,
                           oversample_policy: Optional[Dict[str, float]] = None,
                           background_classes: Optional[List[str]] = None,
+                          raw_counts: Optional[Dict[int, int]] = None,
                           labelmap_path: Optional[str] = None,
                           labelmap_hash: Optional[str] = None,
                           embed_norm: Optional[bool] = None) -> None:
@@ -490,6 +507,7 @@ def _write_cache_metadata(signature: str,
         "aug_policy": aug_policy,
         "oversample_policy": oversample_policy,
         "background_classes": list(background_classes or []),
+        "raw_counts": _coerce_int_counts(raw_counts),
         "labelmap_path": labelmap_path,
         "labelmap_hash": labelmap_hash,
         "embed_norm": bool(embed_norm) if embed_norm is not None else None,
@@ -621,6 +639,19 @@ def _split_train_test_indices(
     if len({str(labels[int(idx)]) for idx in train_idx}) < min(2, len(all_classes)):
         raise TrainingError("Need at least two classes in the training split.")
     return train_idx, test_idx, use_group_split
+
+
+def _make_split_embedding_matrix(path: str, rows: int, embedding_dim: int) -> np.ndarray:
+    shape = (int(rows), int(embedding_dim))
+    if rows <= 0:
+        return np.empty(shape, dtype=np.float64)
+    return np.memmap(path, dtype=np.float64, mode="w+", shape=shape)
+
+
+def _flush_split_embedding_matrix(matrix: np.ndarray) -> None:
+    flush = getattr(matrix, "flush", None)
+    if callable(flush):
+        flush()
 
 
 def _resolve_device(requested: Optional[str]) -> str:
@@ -1046,6 +1077,43 @@ def _compute_oversample_multipliers(raw_counts: Dict[int, int]) -> Dict[int, flo
         mult = max(1.0, min(CLIP_OVERSAMPLE_MAX_MULTIPLIER, mult))
         multipliers[int(cid)] = float(mult)
     return multipliers
+
+
+def _scan_yolo_label_files(
+    image_files: Sequence[str],
+    labels_path: str,
+) -> Tuple[Dict[str, Optional[str]], Counter[int]]:
+    label_exts = (".txt", ".TXT")
+    label_map: Dict[str, Optional[str]] = {}
+    raw_counts: Counter[int] = Counter()
+
+    for img_rel in image_files:
+        base = os.path.splitext(img_rel)[0]
+        label_file = None
+        for ext in label_exts:
+            candidate = os.path.join(labels_path, base + ext)
+            if os.path.isfile(candidate):
+                label_file = candidate
+                break
+        label_map[img_rel] = label_file
+        if label_file is None:
+            continue
+        try:
+            with open(label_file, "r", encoding="utf-8") as handle:
+                lines = handle.read().strip().splitlines()
+        except Exception:
+            continue
+        for ln in lines:
+            parts = ln.split()
+            if len(parts) < 5:
+                continue
+            try:
+                cid = int(float(parts[0]))
+            except Exception:
+                continue
+            raw_counts[cid] += 1
+
+    return label_map, raw_counts
 
 
 def _sample_repeat_count(multiplier: float, rng: random.Random) -> int:
@@ -1660,37 +1728,12 @@ def train_clip_from_yolo(
     oversample_multipliers: Dict[int, float] = {}
     label_map: Dict[str, Optional[str]] = {}
 
-    if not using_cached_embeddings:
-        label_exts = [".txt", ".TXT"]
-        for img_rel in image_files:
-            base = os.path.splitext(img_rel)[0]
-            label_file = None
-            for ext in label_exts:
-                candidate = os.path.join(labels_path, base + ext)
-                if os.path.isfile(candidate):
-                    label_file = candidate
-                    break
-            label_map[img_rel] = label_file
-            if label_file is None:
-                continue
-            try:
-                with open(label_file, "r", encoding="utf-8") as handle:
-                    lines = handle.read().strip().splitlines()
-            except Exception:
-                continue
-            for ln in lines:
-                parts = ln.split()
-                if len(parts) < 5:
-                    continue
-                try:
-                    cid = int(float(parts[0]))
-                except Exception:
-                    continue
-                raw_counts[cid] += 1
-        oversample_multipliers = _compute_oversample_multipliers(raw_counts)
+    label_map, raw_counts = _scan_yolo_label_files(image_files, labels_path)
+    if not raw_counts and using_cached_embeddings and cache_payload:
+        raw_counts = Counter(_coerce_int_counts(cache_payload.get("raw_counts")))
+    oversample_multipliers = _compute_oversample_multipliers(raw_counts)
 
     if not using_cached_embeddings:
-        label_exts = [".txt", ".TXT"]
         for idx, img_rel in enumerate(image_files, start=1):
             base = os.path.splitext(img_rel)[0]
             label_file = label_map.get(img_rel)
@@ -1924,8 +1967,8 @@ def train_clip_from_yolo(
         break
     if embedding_dim is None:
         raise TrainingError("No embeddings available to build train/test split.")
-    X_train_mm = np.memmap(train_memmap_path, dtype=np.float64, mode="w+", shape=(train_size, embedding_dim))
-    X_test_mm = np.memmap(test_memmap_path, dtype=np.float64, mode="w+", shape=(test_count, embedding_dim))
+    X_train_mm = _make_split_embedding_matrix(train_memmap_path, train_size, embedding_dim)
+    X_test_mm = _make_split_embedding_matrix(test_memmap_path, test_count, embedding_dim)
 
     for chunk_path, old_start, count in chunk_records:
         _check_cancel()
@@ -1955,8 +1998,8 @@ def train_clip_from_yolo(
         if not reuse_embeddings:
             os.remove(chunk_path)
 
-    X_train_mm.flush()
-    X_test_mm.flush()
+    _flush_split_embedding_matrix(X_train_mm)
+    _flush_split_embedding_matrix(X_test_mm)
     X_train = np.asarray(X_train_mm)
     X_test = np.asarray(X_test_mm)
     cov_train = geometry_covariates_np[train_idx]
@@ -2955,6 +2998,8 @@ def train_clip_from_yolo(
             encountered_sorted,
             trained_class_names,
         )
+        trained_class_count = len(label_list)
+        encountered_class_count = len(encountered_sorted)
 
         joblib.dump(label_list, labelmap_output, compress=3)
         n_train = int(X_train.shape[0])
@@ -3034,7 +3079,9 @@ def train_clip_from_yolo(
             "phase_timings": dict(phase_timings),
             "labelmap_filename": os.path.basename(labelmap_output),
             "labelmap_path": labelmap_output,
-            "n_classes_seen": len(encountered_sorted),
+            "n_classes_seen": trained_class_count,
+            "n_classes_trained": trained_class_count,
+            "n_classes_encountered": encountered_class_count,
             "n_samples_train": n_train,
             "n_samples_test": n_test,
             "embedding_dim": embedding_dim,
@@ -3060,6 +3107,7 @@ def train_clip_from_yolo(
                 aug_policy=aug_policy,
                 oversample_policy=oversample_policy,
                 background_classes=background_classes,
+                raw_counts=raw_counts,
                 labelmap_path=input_labelmap,
                 labelmap_hash=labelmap_hash,
                 embed_norm=normalize_embeddings,
@@ -3078,7 +3126,8 @@ def train_clip_from_yolo(
             labelmap_path=labelmap_output,
             meta_path=meta_path,
             accuracy=accuracy,
-            classes_seen=len(encountered_sorted),
+            classes_seen=trained_class_count,
+            classes_encountered=encountered_class_count,
             samples_train=n_train,
             samples_test=n_test,
             clip_model=clip_model,

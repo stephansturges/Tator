@@ -816,6 +816,11 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experi
   activation. Train/test splitting also falls back from grouped validation when
   a grouped split would leave a class only in validation, and the CLI confusion
   matrix now reports labels that match the matrix rows/columns.
+- Tightened the remaining filtered-class edge cases. Training artifacts now
+  report trained positive classes separately from raw encountered classes,
+  cached embedding runs recompute YOLO raw class counts before applying
+  `min_per_class`, and tiny rare-class splits can carry an empty validation set
+  without crashing on a zero-row memmap.
 - Validation used:
 
 ```bash
@@ -827,8 +832,8 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experi
   tests/test_classifier_batching.py \
   tests/test_classifier_infer_clip_model_signature.py \
   tests/test_clip_model_infer_dim.py
-.venv-macos/bin/pytest -q tests --ignore=tests/ui/e2e
-.venv-macos/bin/python -m py_compile localinferenceapi.py services/classifier.py tools/clip_training.py
+NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest tests --ignore=tests/ui/e2e -q
+NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m py_compile localinferenceapi.py services/classifier.py tools/clip_training.py tools/train_clip_regression_from_YOLO.py
 node --check ybat-master/ybat.js
 git diff --check
 ```

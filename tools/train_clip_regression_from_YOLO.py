@@ -534,7 +534,9 @@ def main() -> None:
     print(f"Device              : {artifacts.device}")
     print(f"Train samples       : {artifacts.samples_train}")
     print(f"Test samples        : {artifacts.samples_test}")
-    print(f"Classes seen        : {artifacts.classes_seen}")
+    print(f"Classes trained     : {artifacts.classes_seen}")
+    if artifacts.classes_encountered != artifacts.classes_seen:
+        print(f"Classes encountered : {artifacts.classes_encountered}")
     print(f"Class weight        : {artifacts.class_weight}")
     print(f"Solver              : {artifacts.solver}")
     print(f"Iterations run      : {artifacts.iterations_run}")

@@ -18644,19 +18644,23 @@ async def create_local_salad_training_job(manifest_json: str, files: List[Any]) 
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_encoder_unsupported")
     job_id = f"salad_{uuid.uuid4().hex[:10]}"
     out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job_id, "job")
-    rows = await _data_ingestion_save_uploads(files, out_dir / "uploads" / "train", "train")
-    reference_source = str(manifest.get("reference_source") or manifest.get("source_mode") or "").strip()
-    reference_dataset_id = str(manifest.get("reference_dataset_id") or "").strip()
-    if reference_source == "backend_dataset" and reference_dataset_id:
-        rows.extend(
-            _data_ingestion_dataset_media_rows(
-                reference_dataset_id,
-                field_name="train",
-                max_count=_coerce_int(manifest.get("max_train_images"), 0, minimum=0),
+    try:
+        rows = await _data_ingestion_save_uploads(files, out_dir / "uploads" / "train", "train")
+        reference_source = str(manifest.get("reference_source") or manifest.get("source_mode") or "").strip()
+        reference_dataset_id = str(manifest.get("reference_dataset_id") or "").strip()
+        if reference_source == "backend_dataset" and reference_dataset_id:
+            rows.extend(
+                _data_ingestion_dataset_media_rows(
+                    reference_dataset_id,
+                    field_name="train",
+                    max_count=_coerce_int(manifest.get("max_train_images"), 0, minimum=0),
+                )
             )
-        )
-    if not rows:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_no_training_files")
+        if not rows:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_no_training_files")
+    except Exception:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        raise
     request_payload = {**manifest, "train_uploads": rows}
     job = DataIngestionJob(job_id=job_id, kind="local_salad_train", request=request_payload)
     with DATA_INGESTION_JOBS_LOCK:

@@ -133,6 +133,7 @@ def test_data_ingestion_create_jobs_reject_empty_uploads_before_queueing(tmp_pat
         asyncio.run(api.create_local_salad_training_job("{}", []))
     assert salad_error.value.status_code == 400
     assert salad_error.value.detail == "local_salad_no_training_files"
+    assert not any(tmp_path.iterdir())
 
 
 def test_data_ingestion_analysis_cleans_staging_when_thread_start_fails(tmp_path, monkeypatch):
@@ -172,6 +173,32 @@ def test_local_salad_training_cleans_staging_when_thread_start_fails(tmp_path, m
     assert api.DATA_INGESTION_JOBS == {}
     assert not any(tmp_path.iterdir())
     assert upload.closed is True
+
+
+def test_local_salad_training_cleans_saved_uploads_if_backend_reference_lookup_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", tmp_path)
+
+    def _missing_dataset(_dataset_id):
+        raise api.HTTPException(status_code=404, detail="dataset_not_found")
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", _missing_dataset)
+    upload = _FakeUpload("train.jpg", b"train")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(
+            api.create_local_salad_training_job(
+                json.dumps({
+                    "reference_source": "backend_dataset",
+                    "reference_dataset_id": "missing_dataset",
+                }),
+                [upload],
+            )
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "dataset_not_found"
+    assert upload.closed is True
+    assert not any(tmp_path.iterdir())
 
 
 def test_write_upload_file_rejects_broken_symlink_destination(tmp_path):

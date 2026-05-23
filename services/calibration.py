@@ -139,7 +139,19 @@ def _repo_tool_subprocess_env(root_dir: Path, base_env: Optional[Dict[str, str]]
 
 def _write_json_atomic(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise ValueError("calibration_json_parent_symlink")
+    parent_resolved = path.parent.resolve(strict=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
+    for candidate in (tmp_path, path):
+        if candidate.is_symlink():
+            candidate.unlink(missing_ok=True)
+        elif candidate.exists() and candidate.is_dir():
+            raise ValueError("calibration_json_target_is_directory")
+        try:
+            candidate.resolve(strict=False).relative_to(parent_resolved)
+        except Exception as exc:
+            raise ValueError("calibration_json_path_not_allowed") from exc
     tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp_path.replace(path)
 

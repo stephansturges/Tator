@@ -279,7 +279,7 @@ but unhelpful for the dataset.
 Latest checkpoint: Qwen captions/training, SAM3, Class Split Explorer, Data
 Ingestion, detector training, and registry/package paths have been stabilized.
 
-Validation: `825 passed, 17 skipped, 8 warnings`; UI endpoint checks and local
+Validation: `827 passed, 17 skipped, 8 warnings`; UI endpoint checks and local
 backend smoke are clean.
 
 </details>

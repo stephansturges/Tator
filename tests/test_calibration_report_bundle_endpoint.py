@@ -7,6 +7,7 @@ import localinferenceapi as api
 from services.calibration import (
     CALIBRATION_JOB_STATE_FILENAME,
     CalibrationJob,
+    _write_json_atomic,
 )
 
 
@@ -218,6 +219,46 @@ def test_list_calibration_jobs_skips_symlinked_state_escape(tmp_path: Path, monk
     payload = api.list_calibration_jobs()
 
     assert all(item.get("job_id") != "cal_escape" for item in payload)
+
+
+def test_calibration_write_json_atomic_replaces_tmp_symlink_without_target_write(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "job" / CALIBRATION_JOB_STATE_FILENAME
+    state_path.parent.mkdir()
+    outside = tmp_path / "outside_tmp.json"
+    outside.write_text("external", encoding="utf-8")
+    tmp_path_link = state_path.with_suffix(state_path.suffix + ".tmp")
+    try:
+        tmp_path_link.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _write_json_atomic(state_path, {"job_id": "cal_safe"})
+
+    assert not tmp_path_link.exists()
+    assert not state_path.is_symlink()
+    assert json.loads(state_path.read_text(encoding="utf-8"))["job_id"] == "cal_safe"
+    assert outside.read_text(encoding="utf-8") == "external"
+
+
+def test_calibration_write_json_atomic_replaces_final_symlink_without_target_write(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "job" / CALIBRATION_JOB_STATE_FILENAME
+    state_path.parent.mkdir()
+    outside = tmp_path / "outside_state.json"
+    outside.write_text("external", encoding="utf-8")
+    try:
+        state_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _write_json_atomic(state_path, {"job_id": "cal_safe"})
+
+    assert not state_path.is_symlink()
+    assert json.loads(state_path.read_text(encoding="utf-8"))["job_id"] == "cal_safe"
+    assert outside.read_text(encoding="utf-8") == "external"
 
 
 def test_ensemble_filter_rejects_traversal_job_id_before_artifact_resolution(

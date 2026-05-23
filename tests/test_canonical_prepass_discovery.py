@@ -92,6 +92,40 @@ def _write_deployment_source_bundle(
     )
 
 
+def _write_materialize_fixture(tmp_path: Path):
+    run_root = tmp_path / "calibration_cache" / "discovery_runs" / "run"
+    _write_json(
+        run_root / "postrun_similarity_quality_full_window_eval" / "decision_summary.json",
+        {
+            "status": "promoted",
+            "winner_tag": "a0p8",
+        },
+    )
+    _write_deployment_source_bundle(
+        run_root / "postrun_similarity_quality_full_window_eval" / "a0p8" / "seed_42",
+        f1=0.8239,
+    )
+    canonical_recipe_json = run_root / "canonical_edr.json"
+    canonical_recipe_payload = {
+        "dataset": "qwen_dataset",
+        "discovered_winner_lane": "window",
+        "canonical_windowed_recipe": {
+            "scenario": {
+                "train_sam3_similarity_quality": True,
+                "sam3_similarity_quality_alpha": 0.8,
+            },
+            "policy": {},
+            "source_decisions": {
+                "similarity_quality": str(
+                    (run_root / "postrun_similarity_quality_full_window_eval" / "decision_summary.json").resolve()
+                )
+            },
+        },
+    }
+    _write_json(canonical_recipe_json, canonical_recipe_payload)
+    return run_root, canonical_recipe_json, canonical_recipe_payload
+
+
 def test_canonical_prepass_discovery_composes_recipe_from_decision_summaries(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -688,6 +722,68 @@ def test_materialize_canonical_deployment_bundle_uses_best_promoted_seed(tmp_pat
 
     assert deployment["source_seed"] == 1337
     assert deployment["metrics"]["f1"] == pytest.approx(0.8246)
+
+
+def test_materialize_canonical_deployment_bundle_rejects_symlinked_jobs_parent_without_target_write(
+    tmp_path: Path,
+) -> None:
+    run_root, canonical_recipe_json, canonical_recipe_payload = _write_materialize_fixture(tmp_path)
+    outside = tmp_path / "outside_jobs_parent"
+    outside.mkdir()
+    jobs_parent = tmp_path / "linked_parent"
+    try:
+        jobs_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(ValueError, match="canonical_jobs_root_symlink"):
+        materialize_canonical_deployment_bundle(
+            calibration_jobs_root=jobs_parent / "calibration_jobs",
+            run_root=run_root,
+            dataset_id="qwen_dataset",
+            recipe_fingerprint="8a922d9945b17c16f4ed9dc39f50f5e66b28f614",
+            canonical_recipe_payload=canonical_recipe_payload,
+            canonical_recipe_json=canonical_recipe_json,
+            report_bundle_json=None,
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_materialize_canonical_deployment_bundle_replaces_symlinked_final_dir_without_target_write(
+    tmp_path: Path,
+) -> None:
+    run_root, canonical_recipe_json, canonical_recipe_payload = _write_materialize_fixture(tmp_path)
+    jobs_root = tmp_path / "calibration_jobs"
+    jobs_root.mkdir()
+    outside = tmp_path / "outside_final"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    job_id = canonical_completion.canonical_deployment_job_id(
+        "qwen_dataset",
+        "8a922d9945b17c16f4ed9dc39f50f5e66b28f614",
+    )
+    try:
+        (jobs_root / job_id).symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    deployment = materialize_canonical_deployment_bundle(
+        calibration_jobs_root=jobs_root,
+        run_root=run_root,
+        dataset_id="qwen_dataset",
+        recipe_fingerprint="8a922d9945b17c16f4ed9dc39f50f5e66b28f614",
+        canonical_recipe_payload=canonical_recipe_payload,
+        canonical_recipe_json=canonical_recipe_json,
+        report_bundle_json=None,
+    )
+
+    final_dir = jobs_root / job_id
+    assert deployment["job_id"] == job_id
+    assert not final_dir.is_symlink()
+    assert (final_dir / "ensemble_xgb.json").exists()
+    assert sentinel.read_text(encoding="utf-8") == "keep"
 
 
 def test_rewrite_canonical_deployment_bundle_metadata_rewrites_local_paths(tmp_path: Path) -> None:

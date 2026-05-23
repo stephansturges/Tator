@@ -73,7 +73,11 @@ def _copy2_if_different(src: Path, dest: Path) -> None:
         return
     if dest.is_symlink():
         dest.unlink(missing_ok=True)
+    if dest.parent.is_symlink():
+        raise ValueError("canonical_copy_parent_symlink")
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.parent.is_symlink():
+        raise ValueError("canonical_copy_parent_symlink")
     shutil.copy2(src_resolved, dest)
 
 
@@ -106,6 +110,34 @@ def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> Path:
     tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     os.replace(tmp_path, path)
     return path
+
+
+def _prepare_canonical_jobs_root(root: Path) -> Path:
+    raw_root = Path(root)
+    if raw_root.is_symlink() or raw_root.parent.is_symlink():
+        raise ValueError("canonical_jobs_root_symlink")
+    raw_root.mkdir(parents=True, exist_ok=True)
+    if raw_root.is_symlink() or raw_root.parent.is_symlink():
+        raise ValueError("canonical_jobs_root_symlink")
+    return raw_root.resolve(strict=True)
+
+
+def _remove_canonical_child_path(path: Path, root: Path) -> None:
+    root_resolved = root.resolve(strict=True)
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+        return
+    if not path.exists():
+        return
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root_resolved)
+    except Exception as exc:
+        raise ValueError("canonical_child_path_not_allowed") from exc
+    if resolved.is_dir():
+        shutil.rmtree(resolved)
+    else:
+        path.unlink(missing_ok=True)
 
 
 def canonical_completion_context_path(run_root: Path) -> Path:
@@ -560,12 +592,12 @@ def materialize_canonical_deployment_bundle(
     meta_path = Path(source["meta_path"]).resolve()
     meta_payload = json.loads(meta_path.read_text(encoding="utf-8"))
     job_id = canonical_deployment_job_id(dataset_id, recipe_fingerprint)
-    jobs_root = calibration_jobs_root.resolve()
-    jobs_root.mkdir(parents=True, exist_ok=True)
+    jobs_root = _prepare_canonical_jobs_root(calibration_jobs_root)
     temp_dir = jobs_root / f".{job_id}.tmp.{os.getpid()}"
-    if temp_dir.exists():
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    _remove_canonical_child_path(temp_dir, jobs_root)
     temp_dir.mkdir(parents=True, exist_ok=True)
+    if temp_dir.is_symlink():
+        raise ValueError("canonical_temp_dir_symlink")
 
     base_model_name = "ensemble_xgb.json" if model_path.suffix.lower() == ".json" else model_path.name
     _copy2_if_different(model_path, temp_dir / base_model_name)
@@ -650,8 +682,7 @@ def materialize_canonical_deployment_bundle(
     _write_json_atomic(temp_dir / CANONICAL_DEPLOYMENT_METADATA_JSON_NAME, bundle_meta)
 
     final_dir = jobs_root / job_id
-    if final_dir.exists():
-        shutil.rmtree(final_dir, ignore_errors=True)
+    _remove_canonical_child_path(final_dir, jobs_root)
     os.replace(temp_dir, final_dir)
     rewrite_canonical_deployment_bundle_metadata(
         final_dir,

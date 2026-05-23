@@ -1701,6 +1701,45 @@ def test_plan_segmentation_build_materializes_annotation_overlay_for_linked_flat
     assert not (dataset_root / "train").exists()
 
 
+def test_plan_segmentation_build_rejects_symlinked_sam3_output_parent(
+    tmp_path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "source_split"
+    _write_test_image(dataset_root / "train" / "images" / "img.jpg")
+    (dataset_root / "train" / "labels").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "train" / "labels" / "img.txt").write_text(
+        "0 0.5 0.5 0.2 0.2\n", encoding="utf-8"
+    )
+    (dataset_root / "labelmap.txt").write_text("building\n", encoding="utf-8")
+    outside = tmp_path / "outside_sam3_outputs"
+    outside.mkdir()
+    link_parent = tmp_path / "linked_parent"
+    try:
+        link_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    entry = {
+        "id": "ds",
+        "label": "ds",
+        "dataset_root": str(dataset_root),
+        "storage_mode": "managed",
+        "yolo_layout": "split",
+        "yolo_ready": True,
+        "classes": ["building"],
+    }
+    monkeypatch.setattr(api, "_list_all_datasets", lambda: [entry])
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", link_parent / "sam3_outputs")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._plan_segmentation_build(
+            api.SegmentationBuildRequest(source_dataset_id="ds", output_name="ds_seg")
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "segmentation_output_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_register_path_dedupes_existing_linked_entry(tmp_path, monkeypatch) -> None:
     dataset_root = tmp_path / "linked_ds"
     (dataset_root / "images").mkdir(parents=True, exist_ok=True)

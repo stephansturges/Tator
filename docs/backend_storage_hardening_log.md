@@ -28,3 +28,14 @@ preserving the exact validation story for storage and artifact-write fixes.
   zipped dataset registry uploads through symlinked parent directories.
 - Validation: `979 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: SAM3 Segmentation Output Root
+
+- Added guarded SAM3 dataset root and child-directory helpers matching the Qwen
+  dataset storage checks.
+- Routed segmentation-build output planning through the guarded SAM3 dataset
+  child helper.
+- Added a regression that rejects segmentation output planning when
+  `SAM3_DATASET_ROOT` has a symlinked parent.
+- Validation: `980 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

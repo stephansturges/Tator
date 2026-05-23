@@ -14282,6 +14282,66 @@ def _qwen_dataset_child_dir(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
+def _sam3_dataset_storage_root(
+    *,
+    create: bool = True,
+    detail: str = "sam3_dataset_path_invalid",
+) -> Path:
+    try:
+        raw_root = SAM3_DATASET_ROOT
+        if raw_root == SAM3_JOB_ROOT / "datasets" and _storage_path_has_symlink_component(
+            SAM3_JOB_ROOT
+        ):
+            raise ValueError("SAM3 job root is a symlink")
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("SAM3 dataset root is a symlink")
+        if create:
+            raw_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("SAM3 dataset root is a symlink")
+        if raw_root.exists() and not raw_root.is_dir():
+            raise ValueError("SAM3 dataset root is not a directory")
+        return raw_root.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+def _sam3_dataset_child_dir(
+    dataset_id: str,
+    *,
+    create: bool = False,
+    detail: str = "sam3_dataset_target_invalid",
+) -> Path:
+    raw_id = str(dataset_id or "").strip()
+    if (
+        not raw_id
+        or raw_id in {".", ".."}
+        or "/" in raw_id
+        or "\\" in raw_id
+        or Path(raw_id).is_absolute()
+    ):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    try:
+        root = _sam3_dataset_storage_root(create=True, detail=detail)
+        candidate = root / raw_id
+        if _storage_path_has_symlink_component(candidate):
+            raise ValueError("SAM3 dataset child is a symlink")
+        if create:
+            candidate.mkdir(parents=True, exist_ok=False)
+        if _storage_path_has_symlink_component(candidate):
+            raise ValueError("SAM3 dataset child is a symlink")
+        if candidate.exists() and not candidate.is_dir():
+            raise ValueError("SAM3 dataset child is not a directory")
+        resolved = candidate.resolve(strict=False)
+        if not _path_is_within_root_impl(resolved, root) or resolved.parent != root:
+            raise ValueError("SAM3 dataset child escapes root")
+        return resolved
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
 def _qwen_dataset_upload_storage_root(
     *,
     create: bool = True,
@@ -27223,11 +27283,10 @@ def _plan_segmentation_build(
     source_id = source_meta.get("id") or dataset_root.name
     suggested_name = f"{source_id}_seg"
     output_id = _safe_run_name(request.output_name, suggested_name)
-    output_root = (SAM3_DATASET_ROOT / output_id).resolve()
-    if not _path_is_within_root_impl(output_root, SAM3_DATASET_ROOT.resolve()):
-        raise HTTPException(
-            status_code=HTTP_400_BAD_REQUEST, detail="segmentation_output_path_invalid"
-        )
+    output_root = _sam3_dataset_child_dir(
+        output_id,
+        detail="segmentation_output_path_invalid",
+    )
     if output_root.exists():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="segmentation_output_exists")
 

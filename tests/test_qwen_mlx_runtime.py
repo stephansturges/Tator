@@ -466,6 +466,32 @@ def test_qwen_training_config_rejects_symlinked_runs_root(tmp_path, monkeypatch)
     assert list(outside_runs.iterdir()) == []
 
 
+def test_qwen_training_config_rejects_symlinked_job_root_parent_for_runs(
+    tmp_path, monkeypatch
+):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_dataset(tmp_path, monkeypatch)
+    outside_runs = tmp_path / "outside_runs"
+    outside_runs.mkdir()
+    link_parent = tmp_path / "linked_parent"
+    try:
+        link_parent.symlink_to(outside_runs, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", link_parent / "jobs")
+
+    payload = api.QwenTrainRequest(dataset_id="demo", run_name="escaped")
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._build_qwen_config(payload, "job-root-parent-link")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "qwen_run_path_invalid"
+    assert list(outside_runs.iterdir()) == []
+
+
 def test_qwen_training_metadata_replaces_symlinked_metadata_file(tmp_path):
     if api.QwenTrainingConfig is None or api.QwenTrainingResult is None:
         pytest.skip("Qwen training dependencies are not importable in this environment")
@@ -528,6 +554,37 @@ def test_qwen_training_metadata_skips_symlinked_result_dir_without_target_write(
 
     assert metadata["id"] == "linked-run"
     assert not (outside_run / api.QWEN_METADATA_FILENAME).exists()
+
+
+def test_qwen_training_metadata_skips_symlinked_result_parent_without_target_write(tmp_path):
+    if api.QwenTrainingConfig is None or api.QwenTrainingResult is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    outside_run = tmp_path / "outside_run"
+    outside_run.mkdir()
+    link_parent = tmp_path / "linked_parent"
+    try:
+        link_parent.symlink_to(outside_run, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    result_path = link_parent / "run"
+    config = api.QwenTrainingConfig(
+        dataset_root=str(tmp_path / "dataset"),
+        result_path=str(result_path),
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        run_name="linked-parent-run",
+    )
+    result = api.QwenTrainingResult(
+        config=config,
+        checkpoints=[str(result_path / "latest")],
+        latest_checkpoint=str(result_path / "latest"),
+        epochs_ran=1,
+    )
+
+    metadata = api._persist_qwen_run_metadata(result_path, config, result)
+
+    assert metadata["id"] == "linked-parent-run"
+    assert list(outside_run.iterdir()) == []
 
 
 def test_qwen_model_registry_skips_transformers_runs_without_adapter_artifacts(tmp_path, monkeypatch):

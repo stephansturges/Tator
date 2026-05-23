@@ -39,3 +39,14 @@ preserving the exact validation story for storage and artifact-write fixes.
   `SAM3_DATASET_ROOT` has a symlinked parent.
 - Validation: `980 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Qwen Training Run Roots
+
+- Rejected symlink components anywhere in Qwen training job roots and `runs`
+  roots before and after root creation.
+- Rejected symlink components in Qwen run metadata result paths before writing
+  `metadata.json`.
+- Added regressions for Qwen run roots and metadata result paths through
+  symlinked parent directories.
+- Validation: `982 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

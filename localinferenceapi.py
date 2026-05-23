@@ -23215,10 +23215,10 @@ def _persist_qwen_run_metadata(
 def _write_qwen_run_metadata_file(result_path: Path, metadata: Dict[str, Any]) -> bool:
     tmp_path: Optional[Path] = None
     try:
-        if result_path.is_symlink():
+        if _storage_path_has_symlink_component(result_path):
             return False
         result_path.mkdir(parents=True, exist_ok=True)
-        if result_path.is_symlink():
+        if _storage_path_has_symlink_component(result_path):
             return False
         run_root = result_path.resolve(strict=True)
         if not run_root.is_dir():
@@ -23253,18 +23253,22 @@ def _write_qwen_run_metadata_file(result_path: Path, metadata: Dict[str, Any]) -
 def _qwen_training_runs_root(*, create: bool, detail: str) -> Path:
     job_root_raw = QWEN_JOB_ROOT
     try:
-        if job_root_raw.is_symlink():
+        if _storage_path_has_symlink_component(job_root_raw):
             raise ValueError("job root is symlink")
         if create:
             job_root_raw.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(job_root_raw):
+            raise ValueError("job root is symlink")
         if job_root_raw.exists() and not job_root_raw.is_dir():
             raise ValueError("job root is not a directory")
         job_root = job_root_raw.resolve(strict=False)
         runs_raw = job_root_raw / "runs"
-        if runs_raw.is_symlink():
+        if _storage_path_has_symlink_component(runs_raw):
             raise ValueError("runs root is symlink")
         if create:
             runs_raw.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(runs_raw):
+            raise ValueError("runs root is symlink")
         if runs_raw.exists() and not runs_raw.is_dir():
             raise ValueError("runs root is not a directory")
         runs_root = runs_raw.resolve(strict=False)

@@ -147,6 +147,38 @@ def test_ensure_cascade_zip_rejects_symlinked_cascade_root_without_write(
     assert list(outside.iterdir()) == []
 
 
+def test_ensure_cascade_zip_rejects_symlinked_cascade_parent_without_write(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    cascades_parent = tmp_path / "linked_parent"
+    recipes_root = tmp_path / "recipes"
+    classifiers_root = tmp_path / "classifiers"
+    recipes_root.mkdir(parents=True, exist_ok=True)
+    classifiers_root.mkdir(parents=True, exist_ok=True)
+    try:
+        cascades_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _ensure_cascade_zip_impl(
+            {"id": "ac_test", "label": "demo", "steps": [{"recipe_id": "r1"}], "dedupe": {}},
+            cascades_root=cascades_parent / "cascades",
+            recipes_root=recipes_root,
+            classifiers_root=classifiers_root,
+            path_is_within_root_fn=_within_root,
+            ensure_recipe_zip_fn=lambda _recipe: recipes_root / "r1.zip",
+            load_recipe_fn=lambda _rid: {"id": "r1"},
+            resolve_classifier_fn=lambda _rel: None,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_cascade_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_ensure_cascade_zip_skips_symlink_classifier_meta_escape(tmp_path: Path) -> None:
     cascades_root = tmp_path / "cascades"
     recipes_root = tmp_path / "recipes"
@@ -255,6 +287,23 @@ def test_list_agent_cascades_skips_symlinked_json_escape(tmp_path: Path) -> None
     assert cascades == []
 
 
+def test_list_agent_cascades_rejects_symlinked_parent(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    cascades_parent = tmp_path / "linked_parent"
+    try:
+        cascades_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _list_agent_cascades_impl(cascades_root=cascades_parent / "cascades")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_cascade_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_ensure_cascade_zip_replaces_symlinked_existing_zip(tmp_path: Path) -> None:
     cascades_root = tmp_path / "cascades"
     recipes_root = tmp_path / "recipes"
@@ -324,6 +373,28 @@ def test_persist_agent_cascade_replaces_symlink_targets_without_target_write(
     assert json.loads(json_path.read_text(encoding="utf-8"))["id"] == cascade_id
     assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
     assert outside_final.read_text(encoding="utf-8") == "external final"
+
+
+def test_persist_agent_cascade_rejects_symlinked_parent_without_write(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    cascades_parent = tmp_path / "linked_parent"
+    try:
+        cascades_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _persist_agent_cascade_impl(
+            "demo",
+            {"steps": [{"recipe_id": "r1"}], "dedupe": {}},
+            cascades_root=cascades_parent / "cascades",
+            path_is_within_root_fn=_within_root,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_cascade_path_invalid"
+    assert list(outside.iterdir()) == []
 
 
 def test_load_agent_cascade_rejects_symlinked_json_escape(tmp_path: Path) -> None:

@@ -37,13 +37,15 @@ def _agent_cascade_storage_root(
     create: bool = False,
     detail: str = "agent_cascade_path_invalid",
 ) -> Path:
-    if root.is_symlink():
+    if root.is_symlink() or root.parent.is_symlink():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     if create:
         root.mkdir(parents=True, exist_ok=True)
+        if root.is_symlink() or root.parent.is_symlink():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     if root.exists() and not root.is_dir():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
-    if root.is_symlink():
+    if root.is_symlink() or root.parent.is_symlink():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     return root.resolve(strict=False)
 

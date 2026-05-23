@@ -12576,8 +12576,10 @@ def _agent_select_similarity_exemplars(
 
 def _qwen_prepass_trace_prepare_file(path: Path, root: Path) -> Optional[Path]:
     try:
+        if root.is_symlink() or root.parent.is_symlink():
+            return None
         root.mkdir(parents=True, exist_ok=True)
-        if root.is_symlink():
+        if root.is_symlink() or root.parent.is_symlink():
             return None
         root_resolved = root.resolve(strict=True)
         path.parent.mkdir(parents=True, exist_ok=True)

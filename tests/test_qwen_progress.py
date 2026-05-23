@@ -440,3 +440,24 @@ def test_qwen_prepass_trace_rejects_symlinked_root(tmp_path):
     )
 
     assert not (outside_root / "latest.jsonl").exists()
+
+
+def test_qwen_prepass_trace_rejects_symlinked_parent_root(tmp_path):
+    outside_parent = tmp_path / "outside_parent"
+    outside_parent.mkdir()
+    trace_parent = tmp_path / "trace_parent"
+    try:
+        trace_parent.symlink_to(outside_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    trace_root = trace_parent / "prepass_traces"
+
+    written = api._qwen_prepass_trace_write_file(
+        trace_root / "latest.jsonl",
+        trace_root,
+        "{\"event\":\"escaped\"}\n",
+        append=True,
+    )
+
+    assert written is False
+    assert list(outside_parent.iterdir()) == []

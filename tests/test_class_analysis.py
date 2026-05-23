@@ -2,11 +2,13 @@ import asyncio
 import json
 import math
 import types
+from io import BytesIO
 
 import numpy as np
 import pytest
 import torch
 from PIL import Image
+from starlette.datastructures import UploadFile
 
 import localinferenceapi as api
 from services.classifier import _load_clip_head_from_classifier_impl
@@ -234,6 +236,14 @@ def test_class_analysis_sample_cap_defaults_to_unlimited():
     assert api._class_analysis_stratified_indices(records, cap=0, seed=7) == list(range(12))
 
 
+def test_class_analysis_direct_job_rejects_missing_source():
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.create_class_analysis_job({})
+
+    assert exc_info.value.status_code == api.HTTP_400_BAD_REQUEST
+    assert exc_info.value.detail == "dataset_id_required"
+
+
 def test_class_analysis_rejects_local_salad_aggregation_before_queue():
     with pytest.raises(api.HTTPException) as disabled:
         api._normalize_class_analysis_request(
@@ -267,6 +277,47 @@ def test_auto_class_training_rejects_local_salad_aggregation_before_dataset_vali
         )
     assert disabled.value.status_code == 400
     assert disabled.value.detail == "local_salad_auto_class_disabled"
+
+
+def test_auto_class_training_cleans_staged_upload_on_dataset_validation_error(
+    tmp_path,
+    monkeypatch,
+):
+    staged_root = tmp_path / "clip_train_fixed"
+
+    def fake_mkdtemp(prefix=""):
+        staged_root.mkdir(parents=True, exist_ok=True)
+        return str(staged_root)
+
+    monkeypatch.setattr(api.tempfile, "mkdtemp", fake_mkdtemp)
+    image = UploadFile(filename="a.jpg", file=BytesIO(b"image-bytes"))
+    empty_label = UploadFile(filename="a.txt", file=BytesIO(b""))
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(
+            api.start_clip_training(
+                images=[image],
+                labels=[empty_label],
+                labelmap=None,
+                clip_model_name=api.DEFAULT_CLIP_MODEL,
+                encoder_type="clip",
+                encoder_model=None,
+                output_dir=".",
+                images_path_native=None,
+                labels_path_native=None,
+                labelmap_path_native=None,
+                solver="saga",
+                classifier_type="logreg",
+                embedding_aggregation="pooled",
+                embedding_salad_head_id="",
+                reuse_embeddings=None,
+                hard_example_mining=None,
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "clip_labels_empty"
+    assert not staged_root.exists()
 
 
 def test_auto_class_runtime_rejects_local_salad_artifacts_before_encoding():
@@ -610,6 +661,55 @@ def test_class_analysis_source_reads_active_workspace_manifest(tmp_path):
     assert source["dataset_root"] == workspace.resolve()
     assert source["labelmap"] == ["car", "boat"]
     assert source["manifest"]["images"][0]["frontend_image_key"] == "train/original/example.jpg"
+
+
+def test_class_analysis_active_workspace_cleans_partial_upload_on_bad_manifest(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", tmp_path)
+    manifest = {
+        "labelmap": ["car"],
+        "images": [
+            {
+                "upload_name": "missing.jpg",
+                "label_lines": ["0 0.5 0.5 0.2 0.2"],
+            }
+        ],
+    }
+    upload = UploadFile(filename="present.jpg", file=BytesIO(b"image-bytes"))
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(api.create_class_analysis_active_workspace_job(json.dumps(manifest), [upload]))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "active_workspace_image_upload_missing"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_class_analysis_active_workspace_rejects_oversize_upload(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", tmp_path)
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES", 4)
+    manifest = {
+        "labelmap": ["car"],
+        "images": [
+            {
+                "upload_name": "present.jpg",
+                "label_lines": ["0 0.5 0.5 0.2 0.2"],
+            }
+        ],
+    }
+    upload = UploadFile(filename="present.jpg", file=BytesIO(b"too-large"))
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(api.create_class_analysis_active_workspace_job(json.dumps(manifest), [upload]))
+
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.detail == "active_workspace_upload_too_large"
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_class_analysis_encode_crops_reports_batch_progress(monkeypatch):

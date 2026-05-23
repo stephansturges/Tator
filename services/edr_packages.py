@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
+import stat
 import tempfile
 import zipfile
 import numpy as np
@@ -24,6 +26,7 @@ EDR_PACKAGE_KIND_CANONICAL = "canonical_edr"
 EDR_PACKAGE_KIND_SAVED = "saved_edr"
 EDR_PACKAGE_RUNTIME_MODE = "package"
 EDR_PACKAGE_FEATURE_SCHEMA_VERSION = 1
+_EDR_PACKAGE_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _stable_json(payload: Any) -> str:
@@ -48,6 +51,13 @@ def _slug(value: Any, *, fallback: str) -> str:
     text = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(value or "").strip())
     text = text.strip("_")
     return text or fallback
+
+
+def _validate_edr_package_id(package_id: Any) -> str:
+    cleaned = str(package_id or "").strip()
+    if not cleaned or cleaned in {".", ".."} or not _EDR_PACKAGE_ID_RE.fullmatch(cleaned):
+        raise ValueError("edr_package_id_invalid")
+    return cleaned
 
 
 def _normalize_string_list(values: Any) -> List[str]:
@@ -99,7 +109,8 @@ def canonical_edr_package_id(dataset_id: str, recipe_fingerprint: str) -> str:
 
 
 def edr_package_dir(packages_root: Path, package_id: str, *, create: bool = False) -> Path:
-    path = (packages_root / str(package_id).strip()).resolve()
+    safe_id = _validate_edr_package_id(package_id)
+    path = (packages_root / safe_id).resolve()
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path
@@ -449,13 +460,26 @@ def _zip_payload(payload_dir: Path, zip_path: Path) -> None:
             zf.write(item, arcname=str(item.relative_to(payload_dir)))
 
 
-def _extract_zip_safely(zip_path: Path, dest_dir: Path) -> None:
+def _extract_zip_safely(
+    zip_path: Path,
+    dest_dir: Path,
+    *,
+    max_total_uncompressed_bytes: Optional[int] = None,
+) -> None:
     root = dest_dir.resolve()
     with zipfile.ZipFile(zip_path) as zf:
+        total_uncompressed = 0
         for info in zf.infolist():
             target = (dest_dir / info.filename).resolve()
             if info.filename.startswith("/") or (target != root and root not in target.parents):
                 raise RuntimeError("edr_package_path_traversal")
+            mode = (info.external_attr >> 16) & 0xFFFF
+            if stat.S_ISLNK(mode):
+                raise RuntimeError("edr_package_symlink_unsupported")
+            if max_total_uncompressed_bytes and max_total_uncompressed_bytes > 0:
+                total_uncompressed += max(int(info.file_size or 0), 0)
+                if total_uncompressed > max_total_uncompressed_bytes:
+                    raise RuntimeError("edr_package_uncompressed_too_large")
         zf.extractall(dest_dir)
 
 
@@ -881,12 +905,20 @@ def import_edr_package_from_zip(
     *,
     zip_path: Path,
     packages_root: Path,
+    max_extract_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
     temp_dir = Path(tempfile.mkdtemp(prefix="edr_package_import_"))
     try:
         payload_root = temp_dir / "payload"
         payload_root.mkdir(parents=True, exist_ok=True)
-        _extract_zip_safely(zip_path, payload_root)
+        try:
+            _extract_zip_safely(
+                zip_path,
+                payload_root,
+                max_total_uncompressed_bytes=max_extract_bytes,
+            )
+        except zipfile.BadZipFile as exc:
+            raise RuntimeError("edr_package_invalid_zip") from exc
         manifest = _load_json(payload_root / EDR_PACKAGE_MANIFEST_NAME)
         if not manifest:
             raise RuntimeError("edr_package_manifest_missing")

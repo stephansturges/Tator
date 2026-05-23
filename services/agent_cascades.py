@@ -313,33 +313,51 @@ def _import_agent_cascade_zip_obj_impl(
             if arc_path.name.endswith(".meta.pkl") or arc_path.suffix.lower() in classifier_allowed_exts:
                 classifier_file_names.append(name)
 
-    classifier_map: Dict[str, str] = {}
-    if classifier_file_names:
-        import_tag = f"cascade_{uuid.uuid4().hex[:8]}"
-        import_root = (classifiers_root / "imports" / import_tag).resolve()
-        if not path_is_within_root_fn(import_root, classifiers_root.resolve()):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
-        import_root.mkdir(parents=True, exist_ok=True)
-        for name in classifier_file_names:
-            arc_path = Path(name)
-            rel_inside = Path(*arc_path.parts[1:])
-            dest_path = (import_root / rel_inside).resolve()
-            if not path_is_within_root_fn(dest_path, classifiers_root.resolve()):
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
-            dest_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                with zf.open(name) as src, dest_path.open("wb") as dst:
-                    shutil.copyfileobj(src, dst, length=1024 * 1024)
-            except Exception:
-                continue
-            if not arc_path.name.endswith(".meta.pkl") and arc_path.suffix.lower() in classifier_allowed_exts:
-                orig_rel = str(rel_inside.as_posix())
-                new_rel = str((Path("imports") / import_tag / rel_inside).as_posix())
-                classifier_map[orig_rel] = new_rel
+    label = cascade_data.get("label") or "imported_cascade"
+    steps_raw = cascade_data.get("steps")
+    if not isinstance(steps_raw, list) or not steps_raw:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+    dedupe_raw = cascade_data.get("dedupe") if isinstance(cascade_data.get("dedupe"), dict) else {}
 
-    id_map: Dict[str, str] = {}
+    validated_steps: List[tuple[Dict[str, Any], str]] = []
+    for raw in steps_raw:
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+        rid = raw.get("recipe_id")
+        if not rid and isinstance(raw.get("recipe"), dict):
+            rid = raw["recipe"].get("id")
+        if not isinstance(rid, str) or not rid.strip():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
+        validated_steps.append((raw, rid.strip()))
+
+    classifier_map: Dict[str, str] = {}
+    classifier_import_root: Optional[Path] = None
     recipe_import_tmp_root: Optional[Path] = None
     try:
+        if classifier_file_names:
+            import_tag = f"cascade_{uuid.uuid4().hex[:8]}"
+            classifier_import_root = (classifiers_root / "imports" / import_tag).resolve()
+            if not path_is_within_root_fn(classifier_import_root, classifiers_root.resolve()):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+            classifier_import_root.mkdir(parents=True, exist_ok=True)
+            for name in classifier_file_names:
+                arc_path = Path(name)
+                rel_inside = Path(*arc_path.parts[1:])
+                dest_path = (classifier_import_root / rel_inside).resolve()
+                if not path_is_within_root_fn(dest_path, classifiers_root.resolve()):
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with zf.open(name) as src, dest_path.open("wb") as dst:
+                        shutil.copyfileobj(src, dst, length=1024 * 1024)
+                except Exception:
+                    continue
+                if not arc_path.name.endswith(".meta.pkl") and arc_path.suffix.lower() in classifier_allowed_exts:
+                    orig_rel = str(rel_inside.as_posix())
+                    new_rel = str((Path("imports") / import_tag / rel_inside).as_posix())
+                    classifier_map[orig_rel] = new_rel
+
+        id_map: Dict[str, str] = {}
         for name in recipe_zip_names:
             src_id = None
             try:
@@ -373,56 +391,46 @@ def _import_agent_cascade_zip_obj_impl(
                     id_map[str(old_id)] = str(new_id)
                 if src_id:
                     id_map[str(src_id)] = str(new_id)
+
+        steps_out: List[Dict[str, Any]] = []
+        for raw, rid in validated_steps:
+            mapped = id_map.get(rid)
+            if not mapped:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_missing_recipe")
+            extra_classifier_ref = None
+            if isinstance(raw.get("extra_clip_classifier_path"), str) and raw.get("extra_clip_classifier_path").strip():
+                extra_classifier_ref = str(raw.get("extra_clip_classifier_path")).strip()
+                if classifier_map:
+                    mapped_classifier = classifier_map.get(extra_classifier_ref)
+                    if not mapped_classifier:
+                        raise HTTPException(
+                            status_code=HTTP_400_BAD_REQUEST,
+                            detail="agent_cascade_import_missing_classifier",
+                        )
+                    extra_classifier_ref = mapped_classifier
+            steps_out.append(
+                {
+                    "enabled": bool(raw.get("enabled", True)),
+                    "recipe_id": mapped,
+                    "override_class_id": raw.get("override_class_id"),
+                    "override_class_name": raw.get("override_class_name"),
+                    "dedupe_group": raw.get("dedupe_group"),
+                    "participate_cross_class_dedupe": bool(raw.get("participate_cross_class_dedupe", True)),
+                    "clip_head_min_prob_override": raw.get("clip_head_min_prob_override"),
+                    "clip_head_margin_override": raw.get("clip_head_margin_override"),
+                    "extra_clip_classifier_path": extra_classifier_ref,
+                    "extra_clip_min_prob": raw.get("extra_clip_min_prob"),
+                    "extra_clip_margin": raw.get("extra_clip_margin"),
+                }
+            )
+        persisted = persist_cascade_fn(str(label), {"steps": steps_out, "dedupe": dedupe_raw})
+        classifier_import_root = None
+        return persisted
     finally:
         if recipe_import_tmp_root is not None:
             shutil.rmtree(recipe_import_tmp_root, ignore_errors=True)
-
-    label = cascade_data.get("label") or "imported_cascade"
-    steps_raw = cascade_data.get("steps")
-    if not isinstance(steps_raw, list) or not steps_raw:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
-    dedupe_raw = cascade_data.get("dedupe") if isinstance(cascade_data.get("dedupe"), dict) else {}
-
-    steps_out: List[Dict[str, Any]] = []
-    for raw in steps_raw:
-        if not isinstance(raw, dict):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
-        rid = raw.get("recipe_id")
-        if not rid and isinstance(raw.get("recipe"), dict):
-            rid = raw["recipe"].get("id")
-        if not isinstance(rid, str) or not rid.strip():
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_invalid_schema")
-        rid = rid.strip()
-        mapped = id_map.get(rid)
-        if not mapped:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_missing_recipe")
-        extra_classifier_ref = None
-        if isinstance(raw.get("extra_clip_classifier_path"), str) and raw.get("extra_clip_classifier_path").strip():
-            extra_classifier_ref = str(raw.get("extra_clip_classifier_path")).strip()
-            if classifier_map:
-                mapped_classifier = classifier_map.get(extra_classifier_ref)
-                if not mapped_classifier:
-                    raise HTTPException(
-                        status_code=HTTP_400_BAD_REQUEST,
-                        detail="agent_cascade_import_missing_classifier",
-                    )
-                extra_classifier_ref = mapped_classifier
-        steps_out.append(
-            {
-                "enabled": bool(raw.get("enabled", True)),
-                "recipe_id": mapped,
-                "override_class_id": raw.get("override_class_id"),
-                "override_class_name": raw.get("override_class_name"),
-                "dedupe_group": raw.get("dedupe_group"),
-                "participate_cross_class_dedupe": bool(raw.get("participate_cross_class_dedupe", True)),
-                "clip_head_min_prob_override": raw.get("clip_head_min_prob_override"),
-                "clip_head_margin_override": raw.get("clip_head_margin_override"),
-                "extra_clip_classifier_path": extra_classifier_ref,
-                "extra_clip_min_prob": raw.get("extra_clip_min_prob"),
-                "extra_clip_margin": raw.get("extra_clip_margin"),
-            }
-        )
-    return persist_cascade_fn(str(label), {"steps": steps_out, "dedupe": dedupe_raw})
+        if classifier_import_root is not None:
+            shutil.rmtree(classifier_import_root, ignore_errors=True)
 
 
 def _import_agent_cascade_zip_bytes_impl(

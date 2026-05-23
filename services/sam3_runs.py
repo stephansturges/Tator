@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from utils.io import _path_is_within_root_impl
+
 
 def _active_run_paths_for_variant_impl(
     *,
@@ -136,8 +138,9 @@ def _run_dir_for_request_impl(
     http_404: int,
 ) -> Path:
     root = job_root
+    root_resolved = root.resolve()
     candidate = (root / run_id).resolve()
-    if not str(candidate).startswith(str(root.resolve())):
+    if not _path_is_within_root_impl(candidate, root_resolved):
         raise http_exception_cls(status_code=http_400, detail="invalid_run_id")
     if not candidate.exists():
         raise http_exception_cls(status_code=http_404, detail="sam3_run_not_found")

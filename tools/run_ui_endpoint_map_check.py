@@ -7,14 +7,14 @@ from pathlib import Path
 
 
 API_PATTERN = re.compile(r"\$\{API_ROOT\}(/[^\"'\\]+)")
-ENCODE_SEGMENT = re.compile(r"/\\$\\{encodeURIComponent\\([^}]+\\)\\}")
+ENCODE_SEGMENT = re.compile(r"/\$\{encodeURIComponent\([^}]+\)\}")
 
 
 def _normalize_path(raw: str) -> str:
     path = raw.split("?")[0]
     path = path.split("`")[0]
     path = ENCODE_SEGMENT.sub("/{param}", path)
-    path = re.sub(r"/\\$\\{[^}]+\\}", "/{param}", path)
+    path = re.sub(r"/\$\{[^}]+\}", "/{param}", path)
     return path
 
 
@@ -32,25 +32,33 @@ def _extract_paths(js_text: str):
     return paths
 
 
+def _path_match_score(ui_parts: list[str], cand_parts: list[str]) -> int | None:
+    score = 0
+    for u, c in zip(ui_parts, cand_parts, strict=False):
+        ui_param = u.startswith("{") and u.endswith("}")
+        candidate_param = c.startswith("{") and c.endswith("}")
+        if ui_param:
+            if not candidate_param:
+                return None
+            score += 1
+        elif candidate_param:
+            score += 1
+        elif u == c:
+            score += 3
+        else:
+            return None
+    return score
+
+
 def _match_openapi_path(ui_path: str, openapi_paths: set[str]) -> bool:
     if ui_path in openapi_paths:
         return True
-    # normalize both by treating {param} as wildcard
     ui_parts = ui_path.strip("/").split("/")
     for candidate in openapi_paths:
         cand_parts = candidate.strip("/").split("/")
-        if len(ui_parts) != len(cand_parts):
-            continue
-        ok = True
-        for u, c in zip(ui_parts, cand_parts, strict=False):
-            if c.startswith("{") and c.endswith("}"):
-                continue
-            if u.startswith("{") and u.endswith("}"):
-                continue
-            if u != c:
-                ok = False
-                break
-        if ok:
+        if len(ui_parts) == len(cand_parts) and _path_match_score(ui_parts, cand_parts) is not None:
+            return True
+        if len(ui_parts) < len(cand_parts) and _path_match_score(ui_parts, cand_parts[: len(ui_parts)]) is not None:
             return True
     return False
 

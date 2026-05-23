@@ -951,10 +951,16 @@ def _agent_run_deep_prepass_caption_impl(
             bbox = qwen_bbox_to_xyxy_fn(pil_img.width, pil_img.height, det.get("bbox_2d") or [])
         if not bbox or len(bbox) < 4:
             continue
+        try:
+            clean_bbox = [float(v) for v in bbox[:4]]
+        except (TypeError, ValueError):
+            continue
+        if any(not math.isfinite(value) for value in clean_bbox):
+            continue
         caption_hints.append(
             {
                 "label": label,
-                "bbox": [float(v) for v in bbox[:4]],
+                "bbox": clean_bbox,
                 "confidence": det.get("score"),
             }
         )
@@ -969,12 +975,24 @@ def _agent_run_deep_prepass_caption_impl(
     if det_hint_summary and det_hint_summary != "none":
         prepass_prompt = f"{prepass_prompt} Detection hints: {det_hint_summary}."
 
-    caption_profile = (getattr(payload, "prepass_caption_profile", None) or "light").strip().lower()
+    caption_profile = str(getattr(payload, "prepass_caption_profile", None) or "light").strip().lower()
     if caption_profile not in {"light", "deep"}:
         caption_profile = "light"
-    caption_variant = getattr(payload, "prepass_caption_variant", None) or getattr(payload, "model_variant", None) or "auto"
-    caption_model_id = (getattr(payload, "prepass_caption_model_id", None) or model_id_override or "").strip() or None
-    caption_max_tokens = int(getattr(payload, "prepass_caption_max_tokens", None) or (512 if caption_profile == "light" else 1024))
+    caption_variant = (
+        getattr(payload, "prepass_caption_variant", None)
+        or getattr(payload, "model_variant", None)
+        or "auto"
+    )
+    caption_model_id = (
+        str(getattr(payload, "prepass_caption_model_id", None) or model_id_override or "").strip()
+        or None
+    )
+    default_caption_tokens = 512 if caption_profile == "light" else 1024
+    try:
+        caption_max_tokens = int(getattr(payload, "prepass_caption_max_tokens", None) or default_caption_tokens)
+    except (TypeError, ValueError, OverflowError):
+        caption_max_tokens = default_caption_tokens
+    caption_max_tokens = max(32, min(caption_max_tokens, 2000))
     caption_mode = "windowed"
     caption_all_windows = True
     include_coords = False

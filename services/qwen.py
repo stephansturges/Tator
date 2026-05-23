@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import Counter
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 
@@ -99,6 +100,20 @@ def _caption_preferred_label(label: str, glossary_map: Optional[Dict[str, List[s
     if "_" in label:
         return label.replace("_", " ")
     return label
+
+
+def _caption_hint_value(hint: Any, key: str, default: Any = None) -> Any:
+    if isinstance(hint, Mapping):
+        return hint.get(key, default)
+    return getattr(hint, key, default)
+
+
+def _caption_finite_float(value: Any) -> Optional[float]:
+    try:
+        num = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return num if math.isfinite(num) else None
 
 
 def _resolve_caption_all_windows(
@@ -247,7 +262,16 @@ def _build_qwen_caption_prompt(
     safe_height = max(1, int(image_height))
     short_requested = _caption_user_requested_short(user_prompt, max_sentences)
     sentence_limit = _caption_requested_sentence_limit(user_prompt, max_sentences)
-    counts: Dict[str, int] = dict(Counter([getattr(hint, "label", "") for hint in label_hints if getattr(hint, "label", "")]))
+    counts: Dict[str, int] = dict(
+        Counter(
+            label
+            for label in (
+                str(_caption_hint_value(hint, "label", "") or "").strip()
+                for hint in label_hints
+            )
+            if label
+        )
+    )
 
     def _bbox_to_qwen_2d(bbox: Sequence[float]) -> List[int]:
         x1, y1, x2, y2 = bbox
@@ -265,16 +289,28 @@ def _build_qwen_caption_prompt(
 
     hints_payload = []
     for hint in label_hints:
-        bbox = getattr(hint, "bbox", None) or []
-        label = getattr(hint, "label", None)
-        confidence = getattr(hint, "confidence", None)
+        bbox = _caption_hint_value(hint, "bbox", None) or []
+        label = str(_caption_hint_value(hint, "label", "") or "").strip()
+        if not label:
+            continue
+        confidence = _caption_finite_float(_caption_hint_value(hint, "confidence", None))
         if len(bbox) == 4:
-            x1, y1, x2, y2 = bbox
-            x1 = max(0.0, min(float(x1), safe_width))
-            y1 = max(0.0, min(float(y1), safe_height))
-            x2 = max(0.0, min(float(x2), safe_width))
-            y2 = max(0.0, min(float(y2), safe_height))
-            if x2 <= x1 or y2 <= y1:
+            coords = [_caption_finite_float(value) for value in bbox]
+            if any(value is None for value in coords):
+                x1 = y1 = x2 = y2 = None
+            else:
+                x1_raw, y1_raw, x2_raw, y2_raw = coords
+                assert (
+                    x1_raw is not None
+                    and y1_raw is not None
+                    and x2_raw is not None
+                    and y2_raw is not None
+                )
+                x1 = max(0.0, min(x1_raw, safe_width))
+                y1 = max(0.0, min(y1_raw, safe_height))
+                x2 = max(0.0, min(x2_raw, safe_width))
+                y2 = max(0.0, min(y2_raw, safe_height))
+            if (x1 is not None and x2 <= x1) or (y1 is not None and y2 <= y1):
                 continue
         else:
             x1 = y1 = x2 = y2 = None
@@ -444,7 +480,12 @@ def _extract_caption_from_text(text: str, marker: Optional[str] = None) -> Tuple
         cleaned = final_match.group(1)
         marker_found = True
     if marker:
-        match = re.search(rf"{marker}\s*:?\s*(.+)", cleaned, re.IGNORECASE | re.DOTALL)
+        marker_pattern = re.escape(marker)
+        match = re.search(
+            rf"(?:^|\n)\s*{marker_pattern}(?:\s+(?:ANSWER|CAPTION))?\s*:?\s*(.+)",
+            cleaned,
+            re.IGNORECASE | re.DOTALL,
+        )
         if match:
             cleaned = match.group(1)
             marker_found = True
@@ -881,7 +922,7 @@ def _caption_missing_labels(
         if count <= 0:
             continue
         label_terms = _caption_label_terms(label, glossary_map)
-        if not any(term in lowered for term in label_terms):
+        if not any(_caption_term_present(lowered, term) for term in label_terms):
             missing.append(label)
     return missing
 
@@ -919,7 +960,11 @@ def _sanitize_qwen_caption(text: str) -> str:
     if re.search(r"</think>", cleaned, flags=re.IGNORECASE):
         parts = re.split(r"</think>", cleaned, flags=re.IGNORECASE)
         cleaned = parts[-1].strip()
-    if re.search(r"\bFINAL\b", cleaned, flags=re.IGNORECASE):
+    if re.search(
+        r"(?:^|\n)\s*FINAL(?:\s+(?:ANSWER|CAPTION))?\s*:",
+        cleaned,
+        flags=re.IGNORECASE,
+    ):
         cleaned, _ = _extract_caption_from_text(cleaned, marker="FINAL")
     cleaned = cleaned.strip()
     if cleaned.startswith(":"):
@@ -987,7 +1032,8 @@ def _caption_needs_completion(caption: str) -> bool:
     trimmed = caption.strip()
     if not trimmed:
         return True
-    if trimmed[-1] not in ".!?":
+    terminal = re.sub(r"[\"')\]]+$", "", trimmed).rstrip()
+    if not terminal or terminal[-1] not in ".!?":
         return True
     return _caption_has_dangling_tail(trimmed)
 
@@ -1099,13 +1145,10 @@ def _caption_needs_short_form(caption: str, max_words: int = 80, max_sentences: 
     return len(sentences) > max_sentences
 
 
-def _allowed_caption_labels_impl(label_hints: Sequence[Dict[str, Any]]) -> List[str]:
+def _allowed_caption_labels_impl(label_hints: Sequence[Any]) -> List[str]:
     labels = []
     for entry in label_hints or []:
-        try:
-            label = str(entry.get("label") or "").strip()
-        except Exception:
-            label = ""
+        label = str(_caption_hint_value(entry, "label", "") or "").strip()
         if not label:
             continue
         labels.append(label)
@@ -1159,6 +1202,23 @@ def _caption_is_degenerate_impl(caption: str) -> bool:
 
 
 def _resolve_qwen_caption_decode(payload: Any, is_thinking: bool) -> Dict[str, Any]:
+    def _float_param(name: str, default: float, minimum: float, maximum: float) -> float:
+        value = _caption_finite_float(getattr(payload, name, None))
+        if value is None:
+            return default
+        return max(minimum, min(value, maximum))
+
+    def _int_param(name: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            raw = getattr(payload, name, None)
+            raw_float = float(raw)
+            if not math.isfinite(raw_float):
+                return default
+            value = int(raw_float)
+        except (TypeError, ValueError, OverflowError):
+            return default
+        return max(minimum, min(value, maximum))
+
     use_sampling = payload.use_sampling if getattr(payload, "use_sampling", None) is not None else True
     if not use_sampling:
         if is_thinking:
@@ -1187,12 +1247,10 @@ def _resolve_qwen_caption_decode(payload: Any, is_thinking: bool) -> Dict[str, A
         "repetition_context_size": 128,
         "no_repeat_ngram_size": 8,
     }
-    temperature = payload.temperature if getattr(payload, "temperature", None) is not None else defaults["temperature"]
-    top_p = payload.top_p if getattr(payload, "top_p", None) is not None else defaults["top_p"]
-    top_k = payload.top_k if getattr(payload, "top_k", None) is not None else defaults["top_k"]
-    presence_penalty = (
-        payload.presence_penalty if getattr(payload, "presence_penalty", None) is not None else defaults["presence_penalty"]
-    )
+    temperature = _float_param("temperature", defaults["temperature"], 0.01, 2.0)
+    top_p = _float_param("top_p", defaults["top_p"], 0.01, 1.0)
+    top_k = _int_param("top_k", defaults["top_k"], 1, 1000)
+    presence_penalty = _float_param("presence_penalty", defaults["presence_penalty"], -2.0, 2.0)
     return {
         "do_sample": True,
         "temperature": temperature,
@@ -1552,27 +1610,44 @@ def _resolve_qwen_window_size(
     default_size: int = 672,
     default_overlap: float = 0.2,
 ) -> int:
+    try:
+        safe_width = max(1, int(image_width))
+        safe_height = max(1, int(image_height))
+    except (TypeError, ValueError, OverflowError):
+        safe_width = safe_height = max(1, int(default_size or 672))
     if requested is None:
         overlap_val = _resolve_qwen_window_overlap(overlap, default_overlap=default_overlap)
-        base_dim = max(1, min(int(image_width), int(image_height)))
+        base_dim = max(1, min(safe_width, safe_height))
         # Default to two overlapping windows on the shorter axis; the longer axis
         # may need more positions to avoid corner-only coverage.
         base = base_dim / max(1.0, 2.0 - overlap_val)
     else:
         base = requested
     try:
-        base = int(base)
-    except (TypeError, ValueError):
+        base_float = float(base)
+        if not math.isfinite(base_float):
+            raise ValueError("nonfinite_window_size")
+        base = int(base_float)
+    except (TypeError, ValueError, OverflowError):
         base = default_size
     base = max(128, min(base, 4096))
-    return max(64, min(base, int(image_width), int(image_height)))
+    return max(64, min(base, safe_width, safe_height))
 
 
 def _resolve_qwen_window_overlap(requested: Optional[float], *, default_overlap: float = 0.2) -> float:
     try:
         overlap = float(requested) if requested is not None else default_overlap
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         overlap = default_overlap
+    if not math.isfinite(overlap):
+        overlap = default_overlap
+    try:
+        default = float(default_overlap)
+    except (TypeError, ValueError, OverflowError):
+        default = 0.2
+    if not math.isfinite(default):
+        default = 0.2
+    overlap = overlap if math.isfinite(overlap) else default
     return max(0.0, min(overlap, 0.2))
 
 
@@ -1777,11 +1852,26 @@ def _window_positions_impl(
     *,
     force_two: bool = False,
 ) -> List[int]:
-    if total <= window:
+    try:
+        safe_total = max(1, int(total))
+    except (TypeError, ValueError, OverflowError):
+        safe_total = 1
+    try:
+        safe_window = max(1, int(window))
+    except (TypeError, ValueError, OverflowError):
+        safe_window = safe_total
+    try:
+        safe_overlap = float(overlap)
+    except (TypeError, ValueError, OverflowError):
+        safe_overlap = 0.0
+    if not math.isfinite(safe_overlap):
+        safe_overlap = 0.0
+    safe_overlap = max(0.0, min(safe_overlap, 0.95))
+    if safe_total <= safe_window:
         return [0]
-    step = max(1, int(round(window * (1.0 - overlap))))
-    positions = list(range(0, max(1, total - window + 1), step))
-    last = total - window
+    step = max(1, int(round(safe_window * (1.0 - safe_overlap))))
+    positions = list(range(0, max(1, safe_total - safe_window + 1), step))
+    last = safe_total - safe_window
     if positions[-1] != last:
         positions.append(last)
     return sorted(set(positions))

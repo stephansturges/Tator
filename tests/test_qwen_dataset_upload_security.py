@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from io import BytesIO
 from pathlib import Path
 
@@ -44,6 +45,46 @@ def test_qwen_chunk_rejects_multiline_annotation(tmp_path: Path) -> None:
         _cleanup_upload_job("job_ann")
 
 
+def test_qwen_chunk_rejects_invalid_json_annotation(tmp_path: Path) -> None:
+    _register_upload_job(tmp_path, "job_bad_json")
+    try:
+        upload = UploadFile(filename="a.jpg", file=BytesIO(b"img"))
+        with pytest.raises(HTTPException) as exc_info:
+            localinferenceapi.upload_qwen_dataset_chunk(
+                "job_bad_json",
+                "train",
+                "a.jpg",
+                "not json",
+                upload,
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "qwen_dataset_annotation_invalid"
+        assert not (tmp_path / "qwen_upload_job_bad_json" / "train" / "a.jpg").exists()
+    finally:
+        _cleanup_upload_job("job_bad_json")
+
+
+def test_qwen_chunk_rejects_empty_image(tmp_path: Path) -> None:
+    job = _register_upload_job(tmp_path, "job_empty")
+    try:
+        upload = UploadFile(filename="empty.jpg", file=BytesIO(b""))
+        with pytest.raises(HTTPException) as exc_info:
+            localinferenceapi.upload_qwen_dataset_chunk(
+                "job_empty",
+                "train",
+                "empty.jpg",
+                '{"id":"x"}',
+                upload,
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "qwen_dataset_empty_image"
+        assert not (job.root_dir / "train" / "empty.jpg").exists()
+        assert not (job.root_dir / "train" / "annotations.jsonl").exists()
+        assert job.train_count == 0
+    finally:
+        _cleanup_upload_job("job_empty")
+
+
 def test_qwen_chunk_limits_size_and_cleans_partial_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     job = _register_upload_job(tmp_path, "job_size")
     monkeypatch.setattr(localinferenceapi, "QWEN_DATASET_CHUNK_MAX_BYTES", 4)
@@ -79,6 +120,8 @@ def test_qwen_chunk_sanitizes_image_name_to_split_root(tmp_path: Path) -> None:
         assert out["status"] == "ok"
         assert (job.root_dir / "train" / "escape.jpg").exists()
         assert not (tmp_path / "escape.jpg").exists()
+        annotation = json.loads((job.root_dir / "train" / "annotations.jsonl").read_text(encoding="utf-8"))
+        assert annotation["image"] == "escape.jpg"
     finally:
         _cleanup_upload_job("job_path")
 

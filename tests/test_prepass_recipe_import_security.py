@@ -116,6 +116,17 @@ def test_import_prepass_recipe_rejects_symlink_member(tmp_path: Path) -> None:
     assert exc_info.value.detail == "prepass_recipe_archive_symlink_unsupported"
 
 
+def test_import_prepass_recipe_rejects_invalid_zip(tmp_path: Path) -> None:
+    zip_path = tmp_path / "broken_recipe.zip"
+    zip_path.write_bytes(b"not a zip")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _call_import(zip_path, tmp_path)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prepass_recipe_invalid_zip"
+
+
 def test_import_prepass_recipe_rejects_oversize_zip(tmp_path: Path) -> None:
     zip_path = tmp_path / "oversize_recipe.zip"
     _write_zip(

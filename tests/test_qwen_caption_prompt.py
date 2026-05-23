@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from localinferenceapi import (
     QwenCaptionHint,
     _build_caption_overlap_guidance,
@@ -7,24 +10,27 @@ from localinferenceapi import (
     _qwen_neutralize_thinking_prefill,
     _resolve_qwen_caption_refinement_model_id,
 )
-from models.schemas import QwenCaptionRequest
+from models.schemas import AutoLabelRequest, QwenCaptionRequest, QwenPrepassRequest
 from services.qwen import (
     _caption_count_conflicts,
     _caption_demote_unstable_glossary_subtypes,
     _caption_is_degenerate_impl,
     _caption_has_meta,
+    _caption_missing_labels,
     _caption_needs_english_rewrite,
     _caption_needs_completion,
     _caption_missing_exact_counts,
     _caption_needs_refine,
     _caption_repetition_loop_detected,
     _caption_trim_to_complete_sentences,
+    _allowed_caption_labels_impl,
     _clean_caption_source_context_text,
     _extract_caption_from_text,
     _format_caption_source_output_context,
     _format_caption_window_observation_lines,
     _format_qwen_load_error_impl,
     _resolve_qwen_caption_decode,
+    _resolve_qwen_window_overlap,
     _resolve_qwen_window_size,
     _resolve_caption_all_windows,
     _run_qwen_caption_cleanup,
@@ -70,6 +76,33 @@ def test_build_qwen_caption_prompt_counts_and_truncation():
     assert counts.get("person") == 1
     assert used == 1
     assert truncated is True
+
+
+def test_caption_prompt_accepts_dict_and_model_hint_shapes():
+    prompt, counts, used, truncated = _build_qwen_caption_prompt(
+        "Describe this image.",
+        [
+            {"label": "car", "bbox": [0, 0, 10, 10], "confidence": 0.8},
+            QwenCaptionHint(label="person", bbox=[20, 20, 40, 60], confidence=0.9),
+        ],
+        image_width=100,
+        image_height=100,
+        include_counts=True,
+        include_coords=True,
+        max_boxes=0,
+        detailed_mode=False,
+        restrict_to_labels=True,
+    )
+
+    assert counts == {"car": 1, "person": 1}
+    assert used == 2
+    assert truncated is False
+    assert '"label":"car"' in prompt
+    assert '"label":"person"' in prompt
+    assert _allowed_caption_labels_impl([QwenCaptionHint(label="car"), {"label": "person"}]) == [
+        "car",
+        "person",
+    ]
 
 
 def test_caption_prompt_accepts_frontend_context_policy():
@@ -546,6 +579,29 @@ def test_extract_caption_prefers_final_xml_marker():
     assert cleaned == "A tank burns in a muddy field."
 
 
+def test_extract_caption_marker_does_not_strip_plain_final_word():
+    raw = "The final image shows a car parked near a road."
+
+    cleaned, marker_found = _extract_caption_from_text(raw, marker="FINAL")
+
+    assert marker_found is False
+    assert cleaned == raw
+    assert _sanitize_qwen_caption(raw) == raw
+    assert _extract_caption_from_text("FINAL: A car is parked.", marker="FINAL") == (
+        "A car is parked.",
+        True,
+    )
+
+
+def test_caption_missing_labels_uses_word_boundaries():
+    assert _caption_missing_labels("A cargo yard is visible.", {"car": 1}) == ["car"]
+    assert _caption_missing_labels("A car is parked near a road.", {"car": 1}) == []
+
+
+def test_caption_completion_allows_terminal_quote_after_punctuation():
+    assert _caption_needs_completion('A road sign reads "STOP."') is False
+
+
 def test_caption_decode_defaults_include_repeat_controls():
     decode = _resolve_qwen_caption_decode(_DecodePayload(), is_thinking=False)
 
@@ -579,6 +635,72 @@ def test_caption_decode_avoids_greedy_for_thinking_models():
     assert decode["temperature"] == 0.6
     assert decode["top_p"] == 0.95
     assert decode["top_k"] == 20
+
+
+def test_caption_decode_clamps_invalid_sampling_parameters():
+    class Payload(_DecodePayload):
+        temperature = float("nan")
+        top_p = 9
+        top_k = -3
+        presence_penalty = 99
+
+    decode = _resolve_qwen_caption_decode(Payload(), is_thinking=False)
+
+    assert decode["temperature"] == 0.7
+    assert decode["top_p"] == 1.0
+    assert decode["top_k"] == 1
+    assert decode["presence_penalty"] == 2.0
+
+
+def test_caption_decode_defaults_nonfinite_integer_sampling_parameters():
+    class Payload(_DecodePayload):
+        top_k = float("inf")
+
+    decode = _resolve_qwen_caption_decode(Payload(), is_thinking=False)
+
+    assert decode["top_k"] == 20
+
+
+def test_caption_request_drops_nonfinite_numeric_controls():
+    payload = QwenCaptionRequest(
+        image_base64="data:image/png;base64,AA==",
+        temperature=float("nan"),
+        top_p=float("inf"),
+        presence_penalty=float("-inf"),
+        window_overlap=float("nan"),
+        window_size=float("inf"),
+        image_width=float("nan"),
+        image_height=float("inf"),
+        max_new_tokens=float("inf"),
+    )
+
+    assert payload.temperature is None
+    assert payload.top_p is None
+    assert payload.presence_penalty is None
+    assert payload.window_overlap is None
+    assert payload.window_size is None
+    assert payload.image_width is None
+    assert payload.image_height is None
+    assert payload.max_new_tokens == 1000
+
+
+def test_qwen_caption_window_helpers_fallback_for_nonfinite_values():
+    assert _resolve_qwen_window_overlap(float("nan"), default_overlap=0.1) == 0.1
+    assert _resolve_qwen_window_overlap(float("inf"), default_overlap=0.1) == 0.1
+
+    window = _resolve_qwen_window_size(
+        float("nan"),
+        image_width=1600,
+        image_height=900,
+        overlap=float("nan"),
+        default_size=672,
+        default_overlap=0.1,
+    )
+    positions = _window_positions_impl(1600, window, float("nan"))
+
+    assert window == 672
+    assert positions[0] == 0
+    assert positions[-1] == 1600 - window
 
 
 def test_qwen_caption_window_grid_covers_wide_image_not_only_corners():
@@ -652,6 +774,65 @@ def test_caption_request_accepts_custom_system_prompt():
     assert payload.caption_draft_refine_prompt == "Draft policy."
     assert payload.caption_merge_prompt == "Merge policy."
     assert payload.caption_cleanup_prompt == "Cleanup policy."
+
+
+def test_caption_request_normalizes_legacy_caption_mode_and_variant_values():
+    hybrid_payload = QwenCaptionRequest(
+        image_base64="data:image/png;base64,AA==",
+        caption_mode="hybrid",
+        model_variant="thinking",
+    )
+    invalid_payload = QwenCaptionRequest(
+        image_base64="data:image/png;base64,AA==",
+        caption_mode="unexpected",
+        model_variant="unexpected",
+    )
+
+    assert hybrid_payload.caption_mode == "windowed"
+    assert hybrid_payload.model_variant == "Thinking"
+    assert invalid_payload.caption_mode == "full"
+    assert invalid_payload.model_variant == "auto"
+
+
+def test_prepass_request_normalizes_caption_variant_values():
+    payload = QwenPrepassRequest(
+        image_token=" token-1 ",
+        image_name=" image.jpg ",
+        model_variant="thinking",
+        prepass_caption_variant="instruct",
+        prepass_caption_model_id=" Qwen/Qwen3-VL-4B-Instruct ",
+    )
+
+    assert payload.image_token == "token-1"
+    assert payload.image_name == "image.jpg"
+    assert payload.model_variant == "Thinking"
+    assert payload.prepass_caption_variant == "Instruct"
+    assert payload.prepass_caption_model_id == "Qwen/Qwen3-VL-4B-Instruct"
+
+
+def test_auto_label_request_normalizes_caption_planner_variant_values():
+    payload = AutoLabelRequest(
+        dataset_id="dataset-1",
+        planner_model_variant="thinking",
+        planner_model_id=" Qwen/Qwen3-VL-4B-Thinking ",
+        yolo_id=" yolo-run ",
+    )
+    invalid_payload = AutoLabelRequest(
+        dataset_id="dataset-1",
+        planner_model_variant="unexpected",
+    )
+
+    assert payload.planner_model_variant == "Thinking"
+    assert payload.planner_model_id == "Qwen/Qwen3-VL-4B-Thinking"
+    assert payload.yolo_id == "yolo-run"
+    assert invalid_payload.planner_model_variant == "auto"
+
+
+def test_caption_hint_rejects_nonfinite_bbox_values():
+    with pytest.raises(ValidationError):
+        QwenCaptionHint(label="car", bbox=[float("nan"), 0, 10, 10])
+    with pytest.raises(ValidationError):
+        QwenCaptionHint(label="car", bbox=[0, 0, float("inf"), 10])
 
 
 def test_caption_request_normalizes_refinement_model_id():

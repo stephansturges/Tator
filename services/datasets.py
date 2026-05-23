@@ -15,7 +15,7 @@ from starlette.status import HTTP_400_BAD_REQUEST, HTTP_500_INTERNAL_SERVER_ERRO
 from PIL import Image
 
 from utils.glossary import _normalize_labelmap_glossary
-from utils.io import _compute_dir_signature, _load_json_metadata
+from utils.io import _compute_dir_signature, _load_json_metadata, _path_is_within_root_impl
 from utils.labels import _load_labelmap_file
 from utils.coco import (
     _coco_has_invalid_image_refs_impl,
@@ -691,15 +691,18 @@ def _resolve_dataset_legacy_impl(
 ) -> Path:
     cleaned = (dataset_id or "").strip().replace("\\", "/")
     safe = re.sub(r"[^A-Za-z0-9._/-]", "_", cleaned)
+    qwen_base = qwen_root.resolve()
     candidate_qwen = (qwen_root / safe).resolve()
-    if str(candidate_qwen).startswith(str(qwen_root.resolve())) and candidate_qwen.exists():
+    if _path_is_within_root_impl(candidate_qwen, qwen_base) and candidate_qwen.exists():
         return candidate_qwen
+    sam3_base = sam3_root.resolve()
     candidate_sam3 = (sam3_root / safe).resolve()
-    if str(candidate_sam3).startswith(str(sam3_root.resolve())) and candidate_sam3.exists():
+    if _path_is_within_root_impl(candidate_sam3, sam3_base) and candidate_sam3.exists():
         return candidate_sam3
+    registry_base = registry_root.resolve()
     candidate_registry = (registry_root / safe).resolve()
     if (
-        str(candidate_registry).startswith(str(registry_root.resolve()))
+        _path_is_within_root_impl(candidate_registry, registry_base)
         and candidate_registry.exists()
     ):
         return candidate_registry

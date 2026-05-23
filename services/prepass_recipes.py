@@ -1960,8 +1960,14 @@ def _import_prepass_recipe_from_zip_impl(
                 )
         extract_dir = temp_dir / "extract"
         extract_dir.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(zip_path) as zf:
-            _extract_zip_safely(zf, extract_dir)
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                _extract_zip_safely(zf, extract_dir)
+        except zipfile.BadZipFile as exc:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail="prepass_recipe_invalid_zip",
+            ) from exc
         manifest_path = extract_dir / "manifest.json"
         if not manifest_path.exists():
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_missing_manifest")
@@ -2356,9 +2362,11 @@ def _save_prepass_recipe_impl(
     normalize_glossary_fn,
     write_meta_fn,
 ) -> Dict[str, Any]:
+    normalized_config = _validate_prepass_recipe_config_impl(payload.get("config"))
+    normalized_glossary = normalize_glossary_fn(payload.get("glossary"))
     recipe_dir = _prepass_recipe_dir_impl(
         recipe_id,
-        create=True,
+        create=False,
         recipes_root=recipes_root,
         sanitize_id_fn=sanitize_run_id_fn,
     )
@@ -2382,11 +2390,12 @@ def _save_prepass_recipe_impl(
         "schema_version": prepass_schema_version,
         "name": str(payload.get("name") or "").strip(),
         "description": (payload.get("description") or "").strip(),
-        "config": _validate_prepass_recipe_config_impl(payload.get("config")),
-        "glossary": normalize_glossary_fn(payload.get("glossary")),
+        "config": normalized_config,
+        "glossary": normalized_glossary,
         "created_at": created_at,
         "updated_at": now,
     }
+    recipe_dir.mkdir(parents=True, exist_ok=True)
     write_meta_fn(recipe_dir, recipe_meta)
     return {
         "id": recipe_id,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from typing import Any, Dict, Optional, Sequence
 
@@ -113,15 +114,25 @@ def _qwen_job_append_metric_impl(job, metric: Dict[str, Any], *, max_points: Opt
 def _coerce_metric_value_impl(value: Any) -> Any:
     if value is None:
         return None
-    if isinstance(value, (str, int, float, bool)):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            if not math.isfinite(float(value)):
+                return None
+        except Exception:
+            return None
+        return value
+    if isinstance(value, str):
         return value
     if isinstance(value, dict):
         return {str(key): _coerce_metric_value_impl(val) for key, val in value.items()}
     if isinstance(value, (list, tuple)):
         return [_coerce_metric_value_impl(item) for item in value]
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
+    except (TypeError, ValueError, OverflowError):
         return str(value)
 
 

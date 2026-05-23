@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from starlette.datastructures import UploadFile
 
+import localinferenceapi as api
 from localinferenceapi import _extract_zip_safely_impl
 
 
@@ -108,3 +110,18 @@ def test_extract_zip_safely_rejects_oversize_uncompressed_total(tmp_path: Path) 
 
     assert exc_info.value.status_code == 413
     assert exc_info.value.detail == "dataset_zip_uncompressed_too_large"
+
+
+def test_upload_dataset_zip_rejects_invalid_zip() -> None:
+    upload = UploadFile(filename="broken.zip", file=BytesIO(b"not a zip"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        api.upload_dataset_zip(
+            file=upload,
+            dataset_id=None,
+            dataset_type=None,
+            context=None,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "dataset_zip_invalid"

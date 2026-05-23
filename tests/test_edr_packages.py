@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import stat
+import zipfile
 from pathlib import Path
+
+import pytest
 
 from services.edr_packages import (
     EDR_PACKAGE_MANIFEST_NAME,
     EDR_PACKAGE_META_NAME,
     EDR_PACKAGE_PAYLOAD_DIRNAME,
+    edr_package_dir,
+    import_edr_package_from_zip,
     resolve_edr_package_runtime,
 )
 
@@ -175,3 +181,65 @@ def test_resolve_edr_package_runtime_repairs_feature_contract_from_source_featur
     assert runtime["feature_contract"]["embed_proj_dim"] == 1024
     assert runtime["feature_contract"]["feature_schema_hash"] == "abc123"
     assert runtime["labelmap"] == ["person"]
+
+
+def test_edr_package_dir_rejects_traversal_package_id(tmp_path: Path) -> None:
+    packages_root = tmp_path / "edr_packages"
+
+    with pytest.raises(ValueError, match="edr_package_id_invalid"):
+        edr_package_dir(packages_root, "../edr_packages_evil", create=True)
+
+    assert not (tmp_path / "edr_packages_evil").exists()
+
+
+def test_import_edr_package_rejects_traversal_manifest_id(tmp_path: Path) -> None:
+    zip_path = tmp_path / "bad.edr.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            EDR_PACKAGE_MANIFEST_NAME,
+            json.dumps({"package_id": "../edr_packages_evil", "dataset_id": "demo"}),
+        )
+
+    with pytest.raises(ValueError, match="edr_package_id_invalid"):
+        import_edr_package_from_zip(zip_path=zip_path, packages_root=tmp_path / "edr_packages")
+
+    assert not (tmp_path / "edr_packages_evil").exists()
+
+
+def test_import_edr_package_rejects_symlink_member(tmp_path: Path) -> None:
+    zip_path = tmp_path / "symlink.edr.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(EDR_PACKAGE_MANIFEST_NAME, json.dumps({"package_id": "pkg1"}))
+        info = zipfile.ZipInfo("payload/link")
+        info.create_system = 3
+        info.external_attr = (stat.S_IFLNK | 0o777) << 16
+        zf.writestr(info, b"../../outside")
+
+    with pytest.raises(RuntimeError, match="edr_package_symlink_unsupported"):
+        import_edr_package_from_zip(zip_path=zip_path, packages_root=tmp_path / "edr_packages")
+
+    assert not (tmp_path / "outside").exists()
+
+
+def test_import_edr_package_rejects_invalid_zip(tmp_path: Path) -> None:
+    zip_path = tmp_path / "broken.edr.zip"
+    zip_path.write_bytes(b"not a zip")
+
+    with pytest.raises(RuntimeError, match="edr_package_invalid_zip"):
+        import_edr_package_from_zip(zip_path=zip_path, packages_root=tmp_path / "edr_packages")
+
+
+def test_import_edr_package_rejects_oversize_uncompressed_total(tmp_path: Path) -> None:
+    zip_path = tmp_path / "oversize.edr.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(EDR_PACKAGE_MANIFEST_NAME, json.dumps({"package_id": "pkg1"}))
+        zf.writestr("payload/blob.bin", "x" * 2048)
+
+    with pytest.raises(RuntimeError, match="edr_package_uncompressed_too_large"):
+        import_edr_package_from_zip(
+            zip_path=zip_path,
+            packages_root=tmp_path / "edr_packages",
+            max_extract_bytes=512,
+        )
+
+    assert not (tmp_path / "edr_packages" / "pkg1").exists()

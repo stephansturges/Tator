@@ -8,6 +8,7 @@ from services.sam3_runtime import (
     _resolve_sam3_device_impl,
     _resolve_sam3_mining_devices_impl,
 )
+from services.detectors import _yolo_device_arg_impl, _yolo_resolve_device_impl
 from utils.gpu import _resolve_torch_inference_device_impl, _torch_mps_available_impl
 
 
@@ -87,3 +88,38 @@ def test_mps_available_probe_handles_missing_backend() -> None:
     torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False), backends=SimpleNamespace())
 
     assert _torch_mps_available_impl(torch) is False
+
+
+def test_yolo_training_auto_uses_mps_when_cuda_absent() -> None:
+    torch = _fake_torch(cuda=False, mps=True)
+
+    out = _yolo_resolve_device_impl(None, "auto", torch_module=torch, allow_mps=True)
+
+    assert out["resolved_accelerator"] == "mps"
+    assert out["device_arg"] == "mps"
+
+
+def test_yolo_training_preserves_cuda_device_ids() -> None:
+    torch = _fake_torch(cuda=True, mps=True)
+
+    out = _yolo_resolve_device_impl([0, "1"], "auto", torch_module=torch, allow_mps=True)
+
+    assert out["resolved_accelerator"] == "cuda"
+    assert out["device_arg"] == "0,1"
+    assert _yolo_device_arg_impl([0, "1"], torch_module=torch) == "0,1"
+
+
+def test_yolo_training_explicit_mps_requires_available_backend() -> None:
+    torch = _fake_torch(cuda=False, mps=False)
+
+    with pytest.raises(ValueError, match="yolo_mps_unavailable"):
+        _yolo_resolve_device_impl(None, "mps", torch_module=torch, allow_mps=True)
+
+
+def test_yolo_training_can_force_cpu_on_macos() -> None:
+    torch = _fake_torch(cuda=False, mps=True)
+
+    out = _yolo_resolve_device_impl(None, "cpu", torch_module=torch, allow_mps=True)
+
+    assert out["resolved_accelerator"] == "cpu"
+    assert out["device_arg"] == "cpu"

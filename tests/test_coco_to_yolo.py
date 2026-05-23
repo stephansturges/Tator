@@ -7,6 +7,7 @@ from pathlib import Path
 from PIL import Image
 
 import localinferenceapi as api
+from utils.image import _resolve_coco_image_path_impl
 
 
 def _write_image(path: Path, size: tuple[int, int]) -> None:
@@ -78,3 +79,20 @@ def test_convert_coco_to_yolo_segmentation(tmp_path: Path) -> None:
     coords = list(map(float, parts[1:]))
     assert len(coords) >= 6
     assert all(0.0 <= v <= 1.0 for v in coords)
+
+
+def test_resolve_coco_image_path_ignores_absolute_escape(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset"
+    images_dir = dataset_root / "train" / "images"
+    images_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.jpg"
+    _write_image(outside, (10, 10))
+
+    resolved = _resolve_coco_image_path_impl(
+        str(outside.resolve()),
+        images_dir,
+        "train",
+        dataset_root,
+    )
+
+    assert resolved is None

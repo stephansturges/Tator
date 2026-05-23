@@ -53,18 +53,22 @@ def _sanitize_yolo_run_id(raw: str) -> str:
 def _compute_dir_signature(root: Path, *, allowed_exts: Optional[set[str]] = None) -> str:
     """Return a stable signature for all files under ``root``."""
     entries: List[str] = []
-    if not root.exists():
+    root_resolved = root.resolve()
+    if not root_resolved.exists():
         return ""
-    for path in sorted(root.rglob("*")):
+    for path in sorted(root_resolved.rglob("*")):
         if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if not _path_is_within_root_impl(resolved, root_resolved):
             continue
         if allowed_exts is not None and path.suffix.lower() not in allowed_exts:
             continue
         try:
-            stat = path.stat()
+            stat = resolved.stat()
         except OSError:
             continue
-        rel = path.relative_to(root)
+        rel = path.relative_to(root_resolved)
         entries.append(f"{rel}:{stat.st_mtime_ns}:{stat.st_size}")
     return _stable_hash(entries)
 
@@ -83,8 +87,11 @@ def _dir_size_bytes(path: Path) -> int:
     total = 0
     for root, _, files in os.walk(path):
         for name in files:
+            candidate = Path(root) / name
+            if candidate.is_symlink():
+                continue
             try:
-                total += (Path(root) / name).stat().st_size
+                total += candidate.stat().st_size
             except Exception:
                 continue
     return total

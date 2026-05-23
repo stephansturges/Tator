@@ -69,6 +69,9 @@ class _FakeUpload:
         self._read = True
         return self._payload
 
+    async def close(self):
+        return None
+
 
 def _write_unit_local_salad_head(root: Path, head_id: str, metadata: dict | None = None) -> None:
     config = LocalSALADConfig(num_channels=8, num_clusters=2, cluster_dim=4, token_dim=6, hidden_dim=12, dropout=0.0)
@@ -103,6 +106,7 @@ def test_data_ingestion_create_jobs_reject_empty_uploads_before_queueing(tmp_pat
         asyncio.run(api.create_data_ingestion_analysis_job("{}", [_FakeUpload("candidate.jpg", b"candidate")], []))
     assert reference_error.value.status_code == 400
     assert reference_error.value.detail == "data_ingestion_no_reference_files"
+    assert not any(tmp_path.iterdir())
 
     with pytest.raises(api.HTTPException) as encoder_error:
         asyncio.run(
@@ -119,6 +123,53 @@ def test_data_ingestion_create_jobs_reject_empty_uploads_before_queueing(tmp_pat
         asyncio.run(api.create_local_salad_training_job("{}", []))
     assert salad_error.value.status_code == 400
     assert salad_error.value.detail == "local_salad_no_training_files"
+
+
+def test_write_upload_file_rejects_broken_symlink_destination(tmp_path):
+    outside = tmp_path / "outside.bin"
+    dest = tmp_path / "upload.bin"
+    dest.symlink_to(outside)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(api._write_upload_file(_FakeUpload("upload.bin", b"payload"), dest))
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "upload_exists"
+    assert not outside.exists()
+
+
+def test_write_upload_file_overwrite_unlinks_symlink_destination(tmp_path):
+    outside = tmp_path / "outside.bin"
+    dest = tmp_path / "upload.bin"
+    dest.symlink_to(outside)
+
+    asyncio.run(
+        api._write_upload_file(
+            _FakeUpload("upload.bin", b"payload"),
+            dest,
+            allow_overwrite=True,
+        )
+    )
+
+    assert not dest.is_symlink()
+    assert dest.read_bytes() == b"payload"
+    assert not outside.exists()
+
+
+def test_local_salad_training_rejects_bad_encoder_before_saving_uploads(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", tmp_path)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(
+            api.create_local_salad_training_job(
+                json.dumps({"encoder_type": "clip"}),
+                [_FakeUpload("train.jpg", b"train")],
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "local_salad_encoder_unsupported"
+    assert not any(tmp_path.iterdir())
 
 
 def test_data_ingestion_backend_dataset_rows_and_training_queue(tmp_path, monkeypatch):
@@ -517,6 +568,22 @@ def test_local_salad_head_loader_rejects_external_or_stale_payloads(tmp_path, mo
     with pytest.raises(Exception) as exc_info:
         api._load_local_salad_head("forged")
     assert "local_salad_head_trainer_required" in str(exc_info.value)
+
+
+def test_list_local_salad_heads_skips_symlink_escape(tmp_path, monkeypatch):
+    heads_root = tmp_path / "heads"
+    heads_root.mkdir()
+    outside = tmp_path / "outside.pt"
+    outside.write_bytes(b"not a head")
+    (heads_root / "escape.pt").symlink_to(outside)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+
+    def fail_load(*_args, **_kwargs):
+        raise AssertionError("external symlinked head should not be loaded")
+
+    monkeypatch.setattr(api, "load_local_salad_head_file", fail_load)
+
+    assert api._list_local_salad_heads() == []
 
 
 def test_local_salad_head_ids_do_not_overwrite_existing_heads(tmp_path, monkeypatch):

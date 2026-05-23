@@ -83,6 +83,28 @@ def test_save_prepass_recipe_preserves_created_at(tmp_path):
     assert updated["updated_at"] >= first["updated_at"]
 
 
+def test_save_prepass_recipe_rejects_invalid_config_before_directory_create(tmp_path):
+    with pytest.raises(HTTPException) as exc_info:
+        _save_prepass_recipe_impl(
+            {
+                "name": "Invalid",
+                "description": "",
+                "config": {"cross_iou": 0.8, "enable_yolo": True},
+                "glossary": "",
+            },
+            recipe_id="invalid_recipe",
+            prepass_schema_version=1,
+            recipes_root=tmp_path,
+            sanitize_run_id_fn=lambda value: value,
+            normalize_glossary_fn=lambda value: value or "",
+            write_meta_fn=_write_prepass_recipe_meta,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prepass_recipe_legacy_cross_iou_unsupported"
+    assert not (tmp_path / "invalid_recipe").exists()
+
+
 def test_persist_agent_recipe_preserves_numpy_clip_head_classes(tmp_path):
     saved = _persist_agent_recipe_impl(
         dataset_id=None,
@@ -122,7 +144,7 @@ def test_persist_agent_recipe_preserves_numpy_clip_head_classes(tmp_path):
         },
         save_exemplar_crop_fn=lambda **_kwargs: None,
         sanitize_prompts_fn=lambda prompts: prompts,
-        path_is_within_root_fn=lambda path, root: str(Path(path).resolve()).startswith(str(Path(root).resolve())),
+        path_is_within_root_fn=lambda path, root: Path(path).resolve().is_relative_to(Path(root).resolve()),
     )
 
     assert saved["recipe"]["clip_head"]["classes"] == ["person", "vehicle"]

@@ -8341,6 +8341,19 @@ function updateRfDetrTrainStartAvailability(entry) {
     }
 
     function buildYoloHeadGraftPayload() {
+        const accelerator = normalizeYoloAccelerator(yoloHeadGraftElements.acceleratorSelect?.value);
+        const deviceCheck = accelerator === "mps" || accelerator === "cpu"
+            ? { devices: null, error: null }
+            : validateTrainingDeviceIds(
+                yoloHeadGraftElements.devicesInput?.value,
+                yoloHeadGraftElements.devicesHelp,
+                false,
+                "YOLO head graft device IDs",
+                setYoloHeadGraftMessage,
+            );
+        if (deviceCheck.error) {
+            return { error: deviceCheck.error };
+        }
         return {
             base_run_id: yoloHeadGraftState.baseRunId || null,
             dataset_id: yoloHeadGraftState.datasetId || null,
@@ -8350,7 +8363,8 @@ function updateRfDetrTrainStartAvailability(entry) {
             batch: parseYoloNumber(yoloHeadGraftElements.batchInput?.value, { integer: true }),
             workers: parseYoloNumber(yoloHeadGraftElements.workersInput?.value, { integer: true }),
             seed: parseYoloNumber(yoloHeadGraftElements.seedInput?.value, { integer: true }),
-            devices: parseYoloDevices(yoloHeadGraftElements.devicesInput?.value || ""),
+            accelerator,
+            devices: deviceCheck.devices,
             export_onnx: Boolean(yoloHeadGraftElements.exportOnnx?.checked),
             accept_tos: Boolean(yoloTrainElements.acceptTos?.checked),
         };
@@ -8373,6 +8387,10 @@ function updateRfDetrTrainStartAvailability(entry) {
             return;
         }
         const payload = buildYoloHeadGraftPayload();
+        if (payload.error) {
+            setYoloHeadGraftMessage(payload.error, "error");
+            return;
+        }
         yoloHeadGraftState.startInFlight = true;
         updateYoloHeadGraftTosState();
         setYoloHeadGraftMessage("Starting head graft…", "info");
@@ -8649,6 +8667,33 @@ function updateRfDetrTrainStartAvailability(entry) {
             .filter((val) => Number.isFinite(val));
         return devices.length ? devices : null;
     }
+
+function normalizeYoloAccelerator(raw) {
+    const value = String(raw || "auto").trim().toLowerCase();
+    return ["auto", "cuda", "mps", "cpu"].includes(value) ? value : "auto";
+}
+
+function updateYoloDeviceControls(inputEl, helpEl, acceleratorRaw, label, setMessageFn) {
+        const accelerator = normalizeYoloAccelerator(acceleratorRaw);
+        if (!inputEl) {
+            return;
+        }
+        const disabled = accelerator === "mps" || accelerator === "cpu";
+        inputEl.disabled = disabled;
+        if (disabled) {
+            if (helpEl) {
+                if (!helpEl.dataset.defaultText) {
+                    helpEl.dataset.defaultText = helpEl.textContent || "";
+                }
+                helpEl.textContent = accelerator === "mps"
+                    ? "CUDA IDs are ignored when Apple MPS is selected."
+                    : "CUDA IDs are ignored when CPU is selected.";
+                helpEl.style.color = "";
+            }
+            return;
+        }
+        validateTrainingDeviceIds(inputEl.value, helpEl, false, label, setMessageFn);
+}
 
 function validateTrainingDeviceIds(raw, helpEl, showMessage, label, setMessageFn) {
         const result = normalizeDeviceIdList(raw);
@@ -9010,13 +9055,16 @@ function ensureAutomationAvailable(actionLabel) {
         if (!datasetId) {
             return { error: "Select a dataset first." };
         }
-        const deviceCheck = validateTrainingDeviceIds(
-            yoloTrainElements.devicesInput?.value,
-            yoloTrainElements.devicesHelp,
-            false,
-            "YOLO device IDs",
-            setYoloTrainMessage,
-        );
+        const accelerator = normalizeYoloAccelerator(yoloTrainElements.acceleratorSelect?.value);
+        const deviceCheck = accelerator === "mps" || accelerator === "cpu"
+            ? { devices: null, error: null }
+            : validateTrainingDeviceIds(
+                yoloTrainElements.devicesInput?.value,
+                yoloTrainElements.devicesHelp,
+                false,
+                "YOLO device IDs",
+                setYoloTrainMessage,
+            );
         if (deviceCheck.error) {
             return { error: deviceCheck.error };
         }
@@ -9033,7 +9081,8 @@ function ensureAutomationAvailable(actionLabel) {
             img_size: parseYoloNumber(yoloTrainElements.imgSizeInput?.value, { integer: true }),
             batch: parseYoloNumber(yoloTrainElements.batchInput?.value, { integer: true }),
             workers: parseYoloNumber(yoloTrainElements.workersInput?.value, { integer: true }),
-            devices: deviceCheck.devices,
+            accelerator,
+            devices: accelerator === "mps" || accelerator === "cpu" ? null : deviceCheck.devices,
             seed: parseYoloNumber(yoloTrainElements.seedInput?.value, { integer: true }),
             augmentations: buildYoloAugmentations(),
             accept_tos: !!yoloTrainElements.acceptTos?.checked,
@@ -15526,6 +15575,7 @@ async function cancelYoloTrainingJobRequest() {
         yoloTrainElements.imgSizeInput = document.getElementById("yoloImgSize");
         yoloTrainElements.batchInput = document.getElementById("yoloBatch");
         yoloTrainElements.workersInput = document.getElementById("yoloWorkers");
+        yoloTrainElements.acceleratorSelect = document.getElementById("yoloAccelerator");
         yoloTrainElements.devicesInput = document.getElementById("yoloDevices");
         yoloTrainElements.devicesHelp = document.getElementById("yoloDevicesHelp");
         yoloTrainElements.seedInput = document.getElementById("yoloSeed");
@@ -15568,7 +15618,9 @@ async function cancelYoloTrainingJobRequest() {
         yoloHeadGraftElements.imgSizeInput = document.getElementById("yoloHeadGraftImgSize");
         yoloHeadGraftElements.batchInput = document.getElementById("yoloHeadGraftBatch");
         yoloHeadGraftElements.workersInput = document.getElementById("yoloHeadGraftWorkers");
+        yoloHeadGraftElements.acceleratorSelect = document.getElementById("yoloHeadGraftAccelerator");
         yoloHeadGraftElements.devicesInput = document.getElementById("yoloHeadGraftDevices");
+        yoloHeadGraftElements.devicesHelp = document.getElementById("yoloHeadGraftDevicesHelp");
         yoloHeadGraftElements.seedInput = document.getElementById("yoloHeadGraftSeed");
         yoloHeadGraftElements.exportOnnx = document.getElementById("yoloHeadGraftExportOnnx");
         yoloHeadGraftElements.startButton = document.getElementById("yoloHeadGraftStart");
@@ -15606,12 +15658,23 @@ async function cancelYoloTrainingJobRequest() {
                 updateRunActionButtons("yolo");
             });
         }
+        if (yoloTrainElements.acceleratorSelect) {
+            yoloTrainElements.acceleratorSelect.addEventListener("change", () => {
+                updateYoloDeviceControls(
+                    yoloTrainElements.devicesInput,
+                    yoloTrainElements.devicesHelp,
+                    yoloTrainElements.acceleratorSelect.value,
+                    "YOLO device IDs",
+                    setYoloTrainMessage,
+                );
+            });
+        }
         if (yoloTrainElements.devicesInput) {
             yoloTrainElements.devicesInput.addEventListener("input", () => {
-                validateTrainingDeviceIds(
-                    yoloTrainElements.devicesInput.value,
+                updateYoloDeviceControls(
+                    yoloTrainElements.devicesInput,
                     yoloTrainElements.devicesHelp,
-                    false,
+                    yoloTrainElements.acceleratorSelect?.value,
                     "YOLO device IDs",
                     setYoloTrainMessage,
                 );
@@ -15677,12 +15740,23 @@ async function cancelYoloTrainingJobRequest() {
             });
             yoloHeadGraftElements.cancelButton.disabled = true;
         }
+        if (yoloHeadGraftElements.acceleratorSelect) {
+            yoloHeadGraftElements.acceleratorSelect.addEventListener("change", () => {
+                updateYoloDeviceControls(
+                    yoloHeadGraftElements.devicesInput,
+                    yoloHeadGraftElements.devicesHelp,
+                    yoloHeadGraftElements.acceleratorSelect.value,
+                    "YOLO head graft device IDs",
+                    setYoloHeadGraftMessage,
+                );
+            });
+        }
         if (yoloHeadGraftElements.devicesInput) {
             yoloHeadGraftElements.devicesInput.addEventListener("input", () => {
-                validateTrainingDeviceIds(
-                    yoloHeadGraftElements.devicesInput.value,
-                    null,
-                    false,
+                updateYoloDeviceControls(
+                    yoloHeadGraftElements.devicesInput,
+                    yoloHeadGraftElements.devicesHelp,
+                    yoloHeadGraftElements.acceleratorSelect?.value,
                     "YOLO head graft device IDs",
                     setYoloHeadGraftMessage,
                 );
@@ -15743,12 +15817,19 @@ async function cancelYoloTrainingJobRequest() {
         }
         refreshTrainingGpuInfo()
             .then(() => {
-                validateTrainingDeviceIds(
-                    yoloTrainElements.devicesInput?.value,
+                updateYoloDeviceControls(
+                    yoloTrainElements.devicesInput,
                     yoloTrainElements.devicesHelp,
-                    false,
+                    yoloTrainElements.acceleratorSelect?.value,
                     "YOLO device IDs",
                     setYoloTrainMessage,
+                );
+                updateYoloDeviceControls(
+                    yoloHeadGraftElements.devicesInput,
+                    yoloHeadGraftElements.devicesHelp,
+                    yoloHeadGraftElements.acceleratorSelect?.value,
+                    "YOLO head graft device IDs",
+                    setYoloHeadGraftMessage,
                 );
             })
             .catch((error) => {

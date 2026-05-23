@@ -13,6 +13,14 @@ from fastapi import HTTPException
 from services.agent_cascades import _import_agent_cascade_zip_bytes_impl
 
 
+def _within_root(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def _make_zip(entries: Dict[str, bytes]) -> bytes:
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -41,7 +49,7 @@ def _call_import(zip_bytes: bytes, tmp_path: Path, **kwargs: Any) -> Dict[str, A
         max_json_bytes=1024 * 1024,
         max_entry_bytes=max_entry_bytes,
         classifier_allowed_exts=[".pkl", ".joblib"],
-        path_is_within_root_fn=lambda path, root: str(path.resolve()).startswith(str(root.resolve())),
+        path_is_within_root_fn=_within_root,
         import_recipe_fn=import_recipe_fn,
         import_recipe_file_fn=import_recipe_file_fn,
         persist_cascade_fn=_persist,
@@ -149,3 +157,47 @@ def test_agent_cascade_import_rejects_oversize_nested_recipe_zip(tmp_path: Path)
 
     assert exc_info.value.status_code == 413
     assert exc_info.value.detail == "agent_cascade_import_recipe_too_large"
+
+
+def test_agent_cascade_import_validates_schema_before_recipe_import(tmp_path: Path) -> None:
+    payload = _make_zip(
+        {
+            "cascade.json": json.dumps({"label": "demo", "steps": [], "dedupe": {}}).encode("utf-8"),
+            "recipes/r1.zip": b"recipe-bytes",
+        }
+    )
+    seen: Dict[str, Any] = {"called": False}
+
+    def _import_recipe(_payload: bytes) -> tuple[str, Dict[str, Any]]:
+        seen["called"] = True
+        return "r1", {"id": "recipe_new"}
+
+    with pytest.raises(HTTPException) as exc_info:
+        _call_import(payload, tmp_path, import_recipe_fn=_import_recipe)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_cascade_invalid_schema"
+    assert seen["called"] is False
+
+
+def test_agent_cascade_import_cleans_classifier_files_after_late_failure(tmp_path: Path) -> None:
+    cascade = {
+        "label": "demo",
+        "steps": [{"recipe_id": "r1", "extra_clip_classifier_path": "missing.pkl"}],
+        "dedupe": {},
+    }
+    payload = _make_zip(
+        {
+            "cascade.json": json.dumps(cascade).encode("utf-8"),
+            "recipes/r1.zip": b"recipe-bytes",
+            "classifiers/safe.pkl": b"classifier",
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _call_import(payload, tmp_path)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_cascade_import_missing_classifier"
+    imports_root = tmp_path / "classifiers" / "imports"
+    assert not imports_root.exists() or not any(imports_root.iterdir())

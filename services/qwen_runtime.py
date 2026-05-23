@@ -199,8 +199,6 @@ def _ensure_qwen_ready_for_caption_impl(
                 try:
                     logger.warning("Qwen model %s not found; falling back to %s", model_id_override, fallback_id)
                     model, processor = _load_with_online_retry(str(fallback_id))
-                    state["qwen_caption_cache"][cache_key] = (model, processor)
-                    state["qwen_caption_order"].append(cache_key)
                 except Exception as fallback_exc:  # noqa: BLE001
                     state["qwen_last_error"] = str(fallback_exc)
                     detail = format_load_error_fn(fallback_exc)

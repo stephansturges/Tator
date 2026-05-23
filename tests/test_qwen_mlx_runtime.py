@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,38 @@ def _make_qwen_train_dataset(tmp_path, monkeypatch):
     (dataset_root / "val").mkdir(parents=True)
     (dataset_root / "train" / "annotations.jsonl").write_text("{}\n", encoding="utf-8")
     (dataset_root / "val" / "annotations.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", qwen_root)
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "sam3")
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", tmp_path / "registry")
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", tmp_path / "jobs")
+    return dataset_root
+
+
+def _make_qwen_train_only_dataset(tmp_path, monkeypatch):
+    qwen_root = tmp_path / "qwen"
+    dataset_root = qwen_root / "demo"
+    image_dir = dataset_root / "train" / "images"
+    image_dir.mkdir(parents=True)
+    for idx in range(4):
+        name = f"sample_{idx}.png"
+        Image.new("RGB", (8, 8), (idx, idx, idx)).save(image_dir / name)
+    (dataset_root / "train" / "annotations.jsonl").write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "image": f"sample_{idx}.png",
+                    "conversations": [
+                        {"from": "human", "value": "<image> find car"},
+                        {"from": "gpt", "value": "{\"detections\":[]}"},
+                    ],
+                },
+                separators=(",", ":"),
+            )
+            for idx in range(4)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(api, "QWEN_DATASET_ROOT", qwen_root)
     monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "sam3")
     monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", tmp_path / "registry")
@@ -109,6 +142,248 @@ def test_qwen_training_config_accepts_moe_transformers_model(tmp_path, monkeypat
 
     assert config.runtime_platform == api.QWEN_PLATFORM_TRANSFORMERS
     assert config.model_id == "huihui-ai/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated"
+
+
+def test_qwen_training_config_resolves_custom_quantized_abliterated_cuda_base(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_dataset(tmp_path, monkeypatch)
+
+    payload = api.QwenTrainRequest(
+        dataset_id=" demo ",
+        model_id=" custom/Huihui-Qwen3-VL-4B-Instruct-abliterated-AWQ-4bit ",
+        training_mode="QLoRA",
+        lora_target_modules="q_proj,k_proj",
+    )
+    config = api._build_qwen_config(payload, "job-custom-abliterated")
+
+    assert config.runtime_platform == api.QWEN_PLATFORM_TRANSFORMERS
+    assert config.requested_model_id == "custom/Huihui-Qwen3-VL-4B-Instruct-abliterated-AWQ-4bit"
+    assert config.model_id == "custom/Huihui-Qwen3-VL-4B-Instruct-abliterated"
+    assert config.training_mode == "trl_qlora"
+    assert config.lora_target_modules == ["q_proj", "k_proj"]
+    assert config.requested_model_metadata["abliterated"] is True
+    assert config.requested_model_metadata["quantization_backend"] == "awq"
+
+
+def test_qwen_training_config_clamps_direct_api_numeric_knobs(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_dataset(tmp_path, monkeypatch)
+
+    payload = api.QwenTrainRequest(
+        dataset_id="demo",
+        batch_size=0,
+        max_epochs=0,
+        lr=-1.0,
+        accumulate_grad_batches=0,
+        warmup_steps=-3,
+        num_workers=-1,
+        lora_rank=0,
+        lora_alpha=-5,
+        lora_dropout=3.5,
+        log_every_n_steps=0,
+        min_pixels=100000,
+        max_pixels=10,
+        max_length=8,
+        seed=-1,
+        train_limit=-1,
+        val_limit=0,
+    )
+    config = api._build_qwen_config(payload, "job-clamp")
+
+    assert config.batch_size == 1
+    assert config.max_epochs == 3
+    assert config.lr == 2e-4
+    assert config.accumulate_grad_batches == 8
+    assert config.warmup_steps == 50
+    assert config.num_workers == 0
+    assert config.lora_rank == 8
+    assert config.lora_alpha == 16
+    assert config.lora_dropout == 1.0
+    assert config.log_every_n_steps == 10
+    assert config.min_pixels == 100000
+    assert config.max_pixels >= config.min_pixels
+    assert config.max_length == 2048
+    assert config.seed == 1337
+    assert config.train_limit is None
+    assert config.val_limit is None
+
+
+def test_qwen_training_config_random_split_materializes_qwen_split(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_only_dataset(tmp_path, monkeypatch)
+    logs = []
+    payload = api.QwenTrainRequest(
+        dataset_id="demo",
+        random_split=True,
+        val_percent=0.5,
+        split_seed=123,
+    )
+
+    config = api._build_qwen_config(payload, "job-random-split", logs)
+    split_root = Path(config.dataset_root)
+
+    assert split_root == (api.QWEN_JOB_ROOT / "splits" / "job-random-split").resolve()
+    assert (split_root / "train" / "annotations.jsonl").exists()
+    assert (split_root / "val" / "annotations.jsonl").exists()
+    train_lines = (split_root / "train" / "annotations.jsonl").read_text(encoding="utf-8").splitlines()
+    val_lines = (split_root / "val" / "annotations.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(train_lines) == 2
+    assert len(val_lines) == 2
+    for split_name, lines in (("train", train_lines), ("val", val_lines)):
+        for line in lines:
+            payload_out = json.loads(line)
+            assert ".." not in Path(payload_out["image"]).parts
+            assert (split_root / split_name / "images" / payload_out["image"]).exists()
+    metadata = json.loads((split_root / api.QWEN_METADATA_FILENAME).read_text(encoding="utf-8"))
+    assert metadata["random_split"] is True
+    assert metadata["train_count"] == 2
+    assert metadata["val_count"] == 2
+    assert any("Qwen split:" in entry for entry in logs)
+
+
+def test_qwen_training_config_rejects_existing_run_name(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_dataset(tmp_path, monkeypatch)
+    (api.QWEN_JOB_ROOT / "runs" / "existing").mkdir(parents=True)
+    payload = api.QwenTrainRequest(dataset_id="demo", run_name="existing")
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._build_qwen_config(payload, "job-existing")
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail == "run_name_exists"
+
+
+def test_qwen_training_job_rejects_active_duplicate_run_name(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_dataset(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "_start_qwen_training_worker", lambda job, config: None)
+    with api.QWEN_TRAINING_JOBS_LOCK:
+        api.QWEN_TRAINING_JOBS.clear()
+    payload = api.QwenTrainRequest(dataset_id="demo", run_name="duplicate")
+
+    try:
+        first = api.create_qwen_training_job(payload)
+        assert first["job_id"]
+        with pytest.raises(api.HTTPException) as excinfo:
+            api.create_qwen_training_job(payload)
+        assert excinfo.value.status_code == 409
+        assert excinfo.value.detail == "run_name_exists"
+    finally:
+        with api.QWEN_TRAINING_JOBS_LOCK:
+            api.QWEN_TRAINING_JOBS.clear()
+
+
+def test_qwen_train_request_drops_nonfinite_numeric_controls():
+    payload = api.QwenTrainRequest(
+        dataset_id="demo",
+        training_mode="official",
+        batch_size=float("nan"),
+        lr=float("inf"),
+        lora_dropout=float("-inf"),
+        max_epochs=2,
+    )
+
+    assert payload.training_mode == "official_lora"
+    assert payload.batch_size is None
+    assert payload.lr is None
+    assert payload.lora_dropout is None
+    assert payload.max_epochs == 2
+
+
+def test_qwen_train_request_treats_empty_numeric_controls_as_defaults():
+    payload = api.QwenTrainRequest(
+        dataset_id="demo",
+        batch_size="",
+        lr=" ",
+        train_limit="",
+    )
+
+    assert payload.batch_size is None
+    assert payload.lr is None
+    assert payload.train_limit is None
+
+
+def test_qwen_training_metadata_preserves_requested_abliterated_source(tmp_path):
+    if api.QwenTrainingConfig is None or api.QwenTrainingResult is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    result_path = tmp_path / "run"
+    config = api.QwenTrainingConfig(
+        dataset_root=str(tmp_path / "dataset"),
+        result_path=str(result_path),
+        model_id="custom/Huihui-Qwen3-VL-4B-Instruct-abliterated",
+        requested_model_id="custom/Huihui-Qwen3-VL-4B-Instruct-abliterated-AWQ-4bit",
+        requested_model_metadata={
+            "abliterated": True,
+            "quantization": "AWQ 4-bit",
+            "quantization_backend": "awq",
+            "training_note": "Training starts from the resolved unquantized abliterated checkpoint.",
+        },
+        runtime_platform=api.QWEN_PLATFORM_TRANSFORMERS,
+    )
+    result = api.QwenTrainingResult(
+        config=config,
+        checkpoints=[str(result_path / "latest")],
+        latest_checkpoint=str(result_path / "latest"),
+        epochs_ran=1,
+    )
+
+    metadata = api._persist_qwen_run_metadata(result_path, config, result)
+
+    assert metadata["requested_model_id"] == "custom/Huihui-Qwen3-VL-4B-Instruct-abliterated-AWQ-4bit"
+    assert metadata["training_model_id"] == "custom/Huihui-Qwen3-VL-4B-Instruct-abliterated"
+    assert metadata["abliterated"] is True
+    assert metadata["quantization_backend"] == "awq"
+
+
+def test_qwen_model_registry_skips_transformers_runs_without_adapter_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", tmp_path / "qwen_jobs")
+    broken_latest = api.QWEN_JOB_ROOT / "runs" / "broken" / "latest"
+    broken_latest.mkdir(parents=True)
+    (api.QWEN_JOB_ROOT / "runs" / "broken" / api.QWEN_METADATA_FILENAME).write_text(
+        json.dumps(
+            {
+                "id": "broken",
+                "label": "Broken",
+                "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+                "runtime_platform": api.QWEN_PLATFORM_TRANSFORMERS,
+                "latest_checkpoint": str(broken_latest),
+            }
+        ),
+        encoding="utf-8",
+    )
+    good_latest = api.QWEN_JOB_ROOT / "runs" / "good" / "latest"
+    good_latest.mkdir(parents=True)
+    (good_latest / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (good_latest / "adapter_model.safetensors").write_bytes(b"adapter")
+    (api.QWEN_JOB_ROOT / "runs" / "good" / api.QWEN_METADATA_FILENAME).write_text(
+        json.dumps(
+            {
+                "id": "good",
+                "label": "Good",
+                "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+                "runtime_platform": api.QWEN_PLATFORM_TRANSFORMERS,
+                "latest_checkpoint": str(good_latest),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ids = {entry["id"] for entry in api._list_qwen_model_entries()}
+
+    assert "good" in ids
+    assert "broken" not in ids
 
 
 def test_qwen_training_config_accepts_mlx_model(tmp_path, monkeypatch):

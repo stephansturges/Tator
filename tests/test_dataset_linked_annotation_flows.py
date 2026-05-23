@@ -154,6 +154,66 @@ def test_download_dataset_entry_applies_overlay_files(tmp_path, monkeypatch) -> 
         assert zf.read(text_name).decode("utf-8").strip() == "new"
 
 
+def test_download_dataset_entry_skips_dataset_symlink_escape(tmp_path, monkeypatch) -> None:
+    source_root = tmp_path / "linked_source"
+    (source_root / "images").mkdir(parents=True, exist_ok=True)
+    (source_root / "images" / "ok.txt").write_text("ok", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    (source_root / "images" / "escape.txt").symlink_to(outside)
+    record_root = tmp_path / "registry" / "ds_linked"
+    record_root.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds_linked",
+            "dataset_root": str(source_root),
+            "registry_root": str(record_root),
+            "storage_mode": "linked",
+            "linked_root": str(source_root),
+            "yolo_layout": "flat",
+        },
+    )
+
+    response = api.download_dataset_entry("ds_linked")
+
+    with zipfile.ZipFile(Path(response.path), "r") as zf:
+        names = set(zf.namelist())
+        assert f"{source_root.name}/images/ok.txt" in names
+        assert f"{source_root.name}/images/escape.txt" not in names
+
+
+def test_download_dataset_entry_skips_overlay_symlink_escape(tmp_path, monkeypatch) -> None:
+    source_root = tmp_path / "linked_source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    record_root = tmp_path / "registry" / "ds_linked"
+    overlay_root = record_root / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    (overlay_root / "labels" / "train").mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    (overlay_root / "labels" / "train" / "escape.txt").symlink_to(outside)
+
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds_linked",
+            "dataset_root": str(source_root),
+            "registry_root": str(record_root),
+            "storage_mode": "linked",
+            "linked_root": str(source_root),
+            "yolo_layout": "flat",
+        },
+    )
+
+    response = api.download_dataset_entry("ds_linked")
+
+    with zipfile.ZipFile(Path(response.path), "r") as zf:
+        assert f"{source_root.name}/labels/escape.txt" not in set(zf.namelist())
+
+
 def test_set_dataset_glossary_for_linked_dataset_writes_registry_meta(
     tmp_path, monkeypatch
 ) -> None:
@@ -274,6 +334,160 @@ def test_persistent_meta_patch_requires_lock_owner(tmp_path, monkeypatch) -> Non
     assert exc.value.detail == "annotation_lock_session_required"
 
 
+def test_persistent_snapshot_validates_status_before_overlay_writes(tmp_path, monkeypatch) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    meta = {"annotation_lock": _active_lock("sess-lock")}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api, "_dataset_effective_root_from_entry", lambda _entry: Path(_entry["dataset_root"])
+    )
+    monkeypatch.setattr(
+        api, "_annotation_load_or_create_meta", lambda _entry: (Path("/tmp/meta.json"), meta)
+    )
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: {"progress": {}})
+    monkeypatch.setattr(api, "_annotation_persist_meta", lambda _entry, _meta: None)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.save_dataset_annotation_snapshot(
+            "ds",
+            {
+                "session_id": "sess-lock",
+                "status": "not_a_status",
+                "records": [
+                    {
+                        "split": "train",
+                        "image_relpath": "img.jpg",
+                        "label_lines": ["0 0.5 0.5 0.1 0.1"],
+                        "text_label": "caption",
+                    }
+                ],
+            },
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "invalid_annotation_status"
+    overlay_root = Path(entry["registry_root"]) / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    assert not (overlay_root / "labels" / "train" / "img.txt").exists()
+    assert not (overlay_root / "text_labels" / "img.txt").exists()
+    assert "annotation_status" not in meta
+
+
+def test_persistent_snapshot_normalises_all_records_before_overlay_writes(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    meta = {"annotation_lock": _active_lock("sess-lock")}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api, "_dataset_effective_root_from_entry", lambda _entry: Path(_entry["dataset_root"])
+    )
+    monkeypatch.setattr(
+        api, "_annotation_load_or_create_meta", lambda _entry: (Path("/tmp/meta.json"), meta)
+    )
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: {"progress": {}})
+    monkeypatch.setattr(api, "_annotation_persist_meta", lambda _entry, _meta: None)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.save_dataset_annotation_snapshot(
+            "ds",
+            {
+                "session_id": "sess-lock",
+                "records": [
+                    {
+                        "split": "train",
+                        "image_relpath": "img_ok.jpg",
+                        "label_lines": ["0 0.5 0.5 0.1 0.1"],
+                    },
+                    {
+                        "split": "train",
+                        "image_relpath": "../bad.jpg",
+                        "label_lines": [],
+                    },
+                ],
+            },
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "invalid_relative_path"
+    overlay_root = Path(entry["registry_root"]) / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    assert not (overlay_root / "labels" / "train" / "img_ok.txt").exists()
+
+
+def test_resolve_annotation_image_path_rejects_symlink_escape(tmp_path) -> None:
+    dataset_root = tmp_path / "dataset"
+    images_root = dataset_root / "images"
+    images_root.mkdir(parents=True)
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"not really an image")
+    (images_root / "escape.jpg").symlink_to(outside)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api._resolve_annotation_image_path(
+            dataset_root,
+            "flat",
+            "train",
+            Path("escape.jpg"),
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "annotation_image_not_found"
+
+
+def test_persistent_meta_patch_validates_status_before_labelmap_write(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    meta = {"annotation_lock": _active_lock("sess-lock")}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api, "_annotation_load_or_create_meta", lambda _entry: (Path("/tmp/meta.json"), meta)
+    )
+    monkeypatch.setattr(api, "_annotation_persist_meta", lambda _entry, _meta: None)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.patch_dataset_annotation_meta(
+            "ds",
+            {
+                "session_id": "sess-lock",
+                "status": "not_a_status",
+                "labelmap": ["car", "truck"],
+            },
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "invalid_annotation_status"
+    assert not (Path(entry["dataset_root"]) / "labelmap.txt").exists()
+    assert "annotation_status" not in meta
+
+
+def test_persistent_meta_patch_rejects_labelmap_path_outside_dataset_roots(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    outside = tmp_path / "outside" / "labelmap.txt"
+    entry["yolo_labelmap_path"] = str(outside)
+    meta = {"annotation_lock": _active_lock("sess-lock")}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api, "_annotation_load_or_create_meta", lambda _entry: (Path("/tmp/meta.json"), meta)
+    )
+    monkeypatch.setattr(api, "_annotation_persist_meta", lambda _entry, _meta: None)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.patch_dataset_annotation_meta(
+            "ds",
+            {
+                "session_id": "sess-lock",
+                "labelmap": ["car", "truck"],
+            },
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "labelmap_path_forbidden"
+    assert not outside.exists()
+    assert set(meta) == {"annotation_lock"}
+
+
 def test_stop_session_requires_matching_session_or_force(tmp_path, monkeypatch) -> None:
     entry = _entry_for_annotation(tmp_path)
     meta = {"annotation_lock": _active_lock("sess-lock")}
@@ -346,6 +560,156 @@ def test_transient_snapshot_and_meta_patch_require_lock(monkeypatch) -> None:
     assert exc2.value.detail == "annotation_lock_active"
 
     with api.DATASET_TRANSIENT_LOCK:
+        api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
+
+
+def test_transient_snapshot_validates_status_before_overlay_mutation(monkeypatch) -> None:
+    session_id = "transient-invalid-status"
+    now = time.time()
+    overlay_labels = {}
+    overlay_text = {}
+    with api.DATASET_TRANSIENT_LOCK:
+        api.DATASET_TRANSIENT_SESSIONS[session_id] = {
+            "session_id": session_id,
+            "dataset_root": "/tmp/path",
+            "overlay_labels": overlay_labels,
+            "overlay_text": overlay_text,
+            "annotation_lock": _active_lock("sess-lock"),
+            "expires_at": now + 300.0,
+        }
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.save_transient_annotation_snapshot(
+            session_id,
+            {
+                "session_id": "sess-lock",
+                "status": "not_a_status",
+                "records": [
+                    {
+                        "split": "train",
+                        "image_relpath": "img.jpg",
+                        "label_lines": ["0 0.5 0.5 0.1 0.1"],
+                        "text_label": "caption",
+                    }
+                ],
+            },
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "invalid_annotation_status"
+    with api.DATASET_TRANSIENT_LOCK:
+        session = api.DATASET_TRANSIENT_SESSIONS[session_id]
+        assert session["overlay_labels"] == {}
+        assert session["overlay_text"] == {}
+        assert "annotation_status" not in session
+        api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
+
+
+def test_transient_meta_patch_validates_status_before_labelmap_write(
+    tmp_path, monkeypatch
+) -> None:
+    session_id = "transient-invalid-meta"
+    source_root = tmp_path / "source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    with api.DATASET_TRANSIENT_LOCK:
+        api.DATASET_TRANSIENT_SESSIONS[session_id] = {
+            "session_id": session_id,
+            "dataset_root": str(source_root),
+            "classes": ["old"],
+            "annotation_lock": _active_lock("sess-lock"),
+            "expires_at": now + 300.0,
+        }
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.patch_transient_annotation_meta(
+            session_id,
+            {
+                "session_id": "sess-lock",
+                "status": "not_a_status",
+                "labelmap": ["car", "truck"],
+            },
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "invalid_annotation_status"
+    assert not (source_root / "labelmap.txt").exists()
+    with api.DATASET_TRANSIENT_LOCK:
+        session = api.DATASET_TRANSIENT_SESSIONS[session_id]
+        assert session["classes"] == ["old"]
+        assert "annotation_status" not in session
+        api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
+
+
+def test_transient_meta_patch_revalidates_dataset_root_before_labelmap_write(
+    tmp_path, monkeypatch
+) -> None:
+    session_id = "transient-forbidden-root"
+    source_root = tmp_path / "source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    with api.DATASET_TRANSIENT_LOCK:
+        api.DATASET_TRANSIENT_SESSIONS[session_id] = {
+            "session_id": session_id,
+            "dataset_root": str(source_root),
+            "classes": ["old"],
+            "annotation_lock": _active_lock("sess-lock"),
+            "expires_at": now + 300.0,
+        }
+
+    def reject_linked_path(_path: str) -> Path:
+        raise api.HTTPException(status_code=400, detail="dataset_path_not_allowlisted")
+
+    monkeypatch.setattr(api, "_validate_linked_dataset_path", reject_linked_path)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.patch_transient_annotation_meta(
+            session_id,
+            {
+                "session_id": "sess-lock",
+                "labelmap": ["car", "truck"],
+            },
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "dataset_path_not_allowlisted"
+    assert not (source_root / "labelmap.txt").exists()
+    with api.DATASET_TRANSIENT_LOCK:
+        session = api.DATASET_TRANSIENT_SESSIONS[session_id]
+        assert session["classes"] == ["old"]
+        api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
+
+
+def test_transient_meta_patch_writes_labelmap_after_revalidation(
+    tmp_path, monkeypatch
+) -> None:
+    session_id = "transient-allowed-root"
+    source_root = tmp_path / "source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    with api.DATASET_TRANSIENT_LOCK:
+        api.DATASET_TRANSIENT_SESSIONS[session_id] = {
+            "session_id": session_id,
+            "dataset_root": str(source_root),
+            "classes": ["old"],
+            "annotation_lock": _active_lock("sess-lock"),
+            "expires_at": now + 300.0,
+        }
+    monkeypatch.setattr(api, "_validate_linked_dataset_path", lambda _path: source_root)
+
+    out = api.patch_transient_annotation_meta(
+        session_id,
+        {
+            "session_id": "sess-lock",
+            "labelmap": ["car", "truck"],
+        },
+    )
+
+    assert out["labelmap"] == ["car", "truck"]
+    assert (source_root / "labelmap.txt").read_text(encoding="utf-8") == "car\ntruck\n"
+    with api.DATASET_TRANSIENT_LOCK:
+        session = api.DATASET_TRANSIENT_SESSIONS[session_id]
+        assert session["classes"] == ["car", "truck"]
         api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
 
 

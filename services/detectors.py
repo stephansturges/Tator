@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from utils.io import _path_is_within_root_impl
+
 
 def _path_identity(path: Path) -> Path:
     try:
@@ -322,9 +324,13 @@ def _yolo_run_dir_impl(
     sanitize_fn: Callable[[str], str],
     http_exception_cls: Any,
 ) -> Path:
-    safe_id = sanitize_fn(run_id)
+    raw_id = str(run_id or "").strip()
+    safe_id = sanitize_fn(raw_id)
+    if not create and (not raw_id or safe_id != raw_id):
+        raise http_exception_cls(status_code=400, detail="invalid_run_id")
+    job_root_resolved = job_root.resolve()
     candidate = (job_root / safe_id).resolve()
-    if not str(candidate).startswith(str(job_root.resolve())):
+    if not _path_is_within_root_impl(candidate, job_root_resolved):
         raise http_exception_cls(status_code=400, detail="invalid_run_id")
     if create:
         candidate.mkdir(parents=True, exist_ok=True)
@@ -407,9 +413,13 @@ def _rfdetr_run_dir_impl(
     sanitize_fn: Callable[[str], str],
     http_exception_cls: Any,
 ) -> Path:
-    safe_id = sanitize_fn(run_id)
+    raw_id = str(run_id or "").strip()
+    safe_id = sanitize_fn(raw_id)
+    if not create and (not raw_id or safe_id != raw_id):
+        raise http_exception_cls(status_code=400, detail="invalid_run_id")
+    job_root_resolved = job_root.resolve()
     candidate = (job_root / safe_id).resolve()
-    if not str(candidate).startswith(str(job_root.resolve())):
+    if not _path_is_within_root_impl(candidate, job_root_resolved):
         raise http_exception_cls(status_code=400, detail="invalid_run_id")
     if create:
         candidate.mkdir(parents=True, exist_ok=True)
@@ -471,11 +481,139 @@ def _rfdetr_prune_run_dir_impl(
     return {"kept": kept, "deleted": deleted, "freed_bytes": freed}
 
 
-def _yolo_device_arg_impl(devices: Optional[List[int]]) -> Optional[str]:
+def _torch_cuda_available(torch_module: Any) -> bool:
+    try:
+        return bool(torch_module and torch_module.cuda.is_available())
+    except Exception:
+        return False
+
+
+def _torch_mps_available(torch_module: Any) -> bool:
+    try:
+        mps_backend = getattr(torch_module.backends, "mps", None)
+        return bool(torch_module and mps_backend and mps_backend.is_available())
+    except Exception:
+        return False
+
+
+def _clean_yolo_cuda_devices_impl(devices: Optional[List[int]]) -> List[str]:
     if not devices:
-        return None
-    cleaned = [str(int(d)) for d in devices if isinstance(d, (int, str)) and str(d).strip().isdigit()]
-    return ",".join(cleaned) if cleaned else None
+        return []
+    cleaned: List[str] = []
+    for device in devices:
+        raw = str(device).strip()
+        if re.fullmatch(r"\d+", raw):
+            cleaned.append(str(int(raw)))
+    return cleaned
+
+
+def _normalize_yolo_accelerator_impl(accelerator: Optional[str]) -> str:
+    value = str(accelerator or "auto").strip().lower()
+    if value in {"", "default"}:
+        return "auto"
+    if value not in {"auto", "cuda", "mps", "cpu"}:
+        raise ValueError("yolo_accelerator_unknown")
+    return value
+
+
+def _yolo_resolve_device_impl(
+    devices: Optional[List[int]],
+    accelerator: Optional[str] = None,
+    *,
+    torch_module: Any = None,
+    allow_mps: bool = True,
+) -> Dict[str, Any]:
+    requested = _normalize_yolo_accelerator_impl(accelerator)
+    cuda_devices = _clean_yolo_cuda_devices_impl(devices)
+    if cuda_devices:
+        if requested not in {"auto", "cuda"}:
+            raise ValueError("yolo_cuda_devices_conflict")
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "cuda",
+            "device_arg": ",".join(cuda_devices),
+            "device_label": f"CUDA devices {','.join(cuda_devices)}",
+            "devices": [int(device) for device in cuda_devices],
+        }
+
+    cuda_available = _torch_cuda_available(torch_module)
+    mps_available = bool(allow_mps and _torch_mps_available(torch_module))
+
+    if requested == "cpu":
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "cpu",
+            "device_arg": "cpu",
+            "device_label": "CPU",
+            "devices": [],
+        }
+    if requested == "mps":
+        if torch_module is not None and not mps_available:
+            raise ValueError("yolo_mps_unavailable")
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "mps",
+            "device_arg": "mps",
+            "device_label": "Apple MPS",
+            "devices": ["mps"],
+        }
+    if requested == "cuda":
+        if torch_module is not None and not cuda_available:
+            raise ValueError("yolo_cuda_unavailable")
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "cuda",
+            "device_arg": None,
+            "device_label": "CUDA default",
+            "devices": [],
+        }
+
+    if torch_module is None:
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "auto",
+            "device_arg": None,
+            "device_label": "Ultralytics default",
+            "devices": [],
+        }
+    if cuda_available:
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "cuda",
+            "device_arg": None,
+            "device_label": "CUDA default",
+            "devices": [],
+        }
+    if mps_available:
+        return {
+            "requested_accelerator": requested,
+            "resolved_accelerator": "mps",
+            "device_arg": "mps",
+            "device_label": "Apple MPS",
+            "devices": ["mps"],
+        }
+    return {
+        "requested_accelerator": requested,
+        "resolved_accelerator": "cpu",
+        "device_arg": "cpu",
+        "device_label": "CPU",
+        "devices": [],
+    }
+
+
+def _yolo_device_arg_impl(
+    devices: Optional[List[int]],
+    accelerator: Optional[str] = None,
+    *,
+    torch_module: Any = None,
+    allow_mps: bool = True,
+) -> Optional[str]:
+    return _yolo_resolve_device_impl(
+        devices,
+        accelerator,
+        torch_module=torch_module,
+        allow_mps=allow_mps,
+    ).get("device_arg")
 
 
 def _yolo_p2_scale_impl(model_id: str) -> Optional[str]:

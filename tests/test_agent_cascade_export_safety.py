@@ -9,7 +9,11 @@ from services.agent_cascades import _ensure_cascade_zip_impl
 
 
 def _within_root(path: Path, root: Path) -> bool:
-    return str(path.resolve()).startswith(str(root.resolve()))
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def _write_recipe_zip(path: Path) -> None:

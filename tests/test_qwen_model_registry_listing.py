@@ -11,6 +11,12 @@ def _write_meta(run_dir: Path, payload: dict) -> None:
     (run_dir / api.QWEN_METADATA_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_transformers_adapter(checkpoint_dir: Path) -> None:
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    (checkpoint_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (checkpoint_dir / "adapter_model.safetensors").write_bytes(b"adapter")
+
+
 def test_list_qwen_model_entries_skips_incomplete_and_dedupes(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "qwen_runs"
     runs = root / "runs"
@@ -19,7 +25,7 @@ def test_list_qwen_model_entries_skips_incomplete_and_dedupes(tmp_path: Path, mo
     # Valid run with explicit checkpoint path.
     run_a = runs / "run_a"
     ckpt_a = run_a / "latest"
-    ckpt_a.mkdir(parents=True)
+    _write_transformers_adapter(ckpt_a)
     _write_meta(
         run_a,
         {
@@ -33,7 +39,7 @@ def test_list_qwen_model_entries_skips_incomplete_and_dedupes(tmp_path: Path, mo
     # Duplicate id should be dropped in favor of newest entry.
     run_dup = runs / "run_dup"
     ckpt_dup = run_dup / "latest"
-    ckpt_dup.mkdir(parents=True)
+    _write_transformers_adapter(ckpt_dup)
     _write_meta(
         run_dup,
         {
@@ -69,7 +75,7 @@ def test_list_qwen_model_entries_uses_latest_dir_without_metadata(tmp_path: Path
     root = tmp_path / "qwen_runs"
     run = root / "runs" / "run_no_meta"
     latest = run / "latest"
-    latest.mkdir(parents=True)
+    _write_transformers_adapter(latest)
 
     monkeypatch.setattr(api, "QWEN_JOB_ROOT", root)
 

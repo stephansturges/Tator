@@ -2522,9 +2522,19 @@
                                 <input type="number" id="yoloWorkers" min="0" value="4" />
                             </div>
                             <div>
+                                <label for="yoloAccelerator">Accelerator</label>
+                                <select id="yoloAccelerator">
+                                    <option value="auto" selected>Auto (CUDA/MPS/CPU)</option>
+                                    <option value="cuda">CUDA</option>
+                                    <option value="mps">Apple MPS</option>
+                                    <option value="cpu">CPU</option>
+                                </select>
+                                <div class="training-help">YOLOv8 training uses Ultralytics/PyTorch. Auto prefers CUDA, then Apple MPS, then CPU.</div>
+                            </div>
+                            <div>
                                 <label for="yoloDevices">Devices (comma-separated)</label>
                                 <input type="text" id="yoloDevices" placeholder="0,1" />
-                                <div class="training-help" id="yoloDevicesHelp" data-empty-hint="Leave blank to use the default GPU.">Leave blank to use the default GPU. Use comma-separated CUDA indices.</div>
+                                <div class="training-help" id="yoloDevicesHelp" data-empty-hint="Leave blank for auto device selection.">Leave blank for auto device selection. Use comma-separated CUDA indices to force NVIDIA GPUs.</div>
                             </div>
                             <div>
                                 <label for="yoloSeed">Seed</label>
@@ -2686,9 +2696,19 @@
                                     <input type="number" id="yoloHeadGraftWorkers" min="0" value="4" />
                                 </div>
                                 <div>
+                                    <label for="yoloHeadGraftAccelerator">Accelerator</label>
+                                    <select id="yoloHeadGraftAccelerator">
+                                        <option value="auto" selected>Auto (CUDA/MPS/CPU)</option>
+                                        <option value="cuda">CUDA</option>
+                                        <option value="mps">Apple MPS</option>
+                                        <option value="cpu">CPU</option>
+                                    </select>
+                                    <div class="training-help">Uses the same Ultralytics/PyTorch device selection as YOLO training.</div>
+                                </div>
+                                <div>
                                     <label for="yoloHeadGraftDevices">Devices (comma-separated)</label>
                                     <input type="text" id="yoloHeadGraftDevices" placeholder="0,1" />
-                                    <div class="training-help">Leave blank to use the default GPU allocation.</div>
+                                    <div class="training-help" id="yoloHeadGraftDevicesHelp">Leave blank for auto device selection. Use comma-separated CUDA indices to force NVIDIA GPUs.</div>
                                 </div>
                                 <div>
                                     <label for="yoloHeadGraftSeed">Seed</label>

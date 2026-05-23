@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Literal
 
 from pydantic import BaseModel, Field, root_validator
@@ -339,10 +340,22 @@ class QwenCaptionHint(BaseModel):
             cleaned = []
             for val in bbox:
                 try:
-                    cleaned.append(float(val))
+                    num = float(val)
                 except (TypeError, ValueError):
-                    cleaned.append(0.0)
+                    raise ValueError("invalid_bbox") from None
+                if not math.isfinite(num):
+                    raise ValueError("invalid_bbox")
+                cleaned.append(num)
             values["bbox"] = cleaned
+        confidence = values.get("confidence")
+        if confidence is not None:
+            try:
+                confidence_val = float(confidence)
+            except (TypeError, ValueError):
+                confidence_val = None
+            values["confidence"] = (
+                confidence_val if confidence_val is not None and math.isfinite(confidence_val) else None
+            )
         return values
 
 
@@ -386,6 +399,47 @@ class QwenCaptionRequest(BaseModel):
     caption_cleanup_prompt: Optional[str] = None
     labelmap_glossary: Optional[str] = None
 
+    @root_validator(pre=True)
+    def _normalize_caption_payload_input(cls, values):  # noqa: N805
+        if not isinstance(values, Mapping):
+            return values
+        data = dict(values)
+        caption_mode = str(data.get("caption_mode") or "full").strip().lower()
+        if caption_mode == "hybrid":
+            caption_mode = "windowed"
+        if caption_mode not in {"full", "windowed"}:
+            caption_mode = "full"
+        data["caption_mode"] = caption_mode
+        data["model_variant"] = _normalize_qwen_variant_value(
+            data.get("model_variant"),
+            default="auto",
+        )
+        for field in (
+            "image_width",
+            "image_height",
+            "max_boxes",
+            "max_new_tokens",
+            "final_caption_max_sentences",
+            "temperature",
+            "top_p",
+            "top_k",
+            "presence_penalty",
+            "window_size",
+            "window_overlap",
+        ):
+            if data.get(field) is None:
+                continue
+            try:
+                numeric_value = float(data.get(field))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(numeric_value):
+                data[field] = None
+        for field in ("image_token", "image_name"):
+            if data.get(field) is not None:
+                data[field] = str(data.get(field)).strip() or None
+        return data
+
     @root_validator(skip_on_failure=True)
     def _validate_caption_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
@@ -405,7 +459,7 @@ class QwenCaptionRequest(BaseModel):
         if max_boxes is not None:
             try:
                 max_boxes_val = int(max_boxes)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 max_boxes_val = 0
             values["max_boxes"] = max(0, min(max_boxes_val, 200))
         else:
@@ -414,7 +468,7 @@ class QwenCaptionRequest(BaseModel):
         if max_tokens is not None:
             try:
                 max_tokens_val = int(max_tokens)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 max_tokens_val = 1000
             values["max_new_tokens"] = max(32, min(max_tokens_val, 2000))
         else:
@@ -423,7 +477,7 @@ class QwenCaptionRequest(BaseModel):
         if max_sentences is not None:
             try:
                 max_sentences_val = int(max_sentences)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 max_sentences_val = 0
             values["final_caption_max_sentences"] = (
                 max(1, min(max_sentences_val, 30)) if max_sentences_val > 0 else 10
@@ -433,26 +487,29 @@ class QwenCaptionRequest(BaseModel):
         temp = values.get("temperature")
         if temp is not None:
             try:
-                values["temperature"] = float(temp)
-            except (TypeError, ValueError):
+                temp_val = float(temp)
+                values["temperature"] = temp_val if math.isfinite(temp_val) else None
+            except (TypeError, ValueError, OverflowError):
                 values["temperature"] = None
         top_p = values.get("top_p")
         if top_p is not None:
             try:
-                values["top_p"] = float(top_p)
-            except (TypeError, ValueError):
+                top_p_val = float(top_p)
+                values["top_p"] = top_p_val if math.isfinite(top_p_val) else None
+            except (TypeError, ValueError, OverflowError):
                 values["top_p"] = None
         top_k = values.get("top_k")
         if top_k is not None:
             try:
                 values["top_k"] = int(top_k)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 values["top_k"] = None
         presence = values.get("presence_penalty")
         if presence is not None:
             try:
-                values["presence_penalty"] = float(presence)
-            except (TypeError, ValueError):
+                presence_val = float(presence)
+                values["presence_penalty"] = presence_val if math.isfinite(presence_val) else None
+            except (TypeError, ValueError, OverflowError):
                 values["presence_penalty"] = None
         for key in ("image_width", "image_height"):
             val = values.get(key)
@@ -460,7 +517,7 @@ class QwenCaptionRequest(BaseModel):
                 continue
             try:
                 values[key] = max(1, int(val))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 values[key] = None
         caption_mode = (values.get("caption_mode") or "full").strip().lower()
         if caption_mode == "hybrid":
@@ -472,13 +529,14 @@ class QwenCaptionRequest(BaseModel):
         if window_size is not None:
             try:
                 values["window_size"] = max(64, int(window_size))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 values["window_size"] = None
         window_overlap = values.get("window_overlap")
         if window_overlap is not None:
             try:
-                values["window_overlap"] = float(window_overlap)
-            except (TypeError, ValueError):
+                overlap_val = float(window_overlap)
+                values["window_overlap"] = overlap_val if math.isfinite(overlap_val) else None
+            except (TypeError, ValueError, OverflowError):
                 values["window_overlap"] = None
         model_id = (values.get("model_id") or "").strip()
         values["model_id"] = model_id or None
@@ -501,6 +559,20 @@ class QwenCaptionResponse(BaseModel):
     used_counts: Dict[str, int] = Field(default_factory=dict)
     used_boxes: int
     truncated: bool
+
+
+def _normalize_qwen_variant_value(value: Any, *, default: Optional[str] = "auto") -> Optional[str]:
+    if value is None:
+        return default
+    raw = str(value).strip()
+    if not raw:
+        return default
+    variant_lookup = {
+        "auto": "auto",
+        "instruct": "Instruct",
+        "thinking": "Thinking",
+    }
+    return variant_lookup.get(raw.lower(), default)
 
 
 class QwenPromptSection(BaseModel):
@@ -610,6 +682,68 @@ class QwenTrainRequest(BaseModel):
     train_limit: Optional[int] = None
     val_limit: Optional[int] = None
 
+    @root_validator(pre=True)
+    def _normalize_qwen_train_payload_input(cls, values):  # noqa: N805
+        if not isinstance(values, Mapping):
+            return values
+        data = dict(values)
+        mode = str(data.get("training_mode") or "").strip().lower().replace("-", "_")
+        mode_lookup = {
+            "": None,
+            "official": "official_lora",
+            "lora": "official_lora",
+            "official_lora": "official_lora",
+            "qlora": "trl_qlora",
+            "trl": "trl_qlora",
+            "trl_qlora": "trl_qlora",
+        }
+        if mode in mode_lookup:
+            data["training_mode"] = mode_lookup[mode]
+        for field in ("dataset_id", "run_name", "model_id", "system_prompt", "devices"):
+            if data.get(field) is not None:
+                data[field] = str(data.get(field)).strip() or None
+        targets = data.get("lora_target_modules")
+        if isinstance(targets, str):
+            data["lora_target_modules"] = [
+                item.strip() for item in targets.split(",") if item.strip()
+            ]
+        elif isinstance(targets, list):
+            data["lora_target_modules"] = [
+                str(item or "").strip() for item in targets if str(item or "").strip()
+            ] or None
+        for field in (
+            "batch_size",
+            "max_epochs",
+            "lr",
+            "accumulate_grad_batches",
+            "warmup_steps",
+            "num_workers",
+            "lora_rank",
+            "lora_alpha",
+            "lora_dropout",
+            "log_every_n_steps",
+            "min_pixels",
+            "max_pixels",
+            "max_length",
+            "seed",
+            "val_percent",
+            "split_seed",
+            "train_limit",
+            "val_limit",
+        ):
+            if data.get(field) is None:
+                continue
+            if isinstance(data.get(field), str) and not data.get(field).strip():
+                data[field] = None
+                continue
+            try:
+                numeric_value = float(data.get(field))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(numeric_value):
+                data[field] = None
+        return data
+
     @root_validator(skip_on_failure=True)
     def _validate_dataset_fields(cls, values):  # noqa: N805
         if not values.get("dataset_id"):
@@ -670,6 +804,7 @@ class YoloTrainRequest(BaseModel):
     img_size: Optional[int] = None
     batch: Optional[int] = None
     workers: Optional[int] = None
+    accelerator: Optional[Literal["auto", "cuda", "mps", "cpu"]] = "auto"
     devices: Optional[List[int]] = None
     seed: Optional[int] = None
     augmentations: Optional[Dict[str, Any]] = None
@@ -691,6 +826,7 @@ class YoloHeadGraftRequest(BaseModel):
     img_size: Optional[int] = None
     batch: Optional[int] = None
     workers: Optional[int] = None
+    accelerator: Optional[Literal["auto", "cuda", "mps", "cpu"]] = "auto"
     devices: Optional[List[int]] = None
     seed: Optional[int] = None
     export_onnx: Optional[bool] = None
@@ -1195,6 +1331,39 @@ class QwenPrepassRequest(BaseModel):
     immediate_action_logit_bias: Optional[float] = 6.0
     trace_verbose: Optional[bool] = False
 
+    @root_validator(pre=True)
+    def _normalize_prepass_payload_input(cls, values):  # noqa: N805
+        if not isinstance(values, Mapping):
+            return values
+        data = dict(values)
+        data["model_variant"] = _normalize_qwen_variant_value(
+            data.get("model_variant"),
+            default="auto",
+        )
+        if "prepass_caption_variant" in data:
+            data["prepass_caption_variant"] = _normalize_qwen_variant_value(
+                data.get("prepass_caption_variant"),
+                default=None,
+            )
+        for field in ("prepass_caption_max_tokens", "max_new_tokens"):
+            if data.get(field) is None:
+                continue
+            try:
+                numeric_value = float(data.get(field))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if not math.isfinite(numeric_value):
+                data[field] = None
+        for field in (
+            "image_token",
+            "image_name",
+            "model_id",
+            "prepass_caption_model_id",
+        ):
+            if data.get(field) is not None:
+                data[field] = str(data.get(field)).strip() or None
+        return data
+
 
 class AutoLabelPlannerCellAssignment(BaseModel):
     cell: str
@@ -1250,6 +1419,27 @@ class AutoLabelRequest(BaseModel):
     falcon_segmentation_threshold: float = Field(0.3, ge=0.0, le=1.0)
     simplify_epsilon: float = Field(2.0, ge=0.0, le=100.0)
     force_annotation_lock: bool = False
+
+    @root_validator(pre=True)
+    def _normalize_auto_label_payload_input(cls, values):  # noqa: N805
+        if not isinstance(values, Mapping):
+            return values
+        data = dict(values)
+        data["planner_model_variant"] = _normalize_qwen_variant_value(
+            data.get("planner_model_variant"),
+            default="auto",
+        )
+        for field in (
+            "annotation_session_id",
+            "planner_model_id",
+            "falcon_model_id",
+            "yolo_id",
+            "rfdetr_id",
+            "classifier_id",
+        ):
+            if data.get(field) is not None:
+                data[field] = str(data.get(field)).strip() or None
+        return data
 
     @root_validator(skip_on_failure=True)
     def _validate_auto_label_request(cls, values):  # noqa: N805

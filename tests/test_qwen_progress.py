@@ -1,3 +1,5 @@
+import json
+
 from fastapi import HTTPException
 from PIL import Image
 
@@ -187,3 +189,74 @@ def test_qwen_caption_cancel_marks_progress_and_new_run_clears_event():
     assert second_run != first_run
     assert not api.qwen_cancel_event.is_set()
     assert api.qwen_progress()["cancel_requested"] is False
+
+
+def test_qwen_caption_io_input_does_not_fail_on_bad_token_count(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    api._qwen_caption_io_input(
+        call_id="call-1",
+        source="test",
+        model_id="model",
+        max_new_tokens="not-an-int",
+    )
+
+    latest_jsonl = tmp_path / "qwen_caption_io_latest.jsonl"
+    records = [json.loads(line) for line in latest_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["event"] == "input"
+    assert records[-1]["max_new_tokens"] is None
+
+
+def test_qwen_caption_io_readable_failure_does_not_break_request(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    monkeypatch.setattr(
+        api,
+        "_qwen_caption_io_readable",
+        lambda _record: (_ for _ in ()).throw(RuntimeError("format failed")),
+    )
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    api._qwen_caption_io_record({"event": "input", "call_id": "call-2"})
+
+    latest_jsonl = tmp_path / "qwen_caption_io_latest.jsonl"
+    records = [json.loads(line) for line in latest_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["event"] == "input"
+
+
+def test_qwen_caption_io_stops_after_caption_progress_finishes(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+    latest_jsonl = tmp_path / "qwen_caption_io_latest.jsonl"
+    before = latest_jsonl.read_text(encoding="utf-8")
+
+    api._qwen_progress_finish("done", token_preview="caption")
+    api._qwen_caption_io_output(
+        call_id="stale-call",
+        source="test",
+        model_id="model",
+        output_text="stale",
+    )
+
+    assert latest_jsonl.read_text(encoding="utf-8") == before

@@ -514,12 +514,24 @@ def _validate_clip_dataset_impl(
         raise http_exception_cls(status_code=400, detail="clip_dataset_missing_paths")
     valid_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
     image_files: List[Path] = []
-    for p in img_root.rglob("*"):
-        if p.is_file() and p.suffix.lower() in valid_exts:
+    img_root_resolved = img_root.resolve()
+    lbl_root_resolved = lbl_root.resolve()
+    for p in img_root_resolved.rglob("*"):
+        if (
+            p.is_file()
+            and p.suffix.lower() in valid_exts
+            and _path_is_within_root(p.resolve(), img_root_resolved)
+        ):
             image_files.append(p)
     if not image_files:
         raise http_exception_cls(status_code=400, detail="clip_images_missing")
-    label_files = [p for p in lbl_root.rglob("*") if p.is_file() and p.suffix.lower() == ".txt"]
+    label_files = [
+        p
+        for p in lbl_root_resolved.rglob("*")
+        if p.is_file()
+        and p.suffix.lower() == ".txt"
+        and _path_is_within_root(p.resolve(), lbl_root_resolved)
+    ]
     if not label_files:
         raise http_exception_cls(status_code=400, detail="clip_labels_missing")
     labelmap = load_labelmap_simple_fn(labelmap_path)
@@ -549,6 +561,14 @@ def _validate_clip_dataset_impl(
         "boxes": box_count,
         "labelmap_classes": len(labelmap),
     }
+
+
+def _path_is_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except Exception:
+        return False
 
 
 def _resolve_clip_labelmap_path_impl(
@@ -627,6 +647,7 @@ def _list_clip_labelmaps_impl(
     upload_root: Path,
     labelmap_exts: Sequence[str],
     load_labelmap_file_fn: Callable[[Path], Sequence[str]],
+    path_is_within_root_fn: Callable[[Path, Path], bool],
 ) -> List[Dict[str, Any]]:
     labelmaps_root = (upload_root / "labelmaps").resolve()
     entries: List[Dict[str, Any]] = []
@@ -635,6 +656,9 @@ def _list_clip_labelmaps_impl(
         return entries
     for path in sorted(root.rglob("*")):
         if not path.is_file():
+            continue
+        resolved_path = path.resolve()
+        if not path_is_within_root_fn(resolved_path, root):
             continue
         if path.suffix.lower() not in labelmap_exts:
             continue
@@ -653,7 +677,7 @@ def _list_clip_labelmaps_impl(
         entries.append(
             {
                 "filename": path.name,
-                "path": str(path.resolve()),
+                "path": str(resolved_path),
                 "rel_path": str(path.relative_to(root)),
                 "root": "labelmaps",
                 "n_classes": len(classes),

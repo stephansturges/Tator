@@ -93,6 +93,19 @@ def test_unknown_custom_qwen_transformers_model_defaults_to_trainable():
     assert metadata["training_modes"] == ["official_lora", "trl_qlora"]
 
 
+def test_unknown_custom_abliterated_transformers_model_metadata_is_inferred():
+    metadata = qwen_transformers_metadata_for_model(
+        "custom/Huihui-Qwen3-VL-4B-Instruct-abliterated-AWQ-4bit"
+    )
+
+    assert metadata["training_supported"] is True
+    assert metadata["abliterated"] is True
+    assert metadata["quantized"] is True
+    assert metadata["quantization_backend"] == "awq"
+    assert metadata["training_model_id"] == "custom/Huihui-Qwen3-VL-4B-Instruct-abliterated"
+    assert "abliterated" in metadata["training_note"]
+
+
 def test_cuda_catalog_includes_primary_abliterated_qwen3_vl_transformers_models():
     sizes = ("2B", "4B", "8B", "32B", "30B-A3B")
     variants = ("Instruct", "Thinking")
@@ -201,3 +214,52 @@ def test_abliterated_training_model_stays_on_abliterated_checkpoint():
         resolve_qwen_training_model_id("Heouzen/Huihui-Qwen3-VL-32B-Instruct-FP8-abliterated")
         == "huihui-ai/Huihui-Qwen3-VL-32B-Instruct-abliterated"
     )
+
+
+def test_unknown_quantized_abliterated_training_model_keeps_abliterated_base():
+    assert (
+        resolve_qwen_training_model_id(
+            "custom/Huihui-Qwen3-VL-4B-Instruct-abliterated-AWQ-4bit"
+        )
+        == "custom/Huihui-Qwen3-VL-4B-Instruct-abliterated"
+    )
+    assert (
+        resolve_qwen_training_model_id(
+            "custom/Qwen3-VL-8B-Thinking-abliterated-v1-4bit-GPTQ"
+        )
+        == "custom/Qwen3-VL-8B-Thinking-abliterated-v1"
+    )
+    assert (
+        resolve_qwen_training_model_id(
+            "custom/Huihui-Qwen3-VL-32B-Instruct-FP8-abliterated"
+        )
+        == "custom/Huihui-Qwen3-VL-32B-Instruct-abliterated"
+    )
+
+
+def test_generic_4bit_abliterated_cuda_model_resolves_to_abliterated_base():
+    metadata = qwen_transformers_metadata_for_model(
+        "custom/Huihui-Qwen3-VL-8B-Instruct-abliterated-4bit"
+    )
+
+    assert metadata["quantized"] is True
+    assert metadata["quantization_backend"] == "4bit"
+    assert metadata["training_model_id"] == "custom/Huihui-Qwen3-VL-8B-Instruct-abliterated"
+    assert (
+        resolve_qwen_training_model_id(
+            "custom/Huihui-Qwen3-VL-8B-Instruct-abliterated-4bit"
+        )
+        == "custom/Huihui-Qwen3-VL-8B-Instruct-abliterated"
+    )
+
+
+def test_generic_4bit_cuda_runtime_uses_device_map_for_explicit_cuda_device():
+    kwargs = qwen_transformers_load_kwargs(
+        "custom/Qwen3-VL-4B-Instruct-4bit",
+        device="cuda:1",
+        device_pref="cuda:1",
+        torch_module=_Torch,
+    )
+
+    assert kwargs["torch_dtype"] == "auto"
+    assert kwargs["device_map"] == {"": "cuda:1"}

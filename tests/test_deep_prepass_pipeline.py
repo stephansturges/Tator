@@ -1,7 +1,11 @@
+from contextvars import ContextVar
 from PIL import Image
 from types import SimpleNamespace
 
+from fastapi import HTTPException
+
 import localinferenceapi as api
+from services.prepass import _agent_run_deep_prepass_caption_impl
 from services.prepass_similarity import _agent_run_similarity_global
 
 
@@ -92,6 +96,96 @@ def test_deep_prepass_runs_detectors_and_similarity(monkeypatch):
     final_clusters = list(provenance.get("final_clusters") or [])
     assert final_clusters
     assert final_clusters[0].get("atom_ids")
+
+
+def test_deep_prepass_caption_sanitizes_hints_and_token_config():
+    captured = {}
+    pil_img = Image.new("RGB", (64, 64), (0, 0, 0))
+    payload = SimpleNamespace(
+        prepass_caption=True,
+        prepass_caption_profile=123,
+        prepass_caption_max_tokens="not-an-int",
+        prepass_caption_variant="thinking",
+        model_variant="auto",
+    )
+    detections = [
+        {"label": "car", "score": 0.9, "bbox_xyxy_px": [0, 0, 12, 12]},
+        {"label": "truck", "score": 0.8, "bbox_xyxy_px": [0, 0, float("inf"), 12]},
+        {"label": "person", "score": 0.7, "bbox_xyxy_px": [0, "bad", 12, 12]},
+    ]
+
+    def qwen_caption_fn(request):
+        captured["request"] = request
+        return SimpleNamespace(caption="A car is parked beside the road.")
+
+    caption, windows = _agent_run_deep_prepass_caption_impl(
+        payload,
+        pil_img=pil_img,
+        image_token="tok",
+        detections=detections,
+        model_id_override=None,
+        glossary=None,
+        grid_for_log=None,
+        caption_request_cls=api.QwenCaptionRequest,
+        qwen_caption_fn=qwen_caption_fn,
+        sanitize_caption_fn=api._sanitize_qwen_caption_impl,
+        label_counts_fn=lambda _items, limit=10: "car: 1",
+        qwen_bbox_to_xyxy_fn=lambda _w, _h, bbox: bbox,
+        xyxy_to_bbox_fn=lambda *_args: [0, 0, 100, 100],
+        grid_cell_for_window_bbox_fn=lambda *_args: None,
+        readable_format_bbox_fn=lambda _bbox: "bbox",
+        unload_non_qwen_fn=lambda: None,
+        caption_window_hook=ContextVar("caption_window_hook", default=None),
+        http_exception_cls=HTTPException,
+        http_503_code=503,
+    )
+
+    request = captured["request"]
+    assert caption == "A car is parked beside the road."
+    assert windows == []
+    assert request.max_new_tokens == 512
+    assert request.model_variant == "Thinking"
+    assert [hint.label for hint in request.label_hints] == ["car"]
+
+
+def test_deep_prepass_caption_clamps_large_token_config():
+    captured = {}
+    pil_img = Image.new("RGB", (64, 64), (0, 0, 0))
+    payload = SimpleNamespace(
+        prepass_caption=True,
+        prepass_caption_profile="deep",
+        prepass_caption_max_tokens=99999,
+        prepass_caption_variant="auto",
+        model_variant="auto",
+    )
+
+    def qwen_caption_fn(request):
+        captured["request"] = request
+        return SimpleNamespace(caption="A detailed scene caption is available.")
+
+    _agent_run_deep_prepass_caption_impl(
+        payload,
+        pil_img=pil_img,
+        image_token="tok",
+        detections=[],
+        model_id_override=None,
+        glossary=None,
+        grid_for_log=None,
+        caption_request_cls=api.QwenCaptionRequest,
+        qwen_caption_fn=qwen_caption_fn,
+        sanitize_caption_fn=api._sanitize_qwen_caption_impl,
+        label_counts_fn=lambda _items, limit=10: "none",
+        qwen_bbox_to_xyxy_fn=lambda _w, _h, bbox: bbox,
+        xyxy_to_bbox_fn=lambda *_args: [0, 0, 100, 100],
+        grid_cell_for_window_bbox_fn=lambda *_args: None,
+        readable_format_bbox_fn=lambda _bbox: "bbox",
+        unload_non_qwen_fn=lambda: None,
+        caption_window_hook=ContextVar("caption_window_hook", default=None),
+        http_exception_cls=HTTPException,
+        http_503_code=503,
+    )
+
+    assert captured["request"].max_new_tokens == 2000
 
 
 def test_sam3_similarity_multi_prompt_seed_filter_no_type_error(monkeypatch):

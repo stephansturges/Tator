@@ -39,6 +39,24 @@ def _extract_fetches(js_text: str):
     return entries
 
 
+def _path_match_score(ui_parts: list[str], cand_parts: list[str]) -> int | None:
+    score = 0
+    for u, c in zip(ui_parts, cand_parts, strict=False):
+        ui_param = u.startswith("{") and u.endswith("}")
+        candidate_param = c.startswith("{") and c.endswith("}")
+        if ui_param:
+            if not candidate_param:
+                return None
+            score += 1
+        elif candidate_param:
+            score += 1
+        elif u == c:
+            score += 3
+        else:
+            return None
+    return score
+
+
 def _match_openapi_path(ui_path: str, openapi_paths: set[str]) -> str | None:
     if ui_path in openapi_paths:
         return ui_path
@@ -48,22 +66,17 @@ def _match_openapi_path(ui_path: str, openapi_paths: set[str]) -> str | None:
     candidates = list(openapi_paths)
     if ui_has_param:
         candidates.sort(key=lambda p: ("{" not in p or "}" not in p))
+    best_path = None
+    best_score = -1
     for candidate in candidates:
         cand_parts = candidate.strip("/").split("/")
         if len(ui_parts) != len(cand_parts):
             continue
-        ok = True
-        for u, c in zip(ui_parts, cand_parts, strict=False):
-            if c.startswith("{") and c.endswith("}"):
-                continue
-            if u.startswith("{") and u.endswith("}"):
-                continue
-            if u != c:
-                ok = False
-                break
-        if ok:
-            return candidate
-    return None
+        score = _path_match_score(ui_parts, cand_parts)
+        if score is not None and score > best_score:
+            best_path = candidate
+            best_score = score
+    return best_path
 
 
 def main() -> int:

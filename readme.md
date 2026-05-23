@@ -869,13 +869,118 @@ curl -sS http://127.0.0.1:8000/clip/active_model
 curl -sS http://127.0.0.1:8000/class_analysis/capabilities
 ```
 
+### 2026-05-23: Backend Hardening, Qwen Training, and Mac YOLO Acceleration
+
+This checkpoint covers the uncommitted backend debug pass after `c3efb19`.
+It includes the Qwen caption/training cleanup, path-containment hardening,
+job-start validation, and the Mac YOLO training work.
+
+- YOLOv8 training on Mac is now supported through Ultralytics/PyTorch MPS, not
+  through a native MLX YOLOv8 backend. Upstream
+  [Ultralytics training docs](https://docs.ultralytics.com/modes/train) expose
+  `device=mps` for Apple Silicon training, and
+  [PyTorch MPS docs](https://docs.pytorch.org/docs/stable/notes/mps.html)
+  document MPS as the supported GPU path for existing PyTorch scripts on
+  macOS. [MLX](https://ml-explore.github.io/mlx/) remains a separate Apple
+  array framework used here for Qwen/MLX and C-RADIO/SALAD integrations where
+  those code paths are actually MLX-native.
+- Added an explicit YOLO training `accelerator` contract for normal training
+  and head grafting: `auto`, `cuda`, `mps`, or `cpu`. `auto` preserves CUDA
+  device IDs when supplied, otherwise prefers CUDA, then Apple MPS when
+  `TATOR_ALLOW_MPS=1` and `torch.backends.mps.is_available()`, then CPU. An
+  explicit unavailable `mps` or `cuda` request fails before the job is queued.
+- Saved YOLO run metadata now includes `device_resolution`, and both training
+  workers log the resolved backend so later run review can distinguish CUDA,
+  Apple MPS, and CPU jobs. The Train YOLO UI and experimental head-graft panel
+  now expose the accelerator selector and disable CUDA device-ID entry for MPS
+  and CPU.
+- Hardened Qwen caption inputs and prompt plumbing. Caption, prepass, and
+  auto-label requests now normalize model variants and numeric decode knobs;
+  non-finite sampling, bbox, window-size, overlap, and max-token values are
+  clamped before reaching the runtime. Caption I/O logging now only writes
+  during active caption runs and tolerates bad records or bad log paths.
+- Reworked Qwen training config construction. Training requests clamp numeric
+  knobs, validate run paths, can materialize a deterministic random train/val
+  split from an existing managed Qwen dataset, and reject empty or invalid split
+  sources before launch. The collator preserves image placeholders, flattens
+  image batches correctly, and masks image-token labels so visual tokens are not
+  trained as text.
+- Expanded Qwen model metadata for official, quantized, and abliterated
+  Qwen3-VL checkpoints. Quantized AWQ/GPTQ/FP8/4-bit/8-bit inference IDs now
+  resolve to a compatible unquantized training base when adapter training is
+  requested, including current abliterated model families. Persisted Qwen run
+  metadata records the requested model metadata and usable adapter artifacts are
+  checked before they are listed as activatable.
+- Hardened dataset and upload boundaries. Dataset zip import reports invalid
+  archives cleanly, download/export paths stay inside their dataset roots, Qwen
+  dataset chunks validate annotation JSON and non-empty images, finalization
+  rejects empty uploads, and active Class Analysis workspace uploads enforce
+  safe relative names plus per-file and total quota limits.
+- Tightened linked and transient annotation writes. Snapshot and patch endpoints
+  now require the annotation lock owner, validate requested annotation status,
+  normalize incoming records through one shared path, and write labelmaps only
+  inside the dataset or metadata storage roots. Overlay archive export and
+  image resolution both skip or reject paths that escape their expected roots.
+- Added fail-fast job-start validation across backend jobs. Auto-label, prompt
+  helper, prompt presets, calibration, agent mining, SAM3 training, YOLO
+  training, YOLO head grafting, and RF-DETR training now resolve required
+  datasets or preflight state before queueing workers or creating long-lived job
+  records.
+- Hardened EDR, prepass recipe, and agent cascade package handling. EDR package
+  IDs are normalized before filesystem access, EDR/prepass zip extraction
+  rejects traversal, symlinks, oversized payloads, and invalid archives, and
+  agent cascade imports validate schema plus imported classifier paths before
+  persisting a cascade.
+- Extended deep-prepass caption controls. Prepass captioning can carry the
+  selected Qwen model variant, explicit model ID, profile, and max-token budget
+  into the caption runner while keeping conservative token clamps.
+- Added glossary-library name sanitization and tightened endpoint-map/method
+  checker matching so UI fetches with dynamic path segments are matched against
+  OpenAPI paths more reliably.
+- Added regression coverage for the new security and runtime contracts:
+  backend job-start validation, backend path containment, glossary library,
+  Qwen caption runtime, Qwen dataset uploads/jobs, Qwen MLX/training paths,
+  dataset linked annotation flows, EDR package import/export, prepass recipe
+  security, active Class Analysis workspace uploads, and YOLO Mac accelerator
+  resolution.
+- Local validation for this checkpoint used:
+
+```bash
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python -m py_compile \
+  services/detectors.py models/schemas.py localinferenceapi.py
+node --check ybat-master/ybat.js
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python -m pytest \
+  tests/test_macos_acceleration.py \
+  tests/test_backend_job_start_validation.py \
+  tests/test_yolo_head_graft_flow.py -q
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python -m pytest tests -q
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_ui_endpoint_map_check.py
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_ui_endpoint_method_check.py
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python - <<'PY'
+import torch
+print(torch.__version__, torch.cuda.is_available(), torch.backends.mps.is_available())
+from ultralytics import YOLO
+print("ultralytics import ok")
+PY
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_ui_smoke.py \
+  --base-url http://127.0.0.1:8000
+```
+
+  Latest results: full pytest `672 passed, 17 skipped`; endpoint map check
+  `148` UI paths with no missing OpenAPI paths; endpoint method check `248`
+  fetches with no failures; live backend smoke after restart reported MPS via
+  `/system/gpu`, `accelerator` in both YOLO OpenAPI request schemas, and normal
+  UI smoke responses except expected 412 warnings for missing active YOLO/RF-DETR
+  detector runs.
+
 ## Training and Model Management
 
 Tator keeps helper models close to the annotation workflow:
 
 - **CLIP/DINOv3 heads**: fast class predictors trained from managed datasets.
-- **YOLOv8**: detector training, active run selection, run summaries, downloads,
-  deletion, and experimental head grafting for disjoint new classes.
+- **YOLOv8**: detector training with CUDA, Apple MPS, or CPU acceleration,
+  active run selection, run summaries, downloads, deletion, and experimental
+  head grafting for disjoint new classes.
 - **RF-DETR**: detector training, active run selection, summaries, downloads,
   deletion, and full/region/windowed inference.
 - **SAM3**: dataset conversion, training jobs, model registry, active model
@@ -1057,9 +1162,10 @@ and driver notes.
 ## macOS Apple Silicon Setup
 
 The macOS path targets interactive annotation assistance with PyTorch MPS for
-CLIP/SAM/SAM3/detectors and MLX-VLM for Qwen when available. Full detector/SAM
-training remains Linux/CUDA-first, but Qwen MLX LoRA adapter jobs are available
-for small enough local Apple Silicon models.
+CLIP/SAM/SAM3/detectors and MLX-VLM for Qwen when available. YOLOv8 training
+can also use PyTorch MPS on Apple Silicon through the Train YOLO accelerator
+selector. RF-DETR and full SAM training remain Linux/CUDA-first, while Qwen MLX
+LoRA adapter jobs are available for small enough local Apple Silicon models.
 
 ```bash
 poetry install --only-root

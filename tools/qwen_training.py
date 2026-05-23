@@ -131,6 +131,7 @@ class QwenTrainingConfig:
     result_path: str
     model_id: str = "Qwen/Qwen3-VL-4B-Instruct"
     requested_model_id: Optional[str] = None
+    requested_model_metadata: Dict[str, Any] = field(default_factory=dict)
     runtime_platform: str = QWEN_PLATFORM_TRANSFORMERS
     training_mode: str = "official_lora"  # official_lora | trl_qlora
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
@@ -261,13 +262,22 @@ def _select_eval_strategy_key(cls) -> Optional[str]:
 
 def _resolve_image_path(dataset_root: Path, split: str, image_rel: str) -> Optional[Path]:
     rel_path = Path(image_rel)
-    candidates = [
-        dataset_root / split / "images" / rel_path,
-        dataset_root / split / rel_path,
-        dataset_root / "images" / rel_path,
-        dataset_root / rel_path,
+    if rel_path.is_absolute() or not str(image_rel or "").strip():
+        return None
+    if any(part == ".." for part in rel_path.parts):
+        return None
+    roots = [
+        dataset_root / split / "images",
+        dataset_root / split,
+        dataset_root / "images",
+        dataset_root,
     ]
-    for candidate in candidates:
+    for root in roots:
+        candidate = (root / rel_path).resolve()
+        try:
+            candidate.relative_to(root.resolve())
+        except ValueError:
+            continue
         if candidate.exists():
             return candidate
     return None
@@ -279,6 +289,7 @@ def _conversation_to_messages(
     system_prompt: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     messages: List[Dict[str, Any]] = []
+    image_inserted = False
     cleaned_system = (system_prompt or "").strip()
     if cleaned_system:
         messages.append({"role": "system", "content": [{"type": "text", "text": cleaned_system}]})
@@ -301,14 +312,24 @@ def _conversation_to_messages(
             for idx, part in enumerate(parts):
                 if part.strip():
                     content.append({"type": "text", "text": part.strip()})
-                if idx < len(parts) - 1:
+                if idx < len(parts) - 1 and not image_inserted:
                     content.append({"type": "image", "image": image})
+                    image_inserted = True
             messages.append({"role": "user", "content": content})
         elif role == "system":
             if value:
                 messages.append({"role": "system", "content": [{"type": "text", "text": value}]})
         else:
             messages.append({"role": "assistant", "content": [{"type": "text", "text": value}]})
+    if not image_inserted:
+        for message in messages:
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, list):
+                content.insert(0, {"type": "image", "image": image})
+                image_inserted = True
+                break
     return messages
 
 
@@ -401,41 +422,97 @@ class QwenConversationCollator:
         self.tokenizer = processor.tokenizer
         self.max_length = max_length
 
+    @staticmethod
+    def _flat_images(images_list: Sequence[Sequence[Image.Image]]) -> List[Image.Image]:
+        images: List[Image.Image] = []
+        for item_images in images_list:
+            images.extend(list(item_images or []))
+        return images
+
+    def _masked_token_ids(self) -> List[int]:
+        token_ids = set()
+        for value in (
+            getattr(self.tokenizer, "pad_token_id", None),
+            getattr(self.tokenizer, "image_token_id", None),
+            getattr(self.tokenizer, "video_token_id", None),
+            getattr(self.tokenizer, "vision_token_id", None),
+            getattr(self.tokenizer, "vision_start_token_id", None),
+            getattr(self.tokenizer, "vision_end_token_id", None),
+            getattr(self.processor, "image_token_id", None),
+            getattr(self.processor, "video_token_id", None),
+            getattr(self.processor, "vision_token_id", None),
+            getattr(self.processor, "vision_start_token_id", None),
+            getattr(self.processor, "vision_end_token_id", None),
+        ):
+            if isinstance(value, int) and value >= 0:
+                token_ids.add(value)
+        convert = getattr(self.tokenizer, "convert_tokens_to_ids", None)
+        if callable(convert):
+            for token in (
+                "<|image_pad|>",
+                "<|video_pad|>",
+                "<|vision_start|>",
+                "<|vision_end|>",
+            ):
+                try:
+                    value = convert(token)
+                except Exception:
+                    continue
+                if isinstance(value, int) and value >= 0:
+                    token_ids.add(value)
+        return sorted(token_ids)
+
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         messages_list: List[List[Dict[str, Any]]] = []
         images_list: List[List[Image.Image]] = []
-        prompt_lengths: List[int] = []
+        prompt_texts: List[str] = []
         for item in batch:
             messages = item["messages"]
             messages_list.append(messages)
             images_list.append(item["images"])
             prompt_messages = messages[:-1] if len(messages) > 1 else messages
-            prompt_text = self.processor.apply_chat_template(
-                prompt_messages,
-                tokenize=False,
-                add_generation_prompt=True,
+            prompt_texts.append(
+                self.processor.apply_chat_template(
+                    prompt_messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
             )
-            prompt_ids = self.tokenizer(
-                prompt_text,
-                add_special_tokens=False,
-            ).input_ids
-            prompt_lengths.append(len(prompt_ids))
 
         texts = [
             self.processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
             for msgs in messages_list
         ]
+        flat_images = self._flat_images(images_list)
+        prompt_inputs = self.processor(
+            text=prompt_texts,
+            images=flat_images,
+            padding=True,
+            truncation=True,
+            max_length=self.max_length,
+            return_tensors="pt",
+        )
         inputs = self.processor(
             text=texts,
-            images=images_list,
+            images=flat_images,
             padding=True,
             truncation=True,
             max_length=self.max_length,
             return_tensors="pt",
         )
         labels = inputs["input_ids"].clone()
+        prompt_attention = prompt_inputs.get("attention_mask")
+        if prompt_attention is not None:
+            prompt_lengths = prompt_attention.sum(dim=1).tolist()
+        else:
+            prompt_lengths = [int(prompt_inputs["input_ids"].shape[1])] * len(batch)
         for idx, length in enumerate(prompt_lengths):
-            labels[idx, :length] = -100
+            labels[idx, : min(int(length), int(labels.shape[1]))] = -100
+        attention_mask = inputs.get("attention_mask")
+        if attention_mask is not None:
+            labels[attention_mask == 0] = -100
+        for token_id in self._masked_token_ids():
+            labels[labels == int(token_id)] = -100
         inputs["labels"] = labels
         return inputs
 
@@ -1040,15 +1117,25 @@ def train_qwen_model(
     cancel_cb: Optional[CancelCallback] = None,
     metrics_cb: Optional[TelemetryCallback] = None,
 ) -> QwenTrainingResult:
+    previous_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    cuda_visible_changed = False
     if config.devices:
         cleaned = ",".join(part.strip() for part in str(config.devices).split(",") if part.strip())
         if cleaned:
             os.environ["CUDA_VISIBLE_DEVICES"] = cleaned
-    if config.runtime_platform == QWEN_PLATFORM_MLX:
-        return _train_mlx_lora(config, progress_cb, cancel_cb, metrics_cb)
-    if config.training_mode == "trl_qlora":
-        return _train_trl_qlora(config, progress_cb, cancel_cb, metrics_cb)
-    return _train_official_lora(config, progress_cb, cancel_cb, metrics_cb)
+            cuda_visible_changed = True
+    try:
+        if config.runtime_platform == QWEN_PLATFORM_MLX:
+            return _train_mlx_lora(config, progress_cb, cancel_cb, metrics_cb)
+        if config.training_mode == "trl_qlora":
+            return _train_trl_qlora(config, progress_cb, cancel_cb, metrics_cb)
+        return _train_official_lora(config, progress_cb, cancel_cb, metrics_cb)
+    finally:
+        if cuda_visible_changed:
+            if previous_cuda_visible is None:
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            else:
+                os.environ["CUDA_VISIBLE_DEVICES"] = previous_cuda_visible
 
 
 __all__ = [

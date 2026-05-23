@@ -220,6 +220,24 @@ def test_download_clip_labelmap_not_found(monkeypatch) -> None:
     assert exc.value.detail == "labelmap_not_found"
 
 
+def test_list_clip_labelmaps_skips_symlink_escape(tmp_path) -> None:
+    upload_root = tmp_path / "uploads"
+    labelmaps_root = upload_root / "labelmaps"
+    labelmaps_root.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    (labelmaps_root / "escape.txt").symlink_to(outside)
+
+    entries = localinferenceapi._list_clip_labelmaps_impl(
+        upload_root=upload_root,
+        labelmap_exts=localinferenceapi.LABELMAP_ALLOWED_EXTS,
+        load_labelmap_file_fn=lambda _path: ["secret"],
+        path_is_within_root_fn=localinferenceapi._path_is_within_root_impl,
+    )
+
+    assert entries == []
+
+
 def test_delete_active_clip_labelmap_clears_active_label_state(tmp_path, monkeypatch) -> None:
     labelmap_path = tmp_path / "labelmap.pkl"
     labelmap_path.write_bytes(b"labels")

@@ -117,6 +117,14 @@ def _image_path_for_label_impl(
     return None
 
 
+def _path_is_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except Exception:
+        return False
+
+
 def _resolve_coco_image_path_impl(
     file_name: str,
     images_dir: Path,
@@ -126,16 +134,23 @@ def _resolve_coco_image_path_impl(
     if not file_name:
         return None
     rel_path = Path(file_name)
+    if rel_path.is_absolute() or ".." in rel_path.parts:
+        rel_path = Path(rel_path.name)
+    images_root = images_dir.resolve()
+    dataset_root_resolved = dataset_root.resolve()
     candidates: List[Path] = []
-    if rel_path.is_absolute():
-        candidates.append(rel_path)
     candidates.append(images_dir / rel_path)
     candidates.append(images_dir / rel_path.name)
     candidates.append(dataset_root / rel_path)
     candidates.append(dataset_root / split_name / "images" / rel_path.name)
     for cand in candidates:
-        if cand.exists():
-            return cand
+        if not cand.exists():
+            continue
+        resolved = cand.resolve()
+        if _path_is_within_root(resolved, images_root) or _path_is_within_root(
+            resolved, dataset_root_resolved
+        ):
+            return resolved
     return None
 
 

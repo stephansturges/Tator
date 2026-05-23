@@ -71,7 +71,11 @@ def _entry(
             training_note = _QWEN_MOE_TRAINING_NOTE
         elif quantized:
             training_note = (
-                "Training starts from the matching full Transformers checkpoint; QLoRA applies bitsandbytes 4-bit at load time."
+                "Training starts from the matching unquantized abliterated Transformers checkpoint; "
+                "QLoRA applies bitsandbytes 4-bit at load time."
+                if abliterated
+                else "Training starts from the matching full Transformers checkpoint; "
+                "QLoRA applies bitsandbytes 4-bit at load time."
             )
     dataset_context = (
         "Abliterated Qwen3-VL Transformer checkpoint for CUDA/CPU inference and adapter training."
@@ -335,18 +339,89 @@ _TRAINING_MODEL_BY_ID = {
 }
 
 
+def _infer_qwen_size_variant(model_id: str) -> tuple[Optional[str], Optional[str]]:
+    basename = str(model_id or "").rsplit("/", 1)[-1]
+    match = re.search(
+        r"Qwen3-VL-(?P<size>2B|4B|8B|32B|30B-A3B|235B-A22B)-(?P<variant>Instruct|Thinking)",
+        basename,
+    )
+    if not match:
+        return None, None
+    return match.group("size"), match.group("variant")
+
+
+def _quantization_label(quantization_backend: str, model_id: str) -> Optional[str]:
+    backend = str(quantization_backend or "none").lower()
+    lowered = str(model_id or "").lower()
+    if backend == "awq":
+        return "AWQ 8-bit" if "8-bit" in lowered or "8bit" in lowered else "AWQ 4-bit"
+    if backend == "gptq":
+        return "GPTQ 4-bit"
+    if backend == "fp8":
+        return "FP8"
+    if backend == "4bit":
+        return "4-bit"
+    if backend == "8bit":
+        return "8-bit"
+    return None
+
+
 def qwen_transformers_metadata_for_model(model_id: str) -> Dict[str, Any]:
     for entry in QWEN_TRANSFORMERS_MODEL_OPTIONS:
         if str(entry.get("id")) == str(model_id):
             return dict(entry)
+    raw = str(model_id)
+    owner = raw.split("/", 1)[0] if "/" in raw else "huggingface"
+    size, variant = _infer_qwen_size_variant(raw)
+    quant_backend = infer_qwen_quantization_backend(raw)
+    quantization = _quantization_label(quant_backend, raw)
+    quantized = quant_backend != "none"
+    abliterated = "abliterated" in raw.lower()
+    training_model_id = resolve_qwen_training_model_id(raw)
+    label_parts = ["CUDA"]
+    if owner and owner not in {"huggingface", "Qwen"}:
+        label_parts.append(owner)
+    label_parts.append("Qwen3-VL")
+    if size:
+        label_parts.append(size)
+    if variant:
+        label_parts.append(variant)
+    if abliterated:
+        label_parts.append("abliterated")
+    if quantization:
+        label_parts.append(quantization)
+    training_note = None
+    if quantized and training_model_id != raw:
+        training_note = (
+            "Training starts from the resolved unquantized abliterated Transformers checkpoint; "
+            "QLoRA applies bitsandbytes 4-bit at load time."
+            if abliterated
+            else "Training starts from the resolved full Transformers checkpoint; "
+            "QLoRA applies bitsandbytes 4-bit at load time."
+        )
+    elif size in _QWEN_MOE_SIZES:
+        training_note = _QWEN_MOE_TRAINING_NOTE
     return {
-        "id": str(model_id),
-        "label": str(model_id),
-        "model_id": str(model_id),
+        "id": raw,
+        "label": " ".join(label_parts) if len(label_parts) > 2 else raw,
+        "model_id": raw,
         "runtime_platform": QWEN_PLATFORM_TRANSFORMERS,
+        "size": size,
+        "variant": variant,
+        "source": owner,
+        "quantization": quantization,
+        "quantization_backend": quant_backend,
+        "quantized": quantized,
+        "abliterated": abliterated,
         "training_supported": True,
         "training_modes": ["official_lora", "trl_qlora"],
-        "training_model_id": resolve_qwen_training_model_id(model_id),
+        "training_model_id": training_model_id,
+        "training_note": training_note,
+        "dataset_context": (
+            "Abliterated Qwen3-VL Transformer checkpoint for CUDA/CPU inference and adapter training."
+            if abliterated
+            else "Qwen3-VL Transformer checkpoint for CUDA/CPU inference and adapter training."
+        ),
     }
 
 
@@ -358,6 +433,10 @@ def infer_qwen_quantization_backend(model_id: Optional[str]) -> str:
         return "gptq"
     if "fp8" in lowered:
         return "fp8"
+    if re.search(r"(^|[-_])(4bit|4-bit|int4)([-_]|$)", lowered):
+        return "4bit"
+    if re.search(r"(^|[-_])(8bit|8-bit|int8)([-_]|$)", lowered):
+        return "8bit"
     return "none"
 
 
@@ -373,21 +452,57 @@ def is_qwen_mlx_model_id(model_id: Optional[str]) -> bool:
 
 
 def _strip_known_training_quant_suffix(model_id: str) -> Optional[str]:
-    for suffix in ("-FP8", "-GPTQ-Int4", "-GPTQ-Int8", "-AWQ", "-INT4", "-INT8"):
-        if model_id.endswith(suffix):
+    special = re.sub(r"(?i)-FP8-abliterated$", "-abliterated", model_id)
+    if special != model_id:
+        return special
+    for suffix in (
+        "-AWQ-8-bit",
+        "-AWQ-8bit",
+        "-AWQ-4bit",
+        "-4bit-AWQ",
+        "-4-bit-AWQ",
+        "-8bit-AWQ",
+        "-8-bit-AWQ",
+        "-AWQ",
+        "-GPTQ-Int4",
+        "-GPTQ-Int8",
+        "-GPTQ-4bit",
+        "-4bit-GPTQ",
+        "-4-bit-GPTQ",
+        "-GPTQ",
+        "-4bit",
+        "-4-bit",
+        "-8bit",
+        "-8-bit",
+        "-FP8",
+        "-INT4",
+        "-INT8",
+    ):
+        if model_id.lower().endswith(suffix.lower()):
             return model_id[: -len(suffix)]
     return None
 
 
 def _infer_official_base_from_quantized_name(model_id: str) -> Optional[str]:
-    basename = model_id.rsplit("/", 1)[-1]
-    match = re.search(
-        r"(Qwen3-VL-(?:2B|4B|8B|32B|30B-A3B|235B-A22B)-(?:Instruct|Thinking))",
-        basename,
-    )
-    if not match:
+    size, variant = _infer_qwen_size_variant(model_id)
+    if not size or not variant:
         return None
-    return f"Qwen/{match.group(1)}"
+    return _official_model_id(size, variant)
+
+
+def _infer_abliterated_base_from_quantized_name(model_id: str) -> Optional[str]:
+    size, variant = _infer_qwen_size_variant(model_id)
+    if not size or not variant:
+        return None
+    lowered = str(model_id or "").lower()
+    if "abliterated" not in lowered:
+        return None
+    stripped = _strip_known_training_quant_suffix(str(model_id or "").strip())
+    if stripped and "abliterated" in stripped.lower():
+        return stripped
+    if "huihui" in lowered:
+        return _huihui_abliterated_model_id(size, variant)
+    return _huihui_abliterated_model_id(size, variant)
 
 
 def resolve_qwen_training_model_id(model_id: Optional[str]) -> str:
@@ -397,9 +512,16 @@ def resolve_qwen_training_model_id(model_id: Optional[str]) -> str:
     if raw in _TRAINING_MODEL_BY_ID:
         return _TRAINING_MODEL_BY_ID[raw]
     stripped = _strip_known_training_quant_suffix(raw)
+    is_abliterated = "abliterated" in raw.lower()
+    if is_abliterated and stripped and "abliterated" in stripped.lower():
+        return stripped
     if stripped and stripped.startswith("Qwen/Qwen3-VL-"):
         return stripped
-    if infer_qwen_quantization_backend(raw) in {"awq", "gptq", "fp8"}:
+    if infer_qwen_quantization_backend(raw) in {"awq", "gptq", "fp8", "4bit", "8bit"}:
+        if is_abliterated:
+            inferred_abliterated = _infer_abliterated_base_from_quantized_name(raw)
+            if inferred_abliterated:
+                return inferred_abliterated
         inferred = _infer_official_base_from_quantized_name(raw)
         if inferred:
             return inferred
@@ -418,7 +540,7 @@ def qwen_transformers_load_kwargs(
     quant_backend = infer_qwen_quantization_backend(model_id)
     cuda_available = bool(torch_module.cuda.is_available())
     on_cuda = device_text.startswith("cuda") and cuda_available
-    if on_cuda and quant_backend in {"awq", "gptq", "fp8"}:
+    if on_cuda and quant_backend in {"awq", "gptq", "fp8", "4bit", "8bit"}:
         if pref == "auto" or device_text == "cuda":
             return {"torch_dtype": "auto", "device_map": "auto"}
         return {"torch_dtype": "auto", "device_map": {"": device_text}}

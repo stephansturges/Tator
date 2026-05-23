@@ -700,7 +700,7 @@ from services.detectors import (
     _yolo_load_run_meta_impl as _yolo_load_run_meta_impl,
     _yolo_write_run_meta_impl as _yolo_write_run_meta_impl,
     _yolo_prune_run_dir_impl as _yolo_prune_run_dir_impl,
-    _yolo_device_arg_impl as _yolo_device_arg_impl,
+    _yolo_resolve_device_impl as _yolo_resolve_device_impl,
     _yolo_p2_scale_impl as _yolo_p2_scale_impl,
     _rfdetr_variant_info_impl as _rfdetr_variant_info_impl,
     _rfdetr_best_checkpoint_impl as _rfdetr_best_checkpoint_impl,
@@ -994,6 +994,12 @@ CLIP_DATASET_UPLOAD_QUOTA_BYTES = _env_int(
 QWEN_DATASET_CHUNK_MAX_BYTES = _env_int("QWEN_DATASET_CHUNK_MAX_BYTES", 10 * 1024 * 1024 * 1024)
 QWEN_DATASET_UPLOAD_QUOTA_BYTES = _env_int(
     "QWEN_DATASET_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024
+)
+CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES = _env_int(
+    "CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES", 10 * 1024 * 1024 * 1024
+)
+CLASS_ANALYSIS_ACTIVE_UPLOAD_QUOTA_BYTES = _env_int(
+    "CLASS_ANALYSIS_ACTIVE_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024
 )
 ASSET_MAX_BYTES = _env_int("ASSET_MAX_BYTES", 10 * 1024 * 1024 * 1024)
 ASSET_UPLOAD_QUOTA_BYTES = _env_int("ASSET_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
@@ -1411,7 +1417,10 @@ def _qwen_checkpoint_is_usable(checkpoint_path: Path, metadata: Dict[str, Any]) 
             (checkpoint_path / "adapters.safetensors").exists()
             and (checkpoint_path / "adapter_config.json").exists()
         )
-    return True
+    return (checkpoint_path / "adapter_config.json").exists() and any(
+        (checkpoint_path / name).exists()
+        for name in ("adapter_model.safetensors", "adapter_model.bin")
+    )
 
 
 def _list_qwen_model_entries() -> List[Dict[str, Any]]:
@@ -2290,7 +2299,7 @@ def _qwen_caption_io_logging_enabled() -> bool:
     if os.environ.get("TATOR_QWEN_LOG_ALL_IO", "").strip().lower() in {"1", "true", "yes", "on"}:
         return True
     with qwen_progress_lock:
-        return qwen_progress_state.get("kind") == "caption"
+        return qwen_progress_state.get("kind") == "caption" and bool(qwen_progress_state.get("active"))
 
 
 def _qwen_caption_io_snapshot() -> Dict[str, Any]:
@@ -2323,8 +2332,17 @@ def _qwen_caption_io_jsonable(value: Any) -> Any:
     return _agent_trace_full_jsonable(value)
 
 
+def _qwen_caption_io_safe_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _qwen_caption_io_paths(run_id: Optional[str]) -> Tuple[Path, Path, Path, Path]:
-    log_root = Path("logs")
+    log_root = globals().get("LOG_ROOT", Path("logs"))
     run_root = log_root / "qwen_caption_io"
     safe_run_id = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(run_id or "manual"))[:80] or "manual"
     return (
@@ -2385,14 +2403,22 @@ def _qwen_caption_io_record(record: Mapping[str, Any]) -> None:
         return
     snapshot = _qwen_caption_io_snapshot()
     run_id = snapshot.get("run_id")
+    try:
+        record_payload = dict(record)
+    except Exception:
+        record_payload = {"event": "record_encode_failed", "record": str(record)}
     payload = {
         "ts": time.time(),
         "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
         "event_id": uuid.uuid4().hex,
         **snapshot,
-        **dict(record),
+        **record_payload,
     }
-    jsonl_path, text_path, latest_jsonl_path, latest_text_path = _qwen_caption_io_paths(run_id)
+    try:
+        jsonl_path, text_path, latest_jsonl_path, latest_text_path = _qwen_caption_io_paths(run_id)
+    except Exception as exc:
+        logger.debug("[qwen-caption-io] failed to resolve log paths: %s", exc)
+        return
     try:
         jsonable = _qwen_caption_io_jsonable(payload)
     except Exception:
@@ -2404,7 +2430,11 @@ def _qwen_caption_io_record(record: Mapping[str, Any]) -> None:
                 handle.write(json.dumps(jsonable, ensure_ascii=False) + "\n")
         except Exception as exc:
             logger.debug("[qwen-caption-io] failed to write %s: %s", path, exc)
-    readable = _qwen_caption_io_readable(payload)
+    try:
+        readable = _qwen_caption_io_readable(payload)
+    except Exception as exc:
+        logger.debug("[qwen-caption-io] failed to format readable log: %s", exc)
+        readable = ""
     if readable:
         for path in (text_path, latest_text_path):
             try:
@@ -2489,7 +2519,7 @@ def _qwen_caption_io_input(
             "user_prompt": user_prompt,
             "image_width": image_width,
             "image_height": image_height,
-            "max_new_tokens": int(max_new_tokens) if max_new_tokens is not None else None,
+            "max_new_tokens": _qwen_caption_io_safe_int(max_new_tokens),
             "decode_override": decode_override,
             "chat_template_kwargs": chat_template_kwargs,
         }
@@ -11788,15 +11818,21 @@ def _agent_apply_edr_package_runtime(
             status_code=HTTP_412_PRECONDITION_FAILED,
             detail="edr_package_target_dataset_missing",
         )
-    runtime = _resolve_edr_package_runtime_impl(
-        packages_root=EDR_PACKAGES_ROOT,
-        package_id=package_id,
-        upload_root=UPLOAD_ROOT,
-        yolo_job_root=YOLO_JOB_ROOT,
-        rfdetr_job_root=RFDETR_JOB_ROOT,
-        calibration_root=CALIBRATION_ROOT,
-        classifiers_root=(UPLOAD_ROOT / "classifiers"),
-    )
+    try:
+        runtime = _resolve_edr_package_runtime_impl(
+            packages_root=EDR_PACKAGES_ROOT,
+            package_id=package_id,
+            upload_root=UPLOAD_ROOT,
+            yolo_job_root=YOLO_JOB_ROOT,
+            rfdetr_job_root=RFDETR_JOB_ROOT,
+            calibration_root=CALIBRATION_ROOT,
+            classifiers_root=(UPLOAD_ROOT / "classifiers"),
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(
+            status_code=HTTP_412_PRECONDITION_FAILED,
+            detail="edr_package_not_found",
+        ) from exc
     package_labelmap = [str(item).strip() for item in runtime.get("labelmap") or [] if str(item).strip()]
     runtime_config = dict(runtime.get("runtime_config") or {})
     if not package_labelmap:
@@ -13853,6 +13889,16 @@ def _normalize_labelmap_payload(raw_labelmap: Any) -> List[str]:
     return labels
 
 
+def _annotation_labelmap_write_path(entry: Dict[str, Any], dataset_root: Path) -> Path:
+    raw_path = entry.get("yolo_labelmap_path")
+    labelmap_path = Path(str(raw_path)).resolve() if raw_path else (dataset_root / "labelmap.txt").resolve()
+    storage_root = _dataset_meta_storage_root_from_entry(entry).resolve()
+    allowed_roots = [dataset_root.resolve(), storage_root]
+    if not any(_path_is_within_root_impl(labelmap_path, root) for root in allowed_roots):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_forbidden")
+    return labelmap_path
+
+
 def _validate_linked_dataset_path(path_str: str) -> Path:
     raw = str(path_str or "").strip()
     if not raw:
@@ -14320,6 +14366,39 @@ def _require_annotation_lock_owner(
     return existing_lock
 
 
+def _annotation_requested_status(payload: Dict[str, Any]) -> Optional[str]:
+    if "status" not in payload:
+        return None
+    status_value = str(payload.get("status") or "").strip().lower()
+    if status_value and status_value not in DATASET_ANNOTATION_STATUSES:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="invalid_annotation_status"
+        )
+    return status_value or None
+
+
+def _normalise_annotation_snapshot_records(
+    records: Any,
+) -> List[Tuple[str, Path, bool, List[str], bool, str]]:
+    if not isinstance(records, list):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_records_required")
+    normalised: List[Tuple[str, Path, bool, List[str], bool, str]] = []
+    for raw in records:
+        if not isinstance(raw, dict):
+            continue
+        split = _annotation_normalise_split(raw.get("split"))
+        rel = _annotation_normalise_image_relpath(raw.get("image_relpath") or raw.get("image_name"))
+        label_lines_raw = raw.get("label_lines")
+        has_label_lines = isinstance(label_lines_raw, list)
+        label_lines: List[str] = []
+        if has_label_lines:
+            label_lines = [str(line).strip() for line in label_lines_raw if str(line).strip()]
+        has_text_label = "text_label" in raw
+        text_value = str(raw.get("text_label") or "").strip() if has_text_label else ""
+        normalised.append((split, rel, has_label_lines, label_lines, has_text_label, text_value))
+    return normalised
+
+
 def _annotation_overlay_key_to_split_rel(key: str) -> Tuple[str, Path]:
     raw = str(key or "").strip()
     if ":" not in raw:
@@ -14332,27 +14411,31 @@ def _annotation_overlay_key_to_split_rel(key: str) -> Tuple[str, Path]:
 
 def _annotation_overlay_archive_entries(entry: Dict[str, Any]) -> Dict[str, Path]:
     archive_entries: Dict[str, Path] = {}
-    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=False)
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=False).resolve()
     if not overlay_root.exists():
         return archive_entries
     layout = str(entry.get("yolo_layout") or "flat")
     labels_root = overlay_root / "labels"
     for split in ("train", "val"):
-        split_root = labels_root / split
+        split_root = (labels_root / split).resolve()
         if not split_root.exists():
             continue
         for path in split_root.rglob("*.txt"):
             if not path.is_file():
+                continue
+            if not _path_is_within_root_impl(path.resolve(), split_root):
                 continue
             rel = path.relative_to(split_root)
             target_rel = (
                 (Path(split) / "labels" / rel) if layout == "split" else (Path("labels") / rel)
             )
             archive_entries[target_rel.as_posix()] = path
-    text_root = overlay_root / "text_labels"
+    text_root = (overlay_root / "text_labels").resolve()
     if text_root.exists():
         for path in text_root.rglob("*.txt"):
             if not path.is_file():
+                continue
+            if not _path_is_within_root_impl(path.resolve(), text_root):
                 continue
             rel = path.relative_to(text_root)
             archive_entries[(Path("text_labels") / rel).as_posix()] = path
@@ -14464,17 +14547,20 @@ def upload_dataset_zip(
                 handle.write(chunk)
         extract_root = temp_dir / "extract"
         extract_root.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            _extract_zip_safely_impl(
-                zf,
-                extract_root,
-                max_entry_bytes=DATASET_ZIP_ENTRY_MAX_BYTES,
-                max_total_uncompressed_bytes=DATASET_ZIP_MAX_BYTES,
-                traversal_detail="dataset_zip_path_traversal",
-                symlink_detail="dataset_zip_symlink_unsupported",
-                entry_too_large_detail="dataset_zip_entry_too_large",
-                total_too_large_detail="dataset_zip_uncompressed_too_large",
-            )
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                _extract_zip_safely_impl(
+                    zf,
+                    extract_root,
+                    max_entry_bytes=DATASET_ZIP_ENTRY_MAX_BYTES,
+                    max_total_uncompressed_bytes=DATASET_ZIP_MAX_BYTES,
+                    traversal_detail="dataset_zip_path_traversal",
+                    symlink_detail="dataset_zip_symlink_unsupported",
+                    entry_too_large_detail="dataset_zip_entry_too_large",
+                    total_too_large_detail="dataset_zip_uncompressed_too_large",
+                )
+        except zipfile.BadZipFile as exc:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_zip_invalid") from exc
         source_root = _unwrap_single_root_dir(extract_root)
         base_id = dataset_id or Path(file.filename or "dataset").stem
         base_id = _sanitize_yolo_run_id_impl(base_id) or "dataset"
@@ -14566,7 +14652,7 @@ def delete_dataset_entry(dataset_id: str):
 
 def download_dataset_entry(dataset_id: str):
     entry = _resolve_dataset_entry(dataset_id)
-    dataset_root = Path(entry.get("dataset_root") or "")
+    dataset_root = Path(entry.get("dataset_root") or "").resolve()
     if not dataset_root.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
     overlay_entries = _annotation_overlay_archive_entries(entry)
@@ -14577,6 +14663,8 @@ def download_dataset_entry(dataset_id: str):
             overlay_relpaths = set(overlay_entries.keys())
             for path in dataset_root.rglob("*"):
                 if not path.is_file():
+                    continue
+                if not _path_is_within_root_impl(path.resolve(), dataset_root):
                     continue
                 rel = path.relative_to(dataset_root)
                 if rel.parts and rel.parts[0] == DATASET_ANNOTATION_OVERLAY_DIRNAME:
@@ -15165,6 +15253,7 @@ def get_dataset_annotation_manifest(dataset_id: str):
 def _resolve_annotation_image_path(
     dataset_root: Path, yolo_layout: str, split: str, image_relpath: Path
 ) -> Path:
+    dataset_root = dataset_root.resolve()
     if yolo_layout == "split":
         image_path = dataset_root / split / "images" / image_relpath
     else:
@@ -15173,7 +15262,10 @@ def _resolve_annotation_image_path(
             image_path = dataset_root / image_relpath
     if not image_path.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="annotation_image_not_found")
-    return image_path
+    resolved = image_path.resolve()
+    if not _path_is_within_root_impl(resolved, dataset_root):
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="annotation_image_not_found")
+    return resolved
 
 
 def get_dataset_annotation_image(dataset_id: str, split: str, image_relpath: str):
@@ -15188,41 +15280,26 @@ def get_dataset_annotation_image(dataset_id: str, split: str, image_relpath: str
 
 
 def save_dataset_annotation_snapshot(dataset_id: str, payload: Dict[str, Any]):
+    payload = payload or {}
     entry = _resolve_dataset_entry(dataset_id)
     _dataset_effective_root_from_entry(entry)
     _meta_path, meta = _annotation_load_or_create_meta(entry)
-    _require_annotation_lock_owner(meta, payload or {})
-    records = payload.get("records")
-    if not isinstance(records, list):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_records_required")
-    for raw in records:
-        if not isinstance(raw, dict):
-            continue
-        split = _annotation_normalise_split(raw.get("split"))
-        rel = _annotation_normalise_image_relpath(raw.get("image_relpath") or raw.get("image_name"))
-        label_lines_raw = raw.get("label_lines")
-        label_lines: List[str] = []
-        if isinstance(label_lines_raw, list):
-            label_lines = [str(line).strip() for line in label_lines_raw if str(line).strip()]
+    _require_annotation_lock_owner(meta, payload)
+    status_value = _annotation_requested_status(payload)
+    normalised_records = _normalise_annotation_snapshot_records(payload.get("records"))
+    for split, rel, _has_label_lines, label_lines, has_text_label, text_value in normalised_records:
         label_path = _annotation_overlay_label_path(entry, split, rel)
         label_path.parent.mkdir(parents=True, exist_ok=True)
         label_path.write_text(
             "\n".join(label_lines) + ("\n" if label_lines else ""), encoding="utf-8"
         )
-        if "text_label" in raw:
-            text_value = str(raw.get("text_label") or "").strip()
+        if has_text_label:
             text_path = _annotation_overlay_text_path(entry, rel)
             text_path.parent.mkdir(parents=True, exist_ok=True)
             text_path.write_text(text_value, encoding="utf-8")
 
-    if "status" in payload:
-        requested = str(payload.get("status") or "").strip().lower()
-        if requested:
-            if requested not in DATASET_ANNOTATION_STATUSES:
-                raise HTTPException(
-                    status_code=HTTP_400_BAD_REQUEST, detail="invalid_annotation_status"
-                )
-            meta["annotation_status"] = requested
+    if status_value:
+        meta["annotation_status"] = status_value
     if "notes" in payload:
         meta["annotation_notes"] = str(payload.get("notes") or "")
     if "cursor" in payload:
@@ -15238,14 +15315,16 @@ def save_dataset_annotation_snapshot(dataset_id: str, payload: Dict[str, Any]):
 
 
 def patch_dataset_annotation_meta(dataset_id: str, payload: Dict[str, Any]):
+    payload = payload or {}
     entry = _resolve_dataset_entry(dataset_id)
     _meta_path, meta = _annotation_load_or_create_meta(entry)
-    _require_annotation_lock_owner(meta, payload or {})
+    _require_annotation_lock_owner(meta, payload)
+    status_value = _annotation_requested_status(payload)
     saved_labelmap: Optional[List[str]] = None
     if "labelmap" in payload:
         saved_labelmap = _normalize_labelmap_payload(payload.get("labelmap"))
         dataset_root = _dataset_effective_root_from_entry(entry)
-        labelmap_path = Path(str(entry.get("yolo_labelmap_path") or dataset_root / "labelmap.txt")).resolve()
+        labelmap_path = _annotation_labelmap_write_path(entry, dataset_root)
         try:
             labelmap_path.parent.mkdir(parents=True, exist_ok=True)
             labelmap_path.write_text("\n".join(saved_labelmap) + "\n", encoding="utf-8")
@@ -15262,14 +15341,8 @@ def patch_dataset_annotation_meta(dataset_id: str, payload: Dict[str, Any]):
         _persist_dataset_metadata_impl(
             storage_root, dataset_meta, meta_name=DATASET_META_NAME, logger=logger
         )
-    if "status" in payload:
-        status_value = str(payload.get("status") or "").strip().lower()
-        if status_value and status_value not in DATASET_ANNOTATION_STATUSES:
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST, detail="invalid_annotation_status"
-            )
-        if status_value:
-            meta["annotation_status"] = status_value
+    if status_value:
+        meta["annotation_status"] = status_value
     if "notes" in payload:
         meta["annotation_notes"] = str(payload.get("notes") or "")
     if "cursor" in payload:
@@ -15403,38 +15476,27 @@ def get_transient_annotation_image(session_id: str, split: str, image_relpath: s
 
 
 def save_transient_annotation_snapshot(session_id: str, payload: Dict[str, Any]):
+    payload = payload or {}
     session = _resolve_transient_session(session_id)
-    _require_annotation_lock_owner(session, payload or {})
-    records = payload.get("records")
-    if not isinstance(records, list):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_records_required")
+    _require_annotation_lock_owner(session, payload)
+    status_value = _annotation_requested_status(payload)
+    normalised_records = _normalise_annotation_snapshot_records(payload.get("records"))
     overlay_labels = (
         session.get("overlay_labels") if isinstance(session.get("overlay_labels"), dict) else {}
     )
     overlay_text = (
         session.get("overlay_text") if isinstance(session.get("overlay_text"), dict) else {}
     )
-    for raw in records:
-        if not isinstance(raw, dict):
-            continue
-        split = _annotation_normalise_split(raw.get("split"))
-        rel = _annotation_normalise_image_relpath(raw.get("image_relpath") or raw.get("image_name"))
+    for split, rel, has_label_lines, label_lines, has_text_label, text_value in normalised_records:
         key = f"{split}:{rel.as_posix()}"
-        lines_raw = raw.get("label_lines")
-        if isinstance(lines_raw, list):
-            overlay_labels[key] = [str(line).strip() for line in lines_raw if str(line).strip()]
-        if "text_label" in raw:
-            overlay_text[key] = str(raw.get("text_label") or "").strip()
+        if has_label_lines:
+            overlay_labels[key] = label_lines
+        if has_text_label:
+            overlay_text[key] = text_value
     session["overlay_labels"] = overlay_labels
     session["overlay_text"] = overlay_text
-    if "status" in payload:
-        status_value = str(payload.get("status") or "").strip().lower()
-        if status_value:
-            if status_value not in DATASET_ANNOTATION_STATUSES:
-                raise HTTPException(
-                    status_code=HTTP_400_BAD_REQUEST, detail="invalid_annotation_status"
-                )
-            session["annotation_status"] = status_value
+    if status_value:
+        session["annotation_status"] = status_value
     if "notes" in payload:
         session["annotation_notes"] = str(payload.get("notes") or "")
     if "cursor" in payload:
@@ -15446,35 +15508,31 @@ def save_transient_annotation_snapshot(session_id: str, payload: Dict[str, Any])
 
 
 def patch_transient_annotation_meta(session_id: str, payload: Dict[str, Any]):
+    payload = payload or {}
     session = _resolve_transient_session(session_id)
-    _require_annotation_lock_owner(session, payload or {})
+    _require_annotation_lock_owner(session, payload)
+    status_value = _annotation_requested_status(payload)
     saved_labelmap: Optional[List[str]] = None
     if "labelmap" in payload:
         saved_labelmap = _normalize_labelmap_payload(payload.get("labelmap"))
-        session["classes"] = list(saved_labelmap)
         dataset_root_raw = str(session.get("dataset_root") or "").strip()
-        if dataset_root_raw:
-            dataset_root = Path(dataset_root_raw).resolve()
-        else:
-            dataset_root = None
-        if dataset_root is not None and dataset_root.exists():
-            try:
-                (dataset_root / "labelmap.txt").write_text(
-                    "\n".join(saved_labelmap) + "\n", encoding="utf-8"
+        dataset_root = _validate_linked_dataset_path(dataset_root_raw) if dataset_root_raw else None
+        if dataset_root is not None:
+            labelmap_path = (dataset_root / "labelmap.txt").resolve()
+            if not _path_is_within_root_impl(labelmap_path, dataset_root.resolve()):
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_forbidden"
                 )
+            try:
+                labelmap_path.write_text("\n".join(saved_labelmap) + "\n", encoding="utf-8")
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
                     status_code=HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"labelmap_save_failed:{exc}",
                 ) from exc
-    if "status" in payload:
-        status_value = str(payload.get("status") or "").strip().lower()
-        if status_value and status_value not in DATASET_ANNOTATION_STATUSES:
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST, detail="invalid_annotation_status"
-            )
-        if status_value:
-            session["annotation_status"] = status_value
+        session["classes"] = list(saved_labelmap)
+    if status_value:
+        session["annotation_status"] = status_value
     if "notes" in payload:
         session["annotation_notes"] = str(payload.get("notes") or "")
     if "cursor" in payload:
@@ -16985,7 +17043,9 @@ def _enqueue_class_analysis_job(request_payload: Dict[str, Any], *, job_id: Opti
 
 
 def create_class_analysis_job(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return _enqueue_class_analysis_job(_normalize_class_analysis_request(payload))
+    request_payload = _normalize_class_analysis_request(payload)
+    _class_analysis_source(request_payload)
+    return _enqueue_class_analysis_job(request_payload)
 
 
 async def create_class_analysis_active_workspace_job(manifest_json: str, files: List[UploadFile]) -> Dict[str, Any]:
@@ -17011,97 +17071,120 @@ async def create_class_analysis_active_workspace_job(manifest_json: str, files: 
     out_dir = CLASS_ANALYSIS_ROOT / _class_analysis_safe_slug(job_id, "job")
     workspace_dir = out_dir / "active_workspace"
     images_dir = workspace_dir / "images"
-    images_dir.mkdir(parents=True, exist_ok=True)
+    queued = False
+    try:
+        images_dir.mkdir(parents=True, exist_ok=True)
 
-    saved_uploads: Dict[str, str] = {}
-    for upload in files or []:
-        original_name = str(upload.filename or "").strip()
-        if not original_name:
-            continue
-        safe_rel = _class_analysis_safe_relpath(original_name)
-        safe_name = safe_rel.as_posix()
-        if safe_name in saved_uploads:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_duplicate_upload")
-        target = images_dir / safe_rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        size = 0
-        with target.open("wb") as handle:
-            while True:
-                chunk = await upload.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                handle.write(chunk)
-        if size <= 0:
-            try:
-                target.unlink()
-            except OSError:
-                pass
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_empty_upload")
-        saved_uploads[original_name] = safe_name
-        saved_uploads[safe_name] = safe_name
+        saved_uploads: Dict[str, str] = {}
+        total_written = 0
+        for upload in files or []:
+            original_name = str(upload.filename or "").strip()
+            if not original_name:
+                continue
+            safe_rel = _class_analysis_safe_relpath(original_name)
+            safe_name = safe_rel.as_posix()
+            if safe_name in saved_uploads:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_duplicate_upload")
+            target = images_dir / safe_rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            size = 0
+            with target.open("wb") as handle:
+                while True:
+                    chunk = await upload.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    total_written += len(chunk)
+                    if CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES and size > CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES:
+                        raise HTTPException(
+                            status_code=HTTP_413_CONTENT_TOO_LARGE,
+                            detail="active_workspace_upload_too_large",
+                        )
+                    if (
+                        CLASS_ANALYSIS_ACTIVE_UPLOAD_QUOTA_BYTES
+                        and total_written > CLASS_ANALYSIS_ACTIVE_UPLOAD_QUOTA_BYTES
+                    ):
+                        raise HTTPException(
+                            status_code=HTTP_413_CONTENT_TOO_LARGE,
+                            detail="active_workspace_upload_quota_exceeded",
+                        )
+                    handle.write(chunk)
+            if size <= 0:
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_empty_upload")
+            saved_uploads[original_name] = safe_name
+            saved_uploads[safe_name] = safe_name
 
-    rows: List[Dict[str, Any]] = []
-    for row in input_rows:
-        if not isinstance(row, dict):
-            continue
-        source_rel = str(row.get("upload_name") or row.get("image_relpath") or row.get("image_name") or "").strip()
-        if not source_rel:
-            continue
-        safe_rel = _class_analysis_safe_relpath(saved_uploads.get(source_rel) or source_rel)
-        safe_name = safe_rel.as_posix()
-        if safe_name not in set(saved_uploads.values()):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_image_upload_missing")
-        label_lines = [
-            str(line or "").strip()
-            for line in (row.get("label_lines") or [])
-            if str(line or "").strip()
-        ]
-        if not label_lines:
-            continue
-        rows.append(
+        rows: List[Dict[str, Any]] = []
+        uploaded_names = set(saved_uploads.values())
+        for row in input_rows:
+            if not isinstance(row, dict):
+                continue
+            source_rel = str(row.get("upload_name") or row.get("image_relpath") or row.get("image_name") or "").strip()
+            if not source_rel:
+                continue
+            safe_rel = _class_analysis_safe_relpath(saved_uploads.get(source_rel) or source_rel)
+            safe_name = safe_rel.as_posix()
+            if safe_name not in uploaded_names:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_image_upload_missing")
+            label_lines = [
+                str(line or "").strip()
+                for line in (row.get("label_lines") or [])
+                if str(line or "").strip()
+            ]
+            if not label_lines:
+                continue
+            rows.append(
+                {
+                    "split": _annotation_normalise_split(row.get("split") or "train"),
+                    "image_relpath": safe_name,
+                    "image_name": str(row.get("image_name") or row.get("frontend_image_key") or safe_name),
+                    "frontend_image_key": str(row.get("frontend_image_key") or row.get("image_key") or row.get("image_name") or ""),
+                    "label_lines": label_lines,
+                    "text_label": str(row.get("text_label") or ""),
+                }
+            )
+        if not rows:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_no_labeled_rows")
+
+        manifest_out = {
+            "dataset_label": str(manifest_payload.get("dataset_label") or "Active Label Images workspace"),
+            "labelmap": labelmap,
+            "images": rows,
+            "yolo_layout": "flat",
+            "source_mode": "active_workspace",
+        }
+        manifest_path = workspace_dir / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(_class_analysis_json_safe(manifest_out), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        request_options = manifest_payload.get("request") if isinstance(manifest_payload.get("request"), dict) else {}
+        request_payload = _normalize_class_analysis_request(
             {
-                "split": _annotation_normalise_split(row.get("split") or "train"),
-                "image_relpath": safe_name,
-                "image_name": str(row.get("image_name") or row.get("frontend_image_key") or safe_name),
-                "frontend_image_key": str(row.get("frontend_image_key") or row.get("image_key") or row.get("image_name") or ""),
-                "label_lines": label_lines,
-                "text_label": str(row.get("text_label") or ""),
+                **request_options,
+                "source_mode": "active_workspace",
+                "workspace_id": job_id,
+                "workspace_dir": str(workspace_dir),
+                "workspace_manifest_path": str(manifest_path),
+                "yolo_layout": "flat",
+                "labelmap": labelmap,
             }
         )
-    if not rows:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_no_labeled_rows")
-
-    manifest_out = {
-        "dataset_label": str(manifest_payload.get("dataset_label") or "Active Label Images workspace"),
-        "labelmap": labelmap,
-        "images": rows,
-        "yolo_layout": "flat",
-        "source_mode": "active_workspace",
-    }
-    manifest_path = workspace_dir / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(_class_analysis_json_safe(manifest_out), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    request_options = manifest_payload.get("request") if isinstance(manifest_payload.get("request"), dict) else {}
-    request_payload = _normalize_class_analysis_request(
-        {
-            **request_options,
-            "source_mode": "active_workspace",
-            "workspace_id": job_id,
-            "workspace_dir": str(workspace_dir),
-            "workspace_manifest_path": str(manifest_path),
-            "yolo_layout": "flat",
-            "labelmap": labelmap,
-        }
-    )
-    result = _enqueue_class_analysis_job(request_payload, job_id=job_id)
-    job = CLASS_ANALYSIS_JOBS.get(job_id)
-    if job:
-        _class_analysis_log(job, f"Active workspace snapshot queued with {len(rows)} images.")
-    return result
+        result = _enqueue_class_analysis_job(request_payload, job_id=job_id)
+        queued = True
+        job = CLASS_ANALYSIS_JOBS.get(job_id)
+        if job:
+            _class_analysis_log(job, f"Active workspace snapshot queued with {len(rows)} images.")
+        return result
+    except Exception:
+        if not queued:
+            shutil.rmtree(out_dir, ignore_errors=True)
+        raise
 
 
 def _get_class_analysis_job(job_id: str) -> ClassAnalysisJob:
@@ -17262,7 +17345,15 @@ def _encode_local_salad_head_np(head: Any, patch_tokens: Any, global_token: Any 
 
 def _list_local_salad_heads() -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
-    for path in sorted(LOCAL_SALAD_HEAD_ROOT.glob("*.pt")):
+    root = LOCAL_SALAD_HEAD_ROOT.resolve()
+    if not root.exists():
+        return entries
+    for path in sorted(root.glob("*.pt")):
+        try:
+            if not _path_is_within_root_impl(path.resolve(), root):
+                continue
+        except Exception:
+            continue
         entry: Dict[str, Any] = {
             "id": path.stem,
             "filename": path.name,
@@ -18145,12 +18236,14 @@ async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files
     encoder = str(manifest.get("encoder") or "local_salad").strip().lower()
     if encoder != "local_salad":
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_encoder_unsupported")
+    reference_source = str(manifest.get("reference_source") or manifest.get("source_mode") or "").strip()
+    reference_dataset_id = str(manifest.get("reference_dataset_id") or "").strip()
+    if not reference_files and not (reference_source == "backend_dataset" and reference_dataset_id):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_files")
     job_id = f"di_{uuid.uuid4().hex[:10]}"
     out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job_id, "job")
     candidate_rows = await _data_ingestion_save_uploads(candidate_files, out_dir / "uploads" / "candidates", "candidate")
     reference_rows = await _data_ingestion_save_uploads(reference_files, out_dir / "uploads" / "references", "reference")
-    reference_source = str(manifest.get("reference_source") or manifest.get("source_mode") or "").strip()
-    reference_dataset_id = str(manifest.get("reference_dataset_id") or "").strip()
     if reference_source == "backend_dataset" and reference_dataset_id:
         _validate_local_salad_head_reference(str(manifest.get("salad_head_id") or "").strip(), manifest)
         reference_rows.extend(
@@ -18185,6 +18278,9 @@ async def create_local_salad_training_job(manifest_json: str, files: List[Any]) 
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="salad_train_manifest_json_invalid") from exc
     if not isinstance(manifest, dict):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="salad_train_manifest_invalid")
+    encoder_type = str(manifest.get("encoder_type") or "dinov3").strip().lower()
+    if encoder_type not in {"dinov3", "cradio"}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_encoder_unsupported")
     job_id = f"salad_{uuid.uuid4().hex[:10]}"
     out_dir = DATA_INGESTION_ROOT / _class_analysis_safe_slug(job_id, "job")
     rows = await _data_ingestion_save_uploads(files, out_dir / "uploads" / "train", "train")
@@ -18259,8 +18355,20 @@ def list_glossary_library():
     return entries
 
 
+def _glossary_library_safe_name(name: str) -> str:
+    raw = str(name or "").strip()
+    if not raw:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_name_required")
+    if "/" in raw or "\\" in raw:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_name_invalid")
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-_.")
+    if not safe:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_name_invalid")
+    return safe
+
+
 def get_glossary_entry(name: str):
-    safe = _sanitize_yolo_run_id_impl(name) or name
+    safe = _glossary_library_safe_name(name)
     path = GLOSSARY_LIBRARY_ROOT / f"{safe}.json"
     if not path.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="glossary_not_found")
@@ -18270,9 +18378,7 @@ def get_glossary_entry(name: str):
 
 
 def save_glossary_entry(name: str, glossary: str):
-    safe = _sanitize_yolo_run_id_impl(name) or name
-    if not safe:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_name_required")
+    safe = _glossary_library_safe_name(name)
     path = GLOSSARY_LIBRARY_ROOT / f"{safe}.json"
     payload = {"name": name, "glossary": glossary}
     with path.open("w", encoding="utf-8") as handle:
@@ -18281,7 +18387,7 @@ def save_glossary_entry(name: str, glossary: str):
 
 
 def delete_glossary_entry(name: str):
-    safe = _sanitize_yolo_run_id_impl(name) or name
+    safe = _glossary_library_safe_name(name)
     path = GLOSSARY_LIBRARY_ROOT / f"{safe}.json"
     if not path.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="glossary_not_found")
@@ -18332,10 +18438,22 @@ def upload_qwen_dataset_chunk(
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
         )
+    try:
+        annotation_payload = json.loads(annotation_text)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
+        ) from exc
+    if not isinstance(annotation_payload, dict):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_annotation_invalid"
+        )
     split_root = job.root_dir / split
     split_root.mkdir(parents=True, exist_ok=True)
     raw_image_name = image_name or file.filename or f"{uuid.uuid4().hex}.jpg"
     image_name_safe = Path(raw_image_name).name or f"{uuid.uuid4().hex}.jpg"
+    annotation_payload["image"] = image_name_safe
+    annotation_text = json.dumps(annotation_payload, ensure_ascii=False, separators=(",", ":"))
     image_path = (split_root / image_name_safe).resolve()
     if not _path_is_within_root_impl(image_path, split_root.resolve()):
         raise HTTPException(
@@ -18368,6 +18486,12 @@ def upload_qwen_dataset_chunk(
             file.file.close()
         except Exception:
             pass
+    if written <= 0:
+        try:
+            image_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_empty_image")
     ann_path = split_root / "annotations.jsonl"
     with ann_path.open("a", encoding="utf-8") as handle:
         handle.write(annotation_text + "\n")
@@ -18386,13 +18510,21 @@ def upload_qwen_dataset_chunk(
 
 def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name: Optional[str]):
     with QWEN_DATASET_UPLOADS_LOCK:
-        job = QWEN_DATASET_UPLOADS.pop(job_id, None)
+        job = QWEN_DATASET_UPLOADS.get(job_id)
     if not job:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_job_not_found")
+    if job.train_count + job.val_count <= 0:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_empty")
+    if not isinstance(metadata, dict):
+        metadata = {}
     base_id = run_name or metadata.get("id") or job.run_name or job_id
     base_id = _sanitize_yolo_run_id_impl(str(base_id)) or str(job_id)
     dataset_id_final = _unique_dataset_name(base_id, root=QWEN_DATASET_ROOT)
     target_root = QWEN_DATASET_ROOT / dataset_id_final
+    with QWEN_DATASET_UPLOADS_LOCK:
+        job = QWEN_DATASET_UPLOADS.pop(job_id, None)
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="qwen_dataset_job_not_found")
     if target_root.exists():
         shutil.rmtree(target_root, ignore_errors=True)
     shutil.move(str(job.root_dir), target_root)
@@ -21449,6 +21581,7 @@ def _persist_qwen_run_metadata(
         "label": getattr(config, "run_name", None) or result_path.name,
         "model_id": getattr(config, "model_id", None),
         "requested_model_id": getattr(config, "requested_model_id", None),
+        "requested_model_metadata": getattr(config, "requested_model_metadata", {}) or {},
         "training_model_id": getattr(config, "model_id", None),
         "runtime_platform": getattr(config, "runtime_platform", QWEN_PLATFORM_TRANSFORMERS),
         "path": str(result_path),
@@ -21459,6 +21592,12 @@ def _persist_qwen_run_metadata(
         "training_mode": getattr(config, "training_mode", None),
         "dataset_root": getattr(config, "dataset_root", None),
     }
+    requested_metadata = metadata.get("requested_model_metadata")
+    if isinstance(requested_metadata, dict):
+        metadata["abliterated"] = bool(requested_metadata.get("abliterated"))
+        metadata["quantization"] = requested_metadata.get("quantization")
+        metadata["quantization_backend"] = requested_metadata.get("quantization_backend")
+        metadata["training_note"] = requested_metadata.get("training_note")
     result_metadata = getattr(result, "metadata", None)
     if isinstance(result_metadata, dict):
         metadata.update(result_metadata)
@@ -21471,6 +21610,186 @@ def _persist_qwen_run_metadata(
     except Exception:
         pass
     return metadata
+
+
+def _qwen_train_int(
+    value: Any,
+    default: int,
+    *,
+    minimum: int,
+    maximum: Optional[int] = None,
+) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return int(default)
+    if parsed < minimum:
+        return int(default)
+    if maximum is not None:
+        parsed = min(parsed, int(maximum))
+    return parsed
+
+
+def _qwen_train_float(
+    value: Any,
+    default: float,
+    *,
+    minimum: float,
+    maximum: Optional[float] = None,
+) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+    if not math.isfinite(parsed) or parsed < minimum:
+        return float(default)
+    if maximum is not None:
+        parsed = min(parsed, float(maximum))
+    return parsed
+
+
+def _prepare_qwen_training_split(
+    dataset_root: Path,
+    job_id: str,
+    *,
+    val_percent: float,
+    split_seed: int,
+    log_messages: Optional[List[str]] = None,
+) -> Path:
+    dataset_root = dataset_root.resolve()
+
+    def _annotation_entries(split_name: str) -> List[Tuple[Dict[str, Any], Path]]:
+        ann_path = dataset_root / split_name / "annotations.jsonl"
+        if not ann_path.exists():
+            return []
+        entries: List[Tuple[Dict[str, Any], Path]] = []
+        with ann_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                image_name = payload.get("image")
+                if not isinstance(image_name, str) or not image_name.strip():
+                    continue
+                source = _find_qwen_split_image_source(dataset_root, split_name, image_name)
+                if source is None:
+                    continue
+                entries.append((payload, source))
+        return entries
+
+    entries = _annotation_entries("train") + _annotation_entries("val")
+    if len(entries) < 2:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_training_split_empty")
+    rnd = random.Random(int(split_seed))
+    rnd.shuffle(entries)
+    vp = max(0.0, min(float(val_percent), 0.9))
+    val_count = int(len(entries) * vp)
+    if val_count <= 0:
+        val_count = 1
+    if val_count >= len(entries):
+        val_count = len(entries) - 1
+    val_entries = entries[:val_count]
+    train_entries = entries[val_count:]
+    if not train_entries or not val_entries:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_training_split_empty")
+
+    split_root = (QWEN_JOB_ROOT / "splits" / job_id).resolve()
+    split_parent = (QWEN_JOB_ROOT / "splits").resolve()
+    if not _path_is_within_root_impl(split_root, split_parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_split_path_invalid")
+    if split_root.exists():
+        shutil.rmtree(split_root, ignore_errors=True)
+    (split_root / "train" / "images").mkdir(parents=True, exist_ok=True)
+    (split_root / "val" / "images").mkdir(parents=True, exist_ok=True)
+
+    def _write_split(split_name: str, split_entries: Sequence[Tuple[Dict[str, Any], Path]]) -> int:
+        ann_path = split_root / split_name / "annotations.jsonl"
+        count = 0
+        with ann_path.open("w", encoding="utf-8") as handle:
+            for idx, (payload, source) in enumerate(split_entries):
+                try:
+                    rel = _normalise_relative_path(payload.get("image"))
+                except HTTPException:
+                    continue
+                safe_name = f"{idx:06d}_{rel.name or 'image'}"
+                rel_out = Path(safe_name)
+                dst = split_root / split_name / "images" / rel_out
+                _link_or_copy_file(source, dst, overwrite=True)
+                payload_out = dict(payload)
+                payload_out["image"] = rel_out.as_posix()
+                handle.write(json.dumps(payload_out, ensure_ascii=False, separators=(",", ":")) + "\n")
+                count += 1
+        return count
+
+    train_count = _write_split("train", train_entries)
+    val_count_written = _write_split("val", val_entries)
+    if train_count <= 0 or val_count_written <= 0:
+        shutil.rmtree(split_root, ignore_errors=True)
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_training_split_empty")
+
+    source_meta = _load_json_metadata(dataset_root / QWEN_METADATA_FILENAME) or {}
+    meta = {
+        **source_meta,
+        "id": f"{source_meta.get('id') or dataset_root.name}_{str(job_id)[:8]}_split",
+        "label": source_meta.get("label") or dataset_root.name,
+        "created_at": time.time(),
+        "source_dataset_root": str(dataset_root),
+        "train_count": train_count,
+        "val_count": val_count_written,
+        "image_count": train_count + val_count_written,
+        "random_split": True,
+        "split_seed": int(split_seed),
+        "val_percent": float(vp),
+        "signature": _compute_dir_signature_impl(split_root),
+        "type": source_meta.get("type") or "bbox",
+    }
+    (split_root / QWEN_METADATA_FILENAME).write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    summary = (
+        f"Qwen split: {train_count} train / {val_count_written} val "
+        f"(seed={int(split_seed)}, val_percent={vp:.2f}, src={dataset_root}) -> {split_root}"
+    )
+    logger.info(summary)
+    if log_messages is not None:
+        log_messages.append(summary)
+    return split_root
+
+
+def _find_qwen_split_image_source(
+    dataset_root: Path, split_name: str, image_name: str
+) -> Optional[Path]:
+    try:
+        rel = _normalise_relative_path(image_name)
+    except HTTPException:
+        return None
+    roots = [
+        dataset_root / split_name / "images",
+        dataset_root / split_name,
+        dataset_root / "images",
+        dataset_root,
+    ]
+    for root in roots:
+        try:
+            root_resolved = root.resolve()
+            candidate = (root / rel).resolve()
+        except Exception:
+            continue
+        if not _path_is_within_root_impl(candidate, dataset_root):
+            continue
+        try:
+            candidate.relative_to(root_resolved)
+        except ValueError:
+            continue
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
 
 
 def _build_qwen_config(
@@ -21492,6 +21811,14 @@ def _build_qwen_config(
             http_exception_cls=HTTPException,
         ),
     )
+    if bool(payload.random_split):
+        dataset_root = _prepare_qwen_training_split(
+            dataset_root,
+            job_id,
+            val_percent=_qwen_train_float(payload.val_percent, 0.2, minimum=0.0, maximum=0.9),
+            split_seed=_qwen_train_int(payload.split_seed, 42, minimum=0, maximum=2**32 - 1),
+            log_messages=prep_logs,
+        )
     train_jsonl = dataset_root / "train" / "annotations.jsonl"
     val_jsonl = dataset_root / "val" / "annotations.jsonl"
     if not train_jsonl.exists():
@@ -21500,15 +21827,19 @@ def _build_qwen_config(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_val_split_missing")
     run_name = _safe_run_name(payload.run_name, f"qwen_{payload.dataset_id}_{job_id[:8]}")
     result_path = (QWEN_JOB_ROOT / "runs" / run_name).resolve()
+    runs_root = (QWEN_JOB_ROOT / "runs").resolve()
+    if not _path_is_within_root_impl(result_path, runs_root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_run_path_invalid")
+    if result_path.exists():
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="run_name_exists")
     if prep_logs is not None:
         prep_logs.append(f"Dataset: {dataset_root}")
         prep_logs.append(f"Output: {result_path}")
-        if bool(payload.random_split):
-            prep_logs.append(
-                "random_split requested but current trainer uses existing dataset splits"
-            )
+    requested_model_id = payload.model_id
+    if requested_model_id and str(requested_model_id).strip().lower() in {"default", "base"}:
+        requested_model_id = None
     requested_model_id = (
-        payload.model_id
+        requested_model_id
         or (active_qwen_metadata or {}).get("model_id")
         or QWEN_MODEL_NAME
     )
@@ -21547,44 +21878,64 @@ def _build_qwen_config(
             )
         if requested_runtime_platform == QWEN_PLATFORM_MLX:
             prep_logs.append("MLX-VLM path uses existing dataset splits and disables CUDA-only knobs")
-    accumulate_grad_batches = (
-        int(payload.accumulate_grad_batches)
-        if payload.accumulate_grad_batches is not None
-        else 8
+    accumulate_grad_batches = _qwen_train_int(
+        payload.accumulate_grad_batches,
+        8,
+        minimum=1,
+        maximum=1024,
     )
     if requested_runtime_platform == QWEN_PLATFORM_MLX:
         accumulate_grad_batches = 1
+    min_pixels = _qwen_train_int(
+        payload.min_pixels,
+        28 * 28 * 16,
+        minimum=1024,
+        maximum=28 * 28 * 4096,
+    )
+    max_pixels = _qwen_train_int(
+        payload.max_pixels,
+        28 * 28 * 576,
+        minimum=1024,
+        maximum=28 * 28 * 8192,
+    )
+    if max_pixels < min_pixels:
+        max_pixels = max(min_pixels, 28 * 28 * 576)
     kwargs = {
         "dataset_root": str(dataset_root),
         "result_path": str(result_path),
         "model_id": training_model_id,
         "requested_model_id": requested_model_id,
+        "requested_model_metadata": requested_model_metadata,
         "runtime_platform": requested_runtime_platform,
         "training_mode": payload.training_mode or "official_lora",
         "system_prompt": payload.system_prompt or DEFAULT_SYSTEM_PROMPT,
         "run_name": run_name,
         "devices": payload.devices,
-        "batch_size": int(payload.batch_size) if payload.batch_size is not None else 1,
-        "max_epochs": int(payload.max_epochs) if payload.max_epochs is not None else 3,
-        "lr": float(payload.lr) if payload.lr is not None else 2e-4,
+        "batch_size": _qwen_train_int(payload.batch_size, 1, minimum=1, maximum=128),
+        "max_epochs": _qwen_train_int(payload.max_epochs, 3, minimum=1, maximum=10000),
+        "lr": _qwen_train_float(payload.lr, 2e-4, minimum=1e-9, maximum=1.0),
         "accumulate_grad_batches": accumulate_grad_batches,
-        "warmup_steps": int(payload.warmup_steps) if payload.warmup_steps is not None else 50,
-        "num_workers": int(payload.num_workers) if payload.num_workers is not None else 0,
-        "lora_rank": int(payload.lora_rank) if payload.lora_rank is not None else 8,
-        "lora_alpha": int(payload.lora_alpha) if payload.lora_alpha is not None else 16,
-        "lora_dropout": float(payload.lora_dropout) if payload.lora_dropout is not None else 0.05,
+        "warmup_steps": _qwen_train_int(payload.warmup_steps, 50, minimum=0, maximum=1_000_000),
+        "num_workers": _qwen_train_int(payload.num_workers, 0, minimum=0, maximum=128),
+        "lora_rank": _qwen_train_int(payload.lora_rank, 8, minimum=1, maximum=4096),
+        "lora_alpha": _qwen_train_int(payload.lora_alpha, 16, minimum=1, maximum=16384),
+        "lora_dropout": _qwen_train_float(payload.lora_dropout, 0.05, minimum=0.0, maximum=1.0),
         "lora_target_modules": (
             payload.lora_target_modules
             if payload.lora_target_modules
             else ["q_proj", "k_proj", "v_proj", "o_proj"]
         ),
-        "seed": int(payload.seed) if payload.seed is not None else 1337,
+        "seed": _qwen_train_int(payload.seed, 1337, minimum=0, maximum=2**32 - 1),
         "log_every_n_steps": (
-            int(payload.log_every_n_steps) if payload.log_every_n_steps is not None else 10
+            _qwen_train_int(payload.log_every_n_steps, 10, minimum=1, maximum=1_000_000)
         ),
-        "max_pixels": int(payload.max_pixels) if payload.max_pixels is not None else 28 * 28 * 576,
-        "min_pixels": int(payload.min_pixels) if payload.min_pixels is not None else 28 * 28 * 16,
-        "max_length": int(payload.max_length) if payload.max_length is not None else None,
+        "max_pixels": max_pixels,
+        "min_pixels": min_pixels,
+        "max_length": (
+            _qwen_train_int(payload.max_length, 2048, minimum=256, maximum=262_144)
+            if payload.max_length is not None
+            else None
+        ),
         "train_limit": (
             int(payload.train_limit)
             if payload.train_limit is not None and payload.train_limit > 0
@@ -23479,6 +23830,10 @@ def _run_agent_mining_job(job: AgentMiningJob, payload: AgentMiningRequest) -> N
         job.updated_at = time.time()
 
 
+def _validate_prompt_helper_dataset_id(dataset_id: str) -> None:
+    _resolve_sam3_or_qwen_dataset(str(dataset_id or ""))
+
+
 def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
     job_id = f"ph_{uuid.uuid4().hex[:8]}"
     job = PromptHelperJob(job_id=job_id)
@@ -23513,6 +23868,7 @@ def _start_agent_mining_job(payload: AgentMiningRequest) -> AgentMiningJob:
         default_clip_model=DEFAULT_CLIP_MODEL,
         logger=logger,
     )
+    _resolve_sam3_or_qwen_dataset(payload.dataset_id)
     job_id = f"am_{uuid.uuid4().hex[:8]}"
     job = AgentMiningJob(job_id=job_id)
     with AGENT_MINING_JOBS_LOCK:
@@ -24104,6 +24460,7 @@ def cancel_agent_mining_job(job_id: str):
 
 
 def start_auto_label_job(payload: AutoLabelRequest):
+    _resolve_dataset_entry(payload.dataset_id)
     job = _start_auto_label_job(payload)
     return _serialize_auto_label_job(job)
 
@@ -24677,16 +25034,19 @@ def prompt_helper_expand(payload: PromptRecipeExpandRequest):
 
 
 def start_prompt_helper_job(payload: PromptHelperRequest):
+    _validate_prompt_helper_dataset_id(payload.dataset_id)
     job = _start_prompt_helper_job(payload)
     return _serialize_prompt_helper_job_impl(job)
 
 
 def start_prompt_helper_search(payload: PromptHelperSearchRequest):
+    _validate_prompt_helper_dataset_id(payload.dataset_id)
     job = _start_prompt_helper_search_job(payload)
     return _serialize_prompt_helper_job_impl(job)
 
 
 def start_prompt_helper_recipe(payload: PromptRecipeRequest):
+    _validate_prompt_helper_dataset_id(payload.dataset_id)
     job = _start_prompt_recipe_job(payload)
     return _serialize_prompt_helper_job_impl(job)
 
@@ -24717,6 +25077,7 @@ def create_prompt_helper_preset(
             normalized[cid] = cleaned
     if not normalized:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="no_prompts_provided")
+    _validate_prompt_helper_dataset_id(dataset_id)
     preset = _save_prompt_helper_preset_impl(
         label,
         dataset_id,
@@ -25765,6 +26126,21 @@ def _start_sam3_training_worker(
     thread.start()
 
 
+def _resolve_yolo_training_device_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        resolution = _yolo_resolve_device_impl(
+            config.get("devices"),
+            config.get("accelerator"),
+            torch_module=torch,
+            allow_mps=TATOR_ALLOW_MPS,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    config["accelerator"] = resolution.get("requested_accelerator") or "auto"
+    config["device_resolution"] = resolution
+    return resolution
+
+
 def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
     def worker() -> None:
         run_dir = _yolo_run_dir_impl(
@@ -25880,7 +26256,28 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             base_weights,
             p2_scale_fn=_yolo_p2_scale_impl,
         )
-        device_arg = _yolo_device_arg_impl(config.get("devices"))
+        try:
+            device_resolution = config.get("device_resolution") or _resolve_yolo_training_device_config(
+                config
+            )
+            job.config = config
+        except HTTPException as exc:
+            _yolo_job_update(
+                job,
+                status="failed",
+                message="Invalid YOLO training device",
+                error=str(exc.detail),
+            )
+            write_run_meta(
+                {
+                    "job_id": job.job_id,
+                    "status": job.status,
+                    "message": job.message,
+                    "config": job.config,
+                }
+            )
+            return
+        device_arg = device_resolution.get("device_arg")
         train_kwargs = {
             "data": str(data_yaml),
             "task": task,
@@ -25932,6 +26329,10 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
                 f"P2 variant: scale={p2_scale} (config={p2_cfg.name}, pretrained={train_kwargs.get('pretrained')})",
             )
         _yolo_job_log(job, f"Model source: {model_source}")
+        _yolo_job_log(
+            job,
+            f"Training device: {device_resolution.get('device_label') or device_arg or 'Ultralytics default'}",
+        )
         train_kwargs.update(_yolo_build_aug_args_impl(config.get("augmentations")))
         train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
         monitor_stop = threading.Event()
@@ -25994,6 +26395,7 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
                     str(run_dir / "metrics.json") if (run_dir / "metrics.json").exists() else None
                 ),
                 "metrics_series_path": str(series_path) if series_path.exists() else None,
+                "device_resolution": device_resolution,
             }
             _yolo_job_update(
                 job,
@@ -26280,7 +26682,20 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                 yaml_load_fn=yaml.safe_load,
                 yaml_dump_fn=lambda payload: yaml.safe_dump(payload, sort_keys=False),
             )
-            device_arg = _yolo_device_arg_impl(config.get("devices"))
+            try:
+                device_resolution = config.get(
+                    "device_resolution"
+                ) or _resolve_yolo_training_device_config(config)
+                job.config = config
+            except HTTPException as exc:
+                _yolo_head_graft_job_update(
+                    job,
+                    status="failed",
+                    message="Invalid YOLO training device",
+                    error=str(exc.detail),
+                )
+                return
+            device_arg = device_resolution.get("device_arg")
             train_kwargs = {
                 "data": str(data_yaml),
                 "task": "detect",
@@ -26295,6 +26710,10 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                 "exist_ok": True,
             }
             train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
+            _yolo_head_graft_job_log(
+                job,
+                f"Training device: {device_resolution.get('device_label') or device_arg or 'Ultralytics default'}",
+            )
 
             try:
                 model = YOLO(str(head_yaml)).load(str(base_best))
@@ -26448,6 +26867,7 @@ def _start_yolo_head_graft_worker(job: YoloHeadGraftJob) -> None:
                     "labelmap_path": str(labelmap_path),
                     "export_path": str(export_path) if export_path else None,
                     "merged_yaml": str(merged_yaml),
+                    "device_resolution": device_resolution,
                 }
                 _yolo_prune_run_dir_impl(
                     run_dir,
@@ -26926,6 +27346,10 @@ async def _write_upload_file(
     allow_overwrite: bool = False,
 ) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_symlink():
+        if not allow_overwrite:
+            raise HTTPException(status_code=HTTP_409_CONFLICT, detail="upload_exists")
+        dest.unlink()
     if dest.exists() and not allow_overwrite:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="upload_exists")
     written = 0
@@ -27525,6 +27949,7 @@ app.include_router(
             upload_root=UPLOAD_ROOT,
             labelmap_exts=LABELMAP_ALLOWED_EXTS,
             load_labelmap_file_fn=_load_labelmap_file,
+            path_is_within_root_fn=_path_is_within_root_impl,
         ),
         download_classifier_fn=download_clip_classifier,
         download_classifier_zip_fn=download_clip_classifier_zip,
@@ -27943,64 +28368,69 @@ async def start_clip_training(
     images_dir: Optional[str] = None
     labels_dir: Optional[str] = None
 
-    if use_native_paths:
-        images_dir = _ensure_directory(images_path_native)
-        labels_dir = _ensure_directory(labels_path_native)
-    else:
-        temp_root = tempfile.mkdtemp(prefix="clip_train_")
-        images_dir = os.path.join(temp_root, "images")
-        labels_dir = os.path.join(temp_root, "labels")
-        os.makedirs(images_dir, exist_ok=True)
-        os.makedirs(labels_dir, exist_ok=True)
-
-        for upload in images or []:
-            await _save_upload_file(
-                upload,
-                Path(images_dir),
-                max_bytes=CLIP_TRAIN_UPLOAD_MAX_BYTES,
-                quota_root=Path(temp_root),
-                quota_limit=CLIP_TRAIN_UPLOAD_QUOTA_BYTES,
-            )
-
-        for upload in labels or []:
-            await _save_upload_file(
-                upload,
-                Path(labels_dir),
-                max_bytes=CLIP_TRAIN_UPLOAD_MAX_BYTES,
-                quota_root=Path(temp_root),
-                quota_limit=CLIP_TRAIN_UPLOAD_QUOTA_BYTES,
-            )
-
-    labelmap_path = None
-    if labelmap_path_native:
-        labelmap_path = os.path.abspath(labelmap_path_native)
-        if not os.path.isfile(labelmap_path):
-            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found")
-    elif labelmap is not None:
-        if temp_root is None:
+    try:
+        if use_native_paths:
+            images_dir = _ensure_directory(images_path_native)
+            labels_dir = _ensure_directory(labels_path_native)
+        else:
             temp_root = tempfile.mkdtemp(prefix="clip_train_")
-        labelmap_path = str(
-            await _save_upload_file(
-                labelmap,
-                Path(temp_root),
-                max_bytes=ASSET_MAX_BYTES,
-                quota_root=Path(temp_root),
-                quota_limit=CLIP_TRAIN_UPLOAD_QUOTA_BYTES,
-            )
-        )
+            images_dir = os.path.join(temp_root, "images")
+            labels_dir = os.path.join(temp_root, "labels")
+            os.makedirs(images_dir, exist_ok=True)
+            os.makedirs(labels_dir, exist_ok=True)
 
-    job_id = uuid.uuid4().hex
-    if images_dir is None or labels_dir is None:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_paths_unresolved")
-    # Fail fast on obviously invalid staged datasets.
-    _validate_clip_dataset_impl(
-        {"images_dir": images_dir, "labels_dir": labels_dir, "labelmap_path": labelmap_path},
-        http_exception_cls=HTTPException,
-        load_labelmap_simple_fn=lambda path: _load_labelmap_simple_impl(
-            path,
-            load_labelmap_file_fn=_load_labelmap_file,
-        ),
-    )
+            for upload in images or []:
+                await _save_upload_file(
+                    upload,
+                    Path(images_dir),
+                    max_bytes=CLIP_TRAIN_UPLOAD_MAX_BYTES,
+                    quota_root=Path(temp_root),
+                    quota_limit=CLIP_TRAIN_UPLOAD_QUOTA_BYTES,
+                )
+
+            for upload in labels or []:
+                await _save_upload_file(
+                    upload,
+                    Path(labels_dir),
+                    max_bytes=CLIP_TRAIN_UPLOAD_MAX_BYTES,
+                    quota_root=Path(temp_root),
+                    quota_limit=CLIP_TRAIN_UPLOAD_QUOTA_BYTES,
+                )
+
+        labelmap_path = None
+        if labelmap_path_native:
+            labelmap_path = os.path.abspath(labelmap_path_native)
+            if not os.path.isfile(labelmap_path):
+                raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="labelmap_not_found")
+        elif labelmap is not None:
+            if temp_root is None:
+                temp_root = tempfile.mkdtemp(prefix="clip_train_")
+            labelmap_path = str(
+                await _save_upload_file(
+                    labelmap,
+                    Path(temp_root),
+                    max_bytes=ASSET_MAX_BYTES,
+                    quota_root=Path(temp_root),
+                    quota_limit=CLIP_TRAIN_UPLOAD_QUOTA_BYTES,
+                )
+            )
+
+        job_id = uuid.uuid4().hex
+        if images_dir is None or labels_dir is None:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_paths_unresolved")
+        # Fail fast on obviously invalid staged datasets.
+        _validate_clip_dataset_impl(
+            {"images_dir": images_dir, "labels_dir": labels_dir, "labelmap_path": labelmap_path},
+            http_exception_cls=HTTPException,
+            load_labelmap_simple_fn=lambda path: _load_labelmap_simple_impl(
+                path,
+                load_labelmap_file_fn=_load_labelmap_file,
+            ),
+        )
+    except Exception:
+        if temp_root:
+            shutil.rmtree(temp_root, ignore_errors=True)
+        raise
     logger.info(
         "Starting training job %s (encoder=%s, model=%s, native_paths=%s)",
         job_id[:8],
@@ -28657,14 +29087,6 @@ app.include_router(
 def create_yolo_training_job(payload: YoloTrainRequest):
     if not payload.accept_tos:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_tos_required")
-    job_id = uuid.uuid4().hex
-    run_dir = _yolo_run_dir_impl(
-        job_id,
-        create=True,
-        job_root=YOLO_JOB_ROOT,
-        sanitize_fn=_sanitize_yolo_run_id_impl,
-        http_exception_cls=HTTPException,
-    )
     dataset_info = _resolve_yolo_training_dataset(payload)
     if (
         payload.task == "segment"
@@ -28673,6 +29095,15 @@ def create_yolo_training_job(payload: YoloTrainRequest):
     ):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_seg_requires_polygons")
     config = payload.dict(exclude_none=True)
+    _resolve_yolo_training_device_config(config)
+    job_id = uuid.uuid4().hex
+    run_dir = _yolo_run_dir_impl(
+        job_id,
+        create=True,
+        job_root=YOLO_JOB_ROOT,
+        sanitize_fn=_sanitize_yolo_run_id_impl,
+        http_exception_cls=HTTPException,
+    )
     config["paths"] = {"run_dir": str(run_dir)}
     config["dataset"] = dataset_info
     message = "Queued (training not started)"
@@ -28745,9 +29176,25 @@ def cancel_yolo_training_job(job_id: str):
     return {"status": job.status}
 
 
+def _preflight_yolo_head_graft_create(payload: YoloHeadGraftRequest) -> Dict[str, Any]:
+    dry_run_payload = YoloHeadGraftDryRunRequest(
+        base_run_id=payload.base_run_id,
+        dataset_id=payload.dataset_id,
+        dataset_root=payload.dataset_root,
+    )
+    result = yolo_head_graft_dry_run(dry_run_payload)
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=str(result.get("error") or "yolo_head_graft_preflight_failed"),
+        )
+    return result
+
+
 def create_yolo_head_graft_job(payload: YoloHeadGraftRequest):
     if not payload.accept_tos:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="yolo_tos_required")
+    _preflight_yolo_head_graft_create(payload)
     job_id = uuid.uuid4().hex
     if payload.run_name:
         safe_id = _sanitize_yolo_run_id_impl(payload.run_name)
@@ -28763,6 +29210,7 @@ def create_yolo_head_graft_job(payload: YoloHeadGraftRequest):
     if run_dir.exists():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="yolo_run_exists")
     config = payload.dict(exclude_none=True)
+    _resolve_yolo_training_device_config(config)
     job = YoloHeadGraftJob(job_id=job_id, config=config, message="Queued (head graft not started)")
     with YOLO_HEAD_GRAFT_JOBS_LOCK:
         YOLO_HEAD_GRAFT_JOBS[job_id] = job
@@ -28941,6 +29389,7 @@ app.include_router(
 def create_rfdetr_training_job(payload: RfDetrTrainRequest):
     if not payload.accept_tos:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_tos_required")
+    dataset_info = _resolve_rfdetr_training_dataset(payload)
     job_id = uuid.uuid4().hex
     run_dir = _rfdetr_run_dir_impl(
         job_id,
@@ -28949,7 +29398,6 @@ def create_rfdetr_training_job(payload: RfDetrTrainRequest):
         sanitize_fn=_sanitize_rfdetr_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    dataset_info = _resolve_rfdetr_training_dataset(payload)
     config = payload.dict(exclude_none=True)
     config["paths"] = {"run_dir": str(run_dir)}
     config["dataset"] = dataset_info
@@ -30069,6 +30517,11 @@ def create_qwen_training_job(payload: QwenTrainRequest):
         payload.dataset_id,
     )
     with QWEN_TRAINING_JOBS_LOCK:
+        for existing in QWEN_TRAINING_JOBS.values():
+            if existing.status in {"succeeded", "failed", "cancelled"}:
+                continue
+            if str((existing.config or {}).get("result_path") or "") == str(config.result_path):
+                raise HTTPException(status_code=HTTP_409_CONFLICT, detail="run_name_exists")
         QWEN_TRAINING_JOBS[job_id] = job
         for msg in prep_logs:
             _qwen_job_log(job, msg)
@@ -32945,6 +33398,12 @@ app.include_router(
 
 
 def start_calibration_job(payload: CalibrationRequest = Body(...)):
+    labelmap, _glossary = _agent_load_labelmap_meta(payload.dataset_id)
+    if not labelmap:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="calibration_labelmap_missing")
+    images = _calibration_list_images(payload.dataset_id)
+    if not images:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_images_missing")
     job = _start_calibration_job_impl(
         payload,
         job_cls=CalibrationJob,
@@ -33077,14 +33536,14 @@ def list_edr_packages():
 def get_edr_package(package_id: str):
     try:
         return _get_edr_package_impl(EDR_PACKAGES_ROOT, package_id)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="edr_package_not_found") from exc
 
 
 def export_edr_package(package_id: str):
     try:
         zip_path = _export_edr_package_impl(EDR_PACKAGES_ROOT, package_id)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="edr_package_not_found") from exc
     return FileResponse(
         path=str(zip_path),
@@ -33194,10 +33653,14 @@ def _zip_contains_edr_package_manifest(zip_path: Path) -> bool:
 
 
 def _import_edr_package_bundle(zip_path: Path) -> tuple[Dict[str, Any], PrepassRecipeResponse]:
-    package_summary = _import_edr_package_from_zip_impl(
-        zip_path=zip_path,
-        packages_root=EDR_PACKAGES_ROOT,
-    )
+    try:
+        package_summary = _import_edr_package_from_zip_impl(
+            zip_path=zip_path,
+            packages_root=EDR_PACKAGES_ROOT,
+            max_extract_bytes=PREPASS_RECIPE_UPLOAD_MAX_BYTES,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     package_id = str(package_summary.get("id") or "").strip()
     package_payload = _load_edr_package_payload_impl(EDR_PACKAGES_ROOT, package_id)
     saved_recipe = dict(package_payload.get("saved_recipe") or {})

@@ -37,6 +37,32 @@ from services.calibration_recipe_registry import (
 from utils.classifier_utils import _clip_head_classes
 
 
+def _safe_regular_file_within_root(path: Path, root: Path) -> bool:
+    try:
+        resolved_path = path.resolve(strict=True)
+        resolved_root = root.resolve(strict=False)
+    except Exception:
+        return False
+    if not _path_within_root(resolved_path, resolved_root):
+        return False
+    return resolved_path.is_file()
+
+
+def _path_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except Exception:
+        return False
+    return True
+
+
+def _zip_write_safe_file(zf: zipfile.ZipFile, path: Path, root: Path, arcname: str) -> bool:
+    if not _safe_regular_file_within_root(path, root):
+        return False
+    zf.write(path.resolve(strict=True), arcname=arcname)
+    return True
+
+
 def _write_prepass_recipe_meta(recipe_dir: Path, payload: Dict[str, Any]) -> None:
     meta_path = recipe_dir / "prepass.meta.json"
     meta_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -1147,7 +1173,9 @@ def _persist_agent_recipe_impl(
                 if crops_dir.exists():
                     for crop_file in crops_dir.glob("*.png"):
                         try:
-                            zf.write(crop_file, arcname=f"crops/{crop_file.name}")
+                            _zip_write_safe_file(
+                                zf, crop_file, recipe_dir, f"crops/{crop_file.name}"
+                            )
                         except Exception:
                             continue
                 clip_dir = recipe_dir / "clip_head"
@@ -1158,7 +1186,9 @@ def _persist_agent_recipe_impl(
                                 continue
                             if artifact.name not in {"head.npz", "meta.json"}:
                                 continue
-                            zf.write(artifact, arcname=f"clip_head/{artifact.name}")
+                            _zip_write_safe_file(
+                                zf, artifact, recipe_dir, f"clip_head/{artifact.name}"
+                            )
                         except Exception:
                             continue
         except Exception as exc:  # noqa: BLE001
@@ -1333,7 +1363,9 @@ def _ensure_recipe_zip_impl(
             if crops_dir.exists():
                 for crop_file in crops_dir.glob("*.png"):
                     try:
-                        zf.write(crop_file, arcname=f"crops/{crop_file.name}")
+                        _zip_write_safe_file(
+                            zf, crop_file, recipe_dir, f"crops/{crop_file.name}"
+                        )
                     except Exception:
                         continue
             if clip_head_dir.exists():
@@ -1343,7 +1375,9 @@ def _ensure_recipe_zip_impl(
                             continue
                         if artifact.name not in {"head.npz", "meta.json"}:
                             continue
-                        zf.write(artifact, arcname=f"clip_head/{artifact.name}")
+                        _zip_write_safe_file(
+                            zf, artifact, recipe_dir, f"clip_head/{artifact.name}"
+                        )
                     except Exception:
                         continue
         temp_zip_path.replace(zip_path)
@@ -1576,20 +1610,42 @@ def _copy_tree_filtered_impl(
     *,
     keep_files: Optional[set[str]] = None,
     sha256_fn=_sha256_path_impl,
+    source_root: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
     copied: List[Dict[str, Any]] = []
-    if not src.exists():
+    try:
+        src_resolved = src.resolve(strict=True)
+    except Exception:
+        return copied
+    root_resolved = source_root.resolve(strict=False) if source_root is not None else src_resolved
+    if not _path_within_root(src_resolved, root_resolved):
         return copied
     dest.mkdir(parents=True, exist_ok=True)
-    for item in src.iterdir():
-        if item.is_dir():
+    for item in src_resolved.iterdir():
+        try:
+            item_resolved = item.resolve(strict=True)
+        except Exception:
+            continue
+        if not _path_within_root(item_resolved, root_resolved):
+            continue
+        if item_resolved.is_dir():
             sub_dest = dest / item.name
-            copied.extend(_copy_tree_filtered_impl(item, sub_dest, keep_files=keep_files, sha256_fn=sha256_fn))
+            copied.extend(
+                _copy_tree_filtered_impl(
+                    item_resolved,
+                    sub_dest,
+                    keep_files=keep_files,
+                    sha256_fn=sha256_fn,
+                    source_root=root_resolved,
+                )
+            )
             continue
         if keep_files is not None and item.name not in keep_files:
             continue
+        if not item_resolved.is_file():
+            continue
         target = dest / item.name
-        _copy2_if_different(item, target)
+        _copy2_if_different(item_resolved, target)
         copied.append(
             {
                 "path": str(target.relative_to(dest.parent)),

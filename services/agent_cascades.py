@@ -228,10 +228,18 @@ def _ensure_cascade_zip_impl(
                     except Exception:
                         pass
                 meta_path = resolved_path.with_suffix(resolved_path.suffix + ".meta.pkl")
-                if meta_path.exists() and meta_path.is_file():
+                try:
+                    meta_path_resolved = meta_path.resolve(strict=True)
+                except Exception:
+                    meta_path_resolved = None
+                if (
+                    meta_path_resolved is not None
+                    and path_is_within_root_fn(meta_path_resolved, classifiers_root.resolve())
+                    and meta_path_resolved.is_file()
+                ):
                     try:
                         meta_rel = f"classifiers/{safe_classifier_rel}.meta.pkl"
-                        zf.write(meta_path, arcname=meta_rel)
+                        zf.write(meta_path_resolved, arcname=meta_rel)
                     except Exception:
                         pass
         temp_zip_path.replace(zip_path)

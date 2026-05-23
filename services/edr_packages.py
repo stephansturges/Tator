@@ -47,6 +47,19 @@ def _sha256_path(path: Path) -> str:
     return h.hexdigest()
 
 
+def _safe_regular_file_within_root(path: Path, root: Path) -> bool:
+    try:
+        resolved_path = path.resolve(strict=True)
+        resolved_root = root.resolve(strict=False)
+    except Exception:
+        return False
+    try:
+        resolved_path.relative_to(resolved_root)
+    except Exception:
+        return False
+    return resolved_path.is_file()
+
+
 def _slug(value: Any, *, fallback: str) -> str:
     text = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(value or "").strip())
     text = text.strip("_")
@@ -455,9 +468,9 @@ def _build_package_summary(
 def _zip_payload(payload_dir: Path, zip_path: Path) -> None:
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for item in sorted(payload_dir.rglob("*")):
-            if not item.is_file():
+            if not _safe_regular_file_within_root(item, payload_dir):
                 continue
-            zf.write(item, arcname=str(item.relative_to(payload_dir)))
+            zf.write(item.resolve(strict=True), arcname=str(item.relative_to(payload_dir)))
 
 
 def _extract_zip_safely(

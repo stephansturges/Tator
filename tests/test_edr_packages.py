@@ -14,6 +14,7 @@ from services.edr_packages import (
     edr_package_dir,
     import_edr_package_from_zip,
     resolve_edr_package_runtime,
+    _zip_payload,
 )
 
 
@@ -219,6 +220,29 @@ def test_import_edr_package_rejects_symlink_member(tmp_path: Path) -> None:
         import_edr_package_from_zip(zip_path=zip_path, packages_root=tmp_path / "edr_packages")
 
     assert not (tmp_path / "outside").exists()
+
+
+def test_zip_payload_skips_symlink_escape(tmp_path: Path) -> None:
+    payload_root = tmp_path / "payload"
+    payload_root.mkdir(parents=True, exist_ok=True)
+    (payload_root / EDR_PACKAGE_MANIFEST_NAME).write_text(
+        json.dumps({"package_id": "pkg1"}),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (payload_root / "escape.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    zip_path = tmp_path / "package.edr.zip"
+    _zip_payload(payload_root, zip_path)
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        names = set(zf.namelist())
+    assert EDR_PACKAGE_MANIFEST_NAME in names
+    assert "escape.txt" not in names
 
 
 def test_import_edr_package_rejects_invalid_zip(tmp_path: Path) -> None:

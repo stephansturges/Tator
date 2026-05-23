@@ -11,9 +11,13 @@ from services.edr_packages import (
     EDR_PACKAGE_MANIFEST_NAME,
     EDR_PACKAGE_META_NAME,
     EDR_PACKAGE_PAYLOAD_DIRNAME,
+    EDR_PACKAGE_ZIP_NAME,
     _copy_tree,
     edr_package_dir,
+    export_edr_package,
+    get_edr_package,
     import_edr_package_from_zip,
+    list_edr_packages,
     resolve_edr_package_runtime,
     _zip_payload,
 )
@@ -273,6 +277,69 @@ def test_edr_package_dir_rejects_traversal_package_id(tmp_path: Path) -> None:
     assert not (tmp_path / "edr_packages_evil").exists()
 
 
+def test_edr_package_dir_rejects_symlink_package_dir_escape(tmp_path: Path) -> None:
+    packages_root = tmp_path / "edr_packages"
+    packages_root.mkdir()
+    outside = tmp_path / "outside_pkg"
+    outside.mkdir()
+    try:
+        (packages_root / "pkg1").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(ValueError, match="edr_package_path_invalid"):
+        edr_package_dir(packages_root, "pkg1")
+
+    assert outside.exists()
+
+
+def test_list_edr_packages_skips_symlinked_package_dir_escape(tmp_path: Path) -> None:
+    packages_root = tmp_path / "edr_packages"
+    packages_root.mkdir()
+    outside = tmp_path / "outside_pkg"
+    outside.mkdir()
+    (outside / EDR_PACKAGE_META_NAME).write_text(
+        json.dumps({"id": "pkg1", "updated_at": 1}),
+        encoding="utf-8",
+    )
+    try:
+        (packages_root / "pkg1").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert list_edr_packages(packages_root) == []
+
+
+def test_get_edr_package_rejects_symlinked_meta_escape(tmp_path: Path) -> None:
+    packages_root = tmp_path / "edr_packages"
+    package_root = packages_root / "pkg1"
+    package_root.mkdir(parents=True)
+    outside_meta = tmp_path / "outside_meta.json"
+    outside_meta.write_text(json.dumps({"id": "pkg1"}), encoding="utf-8")
+    try:
+        (package_root / EDR_PACKAGE_META_NAME).symlink_to(outside_meta)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(FileNotFoundError):
+        get_edr_package(packages_root, "pkg1")
+
+
+def test_export_edr_package_rejects_symlinked_zip_escape(tmp_path: Path) -> None:
+    packages_root = tmp_path / "edr_packages"
+    package_root = packages_root / "pkg1"
+    package_root.mkdir(parents=True)
+    outside_zip = tmp_path / "outside.edr.zip"
+    outside_zip.write_bytes(b"secret")
+    try:
+        (package_root / EDR_PACKAGE_ZIP_NAME).symlink_to(outside_zip)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(FileNotFoundError):
+        export_edr_package(packages_root, "pkg1")
+
+
 def test_import_edr_package_rejects_traversal_manifest_id(tmp_path: Path) -> None:
     zip_path = tmp_path / "bad.edr.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -300,6 +367,44 @@ def test_import_edr_package_rejects_symlink_member(tmp_path: Path) -> None:
         import_edr_package_from_zip(zip_path=zip_path, packages_root=tmp_path / "edr_packages")
 
     assert not (tmp_path / "outside").exists()
+
+
+def test_import_edr_package_replaces_existing_symlink_children_without_target_write(
+    tmp_path: Path,
+) -> None:
+    packages_root = tmp_path / "edr_packages"
+    package_root = packages_root / "pkg1"
+    package_root.mkdir(parents=True)
+    outside_payload = tmp_path / "outside_payload"
+    outside_payload.mkdir()
+    (outside_payload / "marker.txt").write_text("keep", encoding="utf-8")
+    outside_zip = tmp_path / "outside.edr.zip"
+    outside_zip.write_bytes(b"do-not-overwrite")
+    try:
+        (package_root / EDR_PACKAGE_PAYLOAD_DIRNAME).symlink_to(
+            outside_payload,
+            target_is_directory=True,
+        )
+        (package_root / EDR_PACKAGE_ZIP_NAME).symlink_to(outside_zip)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    zip_path = tmp_path / "pkg1.edr.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            EDR_PACKAGE_MANIFEST_NAME,
+            json.dumps({"package_id": "pkg1", "dataset_id": "demo"}),
+        )
+
+    summary = import_edr_package_from_zip(zip_path=zip_path, packages_root=packages_root)
+
+    payload_root = package_root / EDR_PACKAGE_PAYLOAD_DIRNAME
+    assert summary["id"] == "pkg1"
+    assert not payload_root.is_symlink()
+    assert (payload_root / EDR_PACKAGE_MANIFEST_NAME).exists()
+    assert (outside_payload / "marker.txt").read_text(encoding="utf-8") == "keep"
+    assert outside_zip.read_bytes() == b"do-not-overwrite"
+    assert not (package_root / EDR_PACKAGE_ZIP_NAME).is_symlink()
 
 
 def test_zip_payload_skips_symlink_escape(tmp_path: Path) -> None:

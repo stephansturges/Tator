@@ -280,13 +280,10 @@ but unhelpful for the dataset.
   reference-first Data Ingestion were stabilized.
 - **Acceleration:** C-RADIOv4 and local SALAD heads can use macOS MLX with Torch
   fallback; SALAD stays out of crop-level class presets.
-- **Backend hardening:** job rollback/cleanup, checkpoint containment, EDR/RF-DETR
-  staging, package import/export paths, cache pruning, annotation overlays, CLIP
-  sidecars, calibration job paths, detector run registries, and SAM3 model
-  registry paths now fail closed; Qwen adapters/datasets now reject symlinked
-  registry escapes; dataset registries no longer follow symlinked records on
-  list/delete; class-analysis and data-ingestion job artifacts are contained.
-- **Validation:** `787 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
+- **Backend hardening:** registries, package imports/exports, job artifacts,
+  caches, annotation overlays, sidecars, and checkpoints now fail closed on
+  path/symlink escapes.
+- **Validation:** `792 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
   and local backend smoke are clean.
 
 </details>

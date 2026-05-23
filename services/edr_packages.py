@@ -60,6 +60,14 @@ def _safe_regular_file_within_root(path: Path, root: Path) -> bool:
     return resolved_path.is_file()
 
 
+def _path_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except Exception:
+        return False
+    return True
+
+
 def _safe_child_dir_within_root(path: Path, root: Path) -> bool:
     if path.is_symlink():
         return False
@@ -160,9 +168,23 @@ def canonical_edr_package_id(dataset_id: str, recipe_fingerprint: str) -> str:
 
 def edr_package_dir(packages_root: Path, package_id: str, *, create: bool = False) -> Path:
     safe_id = _validate_edr_package_id(package_id)
-    path = (packages_root / safe_id).resolve()
+    root = packages_root.resolve(strict=False)
+    raw_path = packages_root / safe_id
+    if raw_path.is_symlink():
+        raise ValueError("edr_package_path_invalid")
+    path = raw_path.resolve(strict=False)
+    if not _path_within_root(path, root):
+        raise ValueError("edr_package_path_invalid")
     if create:
-        path.mkdir(parents=True, exist_ok=True)
+        packages_root.mkdir(parents=True, exist_ok=True)
+        if raw_path.is_symlink():
+            raise ValueError("edr_package_path_invalid")
+        raw_path.mkdir(parents=True, exist_ok=True)
+        if raw_path.is_symlink():
+            raise ValueError("edr_package_path_invalid")
+        path = raw_path.resolve(strict=True)
+        if not _path_within_root(path, root):
+            raise ValueError("edr_package_path_invalid")
     return path
 
 
@@ -214,9 +236,29 @@ def _copy2_if_different(src: Path, dest: Path) -> None:
     src_resolved = src.resolve()
     if src_resolved == _path_identity(dest):
         return
-    _unlink_self_referential_symlink(dest)
+    if dest.is_symlink():
+        dest.unlink(missing_ok=True)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src_resolved, dest)
+
+
+def _remove_existing_child_path(path: Path, root: Path) -> None:
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+        return
+    if not path.exists():
+        return
+    root_resolved = root.resolve(strict=False)
+    try:
+        resolved = path.resolve(strict=True)
+    except Exception as exc:
+        raise RuntimeError("edr_package_path_invalid") from exc
+    if not _path_within_root(resolved, root_resolved):
+        raise RuntimeError("edr_package_path_invalid")
+    if resolved.is_dir():
+        shutil.rmtree(resolved)
+    else:
+        path.unlink(missing_ok=True)
 
 
 def _copy_file(src: Path, dest: Path, *, assets: List[Dict[str, Any]], kind: str) -> None:
@@ -717,13 +759,15 @@ def materialize_canonical_edr_package(
 def _ensure_payload(packages_root: Path, package_id: str) -> Path:
     package_root = edr_package_dir(packages_root, package_id, create=False)
     payload_root = package_root / EDR_PACKAGE_PAYLOAD_DIRNAME
-    if payload_root.exists() and (payload_root / EDR_PACKAGE_MANIFEST_NAME).exists():
+    if (
+        _safe_child_dir_within_root(payload_root, package_root)
+        and _safe_regular_file_within_root(payload_root / EDR_PACKAGE_MANIFEST_NAME, payload_root)
+    ):
         return payload_root
     zip_path = package_root / EDR_PACKAGE_ZIP_NAME
-    if not zip_path.exists():
+    if not _safe_regular_file_within_root(zip_path, package_root):
         raise FileNotFoundError(str(zip_path))
-    if payload_root.exists():
-        shutil.rmtree(payload_root)
+    _remove_existing_child_path(payload_root, package_root)
     payload_root.mkdir(parents=True, exist_ok=True)
     _extract_zip_safely(zip_path, payload_root)
     return payload_root
@@ -931,10 +975,20 @@ def list_edr_packages(packages_root: Path) -> List[Dict[str, Any]]:
     packages: List[Dict[str, Any]] = []
     if not packages_root.exists():
         return packages
+    root = packages_root.resolve(strict=False)
     for entry in sorted(packages_root.iterdir()):
-        if not entry.is_dir():
+        if entry.is_symlink():
             continue
-        meta = _load_json(entry / EDR_PACKAGE_META_NAME)
+        try:
+            entry_resolved = entry.resolve(strict=True)
+        except Exception:
+            continue
+        if not _path_within_root(entry_resolved, root) or not entry_resolved.is_dir():
+            continue
+        meta_path = entry_resolved / EDR_PACKAGE_META_NAME
+        if not _safe_regular_file_within_root(meta_path, entry_resolved):
+            continue
+        meta = _load_json(meta_path)
         if meta:
             packages.append(meta)
     packages.sort(key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0.0), reverse=True)
@@ -942,17 +996,22 @@ def list_edr_packages(packages_root: Path) -> List[Dict[str, Any]]:
 
 
 def get_edr_package(packages_root: Path, package_id: str) -> Dict[str, Any]:
-    meta = _load_json(edr_package_meta_path(packages_root, package_id))
+    package_root = edr_package_dir(packages_root, package_id, create=False)
+    meta_path = package_root / EDR_PACKAGE_META_NAME
+    if not _safe_regular_file_within_root(meta_path, package_root):
+        raise FileNotFoundError(package_id)
+    meta = _load_json(meta_path)
     if meta:
         return meta
     raise FileNotFoundError(package_id)
 
 
 def export_edr_package(packages_root: Path, package_id: str) -> Path:
-    zip_path = edr_package_zip_path(packages_root, package_id)
-    if not zip_path.exists():
+    package_root = edr_package_dir(packages_root, package_id, create=False)
+    zip_path = package_root / EDR_PACKAGE_ZIP_NAME
+    if not _safe_regular_file_within_root(zip_path, package_root):
         raise FileNotFoundError(str(zip_path))
-    return zip_path
+    return zip_path.resolve(strict=True)
 
 
 def import_edr_package_from_zip(
@@ -981,8 +1040,7 @@ def import_edr_package_from_zip(
             raise RuntimeError("edr_package_id_missing")
         package_root = edr_package_dir(packages_root, package_id, create=True)
         final_payload = package_root / EDR_PACKAGE_PAYLOAD_DIRNAME
-        if final_payload.exists():
-            shutil.rmtree(final_payload)
+        _remove_existing_child_path(final_payload, package_root)
         shutil.copytree(payload_root, final_payload)
         zip_dest = package_root / EDR_PACKAGE_ZIP_NAME
         _copy2_if_different(zip_path, zip_dest)

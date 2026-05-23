@@ -83,6 +83,31 @@ def test_yolo_run_lookup_rejects_blank_id(tmp_path: Path) -> None:
     assert exc_info.value.detail == "invalid_run_id"
 
 
+def test_yolo_run_lookup_rejects_symlinked_run_id_without_target_delete(tmp_path: Path) -> None:
+    job_root = tmp_path / "yolo_runs"
+    job_root.mkdir()
+    target = job_root / "target_run"
+    target.mkdir()
+    (target / "best.pt").write_text("weights", encoding="utf-8")
+    try:
+        (job_root / "linked_run").symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _yolo_run_dir_impl(
+            "linked_run",
+            create=False,
+            job_root=job_root,
+            sanitize_fn=_sanitize_yolo_run_id,
+            http_exception_cls=HTTPException,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_run_id"
+    assert (target / "best.pt").read_text(encoding="utf-8") == "weights"
+
+
 def test_rfdetr_run_lookup_rejects_normalized_alias(tmp_path: Path) -> None:
     job_root = tmp_path / "rfdetr_runs"
     (job_root / "run1").mkdir(parents=True)
@@ -98,6 +123,31 @@ def test_rfdetr_run_lookup_rejects_normalized_alias(tmp_path: Path) -> None:
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "invalid_run_id"
+
+
+def test_rfdetr_run_lookup_rejects_symlinked_run_id_without_target_delete(tmp_path: Path) -> None:
+    job_root = tmp_path / "rfdetr_runs"
+    job_root.mkdir()
+    target = job_root / "target_run"
+    target.mkdir()
+    (target / "checkpoint_best_total.pth").write_text("weights", encoding="utf-8")
+    try:
+        (job_root / "linked_run").symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _rfdetr_run_dir_impl(
+            "linked_run",
+            create=False,
+            job_root=job_root,
+            sanitize_fn=_sanitize_yolo_run_id,
+            http_exception_cls=HTTPException,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_run_id"
+    assert (target / "checkpoint_best_total.pth").read_text(encoding="utf-8") == "weights"
 
 
 def test_compute_dir_signature_skips_symlink_escape(tmp_path: Path) -> None:

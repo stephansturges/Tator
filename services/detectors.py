@@ -378,12 +378,18 @@ def _yolo_run_dir_impl(
     safe_id = sanitize_fn(raw_id)
     if not create and (not raw_id or safe_id != raw_id):
         raise http_exception_cls(status_code=400, detail="invalid_run_id")
-    job_root_resolved = job_root.resolve()
-    candidate = (job_root / safe_id).resolve()
+    job_root_resolved = job_root.resolve(strict=False)
+    raw_candidate = job_root / safe_id
+    if raw_candidate.is_symlink():
+        raise http_exception_cls(status_code=400, detail="invalid_run_id")
+    candidate = raw_candidate.resolve(strict=False)
     if not _path_is_within_root_impl(candidate, job_root_resolved):
         raise http_exception_cls(status_code=400, detail="invalid_run_id")
     if create:
-        candidate.mkdir(parents=True, exist_ok=True)
+        raw_candidate.mkdir(parents=True, exist_ok=True)
+        if raw_candidate.is_symlink():
+            raise http_exception_cls(status_code=400, detail="invalid_run_id")
+        candidate = raw_candidate.resolve(strict=True)
     return candidate
 
 
@@ -483,12 +489,18 @@ def _rfdetr_run_dir_impl(
     safe_id = sanitize_fn(raw_id)
     if not create and (not raw_id or safe_id != raw_id):
         raise http_exception_cls(status_code=400, detail="invalid_run_id")
-    job_root_resolved = job_root.resolve()
-    candidate = (job_root / safe_id).resolve()
+    job_root_resolved = job_root.resolve(strict=False)
+    raw_candidate = job_root / safe_id
+    if raw_candidate.is_symlink():
+        raise http_exception_cls(status_code=400, detail="invalid_run_id")
+    candidate = raw_candidate.resolve(strict=False)
     if not _path_is_within_root_impl(candidate, job_root_resolved):
         raise http_exception_cls(status_code=400, detail="invalid_run_id")
     if create:
-        candidate.mkdir(parents=True, exist_ok=True)
+        raw_candidate.mkdir(parents=True, exist_ok=True)
+        if raw_candidate.is_symlink():
+            raise http_exception_cls(status_code=400, detail="invalid_run_id")
+        candidate = raw_candidate.resolve(strict=True)
     return candidate
 
 

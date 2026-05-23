@@ -603,8 +603,7 @@ def materialize_canonical_edr_package(
     package_id = canonical_edr_package_id(dataset_id, recipe_fingerprint)
     package_root = edr_package_dir(packages_root, package_id, create=True)
     payload_root = package_root / EDR_PACKAGE_PAYLOAD_DIRNAME
-    if payload_root.exists():
-        shutil.rmtree(payload_root)
+    _remove_existing_child_path(payload_root, package_root)
     payload_root.mkdir(parents=True, exist_ok=True)
 
     assets: List[Dict[str, Any]] = []
@@ -810,6 +809,8 @@ def _stage_tree_if_needed(
     package_sha256: str,
     kind: str,
 ) -> None:
+    if dest.is_symlink():
+        dest.unlink(missing_ok=True)
     if dest.exists() and _stage_meta_matches(
         dest,
         package_id=package_id,
@@ -817,8 +818,7 @@ def _stage_tree_if_needed(
         kind=kind,
     ):
         return
-    if dest.exists():
-        shutil.rmtree(dest)
+    _remove_existing_child_path(dest, dest.parent)
     dest.mkdir(parents=True, exist_ok=True)
     _copy_tree_filtered(src, dest)
     _write_stage_meta(

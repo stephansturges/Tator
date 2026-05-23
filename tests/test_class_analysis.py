@@ -121,6 +121,7 @@ def test_local_salad_head_is_trainable_normalized_and_fixed_width():
 def test_mlx_local_salad_matches_torch_state_and_trains_one_step():
     if not local_salad_mlx_available():
         pytest.skip("MLX is not available")
+    torch.manual_seed(321)
     gen = torch.Generator(device="cpu")
     gen.manual_seed(321)
     config = LocalSALADConfig(

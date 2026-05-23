@@ -11,8 +11,10 @@ from services.edr_packages import (
     EDR_PACKAGE_MANIFEST_NAME,
     EDR_PACKAGE_META_NAME,
     EDR_PACKAGE_PAYLOAD_DIRNAME,
+    EDR_PACKAGE_STAGE_META_NAME,
     EDR_PACKAGE_ZIP_NAME,
     _copy_tree,
+    _stage_tree_if_needed,
     edr_package_dir,
     export_edr_package,
     get_edr_package,
@@ -405,6 +407,45 @@ def test_import_edr_package_replaces_existing_symlink_children_without_target_wr
     assert (outside_payload / "marker.txt").read_text(encoding="utf-8") == "keep"
     assert outside_zip.read_bytes() == b"do-not-overwrite"
     assert not (package_root / EDR_PACKAGE_ZIP_NAME).is_symlink()
+
+
+def test_stage_tree_replaces_symlinked_destination_without_using_target(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "safe.txt").write_text("safe", encoding="utf-8")
+    dest_root = tmp_path / "dest_root"
+    dest_root.mkdir()
+    outside = tmp_path / "outside_stage"
+    outside.mkdir()
+    (outside / EDR_PACKAGE_STAGE_META_NAME).write_text(
+        json.dumps(
+            {
+                "package_id": "pkg1",
+                "package_sha256": "sha",
+                "kind": "classifier",
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        (dest_root / "pkg1__classifier").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _stage_tree_if_needed(
+        src,
+        dest_root / "pkg1__classifier",
+        package_id="pkg1",
+        package_sha256="sha",
+        kind="classifier",
+    )
+
+    dest = dest_root / "pkg1__classifier"
+    assert not dest.is_symlink()
+    assert (dest / "safe.txt").read_text(encoding="utf-8") == "safe"
+    assert not (outside / "safe.txt").exists()
 
 
 def test_zip_payload_skips_symlink_escape(tmp_path: Path) -> None:

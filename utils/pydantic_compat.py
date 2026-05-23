@@ -2,7 +2,57 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Type
+from functools import wraps
+from typing import Any, Callable, Dict, Mapping, Type
+
+try:  # Pydantic v2.
+    from pydantic import model_validator as _model_validator
+except ImportError:  # pragma: no cover - exercised only with Pydantic v1.
+    _model_validator = None
+
+try:  # Prefer the non-deprecated v1 compatibility namespace when present.
+    from pydantic.v1 import root_validator as _v1_root_validator
+except ImportError:  # pragma: no cover - exercised only with Pydantic v1.
+    from pydantic import root_validator as _v1_root_validator  # type: ignore[attr-defined]
+
+
+def root_validator_compat(
+    *,
+    pre: bool = False,
+    skip_on_failure: bool = False,
+    **kwargs: Any,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Expose root-validator semantics without Pydantic v2 deprecation noise."""
+
+    if _model_validator is None:
+        return _v1_root_validator(pre=pre, skip_on_failure=skip_on_failure, **kwargs)
+
+    if pre:
+        def _decorate_before(fn: Callable[..., Any]) -> Callable[..., Any]:
+            @wraps(fn)
+            def _wrapped(cls: Type[Any], values: Any) -> Any:
+                return fn(cls, values)
+
+            return _model_validator(mode="before")(classmethod(_wrapped))
+
+        return _decorate_before
+
+    def _decorate_after(fn: Callable[..., Any]) -> Callable[..., Any]:
+        def _wrapped(self: Any) -> Any:
+            values = dict(getattr(self, "__dict__", {}))
+            updated = fn(type(self), values)
+            if isinstance(updated, Mapping):
+                for key, value in updated.items():
+                    if hasattr(self, key):
+                        object.__setattr__(self, key, value)
+            return self
+
+        _wrapped.__name__ = fn.__name__
+        _wrapped.__qualname__ = fn.__qualname__
+        _wrapped.__doc__ = fn.__doc__
+        return _model_validator(mode="after")(_wrapped)
+
+    return _decorate_after
 
 
 def model_copy_update(model: Any, updates: Mapping[str, Any], **kwargs: Any) -> Any:

@@ -5,7 +5,9 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Literal
 
-from pydantic import BaseModel, Field, root_validator
+from pydantic import BaseModel, Field
+
+from utils.pydantic_compat import root_validator_compat
 
 
 class Base64Payload(BaseModel):
@@ -55,7 +57,7 @@ class PointPrompt(BaseModel):
     sam_variant: Optional[str] = None
     image_name: Optional[str] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _ensure_point_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -73,7 +75,7 @@ class BboxPrompt(BaseModel):
     sam_variant: Optional[str] = None
     image_name: Optional[str] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _ensure_bbox_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -88,7 +90,7 @@ class SamPreloadRequest(BaseModel):
     image_name: Optional[str] = None
     slot: Optional[str] = "current"
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _ensure_preload_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -163,7 +165,7 @@ class Sam3VisualPrompt(BaseModel):
     max_results: Optional[int] = None
     min_size: Optional[int] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_visual_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -286,7 +288,7 @@ class QwenInferenceRequest(BaseModel):
     image_name: Optional[str] = None
     max_results: Optional[int] = 8
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_qwen_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -325,7 +327,7 @@ class QwenCaptionHint(BaseModel):
     confidence: Optional[float] = None
     source_id: Optional[str] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_hint(cls, values):  # noqa: N805
         label = (values.get("label") or "").strip()
         if not label:
@@ -399,7 +401,7 @@ class QwenCaptionRequest(BaseModel):
     caption_cleanup_prompt: Optional[str] = None
     labelmap_glossary: Optional[str] = None
 
-    @root_validator(pre=True)
+    @root_validator_compat(pre=True)
     def _normalize_caption_payload_input(cls, values):  # noqa: N805
         if not isinstance(values, Mapping):
             return values
@@ -440,7 +442,7 @@ class QwenCaptionRequest(BaseModel):
                 data[field] = str(data.get(field)).strip() or None
         return data
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_caption_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -580,7 +582,7 @@ class QwenPromptSection(BaseModel):
     default_image_type: str = "image"
     default_extra_context: str = ""
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_qwen_section(cls, values):  # noqa: N805
         template = values.get("base_prompt") or ""
         if "{items}" not in template:
@@ -682,7 +684,7 @@ class QwenTrainRequest(BaseModel):
     train_limit: Optional[int] = None
     val_limit: Optional[int] = None
 
-    @root_validator(pre=True)
+    @root_validator_compat(pre=True)
     def _normalize_qwen_train_payload_input(cls, values):  # noqa: N805
         if not isinstance(values, Mapping):
             return values
@@ -744,7 +746,7 @@ class QwenTrainRequest(BaseModel):
                 data[field] = None
         return data
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_dataset_fields(cls, values):  # noqa: N805
         if not values.get("dataset_id"):
             raise ValueError("dataset_id_required")
@@ -810,7 +812,7 @@ class YoloTrainRequest(BaseModel):
     augmentations: Optional[Dict[str, Any]] = None
     accept_tos: Optional[bool] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_dataset_fields(cls, values):  # noqa: N805
         if not (values.get("dataset_id") or values.get("dataset_root")):
             raise ValueError("dataset_id_or_root_required")
@@ -832,7 +834,7 @@ class YoloHeadGraftRequest(BaseModel):
     export_onnx: Optional[bool] = None
     accept_tos: Optional[bool] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_dataset_fields(cls, values):  # noqa: N805
         if not (values.get("dataset_id") or values.get("dataset_root")):
             raise ValueError("dataset_id_or_root_required")
@@ -844,7 +846,7 @@ class YoloHeadGraftDryRunRequest(BaseModel):
     dataset_id: Optional[str] = None
     dataset_root: Optional[str] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_dataset_fields(cls, values):  # noqa: N805
         if not (values.get("dataset_id") or values.get("dataset_root")):
             raise ValueError("dataset_id_or_root_required")
@@ -874,7 +876,7 @@ class RfDetrTrainRequest(BaseModel):
     augmentations: Optional[Dict[str, Any]] = None
     accept_tos: Optional[bool] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_dataset_fields(cls, values):  # noqa: N805
         if not (values.get("dataset_id") or values.get("dataset_root")):
             raise ValueError("dataset_id_or_root_required")
@@ -906,7 +908,7 @@ class YoloRegionRequest(BaseModel):
     full_height: Optional[int] = None
     expected_labelmap: Optional[List[str]] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_region(cls, values):  # noqa: N805
         region = values.get("region")
         if not isinstance(region, list) or len(region) < 4:
@@ -937,7 +939,7 @@ class YoloFullRequest(BaseModel):
     max_det: Optional[int] = 300
     expected_labelmap: Optional[List[str]] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_image(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_required")
@@ -955,7 +957,7 @@ class YoloWindowedRequest(BaseModel):
     overlap: Optional[float] = 0.2
     merge_iou: Optional[float] = 0.5
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_image(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_required")
@@ -974,7 +976,7 @@ class RfDetrRegionRequest(BaseModel):
     full_height: Optional[int] = None
     expected_labelmap: Optional[List[str]] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_region(cls, values):  # noqa: N805
         region = values.get("region")
         if not isinstance(region, list) or len(region) < 4:
@@ -1004,7 +1006,7 @@ class RfDetrFullRequest(BaseModel):
     max_det: Optional[int] = 300
     expected_labelmap: Optional[List[str]] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_image(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_required")
@@ -1021,7 +1023,7 @@ class RfDetrWindowedRequest(BaseModel):
     overlap: Optional[float] = 0.2
     merge_iou: Optional[float] = 0.5
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_image(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_required")
@@ -1055,7 +1057,7 @@ class MultiPointPrompt(BaseModel):
     sam_variant: Optional[str] = None
     image_name: Optional[str] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _ensure_multi_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -1087,7 +1089,7 @@ class Sam3TextPrompt(BaseModel):
     window_overlap: Optional[float] = None
     merge_iou: Optional[float] = None
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _ensure_text_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -1162,7 +1164,7 @@ class AgentApplyImageRequest(BaseModel):
     extra_clip_min_prob: Optional[float] = Field(None, ge=0.0, le=1.0)
     extra_clip_margin: Optional[float] = Field(None, ge=0.0, le=1.0)
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _ensure_agent_apply_image_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -1185,7 +1187,7 @@ class AgentApplyChainStep(BaseModel):
     extra_clip_min_prob: Optional[float] = Field(None, ge=0.0, le=1.0)
     extra_clip_margin: Optional[float] = Field(None, ge=0.0, le=1.0)
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _ensure_chain_step(cls, values):  # noqa: N805
         recipe_id = values.get("recipe_id")
         recipe_obj = values.get("recipe")
@@ -1215,7 +1217,7 @@ class AgentApplyImageChainRequest(BaseModel):
     simplify_epsilon: float = Field(0.0, ge=0.0, le=1_000.0)
     max_results: int = Field(1000, ge=1, le=5000)
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _ensure_agent_apply_chain_payload(cls, values):  # noqa: N805
         if not values.get("image_base64") and not values.get("image_token"):
             raise ValueError("image_payload_missing")
@@ -1331,7 +1333,7 @@ class QwenPrepassRequest(BaseModel):
     immediate_action_logit_bias: Optional[float] = 6.0
     trace_verbose: Optional[bool] = False
 
-    @root_validator(pre=True)
+    @root_validator_compat(pre=True)
     def _normalize_prepass_payload_input(cls, values):  # noqa: N805
         if not isinstance(values, Mapping):
             return values
@@ -1420,7 +1422,7 @@ class AutoLabelRequest(BaseModel):
     simplify_epsilon: float = Field(2.0, ge=0.0, le=100.0)
     force_annotation_lock: bool = False
 
-    @root_validator(pre=True)
+    @root_validator_compat(pre=True)
     def _normalize_auto_label_payload_input(cls, values):  # noqa: N805
         if not isinstance(values, Mapping):
             return values
@@ -1441,7 +1443,7 @@ class AutoLabelRequest(BaseModel):
                 data[field] = str(data.get(field)).strip() or None
         return data
 
-    @root_validator(skip_on_failure=True)
+    @root_validator_compat(skip_on_failure=True)
     def _validate_auto_label_request(cls, values):  # noqa: N805
         class_names = values.get("class_names")
         if isinstance(class_names, list):

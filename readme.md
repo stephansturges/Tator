@@ -995,11 +995,16 @@ job-start validation, and the Mac YOLO training work.
   request dumping and validation, eliminating deprecated `.dict()` and
   `.parse_obj()` calls from backend runtime paths while keeping Pydantic v1
   fallback support.
+- Shared request schemas now use a Pydantic-v1/v2-compatible root-validator
+  wrapper, and HTTP status constants now resolve new Starlette names before
+  touching legacy aliases. Importing the backend schemas and status shim is
+  warning-clean under the current Pydantic and Starlette versions.
 - Local validation for this checkpoint used:
 
 ```bash
 NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python -m py_compile \
-  services/detectors.py models/schemas.py localinferenceapi.py
+  services/detectors.py models/schemas.py localinferenceapi.py \
+  utils/pydantic_compat.py utils/status_compat.py
 node --check ybat-master/ybat.js
 NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python -m pytest \
   tests/test_macos_acceleration.py \
@@ -1018,7 +1023,7 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_ui_smoke.py \
   --base-url http://127.0.0.1:8000
 ```
 
-  Latest results: full pytest `700 passed, 17 skipped`; endpoint map check
+  Latest results: full pytest `700 passed, 17 skipped, 8 warnings`; endpoint map check
   `148` UI paths with no missing OpenAPI paths; endpoint method check `248`
   fetches with no failures; live backend smoke after restart reported MPS via
   `/system/gpu`, `accelerator` in both YOLO OpenAPI request schemas, and normal

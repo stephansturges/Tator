@@ -158,6 +158,36 @@ def test_upload_dataset_zip_rejects_symlinked_registry_root_before_copy(
     assert list(outside.iterdir()) == []
 
 
+def test_upload_dataset_zip_rejects_symlinked_registry_root_parent_before_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside_registry"
+    outside.mkdir()
+    link_parent = tmp_path / "linked_parent"
+    try:
+        link_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", link_parent / "registry")
+    upload = UploadFile(
+        filename="demo.zip",
+        file=BytesIO(_zip_bytes({"labelmap.txt": b"building\n", "train/images/a.jpg": b"img"})),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        api.upload_dataset_zip(
+            file=upload,
+            dataset_id="demo",
+            dataset_type=None,
+            context=None,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "dataset_upload_target_invalid"
+    assert upload.file.closed
+    assert list(outside.iterdir()) == []
+
+
 def test_upload_dataset_zip_rejects_target_symlink_without_target_write(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

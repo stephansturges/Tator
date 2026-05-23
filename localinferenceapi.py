@@ -14231,12 +14231,14 @@ def _qwen_dataset_storage_root(
 ) -> Path:
     try:
         raw_root = QWEN_DATASET_ROOT
-        if raw_root == QWEN_JOB_ROOT / "datasets" and QWEN_JOB_ROOT.is_symlink():
+        if raw_root == QWEN_JOB_ROOT / "datasets" and _storage_path_has_symlink_component(QWEN_JOB_ROOT):
             raise ValueError("qwen job root is a symlink")
-        if raw_root.is_symlink():
+        if _storage_path_has_symlink_component(raw_root):
             raise ValueError("qwen dataset root is a symlink")
         if create:
             raw_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("qwen dataset root is a symlink")
         if raw_root.exists() and not raw_root.is_dir():
             raise ValueError("qwen dataset root is not a directory")
         return raw_root.resolve(strict=False)
@@ -14262,10 +14264,12 @@ def _qwen_dataset_child_dir(
     try:
         root = _qwen_dataset_storage_root(create=True, detail=detail)
         candidate = root / raw_id
-        if candidate.is_symlink():
+        if _storage_path_has_symlink_component(candidate):
             raise ValueError("qwen dataset child is a symlink")
         if create:
             candidate.mkdir(parents=True, exist_ok=False)
+        if _storage_path_has_symlink_component(candidate):
+            raise ValueError("qwen dataset child is a symlink")
         if candidate.exists() and not candidate.is_dir():
             raise ValueError("qwen dataset child is not a directory")
         resolved = candidate.resolve(strict=False)
@@ -14285,12 +14289,14 @@ def _qwen_dataset_upload_storage_root(
 ) -> Path:
     try:
         raw_root = DATASET_UPLOAD_ROOT
-        if raw_root == UPLOAD_ROOT / "dataset_uploads" and UPLOAD_ROOT.is_symlink():
+        if raw_root == UPLOAD_ROOT / "dataset_uploads" and _storage_path_has_symlink_component(UPLOAD_ROOT):
             raise ValueError("upload root is a symlink")
-        if raw_root.is_symlink():
+        if _storage_path_has_symlink_component(raw_root):
             raise ValueError("dataset upload root is a symlink")
         if create:
             raw_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("dataset upload root is a symlink")
         if raw_root.exists() and not raw_root.is_dir():
             raise ValueError("dataset upload root is not a directory")
         return raw_root.resolve(strict=False)
@@ -14308,10 +14314,12 @@ def _qwen_dataset_upload_job_dir(
     try:
         root = _qwen_dataset_upload_storage_root(create=True, detail=detail)
         candidate = root / f"qwen_upload_{safe_job_id}"
-        if candidate.is_symlink():
+        if _storage_path_has_symlink_component(candidate):
             raise ValueError("qwen dataset upload job dir is a symlink")
         if create:
             candidate.mkdir(parents=True, exist_ok=False)
+        if _storage_path_has_symlink_component(candidate):
+            raise ValueError("qwen dataset upload job dir is a symlink")
         if candidate.exists() and not candidate.is_dir():
             raise ValueError("qwen dataset upload job path is not a directory")
         resolved = candidate.resolve(strict=False)
@@ -14331,10 +14339,12 @@ def _dataset_registry_storage_root(
 ) -> Path:
     try:
         raw_root = DATASET_REGISTRY_ROOT
-        if raw_root.is_symlink():
+        if _storage_path_has_symlink_component(raw_root):
             raise ValueError("dataset registry root is a symlink")
         if create:
             raw_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("dataset registry root is a symlink")
         if raw_root.exists() and not raw_root.is_dir():
             raise ValueError("dataset registry root is not a directory")
         return raw_root.resolve(strict=False)
@@ -14359,7 +14369,7 @@ def _dataset_registry_child_dir(
     try:
         root = _dataset_registry_storage_root(create=True, detail=detail)
         candidate = root / raw_id
-        if candidate.is_symlink():
+        if _storage_path_has_symlink_component(candidate):
             raise ValueError("dataset registry child is a symlink")
         resolved = candidate.resolve(strict=False)
         if not _path_is_within_root_impl(resolved, root) or resolved.parent != root:

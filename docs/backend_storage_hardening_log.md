@@ -15,3 +15,16 @@ preserving the exact validation story for storage and artifact-write fixes.
   SAM3 generated config roots, and Qwen split roots.
 - Validation: `975 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Dataset Registry and Qwen Dataset Roots
+
+- Rejected symlink components anywhere in Qwen dataset roots and upload staging
+  roots before and after root creation.
+- Rejected symlink components in Qwen dataset children and upload job
+  directories before finalizing uploads or creating build outputs.
+- Rejected symlink components anywhere in the dataset registry root and registry
+  child directories before zipped dataset copies.
+- Added regressions for Qwen upload staging, Qwen finalize/build targets, and
+  zipped dataset registry uploads through symlinked parent directories.
+- Validation: `979 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

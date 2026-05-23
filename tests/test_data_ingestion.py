@@ -300,6 +300,68 @@ def test_write_upload_file_overwrite_unlinks_symlink_destination(tmp_path):
     assert not outside.exists()
 
 
+def test_write_upload_file_rejects_symlinked_parent_without_write(tmp_path):
+    outside_dir = tmp_path / "outside_parent"
+    outside_dir.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(
+            api._write_upload_file(
+                _FakeUpload("upload.bin", b"payload"),
+                linked_parent / "upload.bin",
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_relative_path"
+    assert list(outside_dir.iterdir()) == []
+
+
+def test_save_upload_file_rejects_symlinked_root_without_write(tmp_path):
+    outside_dir = tmp_path / "outside_root"
+    outside_dir.mkdir()
+    upload_root = tmp_path / "upload_root"
+    try:
+        upload_root.symlink_to(outside_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(api._save_upload_file(_FakeUpload("upload.bin", b"payload"), upload_root))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_relative_path"
+    assert list(outside_dir.iterdir()) == []
+
+
+def test_save_upload_file_rejects_symlinked_nested_parent_without_write(tmp_path):
+    upload_root = tmp_path / "upload_root"
+    upload_root.mkdir()
+    outside_dir = tmp_path / "outside_nested"
+    outside_dir.mkdir()
+    try:
+        (upload_root / "nested").symlink_to(outside_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(
+            api._save_upload_file(
+                _FakeUpload("nested/upload.bin", b"payload"),
+                upload_root,
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_relative_path"
+    assert list(outside_dir.iterdir()) == []
+
+
 def test_data_ingestion_save_uploads_closes_upload_handles(tmp_path):
     upload = _FakeUpload("candidate.jpg", b"payload")
 

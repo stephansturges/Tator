@@ -29060,16 +29060,20 @@ async def _save_upload_file(
     quota_limit: Optional[int] = None,
 ) -> Path:
     rel_path = _normalise_relative_path(upload.filename)
-    dest = (root / rel_path).resolve()
-    if not _path_is_within_root_impl(dest, root.resolve()):
+    root_resolved = _safe_upload_write_root(root, detail="invalid_relative_path")
+    dest_raw = root_resolved / rel_path
+    if _classifier_path_has_symlink_component(dest_raw, root_resolved):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
-    if dest.exists():
+    dest = dest_raw.resolve(strict=False)
+    if not _path_is_within_root_impl(dest, root_resolved):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
+    if dest.exists() or dest.is_symlink():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="upload_exists")
     await _write_upload_file(
         upload,
         dest,
         max_bytes=max_bytes,
-        quota_root=quota_root or root,
+        quota_root=quota_root or root_resolved,
         quota_limit=quota_limit,
     )
     return dest
@@ -29090,6 +29094,21 @@ def _validate_upload_extension(filename: str, allowed_exts: set[str], detail: st
     suffix = Path(filename).suffix.lower()
     if allowed_exts and suffix not in allowed_exts:
         raise HTTPException(status_code=HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=detail)
+
+
+def _safe_upload_write_root(root: Path, *, detail: str) -> Path:
+    try:
+        raw_root = Path(root)
+        if raw_root.is_symlink() or raw_root.parent.is_symlink():
+            raise RuntimeError("upload_root_symlink")
+        raw_root.mkdir(parents=True, exist_ok=True)
+        if raw_root.is_symlink() or raw_root.parent.is_symlink() or not raw_root.is_dir():
+            raise RuntimeError("upload_root_invalid")
+        return raw_root.resolve(strict=True)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
 def _safe_upload_subdir(subdir: str, *, detail: str) -> Path:
@@ -29151,7 +29170,11 @@ async def _write_upload_file(
     quota_limit: Optional[int] = None,
     allow_overwrite: bool = False,
 ) -> None:
+    if dest.parent.is_symlink():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.parent.is_symlink():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
     if dest.is_symlink():
         if not allow_overwrite:
             raise HTTPException(status_code=HTTP_409_CONFLICT, detail="upload_exists")

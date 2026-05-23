@@ -496,6 +496,111 @@ def test_persistent_snapshot_normalises_all_records_before_overlay_writes(
     assert not (overlay_root / "labels" / "train" / "img_ok.txt").exists()
 
 
+def test_persistent_snapshot_replaces_overlay_file_symlink_without_touching_target(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    meta = {"annotation_lock": _active_lock("sess-lock")}
+    overlay_root = Path(entry["registry_root"]) / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    label_dir = overlay_root / "labels" / "train"
+    label_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    (label_dir / "img.txt").symlink_to(outside)
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api, "_dataset_effective_root_from_entry", lambda _entry: Path(_entry["dataset_root"])
+    )
+    monkeypatch.setattr(
+        api, "_annotation_load_or_create_meta", lambda _entry: (Path("/tmp/meta.json"), meta)
+    )
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: {"progress": {}})
+    monkeypatch.setattr(api, "_annotation_persist_meta", lambda _entry, _meta: None)
+
+    out = api.save_dataset_annotation_snapshot(
+        "ds",
+        {
+            "session_id": "sess-lock",
+            "records": [
+                {
+                    "split": "train",
+                    "image_relpath": "img.jpg",
+                    "label_lines": ["0 0.5 0.5 0.1 0.1"],
+                }
+            ],
+        },
+    )
+
+    assert out["status"] == "saved"
+    assert outside.read_text(encoding="utf-8") == "secret"
+    label_path = label_dir / "img.txt"
+    assert not label_path.is_symlink()
+    assert label_path.read_text(encoding="utf-8").strip() == "0 0.5 0.5 0.1 0.1"
+
+
+def test_persistent_snapshot_rejects_overlay_parent_symlink_escape(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    meta = {"annotation_lock": _active_lock("sess-lock")}
+    overlay_root = Path(entry["registry_root"]) / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    label_parent = overlay_root / "labels"
+    label_parent.mkdir(parents=True, exist_ok=True)
+    outside_dir = tmp_path / "outside_labels"
+    outside_dir.mkdir()
+    (label_parent / "train").symlink_to(outside_dir, target_is_directory=True)
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api, "_dataset_effective_root_from_entry", lambda _entry: Path(_entry["dataset_root"])
+    )
+    monkeypatch.setattr(
+        api, "_annotation_load_or_create_meta", lambda _entry: (Path("/tmp/meta.json"), meta)
+    )
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.save_dataset_annotation_snapshot(
+            "ds",
+            {
+                "session_id": "sess-lock",
+                "records": [
+                    {
+                        "split": "train",
+                        "image_relpath": "img.jpg",
+                        "label_lines": ["0 0.5 0.5 0.1 0.1"],
+                    }
+                ],
+            },
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "annotation_overlay_path_forbidden"
+    assert not (outside_dir / "img.txt").exists()
+
+
+def test_annotation_manifest_ignores_overlay_and_source_symlink_escapes(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    _write_test_image(Path(entry["dataset_root"]) / "images" / "img.jpg")
+    outside_label = tmp_path / "outside_label.txt"
+    outside_label.write_text("0 0.9 0.9 0.1 0.1\n", encoding="utf-8")
+    outside_text = tmp_path / "outside_text.txt"
+    outside_text.write_text("secret caption", encoding="utf-8")
+    overlay_root = Path(entry["registry_root"]) / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    overlay_label_dir = overlay_root / "labels" / "train"
+    overlay_label_dir.mkdir(parents=True, exist_ok=True)
+    (overlay_label_dir / "img.txt").symlink_to(outside_label)
+    text_dir = Path(entry["dataset_root"]) / "text_labels"
+    text_dir.mkdir(parents=True, exist_ok=True)
+    (text_dir / "img.txt").symlink_to(outside_text)
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+
+    manifest = api.get_dataset_annotation_manifest("ds")
+
+    assert manifest["images"][0]["label_lines"] == []
+    assert manifest["images"][0]["text_label"] == ""
+
+
 def test_resolve_annotation_image_path_rejects_symlink_escape(tmp_path) -> None:
     dataset_root = tmp_path / "dataset"
     images_root = dataset_root / "images"

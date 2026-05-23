@@ -14228,8 +14228,10 @@ def _annotation_source_label_path(
     return dataset_root / "labels" / image_relpath.with_suffix(".txt")
 
 
-def _annotation_overlay_label_path(entry: Dict[str, Any], split: str, image_relpath: Path) -> Path:
-    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
+def _annotation_overlay_label_path(
+    entry: Dict[str, Any], split: str, image_relpath: Path, *, ensure: bool = True
+) -> Path:
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=ensure)
     return overlay_root / "labels" / split / image_relpath.with_suffix(".txt")
 
 
@@ -14251,56 +14253,110 @@ def _annotation_source_text_path_legacy(dataset_root: Path, image_relpath: Path)
     return dataset_root / "text_labels" / _annotation_legacy_text_name(image_relpath)
 
 
-def _annotation_overlay_text_path(entry: Dict[str, Any], image_relpath: Path) -> Path:
-    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
+def _annotation_overlay_text_path(
+    entry: Dict[str, Any], image_relpath: Path, *, ensure: bool = True
+) -> Path:
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=ensure)
     return overlay_root / "text_labels" / _annotation_text_relpath(image_relpath)
 
 
-def _annotation_overlay_text_path_legacy(entry: Dict[str, Any], image_relpath: Path) -> Path:
-    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
+def _annotation_overlay_text_path_legacy(
+    entry: Dict[str, Any], image_relpath: Path, *, ensure: bool = True
+) -> Path:
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=ensure)
     return overlay_root / "text_labels" / _annotation_legacy_text_name(image_relpath)
+
+
+def _annotation_safe_text_path(path: Path, root: Path) -> Optional[Path]:
+    try:
+        root_resolved = root.resolve()
+        resolved = path.resolve()
+    except Exception:
+        return None
+    if not _path_is_within_root_impl(resolved, root_resolved):
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
+def _annotation_read_text_within_root(path: Path, root: Path) -> Optional[str]:
+    resolved = _annotation_safe_text_path(path, root)
+    if resolved is None:
+        return None
+    return resolved.read_text(encoding="utf-8")
+
+
+def _annotation_write_text_within_root(path: Path, root: Path, text: str) -> None:
+    root_resolved = root.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        parent_resolved = path.parent.resolve()
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_overlay_path_forbidden") from exc
+    if not _path_is_within_root_impl(parent_resolved, root_resolved):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_overlay_path_forbidden")
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+    elif path.exists() and path.is_dir():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_overlay_path_forbidden")
+    try:
+        target_resolved = path.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_overlay_path_forbidden") from exc
+    if not _path_is_within_root_impl(target_resolved, root_resolved):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_overlay_path_forbidden")
+    path.write_text(text, encoding="utf-8")
 
 
 def _annotation_effective_label_lines(
     entry: Dict[str, Any], split: str, image_relpath: Path
 ) -> List[str]:
-    overlay_path = _annotation_overlay_label_path(entry, split, image_relpath)
-    if overlay_path.exists():
-        return [
-            ln.strip() for ln in overlay_path.read_text(encoding="utf-8").splitlines() if ln.strip()
-        ]
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=False)
+    overlay_path = _annotation_overlay_label_path(entry, split, image_relpath, ensure=False)
+    overlay_text = _annotation_read_text_within_root(overlay_path, overlay_root)
+    if overlay_text is not None:
+        return [ln.strip() for ln in overlay_text.splitlines() if ln.strip()]
     dataset_root = _dataset_effective_root_from_entry(entry)
     layout = str(entry.get("yolo_layout") or "flat")
     source_path = _annotation_source_label_path(dataset_root, layout, split, image_relpath)
-    if not source_path.exists():
+    source_text = _annotation_read_text_within_root(source_path, dataset_root)
+    if source_text is None:
         return []
-    return [ln.strip() for ln in source_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    return [ln.strip() for ln in source_text.splitlines() if ln.strip()]
 
 
 def _annotation_effective_text_label(entry: Dict[str, Any], image_relpath: Path) -> str:
-    overlay_path = _annotation_overlay_text_path(entry, image_relpath)
-    if overlay_path.exists():
-        return overlay_path.read_text(encoding="utf-8").strip()
-    overlay_legacy = _annotation_overlay_text_path_legacy(entry, image_relpath)
-    if overlay_legacy.exists():
-        return overlay_legacy.read_text(encoding="utf-8").strip()
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=False)
+    overlay_path = _annotation_overlay_text_path(entry, image_relpath, ensure=False)
+    overlay_text = _annotation_read_text_within_root(overlay_path, overlay_root)
+    if overlay_text is not None:
+        return overlay_text.strip()
+    overlay_legacy = _annotation_overlay_text_path_legacy(entry, image_relpath, ensure=False)
+    overlay_legacy_text = _annotation_read_text_within_root(overlay_legacy, overlay_root)
+    if overlay_legacy_text is not None:
+        return overlay_legacy_text.strip()
     dataset_root = _dataset_effective_root_from_entry(entry)
     source_path = _annotation_source_text_path(dataset_root, image_relpath)
-    if source_path.exists():
-        return source_path.read_text(encoding="utf-8").strip()
+    source_text = _annotation_read_text_within_root(source_path, dataset_root)
+    if source_text is not None:
+        return source_text.strip()
     legacy_source = _annotation_source_text_path_legacy(dataset_root, image_relpath)
-    if legacy_source.exists():
-        return legacy_source.read_text(encoding="utf-8").strip()
+    legacy_text = _annotation_read_text_within_root(legacy_source, dataset_root)
+    if legacy_text is not None:
+        return legacy_text.strip()
     return ""
 
 
 def _annotation_source_text_value(dataset_root: Path, image_relpath: Path) -> str:
     source_path = _annotation_source_text_path(dataset_root, image_relpath)
-    if source_path.exists():
-        return source_path.read_text(encoding="utf-8").strip()
+    source_text = _annotation_read_text_within_root(source_path, dataset_root)
+    if source_text is not None:
+        return source_text.strip()
     legacy_source = _annotation_source_text_path_legacy(dataset_root, image_relpath)
-    if legacy_source.exists():
-        return legacy_source.read_text(encoding="utf-8").strip()
+    legacy_text = _annotation_read_text_within_root(legacy_source, dataset_root)
+    if legacy_text is not None:
+        return legacy_text.strip()
     return ""
 
 
@@ -14692,28 +14748,32 @@ def _annotation_overlay_archive_entries(entry: Dict[str, Any]) -> Dict[str, Path
     layout = str(entry.get("yolo_layout") or "flat")
     labels_root = overlay_root / "labels"
     for split in ("train", "val"):
-        split_root = (labels_root / split).resolve()
+        split_root = labels_root / split
         if not split_root.exists():
             continue
+        split_root_resolved = split_root.resolve()
+        if not _path_is_within_root_impl(split_root_resolved, overlay_root):
+            continue
         for path in split_root.rglob("*.txt"):
-            if not path.is_file():
-                continue
-            if not _path_is_within_root_impl(path.resolve(), split_root):
+            resolved = _annotation_safe_text_path(path, split_root_resolved)
+            if resolved is None:
                 continue
             rel = path.relative_to(split_root)
             target_rel = (
                 (Path(split) / "labels" / rel) if layout == "split" else (Path("labels") / rel)
             )
-            archive_entries[target_rel.as_posix()] = path
-    text_root = (overlay_root / "text_labels").resolve()
+            archive_entries[target_rel.as_posix()] = resolved
+    text_root = overlay_root / "text_labels"
     if text_root.exists():
+        text_root_resolved = text_root.resolve()
+        if not _path_is_within_root_impl(text_root_resolved, overlay_root):
+            return archive_entries
         for path in text_root.rglob("*.txt"):
-            if not path.is_file():
-                continue
-            if not _path_is_within_root_impl(path.resolve(), text_root):
+            resolved = _annotation_safe_text_path(path, text_root_resolved)
+            if resolved is None:
                 continue
             rel = path.relative_to(text_root)
-            archive_entries[(Path("text_labels") / rel).as_posix()] = path
+            archive_entries[(Path("text_labels") / rel).as_posix()] = resolved
     return archive_entries
 
 
@@ -14736,8 +14796,12 @@ def _persist_transient_overlays_to_entry(entry: Dict[str, Any], session: Dict[st
         if isinstance(label_lines_raw, list):
             lines = [str(line).strip() for line in label_lines_raw if str(line).strip()]
         label_path = _annotation_overlay_label_path(entry, split, rel)
-        label_path.parent.mkdir(parents=True, exist_ok=True)
-        label_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
+        _annotation_write_text_within_root(
+            label_path,
+            overlay_root,
+            "\n".join(lines) + ("\n" if lines else ""),
+        )
 
     for key, text_raw in overlay_text.items():
         try:
@@ -14745,8 +14809,8 @@ def _persist_transient_overlays_to_entry(entry: Dict[str, Any], session: Dict[st
         except Exception:
             continue
         text_path = _annotation_overlay_text_path(entry, rel)
-        text_path.parent.mkdir(parents=True, exist_ok=True)
-        text_path.write_text(str(text_raw or "").strip(), encoding="utf-8")
+        overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
+        _annotation_write_text_within_root(text_path, overlay_root, str(text_raw or "").strip())
 
 
 def _extract_zip_safely_impl(
@@ -15321,9 +15385,8 @@ def set_text_label(dataset_id: str, image_name: str, payload: Dict[str, Any]):
     )
     caption = str(payload.get("caption") or "").strip()
     text_path = _annotation_overlay_text_path(entry, image_relpath)
-    text_dir = text_path.parent
-    text_dir.mkdir(parents=True, exist_ok=True)
-    text_path.write_text(caption, encoding="utf-8")
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
+    _annotation_write_text_within_root(text_path, overlay_root, caption)
     return {"status": "saved", "caption": caption}
 
 
@@ -15620,16 +15683,17 @@ def save_dataset_annotation_snapshot(dataset_id: str, payload: Dict[str, Any]):
     _require_annotation_lock_owner(meta, payload)
     status_value = _annotation_requested_status(payload)
     normalised_records = _normalise_annotation_snapshot_records(payload.get("records"))
+    overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
     for split, rel, _has_label_lines, label_lines, has_text_label, text_value in normalised_records:
         label_path = _annotation_overlay_label_path(entry, split, rel)
-        label_path.parent.mkdir(parents=True, exist_ok=True)
-        label_path.write_text(
-            "\n".join(label_lines) + ("\n" if label_lines else ""), encoding="utf-8"
+        _annotation_write_text_within_root(
+            label_path,
+            overlay_root,
+            "\n".join(label_lines) + ("\n" if label_lines else ""),
         )
         if has_text_label:
             text_path = _annotation_overlay_text_path(entry, rel)
-            text_path.parent.mkdir(parents=True, exist_ok=True)
-            text_path.write_text(text_value, encoding="utf-8")
+            _annotation_write_text_within_root(text_path, overlay_root, text_value)
 
     if status_value:
         meta["annotation_status"] = status_value

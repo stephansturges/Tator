@@ -289,8 +289,9 @@ but unhelpful for the dataset.
   checkpoint containment, EDR package staging containment, and RF-DETR dataset
   copy fallback containment. Local SALAD training now also cleans staged uploads
   on pre-queue reference failures, and cache/run pruning unlinks symlinked
-  directories without touching their targets.
-- **Current validation:** `753 passed, 17 skipped, 8 warnings`; UI endpoint
+  directories without touching their targets. Annotation overlays now use
+  contained reads/writes for labels and text.
+- **Current validation:** `756 passed, 17 skipped, 8 warnings`; UI endpoint
   checks cover `148` mapped paths and `248` fetches with no failures. Local
   backend smoke is healthy.
 

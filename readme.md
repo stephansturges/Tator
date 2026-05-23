@@ -980,6 +980,9 @@ job-start validation, and the Mac YOLO training work.
   that annotation-effective COCO view as well, so prompt suggestions, prompt
   search, recipe building, and recipe persistence see corrected linked/flat
   YOLO labels.
+- Segmentation-build planning now accepts linked or flat YOLO bbox datasets by
+  materializing the same annotation-effective split view before checking source
+  metadata and planning the generated segmentation dataset.
 - Local validation for this checkpoint used:
 
 ```bash

@@ -25759,36 +25759,49 @@ def _prepare_sam3_training_split(
 def _plan_segmentation_build(
     request: SegmentationBuildRequest,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    dataset_root = _resolve_sam3_or_qwen_dataset_impl(
+    entry = _resolve_dataset_entry_impl(
         request.source_dataset_id,
         list_all_datasets_fn=_list_all_datasets,
-        resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
-            dataset_id,
-            qwen_root=QWEN_DATASET_ROOT,
-            sam3_root=SAM3_DATASET_ROOT,
-            registry_root=DATASET_REGISTRY_ROOT,
-            http_exception_cls=HTTPException,
-        ),
     )
-    source_meta = _load_qwen_dataset_metadata_impl(
-        dataset_root,
-        meta_name=QWEN_METADATA_FILENAME,
-        load_json_metadata_fn=_load_json_metadata,
-    ) or _load_sam3_dataset_metadata_impl(
-        dataset_root,
-        meta_name=SAM3_DATASET_META_NAME,
-        load_json_metadata_fn=_load_json_metadata,
-        persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
-            dataset_dir_inner,
-            metadata,
+    if entry and entry.get("yolo_ready"):
+        if _sam3_entry_needs_annotation_materialized_view(entry):
+            source_meta = _materialize_sam3_annotation_view(entry)
+        else:
+            dataset_root = _dataset_effective_root_from_entry(entry)
+            source_meta = _convert_yolo_dataset_to_coco_impl(dataset_root)
+        dataset_root = Path(source_meta.get("dataset_root") or entry.get("dataset_root") or "")
+    else:
+        dataset_root = _resolve_sam3_or_qwen_dataset_impl(
+            request.source_dataset_id,
+            list_all_datasets_fn=_list_all_datasets,
+            resolve_dataset_legacy_fn=lambda dataset_id: _resolve_dataset_legacy_impl(
+                dataset_id,
+                qwen_root=QWEN_DATASET_ROOT,
+                sam3_root=SAM3_DATASET_ROOT,
+                registry_root=DATASET_REGISTRY_ROOT,
+                http_exception_cls=HTTPException,
+            ),
+        )
+        source_meta = _load_qwen_dataset_metadata_impl(
+            dataset_root,
+            meta_name=QWEN_METADATA_FILENAME,
+            load_json_metadata_fn=_load_json_metadata,
+        ) or _load_sam3_dataset_metadata_impl(
+            dataset_root,
             meta_name=SAM3_DATASET_META_NAME,
-            logger=logger,
-        ),
-    )
+            load_json_metadata_fn=_load_json_metadata,
+            persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
+                dataset_dir_inner,
+                metadata,
+                meta_name=SAM3_DATASET_META_NAME,
+                logger=logger,
+            ),
+        )
     if not source_meta:
         raise HTTPException(
             status_code=HTTP_404_NOT_FOUND, detail="segmentation_source_metadata_missing"
         )
+    dataset_root = Path(source_meta.get("dataset_root") or dataset_root).resolve()
     dataset_type = source_meta.get("type", "bbox")
     if dataset_type != "bbox":
         raise HTTPException(

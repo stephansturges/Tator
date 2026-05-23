@@ -1224,6 +1224,61 @@ def test_prompt_helper_suggest_materializes_annotation_overlay_for_linked_flat_y
     assert not (dataset_root / "train").exists()
 
 
+def test_plan_segmentation_build_materializes_annotation_overlay_for_linked_flat_yolo(
+    tmp_path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "linked_source"
+    _write_test_image(dataset_root / "images" / "nested" / "img.jpg")
+    (dataset_root / "labels" / "nested").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "labels" / "nested" / "img.txt").write_text(
+        "0 0.5 0.5 0.2 0.2\n", encoding="utf-8"
+    )
+    (dataset_root / "labelmap.txt").write_text("old\nnew\n", encoding="utf-8")
+
+    registry_root = tmp_path / "registry" / "ds"
+    overlay_root = registry_root / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    (overlay_root / "labels" / "train" / "nested").mkdir(parents=True, exist_ok=True)
+    (overlay_root / "labels" / "train" / "nested" / "img.txt").write_text(
+        "1 0.5 0.5 0.4 0.4\n", encoding="utf-8"
+    )
+    registry_root.mkdir(parents=True, exist_ok=True)
+    (registry_root / api.DATASET_META_NAME).write_text(json.dumps({"id": "ds"}), encoding="utf-8")
+
+    entry = {
+        "id": "ds",
+        "label": "ds",
+        "dataset_root": str(dataset_root),
+        "registry_root": str(registry_root),
+        "storage_mode": "linked",
+        "linked_root": str(dataset_root),
+        "yolo_layout": "flat",
+        "yolo_ready": True,
+        "classes": ["old", "new"],
+    }
+    sam3_root = tmp_path / "sam3_outputs"
+    seg_root = tmp_path / "seg_jobs"
+    sam3_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(api, "_list_all_datasets", lambda: [entry])
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", sam3_root)
+    monkeypatch.setattr(api, "SEG_BUILDER_ROOT", seg_root)
+
+    planned_meta, planned_layout = api._plan_segmentation_build(
+        api.SegmentationBuildRequest(source_dataset_id="ds", output_name="ds_seg")
+    )
+
+    materialized_root = (
+        registry_root / api.DATASET_ANNOTATION_OVERLAY_DIRNAME / "sam3_materialized"
+    ).resolve()
+    assert planned_meta["source_dataset_root"] == str(materialized_root)
+    assert planned_meta["source_dataset_id"] == "ds"
+    assert planned_meta["classes"] == ["old", "new"]
+    assert Path(planned_layout["dataset_root"]) == (sam3_root / "ds_seg").resolve()
+    assert (
+        materialized_root / "train" / "labels" / "nested" / "img.txt"
+    ).read_text(encoding="utf-8").strip() == "1 0.5 0.5 0.4 0.4"
+    assert not (dataset_root / "train").exists()
+
+
 def test_register_path_dedupes_existing_linked_entry(tmp_path, monkeypatch) -> None:
     dataset_root = tmp_path / "linked_ds"
     (dataset_root / "images").mkdir(parents=True, exist_ok=True)

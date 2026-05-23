@@ -32,6 +32,22 @@ def test_link_or_copy_file_noops_when_source_is_destination(tmp_path):
     assert not artifact.is_symlink()
 
 
+def test_link_or_copy_file_copies_when_hardlink_unavailable(tmp_path, monkeypatch):
+    source = tmp_path / "source.bin"
+    dest = tmp_path / "dest.bin"
+    source.write_bytes(b"payload")
+
+    def fail_link(*_args, **_kwargs):
+        raise OSError("hardlink unavailable")
+
+    monkeypatch.setattr(api.os, "link", fail_link)
+
+    _link_or_copy_file(source, dest)
+
+    assert dest.read_bytes() == b"payload"
+    assert not dest.is_symlink()
+
+
 def test_logistic_regression_constructor_matches_installed_sklearn():
     clf = clip_training._make_logistic_regression(
         random_state=0,

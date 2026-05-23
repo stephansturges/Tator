@@ -14566,11 +14566,6 @@ def _link_or_copy_file(src: Path, dest: Path, *, overwrite: bool = False) -> Non
         return
     except Exception:
         pass
-    try:
-        os.symlink(str(src_resolved), dest)
-        return
-    except Exception:
-        pass
     shutil.copy2(src_resolved, dest)
 
 

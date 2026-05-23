@@ -247,6 +247,29 @@ def test_qwen_training_config_random_split_materializes_qwen_split(tmp_path, mon
     assert any("Qwen split:" in entry for entry in logs)
 
 
+def test_qwen_training_random_split_copies_when_hardlink_unavailable(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_only_dataset(tmp_path, monkeypatch)
+
+    def fail_link(*_args, **_kwargs):
+        raise OSError("hardlink unavailable")
+
+    monkeypatch.setattr(api.os, "link", fail_link)
+    payload = api.QwenTrainRequest(dataset_id="demo", random_split=True, val_percent=0.5)
+
+    config = api._build_qwen_config(payload, "job-copy-split", [])
+    split_root = Path(config.dataset_root)
+    images = list((split_root / "train" / "images").iterdir()) + list(
+        (split_root / "val" / "images").iterdir()
+    )
+
+    assert images
+    assert all(path.is_file() for path in images)
+    assert all(not path.is_symlink() for path in images)
+
+
 def test_qwen_training_config_rejects_existing_run_name(tmp_path, monkeypatch):
     if api.QwenTrainingConfig is None:
         pytest.skip("Qwen training dependencies are not importable in this environment")

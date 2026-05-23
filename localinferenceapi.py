@@ -14317,6 +14317,55 @@ def _qwen_dataset_upload_job_dir(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
+def _dataset_registry_storage_root(
+    *,
+    create: bool = True,
+    detail: str = "dataset_registry_path_invalid",
+) -> Path:
+    try:
+        raw_root = DATASET_REGISTRY_ROOT
+        if raw_root.is_symlink():
+            raise ValueError("dataset registry root is a symlink")
+        if create:
+            raw_root.mkdir(parents=True, exist_ok=True)
+        if raw_root.exists() and not raw_root.is_dir():
+            raise ValueError("dataset registry root is not a directory")
+        return raw_root.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+def _dataset_registry_child_dir(
+    dataset_id: str,
+    *,
+    detail: str = "dataset_upload_target_invalid",
+) -> Path:
+    raw_id = str(dataset_id or "").strip()
+    if (
+        not raw_id
+        or raw_id in {".", ".."}
+        or "/" in raw_id
+        or "\\" in raw_id
+        or Path(raw_id).is_absolute()
+    ):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    try:
+        root = _dataset_registry_storage_root(create=True, detail=detail)
+        candidate = root / raw_id
+        if candidate.is_symlink():
+            raise ValueError("dataset registry child is a symlink")
+        resolved = candidate.resolve(strict=False)
+        if not _path_is_within_root_impl(resolved, root) or resolved.parent != root:
+            raise ValueError("dataset registry child escapes root")
+        if candidate.exists() and not candidate.is_dir():
+            raise ValueError("dataset registry child is not a directory")
+        return resolved
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
 def _unwrap_single_root_dir(extract_root: Path) -> Path:
     entries = [p for p in extract_root.iterdir() if p.name not in {"__MACOSX"}]
     if len(entries) == 1 and entries[0].is_dir():
@@ -15170,10 +15219,15 @@ def upload_dataset_zip(
         source_root = _unwrap_single_root_dir(extract_root)
         base_id = dataset_id or Path(file.filename or "dataset").stem
         base_id = _sanitize_yolo_run_id_impl(base_id) or "dataset"
-        dataset_id_final = _unique_dataset_name(base_id, root=DATASET_REGISTRY_ROOT)
-        target_root = DATASET_REGISTRY_ROOT / dataset_id_final
-        if target_root.exists():
-            shutil.rmtree(target_root)
+        registry_root = _dataset_registry_storage_root(
+            create=True, detail="dataset_upload_target_invalid"
+        )
+        dataset_id_final = _unique_dataset_name(base_id, root=registry_root)
+        target_root = _dataset_registry_child_dir(
+            dataset_id_final, detail="dataset_upload_target_invalid"
+        )
+        if target_root.exists() or target_root.is_symlink():
+            raise HTTPException(status_code=HTTP_409_CONFLICT, detail="dataset_upload_target_exists")
         shutil.copytree(source_root, target_root)
 
         meta_path = target_root / DATASET_META_NAME

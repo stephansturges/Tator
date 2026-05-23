@@ -568,11 +568,10 @@ Broader suites are organized by feature area under `tests/`. UI tests live in
 the backend are available.
 
 <details>
-<summary><strong>Update Tracking</strong></summary>
+<summary>Update Tracking</summary>
 
-Current checkpoint: `908 passed, 17 skipped, 8 warnings`, UI endpoint
-contracts, and backend smoke pass. Detailed history lives in commits and
-focused docs.
+Current checkpoint: `910 passed, 17 skipped`; live UI/API smoke passes. Change
+history lives in commits and focused docs.
 
 </details>
 

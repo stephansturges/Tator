@@ -657,6 +657,47 @@ def test_persistent_snapshot_rejects_overlay_parent_symlink_escape(
     assert not (outside_dir / "img.txt").exists()
 
 
+def test_persistent_snapshot_rejects_overlay_ancestor_symlink_escape(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    meta = {"annotation_lock": _active_lock("sess-lock")}
+    overlay_root = Path(entry["registry_root"]) / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    overlay_root.mkdir(parents=True, exist_ok=True)
+    outside_dir = tmp_path / "outside_labels"
+    outside_dir.mkdir()
+    try:
+        (overlay_root / "labels").symlink_to(outside_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api, "_dataset_effective_root_from_entry", lambda _entry: Path(_entry["dataset_root"])
+    )
+    monkeypatch.setattr(
+        api, "_annotation_load_or_create_meta", lambda _entry: (Path("/tmp/meta.json"), meta)
+    )
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.save_dataset_annotation_snapshot(
+            "ds",
+            {
+                "session_id": "sess-lock",
+                "records": [
+                    {
+                        "split": "train",
+                        "image_relpath": "nested/img.jpg",
+                        "label_lines": ["0 0.5 0.5 0.1 0.1"],
+                    }
+                ],
+            },
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "annotation_overlay_path_forbidden"
+    assert list(outside_dir.iterdir()) == []
+
+
 def test_annotation_manifest_ignores_overlay_and_source_symlink_escapes(
     tmp_path, monkeypatch
 ) -> None:

@@ -14591,7 +14591,11 @@ def _annotation_read_text_within_root(path: Path, root: Path) -> Optional[str]:
 
 def _annotation_write_text_within_root(path: Path, root: Path, text: str) -> None:
     root_resolved = root.resolve()
+    if _storage_path_has_symlink_component(root) or _storage_path_has_symlink_component(path.parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_overlay_path_forbidden")
     path.parent.mkdir(parents=True, exist_ok=True)
+    if _storage_path_has_symlink_component(path.parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_overlay_path_forbidden")
     try:
         parent_resolved = path.parent.resolve()
     except Exception as exc:

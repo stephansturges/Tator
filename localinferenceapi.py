@@ -18244,10 +18244,12 @@ def _data_ingestion_storage_root(
 ) -> Path:
     try:
         raw_root = DATA_INGESTION_ROOT
-        if raw_root.is_symlink():
+        if _storage_path_has_symlink_component(raw_root):
             raise ValueError("data ingestion root is a symlink")
         if create:
             raw_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("data ingestion root is a symlink")
         if raw_root.exists() and not raw_root.is_dir():
             raise ValueError("data ingestion root is not a directory")
         return raw_root.resolve(strict=False)
@@ -18265,10 +18267,12 @@ def _data_ingestion_job_dir(
     try:
         root = _data_ingestion_storage_root(create=True, detail=detail)
         candidate = root / safe_job_id
-        if candidate.is_symlink():
+        if _storage_path_has_symlink_component(candidate):
             raise ValueError("data ingestion job dir is a symlink")
         if create:
             candidate.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(candidate):
+            raise ValueError("data ingestion job dir is a symlink")
         if candidate.exists() and not candidate.is_dir():
             raise ValueError("data ingestion job path is not a directory")
         resolved = candidate.resolve(strict=False)
@@ -18285,7 +18289,25 @@ def _local_salad_head_path(head_id: str) -> Path:
     safe = _class_analysis_safe_slug(str(head_id or ""), "")
     if not safe:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_id_required")
-    return (LOCAL_SALAD_HEAD_ROOT / f"{safe}.pt").resolve()
+    return _local_salad_head_root(create=False) / f"{safe}.pt"
+
+
+def _local_salad_head_root(*, create: bool = False) -> Path:
+    try:
+        raw_root = LOCAL_SALAD_HEAD_ROOT
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("local SALAD head root is a symlink")
+        if create:
+            raw_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("local SALAD head root is a symlink")
+        if raw_root.exists() and not raw_root.is_dir():
+            raise ValueError("local SALAD head root is not a directory")
+        return raw_root.resolve(strict=False)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_path_invalid") from exc
 
 
 def _unique_local_salad_head_id(requested_name: str) -> str:
@@ -18306,20 +18328,23 @@ def _load_local_salad_head(
 ) -> Tuple[Any, Dict[str, Any]]:
     path = _local_salad_head_path(head_id)
     try:
-        root = LOCAL_SALAD_HEAD_ROOT.resolve()
-        if not _path_is_within_root_impl(path, root):
+        root = _local_salad_head_root(create=False)
+        if path.is_symlink():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_path_invalid")
+        if not path.exists():
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="local_salad_head_not_found")
+        resolved_path = path.resolve(strict=True)
+        if not _path_is_within_root_impl(resolved_path, root):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_path_invalid")
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_path_invalid")
-    if not path.exists():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="local_salad_head_not_found")
     try:
         resolved_backend = resolve_local_salad_backend(backend)
         if resolved_backend == "mlx":
-            return load_mlx_local_salad_head_file(path)
-        return load_local_salad_head_file(path, device_name=device_name)
+            return load_mlx_local_salad_head_file(resolved_path)
+        return load_local_salad_head_file(resolved_path, device_name=device_name)
     except HTTPException:
         raise
     except ValueError as exc:
@@ -18339,7 +18364,10 @@ def _encode_local_salad_head_np(head: Any, patch_tokens: Any, global_token: Any 
 
 def _list_local_salad_heads() -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
-    root = LOCAL_SALAD_HEAD_ROOT.resolve()
+    try:
+        root = _local_salad_head_root(create=False)
+    except HTTPException:
+        return entries
     if not root.exists():
         return entries
     for path in sorted(root.glob("*.pt")):
@@ -18440,7 +18468,6 @@ def _data_ingestion_capabilities() -> Dict[str, Any]:
 
 
 async def _data_ingestion_save_uploads(files: Sequence[Any], target_dir: Path, field_name: str) -> List[Dict[str, Any]]:
-    target_dir.mkdir(parents=True, exist_ok=True)
     rows: List[Dict[str, Any]] = []
     used: Set[str] = set()
     for idx, upload in enumerate(files or []):
@@ -18584,7 +18611,11 @@ def _data_ingestion_prepare_media(
             if not ffmpeg_path:
                 raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="ffmpeg_required_for_video_ingestion")
             video_dir = out_dir / _data_ingestion_safe_media_name(path.name, f"video_{idx:05d}")
+            if _storage_path_has_symlink_component(video_dir):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_path_invalid")
             video_dir.mkdir(parents=True, exist_ok=True)
+            if _storage_path_has_symlink_component(video_dir):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_path_invalid")
             fps_expr = f"fps=1/{max(0.1, float(frame_interval or 1.0)):.3f}"
             pattern = video_dir / "frame_%06d.jpg"
             cmd = [
@@ -18905,9 +18936,12 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         }
         result = {"summary": summary, "items": ranked_items}
         result_path = out_dir / "result.json"
-        result_path.write_text(json.dumps(_class_analysis_json_safe(result), indent=2), encoding="utf-8")
+        _class_analysis_write_json(result_path, out_dir, result)
+        embeddings_path = _class_analysis_prepare_write_path(out_dir / "embeddings.npz", out_dir)
+        if embeddings_path is None:
+            raise OSError("data_ingestion_embeddings_path_forbidden")
         np.savez_compressed(
-            out_dir / "embeddings.npz",
+            embeddings_path,
             candidate_embeddings=candidate_embeddings,
             reference_embeddings=reference_embeddings if reference_embeddings is not None else np.empty((0, 0), dtype=np.float32),
         )
@@ -19163,6 +19197,12 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
         with LOCAL_SALAD_HEAD_LOCK:
             head_id = _unique_local_salad_head_id(requested_name)
             head_path = _local_salad_head_path(head_id)
+            head_write_path = _class_analysis_prepare_write_path(
+                head_path,
+                _local_salad_head_root(create=True),
+            )
+            if head_write_path is None:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_path_invalid")
             metadata = {
                 "id": head_id,
                 "label": requested_name,
@@ -19195,19 +19235,19 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                     "state_dict": mlx_local_salad_state_dict(head) if is_mlx_local_salad_head(head) else head.cpu().state_dict(),
                     "metadata": metadata,
                 },
-                head_path,
+                head_write_path,
             )
         result = {
             "summary": {
                 "head_id": head_id,
-                "path": str(head_path),
+                "path": str(head_write_path),
                 "descriptor_dim": head.output_dim,
                 **metadata,
             },
             "losses": losses,
         }
         result_path = out_dir / "result.json"
-        result_path.write_text(json.dumps(_class_analysis_json_safe(result), indent=2), encoding="utf-8")
+        _class_analysis_write_json(result_path, out_dir, result)
         with DATA_INGESTION_JOBS_LOCK:
             job.result_path = str(result_path)
             _data_ingestion_update(job, status="completed", progress=1.0, message=f"Reference profile saved: {head_id}", result=result)
@@ -29217,10 +29257,10 @@ async def _write_upload_file(
     quota_limit: Optional[int] = None,
     allow_overwrite: bool = False,
 ) -> None:
-    if dest.parent.is_symlink():
+    if _storage_path_has_symlink_component(dest.parent):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.parent.is_symlink():
+    if _storage_path_has_symlink_component(dest.parent):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
     if dest.is_symlink():
         if not allow_overwrite:

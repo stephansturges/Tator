@@ -191,6 +191,37 @@ def test_data_ingestion_analysis_rejects_symlinked_root_before_upload(tmp_path, 
     assert list(outside.iterdir()) == []
 
 
+def test_data_ingestion_analysis_rejects_symlinked_root_parent_before_upload(tmp_path, monkeypatch):
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", linked_parent / "data_ingestion")
+    monkeypatch.setattr(api, "_validate_local_salad_head_reference", lambda *_args, **_kwargs: None)
+    candidate = _FakeUpload("candidate.jpg", b"candidate")
+    reference = _FakeUpload("reference.jpg", b"reference")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(
+            api.create_data_ingestion_analysis_job(
+                json.dumps({
+                    "encoder": "local_salad",
+                    "salad_head_id": "unit_head",
+                    "reference_source": "active_label_images",
+                }),
+                [candidate],
+                [reference],
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "data_ingestion_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_data_ingestion_job_dir_rejects_symlinked_existing_job_dir(tmp_path, monkeypatch):
     ingestion_root = tmp_path / "data_ingestion"
     ingestion_root.mkdir()
@@ -234,6 +265,24 @@ def test_local_salad_training_rejects_symlinked_root_before_upload(tmp_path, mon
     except OSError as exc:
         pytest.skip(f"symlink unsupported: {exc}")
     monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(api.create_local_salad_training_job("{}", [_FakeUpload("train.jpg", b"train")]))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "data_ingestion_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_local_salad_training_rejects_symlinked_root_parent_before_upload(tmp_path, monkeypatch):
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", linked_parent / "data_ingestion")
 
     with pytest.raises(api.HTTPException) as exc_info:
         asyncio.run(api.create_local_salad_training_job("{}", [_FakeUpload("train.jpg", b"train")]))
@@ -314,6 +363,28 @@ def test_write_upload_file_rejects_symlinked_parent_without_write(tmp_path):
             api._write_upload_file(
                 _FakeUpload("upload.bin", b"payload"),
                 linked_parent / "upload.bin",
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_relative_path"
+    assert list(outside_dir.iterdir()) == []
+
+
+def test_write_upload_file_rejects_symlinked_ancestor_without_write(tmp_path):
+    outside_dir = tmp_path / "outside_ancestor"
+    outside_dir.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(
+            api._write_upload_file(
+                _FakeUpload("upload.bin", b"payload"),
+                linked_parent / "nested" / "upload.bin",
             )
         )
 
@@ -920,6 +991,25 @@ def test_list_local_salad_heads_skips_symlink_escape(tmp_path, monkeypatch):
     outside = tmp_path / "outside.pt"
     outside.write_bytes(b"not a head")
     (heads_root / "escape.pt").symlink_to(outside)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+
+    def fail_load(*_args, **_kwargs):
+        raise AssertionError("external symlinked head should not be loaded")
+
+    monkeypatch.setattr(api, "load_local_salad_head_file", fail_load)
+
+    assert api._list_local_salad_heads() == []
+
+
+def test_list_local_salad_heads_rejects_symlinked_root(tmp_path, monkeypatch):
+    outside = tmp_path / "outside_heads"
+    outside.mkdir()
+    (outside / "escape.pt").write_bytes(b"not a head")
+    heads_root = tmp_path / "heads"
+    try:
+        heads_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
     monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
 
     def fail_load(*_args, **_kwargs):

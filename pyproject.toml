@@ -55,6 +55,7 @@ follow_imports = "skip"
 pretty = true
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 markers = [
   "auto_label_smoke: fast correctness checks for the automatic labeling stack",
   "auto_label_full: broader automatic labeling integration matrix for nightly/full runs",

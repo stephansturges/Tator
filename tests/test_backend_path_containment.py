@@ -8,10 +8,22 @@ from fastapi import HTTPException
 from services.classifier import _validate_clip_dataset_impl
 from services.datasets import _resolve_dataset_legacy_impl
 from services.detectors import _rfdetr_run_dir_impl, _yolo_run_dir_impl
-from services.prompt_helper_presets import _list_prompt_helper_presets_impl
+from services.prompt_helper_presets import (
+    _list_prompt_helper_presets_impl,
+    _load_prompt_helper_preset_impl,
+    _save_prompt_helper_preset_impl,
+)
 from services.sam3_runs import _run_dir_for_request_impl
 from utils.datasets import _iter_yolo_images
 from utils.io import _compute_dir_signature, _dir_size_bytes, _sanitize_yolo_run_id
+
+
+def _path_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except Exception:
+        return False
 
 
 def test_legacy_dataset_resolution_rejects_sibling_prefix_escape(tmp_path: Path) -> None:
@@ -95,6 +107,63 @@ def test_list_prompt_helper_presets_skips_symlink_escape(tmp_path: Path) -> None
         pytest.skip(f"symlink unsupported: {exc}")
 
     assert _list_prompt_helper_presets_impl(presets_root=presets_root) == []
+
+
+def test_list_prompt_helper_presets_skips_symlinked_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_presets"
+    outside.mkdir()
+    (outside / "phset_escape.json").write_text('{"id":"escape","created_at":1}', encoding="utf-8")
+    presets_root = tmp_path / "presets"
+    try:
+        presets_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert _list_prompt_helper_presets_impl(presets_root=presets_root) == []
+
+
+def test_load_prompt_helper_preset_rejects_symlinked_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_presets"
+    outside.mkdir()
+    (outside / "phset_escape.json").write_text('{"id":"escape","created_at":1}', encoding="utf-8")
+    presets_root = tmp_path / "presets"
+    try:
+        presets_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _load_prompt_helper_preset_impl(
+            "phset_escape",
+            presets_root=presets_root,
+            path_is_within_root_fn=_path_within_root,
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "prompt_helper_preset_not_found"
+
+
+def test_save_prompt_helper_preset_rejects_symlinked_root_without_write(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_presets"
+    outside.mkdir()
+    presets_root = tmp_path / "presets"
+    try:
+        presets_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _save_prompt_helper_preset_impl(
+            "demo",
+            "dataset",
+            {0: ["prompt"]},
+            presets_root=presets_root,
+            path_is_within_root_fn=_path_within_root,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prompt_helper_preset_path_invalid"
+    assert list(outside.iterdir()) == []
 
 
 def test_yolo_run_lookup_rejects_symlinked_run_id_without_target_delete(tmp_path: Path) -> None:

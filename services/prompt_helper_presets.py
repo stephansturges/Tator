@@ -12,10 +12,27 @@ from fastapi import HTTPException
 from starlette.status import HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND, HTTP_500_INTERNAL_SERVER_ERROR
 
 
+def _safe_presets_root(presets_root: Path, *, create: bool = False) -> Path | None:
+    try:
+        if presets_root.is_symlink():
+            return None
+        if create:
+            presets_root.mkdir(parents=True, exist_ok=True)
+        if presets_root.exists() and not presets_root.is_dir():
+            return None
+        if presets_root.is_symlink():
+            return None
+        return presets_root.resolve(strict=False)
+    except Exception:
+        return None
+
+
 def _list_prompt_helper_presets_impl(*, presets_root: Path) -> List[Dict[str, Any]]:
     presets: List[Dict[str, Any]] = []
-    root = presets_root.resolve(strict=False)
-    for path in presets_root.glob("*.json"):
+    root = _safe_presets_root(presets_root)
+    if root is None or not root.exists():
+        return presets
+    for path in root.glob("*.json"):
         try:
             if path.is_symlink():
                 continue
@@ -45,8 +62,14 @@ def _load_prompt_helper_preset_impl(
     presets_root: Path,
     path_is_within_root_fn,
 ) -> Dict[str, Any]:
-    path = (presets_root / f"{preset_id}.json").resolve()
-    if not path_is_within_root_fn(path, presets_root.resolve()) or not path.exists():
+    root = _safe_presets_root(presets_root)
+    if root is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prompt_helper_preset_not_found")
+    raw_path = root / f"{preset_id}.json"
+    if raw_path.is_symlink():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prompt_helper_preset_not_found")
+    path = raw_path.resolve(strict=False)
+    if not path_is_within_root_fn(path, root) or not path.exists() or not path.is_file():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="prompt_helper_preset_not_found")
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -72,8 +95,14 @@ def _save_prompt_helper_preset_impl(
         "created_at": created_at,
         "prompts_by_class": prompts_by_class,
     }
-    path = (presets_root / f"{preset_id}.json").resolve()
-    if not path_is_within_root_fn(path, presets_root.resolve()):
+    root = _safe_presets_root(presets_root, create=True)
+    if root is None:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_helper_preset_path_invalid")
+    raw_path = root / f"{preset_id}.json"
+    if raw_path.is_symlink() or (raw_path.exists() and raw_path.is_dir()):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_helper_preset_path_invalid")
+    path = raw_path.resolve(strict=False)
+    if not path_is_within_root_fn(path, root):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_helper_preset_path_invalid")
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)

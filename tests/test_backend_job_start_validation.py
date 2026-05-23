@@ -258,6 +258,31 @@ def test_yolo_train_rejects_unavailable_mps_before_queue(monkeypatch, tmp_path):
     assert api.YOLO_TRAINING_JOBS == {}
 
 
+def test_yolo_train_cleans_run_dir_when_worker_start_fails(monkeypatch, tmp_path):
+    yolo_root = tmp_path / "yolo_runs"
+    monkeypatch.setattr(api, "YOLO_JOB_ROOT", yolo_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_yolo_training_dataset",
+        lambda _payload: {"yolo_ready": True, "task": "detect"},
+    )
+    monkeypatch.setattr(
+        api,
+        "_start_yolo_training_worker",
+        lambda _job: (_ for _ in ()).throw(RuntimeError("thread start failed")),
+    )
+    with api.YOLO_TRAINING_JOBS_LOCK:
+        api.YOLO_TRAINING_JOBS.clear()
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        api.create_yolo_training_job(
+            api.YoloTrainRequest(dataset_id="dataset_1", accept_tos=True)
+        )
+
+    assert api.YOLO_TRAINING_JOBS == {}
+    assert not yolo_root.exists() or list(yolo_root.iterdir()) == []
+
+
 def test_rfdetr_train_missing_dataset_rejects_before_run_dir(monkeypatch, tmp_path):
     with api.RFDETR_TRAINING_JOBS_LOCK:
         api.RFDETR_TRAINING_JOBS.clear()
@@ -282,6 +307,56 @@ def test_rfdetr_train_missing_dataset_rejects_before_run_dir(monkeypatch, tmp_pa
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == "sam3_dataset_not_found"
     assert api.RFDETR_TRAINING_JOBS == {}
+
+
+def test_rfdetr_train_cleans_run_dir_when_worker_start_fails(monkeypatch, tmp_path):
+    rfdetr_root = tmp_path / "rfdetr_runs"
+    monkeypatch.setattr(api, "RFDETR_JOB_ROOT", rfdetr_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_rfdetr_training_dataset",
+        lambda _payload: {"dataset_root": str(tmp_path / "dataset"), "task": "detect"},
+    )
+    monkeypatch.setattr(
+        api,
+        "_start_rfdetr_training_worker",
+        lambda _job: (_ for _ in ()).throw(RuntimeError("thread start failed")),
+    )
+    with api.RFDETR_TRAINING_JOBS_LOCK:
+        api.RFDETR_TRAINING_JOBS.clear()
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        api.create_rfdetr_training_job(
+            api.RfDetrTrainRequest(dataset_id="dataset_1", accept_tos=True)
+        )
+
+    assert api.RFDETR_TRAINING_JOBS == {}
+    assert not rfdetr_root.exists() or list(rfdetr_root.iterdir()) == []
+
+
+def test_yolo_head_graft_cleans_run_dir_when_worker_start_fails(monkeypatch, tmp_path):
+    yolo_root = tmp_path / "yolo_runs"
+    monkeypatch.setattr(api, "YOLO_JOB_ROOT", yolo_root)
+    monkeypatch.setattr(api, "_preflight_yolo_head_graft_create", lambda _payload: {"ok": True})
+    monkeypatch.setattr(
+        api,
+        "_start_yolo_head_graft_worker",
+        lambda _job: (_ for _ in ()).throw(RuntimeError("thread start failed")),
+    )
+    with api.YOLO_HEAD_GRAFT_JOBS_LOCK:
+        api.YOLO_HEAD_GRAFT_JOBS.clear()
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        api.create_yolo_head_graft_job(
+            api.YoloHeadGraftRequest(
+                base_run_id="base_run",
+                dataset_id="dataset_1",
+                accept_tos=True,
+            )
+        )
+
+    assert api.YOLO_HEAD_GRAFT_JOBS == {}
+    assert not yolo_root.exists() or list(yolo_root.iterdir()) == []
 
 
 def test_sam3_train_missing_dataset_rejects_before_config(monkeypatch):

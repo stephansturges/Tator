@@ -26759,6 +26759,26 @@ def _resolve_yolo_training_device_config(config: Dict[str, Any]) -> Dict[str, An
     return resolution
 
 
+def _cleanup_yolo_run_dir(run_dir: Path) -> None:
+    try:
+        run_resolved = run_dir.resolve(strict=False)
+        root_resolved = YOLO_JOB_ROOT.resolve(strict=False)
+    except Exception:
+        return
+    if _path_is_within_root_impl(run_resolved, root_resolved) and run_resolved.exists():
+        shutil.rmtree(run_resolved, ignore_errors=True)
+
+
+def _cleanup_rfdetr_run_dir(run_dir: Path) -> None:
+    try:
+        run_resolved = run_dir.resolve(strict=False)
+        root_resolved = RFDETR_JOB_ROOT.resolve(strict=False)
+    except Exception:
+        return
+    if _path_is_within_root_impl(run_resolved, root_resolved) and run_resolved.exists():
+        shutil.rmtree(run_resolved, ignore_errors=True)
+
+
 def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
     def worker() -> None:
         run_dir = _yolo_run_dir_impl(
@@ -29764,7 +29784,14 @@ def create_yolo_training_job(payload: YoloTrainRequest):
         time_fn=time.time,
     )
     if job.status != "blocked":
-        _start_yolo_training_worker(job)
+        try:
+            _start_yolo_training_worker(job)
+        except Exception:
+            with YOLO_TRAINING_JOBS_LOCK:
+                if YOLO_TRAINING_JOBS.get(job_id) is job:
+                    YOLO_TRAINING_JOBS.pop(job_id, None)
+            _cleanup_yolo_run_dir(run_dir)
+            raise
     return {"job_id": job_id}
 
 
@@ -29865,7 +29892,14 @@ def create_yolo_head_graft_job(payload: YoloHeadGraftRequest):
         meta_name=YOLO_RUN_META_NAME,
         time_fn=time.time,
     )
-    _start_yolo_head_graft_worker(job)
+    try:
+        _start_yolo_head_graft_worker(job)
+    except Exception:
+        with YOLO_HEAD_GRAFT_JOBS_LOCK:
+            if YOLO_HEAD_GRAFT_JOBS.get(job_id) is job:
+                YOLO_HEAD_GRAFT_JOBS.pop(job_id, None)
+        _cleanup_yolo_run_dir(run_dir)
+        raise
     return _serialize_yolo_head_graft_job_impl(job)
 
 
@@ -30057,7 +30091,14 @@ def create_rfdetr_training_job(payload: RfDetrTrainRequest):
         meta_name=RFDETR_RUN_META_NAME,
         time_fn=time.time,
     )
-    _start_rfdetr_training_worker(job)
+    try:
+        _start_rfdetr_training_worker(job)
+    except Exception:
+        with RFDETR_TRAINING_JOBS_LOCK:
+            if RFDETR_TRAINING_JOBS.get(job_id) is job:
+                RFDETR_TRAINING_JOBS.pop(job_id, None)
+        _cleanup_rfdetr_run_dir(run_dir)
+        raise
     return {"job_id": job_id}
 
 

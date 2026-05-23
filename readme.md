@@ -294,7 +294,10 @@ front page into a development diary.
 - **2026-05-23:** Hardened Qwen dataset uploads plus Qwen/SAM3 random-split
   training job creation so failed promotions or rejected starts do not leave
   corrupt datasets, lost upload jobs, or orphaned split caches.
-- **Current validation:** project pytest reports `725 passed, 17 skipped,
+- **2026-05-23:** Added detector job-start rollback so YOLO, YOLO head-graft,
+  and RF-DETR worker startup failures do not leave queued jobs or stale run
+  directories.
+- **Current validation:** project pytest reports `728 passed, 17 skipped,
   8 warnings`; UI endpoint map/method checks report `148` mapped UI paths and
   `248` fetches with no failures. Live smoke is healthy on the local backend.
 

@@ -12,17 +12,29 @@ from fastapi import HTTPException
 from starlette.status import HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND, HTTP_500_INTERNAL_SERVER_ERROR
 
 
+def _path_has_symlink_component(path: Path) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    checks = [candidate]
+    checks.extend(candidate.parents)
+    for component in checks:
+        if component == component.parent:
+            continue
+        if component.is_symlink():
+            return True
+    return False
+
+
 def _safe_presets_root(presets_root: Path, *, create: bool = False) -> Path | None:
     try:
-        if presets_root.is_symlink() or presets_root.parent.is_symlink():
+        if _path_has_symlink_component(presets_root):
             return None
         if create:
             presets_root.mkdir(parents=True, exist_ok=True)
-            if presets_root.is_symlink() or presets_root.parent.is_symlink():
+            if _path_has_symlink_component(presets_root):
                 return None
         if presets_root.exists() and not presets_root.is_dir():
             return None
-        if presets_root.is_symlink() or presets_root.parent.is_symlink():
+        if _path_has_symlink_component(presets_root):
             return None
         return presets_root.resolve(strict=False)
     except Exception:

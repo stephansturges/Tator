@@ -68,3 +68,12 @@ preserving the exact validation story for storage and artifact-write fixes.
   parent without writing probe files to the target directory.
 - Validation: `984 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Prompt Helper Preset Roots
+
+- Rejected symlink components anywhere in prompt-helper preset roots before and
+  after preset root creation.
+- Added a regression for nested symlinked parent paths such as
+  `linked_parent/nested/presets`.
+- Validation: `985 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

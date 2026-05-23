@@ -203,6 +203,31 @@ def test_save_prompt_helper_preset_rejects_symlinked_parent_without_write(tmp_pa
     assert list(outside.iterdir()) == []
 
 
+def test_save_prompt_helper_preset_rejects_nested_symlinked_parent_without_write(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    presets_parent = tmp_path / "linked_parent"
+    try:
+        presets_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _save_prompt_helper_preset_impl(
+            "demo",
+            "dataset",
+            {0: ["prompt"]},
+            presets_root=presets_parent / "nested" / "presets",
+            path_is_within_root_fn=_path_within_root,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prompt_helper_preset_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_yolo_run_lookup_rejects_symlinked_run_id_without_target_delete(tmp_path: Path) -> None:
     job_root = tmp_path / "yolo_runs"
     job_root.mkdir()

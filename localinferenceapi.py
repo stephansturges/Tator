@@ -28198,11 +28198,13 @@ def download_clip_classifier_zip(rel_path: str = Query(...)):
         ),
     )
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.write(classifier_path, arcname=classifier_path.name)
+        classifiers_root = (UPLOAD_ROOT / "classifiers").resolve()
+        if not _zip_write_safe_file(zf, classifier_path, classifiers_root, classifier_path.name):
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
         if meta_path.exists():
-            zf.write(meta_path, arcname=meta_path.name)
+            _zip_write_safe_file(zf, meta_path, classifiers_root, meta_path.name)
         if labelmap_path is not None:
-            zf.write(labelmap_path, arcname=labelmap_path.name)
+            _zip_write_safe_file(zf, labelmap_path, UPLOAD_ROOT.resolve(), labelmap_path.name)
     buffer.seek(0)
     filename = f"{classifier_path.stem}_clip_head.zip"
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
@@ -30009,8 +30011,7 @@ def download_rfdetr_run(run_id: str):
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for filename in sorted(RFDETR_KEEP_FILES):
             path = run_dir / filename
-            if path.exists():
-                zf.write(path, arcname=filename)
+            _zip_write_safe_file(zf, path, run_dir, filename)
     buffer.seek(0)
     headers = {"Content-Disposition": f'attachment; filename="{safe_name}.zip"'}
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
@@ -30072,6 +30073,24 @@ def rfdetr_run_summary(run_id: str):
         "labelmap": labelmap,
         "metrics": metrics,
     }
+
+
+def _safe_regular_file_within_root(path: Path, root: Path) -> bool:
+    try:
+        resolved_path = path.resolve(strict=True)
+        resolved_root = root.resolve(strict=False)
+    except Exception:
+        return False
+    if not _path_is_within_root_impl(resolved_path, resolved_root):
+        return False
+    return resolved_path.is_file()
+
+
+def _zip_write_safe_file(zf: zipfile.ZipFile, path: Path, root: Path, arcname: str) -> bool:
+    if not _safe_regular_file_within_root(path, root):
+        return False
+    zf.write(path.resolve(strict=True), arcname=arcname)
+    return True
 
 
 def delete_rfdetr_run(run_id: str):
@@ -30706,8 +30725,7 @@ def download_yolo_run(run_id: str):
                 keep_files.add(yaml_path.name)
         for filename in sorted(keep_files):
             path = run_dir / filename
-            if path.exists():
-                zf.write(path, arcname=filename)
+            _zip_write_safe_file(zf, path, run_dir, filename)
     buffer.seek(0)
     headers = {"Content-Disposition": f'attachment; filename="{safe_name}.zip"'}
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
@@ -30729,7 +30747,11 @@ def download_yolo_head_graft_bundle(job_id: str):
     run_name = meta.get("config", {}).get("run_name") or meta.get("job_id") or job_id
     safe_name = _sanitize_yolo_run_id_impl(run_name)
     required = {"best.pt", "labelmap.txt", "head_graft_audit.jsonl", YOLO_RUN_META_NAME}
-    missing = [name for name in sorted(required) if not (run_dir / name).exists()]
+    missing = [
+        name
+        for name in sorted(required)
+        if not _safe_regular_file_within_root(run_dir / name, run_dir)
+    ]
     if missing:
         raise HTTPException(
             status_code=HTTP_412_PRECONDITION_FAILED,
@@ -30739,9 +30761,9 @@ def download_yolo_head_graft_bundle(job_id: str):
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for filename in sorted(required):
             path = run_dir / filename
-            zf.write(path, arcname=filename)
+            _zip_write_safe_file(zf, path, run_dir, filename)
         for yaml_path in sorted(run_dir.glob("*.yaml")):
-            zf.write(yaml_path, arcname=yaml_path.name)
+            _zip_write_safe_file(zf, yaml_path, run_dir, yaml_path.name)
     buffer.seek(0)
     headers = {"Content-Disposition": f'attachment; filename="{safe_name}_head_graft_bundle.zip"'}
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)

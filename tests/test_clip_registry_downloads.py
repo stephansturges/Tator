@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import io
 import warnings
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -9,6 +12,13 @@ from sklearn.exceptions import InconsistentVersionWarning
 from starlette.responses import FileResponse
 
 import localinferenceapi
+
+
+async def _stream_body(response) -> bytes:
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def test_download_clip_classifier_returns_file_response(tmp_path, monkeypatch) -> None:
@@ -24,6 +34,40 @@ def test_download_clip_classifier_returns_file_response(tmp_path, monkeypatch) -
     assert isinstance(response, FileResponse)
     assert Path(response.path) == classifier_path
     assert response.filename == "head.pkl"
+
+
+def test_download_clip_classifier_zip_skips_symlink_meta_escape(tmp_path, monkeypatch) -> None:
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    classifiers_root.mkdir(parents=True, exist_ok=True)
+    classifier_path = classifiers_root / "head.pkl"
+    classifier_path.write_bytes(b"model")
+    outside = tmp_path / "outside.meta.pkl"
+    outside.write_bytes(b"secret")
+    try:
+        (classifiers_root / "head.meta.pkl").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", upload_root)
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_resolve_agent_clip_classifier_path_impl",
+        lambda *args, **kwargs: classifier_path,
+    )
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_find_labelmap_for_classifier_impl",
+        lambda *args, **kwargs: None,
+    )
+
+    response = localinferenceapi.download_clip_classifier_zip(rel_path="head.pkl")
+    raw = asyncio.run(_stream_body(response))
+
+    with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
+        names = set(zf.namelist())
+        payloads = {name: zf.read(name) for name in names}
+    assert names == {"head.pkl"}
+    assert payloads["head.pkl"] == b"model"
 
 
 def test_download_clip_classifier_not_found(monkeypatch) -> None:

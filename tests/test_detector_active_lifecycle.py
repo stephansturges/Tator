@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+import asyncio
+import io
+import zipfile
 from pathlib import Path
 
 import pytest
 
 import localinferenceapi as api
 from services.detectors import _load_yolo_active_impl
+
+
+async def _stream_body(response) -> bytes:
+    chunks = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _zip_names(response) -> set[str]:
+    raw = asyncio.run(_stream_body(response))
+    with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
+        return set(zf.namelist())
 
 
 def test_load_yolo_active_ignores_missing_best_path(tmp_path: Path) -> None:
@@ -16,6 +32,50 @@ def test_load_yolo_active_ignores_missing_best_path(tmp_path: Path) -> None:
     )
 
     assert _load_yolo_active_impl(active_path) == {}
+
+
+def test_download_yolo_run_skips_symlink_keep_file_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_root = tmp_path / "yolo_runs"
+    run_dir = job_root / "run1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.pt"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (run_dir / "best.pt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    (run_dir / "labelmap.txt").write_text("target\n", encoding="utf-8")
+
+    monkeypatch.setattr(api, "YOLO_JOB_ROOT", job_root)
+
+    names = _zip_names(api.download_yolo_run("run1"))
+
+    assert "labelmap.txt" in names
+    assert "best.pt" not in names
+
+
+def test_download_rfdetr_run_skips_symlink_keep_file_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_root = tmp_path / "rfdetr_runs"
+    run_dir = job_root / "run1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.pth"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (run_dir / "checkpoint_best_total.pth").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    (run_dir / "labelmap.txt").write_text("target\n", encoding="utf-8")
+
+    monkeypatch.setattr(api, "RFDETR_JOB_ROOT", job_root)
+
+    names = _zip_names(api.download_rfdetr_run("run1"))
+
+    assert "labelmap.txt" in names
+    assert "checkpoint_best_total.pth" not in names
 
 
 def test_delete_yolo_run_clears_active_and_cached_runtime(

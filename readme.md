@@ -310,7 +310,9 @@ without turning the README's first layer into a development diary.
   prepass recipe imports, and EDR package imports.
 - **2026-05-23:** Pinned pytest collection to Tator's `tests/` tree so vendored
   upstream CLIP tests are not run by the default project test command.
-- **Current validation:** project pytest reports `705 passed, 17 skipped,
+- **2026-05-23:** Hardened detector and classifier ZIP exports so symlinked
+  run artifacts cannot pull files from outside their run or upload roots.
+- **Current validation:** project pytest reports `709 passed, 17 skipped,
   8 warnings`; UI endpoint map/method checks report `148` mapped UI paths and
   `248` fetches with no failures. Live smoke is healthy on the local backend;
   YOLO/RF-DETR prediction smoke returns expected `412` responses when no active

@@ -8687,11 +8687,13 @@ def _active_classifier_head_for_inference() -> Optional[Dict[str, Any]]:
     """Return the active classifier as a normalized inference head when possible."""
     global active_classifier_head
 
-    if isinstance(active_classifier_head, dict):
-        return active_classifier_head
     classifier_path = str(active_classifier_path or "").strip()
     if not classifier_path or not os.path.isfile(classifier_path):
+        if isinstance(active_classifier_head, dict):
+            _clear_active_classifier_state("classifier_not_found")
         return None
+    if isinstance(active_classifier_head, dict):
+        return active_classifier_head
     try:
         head = _load_clip_head_from_classifier_impl(
             Path(classifier_path),
@@ -8711,6 +8713,22 @@ def _active_classifier_head_for_inference() -> Optional[Dict[str, Any]]:
         active_classifier_head = head
         return active_classifier_head
     return None
+
+
+def _clear_active_classifier_state(error: Optional[str] = None) -> None:
+    """Clear active classifier globals after the backing artifact is removed."""
+    global clf, active_classifier_path, active_labelmap_path, active_label_list, clip_last_error
+    global active_classifier_meta, active_head_normalize_embeddings, active_classifier_head
+
+    with clip_lock:
+        clf = None
+        active_classifier_path = None
+        active_labelmap_path = None
+        active_label_list = []
+        active_classifier_meta = {}
+        active_head_normalize_embeddings = True
+        active_classifier_head = None
+        clip_last_error = error
 
 
 def _clip_head_predict_proba(
@@ -27300,6 +27318,8 @@ def download_clip_classifier_zip(rel_path: str = Query(...)):
 
 
 def delete_clip_classifier(rel_path: str = Query(...)):
+    global active_classifier_path
+
     classifier_path = _resolve_agent_clip_classifier_path_impl(
         rel_path,
         allowed_root=(UPLOAD_ROOT / "classifiers").resolve(),
@@ -27321,6 +27341,14 @@ def delete_clip_classifier(rel_path: str = Query(...)):
             meta_path.unlink()
     except Exception:
         pass
+    try:
+        if (
+            active_classifier_path
+            and Path(active_classifier_path).resolve() == classifier_path.resolve()
+        ):
+            _clear_active_classifier_state("classifier_deleted")
+    except Exception:
+        _clear_active_classifier_state("classifier_deleted")
     return {"status": "deleted", "rel_path": rel_path}
 
 
@@ -30323,7 +30351,7 @@ def set_active_model(payload: ActiveModelRequest):
     if not os.path.isfile(classifier_path_abs):
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
     allowed_root = (UPLOAD_ROOT / "classifiers").resolve()
-    if not str(Path(classifier_path_abs).resolve()).startswith(str(allowed_root)):
+    if not _path_is_within_root_impl(Path(classifier_path_abs).resolve(), allowed_root):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_path_not_allowed")
     _validate_upload_extension(
         classifier_path_abs, CLASSIFIER_ALLOWED_EXTS, "classifier_extension_not_allowed"
@@ -30533,7 +30561,7 @@ def set_active_model(payload: ActiveModelRequest):
             (UPLOAD_ROOT / "classifiers").resolve(),
         ]
         if not any(
-            str(Path(labelmap_path_abs).resolve()).startswith(str(root))
+            _path_is_within_root_impl(Path(labelmap_path_abs).resolve(), root)
             for root in allowed_label_roots
         ):
             raise HTTPException(

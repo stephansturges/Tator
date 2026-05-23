@@ -36,6 +36,62 @@ def test_download_clip_classifier_not_found(monkeypatch) -> None:
     assert exc.value.detail == "classifier_not_found"
 
 
+def test_delete_active_clip_classifier_clears_active_state(tmp_path, monkeypatch) -> None:
+    classifier_path = tmp_path / "head.pkl"
+    meta_path = tmp_path / "head.meta.pkl"
+    labelmap_path = tmp_path / "labels.pkl"
+    classifier_path.write_bytes(b"model")
+    meta_path.write_bytes(b"meta")
+    labelmap_path.write_bytes(b"labels")
+    stale_head = {"classes": ["car"]}
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_resolve_agent_clip_classifier_path_impl",
+        lambda *args, **kwargs: classifier_path,
+    )
+    monkeypatch.setattr(localinferenceapi, "clf", object())
+    monkeypatch.setattr(localinferenceapi, "active_classifier_path", str(classifier_path))
+    monkeypatch.setattr(localinferenceapi, "active_labelmap_path", str(labelmap_path))
+    monkeypatch.setattr(localinferenceapi, "active_label_list", ["car"])
+    monkeypatch.setattr(localinferenceapi, "active_classifier_meta", {"encoder_type": "clip"})
+    monkeypatch.setattr(localinferenceapi, "active_head_normalize_embeddings", False)
+    monkeypatch.setattr(localinferenceapi, "active_classifier_head", stale_head)
+    monkeypatch.setattr(localinferenceapi, "clip_last_error", None)
+
+    response = localinferenceapi.delete_clip_classifier(rel_path="head.pkl")
+
+    assert response == {"status": "deleted", "rel_path": "head.pkl"}
+    assert not classifier_path.exists()
+    assert not meta_path.exists()
+    assert localinferenceapi.clf is None
+    assert localinferenceapi.active_classifier_path is None
+    assert localinferenceapi.active_labelmap_path is None
+    assert localinferenceapi.active_label_list == []
+    assert localinferenceapi.active_classifier_meta == {}
+    assert localinferenceapi.active_head_normalize_embeddings is True
+    assert localinferenceapi.active_classifier_head is None
+    assert localinferenceapi.clip_last_error == "classifier_deleted"
+
+
+def test_active_classifier_head_for_inference_drops_missing_cached_head(tmp_path, monkeypatch) -> None:
+    missing_path = tmp_path / "missing.pkl"
+    stale_head = {"classes": ["car"]}
+    monkeypatch.setattr(localinferenceapi, "clf", object())
+    monkeypatch.setattr(localinferenceapi, "active_classifier_path", str(missing_path))
+    monkeypatch.setattr(localinferenceapi, "active_labelmap_path", str(tmp_path / "labels.pkl"))
+    monkeypatch.setattr(localinferenceapi, "active_label_list", ["car"])
+    monkeypatch.setattr(localinferenceapi, "active_classifier_meta", {"encoder_type": "clip"})
+    monkeypatch.setattr(localinferenceapi, "active_head_normalize_embeddings", False)
+    monkeypatch.setattr(localinferenceapi, "active_classifier_head", stale_head)
+    monkeypatch.setattr(localinferenceapi, "clip_last_error", None)
+
+    assert localinferenceapi._active_classifier_head_for_inference() is None
+    assert localinferenceapi.clf is None
+    assert localinferenceapi.active_classifier_path is None
+    assert localinferenceapi.active_classifier_head is None
+    assert localinferenceapi.clip_last_error == "classifier_not_found"
+
+
 def test_download_clip_labelmap_returns_file_response(tmp_path, monkeypatch) -> None:
     labelmap_path = tmp_path / "labelmap.txt"
     labelmap_path.write_text("car\n", encoding="utf-8")

@@ -1804,6 +1804,76 @@ def test_set_active_model_rejects_invalid_mlp_head_before_activation(tmp_path, m
     assert api.active_classifier_head is previous_head
 
 
+def test_set_active_model_rejects_classifier_sibling_prefix_path(tmp_path, monkeypatch):
+    upload_root = tmp_path / "uploads"
+    (upload_root / "classifiers").mkdir(parents=True)
+    sibling_root = tmp_path / "uploads" / "classifiers_evil"
+    sibling_root.mkdir()
+    classifier_path = sibling_root / "outside.pkl"
+    classifier_path.write_bytes(b"not a classifier")
+    monkeypatch.setattr(api, "UPLOAD_ROOT", upload_root)
+
+    def fail_load(_path):
+        raise AssertionError("classifier outside upload root should not be loaded")
+
+    monkeypatch.setattr(api.joblib, "load", fail_load)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.set_active_model(api.ActiveModelRequest(classifier_path=str(classifier_path)))
+
+    assert exc.value.detail == "classifier_path_not_allowed"
+
+
+def test_set_active_model_rejects_labelmap_sibling_prefix_path(tmp_path, monkeypatch):
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    labelmaps_root = upload_root / "labelmaps"
+    sibling_labelmaps_root = upload_root / "labelmaps_evil"
+    classifiers_root.mkdir(parents=True)
+    labelmaps_root.mkdir()
+    sibling_labelmaps_root.mkdir()
+    classifier_path = classifiers_root / "head.pkl"
+    meta_path = classifiers_root / "head.meta.pkl"
+    labelmap_path = sibling_labelmaps_root / "labels.pkl"
+    classifier = types.SimpleNamespace(
+        classes_=np.asarray(["car"], dtype=object),
+        coef_=np.zeros((1, 2), dtype=np.float32),
+        intercept_=np.zeros(1, dtype=np.float32),
+        solver="lbfgs",
+        multi_class="auto",
+    )
+    api.joblib.dump(classifier, classifier_path)
+    api.joblib.dump(
+        {
+            "clip_model": "ViT-B/32",
+            "encoder_type": "clip",
+            "encoder_model": "ViT-B/32",
+            "embedding_dim": 2,
+        },
+        meta_path,
+    )
+    api.joblib.dump(["car"], labelmap_path)
+
+    class FakeClipModel:
+        visual = types.SimpleNamespace(output_dim=2)
+
+    monkeypatch.setattr(api, "UPLOAD_ROOT", upload_root)
+    monkeypatch.setattr(api, "clip_model", None)
+    monkeypatch.setattr(api, "clip_preprocess", None)
+    monkeypatch.setattr(api, "clip_model_name", "ViT-B/32")
+    monkeypatch.setattr(api.clip, "load", lambda name, device=None: (FakeClipModel(), object()))
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.set_active_model(
+            api.ActiveModelRequest(
+                classifier_path=str(classifier_path),
+                labelmap_path=str(labelmap_path),
+            )
+        )
+
+    assert exc.value.detail == "labelmap_path_not_allowed"
+
+
 def test_set_active_model_accepts_multiview_dinov3_embedding_width(tmp_path, monkeypatch):
     classifiers_root = tmp_path / "classifiers"
     labelmaps_root = tmp_path / "labelmaps"

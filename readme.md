@@ -802,6 +802,13 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experi
   runner now resolves the active classifier head lazily when cleanup runs,
   instead of capturing the import-time head, so active-model changes and
   active-classifier retraining refreshes are honored by auto-label filtering.
+- Fixed stale active-classifier cleanup. Deleting the active classifier, or
+  discovering that its backing file disappeared, now clears the loaded
+  classifier, labelmap, metadata, and normalized head instead of letting
+  inference continue with an unlisted in-memory model. Active-model activation
+  also uses strict root-relative path checks for classifiers and labelmaps, so
+  sibling directories with matching path prefixes cannot be treated as upload
+  roots.
 - Validation used:
 
 ```bash

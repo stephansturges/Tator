@@ -821,6 +821,14 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experi
   cached embedding runs recompute YOLO raw class counts before applying
   `min_per_class`, and tiny rare-class splits can carry an empty validation set
   without crashing on a zero-row memmap.
+- Hardened the final frontend edge cases from the debug pass. Class Split crop
+  previews tolerate both relative and absolute backend thumbnail URLs, so a
+  future backend proxy does not generate malformed `API_ROOT + http://...`
+  image paths. Auto-class MLP hidden-size recommendations now use the actual
+  saved embedding width: C-RADIOv4 SO400M/H base dimensions are recognized, and
+  multi-view, DINOv3 `cls_patch_concat`, and C-RADIOv4
+  `summary_spatial_concat` recipes multiply the recommendation width before
+  suggesting a hidden layer size.
 - Validation used:
 
 ```bash
@@ -835,9 +843,25 @@ NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python tools/run_class_split_experi
 NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest tests --ignore=tests/ui/e2e -q
 NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m py_compile localinferenceapi.py services/classifier.py tools/clip_training.py tools/train_clip_regression_from_YOLO.py
 node --check ybat-master/ybat.js
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python -m pytest \
+  tests/test_labeling_panel_layout_contract.py \
+  tests/ui/test_dataset_annotation_flow_playwright.py \
+  tests/test_clip_registry_downloads.py \
+  tests/test_clip_training_artifact_publish.py \
+  tests/test_class_analysis.py -q
+RUN_UI_E2E=1 \
+  UI_PAGE_URL=http://127.0.0.1:8765/ybat.html \
+  UI_DATASET_PATH=/Users/stephansturges/Tator/tests/fixtures/fuzz_pack \
+  NO_ALBUMENTATIONS_UPDATE=1 \
+  ./.venv-macos/bin/python -m pytest tests/ui/e2e -q -rs
+NO_ALBUMENTATIONS_UPDATE=1 ./.venv-macos/bin/python -m pytest --ignore=CLIP -q
 git diff --check
 ```
 
+- The app-only suite is run with `--ignore=CLIP` because the vendored upstream
+  OpenAI CLIP consistency tests download model weights and expect a repo-root
+  `CLIP.png`; those tests are not part of the Tator application verification
+  boundary.
 - Latest local backend smoke after restart:
 
 ```bash

@@ -49,8 +49,10 @@ def _copy2_if_different(src: Path, dest: Path) -> None:
 
 def _copy_tree_within_root(src: Path, dest: Path) -> None:
     src_resolved = src.resolve(strict=True)
-    dest_root = dest.resolve(strict=False)
+    if dest.is_symlink():
+        dest.unlink(missing_ok=True)
     dest.mkdir(parents=True, exist_ok=True)
+    dest_root = dest.resolve(strict=False)
     for item in sorted(src.rglob("*")):
         try:
             item_resolved = item.resolve(strict=True)
@@ -63,11 +65,11 @@ def _copy_tree_within_root(src: Path, dest: Path) -> None:
         rel = item.relative_to(src)
         target = dest / rel
         try:
-            target.resolve(strict=False).relative_to(dest_root)
+            target.parent.resolve(strict=False).relative_to(dest_root)
         except Exception:
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(item_resolved, target)
+        _copy2_if_different(item_resolved, target)
 
 
 def _delete_run_child(child: Path, dir_size_fn: Callable[[Path], int]) -> int:

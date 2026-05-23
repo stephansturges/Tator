@@ -9,6 +9,7 @@ import pytest
 
 import localinferenceapi as api
 from services.detectors import (
+    _copy_tree_within_root,
     _list_rfdetr_runs_impl,
     _list_yolo_runs_impl,
     _load_yolo_active_impl,
@@ -236,6 +237,49 @@ def test_rfdetr_prepare_dataset_copy_fallback_skips_symlink_escape(
 
     assert (prepared / "train" / "safe.jpg").read_text(encoding="utf-8") == "safe"
     assert not (prepared / "train" / "escape.jpg").exists()
+
+
+def test_detector_copy_tree_replaces_symlinked_dest_root_without_target_write(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "safe.txt").write_text("safe", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    dest = tmp_path / "dest"
+    try:
+        dest.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _copy_tree_within_root(src, dest)
+
+    assert not dest.is_symlink()
+    assert (dest / "safe.txt").read_text(encoding="utf-8") == "safe"
+    assert not (outside / "safe.txt").exists()
+
+
+def test_detector_copy_tree_replaces_symlinked_file_destination_without_target_write(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "safe.txt").write_text("safe", encoding="utf-8")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("external", encoding="utf-8")
+    try:
+        (dest / "safe.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _copy_tree_within_root(src, dest)
+
+    assert not (dest / "safe.txt").is_symlink()
+    assert (dest / "safe.txt").read_text(encoding="utf-8") == "safe"
+    assert outside.read_text(encoding="utf-8") == "external"
 
 
 def test_yolo_prune_run_dir_unlinks_symlink_directory_without_target_delete(tmp_path: Path) -> None:

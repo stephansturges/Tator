@@ -25801,6 +25801,23 @@ def _rfdetr_ddp_worker(
 ## NOTE: keep these helpers as direct impl calls at the call sites to avoid wrapper drift.
 
 
+def _sam3_training_split_root(job_id: str) -> Path:
+    split_parent = (SAM3_JOB_ROOT / "splits").resolve()
+    split_root = (split_parent / str(job_id)).resolve()
+    if not _path_is_within_root_impl(split_root, split_parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_split_path_invalid")
+    return split_root
+
+
+def _cleanup_sam3_training_split(job_id: str) -> None:
+    try:
+        split_root = _sam3_training_split_root(job_id)
+    except HTTPException:
+        return
+    if split_root.exists():
+        shutil.rmtree(split_root, ignore_errors=True)
+
+
 def _prepare_sam3_training_split(
     dataset_root: Path,
     meta: Dict[str, Any],
@@ -25870,7 +25887,7 @@ def _prepare_sam3_training_split(
         train_ids = train_ids[:train_limit]
     if not train_ids or not val_ids:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_training_split_empty")
-    split_root = (SAM3_JOB_ROOT / "splits" / job_id).resolve()
+    split_root = _sam3_training_split_root(job_id)
     split_root.parent.mkdir(parents=True, exist_ok=True)
     if split_root.exists():
         shutil.rmtree(split_root, ignore_errors=True)
@@ -29613,22 +29630,33 @@ def create_sam3_training_job(payload: Sam3TrainRequest):
     meta = _resolve_sam3_dataset_meta(payload.dataset_id)
     job_id = uuid.uuid4().hex
     prep_logs: List[str] = []
-    cfg, num_gpus = _build_sam3_config(payload, meta, job_id, prep_logs)
+    try:
+        cfg, num_gpus = _build_sam3_config(payload, meta, job_id, prep_logs)
+    except Exception:
+        _cleanup_sam3_training_split(job_id)
+        raise
     config_dict = OmegaConf.to_container(cfg, resolve=False)  # type: ignore[arg-type]
     job = Sam3TrainingJob(job_id=job_id, config=config_dict)
-    with SAM3_TRAINING_JOBS_LOCK:
-        SAM3_TRAINING_JOBS[job_id] = job
-        for msg in prep_logs:
-            _sam3_job_log(job, msg)
-        _sam3_job_log(job, "Job queued")
-    logger.info("[sam3-train %s] dataset=%s gpus=%s", job_id[:8], payload.dataset_id, num_gpus)
-    _start_sam3_training_worker(
-        job,
-        cfg,
-        num_gpus,
-        val_score_thresh=payload.val_score_thresh,
-        val_max_dets=payload.val_max_dets,
-    )
+    try:
+        with SAM3_TRAINING_JOBS_LOCK:
+            SAM3_TRAINING_JOBS[job_id] = job
+            for msg in prep_logs:
+                _sam3_job_log(job, msg)
+            _sam3_job_log(job, "Job queued")
+        logger.info("[sam3-train %s] dataset=%s gpus=%s", job_id[:8], payload.dataset_id, num_gpus)
+        _start_sam3_training_worker(
+            job,
+            cfg,
+            num_gpus,
+            val_score_thresh=payload.val_score_thresh,
+            val_max_dets=payload.val_max_dets,
+        )
+    except Exception:
+        with SAM3_TRAINING_JOBS_LOCK:
+            if SAM3_TRAINING_JOBS.get(job_id) is job:
+                SAM3_TRAINING_JOBS.pop(job_id, None)
+        _cleanup_sam3_training_split(job_id)
+        raise
     return {"job_id": job_id}
 
 

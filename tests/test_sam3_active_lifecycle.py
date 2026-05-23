@@ -116,3 +116,67 @@ def test_sam3_train_cache_purge_reports_bytes_and_entries(tmp_path: Path, monkey
 
     assert out == {"status": "ok", "deleted_bytes": 6, "deleted_entries": 1}
     assert not split_root.exists()
+
+
+def test_sam3_training_job_cleans_split_when_config_build_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sam3_root = tmp_path / "sam3_training"
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", sam3_root)
+    monkeypatch.setattr(api, "_resolve_sam3_dataset_meta", lambda _dataset_id: {"id": "demo"})
+
+    def failing_build(payload, meta, job_id, prep_logs):
+        split_root = api._sam3_training_split_root(job_id)
+        split_root.mkdir(parents=True, exist_ok=True)
+        (split_root / "payload.bin").write_bytes(b"split")
+        raise api.HTTPException(status_code=409, detail="run_name_exists")
+
+    monkeypatch.setattr(api, "_build_sam3_config", failing_build)
+    with api.SAM3_TRAINING_JOBS_LOCK:
+        api.SAM3_TRAINING_JOBS.clear()
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.create_sam3_training_job(api.Sam3TrainRequest(dataset_id="demo"))
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail == "run_name_exists"
+    split_parent = sam3_root / "splits"
+    assert not split_parent.exists() or list(split_parent.iterdir()) == []
+    assert api.SAM3_TRAINING_JOBS == {}
+
+
+def test_sam3_training_job_cleans_split_when_worker_start_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sam3_root = tmp_path / "sam3_training"
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", sam3_root)
+    monkeypatch.setattr(api, "_resolve_sam3_dataset_meta", lambda _dataset_id: {"id": "demo"})
+
+    def build_config(payload, meta, job_id, prep_logs):
+        split_root = api._sam3_training_split_root(job_id)
+        split_root.mkdir(parents=True, exist_ok=True)
+        (split_root / "payload.bin").write_bytes(b"split")
+        cfg = api.OmegaConf.create(
+            {
+                "paths": {"experiment_log_dir": str(sam3_root / "demo-run")},
+                "launcher": {"gpus_per_node": 1},
+                "trainer": {},
+                "scratch": {},
+            }
+        )
+        return cfg, 1
+
+    def fail_start(*args, **kwargs):
+        raise RuntimeError("thread start failed")
+
+    monkeypatch.setattr(api, "_build_sam3_config", build_config)
+    monkeypatch.setattr(api, "_start_sam3_training_worker", fail_start)
+    with api.SAM3_TRAINING_JOBS_LOCK:
+        api.SAM3_TRAINING_JOBS.clear()
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        api.create_sam3_training_job(api.Sam3TrainRequest(dataset_id="demo"))
+
+    split_parent = sam3_root / "splits"
+    assert not split_parent.exists() or list(split_parent.iterdir()) == []
+    assert api.SAM3_TRAINING_JOBS == {}

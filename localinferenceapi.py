@@ -33532,10 +33532,10 @@ def _storage_check_payload() -> Dict[str, Any]:
 
 
 def _storage_probe_root(root: Path) -> None:
-    if root.is_symlink() or root.parent.is_symlink():
+    if _storage_path_has_symlink_component(root):
         raise RuntimeError("storage_root_symlink")
     root.mkdir(parents=True, exist_ok=True)
-    if root.is_symlink() or root.parent.is_symlink() or not root.is_dir():
+    if _storage_path_has_symlink_component(root) or not root.is_dir():
         raise RuntimeError("storage_root_invalid")
     root_resolved = root.resolve(strict=True)
     test_path = root_resolved / f".write_test_{uuid.uuid4().hex}"

@@ -67,3 +67,26 @@ def test_storage_check_rejects_symlink_root_without_writing_through(
     assert entries["calibration_jobs"]["ok"] is False
     assert "storage_root_symlink" in str(entries["calibration_jobs"]["error"])
     assert list(outside.iterdir()) == []
+
+
+def test_storage_check_rejects_symlinked_root_parent_without_writing_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots = _patch_storage_roots(monkeypatch, tmp_path / "storage")
+    outside = tmp_path / "outside_calibration"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "CALIBRATION_ROOT", linked_parent / "calibration_jobs")
+
+    payload = api._storage_check_payload()
+    entries = {entry["name"]: entry for entry in payload["roots"]}
+
+    assert roots["calibration_jobs"] == tmp_path / "storage" / "calibration_jobs"
+    assert payload["ok"] is False
+    assert entries["calibration_jobs"]["ok"] is False
+    assert "storage_root_symlink" in str(entries["calibration_jobs"]["error"])
+    assert list(outside.iterdir()) == []

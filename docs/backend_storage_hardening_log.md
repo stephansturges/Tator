@@ -59,3 +59,12 @@ preserving the exact validation story for storage and artifact-write fixes.
   without writing to the target directory.
 - Validation: `983 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: System Storage Probe Roots
+
+- Rejected symlink components anywhere in system storage probe roots before and
+  after probe root creation.
+- Added a regression that blocks health/storage probes through a symlinked root
+  parent without writing probe files to the target directory.
+- Validation: `984 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

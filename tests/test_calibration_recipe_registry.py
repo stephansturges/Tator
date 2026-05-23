@@ -11,6 +11,7 @@ from services.calibration_recipe_registry import (
     _atomic_write_json,
     build_recipe_fingerprint,
     build_recipe_fingerprint_payload,
+    discovery_lock,
     find_matching_recipe,
     load_registry,
     register_promoted_recipe,
@@ -175,6 +176,110 @@ def test_load_registry_skips_symlinked_index_escape(tmp_path: Path) -> None:
     registry = load_registry(cache_root)
 
     assert registry["entries"] == {}
+
+
+def test_load_registry_skips_symlinked_cache_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_cache"
+    registry_root = outside / "recipe_registry"
+    registry_root.mkdir(parents=True)
+    (registry_root / "index.json").write_text(
+        json.dumps({"version": 1, "entries": {"escaped": {}}}),
+        encoding="utf-8",
+    )
+    cache_root = tmp_path / "cache"
+    try:
+        cache_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    registry = load_registry(cache_root)
+
+    assert registry["entries"] == {}
+
+
+def test_discovery_lock_replaces_symlink_target_without_target_write(tmp_path: Path) -> None:
+    cache_root = tmp_path / "cache"
+    lock_root = cache_root / "discovery_runs"
+    lock_root.mkdir(parents=True)
+    outside = tmp_path / "outside.lock"
+    outside.write_text("external", encoding="utf-8")
+    lock_path = lock_root / "abc.lock"
+    try:
+        lock_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with discovery_lock(cache_root, "abc"):
+        assert lock_path.exists()
+        assert not lock_path.is_symlink()
+
+    assert outside.read_text(encoding="utf-8") == "external"
+
+
+def test_discovery_lock_rejects_pathlike_fingerprint_before_escape_creation(
+    tmp_path: Path,
+) -> None:
+    cache_root = tmp_path / "cache"
+
+    with pytest.raises(ValueError, match="recipe_discovery_lock_name_not_allowed"):
+        with discovery_lock(cache_root, "../escape"):
+            pass
+
+    assert not (cache_root / "escape.lock").exists()
+
+
+def test_register_promoted_recipe_rejects_pathlike_fingerprint_before_escape_creation(
+    tmp_path: Path,
+) -> None:
+    cache_root = tmp_path / "cache"
+    canonical_json = tmp_path / "canonical_edr.json"
+    canonical_json.write_text(json.dumps({"canonical_windowed_recipe": {"winner_lane": "window"}}))
+
+    with pytest.raises(ValueError, match="recipe_registry_entry_name_not_allowed"):
+        register_promoted_recipe(
+            cache_root,
+            fingerprint="../escape",
+            fingerprint_payload=_sample_payload(),
+            dataset_id="demo",
+            canonical_recipe_json=canonical_json,
+            canonical_recipe_md=None,
+            report_bundle_json=None,
+            discovery_run_root=None,
+        )
+
+    assert not (cache_root / "escape").exists()
+
+
+def test_register_promoted_recipe_replaces_symlinked_index_lock_without_target_write(
+    tmp_path: Path,
+) -> None:
+    cache_root = tmp_path / "cache"
+    registry_root = cache_root / "recipe_registry"
+    registry_root.mkdir(parents=True)
+    outside = tmp_path / "outside_index.lock"
+    outside.write_text("external", encoding="utf-8")
+    try:
+        (registry_root / ".index.lock").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    fingerprint_payload = _sample_payload()
+    fingerprint = build_recipe_fingerprint(fingerprint_payload)
+    canonical_json = tmp_path / "canonical_edr.json"
+    canonical_json.write_text(json.dumps({"canonical_windowed_recipe": {"winner_lane": "window"}}))
+
+    register_promoted_recipe(
+        cache_root,
+        fingerprint=fingerprint,
+        fingerprint_payload=fingerprint_payload,
+        dataset_id="demo",
+        canonical_recipe_json=canonical_json,
+        canonical_recipe_md=None,
+        report_bundle_json=None,
+        discovery_run_root=None,
+    )
+
+    assert not (registry_root / ".index.lock").is_symlink()
+    assert outside.read_text(encoding="utf-8") == "external"
 
 
 def test_register_promoted_recipe_is_safe_under_concurrent_writes(tmp_path: Path) -> None:

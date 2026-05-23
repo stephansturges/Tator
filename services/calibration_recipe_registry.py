@@ -110,6 +110,13 @@ def _path_within(path: Path, root: Path) -> bool:
         return False
 
 
+def _safe_child_name(value: str, detail: str) -> str:
+    name = str(value or "").strip()
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        raise ValueError(detail)
+    return name
+
+
 def _write_text_within_parent(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.parent.is_symlink():
@@ -149,8 +156,34 @@ def _prepare_recipe_registry_root(cache_root: Path) -> Path:
     return root
 
 
+def _prepare_discovery_runs_root(cache_root: Path) -> Path:
+    if cache_root.is_symlink():
+        raise ValueError("recipe_discovery_cache_root_symlink")
+    cache_root.mkdir(parents=True, exist_ok=True)
+    if cache_root.is_symlink():
+        raise ValueError("recipe_discovery_cache_root_symlink")
+    cache_resolved = cache_root.resolve(strict=True)
+    root = discovery_runs_root(cache_root)
+    if root.is_symlink():
+        raise ValueError("recipe_discovery_root_symlink")
+    root.mkdir(parents=True, exist_ok=True)
+    if root.is_symlink():
+        raise ValueError("recipe_discovery_root_symlink")
+    try:
+        root_resolved = root.resolve(strict=True)
+    except Exception as exc:
+        raise ValueError("recipe_discovery_root_not_allowed") from exc
+    if not _path_within(root_resolved, cache_resolved):
+        raise ValueError("recipe_discovery_root_not_allowed")
+    return root
+
+
 def _prepare_recipe_dir(root: Path, fingerprint: str) -> Path:
-    recipe_dir = root / str(fingerprint)
+    safe_fingerprint = _safe_child_name(
+        fingerprint,
+        "recipe_registry_entry_name_not_allowed",
+    )
+    recipe_dir = root / safe_fingerprint
     if recipe_dir.is_symlink():
         recipe_dir.unlink(missing_ok=True)
     elif recipe_dir.exists() and not recipe_dir.is_dir():
@@ -167,6 +200,17 @@ def _prepare_recipe_dir(root: Path, fingerprint: str) -> Path:
 @contextmanager
 def _exclusive_lock(lock_path: Path) -> Iterator[None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if lock_path.parent.is_symlink():
+        raise ValueError("recipe_registry_lock_parent_symlink")
+    parent_resolved = lock_path.parent.resolve(strict=True)
+    if lock_path.is_symlink():
+        lock_path.unlink(missing_ok=True)
+    elif lock_path.exists() and lock_path.is_dir():
+        raise ValueError("recipe_registry_lock_target_is_directory")
+    try:
+        lock_path.resolve(strict=False).relative_to(parent_resolved)
+    except Exception as exc:
+        raise ValueError("recipe_registry_lock_path_not_allowed") from exc
     with lock_path.open("a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
@@ -177,12 +221,19 @@ def _exclusive_lock(lock_path: Path) -> Iterator[None]:
 
 @contextmanager
 def discovery_lock(cache_root: Path, fingerprint: str) -> Iterator[None]:
-    lock_path = discovery_runs_root(cache_root) / f"{str(fingerprint)}.lock"
+    root = _prepare_discovery_runs_root(cache_root)
+    safe_fingerprint = _safe_child_name(
+        fingerprint,
+        "recipe_discovery_lock_name_not_allowed",
+    )
+    lock_path = root / f"{safe_fingerprint}.lock"
     with _exclusive_lock(lock_path):
         yield
 
 
 def load_registry(cache_root: Path) -> Dict[str, Any]:
+    if cache_root.is_symlink():
+        return {"version": CALIBRATION_RECIPE_REGISTRY_VERSION, "entries": {}}
     root = registry_root(cache_root)
     if root.is_symlink():
         return {"version": CALIBRATION_RECIPE_REGISTRY_VERSION, "entries": {}}
@@ -344,7 +395,7 @@ def register_promoted_recipe(
     entry["registry_entry_json"] = str(entry_path.resolve())
     _atomic_write_json(entry_path, entry)
 
-    with _exclusive_lock(registry_root(cache_root) / ".index.lock"):
+    with _exclusive_lock(root / ".index.lock"):
         registry = load_registry(cache_root)
         entries = registry.setdefault("entries", {})
         entries[str(fingerprint)] = entry

@@ -57,6 +57,7 @@ def _describe_run_dir_impl(
             promoted_at = None
     checkpoints: List[Dict[str, Any]] = []
     if checkpoints_dir.exists():
+        checkpoints_root = checkpoints_dir.resolve()
         for ckpt in sorted(
             checkpoints_dir.iterdir(),
             key=lambda p: p.stat().st_mtime if p.exists() else 0,
@@ -64,6 +65,8 @@ def _describe_run_dir_impl(
         ):
             if ckpt.is_file():
                 try:
+                    if not _path_is_within_root_impl(ckpt.resolve(), checkpoints_root):
+                        continue
                     stat = ckpt.stat()
                     checkpoints.append(
                         {

@@ -19853,7 +19853,11 @@ def _ensure_yolo_inference_runtime_for_detector(
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
     best_path = run_dir / "best.pt"
-    if not best_path.exists():
+    try:
+        best_within_run = _path_is_within_root_impl(best_path.resolve(), run_dir.resolve())
+    except Exception:
+        best_within_run = False
+    if not best_path.exists() or not best_within_run:
         raise HTTPException(status_code=HTTP_412_PRECONDITION_FAILED, detail="yolo_best_missing")
     run_meta = _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
     config = run_meta.get("config") or {}
@@ -19960,7 +19964,17 @@ def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
     ckpt_dir = run_dir / "checkpoints"
     if not ckpt_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_checkpoint_dir_missing")
-    ckpts = [p for p in ckpt_dir.iterdir() if p.is_file() and p.suffix in {".ckpt", ".pth", ".pt"}]
+    ckpt_root = ckpt_dir.resolve()
+    ckpts = []
+    for p in ckpt_dir.iterdir():
+        if not p.is_file() or p.suffix not in {".ckpt", ".pth", ".pt"}:
+            continue
+        try:
+            if not _path_is_within_root_impl(p.resolve(), ckpt_root):
+                continue
+        except Exception:
+            continue
+        ckpts.append(p)
     if not ckpts:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_checkpoints_missing")
     # choose keep candidate: prefer last.ckpt else newest

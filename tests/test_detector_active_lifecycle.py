@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import localinferenceapi as api
-from services.detectors import _load_yolo_active_impl
+from services.detectors import _load_yolo_active_impl, _rfdetr_best_checkpoint_impl
 
 
 async def _stream_body(response) -> bytes:
@@ -28,6 +28,25 @@ def test_load_yolo_active_ignores_missing_best_path(tmp_path: Path) -> None:
     active_path = tmp_path / "active.json"
     active_path.write_text(
         '{"run_id":"missing","best_path":"/tmp/tator_missing_yolo_best.pt"}',
+        encoding="utf-8",
+    )
+
+    assert _load_yolo_active_impl(active_path) == {}
+
+
+def test_load_yolo_active_ignores_best_symlink_escape(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    outside = tmp_path / "outside.pt"
+    outside.write_text("secret", encoding="utf-8")
+    best_path = run_dir / "best.pt"
+    try:
+        best_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    active_path = tmp_path / "active.json"
+    active_path.write_text(
+        '{"run_id":"run","best_path":"' + str(best_path) + '"}',
         encoding="utf-8",
     )
 
@@ -56,6 +75,27 @@ def test_download_yolo_run_skips_symlink_keep_file_escape(
     assert "best.pt" not in names
 
 
+def test_yolo_detector_runtime_rejects_best_symlink_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_root = tmp_path / "yolo_runs"
+    run_dir = job_root / "run1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.pt"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (run_dir / "best.pt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "YOLO_JOB_ROOT", job_root)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api._ensure_yolo_inference_runtime_for_detector("run1")
+
+    assert exc.value.status_code == 412
+    assert exc.value.detail == "yolo_best_missing"
+
+
 def test_download_rfdetr_run_skips_symlink_keep_file_escape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -76,6 +116,28 @@ def test_download_rfdetr_run_skips_symlink_keep_file_escape(
 
     assert "labelmap.txt" in names
     assert "checkpoint_best_total.pth" not in names
+
+
+def test_rfdetr_detector_runtime_rejects_best_symlink_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_root = tmp_path / "rfdetr_runs"
+    run_dir = job_root / "run1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.pth"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (run_dir / "checkpoint_best_total.pth").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "RFDETR_JOB_ROOT", job_root)
+
+    assert _rfdetr_best_checkpoint_impl(run_dir) is None
+    with pytest.raises(api.HTTPException) as exc:
+        api._ensure_rfdetr_inference_runtime_for_detector("run1")
+
+    assert exc.value.status_code == 412
+    assert exc.value.detail == "rfdetr_best_missing"
 
 
 def test_delete_yolo_run_clears_active_and_cached_runtime(

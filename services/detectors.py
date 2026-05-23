@@ -232,8 +232,15 @@ def _load_yolo_active_impl(yolo_active_path: Path) -> Dict[str, Any]:
         if not isinstance(payload, dict):
             return {}
         best_path = str(payload.get("best_path") or "")
-        if best_path and not Path(best_path).exists():
-            return {}
+        if best_path:
+            best = Path(best_path)
+            if not best.exists():
+                return {}
+            try:
+                if not _path_is_within_root_impl(best.resolve(), best.parent.resolve()):
+                    return {}
+            except Exception:
+                return {}
         return payload
     except Exception:
         return {}
@@ -653,9 +660,17 @@ def _rfdetr_variant_info_impl(
 
 
 def _rfdetr_best_checkpoint_impl(run_dir: Path) -> Optional[str]:
+    run_root = run_dir.resolve()
     for name in ("checkpoint_best_total.pth", "checkpoint_best_ema.pth", "checkpoint_best_regular.pth"):
         path = run_dir / name
-        if path.exists():
+        if not path.exists():
+            continue
+        try:
+            if not _path_is_within_root_impl(path.resolve(), run_root):
+                continue
+        except Exception:
+            continue
+        if path.is_file():
             return str(path)
     return None
 

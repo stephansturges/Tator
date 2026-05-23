@@ -71,6 +71,53 @@ def test_list_sam3_models_clears_missing_custom_active_checkpoint(tmp_path: Path
     assert api.active_sam3_model_id == "default"
 
 
+def test_list_sam3_models_skips_checkpoint_symlink_escape(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_dir = tmp_path / "runs" / "run_symlink"
+    checkpoint_dir = run_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.ckpt"
+    outside.write_text("weights", encoding="utf-8")
+    try:
+        (checkpoint_dir / "last.ckpt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "runs" / "datasets")
+    monkeypatch.setattr(api, "SAM3_CHECKPOINT_PATH", None)
+    monkeypatch.setattr(api, "active_sam3_checkpoint", None)
+
+    models = api.list_sam3_available_models()
+
+    assert all(model.get("id") != "run_symlink" for model in models)
+
+
+def test_promote_sam3_run_rejects_checkpoint_symlink_escape(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "run_symlink"
+    run_dir = tmp_path / run_id
+    checkpoint_dir = run_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.ckpt"
+    outside.write_text("weights", encoding="utf-8")
+    try:
+        (checkpoint_dir / "last.ckpt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", tmp_path)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.promote_sam3_run(run_id)
+
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.detail == "sam3_checkpoints_missing"
+    assert outside.read_text(encoding="utf-8") == "weights"
+
+
 def test_sam3_train_cache_purge_blocks_active_split_job(tmp_path: Path, monkeypatch) -> None:
     sam3_root = tmp_path / "sam3_training"
     split_root = sam3_root / "splits" / "job-active"

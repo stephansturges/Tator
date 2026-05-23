@@ -284,6 +284,57 @@ def test_qwen_training_job_rejects_active_duplicate_run_name(tmp_path, monkeypat
             api.QWEN_TRAINING_JOBS.clear()
 
 
+def test_qwen_training_job_cleans_random_split_when_run_name_exists(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_only_dataset(tmp_path, monkeypatch)
+    (api.QWEN_JOB_ROOT / "runs" / "existing").mkdir(parents=True)
+    payload = api.QwenTrainRequest(
+        dataset_id="demo",
+        run_name="existing",
+        random_split=True,
+        val_percent=0.5,
+    )
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.create_qwen_training_job(payload)
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail == "run_name_exists"
+    split_root = api.QWEN_JOB_ROOT / "splits"
+    assert not split_root.exists() or list(split_root.iterdir()) == []
+
+
+def test_qwen_training_job_cleans_random_split_for_active_duplicate(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_only_dataset(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "_start_qwen_training_worker", lambda job, config: None)
+    with api.QWEN_TRAINING_JOBS_LOCK:
+        api.QWEN_TRAINING_JOBS.clear()
+    payload = api.QwenTrainRequest(
+        dataset_id="demo",
+        run_name="duplicate",
+        random_split=True,
+        val_percent=0.5,
+    )
+
+    try:
+        first = api.create_qwen_training_job(payload)
+        assert first["job_id"]
+        with pytest.raises(api.HTTPException) as excinfo:
+            api.create_qwen_training_job(payload)
+        assert excinfo.value.status_code == 409
+        assert excinfo.value.detail == "run_name_exists"
+        splits = sorted((api.QWEN_JOB_ROOT / "splits").iterdir())
+        assert [path.name for path in splits] == [first["job_id"]]
+    finally:
+        with api.QWEN_TRAINING_JOBS_LOCK:
+            api.QWEN_TRAINING_JOBS.clear()
+
+
 def test_qwen_train_request_drops_nonfinite_numeric_controls():
     payload = api.QwenTrainRequest(
         dataset_id="demo",

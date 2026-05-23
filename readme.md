@@ -291,10 +291,10 @@ front page into a development diary.
 - **2026-05-23:** Hardened backend job starts, upload handles, dataset and model
   path containment, ZIP exports, active run deletion, Qwen paths, and Mac YOLO
   MPS training setup.
-- **2026-05-23:** Hardened Qwen dataset uploads so chunk writes are serialized,
-  reserved annotation filenames are rejected, and finalize keeps the upload job
-  retryable until metadata and dataset promotion succeed.
-- **Current validation:** project pytest reports `721 passed, 17 skipped,
+- **2026-05-23:** Hardened Qwen dataset uploads and random-split training job
+  creation so failed promotions or rejected starts do not leave corrupt
+  datasets, lost upload jobs, or orphaned split caches.
+- **Current validation:** project pytest reports `723 passed, 17 skipped,
   8 warnings`; UI endpoint map/method checks report `148` mapped UI paths and
   `248` fetches with no failures. Live smoke is healthy on the local backend.
 

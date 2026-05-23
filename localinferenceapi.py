@@ -22252,6 +22252,23 @@ def _qwen_train_float(
     return parsed
 
 
+def _qwen_training_split_root(job_id: str) -> Path:
+    split_parent = (QWEN_JOB_ROOT / "splits").resolve()
+    split_root = (split_parent / str(job_id)).resolve()
+    if not _path_is_within_root_impl(split_root, split_parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_split_path_invalid")
+    return split_root
+
+
+def _cleanup_qwen_training_split(job_id: str) -> None:
+    try:
+        split_root = _qwen_training_split_root(job_id)
+    except HTTPException:
+        return
+    if split_root.exists():
+        shutil.rmtree(split_root, ignore_errors=True)
+
+
 def _prepare_qwen_training_split(
     dataset_root: Path,
     job_id: str,
@@ -22303,10 +22320,7 @@ def _prepare_qwen_training_split(
     if not train_entries or not val_entries:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_training_split_empty")
 
-    split_root = (QWEN_JOB_ROOT / "splits" / job_id).resolve()
-    split_parent = (QWEN_JOB_ROOT / "splits").resolve()
-    if not _path_is_within_root_impl(split_root, split_parent):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_split_path_invalid")
+    split_root = _qwen_training_split_root(job_id)
     if split_root.exists():
         shutil.rmtree(split_root, ignore_errors=True)
     (split_root / "train" / "images").mkdir(parents=True, exist_ok=True)
@@ -31191,7 +31205,11 @@ def create_qwen_training_job(payload: QwenTrainRequest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_id_required")
     job_id = uuid.uuid4().hex
     prep_logs: List[str] = []
-    config = _build_qwen_config(payload, job_id, prep_logs)
+    try:
+        config = _build_qwen_config(payload, job_id, prep_logs)
+    except Exception:
+        _cleanup_qwen_training_split(job_id)
+        raise
     config_dict = asdict(config)
     job = QwenTrainingJob(job_id=job_id, config=config_dict)
     logger.info(
@@ -31201,17 +31219,24 @@ def create_qwen_training_job(payload: QwenTrainRequest):
         getattr(payload, "devices", None) or config_dict.get("devices"),
         payload.dataset_id,
     )
-    with QWEN_TRAINING_JOBS_LOCK:
-        for existing in QWEN_TRAINING_JOBS.values():
-            if existing.status in {"succeeded", "failed", "cancelled"}:
-                continue
-            if str((existing.config or {}).get("result_path") or "") == str(config.result_path):
-                raise HTTPException(status_code=HTTP_409_CONFLICT, detail="run_name_exists")
-        QWEN_TRAINING_JOBS[job_id] = job
-        for msg in prep_logs:
-            _qwen_job_log(job, msg)
-        _qwen_job_log(job, "Job queued")
-    _start_qwen_training_worker(job, config)
+    try:
+        with QWEN_TRAINING_JOBS_LOCK:
+            for existing in QWEN_TRAINING_JOBS.values():
+                if existing.status in {"succeeded", "failed", "cancelled"}:
+                    continue
+                if str((existing.config or {}).get("result_path") or "") == str(config.result_path):
+                    raise HTTPException(status_code=HTTP_409_CONFLICT, detail="run_name_exists")
+            QWEN_TRAINING_JOBS[job_id] = job
+            for msg in prep_logs:
+                _qwen_job_log(job, msg)
+            _qwen_job_log(job, "Job queued")
+        _start_qwen_training_worker(job, config)
+    except Exception:
+        with QWEN_TRAINING_JOBS_LOCK:
+            if QWEN_TRAINING_JOBS.get(job_id) is job:
+                QWEN_TRAINING_JOBS.pop(job_id, None)
+        _cleanup_qwen_training_split(job_id)
+        raise
     return {"job_id": job_id}
 
 

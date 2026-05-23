@@ -172,6 +172,38 @@ def test_resolve_edr_package_runtime_stages_classifier_not_meta(tmp_path: Path) 
     assert (classifiers_root / "pkg1__demo.meta.pkl").read_text(encoding="utf-8") == "meta"
 
 
+def test_resolve_edr_package_runtime_rejects_symlinked_classifier_root_without_target_write(
+    tmp_path: Path,
+) -> None:
+    packages_root = tmp_path / "edr_packages"
+    package_root = packages_root / "pkg1"
+    payload_root = package_root / EDR_PACKAGE_PAYLOAD_DIRNAME
+    classifier_root = payload_root / "models" / "classifier"
+    classifier_root.mkdir(parents=True, exist_ok=True)
+    _write_min_runtime_payload(package_root, payload_root)
+    (classifier_root / "demo.pkl").write_text("model", encoding="utf-8")
+    outside = tmp_path / "outside_classifiers"
+    outside.mkdir()
+    classifiers_root = tmp_path / "classifiers"
+    try:
+        classifiers_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(RuntimeError, match="edr_package_path_invalid"):
+        resolve_edr_package_runtime(
+            packages_root=packages_root,
+            package_id="pkg1",
+            upload_root=tmp_path / "uploads",
+            yolo_job_root=tmp_path / "yolo_runs",
+            rfdetr_job_root=tmp_path / "rfdetr_runs",
+            calibration_root=tmp_path / "calibration_jobs",
+            classifiers_root=classifiers_root,
+        )
+
+    assert list(outside.iterdir()) == []
+
+
 def test_resolve_edr_package_runtime_skips_classifier_symlink_escape(tmp_path: Path) -> None:
     packages_root = tmp_path / "edr_packages"
     package_root = packages_root / "pkg1"
@@ -565,6 +597,32 @@ def test_stage_tree_rejects_symlinked_stage_root_without_target_write(
         _stage_tree_if_needed(
             src,
             stage_root / "pkg1__yolo",
+            package_id="pkg1",
+            package_sha256="sha",
+            kind="yolo_run",
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_stage_tree_rejects_symlinked_stage_parent_without_target_write(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "safe.txt").write_text("safe", encoding="utf-8")
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    stage_parent = tmp_path / "linked_parent"
+    try:
+        stage_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(RuntimeError, match="edr_package_path_invalid"):
+        _stage_tree_if_needed(
+            src,
+            stage_parent / "yolo_runs" / "pkg1__yolo",
             package_id="pkg1",
             package_sha256="sha",
             kind="yolo_run",

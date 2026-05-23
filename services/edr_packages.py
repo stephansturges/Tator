@@ -853,6 +853,15 @@ def _write_stage_meta(dest: Path, *, package_id: str, package_sha256: str, kind:
     )
 
 
+def _prepare_runtime_stage_root(stage_root: Path) -> Path:
+    if stage_root.is_symlink() or stage_root.parent.is_symlink():
+        raise RuntimeError("edr_package_path_invalid")
+    stage_root.mkdir(parents=True, exist_ok=True)
+    if stage_root.is_symlink() or stage_root.parent.is_symlink() or not stage_root.is_dir():
+        raise RuntimeError("edr_package_path_invalid")
+    return stage_root.resolve(strict=True)
+
+
 def _stage_tree_if_needed(
     src: Path,
     dest: Path,
@@ -861,12 +870,8 @@ def _stage_tree_if_needed(
     package_sha256: str,
     kind: str,
 ) -> None:
-    stage_root = dest.parent
-    if stage_root.is_symlink():
-        raise RuntimeError("edr_package_path_invalid")
-    stage_root.mkdir(parents=True, exist_ok=True)
-    if stage_root.is_symlink() or not stage_root.is_dir():
-        raise RuntimeError("edr_package_path_invalid")
+    stage_root = _prepare_runtime_stage_root(dest.parent)
+    dest = stage_root / dest.name
     if dest.is_symlink():
         dest.unlink(missing_ok=True)
     if dest.exists() and _stage_meta_matches(
@@ -916,7 +921,7 @@ def resolve_edr_package_runtime(
     staged_classifier_id = None
     classifier_dir = payload_root / "models" / "classifier"
     if classifier_dir.exists():
-        classifiers_root.mkdir(parents=True, exist_ok=True)
+        classifiers_root = _prepare_runtime_stage_root(classifiers_root)
         classifier_dir_resolved = classifier_dir.resolve(strict=False)
         for item in sorted(classifier_dir.iterdir()):
             if not _safe_regular_file_within_root(item, classifier_dir_resolved):

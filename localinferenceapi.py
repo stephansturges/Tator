@@ -2871,24 +2871,14 @@ def _startup_path_identity(path: Path) -> Path:
         return path.absolute()
 
 
-def _startup_unlink_self_referential_symlink(path: Path) -> None:
-    if not path.is_symlink():
-        return
-    try:
-        target = Path(os.readlink(path))
-    except OSError:
-        return
-    if not target.is_absolute():
-        target = path.parent / target
-    if _startup_path_identity(target) == _startup_path_identity(path):
-        path.unlink(missing_ok=True)
-
-
 def _startup_copy2_if_different(src: Path, dst: Path) -> None:
     src_resolved = src.resolve()
-    if src_resolved == _startup_path_identity(dst):
+    if dst.is_symlink():
+        dst.unlink(missing_ok=True)
+        logger.warning("Removed startup artifact symlink before copy: %s", dst)
+    elif src_resolved == _startup_path_identity(dst):
         return
-    _startup_unlink_self_referential_symlink(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src_resolved, dst)
 
 

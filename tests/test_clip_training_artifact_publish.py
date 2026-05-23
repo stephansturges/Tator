@@ -13,6 +13,7 @@ from utils.local_salad_mlx import is_mlx_local_salad_head, local_salad_mlx_avail
 from localinferenceapi import (
     _copy2_if_different as _api_copy2_if_different,
     _link_or_copy_file,
+    _startup_copy2_if_different,
     _unlink_self_referential_symlink,
 )
 from services.calibration_helpers import _calibration_safe_link
@@ -277,6 +278,33 @@ def test_copy_helpers_replace_symlink_destination_without_target_write(tmp_path,
     assert dest.read_bytes() == b"payload"
     assert not dest.is_symlink()
     assert outside.read_bytes() == b"external"
+
+
+def test_startup_copy_helper_replaces_symlink_destination_without_target_write(tmp_path):
+    source = tmp_path / "source.bin"
+    dest = tmp_path / "dest.bin"
+    outside = tmp_path / "outside.bin"
+    source.write_bytes(b"payload")
+    outside.write_bytes(b"external")
+    os.symlink(str(outside), dest)
+
+    _startup_copy2_if_different(source, dest)
+
+    assert dest.read_bytes() == b"payload"
+    assert not dest.is_symlink()
+    assert outside.read_bytes() == b"external"
+
+
+def test_startup_copy_helper_replaces_source_target_symlink(tmp_path):
+    source = tmp_path / "source.bin"
+    dest = tmp_path / "dest.bin"
+    source.write_bytes(b"payload")
+    os.symlink(str(source), dest)
+
+    _startup_copy2_if_different(source, dest)
+
+    assert dest.read_bytes() == b"payload"
+    assert not dest.is_symlink()
 
 
 def test_calibration_safe_link_replaces_self_referential_destination(tmp_path):

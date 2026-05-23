@@ -276,15 +276,11 @@ but unhelpful for the dataset.
 <details>
 <summary>Update Tracking</summary>
 
-- **Product:** Qwen captions, SAM3 prompting, Class Split Explorer, and
-  reference-first Data Ingestion were stabilized.
-- **Acceleration:** C-RADIOv4 and local SALAD heads can use macOS MLX with Torch
-  fallback; SALAD stays out of crop-level class presets.
-- **Backend hardening:** registries, package imports/exports, job artifacts,
-  uploads, copy destinations, caches, annotation overlays, sidecars, and
-  checkpoints now fail closed on path/symlink escapes.
-- **Validation:** `819 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
-  and local backend smoke are clean.
+Latest checkpoint: Qwen captions/training, SAM3, Class Split Explorer, Data
+Ingestion, detector training, and registry/package paths have been stabilized.
+
+Validation: `821 passed, 17 skipped, 8 warnings`; UI endpoint checks and local
+backend smoke are clean.
 
 </details>
 

@@ -18890,7 +18890,16 @@ def cancel_data_ingestion_job(job_id: str) -> Dict[str, Any]:
 
 def list_glossary_library():
     entries = []
+    root = GLOSSARY_LIBRARY_ROOT.resolve(strict=False)
     for path in sorted(GLOSSARY_LIBRARY_ROOT.glob("*.json")):
+        try:
+            if path.is_symlink():
+                continue
+            resolved = path.resolve(strict=True)
+            if not _path_is_within_root_impl(resolved, root) or not resolved.is_file():
+                continue
+        except Exception:
+            continue
         data = _load_json_metadata(path) or {}
         name = data.get("name") or path.stem
         glossary = data.get("glossary") or ""
@@ -18916,10 +18925,29 @@ def _glossary_library_safe_name(name: str) -> str:
     return safe
 
 
-def get_glossary_entry(name: str):
+def _glossary_library_path(name: str) -> Tuple[Path, str]:
     safe = _glossary_library_safe_name(name)
+    root = GLOSSARY_LIBRARY_ROOT.resolve(strict=False)
     path = GLOSSARY_LIBRARY_ROOT / f"{safe}.json"
-    if not path.exists():
+    try:
+        parent = path.parent.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_path_invalid") from exc
+    if not _path_is_within_root_impl(parent, root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_path_invalid")
+    if not path.is_symlink():
+        try:
+            resolved = path.resolve(strict=False)
+        except Exception as exc:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_path_invalid") from exc
+        if not _path_is_within_root_impl(resolved, root):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_path_invalid")
+    return path, safe
+
+
+def get_glossary_entry(name: str):
+    path, safe = _glossary_library_path(name)
+    if path.is_symlink() or not path.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="glossary_not_found")
     data = _load_json_metadata(path) or {}
     glossary = data.get("glossary") if isinstance(data, dict) else ""
@@ -18927,8 +18955,11 @@ def get_glossary_entry(name: str):
 
 
 def save_glossary_entry(name: str, glossary: str):
-    safe = _glossary_library_safe_name(name)
-    path = GLOSSARY_LIBRARY_ROOT / f"{safe}.json"
+    path, _safe = _glossary_library_path(name)
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+    elif path.exists() and not path.is_file():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_path_invalid")
     payload = {"name": name, "glossary": glossary}
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
@@ -18936,9 +18967,8 @@ def save_glossary_entry(name: str, glossary: str):
 
 
 def delete_glossary_entry(name: str):
-    safe = _glossary_library_safe_name(name)
-    path = GLOSSARY_LIBRARY_ROOT / f"{safe}.json"
-    if not path.exists():
+    path, _safe = _glossary_library_path(name)
+    if not path.exists() and not path.is_symlink():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="glossary_not_found")
     path.unlink(missing_ok=True)
     return {"status": "deleted", "name": name}

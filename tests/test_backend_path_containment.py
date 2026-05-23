@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from services.classifier import _validate_clip_dataset_impl
 from services.datasets import _resolve_dataset_legacy_impl
 from services.detectors import _rfdetr_run_dir_impl, _yolo_run_dir_impl
+from services.prompt_helper_presets import _list_prompt_helper_presets_impl
 from services.sam3_runs import _run_dir_for_request_impl
 from utils.datasets import _iter_yolo_images
 from utils.io import _compute_dir_signature, _dir_size_bytes, _sanitize_yolo_run_id
@@ -81,6 +82,19 @@ def test_yolo_run_lookup_rejects_blank_id(tmp_path: Path) -> None:
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "invalid_run_id"
+
+
+def test_list_prompt_helper_presets_skips_symlink_escape(tmp_path: Path) -> None:
+    presets_root = tmp_path / "presets"
+    presets_root.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"id":"outside","created_at":1}', encoding="utf-8")
+    try:
+        (presets_root / "outside.json").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert _list_prompt_helper_presets_impl(presets_root=presets_root) == []
 
 
 def test_yolo_run_lookup_rejects_symlinked_run_id_without_target_delete(tmp_path: Path) -> None:

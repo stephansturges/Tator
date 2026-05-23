@@ -14,8 +14,14 @@ from starlette.status import HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND, HTTP_500_
 
 def _list_prompt_helper_presets_impl(*, presets_root: Path) -> List[Dict[str, Any]]:
     presets: List[Dict[str, Any]] = []
+    root = presets_root.resolve(strict=False)
     for path in presets_root.glob("*.json"):
         try:
+            if path.is_symlink():
+                continue
+            resolved = path.resolve(strict=True)
+            if not _path_within_root(resolved, root) or not resolved.is_file():
+                continue
             with path.open("r", encoding="utf-8") as handle:
                 data = json.load(handle)
             presets.append(data)
@@ -23,6 +29,14 @@ def _list_prompt_helper_presets_impl(*, presets_root: Path) -> List[Dict[str, An
             continue
     presets.sort(key=lambda p: p.get("created_at", 0), reverse=True)
     return presets
+
+
+def _path_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except Exception:
+        return False
 
 
 def _load_prompt_helper_preset_impl(

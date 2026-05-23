@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from fastapi import HTTPException
 from PIL import Image
 
@@ -301,3 +302,60 @@ def test_qwen_caption_io_stops_after_caption_progress_finishes(monkeypatch, tmp_
     )
 
     assert latest_jsonl.read_text(encoding="utf-8") == before
+
+
+def test_qwen_caption_io_reset_replaces_symlinked_latest_logs(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    outside_jsonl = tmp_path / "outside_latest.jsonl"
+    outside_text = tmp_path / "outside_latest.log"
+    outside_jsonl.write_text("external jsonl\n", encoding="utf-8")
+    outside_text.write_text("external text\n", encoding="utf-8")
+    latest_jsonl = tmp_path / "qwen_caption_io_latest.jsonl"
+    latest_text = tmp_path / "qwen_caption_io_latest.log"
+    try:
+        latest_jsonl.symlink_to(outside_jsonl)
+        latest_text.symlink_to(outside_text)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    assert outside_jsonl.read_text(encoding="utf-8") == "external jsonl\n"
+    assert outside_text.read_text(encoding="utf-8") == "external text\n"
+    assert not latest_jsonl.is_symlink()
+    assert not latest_text.is_symlink()
+    assert json.loads(latest_jsonl.read_text(encoding="utf-8").splitlines()[-1])["event"] == "run_start"
+
+
+def test_qwen_caption_io_append_replaces_symlinked_run_log(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    run_id = api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+    run_jsonl = tmp_path / "qwen_caption_io" / f"{run_id}.jsonl"
+    outside_jsonl = tmp_path / "outside_run.jsonl"
+    outside_jsonl.write_text("external run\n", encoding="utf-8")
+    try:
+        run_jsonl.unlink()
+        run_jsonl.symlink_to(outside_jsonl)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    api._qwen_caption_io_record({"event": "input", "call_id": "call-linked"})
+
+    assert outside_jsonl.read_text(encoding="utf-8") == "external run\n"
+    assert not run_jsonl.is_symlink()
+    records = [json.loads(line) for line in run_jsonl.read_text(encoding="utf-8").splitlines()]
+    assert records[-1]["event"] == "input"

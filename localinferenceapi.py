@@ -2475,12 +2475,43 @@ def _qwen_caption_io_paths(run_id: Optional[str]) -> Tuple[Path, Path, Path, Pat
     )
 
 
+def _qwen_caption_io_prepare_file(path: Path) -> Optional[Path]:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.parent.is_symlink():
+            return None
+        parent_root = path.parent.resolve(strict=True)
+        if path.is_symlink():
+            path.unlink(missing_ok=True)
+        elif path.exists() and not path.is_file():
+            return None
+        try:
+            path.resolve(strict=False).relative_to(parent_root)
+        except Exception:
+            return None
+        return path
+    except Exception:
+        return None
+
+
+def _qwen_caption_io_write_file(path: Path, text: str, *, append: bool) -> None:
+    safe_path = _qwen_caption_io_prepare_file(path)
+    if safe_path is None:
+        return
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(safe_path, flags, 0o644)
+    mode = "a" if append else "w"
+    with os.fdopen(fd, mode, encoding="utf-8") as handle:
+        handle.write(text)
+
+
 def _qwen_caption_io_reset_latest(run_id: Optional[str]) -> None:
     jsonl_path, text_path, latest_jsonl_path, latest_text_path = _qwen_caption_io_paths(run_id)
     for path in (latest_jsonl_path, latest_text_path):
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("", encoding="utf-8")
+            _qwen_caption_io_write_file(path, "", append=False)
         except Exception as exc:
             logger.debug("[qwen-caption-io] failed to reset %s: %s", path, exc)
     for path in (jsonl_path, text_path):
@@ -2547,9 +2578,9 @@ def _qwen_caption_io_record(record: Mapping[str, Any]) -> None:
         jsonable = {"type": "qwen_caption_io_encode_failed", "record": str(payload)}
     for path in (jsonl_path, latest_jsonl_path):
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(jsonable, ensure_ascii=False) + "\n")
+            _qwen_caption_io_write_file(
+                path, json.dumps(jsonable, ensure_ascii=False) + "\n", append=True
+            )
         except Exception as exc:
             logger.debug("[qwen-caption-io] failed to write %s: %s", path, exc)
     try:
@@ -2560,9 +2591,7 @@ def _qwen_caption_io_record(record: Mapping[str, Any]) -> None:
     if readable:
         for path in (text_path, latest_text_path):
             try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with open(path, "a", encoding="utf-8") as handle:
-                    handle.write(readable)
+                _qwen_caption_io_write_file(path, readable, append=True)
             except Exception as exc:
                 logger.debug("[qwen-caption-io] failed to write %s: %s", path, exc)
 

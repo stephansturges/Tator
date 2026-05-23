@@ -75,6 +75,14 @@ class _FakeUpload:
         return None
 
 
+class _FailStartThread:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        raise RuntimeError("thread start failed")
+
+
 def _write_unit_local_salad_head(root: Path, head_id: str, metadata: dict | None = None) -> None:
     config = LocalSALADConfig(num_channels=8, num_clusters=2, cluster_dim=4, token_dim=6, hidden_dim=12, dropout=0.0)
     head = LocalSALADHead(config)
@@ -125,6 +133,45 @@ def test_data_ingestion_create_jobs_reject_empty_uploads_before_queueing(tmp_pat
         asyncio.run(api.create_local_salad_training_job("{}", []))
     assert salad_error.value.status_code == 400
     assert salad_error.value.detail == "local_salad_no_training_files"
+
+
+def test_data_ingestion_analysis_cleans_staging_when_thread_start_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", tmp_path)
+    monkeypatch.setattr(api, "_validate_local_salad_head_reference", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(api.threading, "Thread", _FailStartThread)
+    with api.DATA_INGESTION_JOBS_LOCK:
+        api.DATA_INGESTION_JOBS.clear()
+
+    candidate = _FakeUpload("candidate.jpg", b"candidate")
+    reference = _FakeUpload("reference.jpg", b"reference")
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        asyncio.run(
+            api.create_data_ingestion_analysis_job(
+                json.dumps({"encoder": "local_salad", "salad_head_id": "unit_head"}),
+                [candidate],
+                [reference],
+            )
+        )
+
+    assert api.DATA_INGESTION_JOBS == {}
+    assert not any(tmp_path.iterdir())
+    assert candidate.closed is True
+    assert reference.closed is True
+
+
+def test_local_salad_training_cleans_staging_when_thread_start_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", tmp_path)
+    monkeypatch.setattr(api.threading, "Thread", _FailStartThread)
+    with api.DATA_INGESTION_JOBS_LOCK:
+        api.DATA_INGESTION_JOBS.clear()
+
+    upload = _FakeUpload("train.jpg", b"train")
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        asyncio.run(api.create_local_salad_training_job("{}", [upload]))
+
+    assert api.DATA_INGESTION_JOBS == {}
+    assert not any(tmp_path.iterdir())
+    assert upload.closed is True
 
 
 def test_write_upload_file_rejects_broken_symlink_destination(tmp_path):

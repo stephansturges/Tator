@@ -274,32 +274,21 @@ but unhelpful for the dataset.
 </details>
 
 <details>
-<summary>Implementation log</summary>
+<summary>Recent implementation log</summary>
 
-This collapsed log tracks recent implementation work without turning the README
-front page into a development diary.
-
-- **2026-05-19 to 2026-05-20:** Stabilized Qwen captioning, detection-informed
-  caption cleanup, SAM3 text-prompt windowing, and Label Images ergonomics.
-- **2026-05-20 to 2026-05-21:** Added Class Split Explorer and rebuilt Data
-  Ingestion around reference-first local SALAD diversity analysis.
-- **2026-05-22:** Added local MLX support for C-RADIOv4 and Tator-owned local
-  SALAD heads on macOS, with Torch fallback.
-- **2026-05-23:** Closed the Class Split / auto-class debug pass, including crop
-  preview behavior, active-model validation, and keeping SALAD out of crop-level
-  class presets.
-- **2026-05-23:** Hardened backend job starts, upload handles, dataset and model
-  path containment, ZIP exports, active run deletion, Qwen paths, and Mac YOLO
-  MPS training setup.
-- **2026-05-23:** Hardened Qwen dataset uploads plus Qwen/SAM3 random-split
-  training job creation so failed promotions or rejected starts do not leave
-  corrupt datasets, lost upload jobs, or orphaned split caches.
-- **2026-05-23:** Added detector job-start rollback so YOLO, YOLO head-graft,
-  and RF-DETR worker startup failures do not leave queued jobs or stale run
-  directories.
-- **Current validation:** project pytest reports `728 passed, 17 skipped,
-  8 warnings`; UI endpoint map/method checks report `148` mapped UI paths and
-  `248` fetches with no failures. Live smoke is healthy on the local backend.
+- **2026-05-19 to 2026-05-21:** Stabilized Qwen captioning and SAM3 prompting,
+  added Class Split Explorer, and rebuilt Data Ingestion around reference-first
+  diversity analysis.
+- **2026-05-22:** Added macOS MLX support for C-RADIOv4 and local SALAD heads,
+  with Torch fallback.
+- **2026-05-23:** Closed the Class Split / auto-class UI debug pass and kept
+  SALAD out of crop-level class presets.
+- **2026-05-23:** Hardened backend job lifecycles across Qwen, SAM3,
+  YOLO/RF-DETR, Class Analysis, Data Ingestion, Prompt Helper, Agent Mining, and
+  Auto Labeling, including failed-start rollback and staged-upload cleanup.
+- **Current validation:** `734 passed, 17 skipped, 8 warnings`; UI endpoint
+  checks cover `148` mapped paths and `248` fetches with no failures. Local
+  backend smoke is healthy.
 
 </details>
 

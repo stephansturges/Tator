@@ -17351,10 +17351,15 @@ def _enqueue_class_analysis_job(request_payload: Dict[str, Any], *, job_id: Opti
     resolved_job_id = job_id or f"ca_{uuid.uuid4().hex[:10]}"
     job = ClassAnalysisJob(job_id=resolved_job_id, request=request_payload)
     with CLASS_ANALYSIS_JOBS_LOCK:
-        CLASS_ANALYSIS_JOBS[resolved_job_id] = job
         _class_analysis_log(job, "Class analysis queued.")
-    thread = threading.Thread(target=_run_class_analysis_job, args=(job,), daemon=True, name=f"class-analysis-{resolved_job_id[:8]}")
-    thread.start()
+    _register_job_and_start_thread(
+        job=job,
+        registry=CLASS_ANALYSIS_JOBS,
+        lock=CLASS_ANALYSIS_JOBS_LOCK,
+        target=_run_class_analysis_job,
+        args=(job,),
+        name=f"class-analysis-{resolved_job_id[:8]}",
+    )
     return {"job_id": resolved_job_id}
 
 
@@ -18596,10 +18601,19 @@ async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files
     }
     job = DataIngestionJob(job_id=job_id, kind="analysis", request=request_payload)
     with DATA_INGESTION_JOBS_LOCK:
-        DATA_INGESTION_JOBS[job_id] = job
         _data_ingestion_log(job, f"Queued data ingestion analysis with {len(candidate_rows)} candidate uploads and {len(reference_rows)} reference images.")
-    thread = threading.Thread(target=_run_data_ingestion_analysis_job, args=(job,), daemon=True, name=f"data-ingest-{job_id[:8]}")
-    thread.start()
+    try:
+        _register_job_and_start_thread(
+            job=job,
+            registry=DATA_INGESTION_JOBS,
+            lock=DATA_INGESTION_JOBS_LOCK,
+            target=_run_data_ingestion_analysis_job,
+            args=(job,),
+            name=f"data-ingest-{job_id[:8]}",
+        )
+    except Exception:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        raise
     return {"job_id": job_id}
 
 
@@ -18631,10 +18645,19 @@ async def create_local_salad_training_job(manifest_json: str, files: List[Any]) 
     request_payload = {**manifest, "train_uploads": rows}
     job = DataIngestionJob(job_id=job_id, kind="local_salad_train", request=request_payload)
     with DATA_INGESTION_JOBS_LOCK:
-        DATA_INGESTION_JOBS[job_id] = job
         _data_ingestion_log(job, f"Queued local SALAD training with {len(rows)} uploads.")
-    thread = threading.Thread(target=_run_local_salad_training_job, args=(job,), daemon=True, name=f"local-salad-{job_id[:8]}")
-    thread.start()
+    try:
+        _register_job_and_start_thread(
+            job=job,
+            registry=DATA_INGESTION_JOBS,
+            lock=DATA_INGESTION_JOBS_LOCK,
+            target=_run_local_salad_training_job,
+            args=(job,),
+            name=f"local-salad-{job_id[:8]}",
+        )
+    except Exception:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        raise
     return {"job_id": job_id}
 
 
@@ -24432,13 +24455,37 @@ def _validate_prompt_helper_dataset_id(dataset_id: str) -> None:
     _resolve_sam3_or_qwen_dataset(str(dataset_id or ""))
 
 
+def _register_job_and_start_thread(
+    *,
+    job: Any,
+    registry: Dict[str, Any],
+    lock: threading.Lock,
+    target: Callable[..., Any],
+    args: Tuple[Any, ...],
+    name: Optional[str] = None,
+) -> None:
+    with lock:
+        registry[job.job_id] = job
+    try:
+        thread = threading.Thread(target=target, args=args, daemon=True, name=name)
+        thread.start()
+    except Exception:
+        with lock:
+            if registry.get(job.job_id) is job:
+                registry.pop(job.job_id, None)
+        raise
+
+
 def _start_prompt_helper_job(payload: PromptHelperRequest) -> PromptHelperJob:
     job_id = f"ph_{uuid.uuid4().hex[:8]}"
     job = PromptHelperJob(job_id=job_id)
-    with PROMPT_HELPER_JOBS_LOCK:
-        PROMPT_HELPER_JOBS[job.job_id] = job
-    thread = threading.Thread(target=_run_prompt_helper_job, args=(job, payload), daemon=True)
-    thread.start()
+    _register_job_and_start_thread(
+        job=job,
+        registry=PROMPT_HELPER_JOBS,
+        lock=PROMPT_HELPER_JOBS_LOCK,
+        target=_run_prompt_helper_job,
+        args=(job, payload),
+    )
     return job
 
 
@@ -24469,10 +24516,13 @@ def _start_agent_mining_job(payload: AgentMiningRequest) -> AgentMiningJob:
     _resolve_sam3_or_qwen_dataset(payload.dataset_id)
     job_id = f"am_{uuid.uuid4().hex[:8]}"
     job = AgentMiningJob(job_id=job_id)
-    with AGENT_MINING_JOBS_LOCK:
-        AGENT_MINING_JOBS[job.job_id] = job
-    thread = threading.Thread(target=_run_agent_mining_job, args=(job, payload), daemon=True)
-    thread.start()
+    _register_job_and_start_thread(
+        job=job,
+        registry=AGENT_MINING_JOBS,
+        lock=AGENT_MINING_JOBS_LOCK,
+        target=_run_agent_mining_job,
+        args=(job, payload),
+    )
     return job
 
 
@@ -24988,10 +25038,13 @@ def _run_auto_label_job(job: AutoLabelJob, payload: AutoLabelRequest) -> None:
 def _start_auto_label_job(payload: AutoLabelRequest) -> AutoLabelJob:
     job_id = f"al_{uuid.uuid4().hex[:8]}"
     job = AutoLabelJob(job_id=job_id)
-    with AUTO_LABEL_JOBS_LOCK:
-        AUTO_LABEL_JOBS[job.job_id] = job
-    thread = threading.Thread(target=_run_auto_label_job, args=(job, payload), daemon=True)
-    thread.start()
+    _register_job_and_start_thread(
+        job=job,
+        registry=AUTO_LABEL_JOBS,
+        lock=AUTO_LABEL_JOBS_LOCK,
+        target=_run_auto_label_job,
+        args=(job, payload),
+    )
     return job
 
 
@@ -25012,22 +25065,26 @@ def _cancel_auto_label_job(job_id: str) -> AutoLabelJob:
 def _start_prompt_helper_search_job(payload: PromptHelperSearchRequest) -> PromptHelperJob:
     job_id = f"phs_{uuid.uuid4().hex[:8]}"
     job = PromptHelperJob(job_id=job_id)
-    with PROMPT_HELPER_JOBS_LOCK:
-        PROMPT_HELPER_JOBS[job.job_id] = job
-    thread = threading.Thread(
-        target=_run_prompt_helper_search_job, args=(job, payload), daemon=True
+    _register_job_and_start_thread(
+        job=job,
+        registry=PROMPT_HELPER_JOBS,
+        lock=PROMPT_HELPER_JOBS_LOCK,
+        target=_run_prompt_helper_search_job,
+        args=(job, payload),
     )
-    thread.start()
     return job
 
 
 def _start_prompt_recipe_job(payload: PromptRecipeRequest) -> PromptHelperJob:
     job_id = f"phr_{uuid.uuid4().hex[:8]}"
     job = PromptHelperJob(job_id=job_id)
-    with PROMPT_HELPER_JOBS_LOCK:
-        PROMPT_HELPER_JOBS[job.job_id] = job
-    thread = threading.Thread(target=_run_prompt_recipe_job, args=(job, payload), daemon=True)
-    thread.start()
+    _register_job_and_start_thread(
+        job=job,
+        registry=PROMPT_HELPER_JOBS,
+        lock=PROMPT_HELPER_JOBS_LOCK,
+        target=_run_prompt_recipe_job,
+        args=(job, payload),
+    )
     return job
 
 

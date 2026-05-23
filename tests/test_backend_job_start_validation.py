@@ -16,6 +16,14 @@ class _NoopThread:
         pass
 
 
+class _FailStartThread:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        raise RuntimeError("thread start failed")
+
+
 class _FakeMpsBackend:
     def __init__(self, available):
         self._available = available
@@ -96,6 +104,47 @@ def test_prompt_helper_missing_dataset_rejects_before_queue(monkeypatch):
         assert exc_info.value.detail == "sam3_dataset_not_found"
 
     assert api.PROMPT_HELPER_JOBS == {}
+
+
+def test_prompt_helper_jobs_roll_back_when_thread_start_fails(monkeypatch):
+    with api.PROMPT_HELPER_JOBS_LOCK:
+        api.PROMPT_HELPER_JOBS.clear()
+
+    monkeypatch.setattr(api, "_validate_prompt_helper_dataset_id", lambda _dataset_id: None)
+    monkeypatch.setattr(api.threading, "Thread", _FailStartThread)
+
+    requests = [
+        lambda: api.start_prompt_helper_job(api.PromptHelperRequest(dataset_id="dataset_1")),
+        lambda: api.start_prompt_helper_search(
+            api.PromptHelperSearchRequest(
+                dataset_id="dataset_1",
+                prompts_by_class={0: ["object"]},
+            )
+        ),
+        lambda: api.start_prompt_helper_recipe(
+            api.PromptRecipeRequest(
+                dataset_id="dataset_1",
+                class_id=0,
+                prompts=[api.PromptRecipePrompt(prompt="object")],
+            )
+        ),
+    ]
+    for request_fn in requests:
+        with pytest.raises(RuntimeError, match="thread start failed"):
+            request_fn()
+        assert api.PROMPT_HELPER_JOBS == {}
+
+
+def test_class_analysis_rolls_back_when_thread_start_fails(monkeypatch):
+    with api.CLASS_ANALYSIS_JOBS_LOCK:
+        api.CLASS_ANALYSIS_JOBS.clear()
+
+    monkeypatch.setattr(api.threading, "Thread", _FailStartThread)
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        api._enqueue_class_analysis_job({"source_mode": "backend_dataset"})
+
+    assert api.CLASS_ANALYSIS_JOBS == {}
 
 
 def test_prompt_helper_preset_missing_dataset_rejects_before_save(monkeypatch):
@@ -185,6 +234,53 @@ def test_agent_mining_missing_dataset_rejects_before_queue(monkeypatch, tmp_path
     assert exc_info.value.status_code == 404
     assert exc_info.value.detail == "sam3_dataset_not_found"
     assert api.AGENT_MINING_JOBS == {}
+
+
+def test_agent_mining_rolls_back_when_thread_start_fails(monkeypatch, tmp_path):
+    with api.AGENT_MINING_JOBS_LOCK:
+        api.AGENT_MINING_JOBS.clear()
+
+    classifier_path = tmp_path / "classifier.pkl"
+    classifier_path.write_text("not used", encoding="utf-8")
+    monkeypatch.setattr(
+        api, "_resolve_agent_clip_classifier_path_impl", lambda *args, **kwargs: classifier_path
+    )
+    monkeypatch.setattr(
+        api, "_load_clip_head_from_classifier_impl", lambda *args, **kwargs: ({}, {})
+    )
+    monkeypatch.setattr(api, "_resolve_sam3_or_qwen_dataset", lambda _dataset_id: None)
+    monkeypatch.setattr(api.threading, "Thread", _FailStartThread)
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        api.start_agent_mining_job(
+            api.AgentMiningRequest(
+                dataset_id="dataset_1",
+                clip_head_classifier_path=str(classifier_path),
+            )
+        )
+
+    assert api.AGENT_MINING_JOBS == {}
+
+
+def test_auto_label_rolls_back_when_thread_start_fails(monkeypatch):
+    with api.AUTO_LABEL_JOBS_LOCK:
+        api.AUTO_LABEL_JOBS.clear()
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: {"id": "dataset_1"})
+    monkeypatch.setattr(api.threading, "Thread", _FailStartThread)
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        api.start_auto_label_job(
+            api.AutoLabelRequest(
+                dataset_id="dataset_1",
+                enable_yolo=False,
+                enable_rfdetr=False,
+                enable_falcon=False,
+                max_images=1,
+            )
+        )
+
+    assert api.AUTO_LABEL_JOBS == {}
 
 
 def test_yolo_train_missing_dataset_rejects_before_run_dir(monkeypatch, tmp_path):

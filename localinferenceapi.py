@@ -1473,6 +1473,23 @@ def _qwen_checkpoint_is_usable(checkpoint_path: Path, metadata: Dict[str, Any]) 
     )
 
 
+def _resolve_qwen_run_checkpoint_path(run_dir: Path, raw_path: Any) -> Optional[Path]:
+    raw = str(raw_path or "").strip()
+    if not raw:
+        return None
+    run_root = run_dir.resolve()
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = run_root / candidate
+    try:
+        resolved = candidate.resolve()
+    except Exception:
+        return None
+    if not _path_is_within_root_impl(resolved, run_root):
+        return None
+    return resolved
+
+
 def _list_qwen_model_entries() -> List[Dict[str, Any]]:
     """Return registry entries for custom Qwen fine-tunes (if any)."""
     runs_root = (QWEN_JOB_ROOT / "runs").resolve()
@@ -1496,18 +1513,16 @@ def _list_qwen_model_entries() -> List[Dict[str, Any]]:
                 metadata = {}
         model_id = str(metadata.get("id") or run_dir.name)
         latest = metadata.get("latest_checkpoint")
-        latest_path = Path(str(latest)).resolve() if latest else (run_dir / "latest").resolve()
-        if not latest_path.exists():
+        latest_path = _resolve_qwen_run_checkpoint_path(run_dir, latest or "latest")
+        if latest_path is None or not latest_path.exists():
+            latest_path = None
             checkpoints = metadata.get("checkpoints") or []
             for candidate in checkpoints:
-                try:
-                    candidate_path = Path(str(candidate)).resolve()
-                except Exception:
-                    continue
-                if candidate_path.exists():
+                candidate_path = _resolve_qwen_run_checkpoint_path(run_dir, candidate)
+                if candidate_path and candidate_path.exists():
                     latest_path = candidate_path
                     break
-        if not latest_path.exists():
+        if latest_path is None or not latest_path.exists():
             # Skip incomplete/corrupt runs that don't expose a usable checkpoint.
             continue
         if not _qwen_checkpoint_is_usable(latest_path, metadata):

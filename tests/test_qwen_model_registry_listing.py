@@ -85,6 +85,63 @@ def test_list_qwen_model_entries_uses_latest_dir_without_metadata(tmp_path: Path
     assert entries[0]["path"] == str(latest.resolve())
 
 
+def test_list_qwen_model_entries_accepts_relative_checkpoint_inside_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "qwen_runs"
+    run = root / "runs" / "run_relative"
+    ckpt = run / "checkpoints" / "epoch_1"
+    _write_transformers_adapter(ckpt)
+    _write_meta(
+        run,
+        {
+            "id": "relative_model",
+            "latest_checkpoint": "checkpoints/epoch_1",
+            "created_at": 100.0,
+        },
+    )
+
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", root)
+
+    entries = api._list_qwen_model_entries()
+    assert len(entries) == 1
+    assert entries[0]["id"] == "relative_model"
+    assert entries[0]["path"] == str(ckpt.resolve())
+
+
+def test_list_qwen_model_entries_rejects_checkpoints_outside_run(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "qwen_runs"
+    outside = tmp_path / "outside_adapter"
+    _write_transformers_adapter(outside)
+
+    latest_run = root / "runs" / "run_external_latest"
+    _write_meta(
+        latest_run,
+        {
+            "id": "external_latest",
+            "latest_checkpoint": str(outside),
+            "created_at": 200.0,
+        },
+    )
+
+    checkpoints_run = root / "runs" / "run_external_checkpoint"
+    _write_meta(
+        checkpoints_run,
+        {
+            "id": "external_checkpoint",
+            "latest_checkpoint": "missing",
+            "checkpoints": [str(outside)],
+            "created_at": 100.0,
+        },
+    )
+
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", root)
+
+    assert api._list_qwen_model_entries() == []
+
+
 def test_list_qwen_model_entries_skips_mlx_adapters_without_loader_config(
     tmp_path: Path, monkeypatch
 ) -> None:

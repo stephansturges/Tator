@@ -11737,7 +11737,17 @@ def _agent_apply_ensemble_filter(
         if warnings is not None:
             warnings.append("ensemble_filter_missing_dataset_or_image")
         return detections
-    job_dir = CALIBRATION_ROOT / job_id
+    job_id_raw = str(job_id or "").strip()
+    safe_job_id = _sanitize_yolo_run_id_impl(job_id_raw)
+    if not safe_job_id or safe_job_id != job_id_raw:
+        if warnings is not None:
+            warnings.append("ensemble_filter_job_invalid")
+        return detections
+    job_dir = (CALIBRATION_ROOT / safe_job_id).resolve()
+    if not _path_is_within_root_impl(job_dir, CALIBRATION_ROOT.resolve()):
+        if warnings is not None:
+            warnings.append("ensemble_filter_job_invalid")
+        return detections
     model_path = job_dir / "ensemble_mlp.pt"
     meta_path = job_dir / "ensemble_mlp.meta.json"
     score_tool = "score_ensemble_candidates.py"

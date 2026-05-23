@@ -38,6 +38,7 @@ from services.calibration_recipe_registry import (
     discovery_runs_root,
     find_matching_recipe,
 )
+from utils.io import _path_is_within_root_impl
 from utils.pydantic_compat import model_copy_update, model_dump_compat
 
 DEFAULT_EMBED_PROJ_DIM = 1024
@@ -144,7 +145,11 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
 
 
 def _calibration_job_state_path(calibration_root: Path, job_id: str) -> Path:
-    return (calibration_root / str(job_id) / CALIBRATION_JOB_STATE_FILENAME).resolve()
+    root = calibration_root.resolve()
+    job_dir = (root / str(job_id)).resolve()
+    if not _path_is_within_root_impl(job_dir, root):
+        raise ValueError("calibration_job_path_not_allowed")
+    return job_dir / CALIBRATION_JOB_STATE_FILENAME
 
 
 def _persist_calibration_job_state(job: Any, calibration_root: Path) -> Dict[str, Any]:
@@ -175,7 +180,10 @@ def _load_persisted_calibration_job_payload(
     *,
     mark_interrupted: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    path = _calibration_job_state_path(calibration_root, job_id)
+    try:
+        path = _calibration_job_state_path(calibration_root, job_id)
+    except ValueError:
+        return None
     if not path.exists():
         return None
     try:
@@ -199,13 +207,22 @@ def _list_persisted_calibration_job_payloads(
     mark_interrupted: bool = False,
 ) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
-    if not calibration_root.exists():
+    root = calibration_root.resolve()
+    if not root.exists():
         return out
-    for entry in sorted(calibration_root.iterdir()):
-        if not entry.is_dir():
+    for entry in sorted(root.iterdir()):
+        if entry.is_symlink():
+            continue
+        try:
+            resolved_entry = entry.resolve()
+        except Exception:
+            continue
+        if not _path_is_within_root_impl(resolved_entry, root):
+            continue
+        if not resolved_entry.is_dir():
             continue
         payload = _load_persisted_calibration_job_payload(
-            calibration_root,
+            root,
             entry.name,
             mark_interrupted=mark_interrupted,
         )
@@ -327,7 +344,10 @@ class CalibrationJob:
 
 
 def _remove_calibration_job_state(calibration_root: Path, job_id: str) -> None:
-    state_path = _calibration_job_state_path(calibration_root, job_id)
+    try:
+        state_path = _calibration_job_state_path(calibration_root, job_id)
+    except ValueError:
+        return
     try:
         state_path.unlink(missing_ok=True)
     except Exception:

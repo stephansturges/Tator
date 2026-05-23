@@ -93,6 +93,48 @@ def test_get_calibration_job_reads_persisted_state_without_live_job(tmp_path: Pa
     assert payload["step_total"] == 10
 
 
+def test_get_calibration_job_rejects_symlinked_state_escape(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(api, "CALIBRATION_ROOT", tmp_path)
+    with api.CALIBRATION_JOBS_LOCK:
+        api.CALIBRATION_JOBS.clear()
+    outside = tmp_path.parent / f"{tmp_path.name}_outside"
+    outside.mkdir(parents=True, exist_ok=True)
+    (outside / CALIBRATION_JOB_STATE_FILENAME).write_text(
+        json.dumps(
+            {
+                "job_id": "cal_escape",
+                "status": "completed",
+                "message": "outside",
+                "phase": "completed",
+                "progress": 1.0,
+                "processed": 1,
+                "total": 1,
+                "step_current": 1,
+                "step_total": 1,
+                "step_label": "Done",
+                "substep_current": 0,
+                "substep_total": 0,
+                "substep_label": "",
+                "created_at": 1.0,
+                "updated_at": 2.0,
+                "request": {},
+                "result": None,
+                "error": None,
+                "state_schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        (tmp_path / "cal_escape").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.get_calibration_job("cal_escape")
+    assert excinfo.value.status_code == 404
+
+
 def test_list_calibration_jobs_marks_persisted_running_jobs_interrupted(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(api, "CALIBRATION_ROOT", tmp_path)
     with api.CALIBRATION_JOBS_LOCK:
@@ -134,3 +176,107 @@ def test_list_calibration_jobs_marks_persisted_running_jobs_interrupted(tmp_path
     assert payload[0]["message"] == "Interrupted by backend restart"
     persisted = json.loads(state_path.read_text(encoding="utf-8"))
     assert persisted["status"] == "failed"
+
+
+def test_list_calibration_jobs_skips_symlinked_state_escape(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(api, "CALIBRATION_ROOT", tmp_path)
+    with api.CALIBRATION_JOBS_LOCK:
+        api.CALIBRATION_JOBS.clear()
+    outside = tmp_path.parent / f"{tmp_path.name}_outside"
+    outside.mkdir(parents=True, exist_ok=True)
+    (outside / CALIBRATION_JOB_STATE_FILENAME).write_text(
+        json.dumps(
+            {
+                "job_id": "cal_escape",
+                "status": "completed",
+                "message": "outside",
+                "phase": "completed",
+                "progress": 1.0,
+                "processed": 1,
+                "total": 1,
+                "step_current": 1,
+                "step_total": 1,
+                "step_label": "Done",
+                "substep_current": 0,
+                "substep_total": 0,
+                "substep_label": "",
+                "created_at": 1.0,
+                "updated_at": 2.0,
+                "request": {},
+                "result": None,
+                "error": None,
+                "state_schema_version": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        (tmp_path / "cal_escape").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    payload = api.list_calibration_jobs()
+
+    assert all(item.get("job_id") != "cal_escape" for item in payload)
+
+
+def test_ensemble_filter_rejects_traversal_job_id_before_artifact_resolution(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr(api, "CALIBRATION_ROOT", tmp_path / "calibration_jobs")
+    monkeypatch.setattr(
+        api,
+        "_resolve_agent_clip_classifier_path_impl",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid job_id should stop before classifier resolution")
+        ),
+    )
+    detections = [{"bbox": [0, 0, 1, 1], "label": "car"}]
+    warnings = []
+
+    result = api._agent_apply_ensemble_filter(
+        detections,
+        dataset_id="dataset",
+        image_name="image.jpg",
+        classifier_id="head.pkl",
+        job_id="../outside",
+        warnings=warnings,
+    )
+
+    assert result is detections
+    assert warnings == ["ensemble_filter_job_invalid"]
+
+
+def test_ensemble_filter_rejects_symlinked_job_dir_escape(tmp_path: Path, monkeypatch):
+    calibration_root = tmp_path / "calibration_jobs"
+    outside = tmp_path / "outside_job"
+    calibration_root.mkdir()
+    outside.mkdir()
+    (outside / "ensemble_xgb.json").write_text("{}", encoding="utf-8")
+    (outside / "ensemble_xgb.meta.json").write_text("{}", encoding="utf-8")
+    try:
+        (calibration_root / "cal_link").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "CALIBRATION_ROOT", calibration_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_agent_clip_classifier_path_impl",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("escaped job_dir should stop before classifier resolution")
+        ),
+    )
+    detections = [{"bbox": [0, 0, 1, 1], "label": "car"}]
+    warnings = []
+
+    result = api._agent_apply_ensemble_filter(
+        detections,
+        dataset_id="dataset",
+        image_name="image.jpg",
+        classifier_id="head.pkl",
+        job_id="cal_link",
+        warnings=warnings,
+    )
+
+    assert result is detections
+    assert warnings == ["ensemble_filter_job_invalid"]

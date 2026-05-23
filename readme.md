@@ -280,10 +280,10 @@ but unhelpful for the dataset.
   reference-first Data Ingestion were stabilized.
 - **Acceleration:** C-RADIOv4 and local SALAD heads can use macOS MLX with Torch
   fallback; SALAD stays out of crop-level class presets.
-- **Backend hardening:** job rollback/cleanup, checkpoint containment, EDR and
-  RF-DETR staging containment, cache pruning, annotation overlays, and CLIP
-  sidecars now fail closed.
-- **Validation:** `760 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
+- **Backend hardening:** job rollback/cleanup, checkpoint containment, EDR/RF-DETR
+  staging, cache pruning, annotation overlays, CLIP sidecars, and calibration
+  job paths now fail closed.
+- **Validation:** `764 passed, 17 skipped, 8 warnings`; endpoint-map/fetch checks
   and local backend smoke are clean.
 
 </details>

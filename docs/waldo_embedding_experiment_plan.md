@@ -321,8 +321,9 @@ C-RADIOv4 implementation note:
   benchmark matrix on the active hardware before promoting any C-RADIO recipe.
 - `tools/run_class_split_experiments.py --matrix cradio` runs the focused
   C-RADIO pooling/backbone screen. `tools/benchmark_salad_diversity.py
-  --include-cradio-pooled` and `tools/benchmark_salad_class_separation.py
-  --include-cradio` compare C-RADIO against the DINOv3 baselines.
+  --include-cradio-pooled` compares whole-image Data Ingestion diversity
+  recipes, while `tools/benchmark_salad_class_separation.py --include-cradio`
+  compares only the supported pooled crop-level Class Split recipes.
 
 Full WALDO C-RADIO matrix, uncapped, completed on 2026-05-21:
 

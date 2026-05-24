@@ -8,8 +8,6 @@ import torch
 
 import localinferenceapi as api
 from tools import clip_training
-from utils.local_salad import LOCAL_SALAD_CACHE_VERSION, LOCAL_SALAD_POLICY, LOCAL_SALAD_TRAINER, LocalSALADConfig, LocalSALADHead
-from utils.local_salad_mlx import is_mlx_local_salad_head, local_salad_mlx_available
 from localinferenceapi import (
     _copy2_if_different as _api_copy2_if_different,
     _link_or_copy_file,
@@ -634,38 +632,15 @@ def test_resume_classifier_backbone_reloads_active_clip_model_name(monkeypatch):
     assert api._clip_reload_needed is False
 
 
-def test_auto_class_local_salad_runtime_prefers_mlx_when_requested(tmp_path, monkeypatch):
-    if not local_salad_mlx_available():
-        pytest.skip("MLX is not available in this environment")
-
-    config = LocalSALADConfig(num_channels=8, num_clusters=4, cluster_dim=8, token_dim=8, hidden_dim=64, dropout=0.0)
-    torch_head = LocalSALADHead(config)
-    path = tmp_path / "unit_head.pt"
-    torch.save(
-        {
-            "format": LOCAL_SALAD_CACHE_VERSION,
-            "config": config.to_dict(),
-            "state_dict": torch_head.state_dict(),
-            "metadata": {
-                "id": "unit_head",
-                "label": "Unit Head",
-                "encoder_type": "dinov3",
-                "policy": LOCAL_SALAD_POLICY,
-                "trainer": LOCAL_SALAD_TRAINER,
-            },
-        },
-        path,
-    )
-    monkeypatch.setenv("LOCAL_SALAD_BACKEND", "mlx")
-
-    loaded, meta = clip_training._load_local_salad_runtime_head(path, device_name="cpu")
-    desc = clip_training._encode_local_salad_head_np(
-        loaded,
-        torch.randn(2, 5, 8),
-        torch.randn(2, 8),
-    )
-
-    assert is_mlx_local_salad_head(loaded)
-    assert meta["runtime_backend"] == "mlx"
-    assert desc.shape == (2, loaded.output_dim)
-    assert np.allclose(np.linalg.norm(desc, axis=1), np.ones(2), atol=1e-5)
+def test_clip_training_rejects_local_salad_aggregation_before_file_access(tmp_path):
+    with pytest.raises(clip_training.TrainingError, match="local_salad_auto_class_disabled"):
+        clip_training.train_clip_from_yolo(
+            str(tmp_path / "missing_images"),
+            str(tmp_path / "missing_labels"),
+            str(tmp_path / "model.pkl"),
+            str(tmp_path / "labelmap.txt"),
+            encoder_type="dinov3",
+            encoder_model="facebook/dinov3-vitb16-pretrain-lvd1689m",
+            embedding_aggregation="local_salad",
+            embedding_salad_head_id="unit_head",
+        )

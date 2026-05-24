@@ -1,6 +1,16 @@
-# Tator Validation Matrix (Post‑Refactor)
+# Archived Tator Validation Matrix (February 2026)
 
-Legend: ✅ completed | 🟡 partial | ❌ not run
+This file preserves the February post-refactor GPU validation scratchpad and
+run log. It is not the current product status or open-issue list. Current
+coverage and closure status live in:
+
+- [Flow Audit Matrix](flow_audit_matrix.md)
+- [GPU Validation Closure Report](gpu_validation_closure_report.md)
+- [Backend Storage Hardening Log](backend_storage_hardening_log.md)
+- the README `Update Tracking` section
+
+Historical legend: ✅ completed | 🟡 partial | ❌ not run or not validated in
+that February pass.
 
 ## System / Runtime
 - ✅ `/system/gpu`
@@ -93,7 +103,8 @@ Legend: ✅ completed | 🟡 partial | ❌ not run
 
 ## Notes
 - GPU validation order should follow model availability + cluster load.
-- For each ❌, run once and archive outputs in `logs/` or `uploads/` as appropriate.
+- Archived ❌/🟡 rows below are historical evidence, not current known failures.
+  Revalidate against the current backend before treating any row as actionable.
 
 **Run Log (2026-02-04)**
 Test: `/runtime/unload` under heavy GPU load. Result: PASS. Details: GPU free MB dev0 before=47105.19, after load=38387.19, after unload=47105.19; YOLO detections=28; Qwen caption OK; runtime unload returned `{"status":"unloaded"}`.

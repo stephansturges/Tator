@@ -345,14 +345,14 @@ def parse_args() -> argparse.Namespace:
         "--embedding-aggregation",
         type=str,
         default="pooled",
-        choices=["pooled", "local_salad"],
-        help="Token aggregation mode for DINOv3 auto-class training.",
+        choices=["pooled"],
+        help="Token aggregation mode for crop-level auto-class training.",
     )
     parser.add_argument(
         "--embedding-salad-head-id",
         type=str,
         default="",
-        help="Local SALAD head id under uploads/salad_heads/ when using --embedding-aggregation local_salad.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--calibration_mode",
@@ -547,8 +547,6 @@ def main() -> None:
     print(f"Background / views  : {artifacts.background_mode} / {artifacts.embedding_view_mode}")
     print(f"DINOv3 pooling      : {artifacts.dinov3_pooling}")
     print(f"Aggregation         : {artifacts.embedding_aggregation}")
-    if artifacts.embedding_salad_head_id:
-        print(f"SALAD head          : {artifacts.embedding_salad_head_id}")
     print(f"Accuracy            : {artifacts.accuracy:.4f}")
     if artifacts.classifier_type == "mlp":
         hidden_sizes = artifacts.mlp_hidden_sizes

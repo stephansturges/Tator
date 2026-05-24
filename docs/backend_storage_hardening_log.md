@@ -1800,3 +1800,30 @@ preserving the exact validation story for storage and artifact-write fixes.
   tests/test_labeling_panel_layout_contract.py`, focused local-SALAD UI/product
   contract coverage (`3 passed`), `git diff --check`, and the full pytest suite
   (`1247 passed, 20 skipped`) passed.
+
+## 2026-05-24: Crop-Level SALAD Tooling Closure
+
+- Found that the public backend/UI had already disabled crop-level
+  `local_salad`, but direct auto-class training helpers and the class-separation
+  benchmark still exposed stale crop-level SALAD paths.
+- Made `tools/clip_training.py` fail closed with
+  `local_salad_auto_class_disabled` before dataset or artifact access if direct
+  callers request local SALAD aggregation.
+- Simplified `tools/train_clip_regression_from_YOLO.py` so its public
+  `--embedding-aggregation` choices only advertise the supported pooled mode.
+- Retired local SALAD training/head flags from
+  `tools/benchmark_salad_class_separation.py`; the helper now benchmarks only
+  supported pooled DINOv3/C-RADIO Class Split recipes and records that
+  crop-level local SALAD is disabled.
+- Extended product-contract coverage to keep benchmark and direct-training
+  helper outputs aligned with the Data Ingestion-only SALAD decision.
+- Marked `docs/test_matrix.md` as an archived February validation scratchpad so
+  old partial/failure rows are not mistaken for the current open-issue list.
+- Validation: `py_compile tools/clip_training.py
+  tools/train_clip_regression_from_YOLO.py
+  tools/benchmark_salad_class_separation.py
+  tests/test_clip_training_artifact_publish.py
+  tests/test_labeling_panel_layout_contract.py`, focused crop-level SALAD
+  rejection and product-contract coverage (`4 passed`), CLI help checks for the
+  auto-class trainer and class-separation benchmark, `git diff --check`, and the
+  full pytest suite (`1247 passed, 20 skipped`) passed.

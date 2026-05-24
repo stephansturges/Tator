@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark pooled DINOv3 versus locally trained SALAD for class separation."""
+"""Benchmark supported pooled DINOv3/C-RADIO recipes for class separation."""
 
 from __future__ import annotations
 
@@ -38,24 +38,6 @@ def _find_image_for_label(image_dir: Path, label_path: Path) -> Optional[Path]:
     return None
 
 
-def _image_rows(image_dir: Path, sample_cap: int) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    for path in sorted(image_dir.rglob("*")):
-        if path.is_file() and path.suffix.lower() in IMAGE_EXTS:
-            rows.append(
-                {
-                    "path": str(path.resolve()),
-                    "filename": path.name,
-                    "saved_name": path.name,
-                    "size": path.stat().st_size,
-                    "field": "benchmark",
-                }
-            )
-    if sample_cap > 0:
-        rows = rows[:sample_cap]
-    return rows
-
-
 def _build_manifest(
     *,
     image_dir: Path,
@@ -84,41 +66,12 @@ def _build_manifest(
     if not rows:
         raise SystemExit(f"No labeled images found in {image_dir} with labels from {label_dir}")
     return {
-        "dataset_label": "SALAD class-separation benchmark",
+        "dataset_label": "Class-separation benchmark",
         "labelmap": list(labelmap),
         "images": rows,
         "yolo_layout": "flat",
         "source_mode": "active_workspace",
     }
-
-
-def _train_local_salad_head(args: argparse.Namespace, image_dir: Path) -> str:
-    rows = _image_rows(image_dir, int(args.train_image_cap or 0))
-    if len(rows) < 2:
-        raise SystemExit("Need at least two training images to train a local SALAD head.")
-    job = api.DataIngestionJob(
-        job_id=f"bench_salad_train_{uuid.uuid4().hex[:8]}",
-        kind="local_salad_train",
-        request={
-            "train_uploads": rows,
-            "head_name": args.head_name,
-            "encoder_type": args.train_encoder,
-            "encoder_model": args.cradio_model if args.train_encoder == "cradio" else api.CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL,
-            "cradio_pooling": args.cradio_pooling,
-            "epochs": args.epochs,
-            "batch_size": args.batch_size,
-            "max_train_images": args.train_image_cap,
-            "max_frames_per_video": 0,
-            "num_clusters": args.num_clusters,
-            "cluster_dim": args.cluster_dim,
-            "token_dim": args.token_dim,
-            "dropout": args.dropout,
-        },
-    )
-    api._run_local_salad_training_job(job)
-    if job.status != "completed":
-        raise RuntimeError(f"local SALAD training failed: {job.error or job.message}")
-    return str((job.result or {}).get("summary", {}).get("head_id") or "")
 
 
 def _run_class_analysis(
@@ -131,13 +84,12 @@ def _run_class_analysis(
     cradio_pooling: str,
     embedding_aggregation: str,
     embedding_view_mode: str,
-    salad_head_id: str,
     args: argparse.Namespace,
 ) -> Tuple[Dict[str, Any], float]:
     request = api._normalize_class_analysis_request(
         {
             "source_mode": "active_workspace",
-            "workspace_id": f"salad_bench_{recipe_id}",
+            "workspace_id": f"class_bench_{recipe_id}",
             "workspace_dir": str(image_dir.resolve()),
             "workspace_manifest": manifest,
             "yolo_layout": "flat",
@@ -154,7 +106,7 @@ def _run_class_analysis(
             "dinov3_pooling": "pooler",
             "cradio_pooling": cradio_pooling,
             "embedding_aggregation": embedding_aggregation,
-            "embedding_salad_head_id": salad_head_id,
+            "embedding_salad_head_id": "",
             "background_mode": "full_crop",
             "embedding_view_mode": embedding_view_mode,
             "embedding_adjustment": "remove_size_bias",
@@ -210,12 +162,9 @@ def main() -> int:
     parser.add_argument("--image-dir", type=Path, default=None)
     parser.add_argument("--label-dir", type=Path, default=None)
     parser.add_argument("--labelmap", type=Path, default=None)
-    parser.add_argument("--output-dir", type=Path, default=Path("uploads/class_analysis/benchmarks/salad_class_separation"))
+    parser.add_argument("--output-dir", type=Path, default=Path("uploads/class_analysis/benchmarks/class_separation"))
     parser.add_argument("--image-cap", type=int, default=128)
     parser.add_argument("--object-sample-cap", type=int, default=256)
-    parser.add_argument("--train-local-salad", action="store_true")
-    parser.add_argument("--salad-head-id", default="")
-    parser.add_argument("--train-encoder", choices=["dinov3", "cradio"], default="dinov3")
     parser.add_argument("--include-cradio", action="store_true")
     parser.add_argument("--cradio-model", default=api.CRADIO_DEFAULT_MODEL)
     parser.add_argument(
@@ -223,21 +172,13 @@ def main() -> int:
         choices=["summary", "spatial_mean", "summary_spatial_concat"],
         default="summary",
     )
-    parser.add_argument("--head-name", default="benchmark_local_salad")
-    parser.add_argument("--train-image-cap", type=int, default=64)
-    parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--num-clusters", type=int, default=64)
-    parser.add_argument("--cluster-dim", type=int, default=128)
-    parser.add_argument("--token-dim", type=int, default=256)
-    parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--canonical-size", type=int, default=336)
     parser.add_argument("--padding-ratio", type=float, default=0.08)
     parser.add_argument("--projection", choices=["pca", "umap"], default="pca")
     parser.add_argument("--projection-neighbors", type=int, default=50)
     parser.add_argument("--neighbor-k", type=int, default=15)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--delete-trained-head", action="store_true")
     args = parser.parse_args()
 
     dataset_root = args.dataset_root.expanduser().resolve()
@@ -247,17 +188,11 @@ def main() -> int:
     labelmap = _read_labelmap(labelmap_path)
     manifest = _build_manifest(image_dir=image_dir, label_dir=label_dir, labelmap=labelmap, image_cap=args.image_cap)
 
-    trained_head_id = ""
-    salad_head_id = str(args.salad_head_id or "").strip()
-    if args.train_local_salad:
-        salad_head_id = _train_local_salad_head(args, image_dir)
-        trained_head_id = salad_head_id
-
     output_dir = args.output_dir / time.strftime("%Y%m%d_%H%M%S")
     output_dir.mkdir(parents=True, exist_ok=True)
     recipes = [
-        ("pooled_balanced", "dinov3", api.CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL, "summary", "pooled", "single", ""),
-        ("pooled_precise", "dinov3", api.CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL, "summary", "pooled", "tight_context", ""),
+        ("pooled_balanced", "dinov3", api.CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL, "summary", "pooled", "single"),
+        ("pooled_precise", "dinov3", api.CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL, "summary", "pooled", "tight_context"),
     ]
     if args.include_cradio:
         recipes.append(
@@ -268,23 +203,8 @@ def main() -> int:
                 args.cradio_pooling,
                 "pooled",
                 "single",
-                "",
             )
         )
-    if salad_head_id:
-        local_encoder = args.train_encoder
-        recipes.append(
-            (
-                "local_salad",
-                local_encoder,
-                args.cradio_model if local_encoder == "cradio" else api.CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL,
-                args.cradio_pooling,
-                "local_salad",
-                "single",
-                salad_head_id,
-            )
-        )
-
     results: Dict[str, Any] = {
         "inputs": {
             "dataset_root": str(dataset_root),
@@ -296,13 +216,13 @@ def main() -> int:
             "local_salad_policy": api.LOCAL_SALAD_POLICY,
             "loaded_external_salad_checkpoint": False,
             "include_cradio": bool(args.include_cradio),
-            "train_encoder": args.train_encoder,
+            "crop_level_local_salad": "disabled",
             "cradio_model": args.cradio_model,
             "cradio_pooling": args.cradio_pooling,
         },
         "recipes": {},
     }
-    for recipe_id, encoder_type, encoder_model, cradio_pooling, aggregation, view_mode, head_id in recipes:
+    for recipe_id, encoder_type, encoder_model, cradio_pooling, aggregation, view_mode in recipes:
         result, runtime = _run_class_analysis(
             manifest=manifest,
             image_dir=image_dir,
@@ -312,7 +232,6 @@ def main() -> int:
             cradio_pooling=cradio_pooling,
             embedding_aggregation=aggregation,
             embedding_view_mode=view_mode,
-            salad_head_id=head_id,
             args=args,
         )
         summary = _summarize_result(recipe_id, result, runtime)
@@ -339,13 +258,6 @@ def main() -> int:
             "encoder_type": "dinov3",
             "embedding_aggregation": "pooled",
             "embedding_view_mode": "tight_context",
-        },
-        "local_salad": {
-            "id": "local_salad",
-            "encoder_type": args.train_encoder,
-            "embedding_aggregation": "local_salad",
-            "embedding_salad_head_id": salad_head_id,
-            "embedding_view_mode": "single",
         },
         "cradio_summary": {
             "id": "cradio_summary",
@@ -374,20 +286,6 @@ def main() -> int:
         )
         recommendations.append(recipe)
     results["recommended_recipes"] = {"class_separation": recommendations}
-
-    trained_head_deleted = False
-    if args.delete_trained_head and trained_head_id:
-        safe_head = api._class_analysis_safe_slug(trained_head_id, "")
-        head_path = api.LOCAL_SALAD_HEAD_ROOT / f"{safe_head}.pt"
-        try:
-            head_path.unlink()
-            trained_head_deleted = True
-        except FileNotFoundError:
-            trained_head_deleted = True
-        except OSError:
-            trained_head_deleted = False
-    results["inputs"]["trained_head_id"] = trained_head_id
-    results["inputs"]["trained_head_deleted"] = trained_head_deleted
 
     report_path = output_dir / "benchmark.json"
     report_path.write_text(json.dumps(api._class_analysis_json_safe(results), indent=2), encoding="utf-8")

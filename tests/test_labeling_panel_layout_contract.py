@@ -186,12 +186,18 @@ def test_local_salad_is_data_ingestion_only_in_ui():
 
 
 def test_local_salad_benchmark_does_not_recommend_crop_workflows():
-    benchmark = _read("tools/benchmark_salad_diversity.py")
+    diversity_benchmark = _read("tools/benchmark_salad_diversity.py")
+    class_benchmark = _read("tools/benchmark_salad_class_separation.py")
+    clip_training_cli = _read("tools/train_clip_regression_from_YOLO.py")
 
-    assert '"embedding_aggregation": "local_salad"' not in benchmark
-    assert "crop-token aggregator" not in benchmark
-    assert "Class Split or auto-class training" not in benchmark
-    assert "Data Ingestion diversity scoring" in benchmark
+    assert '"embedding_aggregation": "local_salad"' not in diversity_benchmark
+    assert '"embedding_aggregation": "local_salad"' not in class_benchmark
+    assert 'choices=["pooled", "local_salad"]' not in clip_training_cli
+    assert "--train-local-salad" not in class_benchmark
+    assert "crop-token aggregator" not in diversity_benchmark
+    assert "Class Split or auto-class training" not in diversity_benchmark
+    assert "Data Ingestion diversity scoring" in diversity_benchmark
+    assert "crop_level_local_salad" in class_benchmark
 
 
 def test_data_ingestion_panel_contract():

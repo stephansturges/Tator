@@ -3747,7 +3747,7 @@ class PredictorManager:
                 slot = self.slots.get(slot_name)
                 if slot:
                     self._clear_slot_refs(slot)
-                    slot.clear()
+                    slot.unload()
 
     def active_slot_count(self) -> int:
         return len(self.enabled_slots)

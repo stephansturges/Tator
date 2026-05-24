@@ -1075,3 +1075,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1156 passed, 17 skipped`; predictor-settings UI contract
   coverage, `node --check ybat-master/ybat.js`, `git diff --check`, the full
   pytest suite, and live endpoint sanity checks passed.
+
+## 2026-05-24: SAM Predictor Budget Unload
+
+- Changed SAM predictor capacity reduction to unload disabled slots instead of
+  only clearing their current image state.
+- Preserved token and image-index cleanup for disabled slots before unloading.
+- Added a predictor-manager regression so reducing the budget verifies both
+  disabled-slot unload calls and stale index removal.
+- Validation: `1157 passed, 17 skipped`; focused predictor-manager and SAM
+  preload coverage, `localinferenceapi.py` compile, `git diff --check`, the
+  full pytest suite, and live endpoint sanity checks passed against the
+  restarted backend.

@@ -668,3 +668,14 @@ preserving the exact validation story for storage and artifact-write fixes.
   mutating external targets for all four text-writer families.
 - Validation: `1093 passed, 17 skipped`; focused dataset/prepass/EDR/registry
   coverage and the full pytest suite passed.
+
+## 2026-05-24: Detector Text Artifact Atomic Saves
+
+- Switched detector YAML/text artifact writes from direct final-path writes to
+  guarded temp-file writes followed by atomic replace.
+- Kept detector path containment and symlink replacement behavior aligned with
+  existing detector JSON metadata saves.
+- Added a regression proving detector text temp and final symlink leaves are
+  replaced without mutating external targets.
+- Validation: `1094 passed, 17 skipped`; focused detector metadata IO coverage
+  and the full pytest suite passed.

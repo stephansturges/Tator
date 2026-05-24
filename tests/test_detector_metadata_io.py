@@ -18,6 +18,7 @@ from services.detectors import (
     _save_rfdetr_active_impl,
     _save_yolo_active_impl,
     _strip_checkpoint_optimizer_impl,
+    _write_text_file,
     _yolo_write_run_meta_impl,
 )
 
@@ -142,6 +143,31 @@ def test_save_rfdetr_active_replaces_symlink_targets_without_target_write(tmp_pa
     assert not tmp_link.exists()
     assert not active_path.is_symlink()
     assert json.loads(active_path.read_text(encoding="utf-8"))["run_id"] == "r1"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
+
+
+def test_detector_text_write_is_atomic_and_replaces_symlink_targets_without_target_write(
+    tmp_path: Path,
+) -> None:
+    yaml_path = tmp_path / "runs" / "data.yaml"
+    yaml_path.parent.mkdir(parents=True)
+    outside_tmp = tmp_path / "outside_tmp.yaml"
+    outside_final = tmp_path / "outside_final.yaml"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    tmp_link = yaml_path.with_suffix(yaml_path.suffix + f".tmp.{os.getpid()}")
+    try:
+        tmp_link.symlink_to(outside_tmp)
+        yaml_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _write_text_file(yaml_path, "names:\n- vehicle\n")
+
+    assert not tmp_link.exists()
+    assert not yaml_path.is_symlink()
+    assert yaml_path.read_text(encoding="utf-8") == "names:\n- vehicle\n"
     assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
     assert outside_final.read_text(encoding="utf-8") == "external final"
 

@@ -320,3 +320,15 @@ preserving the exact validation story for storage and artifact-write fixes.
   reference-profile jobs cannot silently ingest files outside the dataset.
 - Validation: `1033 passed, 17 skipped`; focused Data Ingestion and linked
   dataset coverage passed.
+
+## 2026-05-24: Qwen Dataset Upload Finalization Sources
+
+- Revalidated Qwen dataset upload jobs at finalize time against the guarded
+  upload staging root instead of trusting the in-memory job root.
+- Rejected symlinks inside staged upload trees before moving completed Qwen
+  datasets into the training dataset store, while preserving safe replacement
+  of stale top-level metadata and labelmap files.
+- Added regressions for forged outside staging roots and post-upload split
+  symlink swaps.
+- Validation: `1035 passed, 17 skipped`; focused Qwen upload/security/backend
+  coverage passed.

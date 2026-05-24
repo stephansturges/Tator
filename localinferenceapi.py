@@ -14430,6 +14430,54 @@ def _qwen_dataset_upload_job_dir(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
+def _qwen_dataset_upload_resolve_source_root(
+    job: QwenDatasetUploadJob,
+    *,
+    detail: str = "qwen_dataset_source_path_invalid",
+) -> Path:
+    try:
+        raw_root = Path(str(job.root_dir or ""))
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("qwen upload source root has a symlink component")
+        source_root = raw_root.resolve(strict=True)
+        upload_root = _qwen_dataset_upload_storage_root(create=False, detail=detail)
+        if (
+            not source_root.is_dir()
+            or not _path_is_within_root_impl(source_root, upload_root)
+            or source_root.parent != upload_root
+        ):
+            raise ValueError("qwen upload source root escapes staging root")
+        return source_root
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+def _validate_qwen_dataset_upload_source_tree(
+    source_root: Path,
+    *,
+    allow_replaceable_top_level: bool = False,
+    detail: str = "qwen_dataset_source_path_invalid",
+) -> None:
+    try:
+        root = source_root.resolve(strict=True)
+        replaceable_names = {QWEN_METADATA_FILENAME, "dataset_meta.json", "labelmap.txt"}
+        for child in root.rglob("*"):
+            rel = child.relative_to(root)
+            if allow_replaceable_top_level and len(rel.parts) == 1 and child.name in replaceable_names:
+                continue
+            if child.is_symlink():
+                raise ValueError("qwen upload source tree contains a symlink")
+            resolved = child.resolve(strict=False)
+            if not _path_is_within_root_impl(resolved, root):
+                raise ValueError("qwen upload source tree escapes root")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
 def _dataset_registry_storage_root(
     *,
     create: bool = True,
@@ -20031,17 +20079,11 @@ def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name
         base_id = _sanitize_yolo_run_id_impl(str(base_id)) or str(job_id)
         classes = metadata.get("classes") or []
         labelmap = [str(c).strip() for c in classes if str(c).strip()]
-        if job.root_dir.is_symlink():
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST,
-                detail="qwen_dataset_source_path_invalid",
-            )
-        source_root = job.root_dir.resolve(strict=True)
-        if not source_root.is_dir():
-            raise HTTPException(
-                status_code=HTTP_400_BAD_REQUEST,
-                detail="qwen_dataset_source_path_invalid",
-            )
+        source_root = _qwen_dataset_upload_resolve_source_root(job)
+        _validate_qwen_dataset_upload_source_tree(
+            source_root,
+            allow_replaceable_top_level=True,
+        )
         created_at = time.time()
 
         with QWEN_DATASET_FINALIZE_LOCK:
@@ -20095,7 +20137,12 @@ def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name
                 (source_root / "dataset_meta.json").write_text(
                     json.dumps(dataset_meta, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
+                _validate_qwen_dataset_upload_source_tree(source_root)
                 shutil.move(str(source_root), target_root)
+            except HTTPException:
+                if target_root.exists():
+                    shutil.rmtree(target_root, ignore_errors=True)
+                raise
             except Exception as exc:  # noqa: BLE001
                 if target_root.exists():
                     shutil.rmtree(target_root, ignore_errors=True)

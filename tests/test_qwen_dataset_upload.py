@@ -224,6 +224,7 @@ def test_finalize_qwen_dataset_upload_rejects_symlinked_dataset_root_before_move
         qwen_root.symlink_to(outside, target_is_directory=True)
     except OSError as exc:
         pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATASET_UPLOAD_ROOT", upload_parent)
     monkeypatch.setattr(api, "QWEN_DATASET_ROOT", qwen_root)
     job = api.QwenDatasetUploadJob(
         job_id="job_root_link",
@@ -264,6 +265,7 @@ def test_finalize_qwen_dataset_upload_rejects_symlinked_dataset_root_parent_befo
         link_parent.symlink_to(outside, target_is_directory=True)
     except OSError as exc:
         pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATASET_UPLOAD_ROOT", upload_parent)
     monkeypatch.setattr(api, "QWEN_DATASET_ROOT", link_parent / "qwen_datasets")
     job = api.QwenDatasetUploadJob(
         job_id="job_root_parent_link",
@@ -282,6 +284,72 @@ def test_finalize_qwen_dataset_upload_rejects_symlinked_dataset_root_parent_befo
     assert exc_info.value.detail == "qwen_dataset_target_invalid"
     assert job.root_dir.exists()
     assert list(outside.iterdir()) == []
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        assert api.QWEN_DATASET_UPLOADS[job.job_id] is job
+        api.QWEN_DATASET_UPLOADS.clear()
+
+
+def test_finalize_qwen_dataset_upload_rejects_source_outside_staging_root_before_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upload_parent = tmp_path / "dataset_uploads"
+    upload_parent.mkdir()
+    outside_upload = tmp_path / "outside_upload"
+    train_root = outside_upload / "train"
+    train_root.mkdir(parents=True)
+    (outside_upload / "val").mkdir()
+    (train_root / "a.jpg").write_bytes(b"image")
+    (train_root / "annotations.jsonl").write_text('{"image":"a.jpg"}\n', encoding="utf-8")
+    qwen_root = tmp_path / "qwen_datasets"
+    qwen_root.mkdir()
+    monkeypatch.setattr(api, "DATASET_UPLOAD_ROOT", upload_parent)
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", qwen_root)
+    job = api.QwenDatasetUploadJob(
+        job_id="job_outside_upload",
+        root_dir=outside_upload,
+        run_name="demo",
+        train_count=1,
+    )
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        api.QWEN_DATASET_UPLOADS.clear()
+        api.QWEN_DATASET_UPLOADS[job.job_id] = job
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.finalize_qwen_dataset_upload(job.job_id, {"classes": ["building"]}, "demo")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "qwen_dataset_source_path_invalid"
+    assert outside_upload.exists()
+    assert not (outside_upload / api.QWEN_METADATA_FILENAME).exists()
+    assert list(qwen_root.iterdir()) == []
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        assert api.QWEN_DATASET_UPLOADS[job.job_id] is job
+        api.QWEN_DATASET_UPLOADS.clear()
+
+
+def test_finalize_qwen_dataset_upload_rejects_split_symlink_before_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = _register_non_empty_upload(tmp_path, monkeypatch, "job_split_link_finalize")
+    outside = tmp_path / "outside_split_finalize"
+    outside.mkdir()
+    shutil_target = job.root_dir / "train"
+    for path in shutil_target.iterdir():
+        path.unlink()
+    shutil_target.rmdir()
+    try:
+        shutil_target.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.finalize_qwen_dataset_upload(job.job_id, {"classes": ["building"]}, "demo")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "qwen_dataset_source_path_invalid"
+    assert shutil_target.is_symlink()
+    assert list(outside.iterdir()) == []
+    assert list(api.QWEN_DATASET_ROOT.iterdir()) == []
     with api.QWEN_DATASET_UPLOADS_LOCK:
         assert api.QWEN_DATASET_UPLOADS[job.job_id] is job
         api.QWEN_DATASET_UPLOADS.clear()

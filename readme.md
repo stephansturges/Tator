@@ -588,7 +588,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Latest full local suite: `1154 passed, 17 skipped`; details live in [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Latest full local suite: `1155 passed, 17 skipped`; details live in [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

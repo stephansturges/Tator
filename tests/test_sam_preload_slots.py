@@ -38,6 +38,21 @@ def test_sam_preload_rejects_disabled_background_slot():
         api.predictor_manager.set_capacity(original_capacity)
 
 
+def test_sam_preload_rejects_unknown_slot():
+    payload = SamPreloadRequest(
+        image_token="missing-token",
+        image_name="next.jpg",
+        slot="nxt",
+        sam_variant="sam1",
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        api.sam_preload(payload)
+
+    assert exc.value.status_code == 409
+    assert "slot_invalid:nxt" in str(exc.value.detail)
+
+
 def test_sam_preload_request_supersession_is_slot_scoped():
     manager = api.SamPreloadManager()
     try:

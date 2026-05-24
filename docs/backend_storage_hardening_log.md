@@ -1051,3 +1051,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1154 passed, 17 skipped`; focused SAM preload slot coverage,
   `localinferenceapi.py` compile, `git diff --check`, the full pytest suite,
   and live endpoint sanity checks passed against the restarted backend.
+
+## 2026-05-24: SAM Preload Strict Slot Validation
+
+- Stopped strict SAM slot resolution from falling back to `current` when an
+  unknown slot name is submitted.
+- Kept permissive fallback behavior for older internal callers that explicitly
+  allow disabled or unknown slot fallback.
+- Returned `slot_invalid` from preload-worker validation when a stale queued
+  job somehow reaches the worker with an unknown slot.
+- Validation: `1155 passed, 17 skipped`; focused SAM preload slot coverage,
+  `localinferenceapi.py` compile, `git diff --check`, the full pytest suite,
+  and live endpoint sanity checks passed against the restarted backend.

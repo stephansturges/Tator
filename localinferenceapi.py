@@ -3717,7 +3717,9 @@ class PredictorManager:
 
         candidate = (slot_name or "current").lower()
         if candidate not in self.slots:
-            return "current"
+            if allow_disabled_fallback:
+                return "current"
+            raise ValueError(f"slot_invalid:{candidate}")
         if self.is_slot_enabled(candidate):
             return candidate
         if allow_disabled_fallback:
@@ -4178,9 +4180,11 @@ class SamPreloadManager:
         variant = job.variant
         try:
             slot_name = predictor_manager.resolve_slot(job.slot, allow_disabled_fallback=False)
-        except ValueError:
+        except ValueError as exc:
+            detail = str(exc)
+            status = "slot_disabled" if detail.startswith("slot_disabled:") else "slot_invalid"
             return SamPreloadResponse(
-                status="slot_disabled", width=0, height=0, token=job.image_token or ""
+                status=status, width=0, height=0, token=job.image_token or ""
             )
         image_name = job.image_name
 

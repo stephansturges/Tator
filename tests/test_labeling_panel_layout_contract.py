@@ -200,6 +200,26 @@ def test_local_salad_benchmark_does_not_recommend_crop_workflows():
     assert "crop_level_local_salad" in class_benchmark
 
 
+def test_qwen_training_fallback_catalog_covers_mlx_and_abliterated_paths():
+    js = _js()
+    start = js.index("const QWEN_TRAINING_MODEL_FALLBACKS = [")
+    end = js.index("function inferQwenModelSize", start)
+    fallback_block = js[start:end]
+    fallback_ids = re.findall(r'qwenTrainingFallback\("([^"]+)"', fallback_block)
+
+    assert fallback_ids
+    assert len(fallback_ids) == len(set(fallback_ids))
+    assert "qwenTrainingFallback(id, label, metadata = {})" in js
+    assert "mlx-community/Qwen3-VL-4B-Instruct-4bit" in fallback_ids
+    assert "mlx-community/Qwen3-VL-4B-Thinking-4bit" in fallback_ids
+    assert "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx" in fallback_ids
+    assert "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated" in fallback_ids
+    assert "nicklas373/Huihui-Qwen3-VL-8B-Thinking-abliterated-AWQ" in fallback_ids
+    assert 'runtime_platform: "mlx_vlm"' in fallback_block
+    assert "abliterated: true" in fallback_block
+    assert 'training_model_id: "huihui-ai/Huihui-Qwen3-VL-8B-Thinking-abliterated"' in fallback_block
+
+
 def test_data_ingestion_panel_contract():
     html = _html()
     css = _css()

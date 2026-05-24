@@ -10722,16 +10722,75 @@ const QWEN_VRAM_PIXEL_BASE = 451584;
 const QWEN_VRAM_PIXEL_SCALE_MIN = 0.6;
 const QWEN_VRAM_PIXEL_SCALE_MAX = 1.6;
 const QWEN_MLX_MEMORY_ESTIMATE_GB = { "2B": 5.5, "4B": 8.0, "8B": 14.0, "30B": 42.0, "32B": 46.0, "235B": 180.0 };
+function qwenTrainingFallback(id, label, metadata = {}) {
+    return {
+        id,
+        label,
+        model_id: id,
+        training_supported: true,
+        runtime_platform: metadata.runtime_platform || "transformers",
+        quantized: Boolean(metadata.quantized),
+        quantization: metadata.quantization || null,
+        abliterated: Boolean(metadata.abliterated),
+        training_model_id: metadata.training_model_id || id,
+    };
+}
 const QWEN_TRAINING_MODEL_FALLBACKS = [
-    { id: "Qwen/Qwen3-VL-2B-Instruct", label: "CUDA Qwen3-VL 2B Instruct" },
-    { id: "Qwen/Qwen3-VL-4B-Instruct", label: "CUDA Qwen3-VL 4B Instruct" },
-    { id: "Qwen/Qwen3-VL-8B-Instruct", label: "CUDA Qwen3-VL 8B Instruct" },
-    { id: "Qwen/Qwen3-VL-32B-Instruct", label: "CUDA Qwen3-VL 32B Instruct" },
-    { id: "cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit", label: "CUDA Qwen3-VL 4B Instruct AWQ 4-bit" },
-    { id: "cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit", label: "CUDA Qwen3-VL 8B Instruct AWQ 4-bit" },
-    { id: "pramjana/Qwen3-VL-4B-Instruct-4bit-GPTQ", label: "CUDA Qwen3-VL 4B Instruct GPTQ 4-bit" },
-    { id: "huihui-ai/Huihui-Qwen3-VL-4B-Instruct-abliterated", label: "CUDA Huihui Qwen3-VL 4B Instruct abliterated" },
-    { id: "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated", label: "CUDA Huihui Qwen3-VL 8B Instruct abliterated" },
+    qwenTrainingFallback("Qwen/Qwen3-VL-2B-Instruct", "CUDA Qwen3-VL 2B Instruct"),
+    qwenTrainingFallback("Qwen/Qwen3-VL-4B-Instruct", "CUDA Qwen3-VL 4B Instruct"),
+    qwenTrainingFallback("Qwen/Qwen3-VL-4B-Thinking", "CUDA Qwen3-VL 4B Thinking"),
+    qwenTrainingFallback("Qwen/Qwen3-VL-8B-Instruct", "CUDA Qwen3-VL 8B Instruct"),
+    qwenTrainingFallback("Qwen/Qwen3-VL-8B-Thinking", "CUDA Qwen3-VL 8B Thinking"),
+    qwenTrainingFallback("Qwen/Qwen3-VL-32B-Instruct", "CUDA Qwen3-VL 32B Instruct"),
+    qwenTrainingFallback("Qwen/Qwen3-VL-30B-A3B-Thinking", "CUDA Qwen3-VL 30B-A3B Thinking"),
+    qwenTrainingFallback("cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit", "CUDA Qwen3-VL 4B Instruct AWQ 4-bit", {
+        quantized: true,
+        quantization: "AWQ 4-bit",
+        training_model_id: "Qwen/Qwen3-VL-4B-Instruct",
+    }),
+    qwenTrainingFallback("cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit", "CUDA Qwen3-VL 8B Instruct AWQ 4-bit", {
+        quantized: true,
+        quantization: "AWQ 4-bit",
+        training_model_id: "Qwen/Qwen3-VL-8B-Instruct",
+    }),
+    qwenTrainingFallback("pramjana/Qwen3-VL-4B-Instruct-4bit-GPTQ", "CUDA Qwen3-VL 4B Instruct GPTQ 4-bit", {
+        quantized: true,
+        quantization: "GPTQ 4-bit",
+        training_model_id: "Qwen/Qwen3-VL-4B-Instruct",
+    }),
+    qwenTrainingFallback("mlx-community/Qwen3-VL-4B-Instruct-4bit", "MLX Qwen3-VL 4B Instruct 4bit", {
+        runtime_platform: "mlx_vlm",
+        quantized: true,
+        quantization: "4bit",
+    }),
+    qwenTrainingFallback("mlx-community/Qwen3-VL-4B-Thinking-4bit", "MLX Qwen3-VL 4B Thinking 4bit", {
+        runtime_platform: "mlx_vlm",
+        quantized: true,
+        quantization: "4bit",
+    }),
+    qwenTrainingFallback("mlx-community/Qwen3-VL-8B-Instruct-4bit", "MLX Qwen3-VL 8B Instruct 4bit", {
+        runtime_platform: "mlx_vlm",
+        quantized: true,
+        quantization: "4bit",
+    }),
+    qwenTrainingFallback("huihui-ai/Huihui-Qwen3-VL-4B-Instruct-abliterated", "CUDA Huihui Qwen3-VL 4B Instruct abliterated", {
+        abliterated: true,
+    }),
+    qwenTrainingFallback("huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated", "CUDA Huihui Qwen3-VL 8B Instruct abliterated", {
+        abliterated: true,
+    }),
+    qwenTrainingFallback("nicklas373/Huihui-Qwen3-VL-8B-Thinking-abliterated-AWQ", "CUDA Huihui Qwen3-VL 8B Thinking abliterated AWQ 4-bit", {
+        quantized: true,
+        quantization: "AWQ 4-bit",
+        abliterated: true,
+        training_model_id: "huihui-ai/Huihui-Qwen3-VL-8B-Thinking-abliterated",
+    }),
+    qwenTrainingFallback("EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx", "MLX Huihui Qwen3-VL 4B Instruct abliterated 4bit", {
+        runtime_platform: "mlx_vlm",
+        quantized: true,
+        quantization: "4bit",
+        abliterated: true,
+    }),
 ];
 
 function inferQwenModelSize(modelId) {

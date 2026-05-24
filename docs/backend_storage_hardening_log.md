@@ -1827,3 +1827,23 @@ preserving the exact validation story for storage and artifact-write fixes.
   rejection and product-contract coverage (`4 passed`), CLI help checks for the
   auto-class trainer and class-separation benchmark, `git diff --check`, and the
   full pytest suite (`1247 passed, 20 skipped`) passed.
+
+## 2026-05-24: Qwen Training Fallback Catalog Alignment
+
+- Rechecked Qwen runtime/model endpoints and UI endpoint coverage against the
+  live backend. `/qwen/status`, `/qwen/models`, and `/qwen/settings` responded,
+  and `tools/check_ui_endpoints.py http://127.0.0.1:8000` reported no missing
+  paths or method mismatches.
+- Found that the Qwen training UI fallback catalog was still a small stale
+  CUDA-oriented subset. If the live `/qwen/models` registry fetch failed, the UI
+  could hide MLX training presets and most abliterated choices even though the
+  backend supports them.
+- Rebuilt the fallback list with explicit metadata for CUDA, quantized CUDA,
+  MLX-VLM, CUDA abliterated, quantized abliterated, and MLX abliterated
+  training presets.
+- Added a product-contract test to require MLX, abliterated, and quantized
+  abliterated fallback entries plus their runtime/training-base metadata.
+- Validation: `py_compile tests/test_labeling_panel_layout_contract.py`,
+  focused Qwen fallback and local-SALAD UI contract coverage (`2 passed`),
+  `tools/check_ui_endpoints.py http://127.0.0.1:8000`, `git diff --check`, and
+  the full pytest suite (`1248 passed, 20 skipped`) passed.

@@ -98,11 +98,11 @@ def build_datasets_router(
         image_names = [str(name or "").strip() for name in raw_names if str(name or "").strip()]
         return get_text_labels_fn(dataset_id, image_names)
 
-    @router.get("/datasets/{dataset_id}/text_labels/{image_name}")
+    @router.get("/datasets/{dataset_id}/text_labels/{image_name:path}")
     def get_text_label(dataset_id: str, image_name: str):
         return get_text_label_fn(dataset_id, image_name)
 
-    @router.post("/datasets/{dataset_id}/text_labels/{image_name}")
+    @router.post("/datasets/{dataset_id}/text_labels/{image_name:path}")
     def set_text_label(dataset_id: str, image_name: str, payload: dict = Body(...)):  # noqa: B008
         return set_text_label_fn(dataset_id, image_name, payload or {})
 

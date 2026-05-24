@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from PIL import Image
 
 import localinferenceapi as api
@@ -1713,6 +1714,38 @@ def test_text_label_endpoints_read_split_prefixed_source_captions(
         "val/shared.jpg": "val source caption",
     }
     assert result["missing"] == ["shared.jpg"]
+
+
+def test_text_label_routes_accept_encoded_split_prefixed_image_names(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _split_entry_for_annotation(tmp_path)
+    dataset_root = Path(entry["dataset_root"])
+    train_text = dataset_root / "train" / "text_labels"
+    train_text.mkdir(parents=True, exist_ok=True)
+    (train_text / "shared.txt").write_text("train source caption", encoding="utf-8")
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+
+    client = TestClient(api.app)
+    response = client.get("/datasets/ds/text_labels/train%2Fshared.jpg")
+
+    assert response.status_code == 200
+    assert response.json() == {"caption": "train source caption"}
+
+    response = client.post(
+        "/datasets/ds/text_labels/val%2Fshared.jpg",
+        json={"caption": "new val caption"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["caption"] == "new val caption"
+    assert (
+        Path(entry["registry_root"])
+        / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+        / "text_labels"
+        / "val"
+        / "shared.txt"
+    ).read_text(encoding="utf-8") == "new val caption"
 
 
 def test_set_text_label_requires_active_lock_owner_when_locked(tmp_path, monkeypatch) -> None:

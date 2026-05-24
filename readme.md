@@ -24,7 +24,7 @@ Open `ybat-master/ybat.html` in a browser. The UI defaults to
 `http://localhost:8000`.
 
 <details>
-<summary>Workflow demos to add</summary>
+<summary>Workflow demos</summary>
 
 Tator lets you use SAM to refine bounding boxes. Draw a rough box, run SAM, and
 turn the rough annotation into a tighter object outline before accepting it.
@@ -187,33 +187,39 @@ Qwen is the local VLM path. In this repo it is used for:
 - Qwen model activation, settings, unload, and training job endpoints
 - optional qwen-agent adapters for local tool-calling experiments
 
-The portable default model name is `Qwen/Qwen3-VL-4B-Instruct`. On Apple
-Silicon, `QWEN_INFERENCE_PLATFORM=auto` selects MLX-VLM when the `mlx-vlm`
-package is installed and no adapter checkpoint is active. That path maps Qwen3
-VL model choices to quantized `mlx-community` models, with
+The portable default model name is `Qwen/Qwen3-VL-4B-Instruct`. Apple Silicon
+can use MLX-VLM when installed; Linux/CUDA uses the Transformers path. Runtime
+settings live in **Backend Config -> Qwen Runtime (advanced)**.
+
+<details>
+<summary>Qwen runtime and training details</summary>
+
+On Apple Silicon, `QWEN_INFERENCE_PLATFORM=auto` selects MLX-VLM when the
+`mlx-vlm` package is installed and no adapter checkpoint is active. That path
+maps Qwen3 VL model choices to quantized `mlx-community` models, with
 `mlx-community/Qwen3-VL-4B-Instruct-4bit` as the default. Use
 `QWEN_INFERENCE_PLATFORM=transformers` to force the PyTorch/Transformers path,
 or `QWEN_INFERENCE_PLATFORM=mlx_vlm` to require MLX-VLM.
 
-The UI exposes the same runtime controls under **Backend Config -> Qwen Runtime
-(advanced)**. The caption, prepass, and EDR controls can also select exact
-quantized MLX model IDs directly; when an exact ID is selected, the request is
-sent as that exact model rather than being rewritten by the Instruct/Thinking
-variant dropdown.
+The caption, prepass, and EDR controls can also select exact quantized MLX model
+IDs directly; when an exact ID is selected, the request is sent as that exact
+model rather than being rewritten by the Instruct/Thinking variant dropdown.
 
-The Qwen Models tab also includes CUDA/Transformers presets for official
-Qwen3-VL checkpoints, curated FP8/AWQ/GPTQ checkpoints, and current compatible
-abliterated Qwen3-VL checkpoints. Quantized presets are inference checkpoints;
-dense and MoE entries can be selected for LoRA/QLoRA training, and quantized
-CUDA selections resolve to the matching full Transformers checkpoint before
-training starts. QLoRA then applies bitsandbytes NF4 4-bit quantization at
-training load time. MLX model presets are also trainable on Apple Silicon
-through the MLX-VLM trainer; quantized MLX checkpoints use the same LoRA adapter
-path as QLoRA-style training.
+The Qwen Models tab includes CUDA/Transformers presets for official Qwen3-VL
+checkpoints, curated FP8/AWQ/GPTQ checkpoints, and compatible abliterated
+Qwen3-VL checkpoints. Quantized presets are inference checkpoints; dense and
+MoE entries can be selected for LoRA/QLoRA training, and quantized CUDA
+selections resolve to the matching full Transformers checkpoint before training
+starts. QLoRA then applies bitsandbytes NF4 4-bit quantization at training load
+time. MLX model presets are also trainable on Apple Silicon through the MLX-VLM
+trainer; quantized MLX checkpoints use the same LoRA adapter path as
+QLoRA-style training.
 
-Model access, memory requirements, and device support still depend on your
-machine and Hugging Face cache/authentication. Large Thinking and MoE models can
-be listed in the UI even when the local hardware cannot comfortably run them.
+Model access, memory requirements, and device support depend on the machine and
+Hugging Face cache/authentication. Large Thinking and MoE models can be listed
+in the UI even when the local hardware cannot comfortably run them.
+
+</details>
 
 <details>
 <summary>Detection-informed captioning</summary>
@@ -588,7 +594,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Latest full local suite: `1160 passed, 17 skipped`; details live in [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Current verification: `1161 passed, 17 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

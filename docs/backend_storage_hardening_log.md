@@ -1140,3 +1140,18 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1160 passed, 17 skipped`; focused linked-dataset annotation
   coverage, `localinferenceapi.py` compile, `git diff --check`, the full pytest
   suite, and live endpoint sanity checks passed against the restarted backend.
+
+## 2026-05-24: Split Dataset Text Label Routes
+
+- Changed dataset text-label single read/write routes to use FastAPI's path
+  converter so encoded split-prefixed image names such as `train%2Ffoo.jpg`
+  reach the caption resolver instead of 404ing at the router.
+- Added a TestClient regression for encoded split-caption reads and writes
+  through the real app route.
+- Kept the README's top-level update tracking collapsed and shortened the
+  visible Qwen runtime prose into a closed details section.
+- Validation: `1161 passed, 17 skipped`; focused linked-dataset route coverage,
+  route uniqueness coverage, `node --check ybat-master/ybat.js`,
+  `api/datasets.py`/`localinferenceapi.py` compile, `git diff --check`, and the
+  full pytest suite passed; live endpoint map/method checks and OpenAPI sanity
+  checks passed against the restarted backend.

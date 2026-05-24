@@ -8669,7 +8669,7 @@ def _calibration_prepare_for_training() -> None:
 
 
 def _calibration_load_yolo_active() -> dict:
-    return _load_yolo_active_impl(YOLO_ACTIVE_PATH)
+    return _load_yolo_active_impl(YOLO_ACTIVE_PATH, YOLO_JOB_ROOT)
 
 
 def _calibration_list_images(dataset_id: str) -> List[str]:
@@ -21898,7 +21898,7 @@ def _yolo_active_requires_head_graft_patch(active: Dict[str, Any]) -> bool:
 def _ensure_yolo_inference_runtime() -> Tuple[Any, List[str], Optional[str]]:
     global yolo_infer_model, yolo_infer_path, yolo_infer_labelmap, yolo_infer_task
     return _ensure_yolo_inference_runtime_impl(
-        load_active_fn=lambda: _load_yolo_active_impl(YOLO_ACTIVE_PATH),
+        load_active_fn=lambda: _load_yolo_active_impl(YOLO_ACTIVE_PATH, YOLO_JOB_ROOT),
         load_labelmap_fn=_yolo_load_labelmap_impl,
         patch_ultralytics_fn=_patch_ultralytics_for_head_grafting,
         should_patch_ultralytics_fn=_yolo_active_requires_head_graft_patch,
@@ -22013,7 +22013,7 @@ def _ensure_yolo_inference_runtime_for_detector(
     detector_run_id = str(detector_id or "").strip()
     if not detector_run_id:
         return _ensure_yolo_inference_runtime()
-    active = _load_yolo_active_impl(YOLO_ACTIVE_PATH)
+    active = _load_yolo_active_impl(YOLO_ACTIVE_PATH, YOLO_JOB_ROOT)
     active_run_id = str((active or {}).get("run_id") or "").strip()
     if active_run_id and detector_run_id == active_run_id:
         return _ensure_yolo_inference_runtime()
@@ -33860,7 +33860,7 @@ app.include_router(
         list_runs_fn=lambda: _list_yolo_runs_impl(
             job_root=YOLO_JOB_ROOT,
             dataset_cache_root=YOLO_DATASET_CACHE_ROOT,
-            active_payload=_load_yolo_active_impl(YOLO_ACTIVE_PATH),
+            active_payload=_load_yolo_active_impl(YOLO_ACTIVE_PATH, YOLO_JOB_ROOT),
             load_meta_fn=lambda run_dir: _yolo_load_run_meta_impl(
                 run_dir, meta_name=YOLO_RUN_META_NAME
             ),
@@ -33870,7 +33870,7 @@ app.include_router(
             ),
             meta_name=YOLO_RUN_META_NAME,
         ),
-        get_active_fn=lambda: _load_yolo_active_impl(YOLO_ACTIVE_PATH),
+        get_active_fn=lambda: _load_yolo_active_impl(YOLO_ACTIVE_PATH, YOLO_JOB_ROOT),
         set_active_fn=set_yolo_active,
         predict_region_fn=yolo_predict_region,
         predict_full_fn=yolo_predict_full,

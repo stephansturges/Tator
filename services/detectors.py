@@ -150,13 +150,42 @@ def _regular_file_within_root(path: Path, root: Path) -> bool:
     return resolved_path.is_file()
 
 
-def _active_payload_has_valid_files(payload: Dict[str, Any]) -> bool:
+def _active_payload_has_valid_files(
+    payload: Dict[str, Any],
+    *,
+    job_root: Optional[Path] = None,
+) -> bool:
     best_path = _active_regular_file(payload.get("best_path"))
     if best_path is None:
         return False
+    run_root: Optional[Path] = None
+    if job_root is not None:
+        try:
+            if _path_has_symlink_component(job_root):
+                return False
+            job_root_resolved = job_root.resolve(strict=True)
+            best_resolved = best_path.resolve(strict=True)
+        except Exception:
+            return False
+        if not _path_is_within_root_impl(best_resolved, job_root_resolved):
+            return False
+        run_root = best_resolved.parent
+        if run_root == job_root_resolved or not _path_is_within_root_impl(
+            run_root, job_root_resolved
+        ):
+            return False
     labelmap_path = str(payload.get("labelmap_path") or "").strip()
-    if labelmap_path and _active_regular_file(labelmap_path) is None:
-        return False
+    if labelmap_path:
+        labelmap_file = _active_regular_file(labelmap_path)
+        if labelmap_file is None:
+            return False
+        if run_root is not None:
+            try:
+                labelmap_resolved = labelmap_file.resolve(strict=True)
+            except Exception:
+                return False
+            if not _path_is_within_root_impl(labelmap_resolved, run_root):
+                return False
     return True
 
 
@@ -416,14 +445,17 @@ def _ensure_rfdetr_inference_runtime_impl(
     return model, labelmap, task
 
 
-def _load_yolo_active_impl(yolo_active_path: Path) -> Dict[str, Any]:
+def _load_yolo_active_impl(
+    yolo_active_path: Path,
+    yolo_job_root: Optional[Path] = None,
+) -> Dict[str, Any]:
     if yolo_active_path.is_symlink() or not yolo_active_path.exists():
         return {}
     try:
         payload = json.loads(yolo_active_path.read_text())
         if not isinstance(payload, dict):
             return {}
-        if not _active_payload_has_valid_files(payload):
+        if not _active_payload_has_valid_files(payload, job_root=yolo_job_root):
             return {}
         return payload
     except Exception:
@@ -454,12 +486,12 @@ def _load_rfdetr_active_impl(
             return {}
 
     active = _load_from(rfdetr_active_path)
-    if _active_payload_has_valid_files(active):
+    if _active_payload_has_valid_files(active, job_root=rfdetr_job_root):
         return active
 
     fallback_path = rfdetr_job_root / "active.json"
     fallback = _load_from(fallback_path)
-    if _active_payload_has_valid_files(fallback):
+    if _active_payload_has_valid_files(fallback, job_root=rfdetr_job_root):
         try:
             save_active_fn(fallback)
         except Exception:

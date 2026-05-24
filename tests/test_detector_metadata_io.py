@@ -97,6 +97,68 @@ def test_load_yolo_active_skips_symlinked_labelmap_escape(tmp_path: Path) -> Non
     assert _load_yolo_active_impl(active_path) == {}
 
 
+def test_load_yolo_active_rejects_best_outside_job_root(tmp_path: Path) -> None:
+    job_root = tmp_path / "yolo_runs"
+    job_root.mkdir()
+    outside = tmp_path / "outside.pt"
+    outside.write_text("weights", encoding="utf-8")
+    active_path = tmp_path / "yolo_active.json"
+    active_path.write_text(
+        json.dumps({"run_id": "outside", "best_path": str(outside)}),
+        encoding="utf-8",
+    )
+
+    assert _load_yolo_active_impl(active_path, job_root) == {}
+
+
+def test_load_yolo_active_rejects_labelmap_outside_active_run(tmp_path: Path) -> None:
+    job_root = tmp_path / "yolo_runs"
+    run_dir = job_root / "run1"
+    other_run = job_root / "run2"
+    run_dir.mkdir(parents=True)
+    other_run.mkdir()
+    best = run_dir / "best.pt"
+    labelmap = other_run / "labelmap.txt"
+    best.write_text("weights", encoding="utf-8")
+    labelmap.write_text("wrong\n", encoding="utf-8")
+    active_path = tmp_path / "yolo_active.json"
+    active_path.write_text(
+        json.dumps(
+            {
+                "run_id": "run1",
+                "best_path": str(best),
+                "labelmap_path": str(labelmap),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _load_yolo_active_impl(active_path, job_root) == {}
+
+
+def test_load_yolo_active_accepts_files_inside_job_root(tmp_path: Path) -> None:
+    job_root = tmp_path / "yolo_runs"
+    run_dir = job_root / "run1"
+    run_dir.mkdir(parents=True)
+    best = run_dir / "best.pt"
+    labelmap = run_dir / "labelmap.txt"
+    best.write_text("weights", encoding="utf-8")
+    labelmap.write_text("class-a\n", encoding="utf-8")
+    active_path = tmp_path / "yolo_active.json"
+    active_path.write_text(
+        json.dumps(
+            {
+                "run_id": "run1",
+                "best_path": str(best),
+                "labelmap_path": str(labelmap),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _load_yolo_active_impl(active_path, job_root)["run_id"] == "run1"
+
+
 def test_load_rfdetr_active_skips_symlinked_best_escape(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -121,6 +183,50 @@ def test_load_rfdetr_active_skips_symlinked_best_escape(tmp_path: Path) -> None:
         )
         == {}
     )
+
+
+def test_load_rfdetr_active_rejects_best_outside_job_root(tmp_path: Path) -> None:
+    job_root = tmp_path / "rfdetr_runs"
+    job_root.mkdir()
+    outside = tmp_path / "outside.pth"
+    outside.write_text("weights", encoding="utf-8")
+    active_path = tmp_path / "rfdetr_active.json"
+    active_path.write_text(
+        json.dumps({"run_id": "outside", "best_path": str(outside)}),
+        encoding="utf-8",
+    )
+
+    assert (
+        _load_rfdetr_active_impl(
+            active_path,
+            job_root,
+            save_active_fn=lambda payload: _save_rfdetr_active_impl(payload, active_path),
+        )
+        == {}
+    )
+
+
+def test_load_rfdetr_active_does_not_migrate_invalid_fallback(tmp_path: Path) -> None:
+    job_root = tmp_path / "rfdetr_runs"
+    job_root.mkdir()
+    outside = tmp_path / "outside.pth"
+    outside.write_text("weights", encoding="utf-8")
+    fallback_path = job_root / "active.json"
+    active_path = tmp_path / "models" / "rfdetr" / "active.json"
+    fallback_path.write_text(
+        json.dumps({"run_id": "outside", "best_path": str(outside)}),
+        encoding="utf-8",
+    )
+
+    assert (
+        _load_rfdetr_active_impl(
+            active_path,
+            job_root,
+            save_active_fn=lambda payload: _save_rfdetr_active_impl(payload, active_path),
+        )
+        == {}
+    )
+    assert not active_path.exists()
 
 
 def test_save_rfdetr_active_replaces_symlink_targets_without_target_write(tmp_path: Path) -> None:

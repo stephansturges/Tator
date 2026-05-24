@@ -1011,3 +1011,18 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1144 passed, 17 skipped`; focused SAM3 lifecycle coverage,
   `localinferenceapi.py` compile, `git diff --check`, the full pytest suite, and
   live endpoint sanity checks passed against the restarted backend.
+
+## 2026-05-24: Detector Active Model Root Guard
+
+- Tightened persisted YOLO and RF-DETR active-model loading so `best_path` must
+  resolve inside the matching detector job root before inference can use it.
+- Required active labelmap files to resolve inside the same run directory as
+  the active detector weights.
+- Applied the guarded YOLO active loader to inference, calibration, active-model
+  listing, and active-model retrieval paths.
+- Prevented RF-DETR legacy fallback active files from being migrated when their
+  checkpoint paths point outside the RF-DETR run root.
+- Validation: `1149 passed, 17 skipped`; focused detector metadata/active
+  lifecycle coverage, `services/detectors.py` and `localinferenceapi.py` compile,
+  `git diff --check`, the full pytest suite, and live endpoint sanity checks
+  passed against the restarted backend.

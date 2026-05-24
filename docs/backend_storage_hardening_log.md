@@ -762,3 +762,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1105 passed, 17 skipped`; focused linked dataset/Qwen conversion
   coverage, the full pytest suite, and live endpoint sanity checks passed
   against the restarted backend.
+
+## 2026-05-24: Materialized Annotation View Atomic Saves
+
+- Promoted the guarded root text writer from Qwen-only use to a shared helper.
+- Routed SAM3 annotation-overlay materialization and YOLO training-cache
+  materialization labelmap/label writes through temp-file writes followed by
+  atomic replace.
+- Added a regression proving materialized-dataset temp/final symlink leaves are
+  replaced without mutating external targets.
+- Validation: `1106 passed, 17 skipped`; focused linked dataset/materialization
+  coverage, the full pytest suite, and live endpoint sanity checks passed
+  against the restarted backend.

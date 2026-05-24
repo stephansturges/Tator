@@ -14679,7 +14679,7 @@ def _validate_qwen_dataset_upload_source_tree(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
-def _qwen_write_text_within_root(
+def _write_text_within_root_atomic(
     path: Path,
     root: Path,
     text: str,
@@ -14731,7 +14731,7 @@ def _qwen_upload_write_text_within_root(
     *,
     detail: str = "qwen_dataset_source_path_invalid",
 ) -> None:
-    _qwen_write_text_within_root(
+    _write_text_within_root_atomic(
         path,
         root,
         text,
@@ -14747,7 +14747,7 @@ def _qwen_training_write_text_within_root(
     *,
     detail: str = "qwen_split_path_invalid",
 ) -> None:
-    _qwen_write_text_within_root(
+    _write_text_within_root_atomic(
         path,
         root,
         text,
@@ -14763,12 +14763,28 @@ def _qwen_dataset_write_text_within_root(
     *,
     detail: str = "qwen_dataset_target_invalid",
 ) -> None:
-    _qwen_write_text_within_root(
+    _write_text_within_root_atomic(
         path,
         root,
         text,
         detail=detail,
         context="qwen dataset",
+    )
+
+
+def _materialized_dataset_write_text_within_root(
+    path: Path,
+    root: Path,
+    text: str,
+    *,
+    detail: str,
+) -> None:
+    _write_text_within_root_atomic(
+        path,
+        root,
+        text,
+        detail=detail,
+        context="materialized dataset",
     )
 
 
@@ -20845,8 +20861,11 @@ def _materialize_sam3_annotation_view(entry: Dict[str, Any]) -> Dict[str, Any]:
         labelmap = _dataset_labelmap_from_root(dataset_root)
     if not labelmap:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_labelmap_missing")
-    (materialized_root / "labelmap.txt").write_text(
-        "\n".join(labelmap) + "\n", encoding="utf-8"
+    _materialized_dataset_write_text_within_root(
+        materialized_root / "labelmap.txt",
+        materialized_root,
+        "\n".join(labelmap) + "\n",
+        detail="sam3_materialize_path_invalid",
     )
 
     yolo_layout = str(entry.get("yolo_layout") or "flat")
@@ -20877,8 +20896,12 @@ def _materialize_sam3_annotation_view(entry: Dict[str, Any]) -> Dict[str, Any]:
         target_image = materialized_root / split / "images" / image_relpath
         target_label = materialized_root / split / "labels" / image_relpath.with_suffix(".txt")
         _copy2_if_different(image_source, target_image)
-        target_label.parent.mkdir(parents=True, exist_ok=True)
-        target_label.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        _materialized_dataset_write_text_within_root(
+            target_label,
+            materialized_root,
+            "\n".join(lines) + ("\n" if lines else ""),
+            detail="sam3_materialize_path_invalid",
+        )
         counts[split] += 1
 
     meta = _convert_yolo_dataset_to_coco_impl(materialized_root)
@@ -20989,7 +21012,12 @@ def _materialize_yolo_training_annotation_view(
     if not labelmap:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_missing")
     labelmap_path = target_root / "labelmap.txt"
-    labelmap_path.write_text("\n".join(labelmap) + "\n", encoding="utf-8")
+    _materialized_dataset_write_text_within_root(
+        labelmap_path,
+        target_root,
+        "\n".join(labelmap) + "\n",
+        detail="yolo_cache_path_invalid",
+    )
 
     yolo_layout = str(entry.get("yolo_layout") or "flat")
     counts = {"train": 0, "val": 0}
@@ -21019,8 +21047,12 @@ def _materialize_yolo_training_annotation_view(
         target_image = target_root / split / "images" / image_relpath
         target_label = target_root / split / "labels" / image_relpath.with_suffix(".txt")
         _copy2_if_different(image_source, target_image)
-        target_label.parent.mkdir(parents=True, exist_ok=True)
-        target_label.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        _materialized_dataset_write_text_within_root(
+            target_label,
+            target_root,
+            "\n".join(lines) + ("\n" if lines else ""),
+            detail="yolo_cache_path_invalid",
+        )
         counts[split] += 1
 
     train_labels = target_root / "train" / "labels"

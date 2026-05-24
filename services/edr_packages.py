@@ -119,6 +119,31 @@ def _safe_child_dir_within_root(path: Path, root: Path) -> bool:
     return resolved_path.is_dir()
 
 
+def _safe_existing_child_dir(root: Path, child_id: str, *, kind: str) -> Path:
+    try:
+        safe_id = _validate_edr_package_id(child_id)
+    except ValueError as exc:
+        raise RuntimeError(f"edr_package_invalid_{kind}_id") from exc
+    if _path_has_symlink_component(root):
+        raise RuntimeError("edr_package_path_invalid")
+    try:
+        root_resolved = root.resolve(strict=True)
+    except Exception as exc:
+        raise RuntimeError("edr_package_path_invalid") from exc
+    raw_path = root / safe_id
+    if raw_path.is_symlink():
+        raise RuntimeError("edr_package_path_invalid")
+    try:
+        resolved = raw_path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"edr_package_missing_detector_bundle:{kind}:{safe_id}") from exc
+    except Exception as exc:
+        raise RuntimeError("edr_package_path_invalid") from exc
+    if not _path_within_root(resolved, root_resolved) or not resolved.is_dir():
+        raise RuntimeError("edr_package_path_invalid")
+    return resolved
+
+
 def _copy_tree_filtered(src: Path, dest: Path) -> List[Path]:
     if not src.exists():
         raise FileNotFoundError(str(src))
@@ -550,16 +575,18 @@ def _repair_feature_contract_if_needed(
     manifest: Dict[str, Any],
     runtime_config: Dict[str, Any],
     feature_contract: Dict[str, Any],
+    allow_external_source_features: bool = False,
 ) -> Dict[str, Any]:
     if not _feature_contract_incomplete(feature_contract, runtime_config):
         return feature_contract
     repaired = dict(feature_contract or {})
-    for candidate in _candidate_source_feature_paths(payload_root, runtime_config):
-        fallback = _feature_contract_from_npz(candidate, runtime_config)
-        if not fallback:
-            continue
-        repaired = fallback
-        break
+    if allow_external_source_features:
+        for candidate in _candidate_source_feature_paths(payload_root, runtime_config):
+            fallback = _feature_contract_from_npz(candidate, runtime_config)
+            if not fallback:
+                continue
+            repaired = fallback
+            break
     if not _feature_contract_incomplete(repaired, runtime_config):
         manifest["feature_contract"] = repaired
         _write_json(payload_root / "feature_contract.json", repaired)
@@ -754,9 +781,7 @@ def materialize_canonical_edr_package(
         run_id = str(config.get(key) or "").strip()
         if not run_id:
             continue
-        src = root / run_id
-        if not src.exists():
-            raise RuntimeError(f"edr_package_missing_detector_bundle:{kind}:{run_id}")
+        src = _safe_existing_child_dir(root, run_id, kind=kind)
         _copy_tree(src, payload_root / "models" / kind, assets=assets, kind=kind)
 
     # Classifier.
@@ -802,6 +827,7 @@ def materialize_canonical_edr_package(
         manifest=manifest,
         runtime_config=runtime_contract.get("config") if isinstance(runtime_contract.get("config"), dict) else {},
         feature_contract=feature_contract,
+        allow_external_source_features=True,
     )
     manifest["feature_contract"] = feature_contract
     manifest["labelmap_hash"] = feature_contract.get("labelmap_hash")

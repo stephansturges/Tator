@@ -464,3 +464,19 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1062 passed, 17 skipped`; focused linked dataset, dataset
   upload, SAM3, and Qwen coverage plus the full pytest suite and live endpoint
   sanity checks passed.
+
+## 2026-05-24: EDR Package Runtime Source Boundaries
+
+- Kept README update tracking collapsed and reduced the visible content to one
+  concise status sentence plus this log link.
+- Stopped EDR runtime resolution from repairing incomplete feature contracts by
+  reading host paths embedded in imported package metadata; trusted local
+  package materialization can still fill contracts before packaging.
+- Required packaged YOLO/RF-DETR detector run IDs to validate as direct child
+  names and resolve inside their configured run roots before any files are
+  copied into an EDR package.
+- Added regressions for external feature repair attempts during runtime
+  resolution and detector run traversal during package materialization.
+- Validation: `1063 passed, 17 skipped`; focused EDR package coverage,
+  canonical EDR completion coverage, the full pytest suite, and live endpoint
+  sanity checks passed against the restarted backend.

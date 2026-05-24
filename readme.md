@@ -588,8 +588,8 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-- Current validation: `1062 passed, 17 skipped`.
-- Detailed maintenance log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Current validation is `1063 passed, 17 skipped`; detailed change notes live in
+[docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

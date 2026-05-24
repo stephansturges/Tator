@@ -26,6 +26,7 @@ from services.edr_packages import (
     get_edr_package,
     import_edr_package_from_zip,
     list_edr_packages,
+    materialize_canonical_edr_package,
     resolve_edr_package_runtime,
     _zip_payload,
 )
@@ -267,7 +268,9 @@ def test_resolve_edr_package_runtime_skips_run_symlink_dir_escape(tmp_path: Path
     assert not (tmp_path / "yolo_runs" / "pkg1__yolo" / "best.pt").exists()
 
 
-def test_resolve_edr_package_runtime_repairs_feature_contract_from_source_features(tmp_path: Path) -> None:
+def test_resolve_edr_package_runtime_ignores_external_source_feature_repair(
+    tmp_path: Path,
+) -> None:
     packages_root = tmp_path / "edr_packages"
     package_root = packages_root / "pkg1"
     payload_root = package_root / EDR_PACKAGE_PAYLOAD_DIRNAME
@@ -348,9 +351,77 @@ def test_resolve_edr_package_runtime_repairs_feature_contract_from_source_featur
         classifiers_root=tmp_path / "classifiers",
     )
 
-    assert runtime["feature_contract"]["embed_proj_dim"] == 1024
-    assert runtime["feature_contract"]["feature_schema_hash"] == "abc123"
-    assert runtime["labelmap"] == ["person"]
+    assert runtime["feature_contract"]["embed_proj_dim"] == 0
+    assert runtime["feature_contract"]["feature_schema_hash"] == ""
+    assert runtime["labelmap"] == []
+
+
+def test_materialize_canonical_edr_package_rejects_detector_run_traversal(
+    tmp_path: Path,
+) -> None:
+    uploads_root = tmp_path / "uploads"
+    packages_root = tmp_path / "edr_packages"
+    yolo_job_root = uploads_root / "yolo_runs"
+    rfdetr_job_root = uploads_root / "rfdetr_runs"
+    calibration_root = uploads_root / "calibration_jobs"
+    classifiers_root = uploads_root / "classifiers"
+    for root in (yolo_job_root, rfdetr_job_root, calibration_root, classifiers_root):
+        root.mkdir(parents=True, exist_ok=True)
+
+    outside_yolo = uploads_root / "outside_yolo"
+    outside_yolo.mkdir()
+    (outside_yolo / "secret.pt").write_text("do-not-package", encoding="utf-8")
+
+    calibration_job = calibration_root / "calib1"
+    calibration_job.mkdir()
+    (calibration_job / "ensemble_xgb.meta.json").write_text(
+        json.dumps(
+            {
+                "feature_names": ["cand_score_yolo"],
+                "labelmap": ["person"],
+                "classifier_classes": [],
+                "feature_schema_hash": "schema123",
+                "feature_schema_version": 1,
+                "support_iou": 0.5,
+                "context_radius": 0.075,
+                "label_iou": 0.5,
+                "eval_iou": 0.5,
+                "min_crop_size": 4,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    saved_recipe = {
+        "id": "recipe1",
+        "name": "Recipe",
+        "config": {
+            "dataset_id": "demo",
+            "recipe_fingerprint": "fp123",
+            "canonical_deployment_job_id": "calib1",
+            "yolo_id": "../outside_yolo",
+            "labelmap": ["person"],
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="edr_package_invalid_yolo_run_id"):
+        materialize_canonical_edr_package(
+            packages_root=packages_root,
+            saved_recipe=saved_recipe,
+            registry_entry={"dataset_id": "demo", "fingerprint": "fp123"},
+            fingerprint_payload={},
+            yolo_job_root=yolo_job_root,
+            rfdetr_job_root=rfdetr_job_root,
+            calibration_root=calibration_root,
+            classifiers_root=classifiers_root,
+            load_labelmap_fn=lambda _dataset_id: ["person"],
+            resolve_classifier_path_fn=lambda _classifier_id: None,
+            sam3_checkpoint_path=None,
+        )
+
+    package_root = packages_root / "canonical_edr_pkg_demo_fp123"
+    assert not (package_root / "payload" / "models" / "yolo_run" / "secret.pt").exists()
+    assert (outside_yolo / "secret.pt").read_text(encoding="utf-8") == "do-not-package"
 
 
 def test_edr_package_dir_rejects_traversal_package_id(tmp_path: Path) -> None:

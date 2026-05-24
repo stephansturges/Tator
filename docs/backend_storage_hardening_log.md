@@ -798,3 +798,17 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1110 passed, 17 skipped`; focused active-workspace upload coverage,
   `localinferenceapi.py` compile, the full pytest suite, and live endpoint
   sanity checks passed against the restarted backend.
+
+## 2026-05-24: Qwen Dataset Chunk Upload Atomic Saves
+
+- Added a shared guarded binary writer and reused it for class-analysis binary
+  artifacts and Qwen upload staging files.
+- Changed Qwen dataset chunk images from direct final writes to temp-file writes
+  followed by atomic replace.
+- Changed `annotations.jsonl` chunk appends to temp-copy-plus-append followed by
+  atomic replace, so image cleanup and annotation persistence stay consistent.
+- Added a regression proving image and annotation temp symlink leaves are replaced
+  without mutating external targets while preserving existing annotation rows.
+- Validation: `1111 passed, 17 skipped`; focused Qwen upload security coverage,
+  `localinferenceapi.py` compile, the full pytest suite, and live endpoint
+  sanity checks passed against the restarted backend.

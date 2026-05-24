@@ -14724,6 +14724,51 @@ def _write_text_within_root_atomic(
             tmp_path.unlink(missing_ok=True)
 
 
+def _write_binary_within_root_atomic(
+    path: Path,
+    root: Path,
+    writer: Callable[[Any], None],
+    *,
+    detail: str,
+    context: str,
+) -> None:
+    tmp_path = path.with_suffix(f"{path.suffix}.{uuid.uuid4().hex}.tmp")
+    try:
+        root_resolved = root.resolve(strict=True)
+        if _storage_path_has_symlink_component(root) or _storage_path_has_symlink_component(
+            path.parent
+        ):
+            raise ValueError(f"{context} write path contains a symlink")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(path.parent):
+            raise ValueError(f"{context} write parent contains a symlink")
+        parent_resolved = path.parent.resolve(strict=True)
+        if not _path_is_within_root_impl(parent_resolved, root_resolved):
+            raise ValueError(f"{context} write parent escapes root")
+        for candidate in (tmp_path, path):
+            if candidate.is_symlink():
+                candidate.unlink(missing_ok=True)
+            elif candidate.exists() and candidate.is_dir():
+                raise ValueError(f"{context} write target is a directory")
+            target_resolved = candidate.resolve(strict=False)
+            if not _path_is_within_root_impl(target_resolved, root_resolved):
+                raise ValueError(f"{context} write target escapes root")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp_path, flags, 0o644)
+        with os.fdopen(fd, "wb") as handle:
+            writer(handle)
+        os.replace(tmp_path, path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+
+
 def _qwen_upload_write_text_within_root(
     path: Path,
     root: Path,
@@ -14738,6 +14783,44 @@ def _qwen_upload_write_text_within_root(
         detail=detail,
         context="qwen upload",
     )
+
+
+def _qwen_upload_write_binary_within_root(
+    path: Path,
+    root: Path,
+    writer: Callable[[Any], None],
+    *,
+    detail: str = "qwen_dataset_source_path_invalid",
+) -> None:
+    _write_binary_within_root_atomic(
+        path,
+        root,
+        writer,
+        detail=detail,
+        context="qwen upload",
+    )
+
+
+def _qwen_upload_append_text_within_root(
+    path: Path,
+    root: Path,
+    text: str,
+    *,
+    detail: str = "qwen_dataset_annotation_path_invalid",
+) -> None:
+    existing_path: Optional[Path] = None
+    if path.exists() or path.is_symlink():
+        existing_path = _safe_existing_regular_file_within_root_impl(path, root)
+        if existing_path is None:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+
+    def append_text(handle: Any) -> None:
+        if existing_path is not None:
+            with existing_path.open("rb") as source_handle:
+                shutil.copyfileobj(source_handle, handle)
+        handle.write(text.encode("utf-8"))
+
+    _qwen_upload_write_binary_within_root(path, root, append_text, detail=detail)
 
 
 def _qwen_training_write_text_within_root(
@@ -17618,41 +17701,13 @@ def _class_analysis_write_binary(
     *,
     detail: str = "class_analysis_write_path_forbidden",
 ) -> Path:
-    tmp_path = path.with_suffix(f"{path.suffix}.{uuid.uuid4().hex}.tmp")
-    try:
-        root_resolved = root.resolve(strict=True)
-        if _storage_path_has_symlink_component(root) or _storage_path_has_symlink_component(
-            path.parent
-        ):
-            raise ValueError("class analysis write path contains a symlink")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if _storage_path_has_symlink_component(path.parent):
-            raise ValueError("class analysis write parent contains a symlink")
-        parent_resolved = path.parent.resolve(strict=True)
-        if not _path_is_within_root_impl(parent_resolved, root_resolved):
-            raise ValueError("class analysis write parent escapes root")
-        for candidate in (tmp_path, path):
-            if candidate.is_symlink():
-                candidate.unlink(missing_ok=True)
-            elif candidate.exists() and candidate.is_dir():
-                raise ValueError("class analysis write target is a directory")
-            target_resolved = candidate.resolve(strict=False)
-            if not _path_is_within_root_impl(target_resolved, root_resolved):
-                raise ValueError("class analysis write target escapes root")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(tmp_path, flags, 0o644)
-        with os.fdopen(fd, "wb") as handle:
-            writer(handle)
-        os.replace(tmp_path, path)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
-    finally:
-        if tmp_path.exists() or tmp_path.is_symlink():
-            tmp_path.unlink(missing_ok=True)
+    _write_binary_within_root_atomic(
+        path,
+        root,
+        writer,
+        detail=detail,
+        context="class analysis",
+    )
     return path
 
 
@@ -20680,32 +20735,39 @@ def upload_qwen_dataset_chunk(
                 )
             if image_path.exists():
                 raise HTTPException(status_code=HTTP_409_CONFLICT, detail="qwen_dataset_image_exists")
-            written = 0
+            written_box = {"bytes": 0}
+
+            def write_upload_image(handle: Any) -> None:
+                while True:
+                    chunk = file.file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written_box["bytes"] += len(chunk)
+                    if QWEN_DATASET_CHUNK_MAX_BYTES and written_box["bytes"] > QWEN_DATASET_CHUNK_MAX_BYTES:
+                        raise HTTPException(
+                            status_code=HTTP_413_CONTENT_TOO_LARGE,
+                            detail="qwen_dataset_chunk_too_large",
+                        )
+                    handle.write(chunk)
+                if written_box["bytes"] <= 0:
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail="qwen_dataset_empty_image",
+                    )
+
             try:
-                with image_path.open("wb") as handle:
-                    while True:
-                        chunk = file.file.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        written += len(chunk)
-                        if QWEN_DATASET_CHUNK_MAX_BYTES and written > QWEN_DATASET_CHUNK_MAX_BYTES:
-                            raise HTTPException(
-                                status_code=HTTP_413_CONTENT_TOO_LARGE,
-                                detail="qwen_dataset_chunk_too_large",
-                            )
-                        handle.write(chunk)
+                _qwen_upload_write_binary_within_root(
+                    image_path,
+                    split_root,
+                    write_upload_image,
+                    detail="qwen_dataset_image_path_invalid",
+                )
             except Exception:
                 try:
                     image_path.unlink(missing_ok=True)
                 except Exception:
                     pass
                 raise
-            if written <= 0:
-                try:
-                    image_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_dataset_empty_image")
             ann_path = split_root / "annotations.jsonl"
             if ann_path.is_symlink():
                 try:
@@ -20717,8 +20779,11 @@ def upload_qwen_dataset_chunk(
                     detail="qwen_dataset_annotation_path_invalid",
                 )
             try:
-                with ann_path.open("a", encoding="utf-8") as handle:
-                    handle.write(annotation_text + "\n")
+                _qwen_upload_append_text_within_root(
+                    ann_path,
+                    split_root,
+                    annotation_text + "\n",
+                )
             except Exception:
                 try:
                     image_path.unlink(missing_ok=True)

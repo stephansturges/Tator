@@ -181,6 +181,54 @@ def test_qwen_chunk_rejects_duplicate_image_name(tmp_path: Path) -> None:
         _cleanup_upload_job("job_dup")
 
 
+def test_qwen_chunk_image_and_annotation_writes_are_atomic_over_tmp_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FixedUUID:
+        hex = "fixed"
+
+    job = _register_upload_job(tmp_path, "job_atomic")
+    split_root = job.root_dir / "train"
+    ann_path = split_root / "annotations.jsonl"
+    ann_path.write_text('{"image":"old.jpg"}\n', encoding="utf-8")
+    outside_image_tmp = tmp_path / "outside_image_tmp.jpg"
+    outside_annotation_tmp = tmp_path / "outside_annotation_tmp.jsonl"
+    outside_image_tmp.write_bytes(b"external image tmp")
+    outside_annotation_tmp.write_text("external annotation tmp\n", encoding="utf-8")
+    try:
+        (split_root / "atomic.jpg.fixed.tmp").symlink_to(outside_image_tmp)
+        (split_root / "annotations.jsonl.fixed.tmp").symlink_to(outside_annotation_tmp)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(localinferenceapi.uuid, "uuid4", lambda: FixedUUID())
+
+    try:
+        upload = UploadFile(filename="atomic.jpg", file=BytesIO(b"img"))
+        out = localinferenceapi.upload_qwen_dataset_chunk(
+            "job_atomic",
+            "train",
+            "atomic.jpg",
+            '{"id":"x"}',
+            upload,
+        )
+
+        assert out["status"] == "ok"
+        assert (split_root / "atomic.jpg").read_bytes() == b"img"
+        assert not (split_root / "atomic.jpg.fixed.tmp").exists()
+        assert not (split_root / "annotations.jsonl.fixed.tmp").exists()
+        assert outside_image_tmp.read_bytes() == b"external image tmp"
+        assert outside_annotation_tmp.read_text(encoding="utf-8") == "external annotation tmp\n"
+        rows = [
+            json.loads(line)
+            for line in ann_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert rows == [{"image": "old.jpg"}, {"id": "x", "image": "atomic.jpg"}]
+        assert upload.file.closed
+    finally:
+        _cleanup_upload_job("job_atomic")
+
+
 def test_qwen_chunk_rejects_image_symlink_without_target_write(tmp_path: Path) -> None:
     job = _register_upload_job(tmp_path, "job_image_link")
     outside = tmp_path / "outside.jpg"

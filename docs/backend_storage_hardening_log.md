@@ -1456,3 +1456,20 @@ preserving the exact validation story for storage and artifact-write fixes.
   live OpenAPI sanity (`tested=144`, `failures=[]`), and
   `/data_ingestion/capabilities` returned `local_salad` with MLX C-RADIO
   available.
+
+## 2026-05-24: Annotation Snapshot In-Flight Save Race
+
+- Fixed browser annotation snapshot flushing so a successful response only clears
+  a dirty image key when the current browser snapshot still matches the payload
+  that was sent.
+- Added a queued follow-up flush for edits made while a snapshot request is in
+  flight, preventing later local changes from losing their dirty flag after an
+  older save completes.
+- Added a browser regression that holds the first snapshot request, edits the
+  same caption again, releases the request, and verifies the backend manifest
+  contains the newer caption.
+- Validation: `node --check ybat-master/ybat.js`, `py_compile` for the changed
+  tests, focused static/backend annotation coverage (`17 passed`), targeted
+  browser regression (`1 passed`), and the full dataset annotation browser file
+  (`8 passed`) passed. The full pytest suite also passed
+  (`1207 passed, 20 skipped`).

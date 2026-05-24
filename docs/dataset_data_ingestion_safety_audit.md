@@ -15,7 +15,7 @@ mutate, move, or remove user data to the backend guard and regression coverage.
 | Delete linked dataset | Removes linked registry record and overlays only | Source root is never passed to delete helper; active annotation/job guards block delete | `tests/test_dataset_linked_annotation_flows.py` |
 | Delete managed dataset | Moves backend-owned dataset to trash | Managed-root containment, symlink rejection, active annotation/job guards, rollback during trash metadata failure | `tests/test_dataset_linked_annotation_flows.py`, UI E2E |
 | Restore managed dataset | Moves trash entry back into library | Trash-id validation, target-id uniqueness, symlink rejection, metadata rollback on failure | `tests/test_dataset_linked_annotation_flows.py`, UI E2E |
-| Annotation snapshot/meta save | Writes backend overlay labels/text and metadata | Active-lock ownership, image existence checks, guarded overlay roots, atomic no-follow writes | `tests/test_dataset_linked_annotation_flows.py` |
+| Annotation snapshot/meta save | Writes backend overlay labels/text and metadata | Active-lock ownership, image existence checks, guarded overlay roots, atomic no-follow writes, in-flight browser save race protection | `tests/test_dataset_linked_annotation_flows.py`, `tests/ui/e2e/test_dataset_annotation_flows.py` |
 | Dataset glossary save | Writes canonical glossary into backend metadata | Guarded metadata root and strict metadata write | `tests/test_dataset_linked_annotation_flows.py`, `tests/test_glossary_library.py` |
 | Dataset conversion/materialization | Writes COCO sidecars plus SAM3/Qwen metadata for training/build views | Strict final metadata writes; read-time metadata backfills are best-effort only | `tests/test_dataset_metadata_io.py`, `tests/test_dataset_linked_annotation_flows.py` |
 
@@ -37,3 +37,8 @@ write fails, avoiding half-created library records. SAM3/Qwen dataset conversion
 and materialized training-view writes now also fail the mutation when final
 metadata cannot be written, while passive read/list metadata cleanup stays
 best-effort so existing datasets remain browseable.
+
+The browser annotation workspace must also keep local dirty state until the exact
+snapshot that was saved still matches the current image state. If a user edits an
+image while a snapshot request is in flight, the older successful response now
+queues another save instead of clearing the newer edit's dirty flag.

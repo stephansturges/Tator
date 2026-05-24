@@ -5,7 +5,13 @@ import uuid
 import pytest
 
 from .helpers.api import api_json, delete_dataset_if_exists
-from .helpers.ui import ensure_local_mode, open_datasets_tab, open_transient_in_annotation, open_transient_session
+from .helpers.ui import (
+    ensure_local_mode,
+    extract_transient_session_id,
+    open_datasets_tab,
+    open_transient_in_annotation,
+    open_transient_session,
+)
 
 
 pytestmark = [pytest.mark.ui, pytest.mark.ui_smoke]
@@ -247,6 +253,99 @@ def test_close_blocks_when_snapshot_save_fails_then_recovers(playwright_page):
     page.click("#annotationSaveNowBtn")
     page.wait_for_timeout(1200)
     ensure_local_mode(page)
+
+
+# CASE_ID: DATASET_INFLIGHT_SNAPSHOT_DIRTY_PRESERVED
+
+def test_snapshot_save_preserves_caption_edits_made_while_request_is_in_flight(playwright_page):
+    page, dataset_path = playwright_page
+    ensure_local_mode(page)
+    open_transient_in_annotation(page, dataset_path)
+    session_id = extract_transient_session_id(page)
+    page.wait_for_function(
+        "document.querySelectorAll('#imageList option').length > 0",
+        timeout=20000,
+    )
+    page.click("#imageList option:first-child")
+    page.dispatch_event("#imageList", "change")
+    page.wait_for_function(
+        "(() => { const c = document.querySelector('#canvas'); return !!c && c.width > 0 && c.height > 0; })()",
+        timeout=20000,
+    )
+    page.eval_on_selector("#qwenCaptionDetails", "el => { el.open = true; }")
+    page.wait_for_function(
+        """
+(() => {
+  const el = document.querySelector('#qwenCaptionOutput');
+  return !!el && !el.disabled && el.offsetParent !== null;
+})()
+""",
+        timeout=5000,
+    )
+    page.evaluate(
+        """
+() => {
+  const originalFetch = window.fetch.bind(window);
+  window.__pwOriginalFetch = window.fetch;
+  window.__pwSnapshotCallCount = 0;
+  window.__pwSnapshotBodies = [];
+  window.__pwSnapshotReleased = false;
+  window.__pwSnapshotIntercepted = false;
+  window.fetch = (input, init = {}) => {
+    const url = String(typeof input === "string" ? input : (input && input.url) || "");
+    if (url.includes("/annotation/snapshot")) {
+      window.__pwSnapshotCallCount += 1;
+      window.__pwSnapshotBodies.push(String(init && init.body || ""));
+      if (!window.__pwSnapshotIntercepted) {
+        window.__pwSnapshotIntercepted = true;
+        return new Promise((resolve, reject) => {
+          window.__pwReleaseSnapshot = () => {
+            window.__pwSnapshotReleased = true;
+            originalFetch(input, init).then(resolve, reject);
+          };
+        });
+      }
+    }
+    return originalFetch(input, init);
+  };
+}
+"""
+    )
+
+    try:
+        first_caption = f"pw first {uuid.uuid4().hex[:6]}"
+        second_caption = f"pw second {uuid.uuid4().hex[:6]}"
+        caption = page.locator("#qwenCaptionOutput")
+        caption.fill(first_caption)
+        caption.press("Tab")
+        page.wait_for_function("window.__pwSnapshotIntercepted === true", timeout=10000)
+        caption.fill(second_caption)
+        page.evaluate("window.__pwReleaseSnapshot && window.__pwReleaseSnapshot()")
+        page.wait_for_function("window.__pwSnapshotReleased === true", timeout=10000)
+        page.wait_for_function("window.__pwSnapshotCallCount >= 2", timeout=15000)
+        page.wait_for_timeout(800)
+
+        manifest = api_json("GET", f"/datasets/transient/{session_id}/annotation/manifest")
+        text_labels = [str(row.get("text_label") or "") for row in manifest.get("images") or []]
+        assert second_caption in text_labels
+        assert first_caption not in text_labels
+    finally:
+        page.evaluate(
+            """
+() => {
+  if (window.__pwOriginalFetch) {
+    window.fetch = window.__pwOriginalFetch;
+  }
+  delete window.__pwOriginalFetch;
+  delete window.__pwReleaseSnapshot;
+  delete window.__pwSnapshotCallCount;
+  delete window.__pwSnapshotBodies;
+  delete window.__pwSnapshotReleased;
+  delete window.__pwSnapshotIntercepted;
+}
+"""
+        )
+        ensure_local_mode(page)
 
 
 # CASE_ID: DATASET_STALE_MANIFEST_NO_RESURRECT

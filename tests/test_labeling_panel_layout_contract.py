@@ -107,6 +107,20 @@ def test_caption_dataset_picker_is_locked_to_annotation_dataset():
     assert "updateQwenCaptionDatasetRefreshButton" not in js
 
 
+def test_annotation_snapshot_save_preserves_edits_made_during_inflight_save():
+    js = _js()
+
+    assert "saveQueued: false" in js
+    assert "const sentSnapshotByKey = new Map();" in js
+    assert "sentSnapshotByKey.set(key, serializeAnnotationRecord(record));" in js
+    assert "const currentRecord = buildAnnotationRecord(key);" in js
+    assert "const currentSnapshot = serializeAnnotationRecord(currentRecord || record);" in js
+    assert "if (currentSnapshot === sentSnapshot) {" in js
+    assert "annotationSourceState.dirtyRecordsByKey.set(key, currentRecord);" in js
+    assert "annotationSourceState.saveQueued = true;" in js
+    assert "Queued annotation snapshot flush failed" in js
+
+
 def test_loaded_edr_recipe_prepass_caption_flag_is_honored():
     js = _js()
 

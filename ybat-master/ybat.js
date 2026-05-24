@@ -3651,6 +3651,7 @@ const sam3TrainState = {
         autosaveTimer: null,
         heartbeatTimer: null,
         saveInFlight: false,
+        saveQueued: false,
         loadToken: 0,
         statusMessage: "",
     };
@@ -4045,6 +4046,7 @@ const sam3TrainState = {
         annotationSourceState.savedSnapshotByKey = new Map();
         annotationSourceState.dirtyRecordsByKey = new Map();
         annotationSourceState.saveInFlight = false;
+        annotationSourceState.saveQueued = false;
         annotationSourceState.statusMessage = "";
         updateAnnotationSourceUi();
         syncLabelingSourceControls();
@@ -4319,14 +4321,29 @@ const sam3TrainState = {
             return false;
         }
         captureCurrentAnnotationDirtyState();
-        if (!annotationSourceState.dirtyRecordsByKey.size || annotationSourceState.saveInFlight) {
+        if (!annotationSourceState.dirtyRecordsByKey.size) {
             return false;
+        }
+        if (annotationSourceState.saveInFlight) {
+            annotationSourceState.saveQueued = true;
+            if (manual) {
+                setSamStatus("Save already running; latest edits queued.", {
+                    variant: "info",
+                    duration: 2500,
+                });
+            }
+            return true;
         }
         const base = getAnnotationBasePath();
         if (!base) {
             return false;
         }
         const records = Array.from(annotationSourceState.dirtyRecordsByKey.values());
+        const sentSnapshotByKey = new Map();
+        records.forEach((record) => {
+            const key = annotationImageKey(record.split, record.image_relpath);
+            sentSnapshotByKey.set(key, serializeAnnotationRecord(record));
+        });
         const cursor =
             currentImage && isDatasetBackedImageRecord(currentImage)
                 ? {
@@ -4363,13 +4380,21 @@ const sam3TrainState = {
             const payload = parseJsonObjectSafe(detail, {});
             records.forEach((record) => {
                 const key = annotationImageKey(record.split, record.image_relpath);
-                annotationSourceState.savedSnapshotByKey.set(key, serializeAnnotationRecord(record));
-                annotationSourceState.dirtyRecordsByKey.delete(key);
-                const row = annotationSourceState.imageRowsByKey.get(key);
-                if (row) {
-                    row.label_lines = Array.isArray(record.label_lines) ? [...record.label_lines] : [];
-                    row.text_label = String(record.text_label || "");
-                    annotationSourceState.imageRowsByKey.set(key, row);
+                const sentSnapshot = sentSnapshotByKey.get(key) || serializeAnnotationRecord(record);
+                annotationSourceState.savedSnapshotByKey.set(key, sentSnapshot);
+                const currentRecord = buildAnnotationRecord(key);
+                const currentSnapshot = serializeAnnotationRecord(currentRecord || record);
+                if (currentSnapshot === sentSnapshot) {
+                    annotationSourceState.dirtyRecordsByKey.delete(key);
+                    const row = annotationSourceState.imageRowsByKey.get(key);
+                    if (row) {
+                        row.label_lines = Array.isArray(record.label_lines) ? [...record.label_lines] : [];
+                        row.text_label = String(record.text_label || "");
+                        annotationSourceState.imageRowsByKey.set(key, row);
+                    }
+                } else if (currentRecord) {
+                    annotationSourceState.dirtyRecordsByKey.set(key, currentRecord);
+                    annotationSourceState.saveQueued = true;
                 }
             });
             if (payload && typeof payload === "object" && payload.progress && annotationSourceState.manifest) {
@@ -4389,8 +4414,21 @@ const sam3TrainState = {
             }
             return false;
         } finally {
+            const shouldFlushQueued =
+                annotationSourceState.saveQueued
+                && annotationSourceState.dirtyRecordsByKey.size
+                && !annotationSourceState.readOnly
+                && !isAnnotationMutationBlocked();
             annotationSourceState.saveInFlight = false;
+            annotationSourceState.saveQueued = false;
             updateAnnotationSourceUi();
+            if (shouldFlushQueued) {
+                window.setTimeout(() => {
+                    flushAnnotationSnapshot({ manual: false }).catch((error) => {
+                        console.debug("Queued annotation snapshot flush failed", error);
+                    });
+                }, 0);
+            }
         }
     }
 

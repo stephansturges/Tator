@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 import zipfile
 from pathlib import Path
@@ -614,6 +615,52 @@ def test_save_transient_dataset_rejects_symlinked_registry_root(
     assert list(outside.iterdir()) == []
 
 
+def test_register_dataset_path_rollback_revalidates_registry_root_before_rmtree(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "linked_source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    registry_root = tmp_path / "registry"
+    outside_registry = tmp_path / "outside_registry"
+    marker_box: dict[str, Path] = {}
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(api, "_validate_linked_dataset_path", lambda _p: source_root)
+    monkeypatch.setattr(
+        api,
+        "_validate_linked_dataset_shape",
+        lambda *_args, **_kwargs: {"yolo_layout": "flat"},
+    )
+
+    def fail_metadata_write(_path, root, _meta):
+        registry_dir = Path(root)
+        dataset_name = registry_dir.name
+        shutil.rmtree(registry_root)
+        outside_registry.mkdir()
+        outside_dataset = outside_registry / dataset_name
+        outside_dataset.mkdir()
+        marker = outside_dataset / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        marker_box["marker"] = marker
+        registry_root.symlink_to(outside_registry, target_is_directory=True)
+        raise api.HTTPException(status_code=400, detail="metadata_write_failed")
+
+    monkeypatch.setattr(api, "_write_dataset_metadata_json", fail_metadata_write)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.register_dataset_path(
+            str(source_root),
+            dataset_id="saved_linked",
+            label="Saved Linked",
+            context="context",
+            notes="notes",
+        )
+
+    assert exc_info.value.detail == "metadata_write_failed"
+    assert marker_box["marker"].read_text(encoding="utf-8") == "keep"
+    assert registry_root.is_symlink()
+    registry_root.unlink()
+
+
 def test_save_transient_dataset_rolls_back_when_metadata_write_fails(
     tmp_path, monkeypatch
 ) -> None:
@@ -655,6 +702,56 @@ def test_save_transient_dataset_rolls_back_when_metadata_write_fails(
     assert exc_info.value.detail == "metadata_write_failed"
     assert not (registry_root / "saved_linked").exists()
     assert not (source_root / "labelmap.txt").exists()
+
+
+def test_save_transient_dataset_rollback_revalidates_registry_root_before_rmtree(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "linked_source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    registry_root = tmp_path / "registry"
+    outside_registry = tmp_path / "outside_registry"
+    marker_box: dict[str, Path] = {}
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(api, "_validate_linked_dataset_path", lambda _p: source_root)
+    with api.DATASET_TRANSIENT_LOCK:
+        api.DATASET_TRANSIENT_SESSIONS.clear()
+        api.DATASET_TRANSIENT_SESSIONS["sess1"] = {
+            "session_id": "sess1",
+            "dataset_root": str(source_root),
+            "label": "Transient DS",
+            "classes": [],
+            "yolo_layout": "flat",
+        }
+
+    def fail_metadata_write(_path, root, _meta):
+        registry_dir = Path(root)
+        dataset_name = registry_dir.name
+        shutil.rmtree(registry_root)
+        outside_registry.mkdir()
+        outside_dataset = outside_registry / dataset_name
+        outside_dataset.mkdir()
+        marker = outside_dataset / "keep.txt"
+        marker.write_text("keep", encoding="utf-8")
+        marker_box["marker"] = marker
+        registry_root.symlink_to(outside_registry, target_is_directory=True)
+        raise api.HTTPException(status_code=400, detail="metadata_write_failed")
+
+    monkeypatch.setattr(api, "_write_dataset_metadata_json", fail_metadata_write)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.save_transient_dataset(
+            "sess1",
+            dataset_id="saved_linked",
+            label="Saved Linked",
+            context="context",
+            notes="notes",
+        )
+
+    assert exc_info.value.detail == "metadata_write_failed"
+    assert marker_box["marker"].read_text(encoding="utf-8") == "keep"
+    assert registry_root.is_symlink()
+    registry_root.unlink()
 
 
 def test_download_dataset_entry_applies_overlay_files(tmp_path, monkeypatch) -> None:

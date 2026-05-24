@@ -17349,7 +17349,10 @@ def register_dataset_path(
             )
         return entry
     except Exception:
-        shutil.rmtree(registry_dir, ignore_errors=True)
+        try:
+            _delete_dataset_tree_or_link(registry_dir, [registry_root])
+        except Exception:
+            pass
         raise
 
 
@@ -17535,7 +17538,10 @@ def save_transient_dataset(
             )
         return entry
     except Exception:
-        shutil.rmtree(registry_dir, ignore_errors=True)
+        try:
+            _delete_dataset_tree_or_link(registry_dir, [registry_root])
+        except Exception:
+            pass
         raise
 
 
@@ -20033,6 +20039,29 @@ def _data_ingestion_job_dir(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
+def _cleanup_data_ingestion_job_dir(root_dir: Optional[Path]) -> None:
+    if root_dir is None:
+        return
+    try:
+        raw_root = Path(root_dir)
+        if raw_root.is_symlink():
+            raw_root.unlink(missing_ok=True)
+            return
+        if _storage_path_has_symlink_component(raw_root.parent):
+            return
+        ingestion_root = _data_ingestion_storage_root(create=False)
+        resolved = raw_root.resolve(strict=True)
+    except Exception:
+        return
+    if (
+        not resolved.is_dir()
+        or not _path_is_within_root_impl(resolved, ingestion_root)
+        or resolved.parent != ingestion_root
+    ):
+        return
+    shutil.rmtree(resolved, ignore_errors=True)
+
+
 def _local_salad_head_path(head_id: str) -> Path:
     safe = _class_analysis_safe_slug(str(head_id or ""), "")
     if not safe:
@@ -21084,7 +21113,7 @@ async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_files")
     except Exception:
         if out_dir is not None:
-            shutil.rmtree(out_dir, ignore_errors=True)
+            _cleanup_data_ingestion_job_dir(out_dir)
         raise
     request_payload = {
         **manifest,
@@ -21105,7 +21134,7 @@ async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files
         )
     except Exception:
         if out_dir is not None:
-            shutil.rmtree(out_dir, ignore_errors=True)
+            _cleanup_data_ingestion_job_dir(out_dir)
         raise
     return {"job_id": job_id}
 
@@ -21139,7 +21168,7 @@ async def create_local_salad_training_job(manifest_json: str, files: List[Any]) 
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_no_training_files")
     except Exception:
         if out_dir is not None:
-            shutil.rmtree(out_dir, ignore_errors=True)
+            _cleanup_data_ingestion_job_dir(out_dir)
         raise
     request_payload = {**manifest, "train_uploads": rows}
     job = DataIngestionJob(job_id=job_id, kind="local_salad_train", request=request_payload)
@@ -21156,7 +21185,7 @@ async def create_local_salad_training_job(manifest_json: str, files: List[Any]) 
         )
     except Exception:
         if out_dir is not None:
-            shutil.rmtree(out_dir, ignore_errors=True)
+            _cleanup_data_ingestion_job_dir(out_dir)
         raise
     return {"job_id": job_id}
 

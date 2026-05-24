@@ -1617,3 +1617,27 @@ preserving the exact validation story for storage and artifact-write fixes.
   the live UI endpoint map check with no missing paths or method mismatches,
   live OpenAPI sanity (`tested=144`, `failures=[]`), and live `/datasets` plus
   `/data_ingestion/capabilities` reads.
+
+## 2026-05-24: Dataset and Ingestion Rollback Cleanup
+
+- Continued the Dataset Management/Data Ingestion data-loss audit, focusing on
+  cleanup paths that run after a failed mutation or failed job start.
+- Replaced raw `rmtree()` rollback cleanup for linked dataset registration and
+  transient-session saves with the guarded dataset delete helper, so cleanup
+  revalidates the registry root and refuses to delete through a symlinked
+  parent.
+- Added a data-ingestion job cleanup helper that revalidates the ingestion root,
+  unlinks a symlinked job leaf without touching its target, and refuses cleanup
+  if the job parent has become symlinked before the failure handler runs.
+- Added regressions for registry-root swaps during register/transient rollback,
+  ingestion-root swaps during analysis startup failure, and symlinked ingestion
+  job cleanup.
+- Validation so far: `py_compile localinferenceapi.py
+  tests/test_data_ingestion.py tests/test_dataset_linked_annotation_flows.py`,
+  `git diff --check`, focused cleanup/security regressions (`64 passed`), and
+  the affected dataset/data-ingestion/Qwen safety bundle (`187 passed`) passed.
+  The full pytest suite also passed with `1228 passed, 20 skipped`. The
+  restarted backend passed `tools/check_ui_endpoints.py` with no missing paths or
+  method mismatches, endpoint map check (`missing=[]`), endpoint method check
+  (`failures=[]`), OpenAPI sanity (`tested=144`, `failures=[]`), and live
+  `/datasets`, `/datasets/trash`, and `/data_ingestion/capabilities` reads.

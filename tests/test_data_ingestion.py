@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -159,6 +160,72 @@ def test_data_ingestion_analysis_cleans_staging_when_thread_start_fails(tmp_path
     assert not any(tmp_path.iterdir())
     assert candidate.closed is True
     assert reference.closed is True
+
+
+def test_data_ingestion_analysis_cleanup_revalidates_root_before_rmtree(
+    tmp_path, monkeypatch
+):
+    jobs_root = tmp_path / "jobs"
+    outside_root = tmp_path / "outside_jobs"
+    marker_box: dict[str, Path] = {}
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+    monkeypatch.setattr(api, "_validate_local_salad_head_reference", lambda *_args, **_kwargs: None)
+
+    class SwapRootFailThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            job_dirs = [path for path in jobs_root.iterdir() if path.is_dir()]
+            assert len(job_dirs) == 1
+            job_name = job_dirs[0].name
+            shutil.rmtree(jobs_root)
+            outside_root.mkdir()
+            outside_job = outside_root / job_name
+            outside_job.mkdir()
+            marker = outside_job / "keep.txt"
+            marker.write_text("keep", encoding="utf-8")
+            marker_box["marker"] = marker
+            jobs_root.symlink_to(outside_root, target_is_directory=True)
+            raise RuntimeError("thread start failed")
+
+    monkeypatch.setattr(api.threading, "Thread", SwapRootFailThread)
+    with api.DATA_INGESTION_JOBS_LOCK:
+        api.DATA_INGESTION_JOBS.clear()
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        asyncio.run(
+            api.create_data_ingestion_analysis_job(
+                json.dumps({"encoder": "local_salad", "salad_head_id": "unit_head"}),
+                [_FakeUpload("candidate.jpg", b"candidate")],
+                [_FakeUpload("reference.jpg", b"reference")],
+            )
+        )
+
+    assert marker_box["marker"].read_text(encoding="utf-8") == "keep"
+    assert jobs_root.is_symlink()
+    jobs_root.unlink()
+
+
+def test_data_ingestion_cleanup_unlinks_job_symlink_without_target_delete(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "data_ingestion"
+    ingestion_root.mkdir()
+    outside_job = tmp_path / "outside_job"
+    outside_job.mkdir()
+    marker = outside_job / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    job_link = ingestion_root / "di_link"
+    try:
+        job_link.symlink_to(outside_job, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+
+    api._cleanup_data_ingestion_job_dir(job_link)
+
+    assert not job_link.exists()
+    assert not job_link.is_symlink()
+    assert marker.read_text(encoding="utf-8") == "keep"
 
 
 def test_data_ingestion_analysis_rejects_symlinked_root_before_upload(tmp_path, monkeypatch):

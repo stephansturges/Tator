@@ -1063,3 +1063,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1155 passed, 17 skipped`; focused SAM preload slot coverage,
   `localinferenceapi.py` compile, `git diff --check`, the full pytest suite,
   and live endpoint sanity checks passed against the restarted backend.
+
+## 2026-05-24: Predictor Settings GPU Field UI Contract
+
+- Fixed Qwen and SAM3 training GPU-refresh code to read the snake_case
+  `/predictor_settings` fields emitted by the backend.
+- Kept a camelCase fallback for any older injected payloads while making the
+  backend contract explicit in UI coverage.
+- Added a UI contract regression so training GPU availability cannot silently
+  disappear because of field-name drift.
+- Validation: `1156 passed, 17 skipped`; predictor-settings UI contract
+  coverage, `node --check ybat-master/ybat.js`, `git diff --check`, the full
+  pytest suite, and live endpoint sanity checks passed.

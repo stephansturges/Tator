@@ -10830,6 +10830,17 @@ function updateQwenModelPreview() {
     updateQwenVramEstimate();
 }
 
+function readPredictorSettingsNumber(data, snakeKey, camelKey) {
+    if (!data) {
+        return null;
+    }
+    const raw = Object.prototype.hasOwnProperty.call(data, snakeKey)
+        ? data[snakeKey]
+        : data[camelKey];
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
 async function refreshQwenGpuInfo() {
     try {
         const resp = await fetch(`${API_ROOT}/predictor_settings`);
@@ -10837,9 +10848,9 @@ async function refreshQwenGpuInfo() {
             throw new Error(await resp.text() || `HTTP ${resp.status}`);
         }
         const data = await resp.json();
-        const total = typeof data.gpuTotalMb === "number" ? data.gpuTotalMb : null;
+        const total = readPredictorSettingsNumber(data, "gpu_total_mb", "gpuTotalMb");
         qwenTrainState.gpuTotalMb = total && total > 0 ? total : null;
-        const count = typeof data.gpuDeviceCount === "number" ? data.gpuDeviceCount : null;
+        const count = readPredictorSettingsNumber(data, "gpu_device_count", "gpuDeviceCount");
         qwenTrainState.gpuDeviceCount = count && count > 0 ? count : null;
         trainingGpuInfo.deviceCount = count && count > 0 ? count : null;
     } catch (error) {
@@ -10860,7 +10871,7 @@ async function refreshTrainingGpuInfo() {
             throw new Error(await resp.text() || `HTTP ${resp.status}`);
         }
         const data = await resp.json();
-        const count = typeof data.gpuDeviceCount === "number" ? data.gpuDeviceCount : null;
+        const count = readPredictorSettingsNumber(data, "gpu_device_count", "gpuDeviceCount");
         trainingGpuInfo.deviceCount = count && count > 0 ? count : null;
         sam3TrainState.gpuCount = trainingGpuInfo.deviceCount;
         if (sam3TrainElements.numGpus) {

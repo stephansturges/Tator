@@ -277,3 +277,14 @@ preserving the exact validation story for storage and artifact-write fixes.
   writes, asserting outside targets are not created.
 - Validation: `1027 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Class Analysis Cache Roots
+
+- Rejected symlink components in class-analysis cache roots before cached
+  embedding loads, thumbnail-cache reuse, and cache writes.
+- Routed thumbnail output directory creation through the class-analysis guarded
+  directory helper instead of a raw `mkdir`.
+- Added regressions for symlinked cache roots on embedding-cache reads and
+  thumbnail-cache reuse, ensuring outside cache targets are not trusted.
+- Validation: `1029 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

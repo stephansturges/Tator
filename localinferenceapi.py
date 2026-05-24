@@ -16668,6 +16668,24 @@ def _class_analysis_storage_root(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
+def _class_analysis_cache_storage_root(*, create: bool = False) -> Optional[Path]:
+    try:
+        raw_root = CLASS_ANALYSIS_CACHE_ROOT
+        if _storage_path_has_symlink_component(raw_root):
+            return None
+        if create:
+            raw_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_root):
+            return None
+        if raw_root.exists() and not raw_root.is_dir():
+            return None
+        if not create and not raw_root.exists():
+            return None
+        return raw_root.resolve(strict=False)
+    except Exception:
+        return None
+
+
 def _class_analysis_job_dir(
     job_id: str,
     *,
@@ -16921,6 +16939,28 @@ def _class_analysis_prepare_write_path(path: Path, root: Path) -> Optional[Path]
     return raw_path
 
 
+def _class_analysis_prepare_dir(path: Path, root: Path) -> Optional[Path]:
+    try:
+        root_resolved = root.resolve()
+        if _storage_path_has_symlink_component(root):
+            return None
+        raw_path = Path(path)
+        if _storage_path_has_symlink_component(raw_path):
+            return None
+        parent_resolved = raw_path.parent.resolve(strict=False)
+        if not _path_is_within_root_impl(parent_resolved, root_resolved):
+            return None
+        raw_path.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_path) or not raw_path.is_dir():
+            return None
+        resolved = raw_path.resolve(strict=True)
+    except Exception:
+        return None
+    if not _path_is_within_root_impl(resolved, root_resolved):
+        return None
+    return resolved
+
+
 def _class_analysis_write_json(path: Path, root: Path, value: Any) -> Path:
     write_path = _class_analysis_prepare_write_path(path, root)
     if write_path is None:
@@ -16971,8 +17011,11 @@ def _class_analysis_embedding_cache_key(crop_cache_key: str, head: Dict[str, Any
 
 
 def _class_analysis_load_cached_embedding(cache_path: Path) -> Optional[np.ndarray]:
+    cache_root = _class_analysis_cache_storage_root(create=False)
+    if cache_root is None:
+        return None
     safe_cache_path = _safe_existing_regular_file_within_root_impl(
-        cache_path, CLASS_ANALYSIS_CACHE_ROOT
+        cache_path, cache_root
     )
     if safe_cache_path is None:
         return None
@@ -17288,14 +17331,17 @@ def _class_analysis_encode_crops(
             if cache_key:
                 cache_path = _class_analysis_embedding_cache_path(cache_key)
                 try:
+                    cache_root = _class_analysis_cache_storage_root(create=True)
+                    if cache_root is None:
+                        raise OSError("class_analysis_cache_root_forbidden")
                     cache_write_path = _class_analysis_prepare_write_path(
-                        cache_path, CLASS_ANALYSIS_CACHE_ROOT
+                        cache_path, cache_root
                     )
                     if cache_write_path is None:
                         raise OSError("class_analysis_cache_path_forbidden")
                     tmp_path = _class_analysis_prepare_write_path(
                         cache_write_path.with_suffix(".tmp.npy"),
-                        CLASS_ANALYSIS_CACHE_ROOT,
+                        cache_root,
                     )
                     if tmp_path is None:
                         raise OSError("class_analysis_cache_tmp_path_forbidden")
@@ -17379,7 +17425,8 @@ def _class_analysis_collect_records(
     raw_records: List[Dict[str, Any]] = []
     raw_crops: List[Any] = []
     thumb_dir = out_dir / "thumbnails"
-    thumb_dir.mkdir(parents=True, exist_ok=True)
+    if _class_analysis_prepare_dir(thumb_dir, out_dir) is None:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="class_analysis_path_invalid")
     total_candidate_objects = 0
     source_key = str(source.get("source_key") or "source")
     row_count = max(1, len(rows))
@@ -17392,8 +17439,10 @@ def _class_analysis_collect_records(
         point_id = str(record.get("point_id") or "").strip()
         thumb_path = thumb_dir / f"{point_id}.jpg"
         cached_thumb = _class_analysis_thumbnail_cache_path(crop_cache_key)
+        cache_root = _class_analysis_cache_storage_root(create=False)
         can_reuse = bool(
-            crop_cache_key
+            cache_root is not None
+            and crop_cache_key
             and point_id
             and cached_thumb.exists()
             and _class_analysis_cached_embedding_valid(crop_cache_key, embedding_head_for_cache)
@@ -17403,7 +17452,7 @@ def _class_analysis_collect_records(
                 if not _class_analysis_copy_file_within_roots(
                     cached_thumb,
                     thumb_path,
-                    source_root=CLASS_ANALYSIS_CACHE_ROOT,
+                    source_root=cache_root,
                     dest_root=out_dir,
                 ):
                     raise OSError("class_analysis_thumbnail_cache_forbidden")
@@ -17445,12 +17494,14 @@ def _class_analysis_collect_records(
                     raise OSError("class_analysis_thumbnail_path_forbidden")
                 thumb.save(thumb_write_path, format="JPEG", quality=86)
                 if crop_cache_key:
-                    _class_analysis_copy_file_within_roots(
-                        thumb_write_path,
-                        cached_thumb,
-                        source_root=out_dir,
-                        dest_root=CLASS_ANALYSIS_CACHE_ROOT,
-                    )
+                    cache_dest_root = _class_analysis_cache_storage_root(create=True)
+                    if cache_dest_root is not None:
+                        _class_analysis_copy_file_within_roots(
+                            thumb_write_path,
+                            cached_thumb,
+                            source_root=out_dir,
+                            dest_root=cache_dest_root,
+                        )
             finally:
                 try:
                     thumb.close()
@@ -17545,6 +17596,7 @@ def _class_analysis_collect_records(
                     }
                 )
                 cached_thumb = _class_analysis_thumbnail_cache_path(crop_cache_key)
+                cache_root = _class_analysis_cache_storage_root(create=False)
                 point_seed = "|".join(
                     [
                         source_key,
@@ -17557,9 +17609,13 @@ def _class_analysis_collect_records(
                 )
                 point_id = hashlib.sha1(point_seed.encode("utf-8")).hexdigest()[:20]
                 thumb_path = thumb_dir / f"{point_id}.jpg"
-                can_reuse_crop = cached_thumb.exists() and _class_analysis_cached_embedding_valid(
-                    crop_cache_key,
-                    embedding_head_for_cache,
+                can_reuse_crop = (
+                    cache_root is not None
+                    and cached_thumb.exists()
+                    and _class_analysis_cached_embedding_valid(
+                        crop_cache_key,
+                        embedding_head_for_cache,
+                    )
                 )
                 if defer_crop_materialization:
                     embedding_crop = None
@@ -17569,7 +17625,7 @@ def _class_analysis_collect_records(
                         if not _class_analysis_copy_file_within_roots(
                             cached_thumb,
                             thumb_path,
-                            source_root=CLASS_ANALYSIS_CACHE_ROOT,
+                            source_root=cache_root,
                             dest_root=out_dir,
                         ):
                             raise OSError("class_analysis_thumbnail_cache_forbidden")
@@ -17597,12 +17653,14 @@ def _class_analysis_collect_records(
                         if thumb_write_path is None:
                             raise OSError("class_analysis_thumbnail_path_forbidden")
                         thumb.save(thumb_write_path, format="JPEG", quality=86)
-                        _class_analysis_copy_file_within_roots(
-                            thumb_write_path,
-                            cached_thumb,
-                            source_root=out_dir,
-                            dest_root=CLASS_ANALYSIS_CACHE_ROOT,
-                        )
+                        cache_dest_root = _class_analysis_cache_storage_root(create=True)
+                        if cache_dest_root is not None:
+                            _class_analysis_copy_file_within_roots(
+                                thumb_write_path,
+                                cached_thumb,
+                                source_root=out_dir,
+                                dest_root=cache_dest_root,
+                            )
                     except Exception:
                         pass
                     try:

@@ -74,6 +74,8 @@ loop instead of living in separate scripts.
 - Train and select local helper models from the same interface.
 - Audit class purity with CLIP/DINOv3 embedding maps so outliers and likely
   wrong-class objects can be inspected and corrected.
+- Score candidate images or videos against a saved reference profile, preview
+  the subset worth keeping, and export accepted crops/tiles as a ZIP.
 - Package reusable prelabeling recipes so the next batch starts from stronger suggestions.
 
 Tator is not meant to remove review. It is meant to automate the repetitive
@@ -91,6 +93,7 @@ for the final labels.
 | Qwen captions and VLM inference | Qwen Models, Label Images | `/qwen/status`, `/qwen/settings`, `/qwen/caption`, `/qwen/infer`, `/qwen/prepass` | `services/qwen*.py`, `qwen_agent_llm.py`, `qwen_agent_tools.py` |
 | Class predictor training | Train Class Predictor | `/clip/train`, `/clip/classifiers/*`, `/clip/active_model` | `services/classifier*.py`, `services/clip_runtime.py`, `services/dinov3_runtime.py` |
 | Class split and outlier audit | Class Split Explorer | `/class_analysis/*`, `/clip/backbones` | `api/class_analysis.py`, `localinferenceapi.py`, `ybat-master/plotly-2.35.2.min.js`, `ybat-master/ybat.js` |
+| Data ingestion and diversity review | Data Ingestion | `/data_ingestion/*` | `api/data_ingestion.py`, `localinferenceapi.py`, `ybat-master/ybat.js` |
 | Detector training and inference | Train YOLO, Train RF-DETR, Detector Selection | `/yolo/*`, `/rfdetr/*`, `/detectors/default` | `services/detectors.py`, `services/detector_jobs.py` |
 | SAM3 model workflows | Train SAM3, SAM Model Selection | `/sam3/models/*`, `/sam3/train/*`, `/sam3/storage/*` | `services/sam3_*.py`, `sam3_local/` |
 | SAM3 vocabulary and recipes | SAM3 Vocabulary Explorer, SAM3 Recipe Mining | `/sam3/prompt_helper/*`, `/agent_mining/*`, `/prepass/recipes/*` | `services/prompt_helper*.py`, `services/agent_cascades.py`, `services/prepass_recipes.py` |
@@ -151,6 +154,19 @@ Dataset records also carry:
 This is why Tator is useful for extension work. Once a dataset has a glossary,
 active helpers, and one or more saved recipes, new image batches can start from
 dataset-specific suggestions rather than generic detector output.
+
+## Data Ingestion
+
+Data Ingestion is the pre-merge review flow for new images and videos. Build or
+import a reference profile from an existing dataset, score candidate media
+against that baseline, keep or reject the ranked items, preview the accepted
+outputs, and download the kept data as a ZIP. Export modes support originals,
+aspect-preserving resize, stretch resize, center crop, and fixed-size tiling.
+
+Reference profiles can be downloaded and re-uploaded as ZIP bundles so a local
+dataset can reuse the same trained baseline later. Accepted-data exports create
+new preview thumbnails and ZIPs only; candidate source files are not moved,
+renamed, overwritten, or deleted.
 
 ## Assisted Labeling
 
@@ -596,7 +612,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current verification: `1250 passed, 20 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Current verification: `1255 passed, 20 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

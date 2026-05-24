@@ -269,6 +269,8 @@ def test_data_ingestion_panel_contract():
     assert 'id="dataIngestionReferenceBackend"' in html
     assert 'id="dataIngestionReferenceDataset"' in html
     assert 'id="dataIngestionBuildProfileButton"' in html
+    assert 'id="dataIngestionProfileDownload"' in html
+    assert 'id="dataIngestionProfileUpload"' in html
     assert 'id="dataIngestionMaxTrainImages" min="0" max="1000000" step="1" value="0"' in html
     assert 'id="dataIngestionReferenceCap"' not in html
     assert 'id="dataIngestionKeepFraction"' in html
@@ -276,6 +278,14 @@ def test_data_ingestion_panel_contract():
     assert 'id="dataIngestionSaladHead"' in html
     assert 'id="dataIngestionReportTitle">Ingestion report</strong>' in html
     assert 'id="dataIngestionListTitle">Top diverse candidates</strong>' in html
+    assert 'id="dataIngestionAcceptance"' in html
+    assert 'id="dataIngestionOutputMode"' in html
+    assert 'value="tile" selected>Tile into crops</option>' in html
+    assert 'id="dataIngestionTileEdgePolicy"' in html
+    assert 'value="cover_no_padding" selected>Cover no padding</option>' in html
+    assert 'id="dataIngestionPreviewAcceptedButton"' in html
+    assert 'id="dataIngestionDownloadAcceptedButton"' in html
+    assert "Split later by original source to avoid train/val leakage" in html
     assert "WALDO encoder benchmark comparison" in html
     assert "Data Ingestion" in html
     assert 'id="dataIngestionCradioModel"' not in html
@@ -286,6 +296,8 @@ def test_data_ingestion_panel_contract():
     assert '.tab-panel[data-tab-panel="data-ingestion"]' in css
     assert ".data-ingestion-workspace" in css
     assert ".data-ingestion-results" in css
+    assert ".data-ingestion-acceptance" in css
+    assert ".data-ingestion-tile-preview" in css
     assert ".embedding-benchmark-note__grid" in css
     assert "html.theme-dark .data-ingestion-panel" in css
     assert "html.theme-dark .embedding-benchmark-note" in css
@@ -297,6 +309,10 @@ def test_data_ingestion_panel_contract():
     assert "function initDataIngestionUi" in js
     assert "function startDataIngestionAnalysis" in js
     assert "function startLocalSaladTraining" in js
+    assert "function downloadDataIngestionReferenceProfile" in js
+    assert "function uploadDataIngestionReferenceProfile" in js
+    assert "function previewDataIngestionAcceptedOutputs" in js
+    assert "function downloadDataIngestionAcceptedZip" in js
     assert "appendActiveWorkspaceTrainingFiles" in js
     assert "activeDatasetSaladHeadName" in js
     assert "getDataIngestionNumber(dataIngestionElements.maxTrainImages, 0" in js
@@ -305,6 +321,14 @@ def test_data_ingestion_panel_contract():
     assert 'setSelectValueIfPresent(dataIngestionElements.recipe, "local_salad_top20")' not in js
     assert 'fetch(`${API_ROOT}/data_ingestion/jobs`' in js
     assert 'fetch(`${API_ROOT}/data_ingestion/salad_train_jobs`' in js
+    assert 'fetch(`${API_ROOT}/data_ingestion/reference_profiles/${encodeURIComponent(profileId)}/export`' in js
+    assert 'fetch(`${API_ROOT}/data_ingestion/reference_profiles/import`' in js
+    assert 'accepted_export/preview`' in js
+    assert 'accepted_export/download`' in js
+    assert "data-data-ingestion-item-id" in js
+    assert "data-data-ingestion-output-id" in js
+    assert "acceptedOutputFilterActive" in js
+    assert "Tile overlap creates near-duplicates" in js
     assert 'fetch(`${API_ROOT}/datasets`' in js
     assert "appendActiveWorkspaceReferenceFiles" in js
     assert "dataIngestionRecipeValues" not in js
@@ -339,6 +363,11 @@ def test_data_ingestion_panel_contract():
 
     assert '"/data_ingestion/capabilities"' in router
     assert '"/data_ingestion/salad_train_jobs"' in router
+    assert '"/data_ingestion/reference_profiles/{profile_id}/export"' in router
+    assert '"/data_ingestion/reference_profiles/import"' in router
+    assert '"/data_ingestion/jobs/{job_id}/accepted_export/preview"' in router
+    assert '"/data_ingestion/jobs/{job_id}/accepted_export/{preview_id}/thumbnail/{output_id}"' in router
+    assert '"/data_ingestion/jobs/{job_id}/accepted_export/download"' in router
     assert 'max_part_size=1024 * 1024 * 1024' in router
 
 

@@ -26,7 +26,9 @@ mutate, move, or remove user data to the backend guard and regression coverage.
 | Flow | Data touched | Guard | Coverage |
 |---|---|---|---|
 | Build reference profile | Creates job staging data and a local reference-profile head | Guarded job root, upload size/quota checks, backend-reference source validation, guarded startup cleanup, strict local-head path checks, final cancellation check before head write | `tests/test_data_ingestion.py` |
+| Import/export reference profile | Reads or creates a local reference-profile head bundle | Zip traversal/symlink/size checks, checksum verification, bundle-version validation, strict local-head path checks, preserved provenance metadata and reference fingerprint | `tests/test_data_ingestion.py` |
 | Analyze candidates | Creates job staging data, result JSON, embeddings cache | Guarded job root, candidate/reference gating, matching reference-profile validation, guarded startup cleanup, guarded result reads, final cancellation check before result write | `tests/test_data_ingestion.py`, UI E2E |
+| Preview/download accepted candidates | Creates preview thumbnails and a transient export ZIP | Completed-analysis gating, selected-item/output validation, source-path containment inside the job root, output-count limits, explicit crop/resize/tile policy, source files read-only | `tests/test_data_ingestion.py`, UI contract |
 | Backend reference dataset use | Reads existing dataset images | Dataset id resolution, path containment inside selected dataset root, active-job delete blocking by dataset id | `tests/test_data_ingestion.py`, `tests/test_dataset_linked_annotation_flows.py` |
 | Cancel job | Mutates in-memory job state | Terminal jobs are not cancellable; active jobs move through `cancelling`; UI checks cancel response and blocks duplicate cancel clicks | `tests/test_data_ingestion.py` and endpoint sanity |
 
@@ -65,6 +67,18 @@ published. If cancellation is observed after local reference-profile training bu
 before the head write, no local SALAD head is added. Startup failure cleanup
 also revalidates the data-ingestion root and refuses to remove a job directory
 through a symlinked parent.
+
+Reference profile bundles are portable backend-owned artifacts, not source
+dataset snapshots. Exported bundles include a manifest and checksums; imported
+bundles are staged, validated, and copied into the local SALAD head store only
+after their metadata and payload integrity checks pass.
+
+Accepted-data exports are also read-only with respect to candidate sources. The
+review UI records which analysis items are kept, the backend verifies that each
+source path still resolves inside the ingestion job directory, and preview or
+download outputs are rendered into backend-owned thumbnail/ZIP artifacts. This
+flow does not move, overwrite, resize in place, or delete the submitted images
+or extracted video frames.
 
 The same late-cancel boundary now applies to adjacent training jobs that create
 dataset-derived artifacts. CLIP classifier, Qwen, YOLOv8, and RF-DETR workers

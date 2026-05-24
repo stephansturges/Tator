@@ -1884,3 +1884,32 @@ preserving the exact validation story for storage and artifact-write fixes.
   `node --check ybat-master/ybat.js`,
   `tools/check_ui_endpoints.py http://127.0.0.1:8000`, `git diff --check`, and
   the full pytest suite (`1250 passed, 20 skipped`) passed.
+
+## 2026-05-24: Data Ingestion Profile and Accepted Export Flow
+
+- Added reference-profile ZIP export/import for local SALAD reference heads.
+  Bundles carry a manifest, profile payload, checksum file, reference
+  fingerprint, base-encoder metadata, and original/import provenance.
+- Hardened profile imports with zip traversal, symlink, compressed-size,
+  uncompressed-size, bundle-version, checksum, and local-head metadata checks
+  before copying a profile into the backend-owned head store.
+- Added accepted-output review endpoints for completed Data Ingestion analysis
+  jobs. Users can keep/reject ranked items, preview the resulting outputs, and
+  download a ZIP without mutating the submitted candidate files.
+- Added export shaping controls for original images, aspect-fit resize, stretch
+  resize, center crop, and fixed-size tiling with explicit edge policy,
+  overlap, size, and JPEG-quality settings.
+- Stored a stable reference fingerprint when reference profiles are trained,
+  added stable analysis item ids for review/export selection, and kept export
+  source paths constrained to the ingestion job directory.
+- Wired the Data Ingestion UI with reference-profile download/upload controls,
+  per-item keep checkboxes, accepted-output preview thumbnails, and ZIP
+  download controls.
+- Updated README and the Dataset/Data Ingestion safety audit to document the
+  portable reference-profile flow and read-only accepted-data export invariant.
+- Validation: `py_compile localinferenceapi.py api/data_ingestion.py`,
+  `node --check ybat-master/ybat.js`, focused reference-profile and
+  accepted-export regressions (`5 passed`), focused Data Ingestion/UI contract
+  coverage (`54 passed`), `tools/check_ui_endpoints.py http://127.0.0.1:8000`,
+  `git diff --check`, and the full pytest suite (`1255 passed, 20 skipped`)
+  passed against the restarted backend.

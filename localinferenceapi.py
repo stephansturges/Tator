@@ -13873,6 +13873,12 @@ _init_storage_root(DATA_INGESTION_ROOT)
 LOCAL_SALAD_HEAD_ROOT = Path(os.environ.get("LOCAL_SALAD_HEAD_ROOT", "./uploads/salad_heads"))
 _init_storage_root(LOCAL_SALAD_HEAD_ROOT)
 LOCAL_SALAD_HEAD_LOCK = threading.Lock()
+REFERENCE_PROFILE_BUNDLE_VERSION = "tator-reference-profile-v1"
+REFERENCE_PROFILE_BUNDLE_MAX_BYTES = 512 * 1024 * 1024
+REFERENCE_PROFILE_BUNDLE_MAX_UNCOMPRESSED_BYTES = 768 * 1024 * 1024
+ACCEPTED_EXPORT_MAX_PREVIEW_OUTPUTS = 240
+ACCEPTED_EXPORT_MAX_DOWNLOAD_OUTPUTS = 20000
+ACCEPTED_EXPORT_THUMB_SIZE = 192
 PROMPT_HELPER_JOB_ROOT = Path(
     os.environ.get("SAM3_PROMPT_HELPER_ROOT", "./uploads/prompt_helper_jobs")
 )
@@ -20198,6 +20204,7 @@ def _list_local_salad_heads() -> List[Dict[str, Any]]:
                     "reference_dataset_id": metadata.get("reference_dataset_id") or "",
                     "reference_dataset_label": metadata.get("reference_dataset_label") or "",
                     "reference_label": metadata.get("reference_label") or "",
+                    "reference_fingerprint": metadata.get("reference_fingerprint") if isinstance(metadata.get("reference_fingerprint"), dict) else None,
                     "descriptor_dim": int(config.get("token_dim") or 0)
                     + int(config.get("num_clusters") or 0) * int(config.get("cluster_dim") or 0),
                     "config": config,
@@ -20208,6 +20215,284 @@ def _list_local_salad_heads() -> List[Dict[str, Any]]:
             entry["label"] = path.stem
         entries.append(entry)
     return entries
+
+
+def _data_ingestion_sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _data_ingestion_zip_member_is_unsafe(name: str) -> bool:
+    raw = str(name or "")
+    parts = Path(raw).parts
+    return (
+        not raw
+        or raw.startswith("/")
+        or raw.startswith("\\")
+        or PureWindowsPath(raw).is_absolute()
+        or ".." in parts
+        or any(part in {"", ".", ".."} for part in parts)
+    )
+
+
+def _data_ingestion_zip_info_is_symlink(info: zipfile.ZipInfo) -> bool:
+    mode = (int(info.external_attr or 0) >> 16) & 0xFFFF
+    return stat.S_ISLNK(mode)
+
+
+def _data_ingestion_validate_zip_infos(
+    zf: zipfile.ZipFile,
+    *,
+    allowed_names: Set[str],
+    detail_prefix: str,
+    max_uncompressed_bytes: int,
+) -> None:
+    total_uncompressed = 0
+    for info in zf.infolist():
+        name = str(info.filename or "")
+        if _data_ingestion_zip_member_is_unsafe(name) or name not in allowed_names:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"{detail_prefix}_invalid_path")
+        if _data_ingestion_zip_info_is_symlink(info):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"{detail_prefix}_symlink_unsupported")
+        total_uncompressed += max(0, int(info.file_size or 0))
+        if total_uncompressed > max_uncompressed_bytes:
+            raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail=f"{detail_prefix}_uncompressed_too_large")
+
+
+def _data_ingestion_reference_fingerprint(
+    prepared_rows: Sequence[Dict[str, Any]],
+    *,
+    source: str,
+    dataset_id: str = "",
+    label: str = "",
+) -> Dict[str, Any]:
+    rows: List[Dict[str, Any]] = []
+    for row in prepared_rows:
+        rows.append(
+            {
+                "filename": str(row.get("filename") or row.get("saved_name") or ""),
+                "source_type": str(row.get("source_type") or "image"),
+                "frame_index": _coerce_int(row.get("frame_index"), 0, minimum=0),
+                "width": _coerce_int(row.get("width"), 0, minimum=0),
+                "height": _coerce_int(row.get("height"), 0, minimum=0),
+                "size": _coerce_int(row.get("size"), 0, minimum=0),
+                "split": str(row.get("split") or ""),
+                "image_relpath": str(row.get("image_relpath") or ""),
+                "source_dataset_id": str(row.get("source_dataset_id") or ""),
+            }
+        )
+    rows.sort(key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False))
+    digest = hashlib.sha256(json.dumps(rows, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return {
+        "version": 1,
+        "source": str(source or ""),
+        "dataset_id": str(dataset_id or ""),
+        "label": str(label or ""),
+        "image_count": len(rows),
+        "content_hash": digest,
+    }
+
+
+def _data_ingestion_profile_bundle_manifest(profile_id: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    reference_fingerprint = metadata.get("reference_fingerprint") if isinstance(metadata.get("reference_fingerprint"), dict) else None
+    profile_meta = {
+        key: json_sanitize(metadata.get(key))
+        for key in [
+            "id",
+            "label",
+            "encoder_type",
+            "encoder_model",
+            "cradio_pooling",
+            "train_image_count",
+            "source_mode",
+            "reference_source",
+            "reference_dataset_id",
+            "reference_dataset_label",
+            "reference_label",
+            "active_image_count",
+            "epochs",
+            "batch_size",
+            "salad_backend",
+            "created_at",
+            "format",
+            "policy",
+            "trainer",
+        ]
+        if metadata.get(key) is not None
+    }
+    return {
+        "bundle_version": REFERENCE_PROFILE_BUNDLE_VERSION,
+        "exported_at": time.time(),
+        "original_profile_id": str(profile_id or ""),
+        "profile": profile_meta,
+        "reference": {
+            "source": str(metadata.get("reference_source") or metadata.get("source_mode") or ""),
+            "dataset_id": str(metadata.get("reference_dataset_id") or ""),
+            "dataset_label": str(metadata.get("reference_dataset_label") or ""),
+            "label": str(metadata.get("reference_label") or ""),
+        },
+        "reference_fingerprint": reference_fingerprint,
+        "fingerprint_status": "present" if reference_fingerprint else "missing_legacy",
+    }
+
+
+def export_data_ingestion_reference_profile(profile_id: str):
+    safe_profile_id = _class_analysis_safe_slug(str(profile_id or ""), "")
+    if not safe_profile_id:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="reference_profile_id_required")
+    path = _local_salad_head_path(safe_profile_id)
+    head_root = _local_salad_head_root(create=False)
+    safe_path = _safe_existing_regular_file_within_root_impl(path, head_root)
+    if safe_path is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="reference_profile_not_found")
+    _head, metadata = _load_local_salad_head(safe_profile_id, device_name="cpu", backend="torch")
+    profile_bytes = safe_path.read_bytes()
+    manifest = _data_ingestion_profile_bundle_manifest(safe_profile_id, metadata)
+    manifest_bytes = json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+    checksums = {
+        "manifest.json": _data_ingestion_sha256_bytes(manifest_bytes),
+        "profile.pt": _data_ingestion_sha256_bytes(profile_bytes),
+    }
+    checksums_bytes = json.dumps(checksums, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+    tmp_dir = Path(tempfile.mkdtemp(prefix="reference_profile_export_"))
+    try:
+        zip_path = tmp_dir / f"{safe_profile_id}.reference_profile.zip"
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("manifest.json", manifest_bytes)
+            zf.writestr("profile.pt", profile_bytes)
+            zf.writestr("checksums.json", checksums_bytes)
+        return FileResponse(
+            path=str(zip_path),
+            media_type="application/zip",
+            filename=f"{safe_profile_id}.reference_profile.zip",
+            background=BackgroundTask(shutil.rmtree, tmp_dir, ignore_errors=True),
+        )
+    except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"reference_profile_export_failed:{exc}") from exc
+
+
+def _import_data_ingestion_reference_profile_zip(zip_path: Path) -> Dict[str, Any]:
+    try:
+        zip_size = int(zip_path.stat().st_size)
+    except Exception:
+        zip_size = 0
+    if zip_size <= 0:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="reference_profile_import_empty")
+    if zip_size > REFERENCE_PROFILE_BUNDLE_MAX_BYTES:
+        raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="reference_profile_import_zip_too_large")
+    allowed = {"manifest.json", "profile.pt", "checksums.json"}
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = set(zf.namelist())
+            if len(names) != len(zf.infolist()):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="reference_profile_import_duplicate_files")
+            _data_ingestion_validate_zip_infos(
+                zf,
+                allowed_names=allowed,
+                detail_prefix="reference_profile_import",
+                max_uncompressed_bytes=REFERENCE_PROFILE_BUNDLE_MAX_UNCOMPRESSED_BYTES,
+            )
+            if allowed - names:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="reference_profile_import_missing_files")
+            manifest_bytes = zf.read("manifest.json")
+            profile_bytes = zf.read("profile.pt")
+            checksums = json.loads(zf.read("checksums.json").decode("utf-8"))
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="reference_profile_import_invalid_zip") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=f"reference_profile_import_failed:{exc}") from exc
+    if not isinstance(checksums, dict):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="reference_profile_import_bad_checksums")
+    if checksums.get("manifest.json") != _data_ingestion_sha256_bytes(manifest_bytes):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="reference_profile_import_checksum_mismatch")
+    if checksums.get("profile.pt") != _data_ingestion_sha256_bytes(profile_bytes):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="reference_profile_import_checksum_mismatch")
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="reference_profile_import_manifest_invalid") from exc
+    if not isinstance(manifest, dict) or manifest.get("bundle_version") != REFERENCE_PROFILE_BUNDLE_VERSION:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="reference_profile_import_unsupported_bundle")
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="reference_profile_validate_"))
+    try:
+        temp_profile = tmp_dir / "profile.pt"
+        temp_profile.write_bytes(profile_bytes)
+        _head, loaded_metadata = load_local_salad_head_file(temp_profile, device_name="cpu")
+        try:
+            payload = torch.load(temp_profile, map_location="cpu", weights_only=True)
+        except TypeError:
+            payload = torch.load(temp_profile, map_location="cpu")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="reference_profile_import_payload_invalid")
+        existing_meta = dict(payload.get("metadata") or {})
+        profile_manifest = manifest.get("profile") if isinstance(manifest.get("profile"), dict) else {}
+        requested_label = str(existing_meta.get("label") or profile_manifest.get("label") or manifest.get("original_profile_id") or "reference_profile")
+        with LOCAL_SALAD_HEAD_LOCK:
+            new_id = _unique_local_salad_head_id(requested_label)
+            head_root = _local_salad_head_root(create=True)
+            head_path = _local_salad_head_path(new_id)
+            head_write_path = _class_analysis_prepare_write_path(head_path, head_root)
+            if head_write_path is None:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="reference_profile_import_path_invalid")
+            new_meta = {
+                **existing_meta,
+                "id": new_id,
+                "label": requested_label,
+                "original_profile_id": str(manifest.get("original_profile_id") or existing_meta.get("id") or ""),
+                "imported_at": time.time(),
+                "imported_from_bundle": REFERENCE_PROFILE_BUNDLE_VERSION,
+            }
+            if isinstance(manifest.get("reference_fingerprint"), dict):
+                new_meta["reference_fingerprint"] = manifest["reference_fingerprint"]
+            payload["metadata"] = new_meta
+            _class_analysis_write_binary(
+                head_write_path,
+                head_root,
+                lambda handle: torch.save(payload, handle),
+                detail="reference_profile_import_path_invalid",
+            )
+        imported_entry = next((entry for entry in _list_local_salad_heads() if entry.get("id") == new_id), None)
+        return {
+            "status": "imported",
+            "id": new_id,
+            "label": requested_label,
+            "original_profile_id": str(manifest.get("original_profile_id") or loaded_metadata.get("id") or ""),
+            "profile": imported_entry or {"id": new_id, "label": requested_label},
+            "reference": manifest.get("reference") if isinstance(manifest.get("reference"), dict) else {},
+            "reference_fingerprint": manifest.get("reference_fingerprint") if isinstance(manifest.get("reference_fingerprint"), dict) else None,
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc) or "reference_profile_import_payload_invalid") from exc
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+async def import_data_ingestion_reference_profile(file: UploadFile = File(...)):  # noqa: B008
+    tmp_dir = Path(tempfile.mkdtemp(prefix="reference_profile_import_"))
+    try:
+        zip_path = tmp_dir / "upload.zip"
+        written = 0
+        with zip_path.open("wb") as handle:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > REFERENCE_PROFILE_BUNDLE_MAX_BYTES:
+                    raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="reference_profile_import_zip_too_large")
+                handle.write(chunk)
+        return _import_data_ingestion_reference_profile_zip(zip_path)
+    finally:
+        try:
+            await file.close()
+        except Exception:
+            pass
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _local_salad_head_reference_matches_request(metadata: Dict[str, Any], request: Dict[str, Any]) -> bool:
@@ -20716,6 +21001,7 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         for idx, row in enumerate(candidates):
             ranked_items.append(
                 {
+                    "item_id": f"item_{idx:06d}",
                     "index": idx,
                     "rank": rank_by_idx.get(idx),
                     "keep": idx in selected_set,
@@ -20862,6 +21148,12 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
             prepared = [prepared[idx] for idx in sorted(rnd.sample(range(len(prepared)), max_images))]
         if len(prepared) < 2:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_needs_at_least_two_images")
+        reference_fingerprint = _data_ingestion_reference_fingerprint(
+            prepared,
+            source=str(request.get("reference_source") or request.get("source_mode") or ""),
+            dataset_id=str(request.get("reference_dataset_id") or ""),
+            label=str(request.get("reference_dataset_label") or request.get("reference_label") or ""),
+        )
         _data_ingestion_update(job, progress=0.18, message="Encoding reference views ...")
         encoder_type = str(request.get("encoder_type") or "dinov3").strip().lower()
         if encoder_type not in {"dinov3", "cradio"}:
@@ -21046,6 +21338,7 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                 "reference_dataset_id": str(request.get("reference_dataset_id") or ""),
                 "reference_dataset_label": str(request.get("reference_dataset_label") or ""),
                 "reference_label": str(request.get("reference_label") or ""),
+                "reference_fingerprint": reference_fingerprint,
                 "active_image_count": _coerce_int(request.get("active_image_count"), 0, minimum=0),
                 "epochs": epochs,
                 "batch_size": batch_size,
@@ -21234,6 +21527,405 @@ def get_data_ingestion_result(job_id: str) -> Dict[str, Any]:
     if job.status in {"queued", "running", "cancelling"}:
         raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_finished")
     raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="result_not_found")
+
+
+def _data_ingestion_result_item_id(item: Dict[str, Any]) -> str:
+    raw = str(item.get("item_id") or "").strip()
+    if raw:
+        return raw
+    return f"item_{_coerce_int(item.get('index'), 0, minimum=0):06d}"
+
+
+def _data_ingestion_completed_analysis(job_id: str) -> Tuple[DataIngestionJob, Dict[str, Any], List[Dict[str, Any]], Path]:
+    job = _get_data_ingestion_job(job_id)
+    if job.kind != "analysis":
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_accept_analysis_required")
+    if job.status != "completed":
+        raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="data_ingestion_analysis_not_completed")
+    result = get_data_ingestion_result(job_id)
+    items = [dict(item) for item in result.get("items") or [] if isinstance(item, dict)]
+    if not items:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_no_ranked_items")
+    job_dir = _data_ingestion_job_dir(job.job_id, create=False)
+    try:
+        job_dir_resolved = job_dir.resolve(strict=True)
+        root = _data_ingestion_storage_root(create=False)
+        if not _path_is_within_root_impl(job_dir_resolved, root) or job_dir_resolved.parent != root:
+            raise ValueError("job dir escapes data ingestion root")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_job_artifacts_missing") from exc
+    return job, result, items, job_dir_resolved
+
+
+def _data_ingestion_accept_config(payload: Dict[str, Any]) -> Dict[str, Any]:
+    mode = str(payload.get("transform_mode") or payload.get("mode") or "tile").strip().lower()
+    mode_aliases = {
+        "fit": "resize_fit",
+        "resize": "resize_fit",
+        "stretch": "resize_stretch",
+        "center": "center_crop",
+    }
+    mode = mode_aliases.get(mode, mode)
+    if mode not in {"original", "resize_fit", "resize_stretch", "center_crop", "tile"}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_mode_invalid")
+    target_width = _coerce_int(payload.get("target_width"), 0, minimum=0)
+    target_height = _coerce_int(payload.get("target_height"), 0, minimum=0)
+    if mode != "original" and (target_width <= 0 or target_height <= 0):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_target_size_required")
+    edge_policy = str(payload.get("tile_edge_policy") or payload.get("edge_policy") or "cover_no_padding").strip().lower()
+    edge_policy = {
+        "cover": "cover_no_padding",
+        "pad": "pad_edges",
+        "drop": "drop_partials",
+    }.get(edge_policy, edge_policy)
+    if edge_policy not in {"cover_no_padding", "pad_edges", "drop_partials"}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_edge_policy_invalid")
+    overlap = _coerce_float(payload.get("tile_overlap"), 0.0, minimum=0.0, maximum=0.9)
+    quality = _coerce_int(payload.get("jpeg_quality"), 95, minimum=1)
+    quality = min(100, max(1, quality))
+    return {
+        "mode": mode,
+        "target_width": target_width,
+        "target_height": target_height,
+        "tile_edge_policy": edge_policy,
+        "tile_overlap": overlap,
+        "jpeg_quality": quality,
+    }
+
+
+def _data_ingestion_safe_source_file(item: Dict[str, Any], job_dir: Path) -> Path:
+    raw_path = Path(str(item.get("image_path") or ""))
+    safe_path = _safe_existing_regular_file_within_root_impl(raw_path, job_dir)
+    if safe_path is None:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_source_missing")
+    if safe_path.suffix.lower() not in DATA_INGESTION_IMAGE_EXTS:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_source_not_image")
+    return safe_path
+
+
+def _data_ingestion_selected_result_items(items: List[Dict[str, Any]], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    by_id = {_data_ingestion_result_item_id(item): item for item in items}
+    raw_ids = payload.get("item_ids")
+    if raw_ids is None:
+        raw_ids = payload.get("accepted_item_ids")
+    if isinstance(raw_ids, list) and raw_ids:
+        selected: List[Dict[str, Any]] = []
+        for raw_id in raw_ids:
+            item_id = str(raw_id or "").strip()
+            if item_id not in by_id:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_item_id_invalid")
+            selected.append(by_id[item_id])
+        return selected
+    return [item for item in items if bool(item.get("keep"))]
+
+
+def _data_ingestion_tile_positions(size: int, tile: int, overlap: float, edge_policy: str) -> List[int]:
+    size = max(1, int(size or 1))
+    tile = max(1, int(tile or 1))
+    step = max(1, int(round(tile * (1.0 - max(0.0, min(0.9, float(overlap or 0.0)))))))
+    if edge_policy == "drop_partials":
+        if size < tile:
+            return [0]
+        return list(range(0, max(1, size - tile + 1), step)) or [0]
+    if edge_policy == "pad_edges":
+        return list(range(0, size, step)) or [0]
+    if size <= tile:
+        return [0]
+    positions = list(range(0, size - tile + 1, step))
+    last = max(0, size - tile)
+    if not positions or positions[-1] != last:
+        positions.append(last)
+    return positions
+
+
+def _data_ingestion_output_id(item_id: str, mode: str, bounds: Sequence[int], config: Dict[str, Any], ordinal: int) -> str:
+    raw = json.dumps(
+        {
+            "item_id": item_id,
+            "mode": mode,
+            "bounds": list(bounds),
+            "target": [config.get("target_width"), config.get("target_height")],
+            "edge": config.get("tile_edge_policy"),
+            "overlap": config.get("tile_overlap"),
+            "ordinal": ordinal,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _data_ingestion_plan_item_outputs(
+    item: Dict[str, Any],
+    *,
+    job_dir: Path,
+    config: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    source_path = _data_ingestion_safe_source_file(item, job_dir)
+    item_id = _data_ingestion_result_item_id(item)
+    filename = str(item.get("filename") or item.get("saved_name") or source_path.name)
+    source_group = _data_ingestion_safe_media_name(Path(filename).stem or source_path.stem, "source")
+    mode = str(config.get("mode") or "tile")
+    with _data_ingestion_open_image(source_path) as img:
+        width, height = img.size
+    target_w = _coerce_int(config.get("target_width"), 0, minimum=0)
+    target_h = _coerce_int(config.get("target_height"), 0, minimum=0)
+    output_specs: List[Tuple[List[int], int, int, str]] = []
+    if mode == "original":
+        ext = source_path.suffix.lower() if source_path.suffix.lower() in DATA_INGESTION_IMAGE_EXTS else ".jpg"
+        output_specs.append(([0, 0, width, height], width, height, ext))
+    elif mode == "resize_fit":
+        scale = min(target_w / max(1, width), target_h / max(1, height))
+        out_w = max(1, int(round(width * scale)))
+        out_h = max(1, int(round(height * scale)))
+        output_specs.append(([0, 0, width, height], out_w, out_h, ".jpg"))
+    elif mode in {"resize_stretch", "center_crop"}:
+        output_specs.append(([0, 0, width, height], target_w, target_h, ".jpg"))
+    else:
+        edge_policy = str(config.get("tile_edge_policy") or "cover_no_padding")
+        overlap = _coerce_float(config.get("tile_overlap"), 0.0, minimum=0.0, maximum=0.9)
+        xs = _data_ingestion_tile_positions(width, target_w, overlap, edge_policy)
+        ys = _data_ingestion_tile_positions(height, target_h, overlap, edge_policy)
+        for y in ys:
+            for x in xs:
+                right = min(width, x + target_w)
+                bottom = min(height, y + target_h)
+                if right <= x or bottom <= y:
+                    continue
+                if edge_policy == "drop_partials" and (right - x < target_w or bottom - y < target_h) and (width >= target_w and height >= target_h):
+                    continue
+                out_w = target_w if edge_policy == "pad_edges" or (right - x == target_w) else right - x
+                out_h = target_h if edge_policy == "pad_edges" or (bottom - y == target_h) else bottom - y
+                output_specs.append(([x, y, right, bottom], out_w, out_h, ".jpg"))
+    outputs: List[Dict[str, Any]] = []
+    for ordinal, (bounds, out_w, out_h, ext) in enumerate(output_specs):
+        output_id = _data_ingestion_output_id(item_id, mode, bounds, config, ordinal)
+        suffix = "" if mode == "original" and len(output_specs) == 1 else f"_{mode}_{ordinal + 1:04d}"
+        output_filename = f"{source_group}{suffix}_{output_id[:8]}{ext}"
+        outputs.append(
+            {
+                "output_id": output_id,
+                "item_id": item_id,
+                "source_filename": filename,
+                "source_type": str(item.get("source_type") or "image"),
+                "frame_index": _coerce_int(item.get("frame_index"), 0, minimum=0),
+                "source_width": width,
+                "source_height": height,
+                "source_bounds": bounds,
+                "output_width": out_w,
+                "output_height": out_h,
+                "output_filename": output_filename,
+                "zip_path": str(Path("images") / source_group / output_filename),
+                "transform_mode": mode,
+                "tile_edge_policy": config.get("tile_edge_policy"),
+                "tile_overlap": config.get("tile_overlap"),
+                "diversity_score": float(item.get("diversity_score") or 0.0),
+                "rank": item.get("rank"),
+                "original_keep": bool(item.get("keep")),
+                "accepted": True,
+                "_source_path": str(source_path),
+            }
+        )
+    return outputs
+
+
+def _data_ingestion_plan_accepted_outputs(
+    job_id: str,
+    payload: Dict[str, Any],
+) -> Tuple[DataIngestionJob, Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], Path]:
+    job, result, items, job_dir = _data_ingestion_completed_analysis(job_id)
+    config = _data_ingestion_accept_config(payload)
+    selected_items = _data_ingestion_selected_result_items(items, payload)
+    outputs: List[Dict[str, Any]] = []
+    for item in selected_items:
+        outputs.extend(_data_ingestion_plan_item_outputs(item, job_dir=job_dir, config=config))
+    raw_output_ids = payload.get("output_ids")
+    if raw_output_ids is None:
+        raw_output_ids = payload.get("accepted_output_ids")
+    if isinstance(raw_output_ids, list) and raw_output_ids:
+        wanted = {str(output_id or "").strip() for output_id in raw_output_ids}
+        by_id = {str(output.get("output_id") or ""): output for output in outputs}
+        if not wanted.issubset(set(by_id.keys())):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_output_id_invalid")
+        outputs = [by_id[output_id] for output_id in sorted(wanted)]
+    return job, result, config, outputs, job_dir
+
+
+def _data_ingestion_public_output(output: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: json_sanitize(value) for key, value in output.items() if not str(key).startswith("_")}
+
+
+def _data_ingestion_render_output_image(output: Dict[str, Any], config: Dict[str, Any]) -> Image.Image:
+    source_path = Path(str(output.get("_source_path") or ""))
+    mode = str(output.get("transform_mode") or config.get("mode") or "tile")
+    with _data_ingestion_open_image(source_path) as img:
+        if mode == "original":
+            return img.copy()
+        if mode == "resize_fit":
+            resized = img.copy()
+            resized.thumbnail((max(1, int(output.get("output_width") or 1)), max(1, int(output.get("output_height") or 1))))
+            return resized
+        if mode == "resize_stretch":
+            return img.resize((max(1, int(output.get("output_width") or 1)), max(1, int(output.get("output_height") or 1))), Image.Resampling.LANCZOS)
+        if mode == "center_crop":
+            target_w = max(1, int(output.get("output_width") or 1))
+            target_h = max(1, int(output.get("output_height") or 1))
+            src_w, src_h = img.size
+            target_ratio = target_w / target_h
+            src_ratio = src_w / max(1, src_h)
+            if src_ratio > target_ratio:
+                crop_w = max(1, int(round(src_h * target_ratio)))
+                left = max(0, (src_w - crop_w) // 2)
+                crop = img.crop((left, 0, left + crop_w, src_h))
+            else:
+                crop_h = max(1, int(round(src_w / target_ratio)))
+                top = max(0, (src_h - crop_h) // 2)
+                crop = img.crop((0, top, src_w, top + crop_h))
+            try:
+                return crop.resize((target_w, target_h), Image.Resampling.LANCZOS)
+            finally:
+                crop.close()
+        bounds = [int(v) for v in output.get("source_bounds") or [0, 0, img.width, img.height]]
+        x0, y0, x1, y1 = bounds
+        crop = img.crop((max(0, x0), max(0, y0), min(img.width, x1), min(img.height, y1)))
+        if str(config.get("tile_edge_policy") or "") == "pad_edges":
+            target_w = max(1, int(config.get("target_width") or crop.width or 1))
+            target_h = max(1, int(config.get("target_height") or crop.height or 1))
+            padded = Image.new("RGB", (target_w, target_h), (0, 0, 0))
+            padded.paste(crop, (0, 0))
+            crop.close()
+            return padded
+        return crop
+
+
+def _data_ingestion_image_jpeg_bytes(image: Image.Image, *, quality: int) -> bytes:
+    buffer = io.BytesIO()
+    image.convert("RGB").save(buffer, format="JPEG", quality=max(1, min(100, int(quality or 95))))
+    return buffer.getvalue()
+
+
+def preview_data_ingestion_accepted_export(job_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _job, _result, config, outputs, job_dir = _data_ingestion_plan_accepted_outputs(job_id, payload)
+    offset = _coerce_int(payload.get("offset"), 0, minimum=0)
+    limit = min(ACCEPTED_EXPORT_MAX_PREVIEW_OUTPUTS, max(1, _coerce_int(payload.get("limit"), 80, minimum=1)))
+    page_outputs = outputs[offset : offset + limit]
+    preview_id = f"preview_{uuid.uuid4().hex[:12]}"
+    preview_dir = job_dir / "accepted_exports" / preview_id
+    thumb_dir = preview_dir / "thumbnails"
+    prepared_thumb_dir = _class_analysis_prepare_dir(thumb_dir, job_dir)
+    if prepared_thumb_dir is None:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_preview_path_invalid")
+    preview_payload = {
+        "preview_id": preview_id,
+        "job_id": job_id,
+        "created_at": time.time(),
+        "config": config,
+        "offset": offset,
+        "limit": limit,
+        "total_outputs": len(outputs),
+    }
+    _class_analysis_write_json(preview_dir / "preview.json", job_dir, preview_payload)
+    returned: List[Dict[str, Any]] = []
+    for output in page_outputs:
+        thumb_path = prepared_thumb_dir / f"{output['output_id']}.jpg"
+        image = _data_ingestion_render_output_image(output, config)
+        try:
+            image.thumbnail((ACCEPTED_EXPORT_THUMB_SIZE, ACCEPTED_EXPORT_THUMB_SIZE))
+            _class_analysis_write_jpeg(thumb_path, job_dir, image, quality=82)
+        finally:
+            image.close()
+        public = _data_ingestion_public_output(output)
+        public["thumbnail_url"] = f"/data_ingestion/jobs/{job_id}/accepted_export/{preview_id}/thumbnail/{output['output_id']}"
+        returned.append(public)
+    return {
+        "preview_id": preview_id,
+        "total_outputs": len(outputs),
+        "offset": offset,
+        "limit": limit,
+        "outputs": returned,
+        "config": json_sanitize(config),
+        "warnings": _data_ingestion_accepted_export_warnings(config),
+    }
+
+
+def get_data_ingestion_accepted_export_thumbnail(job_id: str, preview_id: str, output_id: str):
+    _job, _result, _items, job_dir = _data_ingestion_completed_analysis(job_id)
+    safe_preview = _class_analysis_safe_slug(preview_id, "")
+    safe_output = re.sub(r"[^a-fA-F0-9]", "", str(output_id or ""))[:64]
+    if not safe_preview or not safe_output:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="accepted_export_thumbnail_not_found")
+    thumb_dir = job_dir / "accepted_exports" / safe_preview / "thumbnails"
+    safe_path = _safe_existing_regular_file_within_root_impl(thumb_dir / f"{safe_output}.jpg", job_dir)
+    if safe_path is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="accepted_export_thumbnail_not_found")
+    return FileResponse(str(safe_path), media_type="image/jpeg")
+
+
+def _data_ingestion_accepted_export_warnings(config: Dict[str, Any]) -> List[str]:
+    warnings_out = ["Export is unsplit to avoid tile/frame leakage across train/val splits."]
+    if str(config.get("mode")) == "tile":
+        overlap = float(config.get("tile_overlap") or 0.0)
+        if overlap > 0:
+            warnings_out.append("Tile overlap creates near-duplicates; split by original source later, not by tile.")
+        if str(config.get("tile_edge_policy")) == "cover_no_padding":
+            warnings_out.append("Cover-no-padding shifts edge tiles inward, which may overlap neighboring tiles.")
+    return warnings_out
+
+
+def download_data_ingestion_accepted_export(job_id: str, payload: Dict[str, Any]):
+    job, result, config, outputs, _job_dir = _data_ingestion_plan_accepted_outputs(job_id, payload)
+    if not outputs:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_no_outputs")
+    if len(outputs) > ACCEPTED_EXPORT_MAX_DOWNLOAD_OUTPUTS:
+        raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="accepted_export_too_many_outputs")
+    tmp_dir = Path(tempfile.mkdtemp(prefix="data_ingestion_accepted_export_"))
+    safe_job = _class_analysis_safe_slug(job.job_id, "data_ingestion")
+    try:
+        zip_path = tmp_dir / f"{safe_job}_accepted.zip"
+        public_outputs = [_data_ingestion_public_output(output) for output in outputs]
+        summary = {
+            "job_id": job.job_id,
+            "profile_id": (result.get("summary") or {}).get("salad_head_id") or "",
+            "created_at": time.time(),
+            "transform": json_sanitize(config),
+            "accepted_item_count": len({output.get("item_id") for output in outputs}),
+            "output_count": len(outputs),
+            "warnings": _data_ingestion_accepted_export_warnings(config),
+        }
+        manifest = {
+            "version": 1,
+            "summary": summary,
+            "outputs": public_outputs,
+        }
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for output in outputs:
+                arcname = str(output.get("zip_path") or Path("images") / output.get("output_filename"))
+                if _data_ingestion_zip_member_is_unsafe(arcname):
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_output_path_invalid")
+                if str(output.get("transform_mode")) == "original":
+                    source_path = Path(str(output.get("_source_path") or ""))
+                    zf.write(source_path, arcname=arcname)
+                else:
+                    image = _data_ingestion_render_output_image(output, config)
+                    try:
+                        zf.writestr(arcname, _data_ingestion_image_jpeg_bytes(image, quality=int(config.get("jpeg_quality") or 95)))
+                    finally:
+                        image.close()
+            zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            zf.writestr("summary.json", json.dumps(summary, ensure_ascii=False, indent=2))
+        return FileResponse(
+            path=str(zip_path),
+            media_type="application/zip",
+            filename=f"{safe_job}_accepted.zip",
+            background=BackgroundTask(shutil.rmtree, tmp_dir, ignore_errors=True),
+        )
+    except HTTPException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"accepted_export_failed:{exc}") from exc
 
 
 def cancel_data_ingestion_job(job_id: str) -> Dict[str, Any]:
@@ -38522,6 +39214,11 @@ app.include_router(
         capabilities_fn=_data_ingestion_capabilities,
         create_analysis_job_fn=create_data_ingestion_analysis_job,
         create_salad_train_job_fn=create_local_salad_training_job,
+        export_reference_profile_fn=export_data_ingestion_reference_profile,
+        import_reference_profile_fn=import_data_ingestion_reference_profile,
+        preview_accepted_export_fn=preview_data_ingestion_accepted_export,
+        get_accepted_export_thumbnail_fn=get_data_ingestion_accepted_export_thumbnail,
+        download_accepted_export_fn=download_data_ingestion_accepted_export,
         get_job_fn=get_data_ingestion_job,
         get_result_fn=get_data_ingestion_result,
         cancel_job_fn=cancel_data_ingestion_job,

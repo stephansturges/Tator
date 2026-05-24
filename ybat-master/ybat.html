@@ -730,7 +730,12 @@
                             </div>
                             <div class="data-ingestion-field">
                                 <label for="dataIngestionSaladHead">Reference profile<span class="help-icon" title="Saved profile built from the selected reference dataset. Build a fresh profile when the reference dataset changes materially.">?</span></label>
-                                <select id="dataIngestionSaladHead"></select>
+                                <div class="data-ingestion-inline-controls">
+                                    <select id="dataIngestionSaladHead"></select>
+                                    <button type="button" id="dataIngestionProfileDownload" class="training-button secondary">Download profile</button>
+                                    <button type="button" id="dataIngestionProfileUploadButton" class="training-button secondary">Upload profile</button>
+                                    <input type="file" id="dataIngestionProfileUpload" accept=".zip,application/zip" hidden />
+                                </div>
                             </div>
                             <div class="data-ingestion-field">
                                 <label for="dataIngestionHeadName">Profile name<span class="help-icon" title="Human-readable name for the saved reference profile. Tator makes it unique if another profile already uses the same name.">?</span></label>
@@ -807,6 +812,57 @@
                         <div>
                             <strong id="dataIngestionListTitle">Top diverse candidates</strong>
                             <div id="dataIngestionList" class="data-ingestion-list"></div>
+                        </div>
+                        <div class="data-ingestion-acceptance" id="dataIngestionAcceptance" hidden>
+                            <div class="data-ingestion-panel__header">
+                                <div>
+                                    <strong>Accepted output</strong>
+                                    <div class="training-help">Review selected candidates, choose output geometry, preview tiles, then download an unsplit ZIP. Split later by original source to avoid train/val leakage from related tiles.</div>
+                                </div>
+                            </div>
+                            <div class="data-ingestion-grid">
+                                <div class="data-ingestion-field">
+                                    <label for="dataIngestionOutputMode">Output mode</label>
+                                    <select id="dataIngestionOutputMode">
+                                        <option value="tile" selected>Tile into crops</option>
+                                        <option value="original">Original files</option>
+                                        <option value="resize_fit">Resize fit</option>
+                                        <option value="resize_stretch">Resize stretch</option>
+                                        <option value="center_crop">Center crop</option>
+                                    </select>
+                                </div>
+                                <div class="data-ingestion-field">
+                                    <label for="dataIngestionTargetWidth">Target width</label>
+                                    <input type="number" id="dataIngestionTargetWidth" min="1" max="20000" step="1" value="960" />
+                                </div>
+                                <div class="data-ingestion-field">
+                                    <label for="dataIngestionTargetHeight">Target height</label>
+                                    <input type="number" id="dataIngestionTargetHeight" min="1" max="20000" step="1" value="960" />
+                                </div>
+                                <div class="data-ingestion-field">
+                                    <label for="dataIngestionTileEdgePolicy">Tile edges<span class="help-icon" title="Cover no padding shifts final edge tiles inward, which preserves real pixels but may overlap neighboring tiles. Pad edges keeps grid positions and adds border pixels. Drop partials discards incomplete edge tiles.">?</span></label>
+                                    <select id="dataIngestionTileEdgePolicy">
+                                        <option value="cover_no_padding" selected>Cover no padding</option>
+                                        <option value="pad_edges">Pad edges</option>
+                                        <option value="drop_partials">Drop partials</option>
+                                    </select>
+                                </div>
+                                <div class="data-ingestion-field">
+                                    <label for="dataIngestionTileOverlap">Tile overlap</label>
+                                    <input type="number" id="dataIngestionTileOverlap" min="0" max="0.9" step="0.05" value="0" />
+                                </div>
+                                <div class="data-ingestion-field">
+                                    <label for="dataIngestionJpegQuality">JPEG quality</label>
+                                    <input type="number" id="dataIngestionJpegQuality" min="1" max="100" step="1" value="95" />
+                                </div>
+                            </div>
+                            <div id="dataIngestionAcceptWarning" class="training-help warn"></div>
+                            <div class="data-ingestion-actions">
+                                <button type="button" id="dataIngestionPreviewAcceptedButton" class="training-button secondary">Preview outputs</button>
+                                <button type="button" id="dataIngestionDownloadAcceptedButton" class="training-button">Download accepted ZIP</button>
+                            </div>
+                            <div id="dataIngestionAcceptedSummary" class="training-help"></div>
+                            <div id="dataIngestionTilePreview" class="data-ingestion-tile-preview"></div>
                         </div>
                     </section>
                 </div>

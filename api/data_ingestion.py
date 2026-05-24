@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 from typing import Any, Callable
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Body, File, HTTPException, Request, UploadFile
 
 
 def build_data_ingestion_router(
@@ -13,6 +13,11 @@ def build_data_ingestion_router(
     capabilities_fn: Callable[[], Any],
     create_analysis_job_fn: Callable[[str, list[Any], list[Any]], Any],
     create_salad_train_job_fn: Callable[[str, list[Any]], Any],
+    export_reference_profile_fn: Callable[[str], Any],
+    import_reference_profile_fn: Callable[[UploadFile], Any],
+    preview_accepted_export_fn: Callable[[str, dict], Any],
+    get_accepted_export_thumbnail_fn: Callable[[str, str, str], Any],
+    download_accepted_export_fn: Callable[[str, dict], Any],
     get_job_fn: Callable[[str], Any],
     get_result_fn: Callable[[str], Any],
     cancel_job_fn: Callable[[str], Any],
@@ -68,6 +73,17 @@ def build_data_ingestion_router(
             return await result
         return result
 
+    @router.get("/data_ingestion/reference_profiles/{profile_id}/export")
+    def export_reference_profile(profile_id: str):
+        return export_reference_profile_fn(profile_id)
+
+    @router.post("/data_ingestion/reference_profiles/import")
+    async def import_reference_profile(file: UploadFile = File(...)):  # noqa: B008
+        result = import_reference_profile_fn(file)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
     @router.get("/data_ingestion/jobs/{job_id}")
     def get_data_ingestion_job(job_id: str):
         return get_job_fn(job_id)
@@ -76,9 +92,20 @@ def build_data_ingestion_router(
     def get_data_ingestion_result(job_id: str):
         return get_result_fn(job_id)
 
+    @router.post("/data_ingestion/jobs/{job_id}/accepted_export/preview")
+    def preview_accepted_export(job_id: str, payload: dict = Body(...)):  # noqa: B008
+        return preview_accepted_export_fn(job_id, payload or {})
+
+    @router.get("/data_ingestion/jobs/{job_id}/accepted_export/{preview_id}/thumbnail/{output_id}")
+    def get_accepted_export_thumbnail(job_id: str, preview_id: str, output_id: str):
+        return get_accepted_export_thumbnail_fn(job_id, preview_id, output_id)
+
+    @router.post("/data_ingestion/jobs/{job_id}/accepted_export/download")
+    def download_accepted_export(job_id: str, payload: dict = Body(...)):  # noqa: B008
+        return download_accepted_export_fn(job_id, payload or {})
+
     @router.post("/data_ingestion/jobs/{job_id}/cancel")
     def cancel_data_ingestion_job(job_id: str):
         return cancel_job_fn(job_id)
 
     return router
-

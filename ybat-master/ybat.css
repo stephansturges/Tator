@@ -2410,6 +2410,17 @@ body.annotation-focus-mode .class-scroll-indicator {
     box-sizing: border-box;
 }
 
+.data-ingestion-inline-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.data-ingestion-inline-controls select {
+    flex: 1 1 180px;
+}
+
 .data-ingestion-actions {
     display: flex;
     flex-wrap: wrap;
@@ -2441,6 +2452,12 @@ body.annotation-focus-mode .class-scroll-indicator {
     display: grid;
     grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
     gap: 12px;
+}
+
+.data-ingestion-acceptance {
+    grid-column: 1 / -1;
+    border-top: 1px solid rgba(148, 163, 184, 0.32);
+    padding-top: 10px;
 }
 
 .data-ingestion-report,
@@ -2475,6 +2492,49 @@ body.annotation-focus-mode .class-scroll-indicator {
 .data-ingestion-list__item.is-keep {
     border-color: rgba(37, 99, 235, 0.45);
     background: rgba(219, 234, 254, 0.75);
+}
+
+.data-ingestion-list__item label {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+
+.data-ingestion-list__item input[type="checkbox"],
+.data-ingestion-tile-card input[type="checkbox"] {
+    flex: 0 0 auto;
+    margin-top: 2px;
+}
+
+.data-ingestion-tile-preview {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 8px;
+    max-height: 520px;
+    overflow: auto;
+}
+
+.data-ingestion-tile-card {
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 7px;
+    padding: 7px;
+    background: rgba(248, 250, 252, 0.82);
+}
+
+.data-ingestion-tile-card img {
+    display: block;
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    object-fit: contain;
+    background: rgba(15, 23, 42, 0.06);
+    border-radius: 5px;
+    margin-bottom: 6px;
+}
+
+.data-ingestion-tile-card span {
+    display: block;
+    font-size: 12px;
+    color: #64748b;
 }
 
 @media (max-width: 1180px) {
@@ -4483,7 +4543,8 @@ html.theme-dark .embedding-recipe-note__text strong {
 }
 
 html.theme-dark .data-ingestion-report__item,
-html.theme-dark .data-ingestion-list__item {
+html.theme-dark .data-ingestion-list__item,
+html.theme-dark .data-ingestion-tile-card {
     background: rgba(15, 23, 42, 0.72);
     border-color: rgba(148, 163, 184, 0.28);
 }
@@ -5211,7 +5272,8 @@ html.theme-pipboy .embedding-recipe-note__text strong {
 }
 
 html.theme-pipboy .data-ingestion-report__item,
-html.theme-pipboy .data-ingestion-list__item {
+html.theme-pipboy .data-ingestion-list__item,
+html.theme-pipboy .data-ingestion-tile-card {
     background: color-mix(in srgb, var(--pip-panel) 80%, transparent);
     border-color: color-mix(in srgb, var(--pip-green) 35%, transparent);
 }

@@ -2,6 +2,8 @@ import asyncio
 import json
 import os
 import shutil
+import warnings
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -104,6 +106,217 @@ def _write_unit_local_salad_head(root: Path, head_id: str, metadata: dict | None
         },
         root / f"{head_id}.pt",
     )
+
+
+def test_reference_profile_export_import_roundtrip_preserves_metadata(tmp_path, monkeypatch):
+    heads_root = tmp_path / "heads"
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+    fingerprint = {
+        "version": 1,
+        "source": "backend_dataset",
+        "dataset_id": "dataset_a",
+        "label": "Dataset A",
+        "image_count": 2,
+        "content_hash": "abc123",
+    }
+    _write_unit_local_salad_head(
+        heads_root,
+        "dataset_a_profile",
+        {
+            "reference_source": "backend_dataset",
+            "reference_dataset_id": "dataset_a",
+            "reference_dataset_label": "Dataset A",
+            "reference_fingerprint": fingerprint,
+        },
+    )
+
+    response = api.export_data_ingestion_reference_profile("dataset_a_profile")
+    zip_path = Path(response.path)
+    assert zip_path.exists()
+    with zipfile.ZipFile(zip_path) as zf:
+        assert set(zf.namelist()) == {"manifest.json", "profile.pt", "checksums.json"}
+        manifest = json.loads(zf.read("manifest.json"))
+        assert manifest["bundle_version"] == api.REFERENCE_PROFILE_BUNDLE_VERSION
+        assert manifest["reference_fingerprint"] == fingerprint
+
+    imported = api._import_data_ingestion_reference_profile_zip(zip_path)
+
+    assert imported["id"] == "dataset_a_profile_2"
+    loaded, metadata = api._load_local_salad_head(imported["id"], device_name="cpu", backend="torch")
+    assert isinstance(loaded, LocalSALADHead)
+    assert metadata["original_profile_id"] == "dataset_a_profile"
+    assert metadata["reference_dataset_id"] == "dataset_a"
+    assert metadata["reference_fingerprint"] == fingerprint
+
+    asyncio.run(response.background())
+    assert not zip_path.parent.exists()
+
+
+def test_reference_profile_import_rejects_checksum_mismatch(tmp_path, monkeypatch):
+    heads_root = tmp_path / "heads"
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+    _write_unit_local_salad_head(heads_root, "profile_a", {"reference_source": "active_label_images"})
+    response = api.export_data_ingestion_reference_profile("profile_a")
+    source_zip = Path(response.path)
+    bad_zip = tmp_path / "bad_profile.zip"
+    with zipfile.ZipFile(source_zip) as src, zipfile.ZipFile(bad_zip, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        for name in src.namelist():
+            payload = src.read(name)
+            if name == "profile.pt":
+                payload += b"tamper"
+            dst.writestr(name, payload)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._import_data_ingestion_reference_profile_zip(bad_zip)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "reference_profile_import_checksum_mismatch"
+    asyncio.run(response.background())
+
+
+def test_reference_profile_import_rejects_duplicate_members(tmp_path, monkeypatch):
+    heads_root = tmp_path / "heads"
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+    _write_unit_local_salad_head(heads_root, "profile_a", {"reference_source": "active_label_images"})
+    response = api.export_data_ingestion_reference_profile("profile_a")
+    source_zip = Path(response.path)
+    duplicate_zip = tmp_path / "duplicate_profile.zip"
+    with zipfile.ZipFile(source_zip) as src, zipfile.ZipFile(duplicate_zip, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        for name in src.namelist():
+            dst.writestr(name, src.read(name))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            dst.writestr("manifest.json", src.read("manifest.json"))
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._import_data_ingestion_reference_profile_zip(duplicate_zip)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "reference_profile_import_duplicate_files"
+    asyncio.run(response.background())
+
+
+def _register_completed_ingestion_job(api_module, job_id: str, job_dir: Path, image_path: Path) -> None:
+    result = {
+        "summary": {"salad_head_id": "unit_profile", "selected_count": 1},
+        "items": [
+            {
+                "item_id": "item_keep",
+                "index": 0,
+                "rank": 1,
+                "keep": True,
+                "diversity_score": 0.92,
+                "filename": "candidate_a.jpg",
+                "saved_name": "candidate_a.jpg",
+                "source_type": "image",
+                "frame_index": 0,
+                "width": 16,
+                "height": 10,
+                "image_path": str(image_path),
+            },
+            {
+                "item_id": "item_skip",
+                "index": 1,
+                "rank": None,
+                "keep": False,
+                "diversity_score": 0.12,
+                "filename": "candidate_b.jpg",
+                "saved_name": "candidate_b.jpg",
+                "source_type": "image",
+                "frame_index": 0,
+                "width": 16,
+                "height": 10,
+                "image_path": str(image_path),
+            },
+        ],
+    }
+    result_path = job_dir / "result.json"
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    job = api_module.DataIngestionJob(
+        job_id=job_id,
+        kind="analysis",
+        status="completed",
+        progress=1.0,
+        result=result,
+        result_path=str(result_path),
+    )
+    api_module.DATA_INGESTION_JOBS[job_id] = job
+
+
+def test_accepted_export_preview_and_download_tiles_kept_items(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_accept_unit"
+    media_dir = job_dir / "media" / "candidates"
+    media_dir.mkdir(parents=True)
+    image_path = media_dir / "candidate_a.jpg"
+    Image.new("RGB", (16, 10), (20, 100, 180)).save(image_path)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_accept_unit", job_dir, image_path)
+
+    payload = {
+        "transform_mode": "tile",
+        "target_width": 8,
+        "target_height": 8,
+        "tile_edge_policy": "cover_no_padding",
+        "tile_overlap": 0,
+        "limit": 10,
+    }
+    preview = api.preview_data_ingestion_accepted_export("di_accept_unit", payload)
+
+    assert preview["total_outputs"] == 4
+    assert len(preview["outputs"]) == 4
+    assert preview["warnings"]
+    assert all("thumbnail_url" in output for output in preview["outputs"])
+    first_output_id = preview["outputs"][0]["output_id"]
+
+    thumb = api.get_data_ingestion_accepted_export_thumbnail(
+        "di_accept_unit",
+        preview["preview_id"],
+        first_output_id,
+    )
+    assert Path(thumb.path).exists()
+
+    download = api.download_data_ingestion_accepted_export(
+        "di_accept_unit",
+        {**payload, "output_ids": [first_output_id]},
+    )
+    zip_path = Path(download.path)
+    with zipfile.ZipFile(zip_path) as zf:
+        names = set(zf.namelist())
+        assert "manifest.json" in names
+        assert "summary.json" in names
+        image_names = [name for name in names if name.startswith("images/")]
+        assert len(image_names) == 1
+        manifest = json.loads(zf.read("manifest.json"))
+        assert manifest["summary"]["output_count"] == 1
+        assert manifest["outputs"][0]["item_id"] == "item_keep"
+        assert str(tmp_path) not in json.dumps(manifest)
+    asyncio.run(download.background())
+    assert not zip_path.parent.exists()
+
+
+def test_accepted_export_rejects_source_outside_job_dir(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_accept_escape"
+    job_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.jpg"
+    Image.new("RGB", (8, 8), (1, 2, 3)).save(outside)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_accept_escape", job_dir, outside)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.preview_data_ingestion_accepted_export(
+            "di_accept_escape",
+            {"transform_mode": "tile", "target_width": 4, "target_height": 4},
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "accepted_export_source_missing"
 
 
 def test_data_ingestion_create_jobs_reject_empty_uploads_before_queueing(tmp_path, monkeypatch):

@@ -2386,6 +2386,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         referenceBackend: null,
         referenceDataset: null,
         saladHead: null,
+        profileDownloadButton: null,
+        profileUploadButton: null,
+        profileUploadInput: null,
         keepFraction: null,
         frameInterval: null,
         maxFrames: null,
@@ -2407,6 +2410,18 @@ const AUTOMATION_LOCKED_TABS = new Set([
         report: null,
         listTitle: null,
         list: null,
+        acceptance: null,
+        outputMode: null,
+        targetWidth: null,
+        targetHeight: null,
+        tileEdgePolicy: null,
+        tileOverlap: null,
+        jpegQuality: null,
+        acceptWarning: null,
+        previewAcceptedButton: null,
+        downloadAcceptedButton: null,
+        acceptedSummary: null,
+        tilePreview: null,
     };
     const dataIngestionState = {
         initialized: false,
@@ -2415,9 +2430,17 @@ const AUTOMATION_LOCKED_TABS = new Set([
         activeJobId: "",
         active: false,
         cancelInFlight: false,
+        profileImportInFlight: false,
+        acceptedPreviewInFlight: false,
+        acceptedDownloadInFlight: false,
         pollTimer: null,
         pollRequestId: 0,
         preferredSaladHeadId: "",
+        currentResult: null,
+        acceptedItemIds: new Set(),
+        acceptedOutputIds: new Set(),
+        acceptedOutputFilterActive: false,
+        lastPreview: null,
     };
     const sam3RecipeElements = {
         fileInput: null,
@@ -35946,10 +35969,18 @@ async function cancelRfDetrTrainingJobRequest() {
         const hasHead = !!String(dataIngestionElements.saladHead?.value || "").trim();
         const selectedHead = getDataIngestionSelectedSaladHead();
         const headMatchesReference = hasHead && dataIngestionHeadMatchesReference(selectedHead);
+        const acceptedCount = dataIngestionState.acceptedItemIds instanceof Set ? dataIngestionState.acceptedItemIds.size : 0;
+        const hasAcceptedResult = !!(dataIngestionState.currentResult && Array.isArray(dataIngestionState.currentResult.items) && dataIngestionState.currentResult.items.length);
+        const outputMode = String(dataIngestionElements.outputMode?.value || "tile");
+        const needsTarget = outputMode !== "original";
         const canUseReference = hasBackendReference && hasActiveReference;
         setButtonDisabled(dataIngestionElements.analyzeButton, dataIngestionState.active || candidateCount <= 0 || !headMatchesReference || !canUseReference);
         setButtonDisabled(dataIngestionElements.buildProfileButton, dataIngestionState.active || !hasTrainingReference);
         setButtonDisabled(dataIngestionElements.cancelButton, !dataIngestionState.active || !dataIngestionState.activeJobId || dataIngestionState.cancelInFlight);
+        setButtonDisabled(dataIngestionElements.profileDownloadButton, dataIngestionState.active || !hasHead);
+        setButtonDisabled(dataIngestionElements.profileUploadButton, dataIngestionState.active || dataIngestionState.profileImportInFlight);
+        setButtonDisabled(dataIngestionElements.previewAcceptedButton, dataIngestionState.active || !hasAcceptedResult || acceptedCount <= 0 || dataIngestionState.acceptedPreviewInFlight);
+        setButtonDisabled(dataIngestionElements.downloadAcceptedButton, dataIngestionState.active || !hasAcceptedResult || acceptedCount <= 0 || dataIngestionState.acceptedDownloadInFlight);
         [
             dataIngestionElements.files,
             dataIngestionElements.referenceActive,
@@ -35965,6 +35996,12 @@ async function cancelRfDetrTrainingJobRequest() {
             dataIngestionElements.epochs,
             dataIngestionElements.batchSize,
             dataIngestionElements.maxTrainImages,
+            dataIngestionElements.outputMode,
+            dataIngestionElements.targetWidth,
+            dataIngestionElements.targetHeight,
+            dataIngestionElements.tileEdgePolicy,
+            dataIngestionElements.tileOverlap,
+            dataIngestionElements.jpegQuality,
         ].forEach((control) => {
             if (control) control.disabled = dataIngestionState.active;
         });
@@ -35973,6 +36010,21 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (dataIngestionElements.trainCradioModel) {
             dataIngestionElements.trainCradioModel.disabled = dataIngestionState.active || !trainingUsesCradio;
+        }
+        [
+            dataIngestionElements.targetWidth,
+            dataIngestionElements.targetHeight,
+            dataIngestionElements.tileEdgePolicy,
+            dataIngestionElements.tileOverlap,
+            dataIngestionElements.jpegQuality,
+        ].forEach((control) => {
+            if (control) control.disabled = dataIngestionState.active || !needsTarget;
+        });
+        if (dataIngestionElements.tileEdgePolicy) {
+            dataIngestionElements.tileEdgePolicy.disabled = dataIngestionState.active || outputMode !== "tile";
+        }
+        if (dataIngestionElements.tileOverlap) {
+            dataIngestionElements.tileOverlap.disabled = dataIngestionState.active || outputMode !== "tile";
         }
     }
 
@@ -36278,6 +36330,225 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+    function dataIngestionResultItemId(item) {
+        const raw = String(item?.item_id || "").trim();
+        if (raw) return raw;
+        const idx = Number(item?.index);
+        return `item_${String(Number.isFinite(idx) ? Math.max(0, Math.round(idx)) : 0).padStart(6, "0")}`;
+    }
+
+    function selectedDataIngestionItemIds() {
+        return Array.from(dataIngestionState.acceptedItemIds || []);
+    }
+
+    function selectedDataIngestionOutputIds() {
+        return Array.from(dataIngestionState.acceptedOutputIds || []);
+    }
+
+    function getDataIngestionAcceptedExportPayload({ includeOutputIds = false, offset = 0, limit = 80 } = {}) {
+        const mode = String(dataIngestionElements.outputMode?.value || "tile");
+        const payload = {
+            transform_mode: mode,
+            item_ids: selectedDataIngestionItemIds(),
+            target_width: Math.round(getDataIngestionNumber(dataIngestionElements.targetWidth, 960, { min: 1 })),
+            target_height: Math.round(getDataIngestionNumber(dataIngestionElements.targetHeight, 960, { min: 1 })),
+            tile_edge_policy: String(dataIngestionElements.tileEdgePolicy?.value || "cover_no_padding"),
+            tile_overlap: getDataIngestionNumber(dataIngestionElements.tileOverlap, 0, { min: 0, max: 0.9 }),
+            jpeg_quality: Math.round(getDataIngestionNumber(dataIngestionElements.jpegQuality, 95, { min: 1, max: 100 })),
+            offset,
+            limit,
+        };
+        if (includeOutputIds && dataIngestionState.acceptedOutputFilterActive) {
+            const outputIds = selectedDataIngestionOutputIds();
+            if (outputIds.length) payload.output_ids = outputIds;
+        }
+        return payload;
+    }
+
+    function filenameFromResponse(resp, fallback) {
+        const header = resp.headers.get("Content-Disposition") || "";
+        const match = /filename="?([^";]+)"?/i.exec(header);
+        return sanitizeFilename((match?.[1] || fallback || "download.zip").trim(), fallback || "download.zip");
+    }
+
+    function renderDataIngestionAcceptWarning() {
+        if (!dataIngestionElements.acceptWarning) return;
+        const mode = String(dataIngestionElements.outputMode?.value || "tile");
+        const edge = String(dataIngestionElements.tileEdgePolicy?.value || "cover_no_padding");
+        const lines = ["ZIP is unsplit so related tiles or frames cannot leak across train/val by accident."];
+        if (mode === "tile") {
+            if (edge === "cover_no_padding") {
+                lines.push("Cover no padding preserves real pixels, but edge tiles may overlap neighboring tiles.");
+            } else if (edge === "pad_edges") {
+                lines.push("Pad edges keeps regular tile positions but adds border pixels.");
+            } else if (edge === "drop_partials") {
+                lines.push("Drop partials avoids edge overlaps but can discard border content.");
+            }
+            const overlap = Number(dataIngestionElements.tileOverlap?.value || 0);
+            if (overlap > 0) lines.push("Tile overlap creates near-duplicates; split downstream by original source, not by tile.");
+        }
+        dataIngestionElements.acceptWarning.textContent = lines.join(" ");
+    }
+
+    function renderDataIngestionAcceptedSummary() {
+        if (!dataIngestionElements.acceptedSummary) return;
+        const itemCount = selectedDataIngestionItemIds().length;
+        const previewTotal = Number(dataIngestionState.lastPreview?.total_outputs || 0);
+        const parts = [`Selected candidates: ${itemCount}`];
+        if (previewTotal) parts.push(`Download outputs: ${previewTotal}`);
+        if (dataIngestionState.acceptedOutputFilterActive) {
+            parts.push(`Selected preview tiles: ${selectedDataIngestionOutputIds().length}`);
+        }
+        dataIngestionElements.acceptedSummary.textContent = parts.join(" • ");
+    }
+
+    async function downloadDataIngestionReferenceProfile() {
+        const profileId = String(dataIngestionElements.saladHead?.value || "").trim();
+        if (!profileId) {
+            setDataIngestionStatus("Choose a reference profile to download.", "warn");
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/data_ingestion/reference_profiles/${encodeURIComponent(profileId)}/export`);
+            const detail = resp.ok ? "" : await resp.text();
+            if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            const blob = await resp.blob();
+            saveBlobToDisk(blob, filenameFromResponse(resp, `${profileId}.reference_profile.zip`));
+            setDataIngestionStatus("Reference profile downloaded.", "success");
+        } catch (error) {
+            console.error("Reference profile download failed", error);
+            setDataIngestionStatus(`Download failed: ${error.message || error}`, "error");
+        }
+    }
+
+    async function uploadDataIngestionReferenceProfile(file) {
+        if (!file || dataIngestionState.profileImportInFlight) return;
+        dataIngestionState.profileImportInFlight = true;
+        refreshDataIngestionControls();
+        try {
+            const formData = new FormData();
+            formData.append("file", file, file.name || "reference_profile.zip");
+            const resp = await fetch(`${API_ROOT}/data_ingestion/reference_profiles/import`, { method: "POST", body: formData });
+            const detail = await resp.text();
+            if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            const payload = parseJsonObjectSafe(detail, {});
+            const importedId = String(payload.id || "").trim();
+            if (importedId) {
+                dataIngestionState.preferredSaladHeadId = importedId;
+            }
+            await refreshDataIngestionCapabilities();
+            const importedHead = (Array.isArray(dataIngestionState.capabilities?.local_salad_heads) ? dataIngestionState.capabilities.local_salad_heads : [])
+                .find((head) => String(head?.id || "") === importedId);
+            if (importedHead && importedId && dataIngestionHeadMatchesReference(importedHead)) {
+                setSelectValueIfPresent(dataIngestionElements.saladHead, importedId);
+                setDataIngestionStatus(`Reference profile imported and selected: ${importedId}.`, "success");
+            } else {
+                setDataIngestionStatus("Reference profile imported but not selected because it belongs to a different reference dataset.", "warn");
+            }
+            refreshDataIngestionControls();
+        } catch (error) {
+            console.error("Reference profile import failed", error);
+            setDataIngestionStatus(`Import failed: ${error.message || error}`, "error");
+        } finally {
+            dataIngestionState.profileImportInFlight = false;
+            if (dataIngestionElements.profileUploadInput) dataIngestionElements.profileUploadInput.value = "";
+            refreshDataIngestionControls();
+        }
+    }
+
+    function renderDataIngestionTilePreview(outputs) {
+        if (!dataIngestionElements.tilePreview) return;
+        const rows = Array.isArray(outputs) ? outputs : [];
+        if (!rows.length) {
+            dataIngestionElements.tilePreview.innerHTML = `<div class="training-help">No preview outputs yet.</div>`;
+            return;
+        }
+        dataIngestionElements.tilePreview.innerHTML = rows.map((output) => {
+            const outputId = String(output.output_id || "");
+            const checked = dataIngestionState.acceptedOutputIds.has(outputId) ? " checked" : "";
+            const dims = `${escapeHtml(output.output_width || "")}x${escapeHtml(output.output_height || "")}`;
+            const bounds = Array.isArray(output.source_bounds) ? output.source_bounds.join(",") : "";
+            const thumbUrl = output.thumbnail_url ? `${API_ROOT}${output.thumbnail_url}` : "";
+            return [
+                `<label class="data-ingestion-tile-card">`,
+                thumbUrl ? `<img src="${escapeHtml(thumbUrl)}" alt="Accepted output preview" loading="lazy">` : "",
+                `<span><input type="checkbox" data-data-ingestion-output-id="${escapeHtml(outputId)}"${checked}> ${escapeHtml(output.source_filename || output.output_filename || "output")}</span>`,
+                `<span>${dims}${bounds ? ` • ${escapeHtml(bounds)}` : ""}</span>`,
+                `</label>`,
+            ].join("");
+        }).join("");
+        dataIngestionElements.tilePreview.querySelectorAll("[data-data-ingestion-output-id]").forEach((checkbox) => {
+            checkbox.addEventListener("change", () => {
+                const outputId = String(checkbox.getAttribute("data-data-ingestion-output-id") || "");
+                if (!outputId) return;
+                if (checkbox.checked) {
+                    dataIngestionState.acceptedOutputIds.add(outputId);
+                } else {
+                    dataIngestionState.acceptedOutputIds.delete(outputId);
+                }
+                dataIngestionState.acceptedOutputFilterActive = true;
+                renderDataIngestionAcceptedSummary();
+                refreshDataIngestionControls();
+            });
+        });
+    }
+
+    async function previewDataIngestionAcceptedOutputs() {
+        if (!dataIngestionState.currentResult || dataIngestionState.acceptedPreviewInFlight) return;
+        dataIngestionState.acceptedPreviewInFlight = true;
+        dataIngestionState.acceptedOutputIds = new Set();
+        dataIngestionState.acceptedOutputFilterActive = false;
+        renderDataIngestionTilePreview([]);
+        refreshDataIngestionControls();
+        try {
+            const resp = await fetch(`${API_ROOT}/data_ingestion/jobs/${encodeURIComponent(dataIngestionState.activeJobId)}/accepted_export/preview`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(getDataIngestionAcceptedExportPayload({ limit: 80 })),
+            });
+            const detail = await resp.text();
+            if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            const payload = parseJsonObjectSafe(detail, {});
+            const outputs = Array.isArray(payload.outputs) ? payload.outputs : [];
+            dataIngestionState.lastPreview = payload;
+            dataIngestionState.acceptedOutputIds = new Set(outputs.map((output) => String(output.output_id || "")).filter(Boolean));
+            dataIngestionState.acceptedOutputFilterActive = false;
+            renderDataIngestionTilePreview(outputs);
+            renderDataIngestionAcceptedSummary();
+            setDataIngestionStatus(`Preview ready: ${payload.total_outputs || outputs.length} output(s).`, "success");
+        } catch (error) {
+            console.error("Accepted output preview failed", error);
+            setDataIngestionStatus(`Preview failed: ${error.message || error}`, "error");
+        } finally {
+            dataIngestionState.acceptedPreviewInFlight = false;
+            refreshDataIngestionControls();
+        }
+    }
+
+    async function downloadDataIngestionAcceptedZip() {
+        if (!dataIngestionState.currentResult || dataIngestionState.acceptedDownloadInFlight) return;
+        dataIngestionState.acceptedDownloadInFlight = true;
+        refreshDataIngestionControls();
+        try {
+            const resp = await fetch(`${API_ROOT}/data_ingestion/jobs/${encodeURIComponent(dataIngestionState.activeJobId)}/accepted_export/download`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(getDataIngestionAcceptedExportPayload({ includeOutputIds: true })),
+            });
+            const detail = resp.ok ? "" : await resp.text();
+            if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            const blob = await resp.blob();
+            saveBlobToDisk(blob, filenameFromResponse(resp, "accepted_data.zip"));
+            setDataIngestionStatus("Accepted data ZIP downloaded.", "success");
+        } catch (error) {
+            console.error("Accepted data download failed", error);
+            setDataIngestionStatus(`Download failed: ${error.message || error}`, "error");
+        } finally {
+            dataIngestionState.acceptedDownloadInFlight = false;
+            refreshDataIngestionControls();
+        }
+    }
+
     async function loadDataIngestionResult(jobId) {
         const resp = await fetch(`${API_ROOT}/data_ingestion/jobs/${encodeURIComponent(jobId)}/result`);
         const detail = await resp.text();
@@ -36290,7 +36561,13 @@ async function cancelRfDetrTrainingJobRequest() {
         const summary = result?.summary || {};
         const items = Array.isArray(result?.items) ? result.items : [];
         const isProfileBuild = !!String(summary.head_id || "").trim() && !items.length;
+        dataIngestionState.currentResult = isProfileBuild ? null : result;
+        dataIngestionState.acceptedItemIds = new Set(isProfileBuild ? [] : items.filter((item) => !!item.keep).map(dataIngestionResultItemId));
+        dataIngestionState.acceptedOutputIds = new Set();
+        dataIngestionState.acceptedOutputFilterActive = false;
+        dataIngestionState.lastPreview = null;
         if (dataIngestionElements.results) dataIngestionElements.results.hidden = false;
+        if (dataIngestionElements.acceptance) dataIngestionElements.acceptance.hidden = isProfileBuild || !items.length;
         if (dataIngestionElements.reportTitle) {
             dataIngestionElements.reportTitle.textContent = isProfileBuild ? "Reference profile report" : "Ingestion report";
         }
@@ -36335,16 +36612,41 @@ async function cancelRfDetrTrainingJobRequest() {
                 dataIngestionElements.list.innerHTML = items.slice(0, 120).map((item) => {
                     const score = Number(item.diversity_score) || 0;
                     const keep = !!item.keep;
+                    const itemId = dataIngestionResultItemId(item);
+                    const checked = dataIngestionState.acceptedItemIds.has(itemId) ? " checked" : "";
                     return [
                         `<div class="data-ingestion-list__item${keep ? " is-keep" : ""}">`,
-                        `<strong>${keep ? `Keep #${escapeHtml(item.rank || "")}` : "Skip"}</strong> `,
-                        `${escapeHtml(item.filename || item.saved_name || "candidate")}`,
-                        `<br><span>${escapeHtml(item.source_type || "image")} • score ${score.toFixed(3)} • ${escapeHtml(item.width || "")}x${escapeHtml(item.height || "")}</span>`,
+                        `<label>`,
+                        `<input type="checkbox" data-data-ingestion-item-id="${escapeHtml(itemId)}"${checked}>`,
+                        `<span><strong>${keep ? `Keep #${escapeHtml(item.rank || "")}` : "Skip"}</strong> ${escapeHtml(item.filename || item.saved_name || "candidate")}<br>`,
+                        `<span>${escapeHtml(item.source_type || "image")} • score ${score.toFixed(3)} • ${escapeHtml(item.width || "")}x${escapeHtml(item.height || "")}</span></span>`,
+                        `</label>`,
                         `</div>`,
                     ].join("");
                 }).join("");
+                dataIngestionElements.list.querySelectorAll("[data-data-ingestion-item-id]").forEach((checkbox) => {
+                    checkbox.addEventListener("change", () => {
+                        const itemId = String(checkbox.getAttribute("data-data-ingestion-item-id") || "");
+                        if (!itemId) return;
+                        if (checkbox.checked) {
+                            dataIngestionState.acceptedItemIds.add(itemId);
+                        } else {
+                            dataIngestionState.acceptedItemIds.delete(itemId);
+                        }
+                        dataIngestionState.acceptedOutputIds = new Set();
+                        dataIngestionState.acceptedOutputFilterActive = false;
+                        dataIngestionState.lastPreview = null;
+                        renderDataIngestionTilePreview([]);
+                        renderDataIngestionAcceptedSummary();
+                        refreshDataIngestionControls();
+                    });
+                });
             }
         }
+        renderDataIngestionAcceptWarning();
+        renderDataIngestionAcceptedSummary();
+        renderDataIngestionTilePreview([]);
+        refreshDataIngestionControls();
     }
 
     function initDataIngestionUi() {
@@ -36356,6 +36658,9 @@ async function cancelRfDetrTrainingJobRequest() {
         dataIngestionElements.referenceBackend = document.getElementById("dataIngestionReferenceBackend");
         dataIngestionElements.referenceDataset = document.getElementById("dataIngestionReferenceDataset");
         dataIngestionElements.saladHead = document.getElementById("dataIngestionSaladHead");
+        dataIngestionElements.profileDownloadButton = document.getElementById("dataIngestionProfileDownload");
+        dataIngestionElements.profileUploadButton = document.getElementById("dataIngestionProfileUploadButton");
+        dataIngestionElements.profileUploadInput = document.getElementById("dataIngestionProfileUpload");
         dataIngestionElements.keepFraction = document.getElementById("dataIngestionKeepFraction");
         dataIngestionElements.frameInterval = document.getElementById("dataIngestionFrameInterval");
         dataIngestionElements.maxFrames = document.getElementById("dataIngestionMaxFrames");
@@ -36377,6 +36682,18 @@ async function cancelRfDetrTrainingJobRequest() {
         dataIngestionElements.report = document.getElementById("dataIngestionReport");
         dataIngestionElements.listTitle = document.getElementById("dataIngestionListTitle");
         dataIngestionElements.list = document.getElementById("dataIngestionList");
+        dataIngestionElements.acceptance = document.getElementById("dataIngestionAcceptance");
+        dataIngestionElements.outputMode = document.getElementById("dataIngestionOutputMode");
+        dataIngestionElements.targetWidth = document.getElementById("dataIngestionTargetWidth");
+        dataIngestionElements.targetHeight = document.getElementById("dataIngestionTargetHeight");
+        dataIngestionElements.tileEdgePolicy = document.getElementById("dataIngestionTileEdgePolicy");
+        dataIngestionElements.tileOverlap = document.getElementById("dataIngestionTileOverlap");
+        dataIngestionElements.jpegQuality = document.getElementById("dataIngestionJpegQuality");
+        dataIngestionElements.acceptWarning = document.getElementById("dataIngestionAcceptWarning");
+        dataIngestionElements.previewAcceptedButton = document.getElementById("dataIngestionPreviewAcceptedButton");
+        dataIngestionElements.downloadAcceptedButton = document.getElementById("dataIngestionDownloadAcceptedButton");
+        dataIngestionElements.acceptedSummary = document.getElementById("dataIngestionAcceptedSummary");
+        dataIngestionElements.tilePreview = document.getElementById("dataIngestionTilePreview");
         [
             dataIngestionElements.referenceActive,
             dataIngestionElements.referenceBackend,
@@ -36392,9 +36709,39 @@ async function cancelRfDetrTrainingJobRequest() {
             dataIngestionElements.keepFraction,
             dataIngestionElements.frameInterval,
             dataIngestionElements.maxFrames,
+            dataIngestionElements.outputMode,
+            dataIngestionElements.targetWidth,
+            dataIngestionElements.targetHeight,
+            dataIngestionElements.tileEdgePolicy,
+            dataIngestionElements.tileOverlap,
+            dataIngestionElements.jpegQuality,
         ].forEach((control) => {
-            if (control) control.addEventListener("change", refreshDataIngestionControls);
+            if (control) control.addEventListener("change", () => {
+                if ([
+                    dataIngestionElements.outputMode,
+                    dataIngestionElements.targetWidth,
+                    dataIngestionElements.targetHeight,
+                    dataIngestionElements.tileEdgePolicy,
+                    dataIngestionElements.tileOverlap,
+                    dataIngestionElements.jpegQuality,
+                ].includes(control)) {
+                    dataIngestionState.acceptedOutputIds = new Set();
+                    dataIngestionState.acceptedOutputFilterActive = false;
+                    dataIngestionState.lastPreview = null;
+                    renderDataIngestionTilePreview([]);
+                    renderDataIngestionAcceptWarning();
+                    renderDataIngestionAcceptedSummary();
+                }
+                refreshDataIngestionControls();
+            });
         });
+        if (dataIngestionElements.profileDownloadButton) {
+            dataIngestionElements.profileDownloadButton.addEventListener("click", () => downloadDataIngestionReferenceProfile());
+        }
+        if (dataIngestionElements.profileUploadButton && dataIngestionElements.profileUploadInput) {
+            dataIngestionElements.profileUploadButton.addEventListener("click", () => dataIngestionElements.profileUploadInput.click());
+            dataIngestionElements.profileUploadInput.addEventListener("change", () => uploadDataIngestionReferenceProfile(dataIngestionElements.profileUploadInput.files?.[0]));
+        }
         if (dataIngestionElements.analyzeButton) {
             dataIngestionElements.analyzeButton.addEventListener("click", startDataIngestionAnalysis);
         }
@@ -36406,6 +36753,12 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (dataIngestionElements.refreshButton) {
             dataIngestionElements.refreshButton.addEventListener("click", refreshDataIngestionCapabilities);
+        }
+        if (dataIngestionElements.previewAcceptedButton) {
+            dataIngestionElements.previewAcceptedButton.addEventListener("click", previewDataIngestionAcceptedOutputs);
+        }
+        if (dataIngestionElements.downloadAcceptedButton) {
+            dataIngestionElements.downloadAcceptedButton.addEventListener("click", downloadDataIngestionAcceptedZip);
         }
         refreshDataIngestionCapabilities();
         refreshDataIngestionControls();

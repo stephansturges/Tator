@@ -67,6 +67,60 @@ def test_sam3_run_lookup_rejects_sibling_prefix_escape(tmp_path: Path) -> None:
     assert exc_info.value.detail == "invalid_run_id"
 
 
+def test_sam3_run_lookup_rejects_symlinked_job_root_without_target_delete(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_sam3_runs"
+    (outside / "run1").mkdir(parents=True)
+    (outside / "run1" / "payload.bin").write_bytes(b"target")
+    job_root = tmp_path / "sam3_runs"
+    try:
+        job_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _run_dir_for_request_impl(
+            run_id="run1",
+            variant="sam3",
+            job_root=job_root,
+            http_exception_cls=HTTPException,
+            http_400=400,
+            http_404=404,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_run_id"
+    assert (outside / "run1" / "payload.bin").read_bytes() == b"target"
+
+
+def test_sam3_run_lookup_rejects_symlinked_job_root_parent_without_target_delete(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    (outside / "sam3_runs" / "run1").mkdir(parents=True)
+    (outside / "sam3_runs" / "run1" / "payload.bin").write_bytes(b"target")
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _run_dir_for_request_impl(
+            run_id="run1",
+            variant="sam3",
+            job_root=linked_parent / "sam3_runs",
+            http_exception_cls=HTTPException,
+            http_400=400,
+            http_404=404,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_run_id"
+    assert (outside / "sam3_runs" / "run1" / "payload.bin").read_bytes() == b"target"
+
+
 def test_yolo_run_lookup_rejects_normalized_alias(tmp_path: Path) -> None:
     job_root = tmp_path / "yolo_runs"
     (job_root / "run1").mkdir(parents=True)

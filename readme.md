@@ -596,7 +596,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current verification: `1219 passed, 20 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Current verification: `1221 passed, 20 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

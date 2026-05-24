@@ -1555,3 +1555,22 @@ preserving the exact validation story for storage and artifact-write fixes.
   The restarted backend also passed the live UI endpoint map check with no
   missing paths or method mismatches, live OpenAPI sanity (`tested=144`,
   `failures=[]`), and a live `/clip/classifiers` registry read.
+
+## 2026-05-24: SAM3 Run Root Symlink Guards
+
+- Audited SAM3 training run deletion and cache cleanup after the classifier
+  registry pass.
+- Hardened the shared SAM3 run lookup helper to reject a symlinked job root or
+  symlinked job-root parent before resolving a run id. This prevents scoped
+  `delete_sam3_run` operations from deleting run directories through a
+  redirected `SAM3_JOB_ROOT`.
+- Made SAM3 run listing return no runs when the job root is symlinked, matching
+  the fail-closed behavior used for deletion.
+- Added regressions for symlinked SAM3 job roots and symlinked job-root parents.
+- Validation: `py_compile services/sam3_runs.py
+  tests/test_backend_path_containment.py`, focused SAM3 root regressions
+  (`2 passed`), SAM3 active lifecycle/path-containment coverage (`57 passed`),
+  and the full pytest suite (`1221 passed, 20 skipped`) passed. The restarted
+  backend also passed the live UI endpoint map check with no missing paths or
+  method mismatches, live OpenAPI sanity (`tested=144`, `failures=[]`), and a
+  live `/sam3/models` registry read.

@@ -9,6 +9,18 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from utils.io import _path_is_within_root_impl
 
 
+def _path_has_symlink_component(path: Path) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    checks = [candidate]
+    checks.extend(candidate.parents)
+    for component in checks:
+        if component == component.parent:
+            continue
+        if component.is_symlink():
+            return True
+    return False
+
+
 def _safe_path_mtime_impl(path: Path) -> float:
     if path.is_symlink():
         return 0.0
@@ -133,6 +145,8 @@ def _list_sam3_runs_impl(
     describe_fn: Callable[[Path, str, set[Path]], Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     root = job_root
+    if _path_has_symlink_component(root):
+        return []
     if not root.exists():
         return []
     try:
@@ -175,6 +189,8 @@ def _run_dir_for_request_impl(
 ) -> Path:
     root = job_root
     raw_id = str(run_id or "").strip()
+    if _path_has_symlink_component(root):
+        raise http_exception_cls(status_code=http_400, detail="invalid_run_id")
     if (
         not raw_id
         or raw_id in {".", ".."}

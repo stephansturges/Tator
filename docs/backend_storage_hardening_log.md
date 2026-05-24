@@ -1317,3 +1317,18 @@ preserving the exact validation story for storage and artifact-write fixes.
   suite passed. Restarted backend on `127.0.0.1:8000` and live-checked
   `/qwen/datasets`, `/datasets/trash`, OpenAPI route methods for Qwen/trash
   deletes, and UI endpoint method matching.
+
+## 2026-05-24: UI Endpoint Checker Dynamic Detector Routes
+
+- Fixed `tools/check_ui_endpoints.py` to expand the UI's detector `endpoint`
+  template variable into both `yolo` and `rfdetr` before comparing fetch calls
+  against OpenAPI.
+- This removes false missing-path reports for shared detector run list,
+  summary, active, download, and delete calls while keeping method checks strict.
+- Added unit coverage proving dynamic detector run paths expand to concrete
+  OpenAPI-style routes instead of the generic `/{}/runs` form.
+- Validation: `1189 passed, 17 skipped`; focused endpoint-checker, route
+  uniqueness, and UI contract coverage (`3 passed`), `py_compile
+  tools/check_ui_endpoints.py`, `git diff --check`, live
+  `tools/check_ui_endpoints.py http://127.0.0.1:8000` with no missing paths or
+  method mismatches, and the full pytest suite passed.

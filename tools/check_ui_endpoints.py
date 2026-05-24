@@ -5,6 +5,12 @@ import sys
 from pathlib import Path
 from urllib import request
 
+
+TEMPLATE_ENDPOINT_EXPANSIONS = {
+    "endpoint": ("yolo", "rfdetr"),
+}
+
+
 def normalize(path: str) -> str:
     path = path.split("?", 1)[0]
     path = re.sub(r"\$\{[^}]+\}", "{}", path)
@@ -13,6 +19,18 @@ def normalize(path: str) -> str:
     if not path.startswith("/"):
         path = "/" + path
     return path
+
+
+def expand_template_endpoint(path: str) -> list[str]:
+    for name, values in TEMPLATE_ENDPOINT_EXPANSIONS.items():
+        token = "${" + name + "}"
+        if token not in path:
+            continue
+        expanded: list[str] = []
+        for value in values:
+            expanded.extend(expand_template_endpoint(path.replace(token, value, 1)))
+        return expanded
+    return [path]
 
 
 def extract_ui_endpoints(js_text: str) -> list[tuple[str, str]]:
@@ -26,7 +44,8 @@ def extract_ui_endpoints(js_text: str) -> list[tuple[str, str]]:
         method_m = re.search(r"method\s*:\s*[\"']([A-Z]+)[\"']", rest)
         if method_m:
             method = method_m.group(1).upper()
-        endpoints.append((normalize(path), method))
+        for expanded_path in expand_template_endpoint(path):
+            endpoints.append((normalize(expanded_path), method))
 
     # Deduplicate while preserving order
     seen = set()

@@ -1306,42 +1306,47 @@ def _persist_agent_recipe_impl(
             },
         }
         raw_path = root / f"{recipe_id}.json"
-        _prepare_output_file(raw_path)
-        path = raw_path.resolve(strict=False)
-        if not path_is_within_root_fn(path, root):
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
         try:
-            with path.open("w", encoding="utf-8") as fp:
-                json.dump(payload, fp, ensure_ascii=False, indent=2)
+            _write_json_file(raw_path, payload)
+            path = raw_path.resolve(strict=False)
+            if not path_is_within_root_fn(path, root):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
             # Persist a portable zip alongside the JSON for download.
             zip_raw = root / f"{recipe_id}.zip"
             _prepare_output_file(zip_raw)
             zip_path = zip_raw.resolve(strict=False)
             if not path_is_within_root_fn(zip_path, root):
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
-            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr("recipe.json", json.dumps(payload, ensure_ascii=False, indent=2))
-                if crops_dir.exists():
-                    for crop_file in crops_dir.glob("*.png"):
-                        try:
-                            _zip_write_safe_file(
-                                zf, crop_file, recipe_dir, f"crops/{crop_file.name}"
-                            )
-                        except Exception:
-                            continue
-                clip_dir = recipe_dir / "clip_head"
-                if clip_dir.exists():
-                    for artifact in clip_dir.iterdir():
-                        try:
-                            if not artifact.is_file():
+            temp_zip_path = zip_raw.with_suffix(f"{zip_raw.suffix}.{uuid.uuid4().hex}.tmp")
+            _prepare_output_file(temp_zip_path)
+            try:
+                with zipfile.ZipFile(temp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    zf.writestr("recipe.json", json.dumps(payload, ensure_ascii=False, indent=2))
+                    if crops_dir.exists():
+                        for crop_file in crops_dir.glob("*.png"):
+                            try:
+                                _zip_write_safe_file(
+                                    zf, crop_file, recipe_dir, f"crops/{crop_file.name}"
+                                )
+                            except Exception:
                                 continue
-                            if artifact.name not in {"head.npz", "meta.json"}:
+                    clip_dir = recipe_dir / "clip_head"
+                    if clip_dir.exists():
+                        for artifact in clip_dir.iterdir():
+                            try:
+                                if not artifact.is_file():
+                                    continue
+                                if artifact.name not in {"head.npz", "meta.json"}:
+                                    continue
+                                _zip_write_safe_file(
+                                    zf, artifact, recipe_dir, f"clip_head/{artifact.name}"
+                                )
+                            except Exception:
                                 continue
-                            _zip_write_safe_file(
-                                zf, artifact, recipe_dir, f"clip_head/{artifact.name}"
-                            )
-                        except Exception:
-                            continue
+                os.replace(temp_zip_path, zip_raw)
+            finally:
+                if temp_zip_path.exists() or temp_zip_path.is_symlink():
+                    temp_zip_path.unlink(missing_ok=True)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(
                 status_code=HTTP_500_INTERNAL_SERVER_ERROR,

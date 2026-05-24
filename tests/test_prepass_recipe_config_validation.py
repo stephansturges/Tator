@@ -220,6 +220,110 @@ def test_persist_agent_recipe_preserves_numpy_clip_head_classes(tmp_path):
     assert saved["recipe"]["clip_head"]["min_prob"] == 0.6
 
 
+def test_persist_agent_recipe_keeps_existing_json_when_serialization_fails(
+    tmp_path, monkeypatch
+) -> None:
+    class FixedUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    recipes_root = tmp_path / "recipes"
+    recipes_root.mkdir()
+    recipe_json = recipes_root / "ar_deadbeef.json"
+    recipe_json.write_text('{"id":"old"}\n', encoding="utf-8")
+    monkeypatch.setattr(prepass_recipes.uuid, "uuid4", lambda: FixedUUID())
+
+    with pytest.raises(HTTPException) as exc_info:
+        _persist_agent_recipe_impl(
+            dataset_id=None,
+            class_id=None,
+            class_name="person",
+            label="person recipe",
+            recipe={"text_prompts": ["person"], "params": {"bad": object()}},
+            meta_overrides={
+                "dataset_signature": "dataset-signature",
+                "labelmap_hash": "labelmap-hash",
+                "labelmap": ["person"],
+            },
+            recipes_root=recipes_root,
+            max_clip_head_bytes=1024 * 1024,
+            max_crops=10,
+            max_crop_bytes=1024 * 1024,
+            resolve_dataset_fn=lambda _dataset_id: tmp_path,
+            load_coco_index_fn=lambda _root: ({"categories": []}, {}, {}),
+            compute_dataset_signature_fn=lambda *_args: "dataset-signature",
+            compute_labelmap_hash_fn=lambda _categories: ("labelmap-hash", ["person"]),
+            resolve_clip_classifier_fn=lambda _path: tmp_path / "classifier.pkl",
+            load_clip_head_fn=lambda _path: None,
+            save_clip_head_artifacts_fn=lambda **_kwargs: None,
+            load_clip_head_artifacts_fn=lambda **_kwargs: None,
+            save_exemplar_crop_fn=lambda **_kwargs: None,
+            sanitize_prompts_fn=lambda prompts: prompts,
+            path_is_within_root_fn=_within_root,
+        )
+
+    assert exc_info.value.status_code == 500
+    assert recipe_json.read_text(encoding="utf-8") == '{"id":"old"}\n'
+    assert not recipe_json.with_suffix(recipe_json.suffix + f".tmp.{os.getpid()}").exists()
+
+
+def test_persist_agent_recipe_writes_zip_atomically_over_symlink_leaves(
+    tmp_path, monkeypatch
+) -> None:
+    class FixedUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    recipes_root = tmp_path / "recipes"
+    recipes_root.mkdir()
+    zip_path = recipes_root / "ar_deadbeef.zip"
+    tmp_zip_path = zip_path.with_suffix(f"{zip_path.suffix}.{FixedUUID.hex}.tmp")
+    outside_tmp = tmp_path / "outside_tmp.zip"
+    outside_final = tmp_path / "outside_final.zip"
+    outside_tmp.write_bytes(b"external tmp")
+    outside_final.write_bytes(b"external final")
+    try:
+        tmp_zip_path.symlink_to(outside_tmp)
+        zip_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(prepass_recipes.uuid, "uuid4", lambda: FixedUUID())
+
+    saved = _persist_agent_recipe_impl(
+        dataset_id=None,
+        class_id=None,
+        class_name="person",
+        label="person recipe",
+        recipe={"text_prompts": ["person"]},
+        meta_overrides={
+            "dataset_signature": "dataset-signature",
+            "labelmap_hash": "labelmap-hash",
+            "labelmap": ["person"],
+        },
+        recipes_root=recipes_root,
+        max_clip_head_bytes=1024 * 1024,
+        max_crops=10,
+        max_crop_bytes=1024 * 1024,
+        resolve_dataset_fn=lambda _dataset_id: tmp_path,
+        load_coco_index_fn=lambda _root: ({"categories": []}, {}, {}),
+        compute_dataset_signature_fn=lambda *_args: "dataset-signature",
+        compute_labelmap_hash_fn=lambda _categories: ("labelmap-hash", ["person"]),
+        resolve_clip_classifier_fn=lambda _path: tmp_path / "classifier.pkl",
+        load_clip_head_fn=lambda _path: None,
+        save_clip_head_artifacts_fn=lambda **_kwargs: None,
+        load_clip_head_artifacts_fn=lambda **_kwargs: None,
+        save_exemplar_crop_fn=lambda **_kwargs: None,
+        sanitize_prompts_fn=lambda prompts: prompts,
+        path_is_within_root_fn=_within_root,
+    )
+
+    assert saved["id"] == "ar_deadbeef"
+    assert not tmp_zip_path.exists()
+    assert not zip_path.is_symlink()
+    assert outside_tmp.read_bytes() == b"external tmp"
+    assert outside_final.read_bytes() == b"external final"
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        assert "recipe.json" in zf.namelist()
+
+
 def test_persist_agent_recipe_rejects_symlinked_recipe_dir_without_write(
     tmp_path, monkeypatch
 ) -> None:

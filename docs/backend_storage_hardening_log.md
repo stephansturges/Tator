@@ -692,3 +692,15 @@ preserving the exact validation story for storage and artifact-write fixes.
   prepass cache preservation.
 - Validation: `1096 passed, 17 skipped`; focused calibration IO coverage and
   the full pytest suite passed.
+
+## 2026-05-24: Agent Recipe JSON and ZIP Atomic Saves
+
+- Routed agent recipe JSON persistence through the guarded atomic JSON helper
+  instead of direct `json.dump` to the final recipe path.
+- Switched the sidecar portable recipe ZIP build to a guarded temp ZIP followed
+  by atomic replace.
+- Added regressions proving failed JSON serialization preserves an existing
+  final recipe JSON and ZIP temp/final symlink leaves do not mutate external
+  targets.
+- Validation: `1098 passed, 17 skipped`; focused recipe persistence coverage
+  and the full pytest suite passed.

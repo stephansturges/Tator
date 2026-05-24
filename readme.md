@@ -588,7 +588,7 @@ the backend are available.
 <details>
 <summary><strong>Update Tracking</strong></summary>
 
-Current validation baseline: `1096 passed, 17 skipped`.
+Current validation baseline: `1098 passed, 17 skipped`.
 
 Maintainer-level storage and backend hardening notes are tracked in
 [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).

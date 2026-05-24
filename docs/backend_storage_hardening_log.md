@@ -409,3 +409,18 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1054 passed, 17 skipped`; focused linked annotation and
   auto-label runner coverage, the full pytest suite, and live endpoint sanity
   checks passed.
+
+## 2026-05-24: Split Dataset Caption Overlay Scoping
+
+- Made annotation text/caption overlays split-aware for YOLO split datasets so
+  `train/images/foo.jpg` and `val/images/foo.jpg` can carry distinct captions.
+- Preserved legacy flat `text_labels/...` lookup as a fallback for existing
+  datasets and non-split flows.
+- Export now maps split-scoped caption overlays back to
+  `train/text_labels/...` or `val/text_labels/...` in downloaded split dataset
+  archives instead of leaking overlay storage paths.
+- Added regressions for split-layout snapshot caption writes, manifest reads,
+  and dataset ZIP export.
+- Validation: `1056 passed, 17 skipped`; focused linked annotation,
+  auto-label runner, dataset download cleanup coverage, the full pytest suite,
+  and live endpoint sanity checks passed.

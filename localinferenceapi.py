@@ -14776,25 +14776,59 @@ def _annotation_legacy_text_name(image_relpath: Path) -> str:
     return f"{image_relpath.stem}.txt"
 
 
-def _annotation_source_text_path(dataset_root: Path, image_relpath: Path) -> Path:
+def _annotation_uses_split_text_path(
+    split: Optional[str], yolo_layout: Optional[str] = None
+) -> bool:
+    return bool(split) and str(yolo_layout or "").strip().lower() == "split"
+
+
+def _annotation_source_text_path(
+    dataset_root: Path,
+    image_relpath: Path,
+    *,
+    split: Optional[str] = None,
+    yolo_layout: Optional[str] = None,
+) -> Path:
+    if _annotation_uses_split_text_path(split, yolo_layout):
+        return dataset_root / str(split) / "text_labels" / _annotation_text_relpath(image_relpath)
     return dataset_root / "text_labels" / _annotation_text_relpath(image_relpath)
 
 
-def _annotation_source_text_path_legacy(dataset_root: Path, image_relpath: Path) -> Path:
+def _annotation_source_text_path_legacy(
+    dataset_root: Path,
+    image_relpath: Path,
+    *,
+    split: Optional[str] = None,
+    yolo_layout: Optional[str] = None,
+) -> Path:
+    if _annotation_uses_split_text_path(split, yolo_layout):
+        return dataset_root / str(split) / "text_labels" / _annotation_legacy_text_name(image_relpath)
     return dataset_root / "text_labels" / _annotation_legacy_text_name(image_relpath)
 
 
 def _annotation_overlay_text_path(
-    entry: Dict[str, Any], image_relpath: Path, *, ensure: bool = True
+    entry: Dict[str, Any],
+    image_relpath: Path,
+    *,
+    split: Optional[str] = None,
+    ensure: bool = True,
 ) -> Path:
     overlay_root = _dataset_overlay_root_from_entry(entry, ensure=ensure)
+    if _annotation_uses_split_text_path(split, entry.get("yolo_layout")):
+        return overlay_root / "text_labels" / str(split) / _annotation_text_relpath(image_relpath)
     return overlay_root / "text_labels" / _annotation_text_relpath(image_relpath)
 
 
 def _annotation_overlay_text_path_legacy(
-    entry: Dict[str, Any], image_relpath: Path, *, ensure: bool = True
+    entry: Dict[str, Any],
+    image_relpath: Path,
+    *,
+    split: Optional[str] = None,
+    ensure: bool = True,
 ) -> Path:
     overlay_root = _dataset_overlay_root_from_entry(entry, ensure=ensure)
+    if _annotation_uses_split_text_path(split, entry.get("yolo_layout")):
+        return overlay_root / "text_labels" / str(split) / _annotation_legacy_text_name(image_relpath)
     return overlay_root / "text_labels" / _annotation_legacy_text_name(image_relpath)
 
 
@@ -14861,37 +14895,88 @@ def _annotation_effective_label_lines(
     return [ln.strip() for ln in source_text.splitlines() if ln.strip()]
 
 
-def _annotation_effective_text_label(entry: Dict[str, Any], image_relpath: Path) -> str:
+def _annotation_effective_text_label(
+    entry: Dict[str, Any], image_relpath: Path, split: Optional[str] = None
+) -> str:
     overlay_root = _dataset_overlay_root_from_entry(entry, ensure=False)
-    overlay_path = _annotation_overlay_text_path(entry, image_relpath, ensure=False)
-    overlay_text = _annotation_read_text_within_root(overlay_path, overlay_root)
-    if overlay_text is not None:
-        return overlay_text.strip()
-    overlay_legacy = _annotation_overlay_text_path_legacy(entry, image_relpath, ensure=False)
-    overlay_legacy_text = _annotation_read_text_within_root(overlay_legacy, overlay_root)
-    if overlay_legacy_text is not None:
-        return overlay_legacy_text.strip()
+    layout = str(entry.get("yolo_layout") or "flat")
+    overlay_paths: List[Path] = []
+    if _annotation_uses_split_text_path(split, layout):
+        overlay_paths.extend(
+            [
+                _annotation_overlay_text_path(
+                    entry, image_relpath, split=split, ensure=False
+                ),
+                _annotation_overlay_text_path_legacy(
+                    entry, image_relpath, split=split, ensure=False
+                ),
+            ]
+        )
+    overlay_paths.extend(
+        [
+            _annotation_overlay_text_path(entry, image_relpath, ensure=False),
+            _annotation_overlay_text_path_legacy(entry, image_relpath, ensure=False),
+        ]
+    )
+    for overlay_path in overlay_paths:
+        overlay_text = _annotation_read_text_within_root(overlay_path, overlay_root)
+        if overlay_text is not None:
+            return overlay_text.strip()
     dataset_root = _dataset_effective_root_from_entry(entry)
-    source_path = _annotation_source_text_path(dataset_root, image_relpath)
-    source_text = _annotation_read_text_within_root(source_path, dataset_root)
-    if source_text is not None:
-        return source_text.strip()
-    legacy_source = _annotation_source_text_path_legacy(dataset_root, image_relpath)
-    legacy_text = _annotation_read_text_within_root(legacy_source, dataset_root)
-    if legacy_text is not None:
-        return legacy_text.strip()
+    source_paths: List[Path] = []
+    if _annotation_uses_split_text_path(split, layout):
+        source_paths.extend(
+            [
+                _annotation_source_text_path(
+                    dataset_root, image_relpath, split=split, yolo_layout=layout
+                ),
+                _annotation_source_text_path_legacy(
+                    dataset_root, image_relpath, split=split, yolo_layout=layout
+                ),
+            ]
+        )
+    source_paths.extend(
+        [
+            _annotation_source_text_path(dataset_root, image_relpath),
+            _annotation_source_text_path_legacy(dataset_root, image_relpath),
+        ]
+    )
+    for source_path in source_paths:
+        source_text = _annotation_read_text_within_root(source_path, dataset_root)
+        if source_text is not None:
+            return source_text.strip()
     return ""
 
 
-def _annotation_source_text_value(dataset_root: Path, image_relpath: Path) -> str:
-    source_path = _annotation_source_text_path(dataset_root, image_relpath)
-    source_text = _annotation_read_text_within_root(source_path, dataset_root)
-    if source_text is not None:
-        return source_text.strip()
-    legacy_source = _annotation_source_text_path_legacy(dataset_root, image_relpath)
-    legacy_text = _annotation_read_text_within_root(legacy_source, dataset_root)
-    if legacy_text is not None:
-        return legacy_text.strip()
+def _annotation_source_text_value(
+    dataset_root: Path,
+    image_relpath: Path,
+    *,
+    split: Optional[str] = None,
+    yolo_layout: Optional[str] = None,
+) -> str:
+    source_paths: List[Path] = []
+    if _annotation_uses_split_text_path(split, yolo_layout):
+        source_paths.extend(
+            [
+                _annotation_source_text_path(
+                    dataset_root, image_relpath, split=split, yolo_layout=yolo_layout
+                ),
+                _annotation_source_text_path_legacy(
+                    dataset_root, image_relpath, split=split, yolo_layout=yolo_layout
+                ),
+            ]
+        )
+    source_paths.extend(
+        [
+            _annotation_source_text_path(dataset_root, image_relpath),
+            _annotation_source_text_path_legacy(dataset_root, image_relpath),
+        ]
+    )
+    for source_path in source_paths:
+        source_text = _annotation_read_text_within_root(source_path, dataset_root)
+        if source_text is not None:
+            return source_text.strip()
     return ""
 
 
@@ -15123,7 +15208,7 @@ def _annotation_manifest_for_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
         split = _annotation_normalise_split(row.get("split"))
         image_relpath = _annotation_normalise_image_relpath(row.get("image_relpath"))
         label_lines = _annotation_effective_label_lines(entry, split, image_relpath)
-        text_label = _annotation_effective_text_label(entry, image_relpath)
+        text_label = _annotation_effective_text_label(entry, image_relpath, split)
         manifest_rows.append(
             {
                 "split": split,
@@ -15362,7 +15447,11 @@ def _annotation_overlay_archive_entries(entry: Dict[str, Any]) -> Dict[str, Path
             if resolved is None:
                 continue
             rel = path.relative_to(text_root)
-            archive_entries[(Path("text_labels") / rel).as_posix()] = resolved
+            if layout == "split" and len(rel.parts) > 1 and rel.parts[0] in {"train", "val"}:
+                target_rel = Path(rel.parts[0]) / "text_labels" / Path(*rel.parts[1:])
+            else:
+                target_rel = Path("text_labels") / rel
+            archive_entries[target_rel.as_posix()] = resolved
     return archive_entries
 
 
@@ -15394,10 +15483,10 @@ def _persist_transient_overlays_to_entry(entry: Dict[str, Any], session: Dict[st
 
     for key, text_raw in overlay_text.items():
         try:
-            _split, rel = _annotation_overlay_key_to_split_rel(str(key))
+            split, rel = _annotation_overlay_key_to_split_rel(str(key))
         except Exception:
             continue
-        text_path = _annotation_overlay_text_path(entry, rel)
+        text_path = _annotation_overlay_text_path(entry, rel, split=split)
         overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
         _annotation_write_text_within_root(text_path, overlay_root, str(text_raw or "").strip())
 
@@ -15980,7 +16069,8 @@ def set_text_label(dataset_id: str, image_name: str, payload: Dict[str, Any]):
         image_name if "." in image_name else f"{image_name}.jpg"
     )
     caption = str(payload.get("caption") or "").strip()
-    text_path = _annotation_overlay_text_path(entry, image_relpath)
+    split = _annotation_normalise_split(payload.get("split")) if "split" in payload else None
+    text_path = _annotation_overlay_text_path(entry, image_relpath, split=split)
     overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
     _annotation_write_text_within_root(text_path, overlay_root, caption)
     return {"status": "saved", "caption": caption}
@@ -16308,7 +16398,7 @@ def save_dataset_annotation_snapshot(dataset_id: str, payload: Dict[str, Any]):
                 "\n".join(label_lines) + ("\n" if label_lines else ""),
             )
         if has_text_label:
-            text_path = _annotation_overlay_text_path(entry, rel)
+            text_path = _annotation_overlay_text_path(entry, rel, split=split)
             _annotation_write_text_within_root(text_path, overlay_root, text_value)
 
     if status_value:
@@ -16458,7 +16548,12 @@ def get_transient_annotation_manifest(session_id: str):
         if key in overlay_text:
             text_val = str(overlay_text.get(key) or "")
         else:
-            text_val = _annotation_source_text_value(dataset_root, rel)
+            text_val = _annotation_source_text_value(
+                dataset_root,
+                rel,
+                split=split,
+                yolo_layout=yolo_layout,
+            )
         rows.append(
             {
                 "split": split,

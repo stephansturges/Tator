@@ -311,6 +311,42 @@ def test_download_dataset_entry_applies_overlay_files(tmp_path, monkeypatch) -> 
         assert zf.read(text_name).decode("utf-8").strip() == "new"
 
 
+def test_download_split_dataset_applies_split_scoped_text_overlays(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _split_entry_for_annotation(tmp_path)
+    source_root = Path(entry["dataset_root"])
+    for split, old_text, new_text in (
+        ("train", "old train", "new train"),
+        ("val", "old val", "new val"),
+    ):
+        source_text = source_root / split / "text_labels"
+        source_text.mkdir(parents=True, exist_ok=True)
+        (source_text / "shared.txt").write_text(old_text, encoding="utf-8")
+        overlay_text = (
+            Path(entry["registry_root"])
+            / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+            / "text_labels"
+            / split
+        )
+        overlay_text.mkdir(parents=True, exist_ok=True)
+        (overlay_text / "shared.txt").write_text(new_text, encoding="utf-8")
+
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+
+    response = api.download_dataset_entry("ds")
+
+    with zipfile.ZipFile(Path(response.path), "r") as zf:
+        names = set(zf.namelist())
+        train_name = f"{source_root.name}/train/text_labels/shared.txt"
+        val_name = f"{source_root.name}/val/text_labels/shared.txt"
+        assert train_name in names
+        assert val_name in names
+        assert zf.read(train_name).decode("utf-8") == "new train"
+        assert zf.read(val_name).decode("utf-8") == "new val"
+        assert f"{source_root.name}/text_labels/train/shared.txt" not in names
+
+
 def test_download_dataset_entry_skips_dataset_symlink_escape(tmp_path, monkeypatch) -> None:
     source_root = tmp_path / "linked_source"
     (source_root / "images").mkdir(parents=True, exist_ok=True)
@@ -433,6 +469,26 @@ def _entry_for_annotation(tmp_path: Path) -> dict:
         "storage_mode": "linked",
         "linked_root": str(dataset_root),
         "yolo_layout": "flat",
+        "classes": ["car"],
+    }
+
+
+def _split_entry_for_annotation(tmp_path: Path) -> dict:
+    dataset_root = tmp_path / "dataset"
+    for split in ("train", "val"):
+        (dataset_root / split / "images").mkdir(parents=True, exist_ok=True)
+        (dataset_root / split / "labels").mkdir(parents=True, exist_ok=True)
+        _write_test_image(dataset_root / split / "images" / "shared.jpg")
+    registry_root = tmp_path / "registry" / "ds"
+    registry_root.mkdir(parents=True, exist_ok=True)
+    return {
+        "id": "ds",
+        "label": "ds",
+        "dataset_root": str(dataset_root),
+        "registry_root": str(registry_root),
+        "storage_mode": "linked",
+        "linked_root": str(dataset_root),
+        "yolo_layout": "split",
         "classes": ["car"],
     }
 
@@ -650,6 +706,53 @@ def test_persistent_snapshot_text_only_update_preserves_existing_label_overlay(
     assert label_path.read_text(encoding="utf-8") == "0 0.5 0.5 0.2 0.2\n"
     text_path = overlay_root / "text_labels" / "img.txt"
     assert text_path.read_text(encoding="utf-8") == "new caption"
+
+
+def test_split_snapshot_text_overlays_are_split_scoped(tmp_path, monkeypatch) -> None:
+    entry = _split_entry_for_annotation(tmp_path)
+    meta = {"annotation_lock": _active_lock("sess-lock")}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api, "_annotation_load_or_create_meta", lambda _entry: (Path("/tmp/meta.json"), meta)
+    )
+    monkeypatch.setattr(api, "_annotation_persist_meta", lambda _entry, _meta: None)
+
+    out = api.save_dataset_annotation_snapshot(
+        "ds",
+        {
+            "session_id": "sess-lock",
+            "records": [
+                {
+                    "split": "train",
+                    "image_relpath": "shared.jpg",
+                    "text_label": "train caption",
+                },
+                {
+                    "split": "val",
+                    "image_relpath": "shared.jpg",
+                    "text_label": "val caption",
+                },
+            ],
+        },
+    )
+
+    assert out["status"] == "saved"
+    overlay_root = Path(entry["registry_root"]) / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    assert (
+        overlay_root / "text_labels" / "train" / "shared.txt"
+    ).read_text(encoding="utf-8") == "train caption"
+    assert (
+        overlay_root / "text_labels" / "val" / "shared.txt"
+    ).read_text(encoding="utf-8") == "val caption"
+    assert not (overlay_root / "text_labels" / "shared.txt").exists()
+
+    manifest = api.get_dataset_annotation_manifest("ds")
+    captions = {
+        (row["split"], row["image_relpath"]): row["text_label"]
+        for row in manifest["images"]
+    }
+    assert captions[("train", "shared.jpg")] == "train caption"
+    assert captions[("val", "shared.jpg")] == "val caption"
 
 
 def test_persistent_snapshot_replaces_overlay_file_symlink_without_touching_target(

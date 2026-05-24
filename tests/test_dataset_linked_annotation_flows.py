@@ -704,6 +704,41 @@ def test_download_dataset_entry_applies_overlay_files(tmp_path, monkeypatch) -> 
         assert zf.read(text_name).decode("utf-8").strip() == "new"
 
 
+def test_download_linked_dataset_applies_registry_labelmap_override(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "linked_source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    (source_root / "labelmap.txt").write_text("old\n", encoding="utf-8")
+
+    record_root = tmp_path / "registry" / "ds_linked"
+    record_root.mkdir(parents=True, exist_ok=True)
+    registry_labelmap = record_root / "labelmap.txt"
+    registry_labelmap.write_text("old\nnew\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds_linked",
+            "dataset_root": str(source_root),
+            "registry_root": str(record_root),
+            "storage_mode": "linked",
+            "linked_root": str(source_root),
+            "yolo_layout": "flat",
+            "yolo_labelmap_path": str(registry_labelmap),
+            "labelmap_source": "registry_overlay",
+        },
+    )
+
+    response = api.download_dataset_entry("ds_linked")
+
+    with zipfile.ZipFile(Path(response.path), "r") as zf:
+        labelmap_name = f"{source_root.name}/labelmap.txt"
+        assert labelmap_name in set(zf.namelist())
+        assert zf.read(labelmap_name).decode("utf-8") == "old\nnew\n"
+
+
 def test_download_split_dataset_applies_split_scoped_text_overlays(
     tmp_path, monkeypatch
 ) -> None:
@@ -798,6 +833,44 @@ def test_download_dataset_entry_skips_overlay_symlink_escape(tmp_path, monkeypat
 
     with zipfile.ZipFile(Path(response.path), "r") as zf:
         assert f"{source_root.name}/labels/escape.txt" not in set(zf.namelist())
+
+
+def test_download_linked_dataset_rejects_symlinked_registry_labelmap(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "linked_source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    (source_root / "labelmap.txt").write_text("old\n", encoding="utf-8")
+    record_root = tmp_path / "registry" / "ds_linked"
+    record_root.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside_labelmap.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    registry_labelmap = record_root / "labelmap.txt"
+    try:
+        registry_labelmap.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds_linked",
+            "dataset_root": str(source_root),
+            "registry_root": str(record_root),
+            "storage_mode": "linked",
+            "linked_root": str(source_root),
+            "yolo_layout": "flat",
+            "yolo_labelmap_path": str(registry_labelmap),
+            "labelmap_source": "registry_overlay",
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.download_dataset_entry("ds_linked")
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "labelmap_path_forbidden"
 
 
 def test_set_dataset_glossary_for_linked_dataset_writes_registry_meta(

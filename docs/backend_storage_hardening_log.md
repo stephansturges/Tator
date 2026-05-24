@@ -1473,3 +1473,21 @@ preserving the exact validation story for storage and artifact-write fixes.
   browser regression (`1 passed`), and the full dataset annotation browser file
   (`8 passed`) passed. The full pytest suite also passed
   (`1207 passed, 20 skipped`).
+
+## 2026-05-24: Linked Dataset Export Labelmap Overrides
+
+- Made dataset ZIP export include linked-dataset registry labelmap overrides as
+  `labelmap.txt`, so downloads stay consistent with saved linked-dataset class
+  edits without mutating the user's source dataset.
+- Kept source files skipped when an override uses the same archive path, matching
+  existing label/text overlay behavior.
+- Rejected symlinked registry labelmap overrides during export instead of
+  silently falling back to the source labelmap.
+- Validation: `py_compile localinferenceapi.py
+  tests/test_dataset_linked_annotation_flows.py`, focused dataset export
+  regressions (`8 passed`), broader export/archive bundle (`110 passed`), and
+  the full pytest suite (`1209 passed, 20 skipped`) passed. The restarted
+  backend also passed the live UI endpoint map check with no missing paths or
+  method mismatches, live OpenAPI sanity (`tested=144`, `failures=[]`), and
+  `/data_ingestion/capabilities` returned `local_salad` with MLX C-RADIO
+  available.

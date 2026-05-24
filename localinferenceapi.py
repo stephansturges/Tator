@@ -16581,6 +16581,27 @@ def _annotation_overlay_archive_entries(entry: Dict[str, Any]) -> Dict[str, Path
     return archive_entries
 
 
+def _dataset_labelmap_archive_entries(entry: Dict[str, Any], dataset_root: Path) -> Dict[str, Path]:
+    storage_mode = str(entry.get("storage_mode") or "managed").strip().lower()
+    if storage_mode != "linked" or not entry.get("registry_root"):
+        return {}
+    storage_root = _dataset_guarded_meta_storage_root_from_entry(
+        entry,
+        ensure=False,
+        detail="labelmap_path_forbidden",
+    ).resolve()
+    labelmap_path = _annotation_labelmap_read_path(entry, dataset_root, storage_root)
+    if not labelmap_path.exists():
+        return {}
+    try:
+        resolved = labelmap_path.resolve(strict=True)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_forbidden") from exc
+    if not resolved.is_file() or not _path_is_within_root_impl(resolved, storage_root):
+        return {}
+    return {"labelmap.txt": resolved}
+
+
 def _persist_transient_overlays_to_entry(entry: Dict[str, Any], session: Dict[str, Any]) -> None:
     overlay_labels = (
         session.get("overlay_labels") if isinstance(session.get("overlay_labels"), dict) else {}
@@ -16834,12 +16855,13 @@ def download_dataset_entry(dataset_id: str):
     dataset_root = Path(entry.get("dataset_root") or "").resolve()
     if not dataset_root.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
-    overlay_entries = _annotation_overlay_archive_entries(entry)
+    override_entries = _annotation_overlay_archive_entries(entry)
+    override_entries.update(_dataset_labelmap_archive_entries(entry, dataset_root))
     tmp_dir = Path(tempfile.mkdtemp(prefix="dataset_export_"))
     try:
         zip_path = tmp_dir / f"{dataset_id}.zip"
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            overlay_relpaths = set(overlay_entries.keys())
+            override_relpaths = set(override_entries.keys())
             for path in dataset_root.rglob("*"):
                 if not path.is_file():
                     continue
@@ -16848,13 +16870,13 @@ def download_dataset_entry(dataset_id: str):
                 rel = path.relative_to(dataset_root)
                 if rel.parts and rel.parts[0] == DATASET_ANNOTATION_OVERLAY_DIRNAME:
                     continue
-                if rel.as_posix() in overlay_relpaths:
+                if rel.as_posix() in override_relpaths:
                     continue
                 zf.write(path, arcname=str(Path(dataset_root.name) / rel))
-            for rel_posix, overlay_path in sorted(overlay_entries.items()):
-                if not overlay_path.exists() or not overlay_path.is_file():
+            for rel_posix, override_path in sorted(override_entries.items()):
+                if not override_path.exists() or not override_path.is_file():
                     continue
-                zf.write(overlay_path, arcname=str(Path(dataset_root.name) / Path(rel_posix)))
+                zf.write(override_path, arcname=str(Path(dataset_root.name) / Path(rel_posix)))
         return FileResponse(
             path=str(zip_path),
             media_type="application/zip",

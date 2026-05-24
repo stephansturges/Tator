@@ -1817,7 +1817,13 @@ def _copy2_if_different(src: Path, dest: Path) -> None:
     _prepare_output_file(dest)
     if dest.exists() and src_resolved == _path_identity(dest):
         return
-    shutil.copy2(src_resolved, dest)
+    tmp_path = _prepare_atomic_output_file(dest)
+    try:
+        shutil.copy2(src_resolved, tmp_path)
+        os.replace(tmp_path, dest)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _copy_tree_filtered_impl(

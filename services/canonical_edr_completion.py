@@ -81,16 +81,32 @@ def _unlink_self_referential_symlink(path: Path) -> bool:
 
 def _copy2_if_different(src: Path, dest: Path) -> None:
     src_resolved = src.resolve()
-    if src_resolved == _path_identity(dest):
-        return
     if dest.is_symlink():
         dest.unlink(missing_ok=True)
+    elif src_resolved == _path_identity(dest):
+        return
     if _path_has_symlink_component(dest.parent):
         raise ValueError("canonical_copy_parent_symlink")
     dest.parent.mkdir(parents=True, exist_ok=True)
     if _path_has_symlink_component(dest.parent):
         raise ValueError("canonical_copy_parent_symlink")
-    shutil.copy2(src_resolved, dest)
+    parent_resolved = dest.parent.resolve(strict=True)
+    tmp_path = dest.with_suffix(dest.suffix + f".tmp.{os.getpid()}")
+    for candidate in (tmp_path, dest):
+        if candidate.is_symlink():
+            candidate.unlink(missing_ok=True)
+        elif candidate.exists() and candidate.is_dir():
+            raise ValueError("canonical_copy_target_is_directory")
+        try:
+            candidate.resolve(strict=False).relative_to(parent_resolved)
+        except Exception as exc:
+            raise ValueError("canonical_copy_path_not_allowed") from exc
+    try:
+        shutil.copy2(src_resolved, tmp_path)
+        os.replace(tmp_path, dest)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _canonical_slug(value: Any, *, fallback: str) -> str:

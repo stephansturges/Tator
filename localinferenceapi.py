@@ -2938,7 +2938,19 @@ def _startup_copy2_if_different(src: Path, dst: Path) -> None:
     if _storage_path_has_symlink_component(dst.parent):
         logger.warning("Skipped startup artifact copy through symlinked parent: %s", dst)
         return
-    shutil.copy2(src_resolved, dst)
+    tmp_path = dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
+    if tmp_path.is_symlink():
+        tmp_path.unlink(missing_ok=True)
+    elif tmp_path.exists():
+        if tmp_path.is_dir():
+            raise IsADirectoryError(str(tmp_path))
+        tmp_path.unlink()
+    try:
+        shutil.copy2(src_resolved, tmp_path)
+        os.replace(tmp_path, dst)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
 
 
 # Keep default CLIP artifacts usable with path allowlists by mirroring them into uploads/.
@@ -15589,17 +15601,29 @@ def _unlink_self_referential_symlink(path: Path) -> bool:
 
 def _copy2_if_different(src: Path, dest: Path) -> None:
     src_resolved = src.resolve()
-    if src_resolved == _path_identity(dest):
-        return
-    if _storage_path_has_symlink_component(dest.parent):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="artifact_path_invalid")
     if dest.is_symlink():
         dest.unlink(missing_ok=True)
         logger.warning("Removed artifact symlink before copy: %s", dest)
+    elif src_resolved == _path_identity(dest):
+        return
+    if _storage_path_has_symlink_component(dest.parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="artifact_path_invalid")
     dest.parent.mkdir(parents=True, exist_ok=True)
     if _storage_path_has_symlink_component(dest.parent):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="artifact_path_invalid")
-    shutil.copy2(src_resolved, dest)
+    tmp_path = dest.with_suffix(dest.suffix + f".tmp.{os.getpid()}")
+    if tmp_path.is_symlink():
+        tmp_path.unlink(missing_ok=True)
+    elif tmp_path.exists():
+        if tmp_path.is_dir():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="artifact_path_invalid")
+        tmp_path.unlink()
+    try:
+        shutil.copy2(src_resolved, tmp_path)
+        os.replace(tmp_path, dest)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _link_or_copy_file(src: Path, dest: Path, *, overwrite: bool = False) -> None:

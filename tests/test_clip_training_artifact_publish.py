@@ -299,6 +299,40 @@ def test_copy_helpers_replace_symlink_destination_without_target_write(tmp_path,
     assert outside.read_bytes() == b"external"
 
 
+@pytest.mark.parametrize(
+    "copy_fn, copy2_target",
+    [
+        (_api_copy2_if_different, "localinferenceapi.shutil.copy2"),
+        (_canonical_copy2_if_different, "services.canonical_edr_completion.shutil.copy2"),
+        (_detector_copy2_if_different, "services.detectors.shutil.copy2"),
+        (_edr_copy2_if_different, "services.edr_packages.shutil.copy2"),
+        (_prepass_copy2_if_different, "services.prepass_recipes.shutil.copy2"),
+    ],
+)
+def test_copy_helpers_remove_partial_temp_after_copy_failure(
+    tmp_path,
+    monkeypatch,
+    copy_fn,
+    copy2_target,
+):
+    source = tmp_path / "source.bin"
+    dest = tmp_path / "dest.bin"
+    tmp_dest = dest.with_suffix(dest.suffix + f".tmp.{os.getpid()}")
+    source.write_bytes(b"payload")
+
+    def _failing_copy2(_src, target):
+        target.write_bytes(b"partial")
+        raise OSError("simulated copy failure")
+
+    monkeypatch.setattr(copy2_target, _failing_copy2)
+
+    with pytest.raises(OSError, match="simulated copy failure"):
+        copy_fn(source, dest)
+
+    assert not dest.exists()
+    assert not tmp_dest.exists()
+
+
 def test_api_copy_helper_rejects_nested_symlinked_parent_before_mkdir(tmp_path):
     source = tmp_path / "source.bin"
     source.write_bytes(b"payload")
@@ -331,6 +365,25 @@ def test_startup_copy_helper_replaces_symlink_destination_without_target_write(t
     assert dest.read_bytes() == b"payload"
     assert not dest.is_symlink()
     assert outside.read_bytes() == b"external"
+
+
+def test_startup_copy_helper_removes_partial_temp_after_copy_failure(tmp_path, monkeypatch):
+    source = tmp_path / "source.bin"
+    dest = tmp_path / "dest.bin"
+    tmp_dest = dest.with_suffix(dest.suffix + f".tmp.{os.getpid()}")
+    source.write_bytes(b"payload")
+
+    def _failing_copy2(_src, target):
+        target.write_bytes(b"partial")
+        raise OSError("simulated startup copy failure")
+
+    monkeypatch.setattr("localinferenceapi.shutil.copy2", _failing_copy2)
+
+    with pytest.raises(OSError, match="simulated startup copy failure"):
+        _startup_copy2_if_different(source, dest)
+
+    assert not dest.exists()
+    assert not tmp_dest.exists()
 
 
 def test_startup_copy_helper_skips_nested_symlinked_parent_before_mkdir(tmp_path):

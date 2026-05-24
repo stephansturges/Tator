@@ -858,3 +858,16 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1115 passed, 17 skipped`; focused detector metadata/lifecycle
   coverage, `services/detectors.py` compile, the full pytest suite, and live
   endpoint sanity checks passed against the restarted backend.
+
+## 2026-05-24: Shared Artifact Copy Atomic Saves
+
+- Changed API, startup, canonical EDR completion, EDR package, and prepass recipe
+  artifact copy helpers from direct final-path `copy2` calls to temp-file copies
+  followed by atomic replace.
+- Preserved existing source-is-destination no-op handling, symlink leaf
+  replacement, and symlinked parent rejection/skip behavior.
+- Added parameterized regressions proving copy failures leave no partial final
+  artifact or temp file behind across the shared copy helpers.
+- Validation: `1121 passed, 17 skipped`; focused copy-helper/prepass/EDR/
+  canonical coverage, compile checks for changed modules, and the full pytest
+  suite passed; live endpoint sanity checks passed against the restarted backend.

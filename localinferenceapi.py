@@ -21258,8 +21258,18 @@ def delete_qwen_dataset(dataset_id: str):
             status_code=HTTP_409_CONFLICT,
             detail=f"qwen_dataset_delete_blocked_active_jobs:{blocking_registry}",
         )
-    shutil.rmtree(dataset_root, ignore_errors=True)
-    return {"status": "deleted", "id": dataset_id}
+    return _soft_delete_managed_dataset_tree(
+        dataset_path,
+        [QWEN_DATASET_ROOT],
+        dataset_id=raw_id,
+        entry={
+            "id": raw_id,
+            "label": raw_id,
+            "dataset_root": str(dataset_root),
+            "source": "qwen",
+            "storage_mode": "managed",
+        },
+    )
 
 
 def init_qwen_dataset_upload(run_name: Optional[str]) -> Dict[str, Any]:

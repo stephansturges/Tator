@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -264,6 +265,46 @@ def test_delete_qwen_dataset_rejects_symlinked_dataset_id_without_target_delete(
     assert excinfo.value.status_code == 400
     assert excinfo.value.detail == "qwen_dataset_delete_forbidden"
     assert (target_root / "payload.bin").read_bytes() == b"target"
+
+
+def test_delete_qwen_dataset_moves_to_managed_trash_and_restores(
+    tmp_path: Path, monkeypatch
+) -> None:
+    qwen_root = tmp_path / "qwen_datasets"
+    dataset_root = qwen_root / "demo"
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    (dataset_root / "payload.bin").write_bytes(b"qwen")
+    (dataset_root / api.QWEN_METADATA_FILENAME).write_text(
+        json.dumps({"id": "demo", "label": "Demo Qwen"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", tmp_path / "registry")
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "sam3_datasets")
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", qwen_root)
+
+    out = api.delete_qwen_dataset("demo")
+
+    assert out["status"] == "trashed"
+    assert out["storage_mode"] == "managed"
+    assert out["restore_available"] is True
+    assert not dataset_root.exists()
+    trash_entries = api.list_dataset_trash_entries()
+    assert [entry["trash_id"] for entry in trash_entries] == [out["trash_id"]]
+    assert trash_entries[0]["source"] == "qwen"
+    assert Path(trash_entries[0]["dataset_path"], "payload.bin").read_bytes() == b"qwen"
+
+    restored = api.restore_dataset_trash_entry(out["trash_id"])
+
+    assert restored["status"] == "restored"
+    assert restored["id"] == "demo"
+    assert dataset_root.exists()
+    assert (dataset_root / "payload.bin").read_bytes() == b"qwen"
+    restored_meta = json.loads(
+        (dataset_root / api.QWEN_METADATA_FILENAME).read_text(encoding="utf-8")
+    )
+    assert restored_meta["id"] == "demo"
+    assert restored_meta["restored_from_trash_id"] == out["trash_id"]
+    assert api.list_dataset_trash_entries() == []
 
 
 def test_delete_dataset_entry_blocks_active_training_reference(

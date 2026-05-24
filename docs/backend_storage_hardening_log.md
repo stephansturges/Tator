@@ -1300,3 +1300,20 @@ preserving the exact validation story for storage and artifact-write fixes.
   suite passed. Restarted backend on `127.0.0.1:8000` and live-checked
   `/datasets`, `/datasets/trash`, `/data_ingestion/capabilities`, OpenAPI route
   methods for the trash endpoints, and UI endpoint method matching.
+
+## 2026-05-24: Qwen Dataset Delete Joins Trash/Restore
+
+- Routed `DELETE /qwen/datasets/{dataset_id}` through the same managed
+  dataset trash/restore path used by Dataset Management deletes.
+- Preserved the active-training guard and symlink rejection before any move, so
+  Qwen datasets referenced by running jobs stay protected and symlinked dataset
+  entries cannot redirect deletion.
+- Added regression coverage proving Qwen dataset delete moves the dataset into
+  managed trash and restores it with `metadata.json` updated.
+- Validation: `1188 passed, 17 skipped`; focused Qwen lifecycle and dataset
+  trash/route/UI contract coverage (`100 passed`), `py_compile
+  localinferenceapi.py api/qwen_datasets.py api/datasets.py`,
+  `node --check ybat-master/ybat.js`, `git diff --check`, and the full pytest
+  suite passed. Restarted backend on `127.0.0.1:8000` and live-checked
+  `/qwen/datasets`, `/datasets/trash`, OpenAPI route methods for Qwen/trash
+  deletes, and UI endpoint method matching.

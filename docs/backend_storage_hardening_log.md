@@ -255,3 +255,12 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Added a prepare-level regression for nested symlinked SAM3 job-root parents.
 - Validation: `1024 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Detector Runtime Tree Copy Parents
+
+- Rejected symlink components in nested detector tree-copy destination parents
+  before creating directories inside staged YOLO/RF-DETR runtime trees.
+- Added a regression for internal symlinked destination parents inside an
+  otherwise valid detector copy root.
+- Validation: `1025 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

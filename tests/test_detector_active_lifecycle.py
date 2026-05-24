@@ -441,6 +441,26 @@ def test_detector_copy_tree_rejects_symlinked_dest_parent_without_target_write(
     assert list(outside.iterdir()) == []
 
 
+def test_detector_copy_tree_rejects_internal_symlinked_dest_parent_without_target_write(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "src"
+    (src / "linked_parent").mkdir(parents=True)
+    (src / "linked_parent" / "safe.txt").write_text("safe", encoding="utf-8")
+    dest = tmp_path / "dest"
+    actual = dest / "actual"
+    actual.mkdir(parents=True)
+    try:
+        (dest / "linked_parent").symlink_to(actual, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(RuntimeError, match="detector_path_invalid"):
+        _copy_tree_within_root(src, dest)
+
+    assert list(actual.iterdir()) == []
+
+
 def test_yolo_prune_run_dir_unlinks_symlink_directory_without_target_delete(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()

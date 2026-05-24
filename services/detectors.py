@@ -175,7 +175,9 @@ def _copy_tree_within_root(src: Path, dest: Path) -> None:
             target.parent.resolve(strict=False).relative_to(dest_root)
         except Exception:
             continue
+        _ensure_no_symlink_components(target.parent)
         target.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_no_symlink_components(target.parent)
         _copy2_if_different(item_resolved, target)
 
 

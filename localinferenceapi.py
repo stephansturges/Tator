@@ -24936,6 +24936,65 @@ def _find_qwen_split_image_source(
     return None
 
 
+def _qwen_training_clean_cuda_devices(devices: Optional[str]) -> Optional[str]:
+    raw = str(devices or "").strip()
+    if not raw:
+        return None
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for part in raw.split(","):
+        value_raw = part.strip()
+        if not value_raw:
+            continue
+        if not re.fullmatch(r"\d+", value_raw):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_invalid_devices")
+        value = str(int(value_raw))
+        if value in seen:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_duplicate_devices")
+        seen.add(value)
+        cleaned.append(value)
+    return ",".join(cleaned) if cleaned else None
+
+
+def _resolve_qwen_training_devices(
+    devices: Optional[str],
+    *,
+    runtime_platform: str,
+    prep_logs: Optional[List[str]] = None,
+) -> Optional[str]:
+    raw = str(devices or "").strip()
+    if not raw:
+        return None
+    if runtime_platform == QWEN_PLATFORM_MLX:
+        if prep_logs is not None:
+            prep_logs.append("Ignoring CUDA device selection for MLX Qwen training")
+        return None
+    cleaned = _qwen_training_clean_cuda_devices(raw)
+    if not cleaned:
+        return None
+    if not torch.cuda.is_available():
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="qwen_cuda_devices_unavailable",
+        )
+    try:
+        device_count = int(torch.cuda.device_count())
+    except Exception:
+        device_count = 0
+    if device_count <= 0:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="qwen_cuda_devices_unavailable",
+        )
+    invalid = [int(value) for value in cleaned.split(",") if int(value) >= device_count]
+    if invalid:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"qwen_invalid_devices:available=0-{device_count - 1}",
+        )
+    return cleaned
+
+
 def _build_qwen_config(
     payload: QwenTrainRequest, job_id: str, prep_logs: Optional[List[str]] = None
 ) -> QwenTrainingConfig:
@@ -25044,6 +25103,11 @@ def _build_qwen_config(
     )
     if max_pixels < min_pixels:
         max_pixels = max(min_pixels, 28 * 28 * 576)
+    qwen_devices = _resolve_qwen_training_devices(
+        payload.devices,
+        runtime_platform=requested_runtime_platform,
+        prep_logs=prep_logs,
+    )
     kwargs = {
         "dataset_root": str(dataset_root),
         "result_path": str(result_path),
@@ -25054,7 +25118,7 @@ def _build_qwen_config(
         "training_mode": payload.training_mode or "official_lora",
         "system_prompt": payload.system_prompt or DEFAULT_SYSTEM_PROMPT,
         "run_name": run_name,
-        "devices": payload.devices,
+        "devices": qwen_devices,
         "batch_size": _qwen_train_int(payload.batch_size, 1, minimum=1, maximum=128),
         "max_epochs": _qwen_train_int(payload.max_epochs, 3, minimum=1, maximum=10000),
         "lr": _qwen_train_float(payload.lr, 2e-4, minimum=1e-9, maximum=1.0),

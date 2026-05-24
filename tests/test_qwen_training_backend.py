@@ -94,6 +94,33 @@ def test_qwen_training_clears_temporary_cuda_visible_devices_on_error(monkeypatc
     )
 
 
+def test_qwen_mlx_training_does_not_touch_cuda_visible_devices(monkeypatch, tmp_path):
+    observed = {}
+
+    def fake_train(config, progress_cb=None, cancel_cb=None, metrics_cb=None):
+        observed["cuda_visible"] = os.environ.get("CUDA_VISIBLE_DEVICES")
+        return training.QwenTrainingResult(
+            config=config,
+            checkpoints=[],
+            latest_checkpoint=None,
+            epochs_ran=0,
+        )
+
+    monkeypatch.setattr(training, "_train_mlx_lora", fake_train)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    config = training.QwenTrainingConfig(
+        dataset_root=str(tmp_path / "dataset"),
+        result_path=str(tmp_path / "run"),
+        runtime_platform=training.QWEN_PLATFORM_MLX,
+        devices="2",
+    )
+
+    training.train_qwen_model(config)
+
+    assert observed["cuda_visible"] == "0,1"
+    assert os.environ.get("CUDA_VISIBLE_DEVICES") == "0,1"
+
+
 def test_qwen_training_image_resolver_rejects_traversal(tmp_path):
     dataset_root = tmp_path / "dataset"
     image_dir = dataset_root / "train" / "images"

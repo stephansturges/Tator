@@ -1249,3 +1249,19 @@ preserving the exact validation story for storage and artifact-write fixes.
   job-start coverage, `py_compile services/detectors.py localinferenceapi.py`,
   `git diff --check`, the full pytest suite, and live endpoint
   map/method/OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Qwen Training Device Handling
+
+- Added backend validation for Qwen Transformers training CUDA device strings,
+  rejecting unavailable, duplicate, invalid, or out-of-range CUDA IDs during
+  config construction instead of letting `CUDA_VISIBLE_DEVICES` drift into the
+  worker.
+- Cleared CUDA-only device selections for MLX Qwen training and made the
+  training runner leave `CUDA_VISIBLE_DEVICES` untouched for MLX runs.
+- Added config-level coverage for CUDA device normalization/rejection and
+  MLX-device clearing, plus runner coverage proving MLX training does not
+  mutate the CUDA environment.
+- Validation: `1180 passed, 17 skipped`; focused Qwen runtime/training/backend
+  job-start coverage, `py_compile localinferenceapi.py tools/qwen_training.py`,
+  `git diff --check`, the full pytest suite, and live endpoint
+  map/method/OpenAPI sanity checks passed against the restarted backend.

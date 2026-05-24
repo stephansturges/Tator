@@ -1149,7 +1149,7 @@ def train_qwen_model(
 ) -> QwenTrainingResult:
     previous_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     cuda_visible_changed = False
-    if config.devices:
+    if config.runtime_platform != QWEN_PLATFORM_MLX and config.devices:
         cleaned = ",".join(part.strip() for part in str(config.devices).split(",") if part.strip())
         if cleaned:
             os.environ["CUDA_VISIBLE_DEVICES"] = cleaned

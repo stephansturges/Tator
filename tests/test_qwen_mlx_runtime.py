@@ -8,6 +8,15 @@ from PIL import Image
 import localinferenceapi as api
 
 
+def _fake_torch(*, cuda: bool = False, cuda_count: int = 0):
+    return SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: cuda,
+            device_count=lambda: cuda_count,
+        )
+    )
+
+
 def _make_qwen_train_dataset(tmp_path, monkeypatch):
     qwen_root = tmp_path / "qwen"
     dataset_root = qwen_root / "demo"
@@ -210,6 +219,63 @@ def test_qwen_training_config_clamps_direct_api_numeric_knobs(tmp_path, monkeypa
     assert config.seed == 1337
     assert config.train_limit is None
     assert config.val_limit is None
+
+
+def test_qwen_training_config_rejects_cuda_devices_when_cuda_absent(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_dataset(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "torch", _fake_torch(cuda=False, cuda_count=0))
+
+    payload = api.QwenTrainRequest(
+        dataset_id="demo",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        devices="0",
+    )
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._build_qwen_config(payload, "job-no-cuda")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "qwen_cuda_devices_unavailable"
+
+
+def test_qwen_training_config_normalizes_cuda_devices(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_dataset(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "torch", _fake_torch(cuda=True, cuda_count=2))
+
+    payload = api.QwenTrainRequest(
+        dataset_id="demo",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        devices=" 0, 01 ",
+    )
+    config = api._build_qwen_config(payload, "job-cuda-devices")
+
+    assert config.devices == "0,1"
+
+
+def test_qwen_training_config_rejects_out_of_range_cuda_devices(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_dataset(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "torch", _fake_torch(cuda=True, cuda_count=1))
+
+    payload = api.QwenTrainRequest(
+        dataset_id="demo",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        devices="1",
+    )
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._build_qwen_config(payload, "job-bad-cuda-devices")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "qwen_invalid_devices:available=0-0"
 
 
 def test_qwen_training_config_random_split_materializes_qwen_split(tmp_path, monkeypatch):
@@ -702,6 +768,26 @@ def test_qwen_training_config_accepts_mlx_model(tmp_path, monkeypatch):
     assert config.model_id == "mlx-community/Qwen3-VL-4B-Instruct-4bit"
     assert config.training_mode == "trl_qlora"
     assert config.accumulate_grad_batches == 1
+
+
+def test_qwen_training_config_ignores_cuda_devices_for_mlx_model(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    _make_qwen_train_dataset(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "torch", _fake_torch(cuda=False, cuda_count=0))
+    logs = []
+
+    payload = api.QwenTrainRequest(
+        dataset_id="demo",
+        model_id="mlx-community/Qwen3-VL-4B-Instruct-4bit",
+        devices="0",
+    )
+    config = api._build_qwen_config(payload, "job-mlx-devices", logs)
+
+    assert config.runtime_platform == api.QWEN_PLATFORM_MLX
+    assert config.devices is None
+    assert "Ignoring CUDA device selection for MLX Qwen training" in logs
 
 
 def test_qwen_mlx_runtime_loads_adapter_path(monkeypatch, tmp_path):

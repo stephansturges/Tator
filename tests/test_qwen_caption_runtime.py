@@ -1,7 +1,7 @@
 from collections import deque
 import threading
 
-from services.qwen_runtime import _ensure_qwen_ready_for_caption_impl
+from services.qwen_runtime import _ensure_qwen_ready_for_caption_impl, _unload_qwen_runtime_impl
 
 
 class _CudaUnavailable:
@@ -36,8 +36,17 @@ class _ProcessorStub:
 
 
 class _LoggerStub:
+    def info(self, *args, **kwargs):
+        return None
+
     def warning(self, *args, **kwargs):
         return None
+
+
+class _GcStub:
+    @staticmethod
+    def collect():
+        return 0
 
 
 def _load_caption_runtime_with_fallback(cache_limit):
@@ -99,3 +108,31 @@ def test_caption_runtime_fallback_respects_disabled_cache():
     assert list(state["qwen_caption_order"]) == []
     assert state["qwen_caption_cache"] == {}
     assert evicted == []
+
+
+def test_unload_qwen_runtime_clears_stale_error_and_caption_cache():
+    state = {
+        "qwen_model": object(),
+        "qwen_processor": object(),
+        "qwen_device": "cpu",
+        "loaded_qwen_model_id": "Qwen/test",
+        "qwen_last_error": "previous failure",
+        "qwen_caption_cache": {"caption:key": ("model", "processor")},
+        "qwen_caption_order": deque(["caption:key"]),
+    }
+
+    _unload_qwen_runtime_impl(
+        state=state,
+        torch_module=_TorchStub(),
+        gc_module=_GcStub(),
+        logger=_LoggerStub(),
+        deque_factory=deque,
+    )
+
+    assert state["qwen_model"] is None
+    assert state["qwen_processor"] is None
+    assert state["qwen_device"] is None
+    assert state["loaded_qwen_model_id"] is None
+    assert state["qwen_last_error"] is None
+    assert state["qwen_caption_cache"] == {}
+    assert list(state["qwen_caption_order"]) == []

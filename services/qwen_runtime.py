@@ -43,6 +43,7 @@ def _unload_qwen_runtime_impl(
     state["qwen_model"] = None
     state["qwen_processor"] = None
     state["loaded_qwen_model_id"] = None
+    state["qwen_last_error"] = None
     state["qwen_caption_cache"] = {}
     state["qwen_caption_order"] = deque_factory()
     cuda_alloc: Optional[int] = None

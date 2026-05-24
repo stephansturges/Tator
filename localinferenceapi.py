@@ -6038,13 +6038,14 @@ def _ensure_qwen_ready():
 
 def _unload_qwen_runtime() -> None:
     """Release Qwen model/processor to free device memory."""
-    global qwen_model, qwen_processor, qwen_device, loaded_qwen_model_id
+    global qwen_model, qwen_processor, qwen_device, qwen_last_error, loaded_qwen_model_id
     global qwen_runtime_platform, qwen_loaded_effective_model_id, qwen_runtime_config
     global qwen_caption_cache, qwen_caption_order
     state = {
         "qwen_model": qwen_model,
         "qwen_processor": qwen_processor,
         "qwen_device": qwen_device,
+        "qwen_last_error": qwen_last_error,
         "loaded_qwen_model_id": loaded_qwen_model_id,
         "qwen_caption_cache": qwen_caption_cache,
         "qwen_caption_order": qwen_caption_order,
@@ -6059,6 +6060,7 @@ def _unload_qwen_runtime() -> None:
     qwen_model = state["qwen_model"]
     qwen_processor = state["qwen_processor"]
     qwen_device = state["qwen_device"]
+    qwen_last_error = state["qwen_last_error"]
     loaded_qwen_model_id = state["loaded_qwen_model_id"]
     qwen_runtime_platform = None
     qwen_loaded_effective_model_id = None

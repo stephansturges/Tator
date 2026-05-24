@@ -1087,3 +1087,16 @@ preserving the exact validation story for storage and artifact-write fixes.
   preload coverage, `localinferenceapi.py` compile, `git diff --check`, the
   full pytest suite, and live endpoint sanity checks passed against the
   restarted backend.
+
+## 2026-05-24: Qwen Runtime Unload Error Reset
+
+- Cleared `qwen_last_error` during Qwen runtime unload so `/qwen/status` does
+  not keep reporting stale failures after the user explicitly unloads the model.
+- Propagated that reset through the top-level backend unload wrapper alongside
+  model, processor, device, and caption-cache state.
+- Added focused coverage for unload clearing the model state, stale error, and
+  caption LRU cache.
+- Validation: `1158 passed, 17 skipped`; focused Qwen runtime coverage,
+  `localinferenceapi.py` and `services/qwen_runtime.py` compile,
+  `git diff --check`, the full pytest suite, and live endpoint sanity checks
+  passed against the restarted backend.

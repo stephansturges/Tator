@@ -586,13 +586,10 @@ Broader suites are organized by feature area under `tests/`. UI tests live in
 the backend are available.
 
 <details>
-<summary><strong>Update Tracking</strong></summary>
+<summary>Update Tracking</summary>
 
-Current validation baseline: `1098 passed, 17 skipped`.
-
-Maintainer-level storage and backend hardening notes are tracked in
+`1100 passed, 17 skipped`. Maintainer notes:
 [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
-
 </details>
 
 ## Runtime Artifacts

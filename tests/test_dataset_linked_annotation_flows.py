@@ -983,6 +983,41 @@ def test_persistent_snapshot_rejects_overlay_parent_symlink_escape(
     assert not (outside_dir / "img.txt").exists()
 
 
+def test_annotation_overlay_text_write_is_atomic_over_symlink_leaves(
+    tmp_path, monkeypatch
+) -> None:
+    class FixedUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    overlay_root = tmp_path / "overlay"
+    overlay_root.mkdir()
+    label_path = overlay_root / "labels" / "train" / "img.txt"
+    label_path.parent.mkdir(parents=True)
+    tmp_path_link = label_path.with_suffix(f"{label_path.suffix}.{FixedUUID.hex}.tmp")
+    outside_tmp = tmp_path / "outside_tmp.txt"
+    outside_final = tmp_path / "outside_final.txt"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    try:
+        tmp_path_link.symlink_to(outside_tmp)
+        label_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: FixedUUID())
+
+    api._annotation_write_text_within_root(
+        label_path,
+        overlay_root,
+        "0 0.5 0.5 0.1 0.1\n",
+    )
+
+    assert not tmp_path_link.exists()
+    assert not label_path.is_symlink()
+    assert label_path.read_text(encoding="utf-8") == "0 0.5 0.5 0.1 0.1\n"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
+
+
 def test_persistent_snapshot_rejects_overlay_ancestor_symlink_escape(
     tmp_path, monkeypatch
 ) -> None:
@@ -1162,6 +1197,36 @@ def test_persistent_meta_patch_rejects_labelmap_path_outside_dataset_roots(
     assert exc.value.detail == "labelmap_path_forbidden"
     assert not outside.exists()
     assert set(meta) == {"annotation_lock"}
+
+
+def test_annotation_labelmap_write_is_atomic_over_symlink_leaves(
+    tmp_path, monkeypatch
+) -> None:
+    class FixedUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    labelmap_path = dataset_root / "labelmap.txt"
+    tmp_path_link = labelmap_path.with_suffix(f"{labelmap_path.suffix}.{FixedUUID.hex}.tmp")
+    outside_tmp = tmp_path / "outside_tmp.txt"
+    outside_final = tmp_path / "outside_final.txt"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    try:
+        tmp_path_link.symlink_to(outside_tmp)
+        labelmap_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: FixedUUID())
+
+    api._annotation_write_labelmap_file(labelmap_path, [dataset_root.resolve()], ["car", "truck"])
+
+    assert not tmp_path_link.exists()
+    assert not labelmap_path.is_symlink()
+    assert labelmap_path.read_text(encoding="utf-8") == "car\ntruck\n"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
 
 
 def test_persistent_meta_patch_rejects_symlinked_registry_parent_before_metadata_write(

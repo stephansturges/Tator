@@ -14903,6 +14903,7 @@ def _annotation_labelmap_read_path(
 def _annotation_write_labelmap_file(
     labelmap_path: Path, allowed_roots: Sequence[Path], labels: Sequence[str]
 ) -> None:
+    tmp_path = labelmap_path.with_suffix(f"{labelmap_path.suffix}.{uuid.uuid4().hex}.tmp")
     try:
         if _storage_path_has_symlink_component(labelmap_path.parent):
             raise ValueError("labelmap parent has a symlink component")
@@ -14912,14 +14913,16 @@ def _annotation_write_labelmap_file(
         parent_resolved = labelmap_path.parent.resolve(strict=True)
         if not any(_path_is_within_root_impl(parent_resolved, root) for root in allowed_roots):
             raise ValueError("labelmap parent escapes allowed roots")
-        if labelmap_path.is_symlink():
-            labelmap_path.unlink(missing_ok=True)
-        elif labelmap_path.exists() and labelmap_path.is_dir():
-            raise ValueError("labelmap target is a directory")
-        target_resolved = labelmap_path.resolve(strict=False)
-        if not any(_path_is_within_root_impl(target_resolved, root) for root in allowed_roots):
-            raise ValueError("labelmap target escapes allowed roots")
-        labelmap_path.write_text("\n".join(labels) + "\n", encoding="utf-8")
+        for candidate in (tmp_path, labelmap_path):
+            if candidate.is_symlink():
+                candidate.unlink(missing_ok=True)
+            elif candidate.exists() and candidate.is_dir():
+                raise ValueError("labelmap target is a directory")
+            target_resolved = candidate.resolve(strict=False)
+            if not any(_path_is_within_root_impl(target_resolved, root) for root in allowed_roots):
+                raise ValueError("labelmap target escapes allowed roots")
+        tmp_path.write_text("\n".join(labels) + "\n", encoding="utf-8")
+        os.replace(tmp_path, labelmap_path)
     except HTTPException:
         raise
     except Exception as exc:
@@ -14927,6 +14930,9 @@ def _annotation_write_labelmap_file(
             status_code=HTTP_400_BAD_REQUEST,
             detail="labelmap_path_forbidden",
         ) from exc
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _validate_linked_dataset_path(path_str: str) -> Path:
@@ -15117,6 +15123,7 @@ def _annotation_read_text_within_root(path: Path, root: Path) -> Optional[str]:
 
 def _annotation_write_text_within_root(path: Path, root: Path, text: str) -> None:
     root_resolved = root.resolve()
+    tmp_path = path.with_suffix(f"{path.suffix}.{uuid.uuid4().hex}.tmp")
     if _storage_path_has_symlink_component(root) or _storage_path_has_symlink_component(path.parent):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_overlay_path_forbidden")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -15128,17 +15135,32 @@ def _annotation_write_text_within_root(path: Path, root: Path, text: str) -> Non
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_overlay_path_forbidden") from exc
     if not _path_is_within_root_impl(parent_resolved, root_resolved):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_overlay_path_forbidden")
-    if path.is_symlink():
-        path.unlink(missing_ok=True)
-    elif path.exists() and path.is_dir():
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_overlay_path_forbidden")
     try:
-        target_resolved = path.resolve(strict=False)
-    except Exception as exc:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_overlay_path_forbidden") from exc
-    if not _path_is_within_root_impl(target_resolved, root_resolved):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="annotation_overlay_path_forbidden")
-    path.write_text(text, encoding="utf-8")
+        for candidate in (tmp_path, path):
+            if candidate.is_symlink():
+                candidate.unlink(missing_ok=True)
+            elif candidate.exists() and candidate.is_dir():
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="annotation_overlay_path_forbidden",
+                )
+            try:
+                target_resolved = candidate.resolve(strict=False)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="annotation_overlay_path_forbidden",
+                ) from exc
+            if not _path_is_within_root_impl(target_resolved, root_resolved):
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="annotation_overlay_path_forbidden",
+                )
+        tmp_path.write_text(text, encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _annotation_effective_label_lines(

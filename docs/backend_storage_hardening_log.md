@@ -704,3 +704,14 @@ preserving the exact validation story for storage and artifact-write fixes.
   targets.
 - Validation: `1098 passed, 17 skipped`; focused recipe persistence coverage
   and the full pytest suite passed.
+
+## 2026-05-24: Annotation Overlay and Labelmap Atomic Saves
+
+- Switched linked-dataset annotation overlay text writes from direct final-path
+  writes to guarded temp-file writes followed by atomic replace.
+- Switched annotation labelmap saves through the same guarded temp/replace
+  pattern while preserving the dataset/metadata-root containment checks.
+- Added regressions proving overlay text and labelmap temp/final symlink leaves
+  are replaced without mutating external targets.
+- Validation: `1100 passed, 17 skipped`; focused linked annotation coverage and
+  the full pytest suite passed.

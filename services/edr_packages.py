@@ -68,9 +68,21 @@ def _path_within_root(path: Path, root: Path) -> bool:
     return True
 
 
+def _path_has_symlink_component(path: Path) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    checks = [candidate]
+    checks.extend(candidate.parents)
+    for component in checks:
+        if component == component.parent:
+            continue
+        if component.is_symlink():
+            return True
+    return False
+
+
 def _prepare_output_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.is_symlink():
+    if _path_has_symlink_component(path.parent):
         raise RuntimeError("edr_package_path_invalid")
     parent_resolved = path.parent.resolve(strict=True)
     if path.is_symlink():
@@ -189,15 +201,15 @@ def canonical_edr_package_id(dataset_id: str, recipe_fingerprint: str) -> str:
 
 
 def _edr_packages_storage_root(packages_root: Path, *, create: bool = False) -> Path:
-    if packages_root.is_symlink() or packages_root.parent.is_symlink():
+    if _path_has_symlink_component(packages_root):
         raise ValueError("edr_package_path_invalid")
     if create:
         packages_root.mkdir(parents=True, exist_ok=True)
-        if packages_root.is_symlink() or packages_root.parent.is_symlink():
+        if _path_has_symlink_component(packages_root):
             raise ValueError("edr_package_path_invalid")
     if packages_root.exists() and not packages_root.is_dir():
         raise ValueError("edr_package_path_invalid")
-    if packages_root.is_symlink() or packages_root.parent.is_symlink():
+    if _path_has_symlink_component(packages_root):
         raise ValueError("edr_package_path_invalid")
     return packages_root.resolve(strict=False)
 
@@ -854,10 +866,10 @@ def _write_stage_meta(dest: Path, *, package_id: str, package_sha256: str, kind:
 
 
 def _prepare_runtime_stage_root(stage_root: Path) -> Path:
-    if stage_root.is_symlink() or stage_root.parent.is_symlink():
+    if _path_has_symlink_component(stage_root):
         raise RuntimeError("edr_package_path_invalid")
     stage_root.mkdir(parents=True, exist_ok=True)
-    if stage_root.is_symlink() or stage_root.parent.is_symlink() or not stage_root.is_dir():
+    if _path_has_symlink_component(stage_root) or not stage_root.is_dir():
         raise RuntimeError("edr_package_path_invalid")
     return stage_root.resolve(strict=True)
 

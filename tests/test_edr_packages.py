@@ -391,6 +391,23 @@ def test_edr_package_dir_rejects_symlinked_packages_parent_without_write(
     assert list(outside.iterdir()) == []
 
 
+def test_edr_package_dir_rejects_nested_symlinked_packages_parent_without_write(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    packages_parent = tmp_path / "linked_parent"
+    try:
+        packages_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(ValueError, match="edr_package_path_invalid"):
+        edr_package_dir(packages_parent / "nested" / "edr_packages", "pkg1", create=True)
+
+    assert list(outside.iterdir()) == []
+
+
 def test_edr_package_dir_rejects_symlink_package_dir_escape(tmp_path: Path) -> None:
     packages_root = tmp_path / "edr_packages"
     packages_root.mkdir()
@@ -623,6 +640,32 @@ def test_stage_tree_rejects_symlinked_stage_parent_without_target_write(
         _stage_tree_if_needed(
             src,
             stage_parent / "yolo_runs" / "pkg1__yolo",
+            package_id="pkg1",
+            package_sha256="sha",
+            kind="yolo_run",
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_stage_tree_rejects_nested_symlinked_stage_parent_without_target_write(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "safe.txt").write_text("safe", encoding="utf-8")
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    stage_parent = tmp_path / "linked_parent"
+    try:
+        stage_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(RuntimeError, match="edr_package_path_invalid"):
+        _stage_tree_if_needed(
+            src,
+            stage_parent / "nested" / "yolo_runs" / "pkg1__yolo",
             package_id="pkg1",
             package_sha256="sha",
             kind="yolo_run",

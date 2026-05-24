@@ -108,3 +108,15 @@ preserving the exact validation story for storage and artifact-write fixes.
   `linked_parent/nested/cascades`.
 - Validation: `989 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: EDR Package and Runtime Stage Roots
+
+- Rejected symlink components anywhere in EDR package roots before and after
+  package root creation.
+- Rejected symlink components in EDR package output-file parent paths before
+  JSON, text, and zip writes.
+- Rejected symlink components anywhere in runtime stage roots before staging
+  package assets into classifier, detector, and calibration stores.
+- Added regressions for nested symlinked package and stage parent paths.
+- Validation: `991 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

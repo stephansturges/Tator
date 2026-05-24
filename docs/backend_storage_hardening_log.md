@@ -169,3 +169,14 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Residual direct-parent symlink scan:
   `rg -n "\.parent\.is_symlink\(|is_symlink\(\) or .*\.parent\.is_symlink\(|\.is_symlink\(\) or .*parent" services api localinferenceapi.py utils models tools tests`
   returned no hits.
+
+## 2026-05-24: Materialized Dataset Cache Roots
+
+- Rejected symlink components in materialized dataset allowed roots, target
+  roots, and target parents before SAM3 and YOLO annotation-overlay cache
+  resets.
+- Added regressions for nested symlinked allowed roots and nested symlinked
+  target ancestors so cache reset cannot create directories outside the allowed
+  materialization root.
+- Validation: `1012 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

@@ -1421,6 +1421,54 @@ def test_resolve_sam3_dataset_meta_rejects_symlinked_materialized_root_without_t
     assert marker.read_text(encoding="utf-8") == "keep"
 
 
+def test_reset_materialized_dataset_root_rejects_nested_symlinked_allowed_root_before_mkdir(
+    tmp_path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._reset_materialized_dataset_root(
+            linked_parent / "nested" / "cache" / "materialized",
+            linked_parent / "nested" / "cache",
+            detail="yolo_cache_path_invalid",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "yolo_cache_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_reset_materialized_dataset_root_rejects_nested_symlinked_target_before_mkdir(
+    tmp_path,
+) -> None:
+    allowed_root = tmp_path / "allowed"
+    outside = tmp_path / "outside_target"
+    allowed_root.mkdir()
+    outside.mkdir()
+    linked_child = allowed_root / "linked_child"
+    try:
+        linked_child.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._reset_materialized_dataset_root(
+            linked_child / "nested" / "materialized",
+            allowed_root,
+            detail="sam3_materialize_path_invalid",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "sam3_materialize_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_resolve_yolo_training_dataset_materializes_annotation_overlay_for_linked_flat_yolo(
     tmp_path, monkeypatch
 ) -> None:

@@ -19938,13 +19938,13 @@ def _sam3_entry_needs_annotation_materialized_view(entry: Dict[str, Any]) -> boo
 
 def _reset_materialized_dataset_root(raw_root: Path, allowed_root: Path, *, detail: str) -> Path:
     try:
-        if allowed_root.is_symlink():
+        if _storage_path_has_symlink_component(allowed_root):
             raise ValueError("materialization allowed root is a symlink")
         allowed_resolved = allowed_root.resolve(strict=False)
-        if raw_root.is_symlink():
+        if _storage_path_has_symlink_component(raw_root):
             raise ValueError("materialization target is a symlink")
         raw_parent = raw_root.parent
-        if raw_parent.is_symlink():
+        if _storage_path_has_symlink_component(raw_parent):
             raise ValueError("materialization parent is a symlink")
         parent_resolved = raw_parent.resolve(strict=False)
         if not _path_is_within_root_impl(parent_resolved, allowed_resolved):
@@ -19959,6 +19959,8 @@ def _reset_materialized_dataset_root(raw_root: Path, allowed_root: Path, *, deta
         if raw_root.exists() or raw_root.is_symlink():
             raise ValueError("materialization target cleanup failed")
         raw_root.mkdir(parents=True, exist_ok=False)
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("materialization target is a symlink after create")
         created = raw_root.resolve(strict=True)
         if not _path_is_within_root_impl(created, allowed_resolved):
             raise ValueError("materialization target escapes root after create")

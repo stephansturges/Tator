@@ -376,3 +376,22 @@ preserving the exact validation story for storage and artifact-write fixes.
   symlink escapes.
 - Validation: `1045 passed, 17 skipped`; focused SAM3/segmentation coverage,
   the full pytest suite, and live endpoint sanity checks passed.
+
+## 2026-05-24: Calibration YOLO Image Resolution
+
+- Fixed calibration/EDR image discovery so standard YOLO split datasets under
+  `train/images` and `val/images` are included instead of being reported as
+  missing.
+- Kept calibration cache keys stable by using relative image paths and
+  deduping the same relative path across validation and training splits.
+- Taught calibration prepass workers, including the single-process fallback, to
+  resolve those relative paths from `split/images` before falling back to
+  legacy direct split-root images.
+- Rejected traversal paths, symlinked image roots, and symlinked image files
+  during calibration image discovery/resolution.
+- Added `.webp` to calibration image discovery to match the broader dataset
+  image support used elsewhere in the backend.
+- Added regressions for YOLO split-image discovery, nested image resolution,
+  worker prepass reads from `val/images`, and symlink/traversal escape handling.
+- Validation: `1051 passed, 17 skipped`; focused calibration/EDR coverage,
+  the full pytest suite, and live endpoint sanity checks passed.

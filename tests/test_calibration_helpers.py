@@ -7,6 +7,7 @@ import pytest
 
 from services.calibration_helpers import (
     _calibration_list_images,
+    _calibration_resolve_image_path,
     _calibration_safe_link,
     _calibration_write_record_atomic,
 )
@@ -44,6 +45,68 @@ def test_calibration_list_images_filters_non_image_files(tmp_path: Path) -> None
     )
 
     assert images == ["a.png", "b.tif"]
+
+
+def test_calibration_list_images_supports_yolo_split_image_dirs(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset"
+    _touch(dataset_root / "val" / "images" / "nested" / "a.jpg")
+    _touch(dataset_root / "train" / "images" / "nested" / "a.jpg")
+    _touch(dataset_root / "train" / "images" / "b.webp")
+
+    images = _calibration_list_images(
+        "dummy",
+        resolve_dataset_fn=lambda _: dataset_root,
+    )
+
+    assert images == ["nested/a.jpg", "b.webp"]
+
+
+def test_calibration_list_images_skips_symlinked_image_root_escape(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset"
+    split_root = dataset_root / "val"
+    split_root.mkdir(parents=True)
+    outside = tmp_path / "outside_images"
+    _touch(outside / "escaped.jpg")
+    try:
+        (split_root / "images").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    images = _calibration_list_images(
+        "dummy",
+        resolve_dataset_fn=lambda _: dataset_root,
+    )
+
+    assert images == []
+
+
+def test_calibration_resolve_image_path_supports_yolo_split_image_dirs(
+    tmp_path: Path,
+) -> None:
+    dataset_root = tmp_path / "dataset"
+    image_path = dataset_root / "val" / "images" / "nested" / "a.jpg"
+    _touch(image_path)
+
+    resolved = _calibration_resolve_image_path(dataset_root, "nested/a.jpg")
+
+    assert resolved == image_path.resolve()
+
+
+def test_calibration_resolve_image_path_rejects_traversal_and_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    dataset_root = tmp_path / "dataset"
+    image_root = dataset_root / "val" / "images"
+    image_root.mkdir(parents=True)
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"external")
+    try:
+        (image_root / "escaped.jpg").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert _calibration_resolve_image_path(dataset_root, "../outside.jpg") is None
+    assert _calibration_resolve_image_path(dataset_root, "escaped.jpg") is None
 
 
 def test_calibration_write_record_atomic_replaces_tmp_symlink_without_target_write(

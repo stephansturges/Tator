@@ -38,6 +38,7 @@ from services.calibration_recipe_registry import (
     discovery_runs_root,
     find_matching_recipe,
 )
+from services.calibration_helpers import _calibration_resolve_image_path
 from services.job_payloads import json_sanitize
 from utils.io import _path_is_within_root_impl
 from utils.pydantic_compat import model_copy_update, model_dump_compat
@@ -1293,12 +1294,7 @@ def _ensure_prepass_jsonl(
             for image_name in remaining:
                 if job.cancel_event.is_set():
                     raise RuntimeError("cancelled")
-                img_path = None
-                for split in ("val", "train"):
-                    candidate = dataset_root / split / image_name
-                    if candidate.exists():
-                        img_path = candidate
-                        break
+                img_path = _calibration_resolve_image_path(dataset_root, image_name)
                 if img_path is None:
                     record = {
                         "image": image_name,

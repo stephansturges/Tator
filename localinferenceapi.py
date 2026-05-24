@@ -8520,7 +8520,7 @@ def _calibration_load_yolo_active() -> dict:
     return _load_yolo_active_impl(YOLO_ACTIVE_PATH)
 
 
-def _calibration_list_images(dataset_id: str) -> List[Path]:
+def _calibration_list_images(dataset_id: str) -> List[str]:
     return _calibration_list_images_impl(
         dataset_id, resolve_dataset_fn=_resolve_sam3_or_qwen_dataset
     )

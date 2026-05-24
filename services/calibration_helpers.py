@@ -15,6 +15,19 @@ import numpy as np
 from PIL import Image
 import torch
 
+from utils.io import _path_is_within_root_impl
+
+
+_CALIBRATION_IMAGE_EXTS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".bmp",
+    ".webp",
+    ".tif",
+    ".tiff",
+}
+
 
 def _calibration_sample_images(images: List[str], *, max_images: int, seed: int) -> List[str]:
     if max_images <= 0 or len(images) <= max_images:
@@ -25,34 +38,96 @@ def _calibration_sample_images(images: List[str], *, max_images: int, seed: int)
     return picks[:max_images]
 
 
+def _safe_calibration_image_file(path: Path, root: Path) -> bool:
+    if path.is_symlink():
+        return False
+    try:
+        resolved_path = path.resolve(strict=True)
+        resolved_root = root.resolve(strict=True)
+    except Exception:
+        return False
+    if not _path_is_within_root_impl(resolved_path, resolved_root):
+        return False
+    return resolved_path.is_file()
+
+
 def _calibration_list_images(
     dataset_id: str,
     *,
     resolve_dataset_fn: Callable[[str], Path],
 ) -> List[str]:
     dataset_root = resolve_dataset_fn(dataset_id)
+    try:
+        dataset_root_resolved = dataset_root.resolve(strict=True)
+    except Exception:
+        return []
     images: List[str] = []
     seen: set[str] = set()
     for split in ("val", "train"):
         split_root = dataset_root / split
-        if not split_root.exists():
+        if not split_root.exists() or not split_root.is_dir() or split_root.is_symlink():
             continue
+        image_root = split_root / "images"
+        if image_root.exists() and image_root.is_dir() and not image_root.is_symlink():
+            try:
+                image_root_resolved = image_root.resolve(strict=True)
+            except Exception:
+                image_root_resolved = None
+            if image_root_resolved is not None and _path_is_within_root_impl(
+                image_root_resolved, dataset_root_resolved
+            ):
+                for entry in sorted(image_root.rglob("*")):
+                    if entry.suffix.lower() not in _CALIBRATION_IMAGE_EXTS:
+                        continue
+                    if not _safe_calibration_image_file(entry, image_root):
+                        continue
+                    rel = entry.relative_to(image_root).as_posix()
+                    if rel in seen:
+                        continue
+                    seen.add(rel)
+                    images.append(rel)
         for entry in sorted(split_root.iterdir()):
-            if entry.is_file() and entry.suffix.lower() in {
-                ".jpg",
-                ".jpeg",
-                ".png",
-                ".bmp",
-                ".tif",
-                ".tiff",
-            }:
-                # Cache keys and downstream lookups are name-based; avoid duplicate names
-                # across splits colliding onto a single cache record.
-                if entry.name in seen:
-                    continue
-                seen.add(entry.name)
-                images.append(entry.name)
+            if entry.suffix.lower() not in _CALIBRATION_IMAGE_EXTS:
+                continue
+            if not _safe_calibration_image_file(entry, split_root):
+                continue
+            # Cache keys and downstream lookups are relative-path based; avoid duplicate
+            # names across splits colliding onto a single cache record.
+            rel = entry.name
+            if rel in seen:
+                continue
+            seen.add(rel)
+            images.append(rel)
     return images
+
+
+def _calibration_resolve_image_path(dataset_root: Path, image_name: str) -> Optional[Path]:
+    rel_path = Path(str(image_name or ""))
+    if (
+        not str(image_name or "").strip()
+        or rel_path.is_absolute()
+        or any(part in {"", ".", ".."} for part in rel_path.parts)
+    ):
+        return None
+    try:
+        dataset_root_resolved = dataset_root.resolve(strict=True)
+    except Exception:
+        return None
+    for split in ("val", "train"):
+        for candidate in (
+            dataset_root / split / "images" / rel_path,
+            dataset_root / split / rel_path,
+        ):
+            if not _safe_calibration_image_file(candidate, dataset_root):
+                continue
+            try:
+                resolved = candidate.resolve(strict=True)
+            except Exception:
+                continue
+            if not _path_is_within_root_impl(resolved, dataset_root_resolved):
+                continue
+            return resolved
+    return None
 
 
 def _calibration_hash_payload(payload: Dict[str, Any]) -> str:
@@ -199,12 +274,7 @@ def _calibration_prepass_worker(
     for image_name, cache_path in tasks:
         if cancel_event is not None and cancel_event.is_set():
             break
-        img_path = None
-        for split in ("val", "train"):
-            candidate = dataset_root / split / image_name
-            if candidate.exists():
-                img_path = candidate
-                break
+        img_path = _calibration_resolve_image_path(dataset_root, image_name)
         if img_path is None:
             try:
                 write_record_fn(

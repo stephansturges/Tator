@@ -824,3 +824,14 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1112 passed, 17 skipped`; focused prepass recipe persistence
   coverage, `services/prepass_recipes.py` compile, the full pytest suite, and
   live endpoint sanity checks passed against the restarted backend.
+
+## 2026-05-24: Cascade Classifier Import Atomic Saves
+
+- Added guarded binary writes for agent-cascade classifier imports.
+- Changed imported classifier payload copies from direct final writes to
+  temp-file writes followed by atomic replace.
+- Added a regression proving a failed classifier copy leaves no partial
+  imported classifier artifact behind.
+- Validation: `1113 passed, 17 skipped`; focused cascade import/export coverage,
+  `services/agent_cascades.py` compile, the full pytest suite, and live endpoint
+  sanity checks passed against the restarted backend.

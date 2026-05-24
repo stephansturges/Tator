@@ -10,7 +10,10 @@ from typing import Any, Dict
 import pytest
 from fastapi import HTTPException
 
-from services.agent_cascades import _import_agent_cascade_zip_bytes_impl
+from services.agent_cascades import (
+    _import_agent_cascade_zip_bytes_impl,
+    _import_agent_cascade_zip_obj_impl,
+)
 
 
 def _within_root(path: Path, root: Path) -> bool:
@@ -203,6 +206,69 @@ def test_agent_cascade_import_cleans_classifier_files_after_late_failure(tmp_pat
     assert exc_info.value.detail == "agent_cascade_import_missing_classifier"
     imports_root = tmp_path / "classifiers" / "imports"
     assert not imports_root.exists() or not any(imports_root.iterdir())
+
+
+def test_agent_cascade_import_does_not_leave_partial_classifier_after_copy_failure(
+    tmp_path: Path,
+) -> None:
+    cascade = {"label": "demo", "steps": [{"recipe_id": "r1"}], "dedupe": {}}
+
+    class FakeInfo:
+        external_attr = 0
+
+        def __init__(self, file_size: int) -> None:
+            self.file_size = file_size
+
+    class FailingClassifier(BytesIO):
+        def __init__(self) -> None:
+            super().__init__(b"partial-classifier")
+
+        def read(self, size: int = -1) -> bytes:
+            chunk = super().read(size)
+            if chunk:
+                return chunk
+            raise OSError("simulated classifier copy failure")
+
+    class FakeZip:
+        def namelist(self) -> list[str]:
+            return ["cascade.json", "recipes/r1.zip", "classifiers/safe.pkl"]
+
+        def getinfo(self, name: str) -> FakeInfo:
+            sizes = {
+                "cascade.json": len(json.dumps(cascade).encode("utf-8")),
+                "recipes/r1.zip": len(b"recipe-bytes"),
+                "classifiers/safe.pkl": len(b"partial-classifier"),
+            }
+            return FakeInfo(sizes[name])
+
+        def open(self, name: str):
+            if name == "cascade.json":
+                return BytesIO(json.dumps(cascade).encode("utf-8"))
+            if name == "recipes/r1.zip":
+                return BytesIO(b"recipe-bytes")
+            if name == "classifiers/safe.pkl":
+                return FailingClassifier()
+            raise KeyError(name)
+
+    classifiers_root = tmp_path / "classifiers"
+    out = _import_agent_cascade_zip_obj_impl(
+        FakeZip(),  # type: ignore[arg-type]
+        cascades_root=tmp_path / "cascades",
+        classifiers_root=classifiers_root,
+        max_json_bytes=1024 * 1024,
+        max_entry_bytes=1024 * 1024,
+        classifier_allowed_exts=[".pkl"],
+        path_is_within_root_fn=_within_root,
+        import_recipe_file_fn=lambda _path: ("r1", {"id": "recipe_new"}),
+        persist_cascade_fn=lambda label, payload: {"label": label, **payload},
+    )
+
+    assert out["steps"][0]["recipe_id"] == "recipe_new"
+    imports_root = classifiers_root / "imports"
+    leaked_files = [
+        path for path in imports_root.rglob("*") if path.is_file() or path.is_symlink()
+    ]
+    assert leaked_files == []
 
 
 def test_agent_cascade_import_rejects_symlinked_classifier_root_without_write(

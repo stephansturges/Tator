@@ -588,10 +588,8 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current validation snapshot: `1112 passed, 17 skipped`.
-
-Detailed maintainer notes live in
-[docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Latest checkpoint: `1113 passed, 17 skipped`.
+Full maintainer log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 </details>
 
 ## Runtime Artifacts

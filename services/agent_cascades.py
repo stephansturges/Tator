@@ -12,7 +12,7 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, BinaryIO, Callable, Dict, List, Optional
 
 from fastapi import HTTPException
 from starlette.status import (
@@ -93,6 +93,22 @@ def _write_json_file(path: Path, payload: Dict[str, Any]) -> Path:
         os.replace(tmp_path, path)
     finally:
         if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+    return path
+
+
+def _write_binary_file(path: Path, writer: Callable[[BinaryIO], None]) -> Path:
+    tmp_path = _prepare_atomic_output_file(path)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp_path, flags, 0o644)
+        with os.fdopen(fd, "wb") as fp:
+            writer(fp)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
             tmp_path.unlink(missing_ok=True)
     return path
 
@@ -490,9 +506,14 @@ def _import_agent_cascade_zip_obj_impl(
                 raw_dest_path.parent.mkdir(parents=True, exist_ok=True)
                 if _path_has_symlink_component(raw_dest_path.parent) or raw_dest_path.is_symlink():
                     raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
-                try:
-                    with zf.open(name) as src, dest_path.open("wb") as dst:
+                def _copy_classifier(dst: BinaryIO, *, archive_name: str = name) -> None:
+                    with zf.open(archive_name) as src:
                         shutil.copyfileobj(src, dst, length=1024 * 1024)
+
+                try:
+                    _write_binary_file(dest_path, _copy_classifier)
+                except HTTPException:
+                    raise
                 except Exception:
                     continue
                 if not arc_path.name.endswith(".meta.pkl") and arc_path.suffix.lower() in classifier_allowed_exts:

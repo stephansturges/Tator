@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import sys
 import zipfile
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -39,6 +41,23 @@ def _zip_names(response) -> set[str]:
     raw = asyncio.run(_stream_body(response))
     with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
         return set(zf.namelist())
+
+
+class _ImmediateTrainingThread:
+    def __init__(self, target=None, args=(), kwargs=None, name="", **_kwargs):
+        self._target = target
+        self._args = tuple(args or ())
+        self._kwargs = dict(kwargs or {})
+        self._name = str(name or "")
+
+    def start(self):
+        if "monitor" in self._name:
+            return
+        if self._target:
+            self._target(*self._args, **self._kwargs)
+
+    def join(self, *_args, **_kwargs):
+        return None
 
 
 def test_load_yolo_active_ignores_missing_best_path(tmp_path: Path) -> None:
@@ -803,6 +822,85 @@ def test_delete_yolo_run_blocks_active_head_graft_base_run(
             api.YOLO_HEAD_GRAFT_JOBS.clear()
 
 
+def test_yolo_training_late_cancel_skips_artifact_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "late_cancel_yolo"
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    labelmap_path = dataset_root / "labelmap.txt"
+    labelmap_path.write_text("target\n", encoding="utf-8")
+    yolo_root = tmp_path / "yolo_runs"
+    job = api.YoloTrainingJob(
+        job_id=run_id,
+        config={
+            "dataset": {
+                "yolo_ready": True,
+                "dataset_root": str(dataset_root),
+                "yolo_layout": "flat",
+                "yolo_labelmap_path": str(labelmap_path),
+                "task": "detect",
+            },
+            "task": "detect",
+            "variant": "yolov8n",
+            "epochs": 1,
+            "device_resolution": {
+                "device_arg": "cpu",
+                "device_label": "CPU",
+                "resolved_accelerator": "cpu",
+            },
+        },
+    )
+
+    class FakeYOLO:
+        def __init__(self, _model_source):
+            pass
+
+        def train(self, **kwargs):
+            train_weights = Path(kwargs["project"]) / "train" / "weights"
+            train_weights.mkdir(parents=True, exist_ok=True)
+            (train_weights / "best.pt").write_text("weights", encoding="utf-8")
+            job.cancel_event.set()
+            return SimpleNamespace(metrics={"mAP50": 1.0})
+
+    fake_ultralytics = ModuleType("ultralytics")
+    fake_ultralytics.YOLO = FakeYOLO
+    monkeypatch.setitem(sys.modules, "ultralytics", fake_ultralytics)
+    monkeypatch.setattr(api, "YOLO_JOB_ROOT", yolo_root)
+    monkeypatch.setattr(api.threading, "Thread", _ImmediateTrainingThread)
+    monkeypatch.setattr(api, "_prepare_for_training_impl", lambda **_kwargs: None)
+    monkeypatch.setattr(api, "_finalize_training_environment_impl", lambda **_kwargs: None)
+    monkeypatch.setattr(api, "_yolo_monitor_training_impl", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        api,
+        "_yolo_write_data_yaml_impl",
+        lambda run_dir, *_args, **_kwargs: run_dir / "data.yaml",
+    )
+    monkeypatch.setattr(
+        api,
+        "_yolo_resolve_model_source_impl",
+        lambda *_args, **_kwargs: ("weights", "yolov8n.pt"),
+    )
+
+    def fail_after_cancel(*_args, **_kwargs):
+        raise AssertionError("cancelled YOLO job should not publish artifacts")
+
+    monkeypatch.setattr(api, "_copy2_if_different", fail_after_cancel)
+    monkeypatch.setattr(api, "_write_detector_json_atomic", fail_after_cancel)
+    monkeypatch.setattr(api, "_yolo_prune_run_dir_impl", fail_after_cancel)
+
+    api._start_yolo_training_worker(job)
+
+    run_dir = yolo_root / run_id
+    meta = json.loads((run_dir / api.YOLO_RUN_META_NAME).read_text(encoding="utf-8"))
+    assert job.status == "cancelled"
+    assert job.result is None
+    assert meta["status"] == "cancelled"
+    assert meta.get("result") is None
+    assert not (run_dir / "best.pt").exists()
+    assert (run_dir / "train" / "weights" / "best.pt").exists()
+
+
 def test_delete_yolo_run_clears_corrupt_active_marker_inside_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -891,6 +989,88 @@ def test_delete_rfdetr_run_blocks_active_training_job(
     finally:
         with api.RFDETR_TRAINING_JOBS_LOCK:
             api.RFDETR_TRAINING_JOBS.clear()
+
+
+def test_rfdetr_training_late_cancel_skips_artifact_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = "late_cancel_rfdetr"
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    coco_path = dataset_root / "train.json"
+    coco_path.write_text('{"images":[],"annotations":[],"categories":[]}', encoding="utf-8")
+    rfdetr_root = tmp_path / "rfdetr_runs"
+    job = api.RfDetrTrainingJob(
+        job_id=run_id,
+        config={
+            "dataset": {
+                "dataset_root": str(dataset_root),
+                "coco_train_json": str(coco_path),
+                "coco_val_json": str(coco_path),
+                "task": "detect",
+            },
+            "task": "detect",
+            "variant": "rfdetr-nano",
+            "epochs": 1,
+            "device_resolution": {
+                "device_arg": "cpu",
+                "device_label": "CPU",
+                "devices": [],
+                "resolved_accelerator": "cpu",
+            },
+        },
+    )
+
+    class FakeRfDetr:
+        def __init__(self, **_kwargs):
+            self.callbacks = {"on_fit_epoch_end": []}
+            self.model = SimpleNamespace(request_early_stop=lambda: None)
+
+        def train(self, **kwargs):
+            run_dir = Path(kwargs["output_dir"])
+            (run_dir / "checkpoint_best_total.pth").write_text("weights", encoding="utf-8")
+            job.cancel_event.set()
+
+    fake_rfdetr = ModuleType("rfdetr")
+    for name in (
+        "RFDETRBase",
+        "RFDETRLarge",
+        "RFDETRNano",
+        "RFDETRSmall",
+        "RFDETRMedium",
+        "RFDETRSegPreview",
+    ):
+        setattr(fake_rfdetr, name, FakeRfDetr)
+
+    monkeypatch.setitem(sys.modules, "rfdetr", fake_rfdetr)
+    monkeypatch.setattr(api, "RFDETR_JOB_ROOT", rfdetr_root)
+    monkeypatch.setattr(api.threading, "Thread", _ImmediateTrainingThread)
+    monkeypatch.setattr(api, "_prepare_for_training_impl", lambda **_kwargs: None)
+    monkeypatch.setattr(api, "_finalize_training_environment_impl", lambda **_kwargs: None)
+    monkeypatch.setattr(api, "_rfdetr_load_labelmap_impl", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        api,
+        "_rfdetr_prepare_dataset_impl",
+        lambda _dataset_root, run_dir, *_args, **_kwargs: run_dir / "dataset",
+    )
+    monkeypatch.setattr(api, "_rfdetr_install_augmentations_impl", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(api, "_rfdetr_restore_augmentations_impl", lambda *_args, **_kwargs: None)
+
+    def fail_after_cancel(*_args, **_kwargs):
+        raise AssertionError("cancelled RF-DETR job should not publish artifacts")
+
+    monkeypatch.setattr(api, "_rfdetr_best_checkpoint_impl", fail_after_cancel)
+    monkeypatch.setattr(api, "_rfdetr_prune_run_dir_impl", fail_after_cancel)
+
+    api._start_rfdetr_training_worker(job)
+
+    run_dir = rfdetr_root / run_id
+    meta = json.loads((run_dir / api.RFDETR_RUN_META_NAME).read_text(encoding="utf-8"))
+    assert job.status == "cancelled"
+    assert job.result is None
+    assert meta["status"] == "cancelled"
+    assert meta.get("result") is None
+    assert not (run_dir / "metrics_series.json").exists()
 
 
 def test_delete_rfdetr_run_clears_corrupt_active_marker_inside_run(

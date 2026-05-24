@@ -8,6 +8,20 @@ from PIL import Image
 import localinferenceapi as api
 
 
+class _ImmediateThread:
+    def __init__(self, target=None, args=(), kwargs=None, **_kwargs):
+        self._target = target
+        self._args = tuple(args or ())
+        self._kwargs = dict(kwargs or {})
+
+    def start(self):
+        if self._target:
+            self._target(*self._args, **self._kwargs)
+
+    def join(self, *_args, **_kwargs):
+        return None
+
+
 def _fake_torch(*, cuda: bool = False, cuda_count: int = 0):
     return SimpleNamespace(
         cuda=SimpleNamespace(
@@ -565,6 +579,47 @@ def test_qwen_training_metadata_preserves_requested_abliterated_source(tmp_path)
     assert metadata["training_model_id"] == "custom/Huihui-Qwen3-VL-4B-Instruct-abliterated"
     assert metadata["abliterated"] is True
     assert metadata["quantization_backend"] == "awq"
+
+
+def test_qwen_training_late_cancel_skips_metadata_publish(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None or api.QwenTrainingResult is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    result_path = tmp_path / "run"
+    config = api.QwenTrainingConfig(
+        dataset_root=str(tmp_path / "dataset"),
+        result_path=str(result_path),
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        run_name="late-cancel",
+    )
+    job = api.QwenTrainingJob(job_id="qwen_late_cancel", config={})
+    persist_calls = {"count": 0}
+
+    def fake_train_qwen_model(_config, **_kwargs):
+        job.cancel_event.set()
+        return api.QwenTrainingResult(
+            config=config,
+            checkpoints=[str(result_path / "latest")],
+            latest_checkpoint=str(result_path / "latest"),
+            epochs_ran=1,
+        )
+
+    def fail_persist(*_args, **_kwargs):
+        persist_calls["count"] += 1
+        raise AssertionError("cancelled Qwen job should not publish metadata")
+
+    monkeypatch.setattr(api.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(api, "_prepare_for_qwen_training", lambda: None)
+    monkeypatch.setattr(api, "_finalize_qwen_training_environment", lambda: None)
+    monkeypatch.setattr(api, "train_qwen_model", fake_train_qwen_model)
+    monkeypatch.setattr(api, "_persist_qwen_run_metadata", fail_persist)
+
+    api._start_qwen_training_worker(job, config)
+
+    assert job.status == "cancelled"
+    assert job.result is None
+    assert persist_calls["count"] == 0
+    assert not (result_path / api.QWEN_METADATA_FILENAME).exists()
 
 
 def test_qwen_training_config_rejects_symlinked_runs_root(tmp_path, monkeypatch):

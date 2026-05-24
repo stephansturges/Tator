@@ -30385,6 +30385,14 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             )
             monitor_thread.start()
             results = model.train(**train_kwargs)
+            if job.cancel_event.is_set():
+                _yolo_job_update(
+                    job,
+                    status="cancelled",
+                    message="Training cancelled before artifact publish",
+                    progress=job.progress,
+                )
+                return
             train_dir = run_dir / "train"
             best_path = train_dir / "weights" / "best.pt"
             if best_path.exists():
@@ -31190,6 +31198,7 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 _rfdetr_job_update(
                     job, status="cancelled", message="Training cancelled", progress=job.progress
                 )
+                return
             else:
                 _rfdetr_job_update(
                     job, status="succeeded", message="Training complete", progress=1.0
@@ -32328,6 +32337,11 @@ def _start_training_worker(
                 metrics_cb=metrics_cb,
                 should_cancel=cancel_event.is_set,
             )
+            if cancel_event.is_set():
+                with TRAINING_JOBS_LOCK:
+                    _job_update(job, status="cancelled", message="Training cancelled by user.")
+                logger.info("[clip-train %s] Training cancelled before artifact publish", job.job_id[:8])
+                return
             artifacts = _publish_clip_training_artifacts(artifacts)
             _refresh_active_classifier_if_current(artifacts)
             payload = _artifacts_to_payload(artifacts)
@@ -32814,6 +32828,10 @@ def _start_qwen_training_worker(job: QwenTrainingJob, config: QwenTrainingConfig
             result = train_qwen_model(
                 config, progress_cb=progress_cb, cancel_cb=cancel_cb, metrics_cb=metrics_cb
             )
+            if job.cancel_event.is_set():
+                with QWEN_TRAINING_JOBS_LOCK:
+                    _qwen_job_update(job, status="cancelled", message="Training cancelled before metadata publish.")
+                return
             run_metadata = _persist_qwen_run_metadata(result_path, config, result)
             payload = {
                 "checkpoints": result.checkpoints,

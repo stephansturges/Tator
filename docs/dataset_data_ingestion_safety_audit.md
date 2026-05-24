@@ -53,3 +53,9 @@ artifacts. If cancellation is observed after candidate/reference encoding but
 before the analysis result write, no `result.json` or embeddings cache is
 published. If cancellation is observed after local reference-profile training but
 before the head write, no local SALAD head is added.
+
+The same late-cancel boundary now applies to adjacent training jobs that create
+dataset-derived artifacts. CLIP classifier, Qwen, YOLOv8, and RF-DETR workers
+re-check cancellation after trainer return and before durable publication, so a
+cancelled job cannot publish new model metadata or success payloads after the
+user has asked it to stop.

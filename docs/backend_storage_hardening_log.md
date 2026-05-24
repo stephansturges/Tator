@@ -1513,3 +1513,25 @@ preserving the exact validation story for storage and artifact-write fixes.
   paths or method mismatches, live OpenAPI sanity (`tested=144`, `failures=[]`),
   and `/data_ingestion/capabilities` returned the local-SALAD reference-profile
   flow with MLX C-RADIO available.
+
+## 2026-05-24: Training Late-Cancel Publish Guards
+
+- Extended the late-cancel finalization rule to CLIP classifier, Qwen, YOLOv8,
+  and RF-DETR training workers.
+- If cancellation is observed after the trainer returns but before durable
+  metadata/artifact publication, the job now ends as `cancelled` without
+  publishing classifier artifacts, Qwen run metadata, detector best weights,
+  metrics JSON, pruning side effects, optimized RF-DETR exports, or success
+  payloads.
+- Added regressions for each worker so artifact/metadata publish helpers fail
+  the test if they run after a late cancellation.
+- Validation: `py_compile localinferenceapi.py
+  tests/test_backend_job_start_validation.py tests/test_qwen_mlx_runtime.py
+  tests/test_detector_active_lifecycle.py`, focused late-cancel regressions
+  (`4 passed`), job/Qwen/detector suites (`116 passed`), dataset/data-ingestion
+  safety bundle (`148 passed`), and the full pytest suite
+  (`1217 passed, 20 skipped`) passed. The restarted backend also passed the
+  live UI endpoint map check with no missing paths or method mismatches, live
+  OpenAPI sanity (`tested=144`, `failures=[]`), and
+  `/data_ingestion/capabilities` returned the local-SALAD reference-profile
+  flow with MLX C-RADIO available.

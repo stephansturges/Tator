@@ -437,3 +437,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1059 passed, 17 skipped`; focused linked annotation,
   Qwen dataset upload/training/runtime coverage, the full pytest suite, and
   live endpoint sanity checks passed.
+
+## 2026-05-24: SAM3 Materialized View Metadata Root Guard
+
+- Hardened SAM3 annotation-overlay materialization to use the guarded dataset
+  metadata root before creating the `sam3_materialized` view.
+- Rejected symlinked linked-dataset registry roots before any materialized
+  SAM3/COCO view can be created outside the registry metadata tree.
+- Added regression coverage proving a symlinked registry root is rejected and
+  the outside target remains untouched.
+- Validation: `1060 passed, 17 skipped`; focused linked annotation/SAM3
+  lifecycle coverage, the full pytest suite, and live endpoint sanity checks
+  passed.

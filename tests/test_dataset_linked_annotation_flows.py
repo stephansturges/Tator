@@ -1832,6 +1832,45 @@ def test_resolve_sam3_dataset_meta_rejects_symlinked_materialized_root_without_t
     assert marker.read_text(encoding="utf-8") == "keep"
 
 
+def test_resolve_sam3_dataset_meta_rejects_symlinked_registry_root_before_materialize(
+    tmp_path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "linked_source"
+    _write_test_image(dataset_root / "images" / "img.jpg")
+    (dataset_root / "labels").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "labels" / "img.txt").write_text(
+        "0 0.5 0.5 0.2 0.2\n", encoding="utf-8"
+    )
+    (dataset_root / "labelmap.txt").write_text("building\n", encoding="utf-8")
+    outside_registry = tmp_path / "outside_registry"
+    outside_registry.mkdir()
+    linked_registry = tmp_path / "linked_registry"
+    try:
+        linked_registry.symlink_to(outside_registry, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    entry = {
+        "id": "ds",
+        "label": "ds",
+        "dataset_root": str(dataset_root),
+        "registry_root": str(linked_registry),
+        "storage_mode": "linked",
+        "linked_root": str(dataset_root),
+        "yolo_layout": "flat",
+        "yolo_ready": True,
+        "classes": ["building"],
+    }
+    monkeypatch.setattr(api, "_list_all_datasets", lambda: [entry])
+    monkeypatch.setattr(api, "_resolve_sam3_or_qwen_dataset", lambda _dataset_id: dataset_root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._resolve_sam3_dataset_meta("ds")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "sam3_materialize_path_invalid"
+    assert list(outside_registry.iterdir()) == []
+
+
 def test_reset_materialized_dataset_root_rejects_nested_symlinked_allowed_root_before_mkdir(
     tmp_path,
 ) -> None:

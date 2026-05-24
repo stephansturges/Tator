@@ -20384,7 +20384,11 @@ def _reset_materialized_dataset_root(raw_root: Path, allowed_root: Path, *, deta
 
 def _materialize_sam3_annotation_view(entry: Dict[str, Any]) -> Dict[str, Any]:
     dataset_root = _dataset_effective_root_from_entry(entry)
-    storage_root = _dataset_meta_storage_root_from_entry(entry)
+    storage_root = _dataset_guarded_meta_storage_root_from_entry(
+        entry,
+        ensure=False,
+        detail="sam3_materialize_path_invalid",
+    )
     materialized_root_raw = (
         storage_root / DATASET_ANNOTATION_OVERLAY_DIRNAME / "sam3_materialized"
     )

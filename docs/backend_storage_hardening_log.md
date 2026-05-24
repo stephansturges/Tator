@@ -449,3 +449,18 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1060 passed, 17 skipped`; focused linked annotation/SAM3
   lifecycle coverage, the full pytest suite, and live endpoint sanity checks
   passed.
+
+## 2026-05-24: Linked Dataset Labelmap Source Guards
+
+- Centralized dataset-root labelmap discovery through a root-contained,
+  symlink-aware reader for `labelmap.txt`, `classes.txt`, and `labels.txt`.
+- Rejected symlinked linked-dataset `labelmap.txt` files during strict
+  register/open flows before registry records or transient sessions are
+  created.
+- Preserved ordinary in-root labelmap discovery for linked datasets and model
+  materialization fallbacks.
+- Added regressions for strict path registration and transient path opening
+  with symlinked labelmaps.
+- Validation: `1062 passed, 17 skipped`; focused linked dataset, dataset
+  upload, SAM3, and Qwen coverage plus the full pytest suite and live endpoint
+  sanity checks passed.

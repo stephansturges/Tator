@@ -14753,9 +14753,37 @@ def _validate_linked_dataset_path(path_str: str) -> Path:
     return resolved
 
 
+def _dataset_labelmap_file_within_root(dataset_root: Path, name: str) -> Path:
+    root_resolved = dataset_root.resolve()
+    candidate = dataset_root / name
+    try:
+        candidate_resolved = candidate.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_forbidden") from exc
+    if not _path_is_within_root_impl(candidate_resolved, root_resolved):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_forbidden")
+    if not candidate.exists():
+        return candidate
+    try:
+        if _storage_path_has_symlink_component(candidate.parent) or candidate.is_symlink():
+            raise ValueError("dataset labelmap has a symlink component")
+        existing_resolved = candidate.resolve(strict=True)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_forbidden") from exc
+    if not existing_resolved.is_file() or not _path_is_within_root_impl(
+        existing_resolved, root_resolved
+    ):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_forbidden")
+    return candidate
+
+
 def _dataset_labelmap_from_root(dataset_root: Path) -> List[str]:
-    classes = _discover_yolo_labelmap_impl(dataset_root, load_labelmap_file_fn=_load_labelmap_file)
-    return [str(x).strip() for x in classes if str(x).strip()]
+    for name in ("labelmap.txt", "classes.txt", "labels.txt"):
+        candidate = _dataset_labelmap_file_within_root(dataset_root, name)
+        classes = _load_labelmap_file(candidate)
+        if classes:
+            return [str(x).strip() for x in classes if str(x).strip()]
+    return []
 
 
 def _validate_linked_dataset_shape(dataset_root: Path, *, strict: bool = True) -> Dict[str, Any]:
@@ -14767,6 +14795,7 @@ def _validate_linked_dataset_shape(dataset_root: Path, *, strict: bool = True) -
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="dataset_shape_missing_labelmap"
         )
+    _dataset_labelmap_file_within_root(dataset_root, "labelmap.txt")
     if layout.get("yolo_layout") in {"flat", "split"} and layout.get("yolo_ready"):
         return layout
     has_flat_images = (dataset_root / "images").exists()

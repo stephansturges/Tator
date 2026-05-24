@@ -2339,6 +2339,39 @@ def test_register_path_rejects_symlinked_registry_root(tmp_path, monkeypatch) ->
     assert list(outside.iterdir()) == []
 
 
+def test_register_path_rejects_symlinked_labelmap_before_registry_write(
+    tmp_path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "linked_ds"
+    (dataset_root / "images").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "labels").mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside_labelmap.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    try:
+        (dataset_root / "labelmap.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    registry_root = tmp_path / "registry"
+    monkeypatch.setattr(api, "DATASET_LINK_ROOTS", [tmp_path.resolve()])
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.register_dataset_path(
+            str(dataset_root),
+            "linked_ds",
+            None,
+            None,
+            None,
+            force_new=True,
+            strict=True,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "labelmap_path_forbidden"
+    assert not registry_root.exists()
+    assert outside.read_text(encoding="utf-8") == "secret\n"
+
+
 def test_register_path_rejects_target_symlink_without_target_write(
     tmp_path, monkeypatch
 ) -> None:
@@ -2385,3 +2418,22 @@ def test_open_path_strict_requires_labelmap(tmp_path, monkeypatch) -> None:
         api.open_dataset_path(str(dataset_root), strict=True)
     assert exc.value.status_code == 400
     assert exc.value.detail == "dataset_shape_missing_labelmap"
+
+
+def test_open_path_strict_rejects_symlinked_labelmap(tmp_path, monkeypatch) -> None:
+    dataset_root = tmp_path / "bad_ds"
+    (dataset_root / "images").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "labels").mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside_labelmap.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    try:
+        (dataset_root / "labelmap.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATASET_LINK_ROOTS", [tmp_path.resolve()])
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.open_dataset_path(str(dataset_root), strict=True)
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "labelmap_path_forbidden"

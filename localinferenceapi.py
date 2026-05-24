@@ -2944,9 +2944,15 @@ def _startup_copy2_if_different(src: Path, dst: Path) -> None:
 # This preserves older workflows that write my_logreg_model.pkl/my_label_list.pkl at repo root.
 try:
     _uploads_root_early = Path("uploads")
+    if _storage_path_has_symlink_component(_uploads_root_early):
+        raise RuntimeError("startup_upload_root_symlink")
     _uploads_root_early.mkdir(exist_ok=True)
     _classifiers_root_early = (_uploads_root_early / "classifiers").resolve()
     _labelmaps_root_early = (_uploads_root_early / "labelmaps").resolve()
+    if _storage_path_has_symlink_component(
+        _classifiers_root_early
+    ) or _storage_path_has_symlink_component(_labelmaps_root_early):
+        raise RuntimeError("startup_artifact_root_symlink")
     _classifiers_root_early.mkdir(parents=True, exist_ok=True)
     _labelmaps_root_early.mkdir(parents=True, exist_ok=True)
 
@@ -13270,22 +13276,32 @@ class ClipTrainingJob:
 TRAINING_JOBS: Dict[str, ClipTrainingJob] = {}
 TRAINING_JOBS_LOCK = threading.Lock()
 
+
+def _init_storage_root(path: Path, *, parents: bool = True, exist_ok: bool = True) -> Path:
+    raw_path = Path(path)
+    if _storage_path_has_symlink_component(raw_path):
+        raise RuntimeError(f"storage_root_symlink:{raw_path}")
+    raw_path.mkdir(parents=parents, exist_ok=exist_ok)
+    if _storage_path_has_symlink_component(raw_path) or not raw_path.is_dir():
+        raise RuntimeError(f"storage_root_invalid:{raw_path}")
+    return raw_path
+
 QWEN_JOB_ROOT = Path(os.environ.get("QWEN_TRAINING_ROOT", "./uploads/qwen_runs"))
-QWEN_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(QWEN_JOB_ROOT)
 QWEN_DATASET_ROOT = QWEN_JOB_ROOT / "datasets"
-QWEN_DATASET_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(QWEN_DATASET_ROOT)
 SAM3_JOB_ROOT = Path(os.environ.get("SAM3_TRAINING_ROOT", "./uploads/sam3_runs"))
-SAM3_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(SAM3_JOB_ROOT)
 SAM3_DATASET_ROOT = SAM3_JOB_ROOT / "datasets"
-SAM3_DATASET_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(SAM3_DATASET_ROOT)
 SAM3_DATASET_META_NAME = "sam3_dataset.json"
 YOLO_JOB_ROOT = Path(os.environ.get("YOLO_TRAINING_ROOT", "./uploads/yolo_runs"))
-YOLO_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(YOLO_JOB_ROOT)
 YOLO_MODEL_ROOT = Path(os.environ.get("YOLO_MODEL_ROOT", "./uploads/yolo_models"))
-YOLO_MODEL_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(YOLO_MODEL_ROOT)
 YOLO_ACTIVE_PATH = YOLO_MODEL_ROOT / "active.json"
 YOLO_DATASET_CACHE_ROOT = YOLO_JOB_ROOT / "datasets"
-YOLO_DATASET_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(YOLO_DATASET_CACHE_ROOT)
 YOLO_RUN_META_NAME = "run.json"
 YOLO_KEEP_FILES = {
     "best.pt",
@@ -13300,12 +13316,12 @@ YOLO_KEEP_FILES = {
 }
 
 RFDETR_JOB_ROOT = Path(os.environ.get("RFDETR_TRAINING_ROOT", "./uploads/rfdetr_runs"))
-RFDETR_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(RFDETR_JOB_ROOT)
 RFDETR_MODEL_ROOT = Path(os.environ.get("RFDETR_MODEL_ROOT", "./uploads/rfdetr_models"))
-RFDETR_MODEL_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(RFDETR_MODEL_ROOT)
 RFDETR_ACTIVE_PATH = RFDETR_MODEL_ROOT / "active.json"
 DETECTOR_PREFS_ROOT = Path(os.environ.get("DETECTOR_PREFS_ROOT", "./uploads/detectors"))
-DETECTOR_PREFS_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(DETECTOR_PREFS_ROOT)
 DETECTOR_DEFAULT_PATH = DETECTOR_PREFS_ROOT / "default.json"
 RFDETR_RUN_META_NAME = "run.json"
 
@@ -13433,7 +13449,7 @@ RFDETR_VARIANTS = [
     {"id": "rfdetr-seg-preview", "label": "RF-DETR Seg Preview", "task": "segment"},
 ]
 DATASET_REGISTRY_ROOT = Path(os.environ.get("DATASET_ROOT", "./uploads/datasets"))
-DATASET_REGISTRY_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(DATASET_REGISTRY_ROOT)
 DATASET_META_NAME = "dataset.json"
 DATASET_ANNOTATION_OVERLAY_DIRNAME = ".annotation_overlay"
 DATASET_ANNOTATION_SESSION_TTL_SECONDS = max(
@@ -13478,33 +13494,33 @@ DATASET_LINK_ROOTS = _parse_dataset_link_roots()
 DATASET_TRANSIENT_SESSIONS: Dict[str, Dict[str, Any]] = {}
 DATASET_TRANSIENT_LOCK = threading.Lock()
 CLASS_ANALYSIS_ROOT = Path(os.environ.get("CLASS_ANALYSIS_ROOT", "./uploads/class_analysis"))
-CLASS_ANALYSIS_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(CLASS_ANALYSIS_ROOT)
 CLASS_ANALYSIS_CACHE_ROOT = Path(
     os.environ.get("CLASS_ANALYSIS_CACHE_ROOT", str(CLASS_ANALYSIS_ROOT / "cache"))
 )
-CLASS_ANALYSIS_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(CLASS_ANALYSIS_CACHE_ROOT)
 CLASS_ANALYSIS_CACHE_VERSION = "class-analysis-v2"
 CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL = os.environ.get(
     "CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL",
     "facebook/dinov3-vitb16-pretrain-lvd1689m",
 )
 DATA_INGESTION_ROOT = Path(os.environ.get("DATA_INGESTION_ROOT", "./uploads/data_ingestion"))
-DATA_INGESTION_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(DATA_INGESTION_ROOT)
 LOCAL_SALAD_HEAD_ROOT = Path(os.environ.get("LOCAL_SALAD_HEAD_ROOT", "./uploads/salad_heads"))
-LOCAL_SALAD_HEAD_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(LOCAL_SALAD_HEAD_ROOT)
 LOCAL_SALAD_HEAD_LOCK = threading.Lock()
 PROMPT_HELPER_JOB_ROOT = Path(
     os.environ.get("SAM3_PROMPT_HELPER_ROOT", "./uploads/prompt_helper_jobs")
 )
-PROMPT_HELPER_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(PROMPT_HELPER_JOB_ROOT)
 SEG_BUILDER_ROOT = Path(os.environ.get("SEGMENTATION_ROOT", "./uploads/seg_runs"))
-SEG_BUILDER_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(SEG_BUILDER_ROOT)
 SAM3_REPO_ROOT = Path(__file__).resolve().parent.resolve()
 SAM3_VENDOR_ROOT = SAM3_REPO_ROOT / "sam3"
 SAM3_PACKAGE_ROOT = SAM3_VENDOR_ROOT / "sam3"
 SAM3_CONFIG_TEMPLATE = SAM3_REPO_ROOT / "sam3_local" / "local_yolo_ft.yaml"
 SAM3_GENERATED_CONFIG_DIR = SAM3_PACKAGE_ROOT / "train/configs/generated"
-SAM3_GENERATED_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+_init_storage_root(SAM3_GENERATED_CONFIG_DIR)
 
 
 def _resolve_sam3_bpe_path() -> Path:
@@ -13752,26 +13768,26 @@ DATA_INGESTION_JOBS_LOCK = threading.Lock()
 CALIBRATION_JOBS: Dict[str, CalibrationJob] = {}
 CALIBRATION_JOBS_LOCK = threading.Lock()
 UPLOAD_ROOT = Path("uploads")
-UPLOAD_ROOT.mkdir(exist_ok=True)
+_init_storage_root(UPLOAD_ROOT, parents=False)
 GLOSSARY_LIBRARY_ROOT = UPLOAD_ROOT / "glossaries"
-GLOSSARY_LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(GLOSSARY_LIBRARY_ROOT)
 PREPASS_RECIPE_ROOT = UPLOAD_ROOT / "prepass_recipes"
-PREPASS_RECIPE_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(PREPASS_RECIPE_ROOT)
 EDR_PACKAGES_ROOT = UPLOAD_ROOT / "edr_packages"
-EDR_PACKAGES_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(EDR_PACKAGES_ROOT)
 PREPASS_RECIPE_META = "prepass.meta.json"
 PREPASS_RECIPE_ASSETS = "assets"
 PREPASS_RECIPE_SCHEMA_VERSION = 1
 PREPASS_RECIPE_TMP_ROOT = UPLOAD_ROOT / "tmp_prepass_recipes"
-PREPASS_RECIPE_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(PREPASS_RECIPE_TMP_ROOT)
 PREPASS_RECIPE_EXPORT_ROOT = Path(
     os.environ.get("PREPASS_RECIPE_EXPORT_ROOT", str(UPLOAD_ROOT / "prepass_recipe_exports"))
 )
-PREPASS_RECIPE_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(PREPASS_RECIPE_EXPORT_ROOT)
 PROMPT_HELPER_PRESET_ROOT = UPLOAD_ROOT / "prompt_helper_presets"
-PROMPT_HELPER_PRESET_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(PROMPT_HELPER_PRESET_ROOT)
 AUTO_LABEL_ROOT = UPLOAD_ROOT / "auto_label_jobs"
-AUTO_LABEL_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(AUTO_LABEL_ROOT)
 AUTO_LABEL_FALCON_MODEL_ID = str(
     os.environ.get("FALCON_PERCEPTION_MODEL_ID", "tiiuae/Falcon-Perception") or "tiiuae/Falcon-Perception"
 ).strip()
@@ -13780,25 +13796,25 @@ AUTO_LABEL_FALCON_LOCAL_ONLY = _parse_bool(os.environ.get("FALCON_PERCEPTION_LOC
 
 
 CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
-CLIP_DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(CLIP_DATASET_UPLOAD_ROOT)
 DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "dataset_uploads"
-DATASET_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(DATASET_UPLOAD_ROOT)
 CLIP_NEGATIVE_REPLAY_ROOT = UPLOAD_ROOT / "clip_negative_replay"
-CLIP_NEGATIVE_REPLAY_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(CLIP_NEGATIVE_REPLAY_ROOT)
 QWEN_PREPASS_TRACE_ROOT = UPLOAD_ROOT / "qwen_prepass_traces"
-QWEN_PREPASS_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(QWEN_PREPASS_TRACE_ROOT)
 QWEN_PREPASS_FULL_TRACE_ROOT = UPLOAD_ROOT / "qwen_prepass_traces_full"
-QWEN_PREPASS_FULL_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(QWEN_PREPASS_FULL_TRACE_ROOT)
 QWEN_PREPASS_FULL_TRACE_LATEST = QWEN_PREPASS_FULL_TRACE_ROOT / "latest.jsonl"
 LOG_ROOT = Path("logs")
-LOG_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(LOG_ROOT)
 QWEN_PREPASS_READABLE_TRACE_ROOT = LOG_ROOT / "prepass_readable"
-QWEN_PREPASS_READABLE_TRACE_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(QWEN_PREPASS_READABLE_TRACE_ROOT)
 QWEN_PREPASS_READABLE_TRACE_LATEST = QWEN_PREPASS_READABLE_TRACE_ROOT / "latest.log"
 CALIBRATION_ROOT = UPLOAD_ROOT / "calibration_jobs"
 CALIBRATION_CACHE_ROOT = UPLOAD_ROOT / "calibration_cache"
 CALIBRATION_FEATURES_VERSION = 7
-CALIBRATION_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(CALIBRATION_ROOT)
 
 
 def _prune_job_registry(
@@ -13832,19 +13848,19 @@ def _prune_job_registry(
 JOB_REGISTRY_TTL_HOURS = _env_int("JOB_REGISTRY_TTL_HOURS", 72)
 STAGING_TTL_HOURS = _env_int("STAGING_TTL_HOURS", 24)
 AGENT_MINING_ROOT = UPLOAD_ROOT / "agent_mining"
-AGENT_MINING_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(AGENT_MINING_ROOT)
 AGENT_MINING_JOB_ROOT = AGENT_MINING_ROOT / "jobs"
-AGENT_MINING_JOB_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(AGENT_MINING_JOB_ROOT)
 AGENT_MINING_CACHE_ROOT = AGENT_MINING_ROOT / "cache"
-AGENT_MINING_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(AGENT_MINING_CACHE_ROOT)
 AGENT_MINING_META_ROOT = AGENT_MINING_ROOT / "meta"
-AGENT_MINING_META_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(AGENT_MINING_META_ROOT)
 AGENT_MINING_DET_CACHE_ROOT = AGENT_MINING_ROOT / "detections"
-AGENT_MINING_DET_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(AGENT_MINING_DET_CACHE_ROOT)
 AGENT_MINING_RECIPES_ROOT = AGENT_MINING_ROOT / "recipes"
-AGENT_MINING_RECIPES_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(AGENT_MINING_RECIPES_ROOT)
 AGENT_MINING_CASCADES_ROOT = AGENT_MINING_ROOT / "cascades"
-AGENT_MINING_CASCADES_ROOT.mkdir(parents=True, exist_ok=True)
+_init_storage_root(AGENT_MINING_CASCADES_ROOT)
 
 
 def _enforce_agent_mining_cache_limits(cache_root: Path, allow_when_running: bool = False) -> None:

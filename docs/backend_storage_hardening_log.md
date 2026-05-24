@@ -288,3 +288,14 @@ preserving the exact validation story for storage and artifact-write fixes.
   thumbnail-cache reuse, ensuring outside cache targets are not trusted.
 - Validation: `1029 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Startup Storage Root Initialization
+
+- Replaced raw import-time `mkdir` calls for backend storage roots with a shared
+  initializer that rejects symlink components before and after root creation.
+- Guarded the early startup artifact mirror so default CLIP artifact copies are
+  skipped when `uploads/` or mirror children have symlinked components.
+- Added regressions proving nested directories are not created through
+  symlinked storage-root parents while normal roots still initialize.
+- Validation: `1031 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

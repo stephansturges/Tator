@@ -310,3 +310,13 @@ preserving the exact validation story for storage and artifact-write fixes.
   candidate diversity review.
 - Validation: `1031 passed, 17 skipped`; focused Data Ingestion/UI contract
   checks passed.
+
+## 2026-05-24: Data Ingestion Backend Dataset Media Roots
+
+- Kept Data Ingestion reference/training media collected from backend datasets
+  inside the selected dataset root, even when an `images/` directory is a
+  symlink to another location.
+- Added regression coverage for symlinked backend dataset image roots so
+  reference-profile jobs cannot silently ingest files outside the dataset.
+- Validation: `1033 passed, 17 skipped`; focused Data Ingestion and linked
+  dataset coverage passed.

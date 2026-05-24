@@ -14849,13 +14849,26 @@ def _annotation_source_text_value(dataset_root: Path, image_relpath: Path) -> st
 
 def _annotation_collect_images(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
     dataset_root = _dataset_effective_root_from_entry(entry)
+    dataset_root_resolved = dataset_root.resolve()
     out: List[Dict[str, Any]] = []
     yolo_layout = str(entry.get("yolo_layout") or "flat")
 
     def _append(split_name: str, images_dir: Path) -> None:
         if not images_dir.exists():
             return
+        try:
+            images_dir_resolved = images_dir.resolve()
+        except Exception:
+            return
+        if not _path_is_within_root_impl(images_dir_resolved, dataset_root_resolved):
+            return
         for image_path in _iter_yolo_images(images_dir):
+            try:
+                image_resolved = image_path.resolve()
+            except Exception:
+                continue
+            if not _path_is_within_root_impl(image_resolved, dataset_root_resolved):
+                continue
             try:
                 rel = image_path.relative_to(images_dir)
             except Exception:
@@ -18797,13 +18810,17 @@ def _data_ingestion_dataset_media_rows(
         return []
     entry = _resolve_dataset_entry(safe_id)
     label = str(entry.get("label") or entry.get("id") or safe_id)
+    dataset_root = _dataset_effective_root_from_entry(entry).resolve()
     image_rows = _annotation_collect_images(entry)
     max_items = _coerce_int(max_count, 0, minimum=0)
-    if max_items > 0:
-        image_rows = image_rows[:max_items]
     out: List[Dict[str, Any]] = []
     for idx, image_row in enumerate(image_rows):
-        image_path = Path(str(image_row.get("image_path") or "")).resolve()
+        try:
+            image_path = Path(str(image_row.get("image_path") or "")).resolve()
+        except Exception:
+            continue
+        if not _path_is_within_root_impl(image_path, dataset_root):
+            continue
         if not image_path.exists() or not image_path.is_file():
             continue
         if image_path.suffix.lower() not in DATA_INGESTION_IMAGE_EXTS:
@@ -18830,6 +18847,8 @@ def _data_ingestion_dataset_media_rows(
                 "dataset_index": idx,
             }
         )
+        if max_items > 0 and len(out) >= max_items:
+            break
     return out
 
 

@@ -549,6 +549,69 @@ def test_data_ingestion_backend_dataset_rows_and_training_queue(tmp_path, monkey
     assert job.request["train_uploads"][0]["source_dataset_id"] == "unit_dataset"
 
 
+def test_data_ingestion_backend_dataset_rows_skip_symlinked_image_root_escape(tmp_path, monkeypatch):
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    outside_images = tmp_path / "outside_images"
+    outside_images.mkdir()
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(outside_images / "outside.jpg")
+    try:
+        (dataset_root / "images").symlink_to(outside_images, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    entry = {
+        "id": "symlink_dataset",
+        "label": "Symlink Dataset",
+        "dataset_root": str(dataset_root),
+        "yolo_layout": "flat",
+    }
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+
+    assert api._annotation_collect_images(entry) == []
+    assert api._data_ingestion_dataset_media_rows("symlink_dataset", field_name="reference") == []
+
+
+def test_data_ingestion_backend_dataset_row_cap_counts_valid_rows(tmp_path, monkeypatch):
+    dataset_root = tmp_path / "dataset"
+    images_root = dataset_root / "images"
+    images_root.mkdir(parents=True)
+    valid_path = images_root / "valid.jpg"
+    outside_path = tmp_path / "outside.jpg"
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(valid_path)
+    Image.new("RGB", (8, 8), (40, 50, 60)).save(outside_path)
+    entry = {
+        "id": "mixed_dataset",
+        "label": "Mixed Dataset",
+        "dataset_root": str(dataset_root),
+        "yolo_layout": "flat",
+    }
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+    monkeypatch.setattr(
+        api,
+        "_annotation_collect_images",
+        lambda _entry: [
+            {
+                "split": "train",
+                "image_relpath": "outside.jpg",
+                "image_name": "outside.jpg",
+                "image_path": outside_path,
+            },
+            {
+                "split": "train",
+                "image_relpath": "valid.jpg",
+                "image_name": "valid.jpg",
+                "image_path": valid_path,
+            },
+        ],
+    )
+
+    rows = api._data_ingestion_dataset_media_rows("mixed_dataset", field_name="reference", max_count=1)
+
+    assert len(rows) == 1
+    assert rows[0]["filename"] == "train/valid.jpg"
+    assert rows[0]["path"] == str(valid_path.resolve())
+
+
 def test_data_ingestion_active_reference_dataset_id_is_metadata_only(tmp_path, monkeypatch):
     jobs_root = tmp_path / "jobs"
     jobs_root.mkdir()

@@ -835,3 +835,14 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1113 passed, 17 skipped`; focused cascade import/export coverage,
   `services/agent_cascades.py` compile, the full pytest suite, and live endpoint
   sanity checks passed against the restarted backend.
+
+## 2026-05-24: Falcon Source Patch Atomic Saves
+
+- Added guarded text writes for Falcon source patching.
+- Changed Hugging Face snapshot and official Falcon source patch writes from
+  direct `write_text` calls to temp-file writes followed by atomic replace.
+- Added a regression proving patching a symlinked snapshot source file replaces
+  the snapshot leaf without mutating the shared cache blob.
+- Validation: `1114 passed, 17 skipped`; focused Falcon coverage,
+  `services/falcon_perception.py` compile, the full pytest suite, and live
+  endpoint sanity checks passed against the restarted backend.

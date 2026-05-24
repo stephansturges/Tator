@@ -226,6 +226,29 @@ def _configure_falcon_torch_runtime(torch_module: Any = torch) -> None:
         pass
 
 
+def _write_falcon_patch_text(path: Path, text: str) -> None:
+    if path.exists() and path.is_dir():
+        raise IsADirectoryError(str(path))
+    tmp_path = path.parent / f".{path.name}.tmp.{os.getpid()}"
+    if tmp_path.is_symlink():
+        tmp_path.unlink(missing_ok=True)
+    elif tmp_path.exists():
+        if tmp_path.is_dir():
+            raise IsADirectoryError(str(tmp_path))
+        tmp_path.unlink()
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp_path, flags, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+
+
 def _patch_falcon_modeling_file(path: Path) -> None:
     try:
         raw = path.read_text(encoding="utf-8")
@@ -246,7 +269,7 @@ def _patch_falcon_modeling_file(path: Path) -> None:
     )
     if updated == raw:
         return
-    path.write_text(updated, encoding="utf-8")
+    _write_falcon_patch_text(path, updated)
 
 
 def _patch_falcon_tokenizer_config(path: Path) -> None:
@@ -257,7 +280,7 @@ def _patch_falcon_tokenizer_config(path: Path) -> None:
     if str(payload.get("tokenizer_class") or "").strip() != "TokenizersBackend":
         return
     payload["tokenizer_class"] = "PreTrainedTokenizerFast"
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _write_falcon_patch_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def _patch_falcon_attention_file(path: Path) -> None:
@@ -282,7 +305,7 @@ def _patch_falcon_attention_file(path: Path) -> None:
     updated = updated.replace(_FALCON_BATCH_MASK_RETURN_OLD, _FALCON_BATCH_MASK_RETURN_NEW, 1)
     if updated == raw:
         return
-    path.write_text(updated, encoding="utf-8")
+    _write_falcon_patch_text(path, updated)
 
 
 def _patch_falcon_anyup_file(path: Path) -> None:
@@ -306,7 +329,7 @@ def _patch_falcon_anyup_file(path: Path) -> None:
     )
     if updated == raw:
         return
-    path.write_text(updated, encoding="utf-8")
+    _write_falcon_patch_text(path, updated)
 
 
 def _patch_falcon_source_tree(source_root: Path) -> None:
@@ -392,7 +415,7 @@ def _patch_official_model_file(path: Path) -> None:
         count=1,
     )
     if updated != raw:
-        path.write_text(updated, encoding="utf-8")
+        _write_falcon_patch_text(path, updated)
 
 
 def _patch_official_attention_file(path: Path) -> None:
@@ -454,7 +477,7 @@ def _patch_official_attention_file(path: Path) -> None:
         "    return create_attention_mask(mask_mod, B, None, max_len, max_len, device=input_batch.device)\n",
     )
     if updated != raw:
-        path.write_text(updated, encoding="utf-8")
+        _write_falcon_patch_text(path, updated)
 
 
 def _patch_official_anyup_file(path: Path) -> None:
@@ -505,7 +528,7 @@ def _patch_official_anyup_file(path: Path) -> None:
         "        return row_lower & row_upper & col_lower & col_upper\n",
     )
     if updated != raw:
-        path.write_text(updated, encoding="utf-8")
+        _write_falcon_patch_text(path, updated)
 
 
 def _patch_official_paged_inference_file(path: Path) -> None:
@@ -518,7 +541,7 @@ def _patch_official_paged_inference_file(path: Path) -> None:
         'seq.image_hash = int.from_bytes(hashlib.sha256(img.tobytes()).digest()[:8], "big")',
     )
     if updated != raw:
-        path.write_text(updated, encoding="utf-8")
+        _write_falcon_patch_text(path, updated)
 
 
 def _patch_official_data_file(path: Path) -> None:
@@ -551,7 +574,7 @@ def _patch_official_data_file(path: Path) -> None:
         "    height = int(mask_thw.sum(axis=-2).astype(int).max())\n",
     )
     if updated != raw:
-        path.write_text(updated, encoding="utf-8")
+        _write_falcon_patch_text(path, updated)
 
 
 def _patch_official_repo_tree(repo_root: Path) -> None:

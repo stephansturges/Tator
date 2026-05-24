@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from pycocotools import mask as mask_utils
 
 from services.falcon_perception import (
+    _FALCON_FLEX_IMPORT_NEW,
+    _FALCON_FLEX_IMPORT_OLD,
     _disable_unsafe_segmentation_hr_cache,
     _falcon_retry_dimensions,
     _normalize_prediction,
+    _patch_falcon_modeling_file,
     resize_mask_rle,
 )
 
@@ -68,3 +72,24 @@ def test_disable_unsafe_segmentation_hr_cache_turns_cache_off_and_clears_entries
     _disable_unsafe_segmentation_hr_cache(engine)
     assert engine.enable_hr_cache is False
     assert engine._hr_features_cache == {}
+
+
+def test_falcon_source_patch_replaces_snapshot_symlink_without_mutating_blob(tmp_path):
+    source_root = tmp_path / "snapshot"
+    source_root.mkdir()
+    shared_blob = tmp_path / "blob.py"
+    original = _FALCON_FLEX_IMPORT_OLD + "\nclass Demo:\n    pass\n"
+    shared_blob.write_text(original, encoding="utf-8")
+    snapshot_file = source_root / "modeling_falcon_perception.py"
+    try:
+        snapshot_file.symlink_to(shared_blob)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _patch_falcon_modeling_file(snapshot_file)
+
+    assert not snapshot_file.is_symlink()
+    assert shared_blob.read_text(encoding="utf-8") == original
+    patched = snapshot_file.read_text(encoding="utf-8")
+    assert _FALCON_FLEX_IMPORT_NEW in patched
+    assert _FALCON_FLEX_IMPORT_OLD not in patched

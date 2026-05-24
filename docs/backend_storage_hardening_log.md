@@ -897,3 +897,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1126 passed, 17 skipped`; focused data-ingestion upload coverage,
   `localinferenceapi.py` compile, the full pytest suite, and live endpoint
   sanity checks passed against the restarted backend.
+
+## 2026-05-24: Transient Annotation Labelmap Atomic Saves
+
+- Routed transient annotation labelmap updates through the existing guarded
+  annotation labelmap writer.
+- Replaced the direct `labelmap.txt` write with temp-file writes followed by
+  atomic replace, including symlink leaf replacement and parent/root checks.
+- Added a regression proving transient labelmap edits replace symlink leaves
+  without mutating external targets or temp symlink targets.
+- Validation: `1127 passed, 17 skipped`; focused linked annotation coverage,
+  `localinferenceapi.py` compile, the full pytest suite, and live endpoint
+  sanity checks passed against the restarted backend.

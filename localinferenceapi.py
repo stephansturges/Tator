@@ -17198,18 +17198,11 @@ def patch_transient_annotation_meta(session_id: str, payload: Dict[str, Any]):
         dataset_root_raw = str(session.get("dataset_root") or "").strip()
         dataset_root = _validate_linked_dataset_path(dataset_root_raw) if dataset_root_raw else None
         if dataset_root is not None:
-            labelmap_path = (dataset_root / "labelmap.txt").resolve()
-            if not _path_is_within_root_impl(labelmap_path, dataset_root.resolve()):
-                raise HTTPException(
-                    status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_forbidden"
-                )
-            try:
-                labelmap_path.write_text("\n".join(saved_labelmap) + "\n", encoding="utf-8")
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(
-                    status_code=HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"labelmap_save_failed:{exc}",
-                ) from exc
+            _annotation_write_labelmap_file(
+                dataset_root / "labelmap.txt",
+                [dataset_root.resolve()],
+                saved_labelmap,
+            )
         session["classes"] = list(saved_labelmap)
     if status_value:
         session["annotation_status"] = status_value

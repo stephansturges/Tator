@@ -1527,6 +1527,59 @@ def test_transient_meta_patch_writes_labelmap_after_revalidation(
         api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
 
 
+def test_transient_meta_patch_replaces_labelmap_symlink_without_target_write(
+    tmp_path, monkeypatch
+) -> None:
+    session_id = "transient-labelmap-symlink"
+    source_root = tmp_path / "source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    outside_final = tmp_path / "outside_labelmap.txt"
+    outside_tmp = tmp_path / "outside_tmp.txt"
+    outside_final.write_text("external final", encoding="utf-8")
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    labelmap_path = source_root / "labelmap.txt"
+    tmp_link = labelmap_path.with_suffix(f"{labelmap_path.suffix}.feedface.tmp")
+    try:
+        labelmap_path.symlink_to(outside_final)
+        tmp_link.symlink_to(outside_tmp)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    class FixedUUID:
+        hex = "feedface"
+
+    now = time.time()
+    with api.DATASET_TRANSIENT_LOCK:
+        api.DATASET_TRANSIENT_SESSIONS[session_id] = {
+            "session_id": session_id,
+            "dataset_root": str(source_root),
+            "classes": ["old"],
+            "annotation_lock": _active_lock("sess-lock"),
+            "expires_at": now + 300.0,
+        }
+    monkeypatch.setattr(api, "_validate_linked_dataset_path", lambda _path: source_root)
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: FixedUUID())
+
+    out = api.patch_transient_annotation_meta(
+        session_id,
+        {
+            "session_id": "sess-lock",
+            "labelmap": ["car", "truck"],
+        },
+    )
+
+    assert out["labelmap"] == ["car", "truck"]
+    assert not labelmap_path.is_symlink()
+    assert not tmp_link.exists()
+    assert labelmap_path.read_text(encoding="utf-8") == "car\ntruck\n"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    with api.DATASET_TRANSIENT_LOCK:
+        session = api.DATASET_TRANSIENT_SESSIONS[session_id]
+        assert session["classes"] == ["car", "truck"]
+        api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
+
+
 def test_transient_delete_and_expiry(monkeypatch) -> None:
     active_id = "transient-active"
     expired_id = "transient-expired"

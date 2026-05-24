@@ -35564,6 +35564,11 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             return headDatasetId === activeDatasetId;
         }
+        const headLabel = String(head.reference_label || head.reference_dataset_label || "").trim();
+        const activeLabel = getDataIngestionReferenceLabel();
+        if (headLabel && activeLabel && headLabel !== activeLabel) {
+            return false;
+        }
         return headReferenceSource === "active_label_images";
     }
 

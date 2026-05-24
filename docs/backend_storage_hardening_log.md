@@ -1113,3 +1113,17 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1159 passed, 17 skipped`; focused Data Ingestion coverage,
   `git diff --check`, the full pytest suite, and live endpoint sanity checks
   passed against the restarted backend.
+
+## 2026-05-24: Data Ingestion Active Profile Matching
+
+- Tightened active Label Images reference-profile matching so profiles with
+  different non-empty reference labels no longer match solely because both came
+  from the active workspace flow.
+- Mirrored the same label-aware filtering in the UI profile picker while keeping
+  older unlabeled active-workspace profiles loadable.
+- Extended backend and UI contract coverage for the active reference-label
+  comparison.
+- Validation: `1159 passed, 17 skipped`; focused Data Ingestion/UI contract
+  coverage, `node --check ybat-master/ybat.js`, `git diff --check`, the full
+  pytest suite, and live endpoint sanity checks passed against the restarted
+  backend.

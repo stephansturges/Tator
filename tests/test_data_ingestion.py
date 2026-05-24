@@ -717,6 +717,14 @@ def test_local_salad_reference_matching_requires_specific_metadata():
         {"reference_source": "active_label_images"},
         {"reference_source": "active_label_images"},
     )
+    assert api._local_salad_head_reference_matches_request(
+        {"reference_source": "active_label_images", "reference_label": "Dataset A"},
+        {"reference_source": "active_label_images", "reference_label": "Dataset A"},
+    )
+    assert not api._local_salad_head_reference_matches_request(
+        {"reference_source": "active_label_images", "reference_label": "Dataset A"},
+        {"reference_source": "active_label_images", "reference_label": "Dataset B"},
+    )
     assert not api._local_salad_head_reference_matches_request(
         {"reference_source": "backend_dataset"},
         {"reference_source": "backend_dataset", "reference_dataset_id": "dataset_a"},

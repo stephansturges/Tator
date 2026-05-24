@@ -19628,8 +19628,10 @@ def _list_local_salad_heads() -> List[Dict[str, Any]]:
 def _local_salad_head_reference_matches_request(metadata: Dict[str, Any], request: Dict[str, Any]) -> bool:
     head_source = str(metadata.get("reference_source") or metadata.get("source_mode") or "").strip()
     head_dataset_id = str(metadata.get("reference_dataset_id") or "").strip()
+    head_label = str(metadata.get("reference_label") or metadata.get("reference_dataset_label") or "").strip()
     request_source = str(request.get("reference_source") or request.get("source_mode") or "").strip()
     request_dataset_id = str(request.get("reference_dataset_id") or "").strip()
+    request_label = str(request.get("reference_label") or request.get("reference_dataset_label") or "").strip()
     if not head_source and not head_dataset_id:
         return False
     if request_source == "backend_dataset":
@@ -19637,6 +19639,8 @@ def _local_salad_head_reference_matches_request(metadata: Dict[str, Any], reques
     if request_source == "active_label_images":
         if head_dataset_id or request_dataset_id:
             return bool(head_dataset_id and request_dataset_id and head_dataset_id == request_dataset_id)
+        if head_label and request_label and head_label != request_label:
+            return False
         return head_source == "active_label_images"
     return False
 

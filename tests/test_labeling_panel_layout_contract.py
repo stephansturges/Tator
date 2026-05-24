@@ -216,6 +216,8 @@ def test_data_ingestion_panel_contract():
     assert "reference_dataset_id" in js
     assert "reference_source" in js
     assert "function dataIngestionHeadMatchesReference" in js
+    assert "const headLabel = String(head.reference_label || head.reference_dataset_label || \"\").trim();" in js
+    assert "const activeLabel = getDataIngestionReferenceLabel();" in js
     assert 'if (!headReferenceSource && !headDatasetId) {\n            return false;' in js
     assert "function handleDataIngestionReferenceChange" in js
     assert "dataIngestionElements.reportTitle" in js

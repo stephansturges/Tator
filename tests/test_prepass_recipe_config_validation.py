@@ -743,6 +743,148 @@ def test_export_keeps_dataset_id_for_canonical_recipe(tmp_path):
     assert exported_meta["config"]["dataset_id"] == "qwen_dataset"
 
 
+def test_collect_recipe_assets_rejects_symlinked_detector_run(tmp_path: Path) -> None:
+    yolo_root = tmp_path / "uploads" / "yolo_runs"
+    yolo_root.mkdir(parents=True)
+    outside = tmp_path / "outside_yolo"
+    outside.mkdir()
+    (outside / "best.pt").write_bytes(b"outside")
+    try:
+        (yolo_root / "bad_run").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _collect_recipe_assets_impl(
+            {"config": {"yolo_id": "bad_run"}},
+            tmp_path / "export",
+            read_labelmap_lines_fn=lambda path: [],
+            load_labelmap_meta_fn=lambda dataset_id: ([], None),
+            active_labelmap_path=None,
+            sanitize_run_id_fn=lambda value: value,
+            copy_tree_filtered_fn=lambda *args, **kwargs: pytest.fail("copied escaped detector run"),
+            sha256_fn=lambda path: "sha",
+            get_qwen_model_entry_fn=lambda model_id: None,
+            resolve_classifier_path_fn=lambda classifier_id: None,
+            yolo_job_root=yolo_root,
+            rfdetr_job_root=tmp_path / "uploads" / "rfdetr_runs",
+            rfdetr_keep_files=None,
+            qwen_metadata_filename="metadata.json",
+            qwen_job_root=tmp_path / "uploads" / "qwen_runs",
+            upload_root=tmp_path / "uploads",
+            calibration_root=tmp_path / "uploads" / "calibration_jobs",
+        )
+
+    assert exc_info.value.detail == "prepass_recipe_path_invalid"
+    assert (outside / "best.pt").read_bytes() == b"outside"
+
+
+def test_collect_recipe_assets_rejects_symlinked_calibration_job(tmp_path: Path) -> None:
+    calibration_root = tmp_path / "uploads" / "calibration_jobs"
+    calibration_root.mkdir(parents=True)
+    outside = tmp_path / "outside_calibration"
+    outside.mkdir()
+    (outside / "ensemble_xgb.json").write_text("{}", encoding="utf-8")
+    try:
+        (calibration_root / "bad_job").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _collect_recipe_assets_impl(
+            {"config": {"ensemble_job_id": "bad_job"}},
+            tmp_path / "export",
+            read_labelmap_lines_fn=lambda path: [],
+            load_labelmap_meta_fn=lambda dataset_id: ([], None),
+            active_labelmap_path=None,
+            sanitize_run_id_fn=lambda value: value,
+            copy_tree_filtered_fn=lambda *args, **kwargs: pytest.fail("copied escaped calibration job"),
+            sha256_fn=lambda path: "sha",
+            get_qwen_model_entry_fn=lambda model_id: None,
+            resolve_classifier_path_fn=lambda classifier_id: None,
+            yolo_job_root=tmp_path / "uploads" / "yolo_runs",
+            rfdetr_job_root=tmp_path / "uploads" / "rfdetr_runs",
+            rfdetr_keep_files=None,
+            qwen_metadata_filename="metadata.json",
+            qwen_job_root=tmp_path / "uploads" / "qwen_runs",
+            upload_root=tmp_path / "uploads",
+            calibration_root=calibration_root,
+        )
+
+    assert exc_info.value.detail == "prepass_recipe_path_invalid"
+    assert (outside / "ensemble_xgb.json").read_text(encoding="utf-8") == "{}"
+
+
+def test_collect_recipe_assets_skips_qwen_model_outside_root(tmp_path: Path) -> None:
+    qwen_root = tmp_path / "uploads" / "qwen_runs"
+    qwen_root.mkdir(parents=True)
+    outside = tmp_path / "outside_qwen"
+    latest = outside / "latest"
+    latest.mkdir(parents=True)
+    (latest / "adapter_config.json").write_text("{}", encoding="utf-8")
+
+    assets = _collect_recipe_assets_impl(
+        {"config": {"model_id": "external_qwen"}},
+        tmp_path / "export",
+        read_labelmap_lines_fn=lambda path: [],
+        load_labelmap_meta_fn=lambda dataset_id: ([], None),
+        active_labelmap_path=None,
+        sanitize_run_id_fn=lambda value: value,
+        copy_tree_filtered_fn=lambda *args, **kwargs: pytest.fail("copied escaped qwen run"),
+        sha256_fn=lambda path: "sha",
+        get_qwen_model_entry_fn=lambda model_id: {"path": str(latest)},
+        resolve_classifier_path_fn=lambda classifier_id: None,
+        yolo_job_root=tmp_path / "uploads" / "yolo_runs",
+        rfdetr_job_root=tmp_path / "uploads" / "rfdetr_runs",
+        rfdetr_keep_files=None,
+        qwen_metadata_filename="metadata.json",
+        qwen_job_root=qwen_root,
+        upload_root=tmp_path / "uploads",
+        calibration_root=tmp_path / "uploads" / "calibration_jobs",
+    )
+
+    assert assets["copied"] == []
+    assert assets["missing"] == [{"kind": "qwen_model", "id": "external_qwen"}]
+
+
+def test_collect_recipe_assets_rejects_symlinked_qwen_root(tmp_path: Path) -> None:
+    outside_root = tmp_path / "outside_qwen_root"
+    run = outside_root / "run1"
+    latest = run / "latest"
+    latest.mkdir(parents=True)
+    (latest / "adapter_config.json").write_text("{}", encoding="utf-8")
+    qwen_root = tmp_path / "uploads" / "qwen_runs"
+    qwen_root.parent.mkdir(parents=True)
+    try:
+        qwen_root.symlink_to(outside_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _collect_recipe_assets_impl(
+            {"config": {"model_id": "linked_qwen"}},
+            tmp_path / "export",
+            read_labelmap_lines_fn=lambda path: [],
+            load_labelmap_meta_fn=lambda dataset_id: ([], None),
+            active_labelmap_path=None,
+            sanitize_run_id_fn=lambda value: value,
+            copy_tree_filtered_fn=lambda *args, **kwargs: pytest.fail("copied linked qwen root"),
+            sha256_fn=lambda path: "sha",
+            get_qwen_model_entry_fn=lambda model_id: {"path": str(latest)},
+            resolve_classifier_path_fn=lambda classifier_id: None,
+            yolo_job_root=tmp_path / "uploads" / "yolo_runs",
+            rfdetr_job_root=tmp_path / "uploads" / "rfdetr_runs",
+            rfdetr_keep_files=None,
+            qwen_metadata_filename="metadata.json",
+            qwen_job_root=qwen_root,
+            upload_root=tmp_path / "uploads",
+            calibration_root=tmp_path / "uploads" / "calibration_jobs",
+        )
+
+    assert exc_info.value.detail == "prepass_recipe_path_invalid"
+    assert (latest / "adapter_config.json").read_text(encoding="utf-8") == "{}"
+
+
 def test_list_prepass_recipes_skips_symlinked_recipe_dir_escape(tmp_path: Path) -> None:
     recipes_root = tmp_path / "recipes"
     outside = tmp_path / "outside_recipe"

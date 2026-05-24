@@ -116,6 +116,29 @@ def _prepare_recipe_dir(path: Path) -> Path:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid") from exc
 
 
+def _existing_child_dir_within_root(root: Path, child_name: str) -> Optional[Path]:
+    if _path_has_symlink_component(root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
+    if not root.exists():
+        return None
+    try:
+        root_resolved = root.resolve(strict=True)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid") from exc
+    raw_path = root / child_name
+    if raw_path.is_symlink():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
+    if not raw_path.exists():
+        return None
+    try:
+        resolved_path = raw_path.resolve(strict=True)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid") from exc
+    if not _path_within_root(resolved_path, root_resolved) or not resolved_path.is_dir():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
+    return resolved_path
+
+
 def _prepare_atomic_output_file(path: Path) -> Path:
     _prepare_output_file(path)
     tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
@@ -1966,8 +1989,9 @@ def _collect_recipe_assets_impl(
     def _copy_run(root: Path, run_id: Optional[str], keep: Optional[set[str]], kind: str):
         if not run_id:
             return
-        run_dir = root / sanitize_run_id_fn(run_id)
-        if not run_dir.exists():
+        safe_run_id = sanitize_run_id_fn(run_id)
+        run_dir = _existing_child_dir_within_root(root, safe_run_id)
+        if run_dir is None:
             assets["missing"].append({"kind": kind, "id": run_id})
             return
         dest = temp_dir / "models" / kind / run_dir.name
@@ -1994,7 +2018,18 @@ def _collect_recipe_assets_impl(
         run_path = Path(str(raw_path)).resolve()
         if run_path.name == "latest":
             run_path = run_path.parent
-        if not run_path.exists():
+        if _path_has_symlink_component(qwen_job_root):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
+        try:
+            qwen_root_resolved = qwen_job_root.resolve(strict=True)
+        except Exception as exc:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid") from exc
+        if (
+            not run_path.exists()
+            or not run_path.is_dir()
+            or not _path_within_root(run_path, qwen_root_resolved)
+            or _path_has_symlink_component(run_path)
+        ):
             assets["missing"].append({"kind": "qwen_model", "id": model_id})
             return
         dest = temp_dir / "models" / "qwen_runs" / run_path.name
@@ -2027,8 +2062,9 @@ def _collect_recipe_assets_impl(
 
     job_id = config.get("ensemble_job_id")
     if job_id:
-        job_dir = calibration_root / sanitize_run_id_fn(job_id)
-        if job_dir.exists():
+        safe_job_id = sanitize_run_id_fn(job_id)
+        job_dir = _existing_child_dir_within_root(calibration_root, safe_job_id)
+        if job_dir is not None:
             dest = temp_dir / "models" / "calibration_jobs" / job_dir.name
             assets["copied"].extend(copy_tree_filtered_fn(job_dir, dest, keep_files=None))
         else:

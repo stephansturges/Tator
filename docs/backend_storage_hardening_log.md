@@ -480,3 +480,16 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1063 passed, 17 skipped`; focused EDR package coverage,
   canonical EDR completion coverage, the full pytest suite, and live endpoint
   sanity checks passed against the restarted backend.
+
+## 2026-05-24: Prepass Recipe Export Source Boundaries
+
+- Required saved prepass/EDR export asset collection to resolve YOLO, RF-DETR,
+  and calibration job directories as direct children inside their configured
+  roots before copying files into portable recipe archives.
+- Rejected symlinked Qwen model roots and skipped Qwen model registry entries
+  whose resolved run paths live outside the Qwen job root.
+- Added regressions for symlinked detector runs, symlinked calibration jobs,
+  external Qwen model paths, and symlinked Qwen roots during recipe export.
+- Validation: `1067 passed, 17 skipped`; focused prepass recipe export/import
+  coverage, the full pytest suite, and live endpoint sanity checks passed
+  against the restarted backend.

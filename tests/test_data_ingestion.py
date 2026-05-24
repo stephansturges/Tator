@@ -816,6 +816,72 @@ def test_data_ingestion_runtime_requires_local_salad_encoder(tmp_path, monkeypat
     assert job.error == "data_ingestion_encoder_unsupported"
 
 
+def test_data_ingestion_analysis_summary_uses_local_salad_head_metadata(tmp_path, monkeypatch):
+    jobs_root = tmp_path / "jobs"
+    heads_root = tmp_path / "heads"
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+    _write_unit_local_salad_head(
+        heads_root,
+        "cradio_profile",
+        {
+            "reference_source": "active_label_images",
+            "encoder_type": "cradio",
+            "encoder_model": "nvidia/C-RADIOv4-H",
+            "cradio_pooling": "spatial_mean",
+            "salad_backend": "mlx",
+        },
+    )
+
+    def fake_prepare(_job, rows, **_kwargs):
+        return [
+            {
+                "image_path": str(tmp_path / f"{row.get('filename', 'image')}.jpg"),
+                "filename": row.get("filename") or "image.jpg",
+                "saved_name": row.get("saved_name") or "",
+                "source_type": "image",
+                "frame_index": 0,
+                "width": 8,
+                "height": 8,
+            }
+            for row in rows
+        ]
+
+    def fake_encode(prepared, **_kwargs):
+        values = np.zeros((len(prepared), 3), dtype=np.float32)
+        for idx in range(len(prepared)):
+            values[idx, idx % 3] = 1.0
+        return values
+
+    monkeypatch.setattr(api, "_data_ingestion_prepare_media", fake_prepare)
+    monkeypatch.setattr(api, "_data_ingestion_encode_prepared_images", fake_encode)
+    job = api.DataIngestionJob(
+        job_id="di_summary_meta",
+        kind="analysis",
+        request={
+            "encoder": "local_salad",
+            "encoder_model": "stale-request-model",
+            "cradio_pooling": "summary_spatial_concat",
+            "salad_head_id": "cradio_profile",
+            "reference_source": "active_label_images",
+            "candidate_uploads": [{"path": str(tmp_path / "candidate.jpg"), "filename": "candidate.jpg"}],
+            "reference_uploads": [{"path": str(tmp_path / "reference.jpg"), "filename": "reference.jpg"}],
+        },
+    )
+
+    api._run_data_ingestion_analysis_job(job)
+
+    assert job.status == "completed"
+    summary = job.result["summary"]
+    assert summary["encoder"] == "local_salad"
+    assert summary["encoder_type"] == "cradio"
+    assert summary["base_encoder"] == "cradio"
+    assert summary["encoder_model"] == "nvidia/C-RADIOv4-H"
+    assert summary["cradio_pooling"] == "spatial_mean"
+    assert summary["salad_head_backend"] == "mlx"
+
+
 def test_data_ingestion_result_rejects_symlinked_result_escape(tmp_path, monkeypatch):
     ingestion_root = tmp_path / "data_ingestion"
     job_root = ingestion_root / "job_escape"

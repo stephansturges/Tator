@@ -1100,3 +1100,16 @@ preserving the exact validation story for storage and artifact-write fixes.
   `localinferenceapi.py` and `services/qwen_runtime.py` compile,
   `git diff --check`, the full pytest suite, and live endpoint sanity checks
   passed against the restarted backend.
+
+## 2026-05-24: Data Ingestion Profile Provenance
+
+- Returned local SALAD head metadata from reference validation so analysis jobs
+  can preserve the selected reference profile's actual base encoder.
+- Fixed completed diversity-analysis summaries to report the SALAD profile's
+  DINOv3/C-RADIOv4 encoder, checkpoint, C-RADIO pooling mode, and head backend
+  instead of stale request defaults.
+- Added a regression using a C-RADIO local SALAD profile to ensure result
+  summaries ignore mismatched request-side encoder defaults.
+- Validation: `1159 passed, 17 skipped`; focused Data Ingestion coverage,
+  `git diff --check`, the full pytest suite, and live endpoint sanity checks
+  passed against the restarted backend.

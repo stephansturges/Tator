@@ -19641,12 +19641,13 @@ def _local_salad_head_reference_matches_request(metadata: Dict[str, Any], reques
     return False
 
 
-def _validate_local_salad_head_reference(head_id: str, request: Dict[str, Any]) -> None:
+def _validate_local_salad_head_reference(head_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
     if not str(head_id or "").strip():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_required")
     _head, metadata = _load_local_salad_head(head_id, device_name="cpu", backend="torch")
     if not _local_salad_head_reference_matches_request(metadata, request):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_reference_mismatch")
+    return dict(metadata)
 
 
 def _data_ingestion_capabilities() -> Dict[str, Any]:
@@ -20051,7 +20052,18 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         ).strip()
         cradio_pooling = normalize_cradio_pooling(request.get("cradio_pooling"))
         salad_head_id = str(request.get("salad_head_id") or "").strip()
-        _validate_local_salad_head_reference(salad_head_id, request)
+        salad_head_meta = _validate_local_salad_head_reference(salad_head_id, request)
+        salad_base_encoder = str(salad_head_meta.get("encoder_type") or "dinov3").strip().lower()
+        if salad_base_encoder not in {"dinov3", "cradio"}:
+            salad_base_encoder = "dinov3"
+        salad_encoder_model = str(salad_head_meta.get("encoder_model") or "").strip()
+        if not salad_encoder_model:
+            salad_encoder_model = CRADIO_DEFAULT_MODEL if salad_base_encoder == "cradio" else model_name
+        salad_cradio_pooling = (
+            normalize_cradio_pooling(salad_head_meta.get("cradio_pooling"))
+            if salad_base_encoder == "cradio"
+            else cradio_pooling
+        )
         _data_ingestion_update(job, status="running", progress=0.02, message="Preparing candidate media ...")
         frame_interval = _coerce_float(request.get("frame_interval"), 1.0, minimum=0.1)
         max_frames = _coerce_int(request.get("max_frames_per_video"), 200, minimum=0)
@@ -20141,9 +20153,12 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             ),
             "keep_fraction": keep_fraction,
             "encoder": encoder,
-            "encoder_model": model_name or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL,
-            "cradio_pooling": cradio_pooling,
+            "encoder_type": salad_base_encoder,
+            "base_encoder": salad_base_encoder,
+            "encoder_model": salad_encoder_model or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL,
+            "cradio_pooling": salad_cradio_pooling,
             "salad_head_id": salad_head_id,
+            "salad_head_backend": salad_head_meta.get("salad_backend") or salad_head_meta.get("backend") or "",
             "reference_count": len(references),
             "reference_source": str(request.get("reference_source") or request.get("source_mode") or ""),
             "reference_dataset_id": str(request.get("reference_dataset_id") or ""),

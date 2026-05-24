@@ -192,6 +192,52 @@ def test_promote_sam3_run_rejects_checkpoint_dir_symlink_escape(
     assert (outside / "extra.ckpt").read_text(encoding="utf-8") == "extra"
 
 
+def test_promote_sam3_run_replaces_marker_symlinks_without_target_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    run_id = "run_promote_marker_symlink"
+    run_dir = tmp_path / run_id
+    checkpoint_dir = run_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    keep = checkpoint_dir / "last.ckpt"
+    keep.write_bytes(b"weights")
+    outside_final = tmp_path / "outside_marker.json"
+    outside_tmp = tmp_path / "outside_marker_tmp.json"
+    outside_final.write_text("external final", encoding="utf-8")
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    marker = run_dir / ".promoted"
+    tmp_marker = marker.with_suffix(f"{marker.suffix}.feedface.tmp")
+    try:
+        marker.symlink_to(outside_final)
+        tmp_marker.symlink_to(outside_tmp)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    class FixedUUID:
+        hex = "feedface"
+
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", tmp_path)
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: FixedUUID())
+    monkeypatch.setattr(
+        api,
+        "_strip_checkpoint_optimizer_impl",
+        lambda *args, **kwargs: (False, 0, 0),
+    )
+    with api.SAM3_TRAINING_JOBS_LOCK:
+        api.SAM3_TRAINING_JOBS.clear()
+
+    out = api.promote_sam3_run(run_id)
+
+    assert out["promoted"] is True
+    assert out["kept"] == str(keep)
+    assert not marker.is_symlink()
+    assert not tmp_marker.exists()
+    marker_payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert marker_payload["keep"] == str(keep)
+    assert outside_final.read_text(encoding="utf-8") == "external final"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+
+
 def test_delete_sam3_run_rejects_symlink_run_id_without_target_delete(
     tmp_path: Path, monkeypatch
 ) -> None:

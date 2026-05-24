@@ -22033,10 +22033,12 @@ def _promote_run(run_id: str, variant: str) -> Dict[str, Any]:
     freed += max(0, before - after)
     marker = run_dir / ".promoted"
     try:
-        if marker.is_symlink():
-            marker.unlink(missing_ok=True)
-        marker.write_text(
-            json.dumps({"timestamp": time.time(), "keep": str(keep)}), encoding="utf-8"
+        _write_text_within_root_atomic(
+            marker,
+            run_dir,
+            json.dumps({"timestamp": time.time(), "keep": str(keep)}),
+            detail="sam3_promote_marker_write_failed",
+            context="sam3 promote marker",
         )
     except Exception:
         pass

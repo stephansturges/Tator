@@ -922,3 +922,14 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1130 passed, 17 skipped`; focused COCO/dataset conversion
   coverage, `utils/coco.py` compile, the full pytest suite, and live endpoint
   sanity checks passed against the restarted backend.
+
+## 2026-05-24: SAM3 Promotion Marker Atomic Saves
+
+- Routed the SAM3 `.promoted` marker through the guarded atomic text writer.
+- Replaced the direct marker write with temp-file writes followed by atomic
+  replace, including symlink leaf replacement and stale temp symlink cleanup.
+- Added a regression proving SAM3 promotion markers replace symlink leaves
+  without mutating external marker targets or temp symlink targets.
+- Validation: `1131 passed, 17 skipped`; focused SAM3 lifecycle coverage,
+  `localinferenceapi.py` compile, the full pytest suite, and live endpoint
+  sanity checks passed against the restarted backend.

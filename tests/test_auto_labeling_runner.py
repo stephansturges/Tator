@@ -329,6 +329,39 @@ def test_auto_label_runner_respects_image_relpath_subset_and_records_zero_write_
 
 
 @pytest.mark.auto_label_smoke
+def test_auto_label_runner_does_not_require_falcon_when_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _build_auto_label_fixture(
+        tmp_path,
+        monkeypatch,
+        rows=[{"split": "train", "image_relpath": "img1.jpg", "label_lines": []}],
+        labelmap=["car"],
+    )
+    monkeypatch.setattr(api, "_falcon_runtime_error_detail", lambda _torch: "falcon_runtime_unavailable")
+    monkeypatch.setattr(api, "_run_prepass_annotation_qwen", lambda *_args, **_kwargs: _prepass_response([]))
+    monkeypatch.setattr(api, "_auto_label_falcon_candidates_for_window", lambda **_kwargs: pytest.fail("Falcon should not run"))
+
+    payload = api.AutoLabelRequest(
+        dataset_id="ds_auto",
+        target_mode="detection",
+        image_relpaths=["img1.jpg"],
+        class_names=["car"],
+        enable_yolo=False,
+        enable_rfdetr=False,
+        enable_falcon=False,
+    )
+    job = api.AutoLabelJob(job_id="al_no_falcon_runtime")
+    api._run_auto_label_job(job, payload)
+
+    assert job.status == "completed"
+    assert job.result["baseline_candidate_count"] == 0
+    assert job.result["falcon_candidate_count"] == 0
+    assert job.result["zero_write_images"] == 1
+
+
+@pytest.mark.auto_label_smoke
 def test_auto_label_runner_does_not_write_result_through_symlinked_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -1204,3 +1204,18 @@ preserving the exact validation story for storage and artifact-write fixes.
   and EDR runtime coverage, `node --check ybat-master/ybat.js`,
   `git diff --check`, the full pytest suite, and live endpoint
   map/method/OpenAPI sanity checks passed.
+
+## 2026-05-24: Auto-Label Falcon Runtime Gate
+
+- Made the auto-label runner require Falcon runtime availability only when
+  `enable_falcon` is true.
+- This lets baseline-only and EDR-only auto-label jobs run on machines where
+  Falcon is unavailable, instead of failing before dataset or baseline work
+  starts.
+- Added a regression proving a no-Falcon auto-label request completes even when
+  the Falcon runtime reports unavailable, and that Falcon candidate generation
+  is not invoked.
+- Validation: `1166 passed, 17 skipped`; focused auto-label runner, backend job
+  start, and EDR runtime coverage, `py_compile localinferenceapi.py`,
+  `git diff --check`, the full pytest suite, and live endpoint
+  map/method/OpenAPI sanity checks passed against the restarted backend.

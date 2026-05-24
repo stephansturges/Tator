@@ -27055,9 +27055,10 @@ def _run_auto_label_job(job: AutoLabelJob, payload: AutoLabelRequest) -> None:
     lock_started = False
     lock_holder = f"auto_label:{job.job_id}"
     try:
-        falcon_err = _falcon_runtime_error_detail(torch)
-        if falcon_err:
-            raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=falcon_err)
+        if bool(payload.enable_falcon):
+            falcon_err = _falcon_runtime_error_detail(torch)
+            if falcon_err:
+                raise HTTPException(status_code=HTTP_503_SERVICE_UNAVAILABLE, detail=falcon_err)
 
         entry = _resolve_dataset_entry(payload.dataset_id)
         if payload.annotation_session_id:

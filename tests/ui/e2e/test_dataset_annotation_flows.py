@@ -45,6 +45,8 @@ def test_transient_path_opens_in_annotation(playwright_page):
     assert int(option_count) > 0
     images_disabled = page.eval_on_selector("#images", "el => !!el.disabled")
     assert images_disabled is True
+    caption_dataset_disabled = page.eval_on_selector("#qwenCaptionDataset", "el => !!el.disabled")
+    assert caption_dataset_disabled is True
     ensure_local_mode(page)
 
 

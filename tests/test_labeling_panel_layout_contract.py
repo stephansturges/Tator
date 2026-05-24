@@ -95,6 +95,18 @@ def test_caption_prompt_controls_have_tooltips_and_roomy_textareas():
     assert "max-height: 520px;" in css
 
 
+def test_caption_dataset_picker_is_locked_to_annotation_dataset():
+    js = _js()
+
+    assert "function syncQwenCaptionDatasetControls()" in js
+    assert "qwenElements.captionDatasetSelect.disabled =\n                qwenCaptionDatasetRefreshInFlight || isAnnotationDatasetModeActive();" in js
+    assert "if (isAnnotationDatasetModeActive()) {\n            return getActiveAnnotationDatasetIdForCaption();\n        }" in js
+    assert "if (isAnnotationDatasetModeActive()) {\n                    syncCaptionDatasetSelectionWithAnnotationDataset();" in js
+    assert "if (isAnnotationDatasetModeActive()) {\n                syncCaptionDatasetSelectionWithAnnotationDataset();\n            } else {" in js
+    assert "qwenElements.captionDatasetSelect.disabled = false;" not in js
+    assert "updateQwenCaptionDatasetRefreshButton" not in js
+
+
 def test_keyboard_image_navigation_shortcuts_are_documented_and_guarded():
     html = _html()
     js = _js()

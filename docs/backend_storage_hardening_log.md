@@ -1155,3 +1155,21 @@ preserving the exact validation story for storage and artifact-write fixes.
   `api/datasets.py`/`localinferenceapi.py` compile, `git diff --check`, and the
   full pytest suite passed; live endpoint map/method checks and OpenAPI sanity
   checks passed against the restarted backend.
+
+## 2026-05-24: Caption Dataset Ownership in Annotation Mode
+
+- Locked the Qwen caption dataset picker to the active annotation dataset while
+  Label Images is open on a dataset so manual picker changes cannot reset the
+  annotation session's `textLabels` store.
+- Made the effective caption dataset resolver return the active linked
+  annotation dataset in annotation mode and no external dataset for transient
+  sessions.
+- Kept dataset refreshes from re-enabling the picker or clearing captions while
+  annotation mode owns caption persistence.
+- Added UI contract coverage for the locked picker, annotation-owned dataset
+  resolver, and refresh path.
+- Validation: `1162 passed, 17 skipped`; focused caption UI contract and
+  dataset annotation coverage, `node --check ybat-master/ybat.js`,
+  `git diff --check`, the full pytest suite, a Playwright annotation-mode
+  smoke check, and live endpoint map/method/OpenAPI sanity checks passed
+  against the restarted backend.

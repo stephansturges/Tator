@@ -3956,6 +3956,7 @@ const sam3TrainState = {
             // In annotation read-only mode, block direct text edits to avoid local drift vs locked source.
             qwenElements.captionOutput.disabled = datasetMode && readOnly;
         }
+        syncQwenCaptionDatasetControls();
         updateAnnotationSourceUi();
         if (classSplitState.initialized) {
             refreshClassSplitControls();
@@ -20792,6 +20793,13 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionDatasetSelect) {
             qwenElements.captionDatasetSelect.addEventListener("change", () => {
+                if (isAnnotationDatasetModeActive()) {
+                    syncCaptionDatasetSelectionWithAnnotationDataset();
+                    refreshCaptionGlossaryForCurrentContext({ force: true }).catch((error) => {
+                        console.error("Failed to refresh caption glossary", error);
+                    });
+                    return;
+                }
                 qwenCaptionDatasetState.selectedId = qwenElements.captionDatasetSelect.value || "";
                 ensureCaptionLabelStoreForDataset(qwenCaptionDatasetState.selectedId || "");
                 updateCaptionDatasetSummary();
@@ -25621,6 +25629,7 @@ async function cancelRfDetrTrainingJobRequest() {
     function syncCaptionDatasetSelectionWithAnnotationDataset() {
         const activeDatasetId = getActiveAnnotationDatasetIdForCaption();
         if (!activeDatasetId) {
+            syncQwenCaptionDatasetControls();
             return;
         }
         qwenCaptionDatasetState.selectedId = activeDatasetId;
@@ -25634,6 +25643,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         ensureCaptionLabelStoreForDataset(activeDatasetId);
         updateCaptionDatasetSummary();
+        syncQwenCaptionDatasetControls();
     }
 
     async function refreshCaptionGlossaryForCurrentContext(options = {}) {
@@ -25859,6 +25869,9 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function getCaptionDatasetId() {
+        if (isAnnotationDatasetModeActive()) {
+            return getActiveAnnotationDatasetIdForCaption();
+        }
         const selected = qwenElements.captionDatasetSelect?.value || qwenCaptionDatasetState.selectedId || "";
         return String(selected || "").trim();
     }
@@ -25878,7 +25891,19 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!id) {
             return null;
         }
-        return qwenCaptionDatasetState.items.find((entry) => entry?.id === id || entry?.signature === id) || null;
+        const entry = qwenCaptionDatasetState.items.find((item) => item?.id === id || item?.signature === id);
+        if (entry) {
+            return entry;
+        }
+        if (isAnnotationDatasetModeActive()) {
+            return {
+                id,
+                label: annotationSourceState.datasetLabel || id,
+                caption_count: null,
+                caption_total: null,
+            };
+        }
+        return null;
     }
 
     function updateCaptionDatasetSummary() {
@@ -25903,7 +25928,11 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    function updateQwenCaptionDatasetRefreshButton() {
+    function syncQwenCaptionDatasetControls() {
+        if (qwenElements.captionDatasetSelect) {
+            qwenElements.captionDatasetSelect.disabled =
+                qwenCaptionDatasetRefreshInFlight || isAnnotationDatasetModeActive();
+        }
         if (qwenElements.captionDatasetRefresh) {
             // Keep refresh disabled while a fetch is active to prevent overlap races.
             qwenElements.captionDatasetRefresh.disabled = qwenCaptionDatasetRefreshInFlight;
@@ -25919,13 +25948,12 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         qwenCaptionDatasetRefreshInFlight = true;
-        updateQwenCaptionDatasetRefreshButton();
+        syncQwenCaptionDatasetControls();
         const requestId = qwenCaptionDatasetState.refreshRequestId + 1;
         qwenCaptionDatasetState.refreshRequestId = requestId;
         if (!options.silent) {
             qwenElements.captionDatasetSummary.textContent = "Refreshing datasets…";
         }
-        qwenElements.captionDatasetSelect.disabled = true;
         try {
             const resp = await fetch(`${API_ROOT}/datasets`);
             if (!resp.ok) {
@@ -25961,8 +25989,12 @@ async function cancelRfDetrTrainingJobRequest() {
             } else {
                 qwenCaptionDatasetState.selectedId = "";
             }
-            ensureCaptionLabelStoreForDataset(qwenCaptionDatasetState.selectedId || "");
-            updateCaptionDatasetSummary();
+            if (isAnnotationDatasetModeActive()) {
+                syncCaptionDatasetSelectionWithAnnotationDataset();
+            } else {
+                ensureCaptionLabelStoreForDataset(qwenCaptionDatasetState.selectedId || "");
+                updateCaptionDatasetSummary();
+            }
             refreshCaptionGlossaryForCurrentContext({ force: true, silent: true }).catch((error) => {
                 console.error("Failed to refresh caption glossary", error);
             });
@@ -25980,9 +26012,8 @@ async function cancelRfDetrTrainingJobRequest() {
             console.error("Failed to refresh caption datasets", error);
         } finally {
             qwenCaptionDatasetRefreshInFlight = false;
-            updateQwenCaptionDatasetRefreshButton();
+            syncQwenCaptionDatasetControls();
             if (requestId === qwenCaptionDatasetState.refreshRequestId) {
-                qwenElements.captionDatasetSelect.disabled = false;
                 if (qwenCaptionDatasetRefreshNeedsRefresh) {
                     qwenCaptionDatasetRefreshNeedsRefresh = false;
                     refreshQwenCaptionDatasets({ silent: true }).catch((error) => {

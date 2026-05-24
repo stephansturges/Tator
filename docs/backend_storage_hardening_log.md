@@ -214,3 +214,14 @@ preserving the exact validation story for storage and artifact-write fixes.
   symlinked runtime tree parents.
 - Validation: `1020 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Agent Cascade Classifier Imports
+
+- Rejected symlink components in raw cascade classifier import roots before
+  creating `classifiers/imports/<tag>` directories.
+- Rejected symlink components in classifier import destination parents before
+  creating nested directories or writing imported classifier files.
+- Added a regression for an `imports` symlink that points back inside the
+  classifier store and would otherwise redirect imported files.
+- Validation: `1021 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

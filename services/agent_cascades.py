@@ -466,17 +466,27 @@ def _import_agent_cascade_zip_obj_impl(
         )
         if classifier_file_names:
             import_tag = f"cascade_{uuid.uuid4().hex[:8]}"
-            classifier_import_root = (classifiers_base / "imports" / import_tag).resolve()
+            raw_classifier_import_root = classifiers_base / "imports" / import_tag
+            if _path_has_symlink_component(raw_classifier_import_root):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+            classifier_import_root = raw_classifier_import_root.resolve(strict=False)
             if not path_is_within_root_fn(classifier_import_root, classifiers_base):
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
-            classifier_import_root.mkdir(parents=True, exist_ok=True)
+            raw_classifier_import_root.mkdir(parents=True, exist_ok=True)
+            if _path_has_symlink_component(raw_classifier_import_root):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
             for name in classifier_file_names:
                 arc_path = Path(name)
                 rel_inside = Path(*arc_path.parts[1:])
-                dest_path = (classifier_import_root / rel_inside).resolve()
+                raw_dest_path = classifier_import_root / rel_inside
+                if _path_has_symlink_component(raw_dest_path.parent):
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
+                dest_path = raw_dest_path.resolve(strict=False)
                 if not path_is_within_root_fn(dest_path, classifiers_base):
                     raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
-                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                raw_dest_path.parent.mkdir(parents=True, exist_ok=True)
+                if _path_has_symlink_component(raw_dest_path.parent) or raw_dest_path.is_symlink():
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
                 try:
                     with zf.open(name) as src, dest_path.open("wb") as dst:
                         shutil.copyfileobj(src, dst, length=1024 * 1024)

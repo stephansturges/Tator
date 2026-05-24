@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from services.agent_cascades import (
     _delete_agent_cascade_impl,
     _ensure_cascade_zip_impl,
+    _import_agent_cascade_zip_obj_impl,
     _list_agent_cascades_impl,
     _load_agent_cascade_impl,
     _persist_agent_cascade_impl,
@@ -229,6 +230,62 @@ def test_agent_cascade_prepare_output_file_rejects_nested_symlinked_parent_befor
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "agent_cascade_path_invalid"
     assert list(outside.iterdir()) == []
+
+
+def test_import_agent_cascade_rejects_symlinked_classifier_import_parent_inside_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cascades_root = tmp_path / "cascades"
+    classifiers_root = tmp_path / "classifiers"
+    redirected = classifiers_root / "redirected_imports"
+    cascades_root.mkdir()
+    redirected.mkdir(parents=True)
+    try:
+        (classifiers_root / "imports").symlink_to(redirected, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    class FixedUUID:
+        hex = "abc12345000000000000000000000000"
+
+    monkeypatch.setattr("services.agent_cascades.uuid.uuid4", lambda: FixedUUID())
+    zip_path = tmp_path / "cascade.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            "cascade.json",
+            json.dumps(
+                {
+                    "label": "demo",
+                    "steps": [
+                        {
+                            "recipe_id": "r1",
+                            "extra_clip_classifier_path": "safe.pkl",
+                        }
+                    ],
+                    "dedupe": {},
+                }
+            ),
+        )
+        zf.writestr("recipes/r1.zip", b"recipe")
+        zf.writestr("classifiers/safe.pkl", b"classifier")
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        with pytest.raises(HTTPException) as exc_info:
+            _import_agent_cascade_zip_obj_impl(
+                zf,
+                cascades_root=cascades_root,
+                classifiers_root=classifiers_root,
+                max_json_bytes=1024 * 1024,
+                classifier_allowed_exts=[".pkl"],
+                path_is_within_root_fn=_within_root,
+                import_recipe_fn=lambda _payload: ("r1", {"id": "r1_imported"}),
+                persist_cascade_fn=lambda _label, payload: {"id": "ac_imported", **payload},
+            )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_cascade_import_invalid_path"
+    assert list(redirected.iterdir()) == []
 
 
 def test_ensure_cascade_zip_skips_symlink_classifier_meta_escape(tmp_path: Path) -> None:

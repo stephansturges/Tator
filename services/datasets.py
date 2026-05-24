@@ -404,14 +404,20 @@ def _list_all_datasets_impl(
         ("qwen", qwen_dataset_root, load_qwen_meta_fn),
     ]
     for source, root, loader in sources:
+        if _path_has_symlink_component(root):
+            if logger is not None:
+                logger.warning("Skipping dataset root with symlink component: %s", root)
+            continue
         if not root.exists():
             continue
+        if not root.is_dir():
+            continue
         try:
-            root_resolved = root.resolve()
+            root_resolved = root.resolve(strict=True)
         except Exception:
             continue
         for raw_path in root.iterdir():
-            if raw_path.is_symlink():
+            if raw_path.is_symlink() or _path_has_symlink_component(raw_path):
                 continue
             try:
                 path = raw_path.resolve(strict=True)

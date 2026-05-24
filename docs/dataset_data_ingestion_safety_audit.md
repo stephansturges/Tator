@@ -11,7 +11,7 @@ mutate, move, or remove user data to the backend guard and regression coverage.
 | Upload current labeling session | Packages browser images/labels, then uses the same upload endpoint | UI geometry/labelmap validation, upload endpoint guards | `tests/ui/e2e/test_dataset_ingestion_safety_flows.py`, upload security tests |
 | Register server path | Creates a linked registry record only | Link-root allowlist, strict YOLO shape/labelmap validation, guarded registry path, guarded rollback on metadata failure | `tests/test_dataset_linked_annotation_flows.py` |
 | Open transient server path | Creates in-memory transient session only | Link-root allowlist, strict YOLO shape/labelmap validation, TTL expiry, source label/text reads stay root-contained and ignore symlink escapes | `tests/test_dataset_linked_annotation_flows.py`, UI E2E |
-| List linked datasets | Reads linked source metadata and registry overlays | Linked roots are rechecked against `DATASET_LINK_ROOTS`; non-allowlisted roots are marked unavailable and not inspected. No read-time source conversion or metadata backfill writes for linked roots; registry metadata remains the mutable overlay | `tests/test_dataset_linked_root_status.py` |
+| List linked datasets | Reads linked source metadata and registry overlays | Dataset storage roots fail closed if the root or parent is a symlink; linked roots are rechecked against `DATASET_LINK_ROOTS`; non-allowlisted roots are marked unavailable and not inspected. No read-time source conversion or metadata backfill writes for linked roots; registry metadata remains the mutable overlay | `tests/test_dataset_linked_root_status.py` |
 | Save transient to library | Persists linked registry metadata plus overlay labels/text | Guarded registry path, registry-only labelmap overlay, strict metadata write, guarded rollback on failure | `tests/test_dataset_linked_annotation_flows.py` |
 | Delete linked dataset | Removes linked registry record and overlays only | Source root is never passed to delete helper; active annotation/job guards block delete | `tests/test_dataset_linked_annotation_flows.py` |
 | Delete managed dataset | Moves backend-owned dataset to trash | Managed-root containment, symlink rejection, active annotation/job guards, rollback during trash metadata failure | `tests/test_dataset_linked_annotation_flows.py`, UI E2E |
@@ -76,3 +76,8 @@ Transient linked-dataset manifests now use the same guarded source-label read
 path as persisted linked annotation manifests. A symlinked `labels/*.txt` source
 file that resolves outside the allowlisted dataset root is ignored instead of
 being followed into external content.
+
+Dataset discovery also fails closed at the shared service helper when a runtime
+storage root or any of its parents has become a symlink. This keeps a swapped
+`uploads/datasets`, SAM3 dataset root, or Qwen dataset root from being listed as
+trusted backend-owned data.

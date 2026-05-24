@@ -70,6 +70,23 @@ def test_load_yolo_active_ignores_missing_best_path(tmp_path: Path) -> None:
     assert _load_yolo_active_impl(active_path) == {}
 
 
+def test_raw_detector_active_loader_ignores_symlinked_marker(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_active.json"
+    outside.write_text('{"run_id":"active_run"}', encoding="utf-8")
+    active_path = tmp_path / "models" / "yolo" / "active.json"
+    active_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        active_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert api._load_detector_active_payload_raw(active_path) == {}
+    assert active_path.is_symlink()
+    assert outside.read_text(encoding="utf-8") == '{"run_id":"active_run"}'
+
+
 def test_load_yolo_active_ignores_best_symlink_escape(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()

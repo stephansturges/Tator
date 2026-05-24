@@ -71,6 +71,51 @@ def test_linked_root_status_missing_for_broken_link(tmp_path) -> None:
     assert entry["linked_root"] == str(missing_root)
 
 
+def test_list_all_datasets_skips_symlinked_registry_root_without_target_read(
+    tmp_path,
+) -> None:
+    outside_root = tmp_path / "outside_registry"
+    dataset_dir = outside_root / "external_dataset"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    (dataset_dir / "dataset_meta.json").write_text(
+        json.dumps({"id": "external_dataset", "label": "External"}),
+        encoding="utf-8",
+    )
+    registry_root = tmp_path / "registry"
+    try:
+        registry_root.symlink_to(outside_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    entries = _list_entries(registry_root)
+
+    assert entries == []
+    assert (dataset_dir / "dataset_meta.json").exists()
+
+
+def test_list_all_datasets_skips_symlinked_registry_parent_without_target_read(
+    tmp_path,
+) -> None:
+    outside_root = tmp_path / "outside_parent"
+    outside_registry = outside_root / "registry"
+    dataset_dir = outside_registry / "external_dataset"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    (dataset_dir / "dataset_meta.json").write_text(
+        json.dumps({"id": "external_dataset", "label": "External"}),
+        encoding="utf-8",
+    )
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    entries = _list_entries(linked_parent / "registry")
+
+    assert entries == []
+    assert (dataset_dir / "dataset_meta.json").exists()
+
+
 def test_linked_root_status_ok_for_available_link(tmp_path) -> None:
     registry_root = tmp_path / "registry"
     registry_root.mkdir(parents=True, exist_ok=True)

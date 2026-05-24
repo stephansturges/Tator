@@ -13748,7 +13748,13 @@ def _clear_rfdetr_infer_state() -> None:
 
 def _load_detector_active_payload_raw(path: Path) -> Dict[str, Any]:
     try:
-        if not path.exists():
+        if path.is_symlink() or not path.exists():
+            return {}
+        if _storage_path_has_symlink_component(path.parent):
+            return {}
+        resolved = path.resolve(strict=True)
+        parent = path.parent.resolve(strict=True)
+        if not _path_is_within_root_impl(resolved, parent) or not resolved.is_file():
             return {}
         payload = json.loads(path.read_text(encoding="utf-8"))
         return payload if isinstance(payload, dict) else {}

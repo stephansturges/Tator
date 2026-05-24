@@ -1754,3 +1754,29 @@ preserving the exact validation story for storage and artifact-write fixes.
   method mismatches, endpoint map check (`missing=[]`), endpoint method check
   (`failures=[]`), OpenAPI sanity (`tested=144`, `failures=[]`), and live
   `/datasets`, `/datasets/trash`, and `/data_ingestion/capabilities` reads.
+
+## 2026-05-24: Final Inference Marker and Dataset Discovery Fail-Closed Pass
+
+- Finished the current narrow hardening pass before pausing manual-audit work.
+- Hardened the raw detector active-marker loader used by inference activation
+  cleanup/status paths so symlinked `active.json` files, symlinked marker
+  parents, and non-file marker targets are ignored instead of followed.
+- Added service-level fail-closed guards to dataset discovery. The shared
+  dataset-listing helper now skips registry/SAM3/Qwen dataset roots when the root
+  or any parent component is a symlink, and skips child records with symlink
+  components before reading metadata.
+- Updated the Dataset/Data Ingestion safety audit to record the stronger
+  discovery invariant.
+- Validation: `py_compile localinferenceapi.py services/datasets.py
+  tests/test_dataset_linked_root_status.py tests/test_detector_active_lifecycle.py`,
+  focused symlink regressions (`3 passed`), the Dataset Management/Data
+  Ingestion safety bundle (`176 passed`), and the inference artifact lifecycle
+  bundle covering detector, SAM3, Qwen, and CLIP active/download/delete paths
+  (`115 passed`) passed. The full pytest suite passed with `1246 passed, 20
+  skipped`. After backend restart, `tools/check_ui_endpoints.py` reported no
+  missing paths or method mismatches, endpoint map check returned `missing=[]`,
+  endpoint method check returned `failures=[]`, OpenAPI sanity returned
+  `tested=144`, `failures=[]`, and live reads of `/datasets`, `/datasets/trash`,
+  `/data_ingestion/capabilities`, `/yolo/runs`, `/rfdetr/runs`, and
+  `/sam3/storage/runs` succeeded. With `RUN_UI_E2E=1`, the Dataset
+  Management/Data Ingestion UI smoke tests passed (`2 passed`).

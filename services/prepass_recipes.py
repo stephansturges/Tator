@@ -1762,8 +1762,10 @@ def _copy_tree_filtered_impl(
         return copied
     if dest.is_symlink():
         dest.unlink(missing_ok=True)
+    if _path_has_symlink_component(dest):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     dest.mkdir(parents=True, exist_ok=True)
-    if dest.is_symlink():
+    if _path_has_symlink_component(dest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     for item in src_resolved.iterdir():
         try:

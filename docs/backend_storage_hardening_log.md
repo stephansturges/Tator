@@ -225,3 +225,12 @@ preserving the exact validation story for storage and artifact-write fixes.
   classifier store and would otherwise redirect imported files.
 - Validation: `1021 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Prepass Recipe Tree Copy Destinations
+
+- Rejected symlink components in prepass recipe filtered tree-copy destination
+  roots before creating directories for exported/imported recipe assets.
+- Added a regression for nested symlinked destination parents so recipe
+  tree-copy cannot create directories through a linked parent before rejection.
+- Validation: `1022 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

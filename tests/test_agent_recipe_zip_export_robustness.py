@@ -208,3 +208,25 @@ def test_copy_tree_filtered_skips_symlink_escape(tmp_path: Path) -> None:
     assert not (dest / "escape.txt").exists()
     assert not (dest / "escape_dir").exists()
     assert [entry["path"] for entry in copied] == ["dest/safe.txt"]
+
+
+def test_copy_tree_filtered_rejects_nested_symlinked_destination_parent_before_mkdir(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "safe.txt").write_text("ok", encoding="utf-8")
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _copy_tree_filtered_impl(src, linked_parent / "nested" / "dest")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prepass_recipe_path_invalid"
+    assert list(outside.iterdir()) == []

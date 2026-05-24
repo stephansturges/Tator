@@ -14501,18 +14501,57 @@ def _annotation_normalise_image_relpath(raw_path: Optional[str]) -> Path:
     return rel
 
 
-def _dataset_meta_storage_root_from_entry(entry: Dict[str, Any]) -> Path:
+def _dataset_raw_meta_storage_root_from_entry(entry: Dict[str, Any]) -> Path:
     registry_root = entry.get("registry_root")
     if registry_root:
-        return Path(str(registry_root)).resolve()
-    return Path(str(entry.get("dataset_root") or "")).resolve()
+        return Path(str(registry_root))
+    return Path(str(entry.get("dataset_root") or ""))
+
+
+def _dataset_meta_storage_root_from_entry(entry: Dict[str, Any]) -> Path:
+    return _dataset_raw_meta_storage_root_from_entry(entry).resolve()
+
+
+def _dataset_guarded_meta_storage_root_from_entry(
+    entry: Dict[str, Any],
+    *,
+    ensure: bool = False,
+    detail: str = "dataset_metadata_path_forbidden",
+) -> Path:
+    raw_root = _dataset_raw_meta_storage_root_from_entry(entry)
+    try:
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("dataset metadata root has a symlink component")
+        if ensure:
+            raw_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("dataset metadata root has a symlink component")
+        if raw_root.exists() and not raw_root.is_dir():
+            raise ValueError("dataset metadata root is not a directory")
+        return raw_root.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
 def _dataset_overlay_root_from_entry(entry: Dict[str, Any], *, ensure: bool = False) -> Path:
-    storage_root = _dataset_meta_storage_root_from_entry(entry)
+    storage_root = _dataset_guarded_meta_storage_root_from_entry(
+        entry,
+        ensure=ensure,
+        detail="annotation_overlay_path_forbidden",
+    )
     overlay_root = storage_root / DATASET_ANNOTATION_OVERLAY_DIRNAME
     if ensure:
+        if _storage_path_has_symlink_component(overlay_root):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail="annotation_overlay_path_forbidden",
+            )
         overlay_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(overlay_root) or not overlay_root.is_dir():
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail="annotation_overlay_path_forbidden",
+            )
     return overlay_root
 
 
@@ -14550,12 +14589,46 @@ def _normalize_labelmap_payload(raw_labelmap: Any) -> List[str]:
 
 def _annotation_labelmap_write_path(entry: Dict[str, Any], dataset_root: Path) -> Path:
     raw_path = entry.get("yolo_labelmap_path")
-    labelmap_path = Path(str(raw_path)).resolve() if raw_path else (dataset_root / "labelmap.txt").resolve()
-    storage_root = _dataset_meta_storage_root_from_entry(entry).resolve()
+    labelmap_path = Path(str(raw_path)) if raw_path else (dataset_root / "labelmap.txt")
+    labelmap_resolved = labelmap_path.resolve(strict=False)
+    storage_root = _dataset_guarded_meta_storage_root_from_entry(
+        entry,
+        ensure=False,
+        detail="labelmap_path_forbidden",
+    ).resolve()
     allowed_roots = [dataset_root.resolve(), storage_root]
-    if not any(_path_is_within_root_impl(labelmap_path, root) for root in allowed_roots):
+    if not any(_path_is_within_root_impl(labelmap_resolved, root) for root in allowed_roots):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_forbidden")
     return labelmap_path
+
+
+def _annotation_write_labelmap_file(
+    labelmap_path: Path, allowed_roots: Sequence[Path], labels: Sequence[str]
+) -> None:
+    try:
+        if _storage_path_has_symlink_component(labelmap_path.parent):
+            raise ValueError("labelmap parent has a symlink component")
+        labelmap_path.parent.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(labelmap_path.parent):
+            raise ValueError("labelmap parent has a symlink component")
+        parent_resolved = labelmap_path.parent.resolve(strict=True)
+        if not any(_path_is_within_root_impl(parent_resolved, root) for root in allowed_roots):
+            raise ValueError("labelmap parent escapes allowed roots")
+        if labelmap_path.is_symlink():
+            labelmap_path.unlink(missing_ok=True)
+        elif labelmap_path.exists() and labelmap_path.is_dir():
+            raise ValueError("labelmap target is a directory")
+        target_resolved = labelmap_path.resolve(strict=False)
+        if not any(_path_is_within_root_impl(target_resolved, root) for root in allowed_roots):
+            raise ValueError("labelmap target escapes allowed roots")
+        labelmap_path.write_text("\n".join(labels) + "\n", encoding="utf-8")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="labelmap_path_forbidden",
+        ) from exc
 
 
 def _validate_linked_dataset_path(path_str: str) -> Path:
@@ -14834,8 +14907,11 @@ def _annotation_load_or_create_meta(entry: Dict[str, Any]) -> Tuple[Path, Dict[s
 
 
 def _annotation_persist_meta(entry: Dict[str, Any], meta: Dict[str, Any]) -> None:
-    storage_root = _dataset_meta_storage_root_from_entry(entry)
-    storage_root.mkdir(parents=True, exist_ok=True)
+    storage_root = _dataset_guarded_meta_storage_root_from_entry(
+        entry,
+        ensure=True,
+        detail="dataset_metadata_path_forbidden",
+    )
     _persist_dataset_metadata_impl(storage_root, meta, meta_name=DATASET_META_NAME, logger=logger)
 
 
@@ -16170,15 +16246,30 @@ def patch_dataset_annotation_meta(dataset_id: str, payload: Dict[str, Any]):
         saved_labelmap = _normalize_labelmap_payload(payload.get("labelmap"))
         dataset_root = _dataset_effective_root_from_entry(entry)
         labelmap_path = _annotation_labelmap_write_path(entry, dataset_root)
+        storage_root = _dataset_guarded_meta_storage_root_from_entry(
+            entry,
+            ensure=False,
+            detail="labelmap_path_forbidden",
+        )
+        allowed_labelmap_roots = [dataset_root.resolve(), storage_root.resolve()]
         try:
-            labelmap_path.parent.mkdir(parents=True, exist_ok=True)
-            labelmap_path.write_text("\n".join(saved_labelmap) + "\n", encoding="utf-8")
+            _annotation_write_labelmap_file(
+                labelmap_path,
+                allowed_labelmap_roots,
+                saved_labelmap,
+            )
+        except HTTPException:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(
                 status_code=HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"labelmap_save_failed:{exc}",
             ) from exc
-        storage_root = _dataset_meta_storage_root_from_entry(entry)
+        storage_root = _dataset_guarded_meta_storage_root_from_entry(
+            entry,
+            ensure=True,
+            detail="dataset_metadata_path_forbidden",
+        )
         dataset_meta = _load_json_metadata(_dataset_meta_path_for_entry(entry)) or dict(entry)
         dataset_meta["classes"] = list(saved_labelmap)
         dataset_meta["yolo_labelmap_path"] = str(labelmap_path)

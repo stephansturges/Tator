@@ -264,3 +264,16 @@ preserving the exact validation story for storage and artifact-write fixes.
   otherwise valid detector copy root.
 - Validation: `1025 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Linked Annotation Storage Roots
+
+- Kept README update tracking collapsed and reduced to one validation sentence
+  plus the detailed-log link.
+- Rejected symlink components in linked dataset annotation metadata and overlay
+  storage roots before creating backend-owned directories.
+- Added labelmap writes to the same allowed-root and parent symlink preflight
+  used by other dataset output writers.
+- Added regressions for symlinked registry parents on overlay and metadata
+  writes, asserting outside targets are not created.
+- Validation: `1027 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

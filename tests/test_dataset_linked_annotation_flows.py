@@ -698,6 +698,47 @@ def test_persistent_snapshot_rejects_overlay_ancestor_symlink_escape(
     assert list(outside_dir.iterdir()) == []
 
 
+def test_persistent_snapshot_rejects_symlinked_registry_parent_before_overlay_creation(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    outside_registry = tmp_path / "outside_registry"
+    outside_registry.mkdir()
+    linked_parent = tmp_path / "linked_registry"
+    try:
+        linked_parent.symlink_to(outside_registry, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    entry["registry_root"] = str(linked_parent / "nested" / "ds")
+    meta = {"annotation_lock": _active_lock("sess-lock")}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api, "_dataset_effective_root_from_entry", lambda _entry: Path(_entry["dataset_root"])
+    )
+    monkeypatch.setattr(
+        api, "_annotation_load_or_create_meta", lambda _entry: (Path("/tmp/meta.json"), meta)
+    )
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.save_dataset_annotation_snapshot(
+            "ds",
+            {
+                "session_id": "sess-lock",
+                "records": [
+                    {
+                        "split": "train",
+                        "image_relpath": "nested/img.jpg",
+                        "label_lines": ["0 0.5 0.5 0.1 0.1"],
+                    }
+                ],
+            },
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "annotation_overlay_path_forbidden"
+    assert not (outside_registry / "nested").exists()
+
+
 def test_annotation_manifest_ignores_overlay_and_source_symlink_escapes(
     tmp_path, monkeypatch
 ) -> None:
@@ -795,6 +836,38 @@ def test_persistent_meta_patch_rejects_labelmap_path_outside_dataset_roots(
     assert exc.value.detail == "labelmap_path_forbidden"
     assert not outside.exists()
     assert set(meta) == {"annotation_lock"}
+
+
+def test_persistent_meta_patch_rejects_symlinked_registry_parent_before_metadata_write(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    outside_registry = tmp_path / "outside_registry"
+    outside_registry.mkdir()
+    linked_parent = tmp_path / "linked_registry"
+    try:
+        linked_parent.symlink_to(outside_registry, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    entry["registry_root"] = str(linked_parent / "nested" / "ds")
+    meta = {"annotation_lock": _active_lock("sess-lock")}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api, "_annotation_load_or_create_meta", lambda _entry: (Path("/tmp/meta.json"), meta)
+    )
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.patch_dataset_annotation_meta(
+            "ds",
+            {
+                "session_id": "sess-lock",
+                "notes": "blocked",
+            },
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "dataset_metadata_path_forbidden"
+    assert not (outside_registry / "nested").exists()
 
 
 def test_stop_session_requires_matching_session_or_force(tmp_path, monkeypatch) -> None:

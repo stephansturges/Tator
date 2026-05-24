@@ -570,8 +570,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Latest full suite: `1025 passed, 17 skipped`.
-Full maintenance log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Latest validation: `1027 passed, 17 skipped`; detailed maintenance notes live in [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

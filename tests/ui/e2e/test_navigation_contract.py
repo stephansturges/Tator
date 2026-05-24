@@ -20,6 +20,7 @@ def test_all_tab_buttons_open_expected_panels(playwright_page):
         ("#tabRfDetrTrainButton", "#tabRfDetrTrain", "#rfdetrTrainStartBtn"),
         ("#tabAgentMiningButton", "#tabAgentMining", "#agentRunBtn"),
         ("#tabPromptHelperButton", "#tabPromptHelper", "#promptHelperGenerateBtn"),
+        ("#tabDataIngestionButton", "#tabDataIngestion", "#dataIngestionBuildProfileButton"),
         ("#tabDatasetsButton", "#tabDatasets", "#datasetPathOpenBtn"),
         ("#tabSam3PromptModelsButton", "#tabSam3PromptModels", "#sam3PromptRefresh"),
         ("#tabDetectorsButton", "#tabDetectors", "#detectorDefaultSave"),

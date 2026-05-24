@@ -215,14 +215,10 @@ def test_close_blocks_when_snapshot_save_fails_then_recovers(playwright_page):
 """,
         timeout=5000,
     )
-    caption = page.locator("#qwenCaptionOutput")
-    caption.fill(f"playwright dirty {uuid.uuid4().hex[:6]}")
-    caption.press("Tab")
-
     failed = {"count": 0}
 
-    def _fail_first_snapshot(route):
-        if "/annotation/snapshot" in route.request.url and failed["count"] == 0:
+    def _fail_snapshot(route):
+        if "/annotation/snapshot" in route.request.url:
             failed["count"] += 1
             route.fulfill(
                 status=500,
@@ -232,8 +228,11 @@ def test_close_blocks_when_snapshot_save_fails_then_recovers(playwright_page):
             return
         route.continue_()
 
-    page.route("**/*annotation/snapshot*", _fail_first_snapshot)
+    page.route("**/*annotation/snapshot*", _fail_snapshot)
     try:
+        caption = page.locator("#qwenCaptionOutput")
+        caption.fill(f"playwright dirty {uuid.uuid4().hex[:6]}")
+        caption.press("Tab")
         page.click("#annotationCloseBtn")
         page.wait_for_function(
             "document.querySelector('#annotationSourceSummary')?.textContent?.toLowerCase().includes('close blocked')",
@@ -241,8 +240,9 @@ def test_close_blocks_when_snapshot_save_fails_then_recovers(playwright_page):
         )
         mode_text = page.text_content("#annotationSourceMode") or ""
         assert "transient" in mode_text.lower()
+        assert failed["count"] >= 1
     finally:
-        page.unroute("**/*annotation/snapshot*", _fail_first_snapshot)
+        page.unroute("**/*annotation/snapshot*", _fail_snapshot)
 
     page.click("#annotationSaveNowBtn")
     page.wait_for_timeout(1200)

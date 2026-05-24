@@ -1360,3 +1360,23 @@ preserving the exact validation story for storage and artifact-write fixes.
   map check with no missing paths or method mismatches, live OpenAPI sanity
   (`tested=144`, `failures=[]`), `py_compile tools/run_gpu_validation_suite.py`,
   and the full pytest suite passed.
+
+## 2026-05-24: Dataset and Data Ingestion UI Safety Coverage
+
+- Made the annotation close-block E2E deterministic by forcing all snapshot
+  saves to fail until the close guard is observed, covering blur/autosave and
+  close-time saves.
+- Added browser coverage for managed Dataset Management delete/restore:
+  a uniquely-prefixed test dataset is uploaded, deleted into backend trash,
+  restored through the UI, and then purged from test-owned storage.
+- Added browser coverage for Data Ingestion reference/profile gating:
+  backend reference mode enables only with a selected dataset, analysis stays
+  disabled until a matching saved reference profile and candidate file are
+  present, C-RADIOv4 model selection is enabled only for the C-RADIO training
+  encoder, and backend-reference analysis posts no browser reference files.
+- Added Data Ingestion to the all-tabs navigation E2E contract and a multipart
+  API helper for UI tests that need realistic dataset uploads.
+- Validation: targeted UI E2E (`10 passed`), focused dataset/data-ingestion
+  safety bundle (`158 passed`), `py_compile` for the changed UI test helpers,
+  and the full pytest suite (`1194 passed, 19 skipped`) passed against the
+  running backend.

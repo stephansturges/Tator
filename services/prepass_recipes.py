@@ -104,6 +104,18 @@ def _prepare_output_file(path: Path) -> None:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid") from exc
 
 
+def _prepare_recipe_dir(path: Path) -> Path:
+    if _path_has_symlink_component(path):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
+    path.mkdir(parents=True, exist_ok=True)
+    if _path_has_symlink_component(path) or not path.is_dir():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
+    try:
+        return path.resolve(strict=True)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid") from exc
+
+
 def _prepare_atomic_output_file(path: Path) -> Path:
     _prepare_output_file(path)
     tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
@@ -1764,9 +1776,7 @@ def _copy_tree_filtered_impl(
         dest.unlink(missing_ok=True)
     if _path_has_symlink_component(dest):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
-    dest.mkdir(parents=True, exist_ok=True)
-    if _path_has_symlink_component(dest):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
+    _prepare_recipe_dir(dest)
     for item in src_resolved.iterdir():
         try:
             item_resolved = item.resolve(strict=True)
@@ -2250,7 +2260,7 @@ def _import_prepass_recipe_from_zip_impl(
                     return run_dir.name
                 new_id = uuid.uuid4().hex
                 dest = root / new_id
-                dest.mkdir(parents=True, exist_ok=True)
+                _prepare_recipe_dir(dest)
                 for item in run_dir.iterdir():
                     if item.is_file():
                         if keep_files is not None and item.name not in keep_files:
@@ -2282,7 +2292,7 @@ def _import_prepass_recipe_from_zip_impl(
                 old_id = str(meta_payload.get("id") or run_dir.name)
                 new_id = uuid.uuid4().hex
                 dest = qwen_job_root / new_id
-                dest.mkdir(parents=True, exist_ok=True)
+                _prepare_recipe_dir(dest)
                 for item in run_dir.iterdir():
                     if item.is_file():
                         _copy2_if_different(item, dest / item.name)
@@ -2304,12 +2314,11 @@ def _import_prepass_recipe_from_zip_impl(
                     config[key] = qwen_id_map[val]
 
         classifier_root = extract_dir / "models" / "classifiers"
-        if classifier_root.exists():
-            classifier_root.mkdir(parents=True, exist_ok=True)
+        if classifier_root.exists() and classifier_root.is_dir():
             for item in classifier_root.iterdir():
                 if item.is_file():
                     dest = (upload_root / "classifiers") / item.name
-                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    _prepare_recipe_dir(dest.parent)
                     if not dest.exists() or dest.stat().st_size != item.stat().st_size:
                         _copy2_if_different(item, dest)
                     config["classifier_id"] = str(dest.relative_to(upload_root / "classifiers"))
@@ -2327,7 +2336,7 @@ def _import_prepass_recipe_from_zip_impl(
                 else:
                     new_job = uuid.uuid4().hex
                     dest = calibration_root / new_job
-                    dest.mkdir(parents=True, exist_ok=True)
+                    _prepare_recipe_dir(dest)
                     for item in job_dir.iterdir():
                         if item.is_file():
                             _copy2_if_different(item, dest / item.name)
@@ -2371,7 +2380,7 @@ def _import_prepass_recipe_from_zip_impl(
         if is_canonical_recipe:
             if canonical_extract_dir.exists() and canonical_extract_dir.is_dir():
                 canonical_dest_dir = recipe_dir / "canonical"
-                canonical_dest_dir.mkdir(parents=True, exist_ok=True)
+                _prepare_recipe_dir(canonical_dest_dir)
                 canonical_json_src = canonical_extract_dir / "canonical_edr.json"
                 if canonical_json_src.exists():
                     local_canonical_json = canonical_dest_dir / "canonical_edr.json"

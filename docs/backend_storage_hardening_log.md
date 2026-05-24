@@ -234,3 +234,15 @@ preserving the exact validation story for storage and artifact-write fixes.
   tree-copy cannot create directories through a linked parent before rejection.
 - Validation: `1022 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Prepass Recipe Import Destinations
+
+- Added a guarded prepass recipe directory helper for imported run bundles,
+  Qwen runs, classifier upload parents, calibration job copies, and canonical
+  recipe artifact directories.
+- Rejected symlink components before creating those import destination
+  directories.
+- Added a regression for classifier imports through a nested symlinked upload
+  root parent.
+- Validation: `1023 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

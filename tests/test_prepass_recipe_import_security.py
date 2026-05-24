@@ -33,6 +33,7 @@ def _call_import(
     *,
     max_zip_bytes: Optional[int] = None,
     max_extract_bytes: Optional[int] = None,
+    upload_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     return _import_prepass_recipe_from_zip_impl(
         zip_path,
@@ -45,7 +46,7 @@ def _call_import(
         rfdetr_keep_files=None,
         qwen_job_root=tmp_path / "qwen_runs",
         qwen_metadata_filename="metadata.json",
-        upload_root=tmp_path / "uploads",
+        upload_root=upload_root or (tmp_path / "uploads"),
         calibration_root=tmp_path / "calibration",
         read_labelmap_lines_fn=lambda _path: [],
         validate_manifest_fn=lambda _manifest, _extract: None,
@@ -163,3 +164,35 @@ def test_import_prepass_recipe_rejects_oversize_uncompressed_total(tmp_path: Pat
 
     assert exc_info.value.status_code == 413
     assert exc_info.value.detail == "prepass_recipe_import_uncompressed_too_large"
+
+
+def test_import_prepass_recipe_rejects_nested_symlinked_classifier_upload_parent_before_mkdir(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    zip_path = tmp_path / "classifier_recipe.zip"
+    _write_zip(
+        zip_path,
+        {
+            "manifest.json": json.dumps({"schema_version": 2, "assets": []}),
+            "prepass.meta.json": json.dumps({"name": "with_classifier", "config": {}}),
+            "models/classifiers/demo.pkl": "classifier",
+        },
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _call_import(
+            zip_path,
+            tmp_path,
+            upload_root=linked_parent / "nested" / "uploads",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prepass_recipe_path_invalid"
+    assert list(outside.iterdir()) == []

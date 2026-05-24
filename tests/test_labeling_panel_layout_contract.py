@@ -281,11 +281,14 @@ def test_data_ingestion_panel_contract():
     assert 'id="dataIngestionAcceptance"' in html
     assert 'id="dataIngestionOutputMode"' in html
     assert 'value="tile" selected>Tile into crops</option>' in html
+    assert 'id="dataIngestionTargetWidth" min="1" max="8192" step="1" value="960"' in html
+    assert 'id="dataIngestionTargetHeight" min="1" max="8192" step="1" value="960"' in html
     assert 'id="dataIngestionTileEdgePolicy"' in html
     assert 'value="cover_no_padding" selected>Cover no padding</option>' in html
     assert 'id="dataIngestionPreviewAcceptedButton"' in html
     assert 'id="dataIngestionDownloadAcceptedButton"' in html
     assert "Split later by original source to avoid train/val leakage" in html
+    assert "Use 0 for the backend safety cap" in html
     assert "WALDO encoder benchmark comparison" in html
     assert "Data Ingestion" in html
     assert 'id="dataIngestionCradioModel"' not in html
@@ -325,9 +328,12 @@ def test_data_ingestion_panel_contract():
     assert 'fetch(`${API_ROOT}/data_ingestion/reference_profiles/import`' in js
     assert 'accepted_export/preview`' in js
     assert 'accepted_export/download`' in js
+    assert "candidate_thumbnail" in router
     assert "data-data-ingestion-item-id" in js
-    assert "data-data-ingestion-output-id" in js
-    assert "acceptedOutputFilterActive" in js
+    assert "data-data-ingestion-output-id" not in js
+    assert "acceptedOutputFilterActive" not in js
+    assert "reference novelty" in js
+    assert "dataIngestionHoverPreview" in js
     assert "Tile overlap creates near-duplicates" in js
     assert 'fetch(`${API_ROOT}/datasets`' in js
     assert "appendActiveWorkspaceReferenceFiles" in js

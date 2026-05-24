@@ -2489,6 +2489,10 @@ body.annotation-focus-mode .class-scroll-indicator {
     margin-bottom: 6px;
 }
 
+.data-ingestion-list__item:hover {
+    border-color: rgba(14, 165, 233, 0.55);
+}
+
 .data-ingestion-list__item.is-keep {
     border-color: rgba(37, 99, 235, 0.45);
     background: rgba(219, 234, 254, 0.75);
@@ -2500,8 +2504,7 @@ body.annotation-focus-mode .class-scroll-indicator {
     gap: 8px;
 }
 
-.data-ingestion-list__item input[type="checkbox"],
-.data-ingestion-tile-card input[type="checkbox"] {
+.data-ingestion-list__item input[type="checkbox"] {
     flex: 0 0 auto;
     margin-top: 2px;
 }
@@ -2535,6 +2538,40 @@ body.annotation-focus-mode .class-scroll-indicator {
     display: block;
     font-size: 12px;
     color: #64748b;
+}
+
+.data-ingestion-hover-preview {
+    position: fixed;
+    z-index: 10000;
+    width: min(400px, calc(100vw - 24px));
+    max-width: 400px;
+    pointer-events: none;
+    border: 1px solid rgba(15, 23, 42, 0.18);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.98);
+    box-shadow: 0 18px 42px rgba(15, 23, 42, 0.24);
+    padding: 8px;
+}
+
+.data-ingestion-hover-preview[hidden] {
+    display: none;
+}
+
+.data-ingestion-hover-preview img {
+    display: block;
+    width: 100%;
+    max-height: 70vh;
+    object-fit: contain;
+    border-radius: 5px;
+    background: rgba(15, 23, 42, 0.06);
+}
+
+.data-ingestion-hover-preview span {
+    display: block;
+    margin-top: 6px;
+    font-size: 12px;
+    color: #475569;
+    overflow-wrap: anywhere;
 }
 
 @media (max-width: 1180px) {

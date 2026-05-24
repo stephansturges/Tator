@@ -25,11 +25,11 @@ mutate, move, or remove user data to the backend guard and regression coverage.
 
 | Flow | Data touched | Guard | Coverage |
 |---|---|---|---|
-| Build reference profile | Creates job staging data and a local reference-profile head | Guarded job root, upload size/quota checks, backend-reference source validation, guarded startup cleanup, strict local-head path checks, final cancellation check before head write | `tests/test_data_ingestion.py` |
+| Build reference profile | Creates job staging data and a local reference-profile head | Guarded job root, upload extension/size/quota checks, bounded generated filenames, backend-reference source validation, backend video frame safety cap, guarded startup cleanup, strict local-head path checks, final cancellation check before head write | `tests/test_data_ingestion.py` |
 | Import/export reference profile | Reads or creates a local reference-profile head bundle | Zip traversal/symlink/size checks, checksum verification, bundle-version validation, strict local-head path checks, preserved provenance metadata and reference fingerprint | `tests/test_data_ingestion.py` |
-| Analyze candidates | Creates job staging data, result JSON, embeddings cache | Guarded job root, candidate/reference gating, matching reference-profile validation, guarded startup cleanup, guarded result reads, final cancellation check before result write | `tests/test_data_ingestion.py`, UI E2E |
-| Preview/download accepted candidates | Creates preview thumbnails and a transient export ZIP | Completed-analysis gating, selected-item/output validation, source-path containment inside the job root, output-count limits, explicit crop/resize/tile policy, source files read-only | `tests/test_data_ingestion.py`, UI contract |
-| Backend reference dataset use | Reads existing dataset images | Dataset id resolution, path containment inside selected dataset root, active-job delete blocking by dataset id | `tests/test_data_ingestion.py`, `tests/test_dataset_linked_annotation_flows.py` |
+| Analyze candidates | Creates job staging data, result JSON, embeddings cache | Guarded job root, candidate/reference gating, matching reference-profile validation, guarded startup cleanup, guarded result reads with public source-path stripping, final cancellation check before result write | `tests/test_data_ingestion.py`, UI E2E |
+| Preview/download accepted candidates | Creates candidate/accepted preview thumbnails and a transient export ZIP | Completed-analysis gating, selected-item/output validation without empty-selection fallback, source-path containment inside the job root, output-count and target-geometry limits, duplicate output-path rejection, explicit crop/resize/tile policy, source files read-only | `tests/test_data_ingestion.py`, UI contract |
+| Backend reference dataset use | Reads existing dataset images | Dataset id resolution, symlinked dataset roots rejected, path containment inside selected dataset root, active-job delete blocking by dataset id | `tests/test_data_ingestion.py`, `tests/test_dataset_linked_annotation_flows.py` |
 | Cancel job | Mutates in-memory job state | Terminal jobs are not cancellable; active jobs move through `cancelling`; UI checks cancel response and blocks duplicate cancel clicks | `tests/test_data_ingestion.py` and endpoint sanity |
 
 ## Current Invariant
@@ -79,6 +79,13 @@ source path still resolves inside the ingestion job directory, and preview or
 download outputs are rendered into backend-owned thumbnail/ZIP artifacts. This
 flow does not move, overwrite, resize in place, or delete the submitted images
 or extracted video frames.
+
+Accepted exports now treat an explicit empty item or output selection as empty
+instead of falling back to the original keep defaults. Direct API callers cannot
+request unbounded crop/resize geometry, and `drop_partials` tiling emits no
+tiles for sources smaller than the requested tile. Public analysis results carry
+candidate thumbnail URLs and reference-novelty ranks/percentiles, but omit the
+internal source paths used by export rendering.
 
 The same late-cancel boundary now applies to adjacent training jobs that create
 dataset-derived artifacts. CLIP classifier, Qwen, YOLOv8, and RF-DETR workers

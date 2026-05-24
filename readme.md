@@ -159,7 +159,8 @@ dataset-specific suggestions rather than generic detector output.
 
 Data Ingestion is the pre-merge review flow for new images and videos. Build or
 import a reference profile from an existing dataset, score candidate media
-against that baseline, keep or reject the ranked items, preview the accepted
+against that baseline, review coverage-ranked candidates with reference-novelty
+percentiles and image previews, keep or reject items, preview the accepted
 outputs, and download the kept data as a ZIP. Export modes support originals,
 aspect-preserving resize, stretch resize, center crop, and fixed-size tiling.
 
@@ -612,7 +613,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current verification: `1255 passed, 20 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Current verification: `1269 passed, 20 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

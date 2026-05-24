@@ -2438,8 +2438,6 @@ const AUTOMATION_LOCKED_TABS = new Set([
         preferredSaladHeadId: "",
         currentResult: null,
         acceptedItemIds: new Set(),
-        acceptedOutputIds: new Set(),
-        acceptedOutputFilterActive: false,
         lastPreview: null,
     };
     const sam3RecipeElements = {
@@ -36341,11 +36339,7 @@ async function cancelRfDetrTrainingJobRequest() {
         return Array.from(dataIngestionState.acceptedItemIds || []);
     }
 
-    function selectedDataIngestionOutputIds() {
-        return Array.from(dataIngestionState.acceptedOutputIds || []);
-    }
-
-    function getDataIngestionAcceptedExportPayload({ includeOutputIds = false, offset = 0, limit = 80 } = {}) {
+    function getDataIngestionAcceptedExportPayload({ offset = 0, limit = 80 } = {}) {
         const mode = String(dataIngestionElements.outputMode?.value || "tile");
         const payload = {
             transform_mode: mode,
@@ -36358,10 +36352,6 @@ async function cancelRfDetrTrainingJobRequest() {
             offset,
             limit,
         };
-        if (includeOutputIds && dataIngestionState.acceptedOutputFilterActive) {
-            const outputIds = selectedDataIngestionOutputIds();
-            if (outputIds.length) payload.output_ids = outputIds;
-        }
         return payload;
     }
 
@@ -36396,10 +36386,63 @@ async function cancelRfDetrTrainingJobRequest() {
         const previewTotal = Number(dataIngestionState.lastPreview?.total_outputs || 0);
         const parts = [`Selected candidates: ${itemCount}`];
         if (previewTotal) parts.push(`Download outputs: ${previewTotal}`);
-        if (dataIngestionState.acceptedOutputFilterActive) {
-            parts.push(`Selected preview tiles: ${selectedDataIngestionOutputIds().length}`);
-        }
         dataIngestionElements.acceptedSummary.textContent = parts.join(" • ");
+    }
+
+    function getDataIngestionHoverPreview() {
+        let preview = document.getElementById("dataIngestionHoverPreview");
+        if (!preview) {
+            preview = document.createElement("div");
+            preview.id = "dataIngestionHoverPreview";
+            preview.className = "data-ingestion-hover-preview";
+            preview.hidden = true;
+            preview.innerHTML = `<img alt="Candidate preview"><span></span>`;
+            document.body.appendChild(preview);
+        }
+        return preview;
+    }
+
+    function moveDataIngestionHoverPreview(event) {
+        const preview = document.getElementById("dataIngestionHoverPreview");
+        if (!preview || preview.hidden) return;
+        const gap = 18;
+        const rect = preview.getBoundingClientRect();
+        let left = event.clientX + gap;
+        let top = event.clientY + gap;
+        if (left + rect.width > window.innerWidth - gap) {
+            left = Math.max(gap, event.clientX - rect.width - gap);
+        }
+        if (top + rect.height > window.innerHeight - gap) {
+            top = Math.max(gap, window.innerHeight - rect.height - gap);
+        }
+        preview.style.left = `${Math.round(left)}px`;
+        preview.style.top = `${Math.round(top)}px`;
+    }
+
+    function showDataIngestionHoverPreview(event, previewUrl, label) {
+        if (!previewUrl) return;
+        const preview = getDataIngestionHoverPreview();
+        const img = preview.querySelector("img");
+        const caption = preview.querySelector("span");
+        if (img && img.getAttribute("src") !== previewUrl) img.setAttribute("src", previewUrl);
+        if (caption) caption.textContent = label || "";
+        preview.hidden = false;
+        moveDataIngestionHoverPreview(event);
+    }
+
+    function hideDataIngestionHoverPreview() {
+        const preview = document.getElementById("dataIngestionHoverPreview");
+        if (preview) preview.hidden = true;
+    }
+
+    function formatDataIngestionReferenceNovelty(item, totalItems) {
+        const rawScore = item.reference_novelty_score ?? item.diversity_score ?? 0;
+        const score = Number(rawScore) || 0;
+        const percentileValue = Number(item.reference_novelty_percentile);
+        const percentile = Number.isFinite(percentileValue) ? `p${Math.round(percentileValue)}` : "";
+        const rankValue = Number(item.reference_novelty_rank);
+        const rank = Number.isFinite(rankValue) && rankValue > 0 && totalItems > 0 ? `rank ${rankValue}/${totalItems}` : "";
+        return [`reference novelty ${score.toFixed(3)}`, percentile, rank].filter(Boolean).join(" • ");
     }
 
     async function downloadDataIngestionReferenceProfile() {
@@ -36464,40 +36507,22 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         dataIngestionElements.tilePreview.innerHTML = rows.map((output) => {
-            const outputId = String(output.output_id || "");
-            const checked = dataIngestionState.acceptedOutputIds.has(outputId) ? " checked" : "";
             const dims = `${escapeHtml(output.output_width || "")}x${escapeHtml(output.output_height || "")}`;
             const bounds = Array.isArray(output.source_bounds) ? output.source_bounds.join(",") : "";
             const thumbUrl = output.thumbnail_url ? `${API_ROOT}${output.thumbnail_url}` : "";
             return [
                 `<label class="data-ingestion-tile-card">`,
                 thumbUrl ? `<img src="${escapeHtml(thumbUrl)}" alt="Accepted output preview" loading="lazy">` : "",
-                `<span><input type="checkbox" data-data-ingestion-output-id="${escapeHtml(outputId)}"${checked}> ${escapeHtml(output.source_filename || output.output_filename || "output")}</span>`,
+                `<span>${escapeHtml(output.source_filename || output.output_filename || "output")}</span>`,
                 `<span>${dims}${bounds ? ` • ${escapeHtml(bounds)}` : ""}</span>`,
                 `</label>`,
             ].join("");
         }).join("");
-        dataIngestionElements.tilePreview.querySelectorAll("[data-data-ingestion-output-id]").forEach((checkbox) => {
-            checkbox.addEventListener("change", () => {
-                const outputId = String(checkbox.getAttribute("data-data-ingestion-output-id") || "");
-                if (!outputId) return;
-                if (checkbox.checked) {
-                    dataIngestionState.acceptedOutputIds.add(outputId);
-                } else {
-                    dataIngestionState.acceptedOutputIds.delete(outputId);
-                }
-                dataIngestionState.acceptedOutputFilterActive = true;
-                renderDataIngestionAcceptedSummary();
-                refreshDataIngestionControls();
-            });
-        });
     }
 
     async function previewDataIngestionAcceptedOutputs() {
         if (!dataIngestionState.currentResult || dataIngestionState.acceptedPreviewInFlight) return;
         dataIngestionState.acceptedPreviewInFlight = true;
-        dataIngestionState.acceptedOutputIds = new Set();
-        dataIngestionState.acceptedOutputFilterActive = false;
         renderDataIngestionTilePreview([]);
         refreshDataIngestionControls();
         try {
@@ -36511,8 +36536,6 @@ async function cancelRfDetrTrainingJobRequest() {
             const payload = parseJsonObjectSafe(detail, {});
             const outputs = Array.isArray(payload.outputs) ? payload.outputs : [];
             dataIngestionState.lastPreview = payload;
-            dataIngestionState.acceptedOutputIds = new Set(outputs.map((output) => String(output.output_id || "")).filter(Boolean));
-            dataIngestionState.acceptedOutputFilterActive = false;
             renderDataIngestionTilePreview(outputs);
             renderDataIngestionAcceptedSummary();
             setDataIngestionStatus(`Preview ready: ${payload.total_outputs || outputs.length} output(s).`, "success");
@@ -36533,7 +36556,7 @@ async function cancelRfDetrTrainingJobRequest() {
             const resp = await fetch(`${API_ROOT}/data_ingestion/jobs/${encodeURIComponent(dataIngestionState.activeJobId)}/accepted_export/download`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(getDataIngestionAcceptedExportPayload({ includeOutputIds: true })),
+                body: JSON.stringify(getDataIngestionAcceptedExportPayload()),
             });
             const detail = resp.ok ? "" : await resp.text();
             if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
@@ -36558,13 +36581,12 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function renderDataIngestionResult(result) {
+        hideDataIngestionHoverPreview();
         const summary = result?.summary || {};
         const items = Array.isArray(result?.items) ? result.items : [];
         const isProfileBuild = !!String(summary.head_id || "").trim() && !items.length;
         dataIngestionState.currentResult = isProfileBuild ? null : result;
         dataIngestionState.acceptedItemIds = new Set(isProfileBuild ? [] : items.filter((item) => !!item.keep).map(dataIngestionResultItemId));
-        dataIngestionState.acceptedOutputIds = new Set();
-        dataIngestionState.acceptedOutputFilterActive = false;
         dataIngestionState.lastPreview = null;
         if (dataIngestionElements.results) dataIngestionElements.results.hidden = false;
         if (dataIngestionElements.acceptance) dataIngestionElements.acceptance.hidden = isProfileBuild || !items.length;
@@ -36610,20 +36632,32 @@ async function cancelRfDetrTrainingJobRequest() {
                 dataIngestionElements.list.innerHTML = `<div class="training-help">No ranked candidates for this job.</div>`;
             } else {
                 dataIngestionElements.list.innerHTML = items.slice(0, 120).map((item) => {
-                    const score = Number(item.diversity_score) || 0;
                     const keep = !!item.keep;
                     const itemId = dataIngestionResultItemId(item);
                     const checked = dataIngestionState.acceptedItemIds.has(itemId) ? " checked" : "";
+                    const previewUrl = item.thumbnail_url ? `${API_ROOT}${item.thumbnail_url}` : "";
+                    const sourceType = escapeHtml(item.source_type || "image");
+                    const dimensions = `${escapeHtml(item.width || "")}x${escapeHtml(item.height || "")}`;
+                    const novelty = formatDataIngestionReferenceNovelty(item, items.length);
+                    const title = "Keep rank is the farthest-first coverage order. Reference novelty is nearest-reference cosine distance.";
                     return [
-                        `<div class="data-ingestion-list__item${keep ? " is-keep" : ""}">`,
+                        `<div class="data-ingestion-list__item${keep ? " is-keep" : ""}" data-data-ingestion-preview-url="${escapeHtml(previewUrl)}" data-data-ingestion-preview-label="${escapeHtml(item.filename || item.saved_name || "candidate")}" title="${escapeHtml(title)}">`,
                         `<label>`,
                         `<input type="checkbox" data-data-ingestion-item-id="${escapeHtml(itemId)}"${checked}>`,
                         `<span><strong>${keep ? `Keep #${escapeHtml(item.rank || "")}` : "Skip"}</strong> ${escapeHtml(item.filename || item.saved_name || "candidate")}<br>`,
-                        `<span>${escapeHtml(item.source_type || "image")} • score ${score.toFixed(3)} • ${escapeHtml(item.width || "")}x${escapeHtml(item.height || "")}</span></span>`,
+                        `<span>${sourceType} • ${escapeHtml(novelty)} • ${dimensions}</span></span>`,
                         `</label>`,
                         `</div>`,
                     ].join("");
                 }).join("");
+                dataIngestionElements.list.querySelectorAll("[data-data-ingestion-preview-url]").forEach((card) => {
+                    const previewUrl = String(card.getAttribute("data-data-ingestion-preview-url") || "");
+                    const previewLabel = String(card.getAttribute("data-data-ingestion-preview-label") || "");
+                    if (!previewUrl) return;
+                    card.addEventListener("mouseenter", (event) => showDataIngestionHoverPreview(event, previewUrl, previewLabel));
+                    card.addEventListener("mousemove", moveDataIngestionHoverPreview);
+                    card.addEventListener("mouseleave", hideDataIngestionHoverPreview);
+                });
                 dataIngestionElements.list.querySelectorAll("[data-data-ingestion-item-id]").forEach((checkbox) => {
                     checkbox.addEventListener("change", () => {
                         const itemId = String(checkbox.getAttribute("data-data-ingestion-item-id") || "");
@@ -36633,8 +36667,6 @@ async function cancelRfDetrTrainingJobRequest() {
                         } else {
                             dataIngestionState.acceptedItemIds.delete(itemId);
                         }
-                        dataIngestionState.acceptedOutputIds = new Set();
-                        dataIngestionState.acceptedOutputFilterActive = false;
                         dataIngestionState.lastPreview = null;
                         renderDataIngestionTilePreview([]);
                         renderDataIngestionAcceptedSummary();
@@ -36725,8 +36757,6 @@ async function cancelRfDetrTrainingJobRequest() {
                     dataIngestionElements.tileOverlap,
                     dataIngestionElements.jpegQuality,
                 ].includes(control)) {
-                    dataIngestionState.acceptedOutputIds = new Set();
-                    dataIngestionState.acceptedOutputFilterActive = false;
                     dataIngestionState.lastPreview = null;
                     renderDataIngestionTilePreview([]);
                     renderDataIngestionAcceptWarning();

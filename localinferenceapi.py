@@ -1016,6 +1016,9 @@ DATA_INGESTION_UPLOAD_MAX_BYTES = _env_int(
 DATA_INGESTION_UPLOAD_QUOTA_BYTES = _env_int(
     "DATA_INGESTION_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024
 )
+DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO = _env_int(
+    "DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO", 10000
+)
 CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES = _env_int(
     "CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES", 10 * 1024 * 1024 * 1024
 )
@@ -13879,6 +13882,9 @@ REFERENCE_PROFILE_BUNDLE_MAX_UNCOMPRESSED_BYTES = 768 * 1024 * 1024
 ACCEPTED_EXPORT_MAX_PREVIEW_OUTPUTS = 240
 ACCEPTED_EXPORT_MAX_DOWNLOAD_OUTPUTS = 20000
 ACCEPTED_EXPORT_THUMB_SIZE = 192
+DATA_INGESTION_CANDIDATE_THUMB_SIZE = 400
+ACCEPTED_EXPORT_MAX_TARGET_EDGE = 8192
+ACCEPTED_EXPORT_MAX_TARGET_PIXELS = 67_108_864
 PROMPT_HELPER_JOB_ROOT = Path(
     os.environ.get("SAM3_PROMPT_HELPER_ROOT", "./uploads/prompt_helper_jobs")
 )
@@ -20267,6 +20273,15 @@ def _data_ingestion_reference_fingerprint(
 ) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     for row in prepared_rows:
+        stat_size = _coerce_int(row.get("size"), 0, minimum=0)
+        stat_mtime_ns = _coerce_int(row.get("mtime_ns"), 0, minimum=0)
+        if not stat_size or not stat_mtime_ns:
+            try:
+                stat_result = Path(str(row.get("image_path") or row.get("path") or "")).stat()
+                stat_size = stat_size or int(stat_result.st_size)
+                stat_mtime_ns = stat_mtime_ns or int(stat_result.st_mtime_ns)
+            except OSError:
+                pass
         rows.append(
             {
                 "filename": str(row.get("filename") or row.get("saved_name") or ""),
@@ -20274,7 +20289,8 @@ def _data_ingestion_reference_fingerprint(
                 "frame_index": _coerce_int(row.get("frame_index"), 0, minimum=0),
                 "width": _coerce_int(row.get("width"), 0, minimum=0),
                 "height": _coerce_int(row.get("height"), 0, minimum=0),
-                "size": _coerce_int(row.get("size"), 0, minimum=0),
+                "size": stat_size,
+                "mtime_ns": stat_mtime_ns,
                 "split": str(row.get("split") or ""),
                 "image_relpath": str(row.get("image_relpath") or ""),
                 "source_dataset_id": str(row.get("source_dataset_id") or ""),
@@ -20541,6 +20557,7 @@ def _data_ingestion_capabilities() -> Dict[str, Any]:
         "ffmpeg_available": bool(shutil.which("ffmpeg")),
         "image_exts": sorted(DATA_INGESTION_IMAGE_EXTS),
         "video_exts": sorted(DATA_INGESTION_VIDEO_EXTS),
+        "max_extracted_frames_per_video": DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO,
         "salad_policy": "local_training_only",
         "local_salad_policy": LOCAL_SALAD_POLICY,
         "local_salad_trainer": LOCAL_SALAD_TRAINER,
@@ -20556,14 +20573,46 @@ def _data_ingestion_capabilities() -> Dict[str, Any]:
     }
 
 
+def _data_ingestion_novelty_score_metadata(scores: Sequence[float]) -> List[Dict[str, Any]]:
+    values = np.asarray([] if scores is None else scores, dtype=np.float32).reshape(-1)
+    total = int(values.shape[0])
+    if total <= 0:
+        return []
+    percentiles = np.zeros(total, dtype=np.float32)
+    if total == 1:
+        percentiles[0] = 100.0
+    else:
+        for asc_rank, idx in enumerate(np.argsort(values, kind="mergesort")):
+            percentiles[int(idx)] = float(100.0 * asc_rank / max(1, total - 1))
+    novelty_ranks = np.zeros(total, dtype=np.int32)
+    for rank, idx in enumerate(sorted(range(total), key=lambda pos: (-float(values[pos]), pos)), start=1):
+        novelty_ranks[int(idx)] = int(rank)
+    return [
+        {
+            "reference_novelty_score": float(values[idx]),
+            "reference_novelty_percentile": float(percentiles[idx]),
+            "reference_novelty_rank": int(novelty_ranks[idx]),
+        }
+        for idx in range(total)
+    ]
+
+
 async def _data_ingestion_save_uploads(files: Sequence[Any], target_dir: Path, field_name: str) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     used: Set[str] = set()
+    allowed_exts = DATA_INGESTION_IMAGE_EXTS | DATA_INGESTION_VIDEO_EXTS
     for idx, upload in enumerate(files or []):
         original = str(getattr(upload, "filename", "") or "").strip()
         if not original:
             continue
         ext = Path(original).suffix.lower()
+        if ext not in allowed_exts:
+            close_fn = getattr(upload, "close", None)
+            if callable(close_fn):
+                close_result = close_fn()
+                if hasattr(close_result, "__await__"):
+                    await close_result
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_media_extension_unsupported")
         safe_stem = _data_ingestion_safe_media_name(original, f"{field_name}_{idx:05d}")
         safe_name = f"{idx:05d}_{safe_stem}{ext}"
         while safe_name in used:
@@ -20585,9 +20634,12 @@ async def _data_ingestion_save_uploads(files: Sequence[Any], target_dir: Path, f
                 if hasattr(close_result, "__await__"):
                     await close_result
         try:
-            size = target.stat().st_size
+            stat_result = target.stat()
+            size = stat_result.st_size
+            mtime_ns = stat_result.st_mtime_ns
         except OSError:
             size = 0
+            mtime_ns = 0
         if size <= 0:
             try:
                 target.unlink()
@@ -20600,6 +20652,7 @@ async def _data_ingestion_save_uploads(files: Sequence[Any], target_dir: Path, f
                 "filename": original,
                 "saved_name": safe_name,
                 "size": size,
+                "mtime_ns": mtime_ns,
                 "field": field_name,
             }
         )
@@ -20617,6 +20670,9 @@ def _data_ingestion_dataset_media_rows(
         return []
     entry = _resolve_dataset_entry(safe_id)
     label = str(entry.get("label") or entry.get("id") or safe_id)
+    raw_dataset_root = Path(str(entry.get("dataset_root") or ""))
+    if _storage_path_has_symlink_component(raw_dataset_root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_path_not_found")
     dataset_root = _dataset_effective_root_from_entry(entry).resolve()
     image_rows = _annotation_collect_images(entry)
     max_items = _coerce_int(max_count, 0, minimum=0)
@@ -20633,9 +20689,12 @@ def _data_ingestion_dataset_media_rows(
         if image_path.suffix.lower() not in DATA_INGESTION_IMAGE_EXTS:
             continue
         try:
-            size = image_path.stat().st_size
+            stat_result = image_path.stat()
+            size = stat_result.st_size
+            mtime_ns = stat_result.st_mtime_ns
         except OSError:
             size = 0
+            mtime_ns = 0
         if size <= 0:
             continue
         split = str(image_row.get("split") or "train")
@@ -20646,6 +20705,7 @@ def _data_ingestion_dataset_media_rows(
                 "filename": f"{split}/{rel}",
                 "saved_name": image_path.name,
                 "size": size,
+                "mtime_ns": mtime_ns,
                 "field": field_name,
                 "source_dataset_id": safe_id,
                 "source_dataset_label": label,
@@ -20660,9 +20720,9 @@ def _data_ingestion_dataset_media_rows(
 
 
 def _data_ingestion_open_image(path: Path) -> Image.Image:
-    img = Image.open(path)
-    img.load()
-    return img.convert("RGB")
+    with Image.open(path) as img:
+        img.load()
+        return img.convert("RGB")
 
 
 def _data_ingestion_prepare_media(
@@ -20689,6 +20749,13 @@ def _data_ingestion_prepare_media(
             try:
                 with _data_ingestion_open_image(path) as img:
                     width, height = img.size
+                try:
+                    stat_result = path.stat()
+                    size = int(stat_result.st_size)
+                    mtime_ns = int(stat_result.st_mtime_ns)
+                except OSError:
+                    size = _coerce_int(row.get("size"), 0, minimum=0)
+                    mtime_ns = _coerce_int(row.get("mtime_ns"), 0, minimum=0)
                 prepared.append(
                     {
                         **row,
@@ -20697,6 +20764,8 @@ def _data_ingestion_prepare_media(
                         "frame_index": 0,
                         "width": width,
                         "height": height,
+                        "size": size,
+                        "mtime_ns": mtime_ns,
                     }
                 )
             except Exception as exc:
@@ -20723,8 +20792,10 @@ def _data_ingestion_prepare_media(
                 "-vf",
                 fps_expr,
             ]
-            if int(max_frames_per_video or 0) > 0:
-                cmd += ["-frames:v", str(int(max_frames_per_video))]
+            requested_max_frames = _coerce_int(max_frames_per_video, 200, minimum=0)
+            hard_max_frames = max(1, int(DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO or 10000))
+            effective_max_frames = requested_max_frames if 0 < requested_max_frames <= hard_max_frames else hard_max_frames
+            cmd += ["-frames:v", str(effective_max_frames)]
             cmd += [str(pattern)]
             try:
                 subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -20737,6 +20808,13 @@ def _data_ingestion_prepare_media(
                 try:
                     with _data_ingestion_open_image(frame_path) as img:
                         width, height = img.size
+                    try:
+                        stat_result = frame_path.stat()
+                        size = int(stat_result.st_size)
+                        mtime_ns = int(stat_result.st_mtime_ns)
+                    except OSError:
+                        size = 0
+                        mtime_ns = 0
                     prepared.append(
                         {
                             **row,
@@ -20745,6 +20823,8 @@ def _data_ingestion_prepare_media(
                             "frame_index": frame_idx,
                             "width": width,
                             "height": height,
+                            "size": size,
+                            "mtime_ns": mtime_ns,
                         }
                     )
                 except Exception:
@@ -20998,14 +21078,18 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         selected_set = set(selected)
         ranked_items: List[Dict[str, Any]] = []
         rank_by_idx = {idx: rank + 1 for rank, idx in enumerate(selected)}
+        novelty_metadata = _data_ingestion_novelty_score_metadata(novelty_scores)
         for idx, row in enumerate(candidates):
+            novelty_meta = novelty_metadata[idx] if idx < len(novelty_metadata) else {}
+            novelty_score = float(novelty_scores[idx]) if idx < len(novelty_scores) else 0.0
             ranked_items.append(
                 {
                     "item_id": f"item_{idx:06d}",
                     "index": idx,
                     "rank": rank_by_idx.get(idx),
                     "keep": idx in selected_set,
-                    "diversity_score": float(novelty_scores[idx]) if idx < len(novelty_scores) else 0.0,
+                    "diversity_score": novelty_score,
+                    **novelty_meta,
                     "filename": row.get("filename") or Path(str(row.get("image_path") or "")).name,
                     "saved_name": row.get("saved_name") or "",
                     "source_type": row.get("source_type") or "image",
@@ -21046,6 +21130,15 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             "local_salad_policy": LOCAL_SALAD_POLICY,
             "local_salad_trainer": LOCAL_SALAD_TRAINER,
         }
+        if len(novelty_scores):
+            summary.update(
+                {
+                    "reference_novelty_min": float(np.min(novelty_scores)),
+                    "reference_novelty_max": float(np.max(novelty_scores)),
+                    "reference_novelty_mean": float(np.mean(novelty_scores)),
+                    "selection_method": "farthest_first_coverage",
+                }
+            )
         result = {"summary": summary, "items": ranked_items}
         result_path = out_dir / "result.json"
         if job.cancel_event.is_set():
@@ -21517,16 +21610,42 @@ def get_data_ingestion_job(job_id: str) -> Dict[str, Any]:
     return _serialize_data_ingestion_job(_get_data_ingestion_job(job_id))
 
 
-def get_data_ingestion_result(job_id: str) -> Dict[str, Any]:
+def _load_data_ingestion_result(job_id: str) -> Dict[str, Any]:
     job = _get_data_ingestion_job(job_id)
     if isinstance(job.result, dict):
         return job.result
-    result_path = _safe_job_result_json_path(job.result_path, DATA_INGESTION_ROOT)
+    result_root = _data_ingestion_storage_root(create=False)
+    result_path = _safe_job_result_json_path(job.result_path, result_root)
     if result_path is not None:
         return _load_json_metadata(result_path) or {}
     if job.status in {"queued", "running", "cancelling"}:
         raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_finished")
     raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="result_not_found")
+
+
+def _data_ingestion_public_result(job_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    public = dict(result or {})
+    items: List[Dict[str, Any]] = []
+    for item in result.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        item_public = {
+            str(key): json_sanitize(value)
+            for key, value in item.items()
+            if str(key) != "image_path" and not str(key).startswith("_")
+        }
+        item_id = _data_ingestion_result_item_id(item_public)
+        if item_id:
+            item_public["item_id"] = item_id
+            item_public["thumbnail_url"] = f"/data_ingestion/jobs/{job_id}/candidate_thumbnail/{item_id}"
+        items.append(item_public)
+    if "items" in public:
+        public["items"] = items
+    return json_sanitize(public)
+
+
+def get_data_ingestion_result(job_id: str) -> Dict[str, Any]:
+    return _data_ingestion_public_result(job_id, _load_data_ingestion_result(job_id))
 
 
 def _data_ingestion_result_item_id(item: Dict[str, Any]) -> str:
@@ -21542,7 +21661,7 @@ def _data_ingestion_completed_analysis(job_id: str) -> Tuple[DataIngestionJob, D
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_accept_analysis_required")
     if job.status != "completed":
         raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="data_ingestion_analysis_not_completed")
-    result = get_data_ingestion_result(job_id)
+    result = _load_data_ingestion_result(job_id)
     items = [dict(item) for item in result.get("items") or [] if isinstance(item, dict)]
     if not items:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_no_ranked_items")
@@ -21557,6 +21676,36 @@ def _data_ingestion_completed_analysis(job_id: str) -> Tuple[DataIngestionJob, D
     except Exception as exc:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_job_artifacts_missing") from exc
     return job, result, items, job_dir_resolved
+
+
+def get_data_ingestion_candidate_thumbnail(job_id: str, item_id: str):
+    _job, _result, items, job_dir = _data_ingestion_completed_analysis(job_id)
+    wanted = str(item_id or "").strip()
+    item = next((entry for entry in items if _data_ingestion_result_item_id(entry) == wanted), None)
+    safe_item_id = hashlib.sha256(wanted.encode("utf-8")).hexdigest()[:24] if wanted else ""
+    if item is None or not safe_item_id:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_candidate_thumbnail_not_found")
+    try:
+        source_path = _data_ingestion_safe_source_file(item, job_dir)
+    except HTTPException as exc:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_candidate_thumbnail_not_found") from exc
+    thumb_dir = job_dir / "candidate_thumbnails"
+    prepared_thumb_dir = _class_analysis_prepare_dir(thumb_dir, job_dir)
+    if prepared_thumb_dir is None:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_candidate_thumbnail_path_invalid")
+    thumb_path = prepared_thumb_dir / f"{safe_item_id}.jpg"
+    safe_thumb_path = _safe_existing_regular_file_within_root_impl(thumb_path, job_dir)
+    if safe_thumb_path is None:
+        image = _data_ingestion_open_image(source_path)
+        try:
+            image.thumbnail((DATA_INGESTION_CANDIDATE_THUMB_SIZE, DATA_INGESTION_CANDIDATE_THUMB_SIZE))
+            _class_analysis_write_jpeg(thumb_path, job_dir, image, quality=86)
+        finally:
+            image.close()
+        safe_thumb_path = _safe_existing_regular_file_within_root_impl(thumb_path, job_dir)
+    if safe_thumb_path is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_candidate_thumbnail_not_found")
+    return FileResponse(str(safe_thumb_path), media_type="image/jpeg")
 
 
 def _data_ingestion_accept_config(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -21574,6 +21723,12 @@ def _data_ingestion_accept_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     target_height = _coerce_int(payload.get("target_height"), 0, minimum=0)
     if mode != "original" and (target_width <= 0 or target_height <= 0):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_target_size_required")
+    if mode != "original" and (
+        target_width > ACCEPTED_EXPORT_MAX_TARGET_EDGE
+        or target_height > ACCEPTED_EXPORT_MAX_TARGET_EDGE
+        or target_width * target_height > ACCEPTED_EXPORT_MAX_TARGET_PIXELS
+    ):
+        raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="accepted_export_target_size_too_large")
     edge_policy = str(payload.get("tile_edge_policy") or payload.get("edge_policy") or "cover_no_padding").strip().lower()
     edge_policy = {
         "cover": "cover_no_padding",
@@ -21610,7 +21765,9 @@ def _data_ingestion_selected_result_items(items: List[Dict[str, Any]], payload: 
     raw_ids = payload.get("item_ids")
     if raw_ids is None:
         raw_ids = payload.get("accepted_item_ids")
-    if isinstance(raw_ids, list) and raw_ids:
+    if raw_ids is not None and not isinstance(raw_ids, list):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_item_ids_invalid")
+    if isinstance(raw_ids, list):
         selected: List[Dict[str, Any]] = []
         for raw_id in raw_ids:
             item_id = str(raw_id or "").strip()
@@ -21627,7 +21784,7 @@ def _data_ingestion_tile_positions(size: int, tile: int, overlap: float, edge_po
     step = max(1, int(round(tile * (1.0 - max(0.0, min(0.9, float(overlap or 0.0)))))))
     if edge_policy == "drop_partials":
         if size < tile:
-            return [0]
+            return []
         return list(range(0, max(1, size - tile + 1), step)) or [0]
     if edge_policy == "pad_edges":
         return list(range(0, size, step)) or [0]
@@ -21656,6 +21813,22 @@ def _data_ingestion_output_id(item_id: str, mode: str, bounds: Sequence[int], co
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
+def _data_ingestion_center_crop_bounds(width: int, height: int, target_width: int, target_height: int) -> List[int]:
+    src_w = max(1, int(width or 1))
+    src_h = max(1, int(height or 1))
+    target_w = max(1, int(target_width or 1))
+    target_h = max(1, int(target_height or 1))
+    target_ratio = target_w / target_h
+    src_ratio = src_w / src_h
+    if src_ratio > target_ratio:
+        crop_w = max(1, min(src_w, int(round(src_h * target_ratio))))
+        left = max(0, (src_w - crop_w) // 2)
+        return [left, 0, left + crop_w, src_h]
+    crop_h = max(1, min(src_h, int(round(src_w / target_ratio))))
+    top = max(0, (src_h - crop_h) // 2)
+    return [0, top, src_w, top + crop_h]
+
+
 def _data_ingestion_plan_item_outputs(
     item: Dict[str, Any],
     *,
@@ -21680,8 +21853,10 @@ def _data_ingestion_plan_item_outputs(
         out_w = max(1, int(round(width * scale)))
         out_h = max(1, int(round(height * scale)))
         output_specs.append(([0, 0, width, height], out_w, out_h, ".jpg"))
-    elif mode in {"resize_stretch", "center_crop"}:
+    elif mode == "resize_stretch":
         output_specs.append(([0, 0, width, height], target_w, target_h, ".jpg"))
+    elif mode == "center_crop":
+        output_specs.append((_data_ingestion_center_crop_bounds(width, height, target_w, target_h), target_w, target_h, ".jpg"))
     else:
         edge_policy = str(config.get("tile_edge_policy") or "cover_no_padding")
         overlap = _coerce_float(config.get("tile_overlap"), 0.0, minimum=0.0, maximum=0.9)
@@ -21725,6 +21900,7 @@ def _data_ingestion_plan_item_outputs(
                 "original_keep": bool(item.get("keep")),
                 "accepted": True,
                 "_source_path": str(source_path),
+                "_job_dir": str(job_dir),
             }
         )
     return outputs
@@ -21733,6 +21909,8 @@ def _data_ingestion_plan_item_outputs(
 def _data_ingestion_plan_accepted_outputs(
     job_id: str,
     payload: Dict[str, Any],
+    *,
+    max_outputs: Optional[int] = None,
 ) -> Tuple[DataIngestionJob, Dict[str, Any], Dict[str, Any], List[Dict[str, Any]], Path]:
     job, result, items, job_dir = _data_ingestion_completed_analysis(job_id)
     config = _data_ingestion_accept_config(payload)
@@ -21740,10 +21918,14 @@ def _data_ingestion_plan_accepted_outputs(
     outputs: List[Dict[str, Any]] = []
     for item in selected_items:
         outputs.extend(_data_ingestion_plan_item_outputs(item, job_dir=job_dir, config=config))
+        if max_outputs is not None and len(outputs) > max_outputs:
+            raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="accepted_export_too_many_outputs")
     raw_output_ids = payload.get("output_ids")
     if raw_output_ids is None:
         raw_output_ids = payload.get("accepted_output_ids")
-    if isinstance(raw_output_ids, list) and raw_output_ids:
+    if raw_output_ids is not None and not isinstance(raw_output_ids, list):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_output_ids_invalid")
+    if isinstance(raw_output_ids, list):
         wanted = {str(output_id or "").strip() for output_id in raw_output_ids}
         by_id = {str(output.get("output_id") or ""): output for output in outputs}
         if not wanted.issubset(set(by_id.keys())):
@@ -21756,8 +21938,17 @@ def _data_ingestion_public_output(output: Dict[str, Any]) -> Dict[str, Any]:
     return {key: json_sanitize(value) for key, value in output.items() if not str(key).startswith("_")}
 
 
-def _data_ingestion_render_output_image(output: Dict[str, Any], config: Dict[str, Any]) -> Image.Image:
+def _data_ingestion_safe_output_source_path(output: Dict[str, Any]) -> Path:
+    job_dir = Path(str(output.get("_job_dir") or ""))
     source_path = Path(str(output.get("_source_path") or ""))
+    safe_path = _safe_existing_regular_file_within_root_impl(source_path, job_dir)
+    if safe_path is None:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_source_missing")
+    return safe_path
+
+
+def _data_ingestion_render_output_image(output: Dict[str, Any], config: Dict[str, Any]) -> Image.Image:
+    source_path = _data_ingestion_safe_output_source_path(output)
     mode = str(output.get("transform_mode") or config.get("mode") or "tile")
     with _data_ingestion_open_image(source_path) as img:
         if mode == "original":
@@ -21771,17 +21962,9 @@ def _data_ingestion_render_output_image(output: Dict[str, Any], config: Dict[str
         if mode == "center_crop":
             target_w = max(1, int(output.get("output_width") or 1))
             target_h = max(1, int(output.get("output_height") or 1))
-            src_w, src_h = img.size
-            target_ratio = target_w / target_h
-            src_ratio = src_w / max(1, src_h)
-            if src_ratio > target_ratio:
-                crop_w = max(1, int(round(src_h * target_ratio)))
-                left = max(0, (src_w - crop_w) // 2)
-                crop = img.crop((left, 0, left + crop_w, src_h))
-            else:
-                crop_h = max(1, int(round(src_w / target_ratio)))
-                top = max(0, (src_h - crop_h) // 2)
-                crop = img.crop((0, top, src_w, top + crop_h))
+            bounds = [int(v) for v in output.get("source_bounds") or _data_ingestion_center_crop_bounds(img.width, img.height, target_w, target_h)]
+            x0, y0, x1, y1 = bounds
+            crop = img.crop((max(0, x0), max(0, y0), min(img.width, x1), min(img.height, y1)))
             try:
                 return crop.resize((target_w, target_h), Image.Resampling.LANCZOS)
             finally:
@@ -21801,12 +21984,20 @@ def _data_ingestion_render_output_image(output: Dict[str, Any], config: Dict[str
 
 def _data_ingestion_image_jpeg_bytes(image: Image.Image, *, quality: int) -> bytes:
     buffer = io.BytesIO()
-    image.convert("RGB").save(buffer, format="JPEG", quality=max(1, min(100, int(quality or 95))))
+    converted = image.convert("RGB")
+    try:
+        converted.save(buffer, format="JPEG", quality=max(1, min(100, int(quality or 95))))
+    finally:
+        converted.close()
     return buffer.getvalue()
 
 
 def preview_data_ingestion_accepted_export(job_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    _job, _result, config, outputs, job_dir = _data_ingestion_plan_accepted_outputs(job_id, payload)
+    _job, _result, config, outputs, job_dir = _data_ingestion_plan_accepted_outputs(
+        job_id,
+        payload,
+        max_outputs=ACCEPTED_EXPORT_MAX_DOWNLOAD_OUTPUTS,
+    )
     offset = _coerce_int(payload.get("offset"), 0, minimum=0)
     limit = min(ACCEPTED_EXPORT_MAX_PREVIEW_OUTPUTS, max(1, _coerce_int(payload.get("limit"), 80, minimum=1)))
     page_outputs = outputs[offset : offset + limit]
@@ -21874,7 +22065,11 @@ def _data_ingestion_accepted_export_warnings(config: Dict[str, Any]) -> List[str
 
 
 def download_data_ingestion_accepted_export(job_id: str, payload: Dict[str, Any]):
-    job, result, config, outputs, _job_dir = _data_ingestion_plan_accepted_outputs(job_id, payload)
+    job, result, config, outputs, _job_dir = _data_ingestion_plan_accepted_outputs(
+        job_id,
+        payload,
+        max_outputs=ACCEPTED_EXPORT_MAX_DOWNLOAD_OUTPUTS,
+    )
     if not outputs:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_no_outputs")
     if len(outputs) > ACCEPTED_EXPORT_MAX_DOWNLOAD_OUTPUTS:
@@ -21898,13 +22093,17 @@ def download_data_ingestion_accepted_export(job_id: str, payload: Dict[str, Any]
             "summary": summary,
             "outputs": public_outputs,
         }
+        written_arcnames: Set[str] = set()
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for output in outputs:
                 arcname = str(output.get("zip_path") or Path("images") / output.get("output_filename"))
                 if _data_ingestion_zip_member_is_unsafe(arcname):
                     raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_output_path_invalid")
+                if arcname in written_arcnames:
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_duplicate_output_path")
+                written_arcnames.add(arcname)
                 if str(output.get("transform_mode")) == "original":
-                    source_path = Path(str(output.get("_source_path") or ""))
+                    source_path = _data_ingestion_safe_output_source_path(output)
                     zf.write(source_path, arcname=arcname)
                 else:
                     image = _data_ingestion_render_output_image(output, config)
@@ -39217,6 +39416,7 @@ app.include_router(
         export_reference_profile_fn=export_data_ingestion_reference_profile,
         import_reference_profile_fn=import_data_ingestion_reference_profile,
         preview_accepted_export_fn=preview_data_ingestion_accepted_export,
+        get_candidate_thumbnail_fn=get_data_ingestion_candidate_thumbnail,
         get_accepted_export_thumbnail_fn=get_data_ingestion_accepted_export_thumbnail,
         download_accepted_export_fn=download_data_ingestion_accepted_export,
         get_job_fn=get_data_ingestion_job,

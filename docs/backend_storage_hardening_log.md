@@ -1913,3 +1913,42 @@ preserving the exact validation story for storage and artifact-write fixes.
   coverage (`54 passed`), `tools/check_ui_endpoints.py http://127.0.0.1:8000`,
   `git diff --check`, and the full pytest suite (`1255 passed, 20 skipped`)
   passed against the restarted backend.
+
+## 2026-05-24: Data Ingestion Deep Export and Candidate Review Hardening
+
+- Re-audited the Data Ingestion analysis, accepted-export, media-staging, and
+  backend-reference paths after adding reference-profile and accepted-ZIP flows.
+- Rejected unsupported upload extensions before writing files, closed rejected
+  upload handles, bounded generated media names, recorded file mtimes, and
+  included mtime identity in reference fingerprints so changed same-name media
+  invalidates profile provenance.
+- Applied a backend video frame extraction safety cap even when the UI sends
+  `max_frames_per_video=0`, and exposed the cap in capabilities.
+- Rejected symlinked backend dataset roots and symlinked Data Ingestion storage
+  roots before reference reads or result reads.
+- Hardened accepted-export planning: explicit empty item/output selections stay
+  empty, invalid selection shapes fail fast, center-crop bounds are recorded
+  accurately, too-small `drop_partials` sources emit no tiles, target geometry is
+  capped, duplicate ZIP paths are rejected, and every render revalidates the
+  source file inside the job directory.
+- Split public analysis results from internal result state. Public result items
+  now omit source paths and expose candidate-thumbnail URLs; internal accepted
+  export still uses guarded source paths.
+- Clarified candidate review scoring by adding reference-novelty score,
+  percentile, and raw novelty rank alongside the farthest-first keep rank. The
+  UI labels this as reference novelty instead of a generic score and shows a
+  400 px hover preview for candidate cards.
+- Removed preview-tile checkboxes from the UI because selecting a paginated
+  preview tile could accidentally restrict the final ZIP to only the first
+  preview page. Candidate keep/reject checkboxes remain the accepted-data
+  selection control.
+- Updated README and the Dataset/Data Ingestion safety audit to record the
+  stronger accepted-export, candidate-thumbnail, and public-result invariants.
+- Validation: `py_compile localinferenceapi.py api/data_ingestion.py
+  services/data_ingestion.py tests/test_data_ingestion.py
+  tests/test_labeling_panel_layout_contract.py`, `node --check
+  ybat-master/ybat.js`, focused Dataset/Data Ingestion coverage
+  (`185 passed`), `tools/check_ui_endpoints.py http://127.0.0.1:8000`,
+  OpenAPI route confirmation for candidate and accepted-export thumbnails, and
+  the full pytest suite (`1269 passed, 20 skipped`) passed against the
+  restarted backend.

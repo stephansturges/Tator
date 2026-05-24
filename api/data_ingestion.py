@@ -16,6 +16,7 @@ def build_data_ingestion_router(
     export_reference_profile_fn: Callable[[str], Any],
     import_reference_profile_fn: Callable[[UploadFile], Any],
     preview_accepted_export_fn: Callable[[str, dict], Any],
+    get_candidate_thumbnail_fn: Callable[[str, str], Any],
     get_accepted_export_thumbnail_fn: Callable[[str, str, str], Any],
     download_accepted_export_fn: Callable[[str, dict], Any],
     get_job_fn: Callable[[str], Any],
@@ -95,6 +96,10 @@ def build_data_ingestion_router(
     @router.post("/data_ingestion/jobs/{job_id}/accepted_export/preview")
     def preview_accepted_export(job_id: str, payload: dict = Body(...)):  # noqa: B008
         return preview_accepted_export_fn(job_id, payload or {})
+
+    @router.get("/data_ingestion/jobs/{job_id}/candidate_thumbnail/{item_id}")
+    def get_candidate_thumbnail(job_id: str, item_id: str):
+        return get_candidate_thumbnail_fn(job_id, item_id)
 
     @router.get("/data_ingestion/jobs/{job_id}/accepted_export/{preview_id}/thumbnail/{output_id}")
     def get_accepted_export_thumbnail(job_id: str, preview_id: str, output_id: str):

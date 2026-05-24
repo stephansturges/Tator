@@ -11,7 +11,7 @@ import pytest
 import torch
 
 import localinferenceapi as api
-from services.data_ingestion import greedy_diverse_indices, normalize_keep_fraction
+from services.data_ingestion import greedy_diverse_indices, normalize_keep_fraction, safe_media_name
 from utils.local_salad import LocalSALADConfig, LocalSALADHead
 from utils.local_salad_mlx import local_salad_mlx_available
 from PIL import Image
@@ -37,6 +37,39 @@ def test_diverse_indices_use_reference_novelty_and_keep_fraction():
     assert novelty[3] > novelty[2] > novelty[1]
 
 
+def test_safe_media_name_bounds_generated_filename_length():
+    name = safe_media_name(f"{'a' * 300}.jpg")
+
+    assert len(name) == 96
+    assert name == "a" * 96
+
+
+def test_reference_fingerprint_changes_with_file_mtime_identity():
+    base_row = {
+        "filename": "a.jpg",
+        "source_type": "image",
+        "frame_index": 0,
+        "width": 8,
+        "height": 8,
+        "size": 10,
+        "mtime_ns": 100,
+    }
+
+    first = api._data_ingestion_reference_fingerprint([base_row], source="backend_dataset")
+    second = api._data_ingestion_reference_fingerprint([{**base_row, "mtime_ns": 200}], source="backend_dataset")
+
+    assert first["content_hash"] != second["content_hash"]
+
+
+def test_data_ingestion_novelty_score_metadata_explains_raw_distance_order():
+    metadata = api._data_ingestion_novelty_score_metadata([0.2, 0.5, 0.1])
+
+    assert [entry["reference_novelty_rank"] for entry in metadata] == [2, 1, 3]
+    assert metadata[1]["reference_novelty_percentile"] == pytest.approx(100.0)
+    assert metadata[2]["reference_novelty_percentile"] == pytest.approx(0.0)
+    assert metadata[0]["reference_novelty_score"] == pytest.approx(0.2)
+
+
 def test_data_ingestion_capabilities_expose_reference_profile_flow():
     caps = api._data_ingestion_capabilities()
 
@@ -53,6 +86,7 @@ def test_data_ingestion_capabilities_expose_reference_profile_flow():
     assert caps["local_salad_backend"]["default"] == "auto"
     assert caps["local_salad_backend"]["auto_resolved"] in {"mlx", "torch"}
     assert "local_salad_heads" in caps
+    assert caps["max_extracted_frames_per_video"] == api.DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO
     assert "data_ingestion_recipes" not in caps
     assert api._local_salad_training_stage(0.02) == "Preparing reference media"
     assert api._local_salad_training_stage(0.20) == "Encoding reference views"
@@ -246,6 +280,43 @@ def _register_completed_ingestion_job(api_module, job_id: str, job_dir: Path, im
     api_module.DATA_INGESTION_JOBS[job_id] = job
 
 
+def test_data_ingestion_result_hides_source_paths_and_exposes_candidate_thumbnails(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_public_result"
+    media_dir = job_dir / "media" / "candidates"
+    media_dir.mkdir(parents=True)
+    image_path = media_dir / "candidate_a.jpg"
+    Image.new("RGB", (24, 16), (20, 100, 180)).save(image_path)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_public_result", job_dir, image_path)
+
+    public_result = api.get_data_ingestion_result("di_public_result")
+
+    assert public_result["items"][0]["thumbnail_url"] == "/data_ingestion/jobs/di_public_result/candidate_thumbnail/item_keep"
+    assert "image_path" not in public_result["items"][0]
+    assert str(tmp_path) not in json.dumps(public_result)
+
+
+def test_data_ingestion_candidate_thumbnail_uses_internal_source_path(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_candidate_thumb"
+    media_dir = job_dir / "media" / "candidates"
+    media_dir.mkdir(parents=True)
+    image_path = media_dir / "candidate_a.jpg"
+    Image.new("RGB", (800, 200), (20, 100, 180)).save(image_path)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_candidate_thumb", job_dir, image_path)
+
+    response = api.get_data_ingestion_candidate_thumbnail("di_candidate_thumb", "item_keep")
+
+    thumb_path = Path(response.path)
+    assert thumb_path.exists()
+    with Image.open(thumb_path) as img:
+        assert max(img.size) == api.DATA_INGESTION_CANDIDATE_THUMB_SIZE
+
+
 def test_accepted_export_preview_and_download_tiles_kept_items(tmp_path, monkeypatch):
     ingestion_root = tmp_path / "ingestion"
     job_dir = ingestion_root / "di_accept_unit"
@@ -314,6 +385,153 @@ def test_accepted_export_rejects_source_outside_job_dir(tmp_path, monkeypatch):
             "di_accept_escape",
             {"transform_mode": "tile", "target_width": 4, "target_height": 4},
         )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "accepted_export_source_missing"
+
+
+def test_accepted_export_empty_item_ids_do_not_fall_back_to_keep_defaults(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_accept_empty"
+    media_dir = job_dir / "media" / "candidates"
+    media_dir.mkdir(parents=True)
+    image_path = media_dir / "candidate_a.jpg"
+    Image.new("RGB", (16, 10), (20, 100, 180)).save(image_path)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_accept_empty", job_dir, image_path)
+
+    preview = api.preview_data_ingestion_accepted_export(
+        "di_accept_empty",
+        {
+            "item_ids": [],
+            "transform_mode": "tile",
+            "target_width": 8,
+            "target_height": 8,
+        },
+    )
+
+    assert preview["total_outputs"] == 0
+    assert preview["outputs"] == []
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.download_data_ingestion_accepted_export(
+            "di_accept_empty",
+            {
+                "item_ids": [],
+                "transform_mode": "tile",
+                "target_width": 8,
+                "target_height": 8,
+            },
+        )
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "accepted_export_no_outputs"
+
+
+def test_accepted_export_drop_partials_drops_too_small_sources(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_accept_drop"
+    media_dir = job_dir / "media" / "candidates"
+    media_dir.mkdir(parents=True)
+    image_path = media_dir / "small.jpg"
+    Image.new("RGB", (8, 8), (20, 100, 180)).save(image_path)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_accept_drop", job_dir, image_path)
+
+    payload = {
+        "transform_mode": "tile",
+        "target_width": 16,
+        "target_height": 16,
+        "tile_edge_policy": "drop_partials",
+    }
+    preview = api.preview_data_ingestion_accepted_export("di_accept_drop", payload)
+
+    assert preview["total_outputs"] == 0
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.download_data_ingestion_accepted_export("di_accept_drop", payload)
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "accepted_export_no_outputs"
+
+
+def test_accepted_export_center_crop_reports_real_source_bounds_and_size(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_accept_center"
+    media_dir = job_dir / "media" / "candidates"
+    media_dir.mkdir(parents=True)
+    image_path = media_dir / "wide.jpg"
+    Image.new("RGB", (16, 10), (20, 100, 180)).save(image_path)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_accept_center", job_dir, image_path)
+
+    payload = {"transform_mode": "center_crop", "target_width": 8, "target_height": 8}
+    preview = api.preview_data_ingestion_accepted_export("di_accept_center", payload)
+
+    assert preview["total_outputs"] == 1
+    assert preview["outputs"][0]["source_bounds"] == [3, 0, 13, 10]
+    download = api.download_data_ingestion_accepted_export("di_accept_center", payload)
+    zip_path = Path(download.path)
+    with zipfile.ZipFile(zip_path) as zf:
+        image_names = [name for name in zf.namelist() if name.startswith("images/")]
+        assert len(image_names) == 1
+        with zf.open(image_names[0]) as handle:
+            with Image.open(handle) as img:
+                assert img.size == (8, 8)
+        manifest = json.loads(zf.read("manifest.json"))
+        assert manifest["outputs"][0]["source_bounds"] == [3, 0, 13, 10]
+    asyncio.run(download.background())
+
+
+def test_accepted_export_rejects_oversized_target_geometry(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_accept_huge"
+    media_dir = job_dir / "media" / "candidates"
+    media_dir.mkdir(parents=True)
+    image_path = media_dir / "candidate_a.jpg"
+    Image.new("RGB", (16, 10), (20, 100, 180)).save(image_path)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_accept_huge", job_dir, image_path)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.preview_data_ingestion_accepted_export(
+            "di_accept_huge",
+            {
+                "transform_mode": "tile",
+                "target_width": api.ACCEPTED_EXPORT_MAX_TARGET_EDGE + 1,
+                "target_height": 8,
+            },
+        )
+
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.detail == "accepted_export_target_size_too_large"
+
+
+def test_accepted_export_revalidates_original_source_before_render(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_accept_revalidate"
+    media_dir = job_dir / "media" / "candidates"
+    media_dir.mkdir(parents=True)
+    image_path = media_dir / "candidate_a.jpg"
+    outside = tmp_path / "outside.jpg"
+    Image.new("RGB", (16, 10), (20, 100, 180)).save(image_path)
+    Image.new("RGB", (16, 10), (1, 2, 3)).save(outside)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_accept_revalidate", job_dir, image_path)
+    _job, _result, config, outputs, _job_dir = api._data_ingestion_plan_accepted_outputs(
+        "di_accept_revalidate",
+        {"transform_mode": "original"},
+    )
+    assert len(outputs) == 1
+    image_path.unlink()
+    try:
+        image_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._data_ingestion_render_output_image(outputs[0], config)
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "accepted_export_source_missing"
@@ -764,6 +982,18 @@ def test_data_ingestion_save_uploads_closes_upload_handles(tmp_path):
     assert Path(rows[0]["path"]).read_bytes() == b"payload"
 
 
+def test_data_ingestion_save_uploads_rejects_unsupported_media_extension(tmp_path):
+    upload = _FakeUpload("notes.txt", b"payload")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(api._data_ingestion_save_uploads([upload], tmp_path, "candidate"))
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "data_ingestion_media_extension_unsupported"
+    assert upload.closed is True
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_data_ingestion_save_uploads_rejects_symlink_destination(tmp_path):
     outside = tmp_path / "outside.jpg"
     outside.write_bytes(b"external")
@@ -810,6 +1040,40 @@ def test_data_ingestion_save_uploads_enforces_quota(tmp_path, monkeypatch):
     assert upload.closed is True
     assert (tmp_path / "existing.bin").read_bytes() == b"12345"
     assert not (tmp_path / "00000_candidate.jpg").exists()
+
+
+def test_data_ingestion_video_extraction_applies_backend_frame_cap(tmp_path, monkeypatch):
+    video_path = tmp_path / "sample.mp4"
+    video_path.write_bytes(b"fake-video")
+    out_dir = tmp_path / "frames"
+    monkeypatch.setattr(api, "DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO", 3)
+    monkeypatch.setattr(api.shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **_kwargs):
+        seen["cmd"] = list(cmd)
+        pattern = Path(cmd[-1])
+        pattern.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 8), (10, 20, 30)).save(pattern.parent / "frame_000001.jpg")
+        return api.subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    job = api.DataIngestionJob(job_id="di_video_cap")
+
+    rows = api._data_ingestion_prepare_media(
+        job,
+        [{"path": str(video_path), "filename": "sample.mp4", "saved_name": "sample.mp4", "size": len(b"fake-video")}],
+        out_dir=out_dir,
+        frame_interval=1.0,
+        max_frames_per_video=0,
+        progress_start=0.0,
+        progress_end=1.0,
+    )
+
+    assert "-frames:v" in seen["cmd"]
+    assert seen["cmd"][seen["cmd"].index("-frames:v") + 1] == "3"
+    assert len(rows) == 1
+    assert rows[0]["source_type"] == "video_frame"
 
 
 def test_local_salad_training_rejects_bad_encoder_before_saving_uploads(tmp_path, monkeypatch):
@@ -912,6 +1176,30 @@ def test_data_ingestion_backend_dataset_rows_skip_symlinked_image_root_escape(tm
 
     assert api._annotation_collect_images(entry) == []
     assert api._data_ingestion_dataset_media_rows("symlink_dataset", field_name="reference") == []
+
+
+def test_data_ingestion_backend_dataset_rows_reject_symlinked_dataset_root(tmp_path, monkeypatch):
+    outside_root = tmp_path / "outside_dataset"
+    (outside_root / "images").mkdir(parents=True)
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(outside_root / "images" / "a.jpg")
+    dataset_link = tmp_path / "dataset_link"
+    try:
+        dataset_link.symlink_to(outside_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    entry = {
+        "id": "symlink_root_dataset",
+        "label": "Symlink Root Dataset",
+        "dataset_root": str(dataset_link),
+        "yolo_layout": "flat",
+    }
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._data_ingestion_dataset_media_rows("symlink_root_dataset", field_name="reference")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "dataset_path_not_found"
 
 
 def test_data_ingestion_backend_dataset_row_cap_counts_valid_rows(tmp_path, monkeypatch):
@@ -1273,6 +1561,37 @@ def test_data_ingestion_result_rejects_symlinked_result_escape(tmp_path, monkeyp
             api.get_data_ingestion_result(job.job_id)
         assert exc_info.value.status_code == 404
         assert exc_info.value.detail == "result_not_found"
+    finally:
+        with api.DATA_INGESTION_JOBS_LOCK:
+            api.DATA_INGESTION_JOBS.clear()
+
+
+def test_data_ingestion_result_rejects_symlinked_storage_root(tmp_path, monkeypatch):
+    outside_root = tmp_path / "outside_ingestion"
+    job_root = outside_root / "job_escape"
+    job_root.mkdir(parents=True)
+    result_path = job_root / "result.json"
+    result_path.write_text('{"escaped":true}', encoding="utf-8")
+    ingestion_root = tmp_path / "data_ingestion"
+    try:
+        ingestion_root.symlink_to(outside_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    job = api.DataIngestionJob(
+        job_id="job_escape",
+        status="completed",
+        result_path=str(ingestion_root / "job_escape" / "result.json"),
+    )
+    with api.DATA_INGESTION_JOBS_LOCK:
+        api.DATA_INGESTION_JOBS.clear()
+        api.DATA_INGESTION_JOBS[job.job_id] = job
+
+    try:
+        with pytest.raises(api.HTTPException) as exc_info:
+            api.get_data_ingestion_result(job.job_id)
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "data_ingestion_path_invalid"
     finally:
         with api.DATA_INGESTION_JOBS_LOCK:
             api.DATA_INGESTION_JOBS.clear()

@@ -110,9 +110,11 @@ def diversity_summary(
     }
 
 
-def safe_media_name(path_or_name: str, fallback: str = "media") -> str:
+def safe_media_name(path_or_name: str, fallback: str = "media", *, max_length: int = 96) -> str:
     stem = Path(str(path_or_name or "")).stem or fallback
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in stem).strip("._-")
+    if max_length > 0:
+        cleaned = cleaned[:max_length].strip("._-")
     return cleaned or fallback
 
 
@@ -127,4 +129,3 @@ def iter_media_files(paths: Iterable[Path]) -> List[Path]:
         elif p.is_file() and p.suffix.lower() in IMAGE_EXTS | VIDEO_EXTS:
             found.append(p)
     return found
-

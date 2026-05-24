@@ -1127,3 +1127,16 @@ preserving the exact validation story for storage and artifact-write fixes.
   coverage, `node --check ybat-master/ybat.js`, `git diff --check`, the full
   pytest suite, and live endpoint sanity checks passed against the restarted
   backend.
+
+## 2026-05-24: Split Dataset Text Label Lookup
+
+- Added split-aware normalization for dataset text-label endpoints so
+  `train/foo.jpg` and `val/foo.jpg` resolve to split-layout source captions
+  under `train/text_labels/` and `val/text_labels/`.
+- Reused the same resolver for single-caption reads, batch-caption reads, and
+  direct caption writes while preserving flat-dataset nested paths.
+- Added linked-dataset coverage for split-prefixed source captions and kept the
+  split overlay snapshot tests green.
+- Validation: `1160 passed, 17 skipped`; focused linked-dataset annotation
+  coverage, `localinferenceapi.py` compile, `git diff --check`, the full pytest
+  suite, and live endpoint sanity checks passed against the restarted backend.

@@ -1687,6 +1687,34 @@ def test_get_text_labels_batch_reads_overlay_source_and_legacy(tmp_path, monkeyp
     assert result["missing"] == ["missing.jpg"]
 
 
+def test_text_label_endpoints_read_split_prefixed_source_captions(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _split_entry_for_annotation(tmp_path)
+    dataset_root = Path(entry["dataset_root"])
+    train_text = dataset_root / "train" / "text_labels"
+    val_text = dataset_root / "val" / "text_labels"
+    train_text.mkdir(parents=True, exist_ok=True)
+    val_text.mkdir(parents=True, exist_ok=True)
+    (train_text / "shared.txt").write_text("train source caption", encoding="utf-8")
+    (val_text / "shared.txt").write_text("val source caption", encoding="utf-8")
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+
+    assert api.get_text_label("ds", "train/shared.jpg") == {
+        "caption": "train source caption",
+    }
+    result = api.get_text_labels(
+        "ds",
+        ["train/shared.jpg", "val/shared.jpg", "shared.jpg"],
+    )
+
+    assert result["captions"] == {
+        "train/shared.jpg": "train source caption",
+        "val/shared.jpg": "val source caption",
+    }
+    assert result["missing"] == ["shared.jpg"]
+
+
 def test_set_text_label_requires_active_lock_owner_when_locked(tmp_path, monkeypatch) -> None:
     entry = _entry_for_annotation(tmp_path)
     meta = {

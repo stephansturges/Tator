@@ -15623,6 +15623,24 @@ def _annotation_source_text_value(
     return ""
 
 
+def _annotation_text_split_rel_from_name(
+    entry: Dict[str, Any],
+    image_name: str,
+    *,
+    split: Optional[str] = None,
+) -> Tuple[Optional[str], Path]:
+    rel = _annotation_normalise_image_relpath(
+        image_name if "." in str(image_name or "") else f"{image_name}.jpg"
+    )
+    explicit_split = _annotation_normalise_split(split) if split is not None else None
+    layout = str(entry.get("yolo_layout") or "flat").strip().lower()
+    if explicit_split:
+        return explicit_split, rel
+    if layout == "split" and len(rel.parts) >= 2 and rel.parts[0] in {"train", "val", "valid", "test"}:
+        return _annotation_normalise_split(rel.parts[0]), Path(*rel.parts[1:])
+    return None, rel
+
+
 def _annotation_collect_images(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
     dataset_root = _dataset_effective_root_from_entry(entry)
     dataset_root_resolved = dataset_root.resolve()
@@ -16728,10 +16746,8 @@ def set_dataset_glossary(dataset_id: str, glossary: str):
 
 def get_text_label(dataset_id: str, image_name: str):
     entry = _resolve_dataset_entry(dataset_id)
-    image_relpath = _annotation_normalise_image_relpath(
-        image_name if "." in image_name else f"{image_name}.jpg"
-    )
-    caption = _annotation_effective_text_label(entry, image_relpath)
+    split, image_relpath = _annotation_text_split_rel_from_name(entry, image_name)
+    caption = _annotation_effective_text_label(entry, image_relpath, split)
     if not caption:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="caption_not_found")
     return {"caption": caption}
@@ -16746,13 +16762,11 @@ def get_text_labels(dataset_id: str, image_names: Sequence[str]):
         if not image_name:
             continue
         try:
-            image_relpath = _annotation_normalise_image_relpath(
-                image_name if "." in image_name else f"{image_name}.jpg"
-            )
+            split, image_relpath = _annotation_text_split_rel_from_name(entry, image_name)
         except HTTPException:
             missing.append(image_name)
             continue
-        caption = _annotation_effective_text_label(entry, image_relpath)
+        caption = _annotation_effective_text_label(entry, image_relpath, split)
         if caption:
             captions[image_name] = caption
         else:
@@ -16772,11 +16786,12 @@ def set_text_label(dataset_id: str, image_name: str, payload: Dict[str, Any]):
     lock = meta.get("annotation_lock") if isinstance(meta.get("annotation_lock"), dict) else {}
     if _annotation_lock_is_active(lock):
         _require_annotation_lock_owner(meta, payload)
-    image_relpath = _annotation_normalise_image_relpath(
-        image_name if "." in image_name else f"{image_name}.jpg"
+    split, image_relpath = _annotation_text_split_rel_from_name(
+        entry,
+        image_name,
+        split=payload.get("split") if "split" in payload else None,
     )
     caption = str(payload.get("caption") or "").strip()
-    split = _annotation_normalise_split(payload.get("split")) if "split" in payload else None
     text_path = _annotation_overlay_text_path(entry, image_relpath, split=split)
     overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
     _annotation_write_text_within_root(text_path, overlay_root, caption)

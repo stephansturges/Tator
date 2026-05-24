@@ -81,6 +81,84 @@ def test_delete_linked_dataset_unlinks_registry_symlink_without_target_delete(
     assert source_root.exists()
 
 
+def test_delete_linked_dataset_rejects_symlinked_registry_parent_without_target_delete(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "linked_source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    registry_root = tmp_path / "registry"
+    registry_root.mkdir(parents=True, exist_ok=True)
+    target_parent = registry_root / "target_parent"
+    target_parent.mkdir(parents=True, exist_ok=True)
+    target_record = target_parent / "ds_linked"
+    target_record.mkdir()
+    (target_record / "payload.bin").write_bytes(b"target")
+    parent_link = registry_root / "linked_parent"
+    try:
+        parent_link.symlink_to(target_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds_linked",
+            "dataset_root": str(source_root),
+            "registry_root": str(parent_link / "ds_linked"),
+            "storage_mode": "linked",
+            "linked_root": str(source_root),
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.delete_dataset_entry("ds_linked")
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "dataset_delete_forbidden"
+    assert (target_record / "payload.bin").read_bytes() == b"target"
+    assert source_root.exists()
+
+
+def test_delete_managed_dataset_rejects_symlinked_registry_parent_without_target_delete(
+    tmp_path, monkeypatch
+) -> None:
+    registry_root = tmp_path / "registry"
+    registry_root.mkdir(parents=True, exist_ok=True)
+    target_parent = registry_root / "target_parent"
+    target_parent.mkdir(parents=True, exist_ok=True)
+    target_root = target_parent / "managed_ds"
+    target_root.mkdir()
+    (target_root / "payload.bin").write_bytes(b"target")
+    parent_link = registry_root / "linked_parent"
+    try:
+        parent_link.symlink_to(target_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "sam3")
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", tmp_path / "qwen")
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "managed_ds",
+            "dataset_root": str(parent_link / "managed_ds"),
+            "registry_root": str(parent_link / "managed_ds"),
+            "storage_mode": "managed",
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.delete_dataset_entry("managed_ds")
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "dataset_delete_forbidden"
+    assert (target_root / "payload.bin").read_bytes() == b"target"
+
+
 def test_delete_linked_dataset_blocks_active_annotation_lock(tmp_path, monkeypatch) -> None:
     source_root = tmp_path / "linked_source"
     source_root.mkdir(parents=True, exist_ok=True)

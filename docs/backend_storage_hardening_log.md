@@ -517,3 +517,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1073 passed, 17 skipped`; focused detector lifecycle/path
   containment coverage, the full pytest suite, and live endpoint sanity checks
   passed against the restarted backend.
+
+## 2026-05-24: Dataset Registry Delete Parent Guards
+
+- Rejected dataset delete targets whose parent path contains a symlink before
+  resolving or removing linked/managed registry records.
+- Preserved the existing behavior that unlinks a final registry-record symlink
+  without deleting its target.
+- Added linked and managed dataset regressions proving a symlinked registry
+  parent cannot delete another in-root dataset tree.
+- Validation: `1075 passed, 17 skipped`; focused dataset/Qwen lifecycle
+  coverage, the full pytest suite, and live endpoint sanity checks passed
+  against the restarted backend.

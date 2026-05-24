@@ -588,7 +588,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-`1073 passed, 17 skipped`; [backend storage hardening log](docs/backend_storage_hardening_log.md).
+`1075 passed, 17 skipped`; [backend storage hardening log](docs/backend_storage_hardening_log.md).
 
 </details>
 

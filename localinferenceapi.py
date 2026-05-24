@@ -15471,6 +15471,8 @@ def _dataset_entry_has_active_annotation_lock(entry: Dict[str, Any]) -> bool:
 
 def _dataset_delete_raw_path_contained(path: Path, allowed_roots: Sequence[Path]) -> bool:
     try:
+        if _storage_path_has_symlink_component(path.parent):
+            return False
         parent = path.parent.resolve(strict=False)
     except Exception:
         return False

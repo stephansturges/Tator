@@ -847,6 +847,101 @@ def test_class_analysis_prepare_write_path_rejects_symlinked_parent_without_writ
     assert list(outside.iterdir()) == []
 
 
+def test_class_analysis_json_write_is_atomic_over_symlink_leaves(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "class_analysis"
+    root.mkdir()
+    outside_tmp = tmp_path / "outside_tmp.json"
+    outside_final = tmp_path / "outside_final.json"
+    outside_tmp.write_text('{"tmp":true}', encoding="utf-8")
+    outside_final.write_text('{"final":true}', encoding="utf-8")
+    target = root / "result.json"
+    tmp_leaf = root / "result.json.fixed.tmp"
+    try:
+        target.symlink_to(outside_final)
+        tmp_leaf.symlink_to(outside_tmp)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: types.SimpleNamespace(hex="fixed"))
+
+    api._class_analysis_write_json(target, root, {"status": "ok"})
+
+    assert outside_tmp.read_text(encoding="utf-8") == '{"tmp":true}'
+    assert outside_final.read_text(encoding="utf-8") == '{"final":true}'
+    assert not target.is_symlink()
+    assert json.loads(target.read_text(encoding="utf-8")) == {"status": "ok"}
+    assert not tmp_leaf.exists()
+
+
+def test_class_analysis_binary_copy_is_atomic_over_symlink_leaves(
+    tmp_path, monkeypatch
+):
+    source_root = tmp_path / "source"
+    dest_root = tmp_path / "dest"
+    source_root.mkdir()
+    dest_root.mkdir()
+    src = source_root / "source.bin"
+    src.write_bytes(b"new payload")
+    outside_tmp = tmp_path / "outside_tmp.bin"
+    outside_final = tmp_path / "outside_final.bin"
+    outside_tmp.write_bytes(b"external tmp")
+    outside_final.write_bytes(b"external final")
+    dest = dest_root / "copy.bin"
+    tmp_leaf = dest_root / "copy.bin.fixed.tmp"
+    try:
+        dest.symlink_to(outside_final)
+        tmp_leaf.symlink_to(outside_tmp)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: types.SimpleNamespace(hex="fixed"))
+
+    assert api._class_analysis_copy_file_within_roots(
+        src,
+        dest,
+        source_root=source_root,
+        dest_root=dest_root,
+    )
+
+    assert outside_tmp.read_bytes() == b"external tmp"
+    assert outside_final.read_bytes() == b"external final"
+    assert not dest.is_symlink()
+    assert dest.read_bytes() == b"new payload"
+    assert not tmp_leaf.exists()
+
+
+def test_class_analysis_npz_write_is_atomic_over_symlink_leaves(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "class_analysis"
+    root.mkdir()
+    outside_tmp = tmp_path / "outside_tmp.npz"
+    outside_final = tmp_path / "outside_final.npz"
+    outside_tmp.write_bytes(b"external tmp")
+    outside_final.write_bytes(b"external final")
+    target = root / "embeddings.npz"
+    tmp_leaf = root / "embeddings.npz.fixed.tmp"
+    try:
+        target.symlink_to(outside_final)
+        tmp_leaf.symlink_to(outside_tmp)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: types.SimpleNamespace(hex="fixed"))
+
+    api._class_analysis_write_npz(
+        target,
+        root,
+        embeddings=np.asarray([[1.0, 2.0]], dtype=np.float32),
+    )
+
+    assert outside_tmp.read_bytes() == b"external tmp"
+    assert outside_final.read_bytes() == b"external final"
+    assert not target.is_symlink()
+    with np.load(target) as loaded:
+        assert np.allclose(loaded["embeddings"], [[1.0, 2.0]])
+    assert not tmp_leaf.exists()
+
+
 def test_class_analysis_result_rejects_symlinked_result_escape(tmp_path, monkeypatch):
     class_root = tmp_path / "class_analysis"
     job_root = class_root / "job_escape"

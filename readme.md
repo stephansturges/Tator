@@ -588,7 +588,9 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-`1106 passed, 17 skipped`. Maintainer notes:
+Current validation snapshot: `1109 passed, 17 skipped`.
+
+Detailed maintainer notes live in
 [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 </details>
 

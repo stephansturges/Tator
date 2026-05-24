@@ -774,3 +774,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1106 passed, 17 skipped`; focused linked dataset/materialization
   coverage, the full pytest suite, and live endpoint sanity checks passed
   against the restarted backend.
+
+## 2026-05-24: Class Analysis Artifact Atomic Saves
+
+- Routed class-analysis JSON, JSONL, thumbnail, embedding cache, and NPZ result
+  artifacts through guarded temp-file writes followed by atomic replace.
+- Reused the same guarded binary writer for data-ingestion embedding archives and
+  local SALAD head payload saves.
+- Added regressions proving class-analysis JSON, binary copy, and NPZ temp/final
+  symlink leaves are replaced without mutating external targets.
+- Validation: `1109 passed, 17 skipped`; focused class-analysis coverage,
+  `localinferenceapi.py` compile, the full pytest suite, and live endpoint
+  sanity checks passed against the restarted backend.

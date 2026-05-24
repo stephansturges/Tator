@@ -17590,14 +17590,100 @@ def _class_analysis_prepare_dir(path: Path, root: Path) -> Optional[Path]:
 
 
 def _class_analysis_write_json(path: Path, root: Path, value: Any) -> Path:
-    write_path = _class_analysis_prepare_write_path(path, root)
-    if write_path is None:
-        raise OSError("class_analysis_write_path_forbidden")
-    write_path.write_text(
+    _write_text_within_root_atomic(
+        path,
+        root,
         json.dumps(_class_analysis_json_safe(value), ensure_ascii=False, indent=2),
-        encoding="utf-8",
+        detail="class_analysis_write_path_forbidden",
+        context="class analysis",
     )
-    return write_path
+    return path
+
+
+def _class_analysis_write_text(path: Path, root: Path, text: str) -> Path:
+    _write_text_within_root_atomic(
+        path,
+        root,
+        text,
+        detail="class_analysis_write_path_forbidden",
+        context="class analysis",
+    )
+    return path
+
+
+def _class_analysis_write_binary(
+    path: Path,
+    root: Path,
+    writer: Callable[[Any], None],
+    *,
+    detail: str = "class_analysis_write_path_forbidden",
+) -> Path:
+    tmp_path = path.with_suffix(f"{path.suffix}.{uuid.uuid4().hex}.tmp")
+    try:
+        root_resolved = root.resolve(strict=True)
+        if _storage_path_has_symlink_component(root) or _storage_path_has_symlink_component(
+            path.parent
+        ):
+            raise ValueError("class analysis write path contains a symlink")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(path.parent):
+            raise ValueError("class analysis write parent contains a symlink")
+        parent_resolved = path.parent.resolve(strict=True)
+        if not _path_is_within_root_impl(parent_resolved, root_resolved):
+            raise ValueError("class analysis write parent escapes root")
+        for candidate in (tmp_path, path):
+            if candidate.is_symlink():
+                candidate.unlink(missing_ok=True)
+            elif candidate.exists() and candidate.is_dir():
+                raise ValueError("class analysis write target is a directory")
+            target_resolved = candidate.resolve(strict=False)
+            if not _path_is_within_root_impl(target_resolved, root_resolved):
+                raise ValueError("class analysis write target escapes root")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp_path, flags, 0o644)
+        with os.fdopen(fd, "wb") as handle:
+            writer(handle)
+        os.replace(tmp_path, path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+    return path
+
+
+def _class_analysis_write_npy(path: Path, root: Path, value: np.ndarray) -> Path:
+    return _class_analysis_write_binary(
+        path,
+        root,
+        lambda handle: np.save(handle, value),
+    )
+
+
+def _class_analysis_write_npz(path: Path, root: Path, **arrays: Any) -> Path:
+    return _class_analysis_write_binary(
+        path,
+        root,
+        lambda handle: np.savez_compressed(handle, **arrays),
+    )
+
+
+def _class_analysis_write_jpeg(
+    path: Path,
+    root: Path,
+    image: Image.Image,
+    *,
+    quality: int = 86,
+) -> Path:
+    return _class_analysis_write_binary(
+        path,
+        root,
+        lambda handle: image.save(handle, format="JPEG", quality=quality),
+    )
 
 
 def _class_analysis_copy_file_within_roots(
@@ -17610,11 +17696,17 @@ def _class_analysis_copy_file_within_roots(
     src_path = _safe_existing_regular_file_within_root_impl(src, source_root)
     if src_path is None:
         return False
-    dest_path = _class_analysis_prepare_write_path(dest, dest_root)
-    if dest_path is None:
-        return False
+
+    def copy_source(handle: Any) -> None:
+        with src_path.open("rb") as source_handle:
+            shutil.copyfileobj(source_handle, handle)
+
     try:
-        shutil.copyfile(src_path, dest_path)
+        _class_analysis_write_binary(
+            dest,
+            dest_root,
+            copy_source,
+        )
     except Exception:
         return False
     return True
@@ -17962,19 +18054,11 @@ def _class_analysis_encode_crops(
                     cache_root = _class_analysis_cache_storage_root(create=True)
                     if cache_root is None:
                         raise OSError("class_analysis_cache_root_forbidden")
-                    cache_write_path = _class_analysis_prepare_write_path(
-                        cache_path, cache_root
-                    )
-                    if cache_write_path is None:
-                        raise OSError("class_analysis_cache_path_forbidden")
-                    tmp_path = _class_analysis_prepare_write_path(
-                        cache_write_path.with_suffix(".tmp.npy"),
+                    _class_analysis_write_npy(
+                        cache_path,
                         cache_root,
+                        feature,
                     )
-                    if tmp_path is None:
-                        raise OSError("class_analysis_cache_tmp_path_forbidden")
-                    np.save(tmp_path, feature)
-                    tmp_path.replace(cache_write_path)
                 except Exception:
                     cache_errors += 1
         for crop in [crops[idx] for idx in batch_indices]:
@@ -18117,10 +18201,7 @@ def _class_analysis_collect_records(
             thumb = pil_for_crop.crop(selected_crop_bounds).copy()
             thumb.thumbnail((256, 256))
             try:
-                thumb_write_path = _class_analysis_prepare_write_path(thumb_path, out_dir)
-                if thumb_write_path is None:
-                    raise OSError("class_analysis_thumbnail_path_forbidden")
-                thumb.save(thumb_write_path, format="JPEG", quality=86)
+                thumb_write_path = _class_analysis_write_jpeg(thumb_path, out_dir, thumb)
                 if crop_cache_key:
                     cache_dest_root = _class_analysis_cache_storage_root(create=True)
                     if cache_dest_root is not None:
@@ -18277,10 +18358,7 @@ def _class_analysis_collect_records(
                     thumb = pil_img.crop(crop_bounds).copy()
                     thumb.thumbnail((256, 256))
                     try:
-                        thumb_write_path = _class_analysis_prepare_write_path(thumb_path, out_dir)
-                        if thumb_write_path is None:
-                            raise OSError("class_analysis_thumbnail_path_forbidden")
-                        thumb.save(thumb_write_path, format="JPEG", quality=86)
+                        thumb_write_path = _class_analysis_write_jpeg(thumb_path, out_dir, thumb)
                         cache_dest_root = _class_analysis_cache_storage_root(create=True)
                         if cache_dest_root is not None:
                             _class_analysis_copy_file_within_roots(
@@ -18727,16 +18805,17 @@ def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
             records,
             mode=embedding_adjustment,
         )
-        embeddings_path = _class_analysis_prepare_write_path(out_dir / "embeddings.npz", out_dir)
-        if embeddings_path is None:
-            raise OSError("class_analysis_embeddings_path_forbidden")
-        np.savez_compressed(embeddings_path, embeddings=embeddings, raw_embeddings=raw_embeddings)
-        metadata_path = _class_analysis_prepare_write_path(out_dir / "metadata.jsonl", out_dir)
-        if metadata_path is None:
-            raise OSError("class_analysis_metadata_path_forbidden")
-        with metadata_path.open("w", encoding="utf-8") as handle:
-            for record in records:
-                handle.write(json.dumps(_class_analysis_json_safe(record), ensure_ascii=False) + "\n")
+        _class_analysis_write_npz(
+            out_dir / "embeddings.npz",
+            out_dir,
+            embeddings=embeddings,
+            raw_embeddings=raw_embeddings,
+        )
+        metadata_text = "".join(
+            json.dumps(_class_analysis_json_safe(record), ensure_ascii=False) + "\n"
+            for record in records
+        )
+        _class_analysis_write_text(out_dir / "metadata.jsonl", out_dir, metadata_text)
         with CLASS_ANALYSIS_JOBS_LOCK:
             _class_analysis_update(job, progress=0.72, message="Projecting and scoring graph ...")
         result = _class_analysis_build_result(
@@ -19824,11 +19903,9 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         result = {"summary": summary, "items": ranked_items}
         result_path = out_dir / "result.json"
         _class_analysis_write_json(result_path, out_dir, result)
-        embeddings_path = _class_analysis_prepare_write_path(out_dir / "embeddings.npz", out_dir)
-        if embeddings_path is None:
-            raise OSError("data_ingestion_embeddings_path_forbidden")
-        np.savez_compressed(
-            embeddings_path,
+        _class_analysis_write_npz(
+            out_dir / "embeddings.npz",
+            out_dir,
             candidate_embeddings=candidate_embeddings,
             reference_embeddings=reference_embeddings if reference_embeddings is not None else np.empty((0, 0), dtype=np.float32),
         )
@@ -20084,9 +20161,10 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
         with LOCAL_SALAD_HEAD_LOCK:
             head_id = _unique_local_salad_head_id(requested_name)
             head_path = _local_salad_head_path(head_id)
+            head_root = _local_salad_head_root(create=True)
             head_write_path = _class_analysis_prepare_write_path(
                 head_path,
-                _local_salad_head_root(create=True),
+                head_root,
             )
             if head_write_path is None:
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="local_salad_head_path_invalid")
@@ -20115,14 +20193,17 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                 "policy": LOCAL_SALAD_POLICY,
                 "trainer": LOCAL_SALAD_TRAINER,
             }
-            torch.save(
-                {
-                    "format": LOCAL_SALAD_CACHE_VERSION,
-                    "config": config.to_dict(),
-                    "state_dict": mlx_local_salad_state_dict(head) if is_mlx_local_salad_head(head) else head.cpu().state_dict(),
-                    "metadata": metadata,
-                },
+            head_payload = {
+                "format": LOCAL_SALAD_CACHE_VERSION,
+                "config": config.to_dict(),
+                "state_dict": mlx_local_salad_state_dict(head) if is_mlx_local_salad_head(head) else head.cpu().state_dict(),
+                "metadata": metadata,
+            }
+            _class_analysis_write_binary(
                 head_write_path,
+                head_root,
+                lambda handle: torch.save(head_payload, handle),
+                detail="local_salad_head_path_invalid",
             )
         result = {
             "summary": {

@@ -846,3 +846,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1114 passed, 17 skipped`; focused Falcon coverage,
   `services/falcon_perception.py` compile, the full pytest suite, and live
   endpoint sanity checks passed against the restarted backend.
+
+## 2026-05-24: Detector Artifact Copy Atomic Saves
+
+- Changed detector artifact copies from direct final-path `copy2` calls to
+  temp-file copies followed by atomic replace.
+- Preserved existing symlink leaf replacement and parent symlink rejection
+  behavior for YOLO/RF-DETR artifact collection and run materialization.
+- Added a regression proving a failed detector artifact copy leaves no partial
+  final artifact or temp file behind.
+- Validation: `1115 passed, 17 skipped`; focused detector metadata/lifecycle
+  coverage, `services/detectors.py` compile, the full pytest suite, and live
+  endpoint sanity checks passed against the restarted backend.

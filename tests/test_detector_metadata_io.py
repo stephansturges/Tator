@@ -292,6 +292,28 @@ def test_detector_copy2_if_different_replaces_symlink_to_source(tmp_path: Path) 
     assert dest.read_text(encoding="utf-8") == "source"
 
 
+def test_detector_copy2_if_different_removes_partial_temp_after_copy_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "source.bin"
+    src.write_text("source", encoding="utf-8")
+    dest = tmp_path / "dest.bin"
+    tmp_dest = dest.with_suffix(dest.suffix + f".tmp.{os.getpid()}")
+
+    def _failing_copy2(_src: Path, target: Path) -> None:
+        target.write_text("partial", encoding="utf-8")
+        raise OSError("simulated detector copy failure")
+
+    monkeypatch.setattr("services.detectors.shutil.copy2", _failing_copy2)
+
+    with pytest.raises(OSError, match="simulated detector copy failure"):
+        _copy2_if_different(src, dest)
+
+    assert not dest.exists()
+    assert not tmp_dest.exists()
+
+
 def test_rfdetr_remap_replaces_symlink_dest_without_target_write(tmp_path: Path) -> None:
     src = tmp_path / "src.coco.json"
     src.write_text(

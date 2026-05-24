@@ -11,7 +11,7 @@ import stat
 import tempfile
 import zipfile
 import numpy as np
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 
@@ -677,8 +677,16 @@ def _extract_zip_safely(
     with zipfile.ZipFile(zip_path) as zf:
         total_uncompressed = 0
         for info in zf.infolist():
-            target = (dest_dir / info.filename).resolve()
-            if info.filename.startswith("/") or (target != root and root not in target.parents):
+            member_name = info.filename or ""
+            member_win = PureWindowsPath(member_name)
+            target = (dest_dir / member_name).resolve()
+            if (
+                member_name.startswith("/")
+                or member_name.startswith("\\")
+                or member_win.is_absolute()
+                or bool(member_win.drive)
+                or (target != root and root not in target.parents)
+            ):
                 raise RuntimeError("edr_package_path_traversal")
             mode = (info.external_attr >> 16) & 0xFFFF
             if stat.S_ISLNK(mode):

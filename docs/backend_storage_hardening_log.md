@@ -971,3 +971,16 @@ preserving the exact validation story for storage and artifact-write fixes.
   prepass recipe, data-ingestion, calibration, and auto-label coverage,
   `localinferenceapi.py` compile, the full pytest suite, and live endpoint
   sanity checks passed against the restarted backend.
+
+## 2026-05-24: Cross-Platform Archive Member Guards
+
+- Rejected Windows absolute, UNC, and drive-style paths in dataset ZIP uploads,
+  EDR package imports, and agent cascade imports.
+- Kept existing POSIX traversal and symlink-member protections, but removed the
+  host-OS assumption from archive member validation.
+- Added regressions for Windows-style absolute members across dataset ZIP, EDR
+  package, and agent cascade import paths.
+- Validation: `1138 passed, 17 skipped`; focused dataset ZIP, EDR package, and
+  agent cascade import coverage, module compile checks for touched importers,
+  the full pytest suite, and live endpoint sanity checks passed against the
+  restarted backend.

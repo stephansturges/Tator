@@ -41,6 +41,29 @@ def test_extract_zip_safely_rejects_path_traversal(tmp_path: Path) -> None:
     assert exc_info.value.detail == "dataset_zip_path_traversal"
 
 
+@pytest.mark.parametrize("member_name", ["C:/escape.txt", "\\\\server\\share\\escape.txt"])
+def test_extract_zip_safely_rejects_windows_absolute_members(
+    tmp_path: Path, member_name: str
+) -> None:
+    zip_path = tmp_path / "bad_windows.zip"
+    zip_path.write_bytes(_zip_bytes({member_name: b"nope"}))
+
+    with zipfile.ZipFile(zip_path, "r") as zf, pytest.raises(HTTPException) as exc_info:
+        _extract_zip_safely_impl(
+            zf,
+            tmp_path / "extract",
+            max_entry_bytes=1024,
+            max_total_uncompressed_bytes=2048,
+            traversal_detail="dataset_zip_path_traversal",
+            symlink_detail="dataset_zip_symlink_unsupported",
+            entry_too_large_detail="dataset_zip_entry_too_large",
+            total_too_large_detail="dataset_zip_uncompressed_too_large",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "dataset_zip_path_traversal"
+
+
 def test_extract_zip_safely_rejects_symlink_members(tmp_path: Path) -> None:
     zip_path = tmp_path / "symlink.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:

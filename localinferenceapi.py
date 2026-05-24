@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue, functools, math, stat, importlib, warnings
 from contextvars import ContextVar
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import numpy as np
 import yaml
 from typing import (
@@ -16043,10 +16043,13 @@ def _extract_zip_safely_impl(
     total_uncompressed = 0
     for info in zf.infolist():
         member_name = info.filename or ""
+        member_win = PureWindowsPath(member_name)
         resolved_member = (extract_root / member_name).resolve()
         if (
             member_name.startswith("/")
             or member_name.startswith("\\")
+            or member_win.is_absolute()
+            or bool(member_win.drive)
             or (resolved_member != root and root not in resolved_member.parents)
         ):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=traversal_detail)

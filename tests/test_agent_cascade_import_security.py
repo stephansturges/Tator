@@ -99,6 +99,24 @@ def test_agent_cascade_import_rejects_symlink_entries(tmp_path: Path) -> None:
     assert exc_info.value.detail == "agent_cascade_import_symlink_unsupported"
 
 
+@pytest.mark.parametrize("member_name", ["C:/cascade.json", "\\\\server\\share\\cascade.json"])
+def test_agent_cascade_import_rejects_windows_absolute_members(
+    tmp_path: Path, member_name: str
+) -> None:
+    payload = _make_zip(
+        {
+            "cascade.json": json.dumps({"label": "demo", "steps": []}).encode("utf-8"),
+            member_name: b"{}",
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _call_import(payload, tmp_path)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_cascade_import_invalid_path"
+
+
 def test_agent_cascade_import_rejects_oversize_entries(tmp_path: Path) -> None:
     cascade = {
         "label": "demo",

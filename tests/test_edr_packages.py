@@ -604,6 +604,21 @@ def test_import_edr_package_rejects_traversal_manifest_id(tmp_path: Path) -> Non
     assert not (tmp_path / "edr_packages_evil").exists()
 
 
+@pytest.mark.parametrize("member_name", ["C:/escape.txt", "\\\\server\\share\\escape.txt"])
+def test_import_edr_package_rejects_windows_absolute_members(
+    tmp_path: Path, member_name: str
+) -> None:
+    zip_path = tmp_path / "bad_windows.edr.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(EDR_PACKAGE_MANIFEST_NAME, json.dumps({"package_id": "pkg1"}))
+        zf.writestr(member_name, b"nope")
+
+    with pytest.raises(RuntimeError, match="edr_package_path_traversal"):
+        import_edr_package_from_zip(zip_path=zip_path, packages_root=tmp_path / "edr_packages")
+
+    assert not (tmp_path / "escape.txt").exists()
+
+
 def test_import_edr_package_rejects_symlink_member(tmp_path: Path) -> None:
     zip_path = tmp_path / "symlink.edr.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:

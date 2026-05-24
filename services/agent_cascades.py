@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, BinaryIO, Callable, Dict, List, Optional
 
 from fastapi import HTTPException
@@ -41,6 +41,21 @@ def _path_has_symlink_component(path: Path) -> bool:
         if component.is_symlink():
             return True
     return False
+
+
+def _zip_member_path_is_unsafe(name: str) -> bool:
+    member_name = str(name or "")
+    member_win = PureWindowsPath(member_name)
+    member_posix = Path(member_name)
+    return (
+        not member_name
+        or member_name.startswith("/")
+        or member_name.startswith("\\")
+        or member_win.is_absolute()
+        or bool(member_win.drive)
+        or member_posix.is_absolute()
+        or ".." in member_posix.parts
+    )
 
 
 def _agent_cascade_storage_root(
@@ -410,6 +425,8 @@ def _import_agent_cascade_zip_obj_impl(
     names = zf.namelist()
     cascade_name = None
     for name in names:
+        if _zip_member_path_is_unsafe(name):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
         if Path(name).name.lower() == "cascade.json":
             cascade_name = name
             break
@@ -424,7 +441,7 @@ def _import_agent_cascade_zip_obj_impl(
     if info.file_size > max_json_bytes:
         raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="agent_cascade_import_json_too_large")
     cascade_path = Path(cascade_name)
-    if cascade_path.is_absolute() or ".." in cascade_path.parts:
+    if _zip_member_path_is_unsafe(cascade_name) or cascade_path.is_absolute() or ".." in cascade_path.parts:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
     with zf.open(cascade_name) as jf:
         cascade_data = json.load(jf)
@@ -434,6 +451,8 @@ def _import_agent_cascade_zip_obj_impl(
     recipe_zip_names: List[str] = []
     classifier_file_names: List[str] = []
     for name in names:
+        if _zip_member_path_is_unsafe(name):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
         arc_path = Path(name)
         if arc_path.is_dir():
             continue

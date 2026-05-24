@@ -3653,6 +3653,7 @@ const sam3TrainState = {
     const ANNOTATION_HEARTBEAT_INTERVAL_MS = 10000;
     const ANNOTATION_EDITOR_NAME = "webui";
     const ANNOTATION_EDITOR_STORAGE_KEY = "tator.annotationEditorId";
+    const ANNOTATION_DIVERSITY_METRIC_STORAGE_KEY = "tator.annotationDiversityMetric.enabled";
 
     const annotationSourceState = {
         mode: "none", // "none" | "linked" | "transient"
@@ -3996,6 +3997,7 @@ const sam3TrainState = {
         if (classSplitState.initialized) {
             refreshClassSplitControls();
         }
+        scheduleAnnotationDiversityMetricRefresh();
     }
 
     function annotationImageKey(split, imageRelpath) {
@@ -19533,6 +19535,7 @@ async function cancelRfDetrTrainingJobRequest() {
             setGlobalCursor("default");
         }
         clearSelectedBboxes();
+        scheduleAnnotationDiversityMetricRefresh();
         return removed;
     }
 
@@ -23052,6 +23055,217 @@ async function cancelRfDetrTrainingJobRequest() {
             .map(([name]) => name);
     }
 
+    function getAnnotationDiversityApi() {
+        if (typeof window === "undefined") {
+            return null;
+        }
+        const api = window.TatorAnnotationDiversity;
+        return api && typeof api.computeImageDiversityMetric === "function" ? api : null;
+    }
+
+    function getAnnotationDiversityClassNames() {
+        const ordered = orderedClassNames();
+        if (ordered.length) {
+            return ordered;
+        }
+        if (Array.isArray(loadedClassList) && loadedClassList.length) {
+            return loadedClassList.map((name) => String(name || "").trim()).filter(Boolean);
+        }
+        const manifestLabelmap = annotationSourceState.manifest?.labelmap;
+        if (Array.isArray(manifestLabelmap)) {
+            return manifestLabelmap.map((name) => String(name || "").trim()).filter(Boolean);
+        }
+        return [];
+    }
+
+    function getAnnotationDiversityRawLabelLines(imageKey) {
+        if (!imageKey || !(annotationSourceState.rawLabelLinesByKey instanceof Map)) {
+            return [];
+        }
+        const lines = annotationSourceState.rawLabelLinesByKey.get(imageKey);
+        return Array.isArray(lines) ? lines : [];
+    }
+
+    function getAnnotationDiversityBucketCounts(api, imageKey) {
+        if (!api || !imageKey || !bboxes || !Object.prototype.hasOwnProperty.call(bboxes, imageKey)) {
+            return {};
+        }
+        return api.countBoxesByClassFromBuckets(bboxes[imageKey] || {});
+    }
+
+    function shouldUseAnnotationDiversityBuckets(api, imageKey, bucketCounts, rawLines) {
+        if (!imageKey || !Object.prototype.hasOwnProperty.call(bboxes || {}, imageKey)) {
+            return false;
+        }
+        if (api.sumCounts(bucketCounts) > 0) {
+            return true;
+        }
+        if (isAnnotationDatasetModeActive() && annotationSourceState.hydratedKeys.has(imageKey)) {
+            return true;
+        }
+        if (!rawLines.length) {
+            return true;
+        }
+        return false;
+    }
+
+    function countAnnotationImageForDiversity(api, imageKey, classNames) {
+        if (!api || !imageKey) {
+            return {};
+        }
+        const rawLines = getAnnotationDiversityRawLabelLines(imageKey);
+        const bucketCounts = getAnnotationDiversityBucketCounts(api, imageKey);
+        if (shouldUseAnnotationDiversityBuckets(api, imageKey, bucketCounts, rawLines)) {
+            return bucketCounts;
+        }
+        return api.countBoxesByClassFromYoloLines(rawLines, classNames);
+    }
+
+    function buildAnnotationDiversityCounts(api, classNames) {
+        const currentName = currentImage?.name || "";
+        const currentCounts = countAnnotationImageForDiversity(api, currentName, classNames);
+        const datasetCounts = {};
+        const imageKeys = new Set(Object.keys(images || {}));
+        if (annotationSourceState.rawLabelLinesByKey instanceof Map) {
+            annotationSourceState.rawLabelLinesByKey.forEach((_, key) => {
+                if (key) {
+                    imageKeys.add(key);
+                }
+            });
+        }
+        if (currentName) {
+            imageKeys.add(currentName);
+        }
+        imageKeys.forEach((imageKey) => {
+            const counts = imageKey === currentName
+                ? currentCounts
+                : countAnnotationImageForDiversity(api, imageKey, classNames);
+            api.mergeCounts(datasetCounts, counts);
+        });
+        return { currentCounts, datasetCounts };
+    }
+
+    function isAnnotationDiversityMetricEnabled() {
+        return Boolean(annotationDiversityToggle && annotationDiversityToggle.checked);
+    }
+
+    function setAnnotationDiversityMetricHidden(hidden) {
+        if (!annotationDiversityMetricEl) {
+            annotationDiversityMetricEl = document.getElementById("annotationDiversityMetric");
+        }
+        if (!annotationDiversityMetricEl) {
+            return;
+        }
+        annotationDiversityMetricEl.hidden = Boolean(hidden);
+        if (hidden) {
+            annotationDiversityMetricEl.textContent = "";
+            annotationDiversityMetricEl.title = "";
+            annotationDiversityMetricEl.classList.remove("is-low", "is-mid", "is-high");
+        }
+    }
+
+    function getAnnotationDiversityTitle(metric) {
+        if (!metric || metric.status === "empty") {
+            return "Class-coverage image value. Add or load bboxes to score this image.";
+        }
+        const detail = (metric.classDetails || [])
+            .slice(0, 6)
+            .map((entry) => `${entry.className}: ${entry.currentCount} here, ${entry.existingCount} elsewhere`)
+            .join(" | ");
+        return `Class-coverage image value. Higher means the current bboxes improve rare or missing class coverage. ${detail}`;
+    }
+
+    function renderAnnotationDiversityMetric(metric, message) {
+        if (!annotationDiversityMetricEl) {
+            annotationDiversityMetricEl = document.getElementById("annotationDiversityMetric");
+        }
+        if (!annotationDiversityMetricEl) {
+            return;
+        }
+        annotationDiversityMetricEl.hidden = false;
+        annotationDiversityMetricEl.textContent = message || "";
+        annotationDiversityMetricEl.title = getAnnotationDiversityTitle(metric);
+        annotationDiversityMetricEl.classList.remove("is-low", "is-mid", "is-high");
+        const score = Number(metric?.score);
+        if (!Number.isFinite(score)) {
+            return;
+        }
+        annotationDiversityMetricEl.classList.add(score >= 75 ? "is-high" : (score >= 40 ? "is-mid" : "is-low"));
+    }
+
+    function refreshAnnotationDiversityMetric() {
+        if (annotationDiversityRefreshTimer) {
+            window.clearTimeout(annotationDiversityRefreshTimer);
+            annotationDiversityRefreshTimer = 0;
+        }
+        if (!annotationDiversityToggle) {
+            annotationDiversityToggle = document.getElementById("showAnnotationDiversityMetric");
+        }
+        if (!annotationDiversityMetricEl) {
+            annotationDiversityMetricEl = document.getElementById("annotationDiversityMetric");
+        }
+        if (!isAnnotationDiversityMetricEnabled()) {
+            setAnnotationDiversityMetricHidden(true);
+            return;
+        }
+        if (!currentImage) {
+            renderAnnotationDiversityMetric(null, "Image value pending - load an image.");
+            return;
+        }
+        const api = getAnnotationDiversityApi();
+        if (!api) {
+            renderAnnotationDiversityMetric(null, "Image value unavailable.");
+            return;
+        }
+        const classNames = getAnnotationDiversityClassNames();
+        const { currentCounts, datasetCounts } = buildAnnotationDiversityCounts(api, classNames);
+        const metric = api.computeImageDiversityMetric({
+            currentCounts,
+            datasetCounts,
+            classNames,
+        });
+        renderAnnotationDiversityMetric(metric, api.formatImageDiversityMetric(metric));
+    }
+
+    function scheduleAnnotationDiversityMetricRefresh() {
+        if (!isAnnotationDiversityMetricEnabled()) {
+            setAnnotationDiversityMetricHidden(true);
+            return;
+        }
+        if (annotationDiversityRefreshTimer) {
+            return;
+        }
+        annotationDiversityRefreshTimer = window.setTimeout(() => {
+            annotationDiversityRefreshTimer = 0;
+            refreshAnnotationDiversityMetric();
+        }, 40);
+    }
+
+    function initAnnotationDiversityControls() {
+        annotationDiversityToggle = document.getElementById("showAnnotationDiversityMetric");
+        annotationDiversityMetricEl = document.getElementById("annotationDiversityMetric");
+        if (!annotationDiversityToggle || !annotationDiversityMetricEl) {
+            return;
+        }
+        try {
+            annotationDiversityToggle.checked = window.localStorage?.getItem(ANNOTATION_DIVERSITY_METRIC_STORAGE_KEY) === "1";
+        } catch (error) {
+            console.debug("Unable to restore annotation diversity metric preference", error);
+        }
+        annotationDiversityToggle.addEventListener("change", () => {
+            try {
+                window.localStorage?.setItem(
+                    ANNOTATION_DIVERSITY_METRIC_STORAGE_KEY,
+                    annotationDiversityToggle.checked ? "1" : "0",
+                );
+            } catch (error) {
+                console.debug("Unable to store annotation diversity metric preference", error);
+            }
+            refreshAnnotationDiversityMetric();
+        });
+        refreshAnnotationDiversityMetric();
+    }
+
     function updateQwenClassOptions({ resetOverride = false, preserveSelection = false } = {}) {
         if (!qwenElements.classSelect) {
             return;
@@ -24782,6 +24996,7 @@ async function cancelRfDetrTrainingJobRequest() {
         });
         if (totalRemoved > 0) {
             captureCurrentAnnotationDirtyState();
+            scheduleAnnotationDiversityMetricRefresh();
         }
         return { removed: totalRemoved, byClass: removedByClass };
     }
@@ -31612,6 +31827,7 @@ async function cancelRfDetrTrainingJobRequest() {
             bboxes[currentImage.name][className] = [];
         }
         bboxes[currentImage.name][className].push(bboxRecord);
+        scheduleAnnotationDiversityMetricRefresh();
         return bboxRecord;
     }
 
@@ -31659,6 +31875,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         bboxes[currentImage.name][className].push(bboxRecord);
         setDatasetType("seg");
+        scheduleAnnotationDiversityMetricRefresh();
         return bboxRecord;
     }
 
@@ -32041,6 +32258,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (firstRecord) {
             setDatasetType("seg");
+            scheduleAnnotationDiversityMetricRefresh();
         }
         return firstRecord;
     }
@@ -39006,6 +39224,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 updateBboxAfterTransform();
             } else {
                 captureAnnotationDirtyStateForImage(imageName);
+                scheduleAnnotationDiversityMetricRefresh();
             }
             const classSummary = Object.entries(perClassCounts)
                 .sort((a, b) => b[1] - a[1])
@@ -40720,6 +40939,9 @@ async function cancelRfDetrTrainingJobRequest() {
     let datasetTypeBadge = null;
     let polygonSimplifyInput = null;
     let polygonSimplifyField = null;
+    let annotationDiversityToggle = null;
+    let annotationDiversityMetricEl = null;
+    let annotationDiversityRefreshTimer = 0;
     let bboxCreationCounter = 0;
     let polygonDraft = null; // {points: [{x,y}], className}
     let polygonDrag = null; // {bbox, className, index, vertexIndex}
@@ -40922,6 +41144,7 @@ async function cancelRfDetrTrainingJobRequest() {
         listenImageSearch();
         listenImageCrop();
         ensureBatchTweakElements();
+        initAnnotationDiversityControls();
         datasetTypeBadge = document.getElementById("datasetTypeBadge");
         setDatasetType(datasetType);
     }
@@ -42106,6 +42329,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         setDatasetType("seg");
         polygonDraft = null;
+        scheduleAnnotationDiversityMetricRefresh();
     }
 
     async function handlePolygonPointer(event, prevX, prevY) {
@@ -42246,6 +42470,7 @@ async function cancelRfDetrTrainingJobRequest() {
             currentBbox.originalHeight = currentBbox.bbox.height;
             currentBbox.moving = false;
         }
+        scheduleAnnotationDiversityMetricRefresh();
     };
 
     function findBboxAtPoint(x, y) {
@@ -43777,6 +44002,7 @@ async function cancelRfDetrTrainingJobRequest() {
         textLabels = {};
         textLabelRecords = [];
         setDatasetType("bbox");
+        scheduleAnnotationDiversityMetricRefresh();
     };
 
     const storeBbox = (filename, text) => {
@@ -44005,6 +44231,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
             }
         }
+        scheduleAnnotationDiversityMetricRefresh();
     };
 
     function summarizeGeometry() {
@@ -44459,6 +44686,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     setGlobalCursor("default");
                     if (removed) {
                         showShortcutToast("delete_bbox", "Deleted 1 bbox.");
+                        scheduleAnnotationDiversityMetricRefresh();
                     }
                 }
                 event.preventDefault();
@@ -44490,6 +44718,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
                 if (removed) {
                     showShortcutToast("delete_latest", "Deleted latest bbox.");
+                    scheduleAnnotationDiversityMetricRefresh();
                     event.preventDefault();
                 }
             }

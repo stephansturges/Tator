@@ -64,6 +64,26 @@ def test_yolo_import_and_export_controls_live_in_annotation_source_panel():
     assert source_start < html.index('id="saveBboxes"') < html.index('id="qwenDetectionDetails"')
 
 
+def test_annotation_diversity_metric_control_contract():
+    html = _html()
+    css = _css()
+    js = _js()
+    helper = _read("ybat-master/annotation_diversity.js")
+
+    assert "annotation_diversity.js" in html
+    assert html.index('src="annotation_diversity.js') < html.index('src="ybat.js')
+    assert 'id="showAnnotationDiversityMetric"' in html
+    assert "Show diversity metric / image value" in html
+    assert 'id="annotationDiversityMetric"' in html
+    assert 'data-testid="status.annotation.diversity_metric"' in html
+    assert ".annotation-diversity-metric" in css
+    assert "ANNOTATION_DIVERSITY_METRIC_STORAGE_KEY" in js
+    assert "initAnnotationDiversityControls();" in js
+    assert "scheduleAnnotationDiversityMetricRefresh();" in js
+    assert "computeImageDiversityMetric" in helper
+    assert "countBoxesByClassFromYoloLines" in helper
+
+
 def test_caption_output_label_precedes_large_textarea():
     html = _html()
     output_start = html.index('class="qwen-caption-output"')

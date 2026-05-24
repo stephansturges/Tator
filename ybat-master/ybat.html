@@ -12,7 +12,8 @@
     <script src="jszip.min.js?v=20260409a"></script>
     <script src="filesaver.min.js?v=20260409a"></script>
     <script src="plotly-2.35.2.min.js?v=20260520a"></script>
-    <script src="ybat.js?v=20260522a"></script>
+    <script src="annotation_diversity.js?v=20260524a"></script>
+    <script src="ybat.js?v=20260524a"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -87,6 +88,11 @@
                             <label for="imageList"></label>
                             <select name="imageList" data-testid="input.labeling.image_list" id="imageList" size="10" multiple></select>
                             <div id="imageInformation"></div>
+                            <div class="training-field training-field--inline annotation-diversity-control">
+                                <label for="showAnnotationDiversityMetric">Show diversity metric / image value<span class="help-icon" title="Uses current bboxes plus dataset class coverage to estimate how much this image improves class balance.">?</span></label>
+                                <input type="checkbox" id="showAnnotationDiversityMetric" />
+                            </div>
+                            <div id="annotationDiversityMetric" class="annotation-diversity-metric" data-testid="status.annotation.diversity_metric" hidden></div>
                             <div id="datasetTypeBadge" class="training-help"></div>
                             <div id="annotationSourcePanel" class="training-help" style="margin:8px 0 10px; border-left:3px solid #475569; padding-left:10px;">
                                 <div><strong>Annotation source:</strong> <span data-testid="status.annotation.mode" id="annotationSourceMode">local files</span></div>

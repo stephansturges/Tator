@@ -1952,3 +1952,21 @@ preserving the exact validation story for storage and artifact-write fixes.
   OpenAPI route confirmation for candidate and accepted-export thumbnails, and
   the full pytest suite (`1269 passed, 20 skipped`) passed against the
   restarted backend.
+
+## 2026-05-24: Annotation Image Value Metric
+
+- Added an optional Label Images checkbox for `Show diversity metric / image
+  value`. When enabled, changing images or editing boxes refreshes a compact
+  image value score beside the image selector.
+- Kept the metric client-side and class-coverage based: it scores the active
+  image's bboxes against dataset-wide class counts, with higher values for
+  boxes that add rare or missing classes. This is separate from Data Ingestion's
+  SALAD/reference-novelty scoring.
+- Added a testable browser/Node helper for bbox-bucket and YOLO-line counting,
+  image value computation, and compact display formatting.
+- Validation: `node --check ybat-master/annotation_diversity.js`, `node --check
+  ybat-master/ybat.js`, `py_compile tests/test_annotation_diversity_metric.py
+  tests/test_labeling_panel_layout_contract.py`, focused annotation/UI coverage
+  (`22 passed`), `tools/check_ui_endpoints.py http://127.0.0.1:8000`,
+  `git diff --check`, and the full pytest suite (`1272 passed, 20 skipped`)
+  passed against the running backend.

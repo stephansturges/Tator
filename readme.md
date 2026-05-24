@@ -174,6 +174,8 @@ renamed, overwritten, or deleted.
 The Label Images tab is the everyday workspace.
 
 - Draw boxes manually and export labels.
+- Optionally show an image value score based on the active image's boxes and how
+  they improve rare or missing class coverage in the loaded dataset.
 - Ask CLIP/DINO heads to suggest or correct classes.
 - Use SAM point, box, and multi-point prompts to tighten boxes or derive masks.
 - Use SAM3 visual and text prompts when the SAM3 runtime is available.

@@ -907,6 +907,53 @@ body.annotation-focus-mode .class-scroll-indicator {
     width: 100%;
 }
 
+.annotation-diversity-control {
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0 4px;
+}
+
+.annotation-diversity-control label {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.annotation-diversity-control input {
+    flex: 0 0 auto;
+}
+
+.annotation-diversity-metric {
+    box-sizing: border-box;
+    width: 100%;
+    margin: 4px 0 8px;
+    padding: 6px 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #f8fafc;
+    color: #1f2937;
+    font-size: 12px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.annotation-diversity-metric.is-low {
+    border-color: #fecaca;
+    background: #fef2f2;
+    color: #991b1b;
+}
+
+.annotation-diversity-metric.is-mid {
+    border-color: #fed7aa;
+    background: #fff7ed;
+    color: #9a3412;
+}
+
+.annotation-diversity-metric.is-high {
+    border-color: #bbf7d0;
+    background: #f0fdf4;
+    color: #166534;
+}
+
 .fallback-options {
     display: grid;
     grid-template-columns: repeat(2, minmax(100px, 1fr));
@@ -5653,6 +5700,20 @@ html.theme-pipboy #annotationSourcePanel {
     border-left-color: var(--pip-border-strong) !important;
 }
 
+html.theme-pipboy .annotation-diversity-metric {
+    background: var(--pip-inline-bg);
+    border-color: color-mix(in srgb, var(--pip-green) 34%, transparent);
+    color: var(--pip-green);
+    text-shadow: 0 0 7px color-mix(in srgb, var(--pip-green) 45%, transparent);
+}
+
+html.theme-pipboy .annotation-diversity-metric.is-low,
+html.theme-pipboy .annotation-diversity-metric.is-mid,
+html.theme-pipboy .annotation-diversity-metric.is-high {
+    background: var(--pip-inline-bg);
+    color: var(--pip-green-strong);
+}
+
 html.theme-pipboy [style*="background: #f8fafc"],
 html.theme-pipboy [style*="background:#f8fafc"],
 html.theme-pipboy [style*="background: #ffffff"],
@@ -5697,6 +5758,27 @@ html.theme-pipboy [style*="color:#64748b"] {
 
 html.theme-dark:not(.theme-pipboy) #annotationSourcePanel {
     border-left-color: #6b7780 !important;
+}
+
+html.theme-dark:not(.theme-pipboy) .annotation-diversity-metric {
+    background: #1e2428;
+    border-color: #3a444b;
+    color: #dce4e8;
+}
+
+html.theme-dark:not(.theme-pipboy) .annotation-diversity-metric.is-low {
+    border-color: #7f1d1d;
+    color: #fecaca;
+}
+
+html.theme-dark:not(.theme-pipboy) .annotation-diversity-metric.is-mid {
+    border-color: #9a3412;
+    color: #fed7aa;
+}
+
+html.theme-dark:not(.theme-pipboy) .annotation-diversity-metric.is-high {
+    border-color: #166534;
+    color: #bbf7d0;
 }
 
 html.theme-dark:not(.theme-pipboy) [style*="background: #f8fafc"],

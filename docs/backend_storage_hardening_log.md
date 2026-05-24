@@ -1691,3 +1691,34 @@ preserving the exact validation story for storage and artifact-write fixes.
   `failures=[]`), live `/datasets`, `/datasets/trash`, and
   `/data_ingestion/capabilities` reads, and a live malformed prepass lookup
   returned `400 prepass_recipe_path_invalid`.
+
+## 2026-05-24: Agent Recipe and Cascade ID Path Hardening
+
+- Continued from the prepass recipe ID alias fix into adjacent Agent Mining
+  recipe and cascade artifacts.
+- Found the same resolved-path-only pattern on agent recipe and cascade
+  load/delete/zip-build paths. A malformed ID such as `alias_parent/../victim`
+  could resolve to an existing direct-child artifact when the intermediate
+  directory existed, making the request path touch the wrong saved recipe or
+  cascade.
+- Added explicit direct-child ID validators for Agent Mining recipes and
+  cascades. IDs must now be ASCII safe names using only letters, digits, `.`,
+  `_`, and `-`; slashes, backslashes, path aliases, empty IDs, and sanitizer
+  aliases fail with the existing `agent_recipe_path_invalid` or
+  `agent_cascade_path_invalid` errors before any JSON, zip, or recipe directory
+  is read, built, or removed.
+- Added regressions proving malformed recipe/cascade aliases cannot load or
+  delete existing artifacts, and nested IDs cannot cause zip builders to create
+  new parent directories.
+- Validation so far: `py_compile services/prepass_recipes.py
+  services/agent_cascades.py tests/test_prepass_recipe_config_validation.py
+  tests/test_agent_cascade_export_safety.py`, focused recipe/cascade coverage
+  (`60 passed`), the broader prepass/agent-recipe/cascade bundle (`104 passed`),
+  `git diff --check`, and the full pytest suite (`1238 passed, 20 skipped`)
+  passed. The restarted backend passed `tools/check_ui_endpoints.py` with no
+  missing paths or method mismatches, endpoint map check (`missing=[]`),
+  endpoint method check (`failures=[]`), OpenAPI sanity (`tested=144`,
+  `failures=[]`), live `/datasets`, `/datasets/trash`, and
+  `/data_ingestion/capabilities` reads, plus live malformed Agent Mining recipe
+  and cascade lookups returning `400 agent_recipe_path_invalid` and
+  `400 agent_cascade_path_invalid`.

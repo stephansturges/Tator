@@ -18,6 +18,8 @@ from services.prepass_recipes import (
     _get_prepass_recipe_impl,
     _import_prepass_recipe_from_zip_impl,
     _list_agent_recipes_impl,
+    _load_agent_recipe_impl,
+    _load_agent_recipe_json_only_impl,
     _list_prepass_recipes_impl,
     _load_prepass_recipe_meta,
     _persist_agent_recipe_impl,
@@ -1454,6 +1456,64 @@ def test_delete_agent_recipe_rejects_symlinked_nested_parent_without_target_dele
     assert (target_dir / "sentinel.txt").read_text(encoding="utf-8") == "keep"
 
 
+def test_agent_recipe_rejects_path_alias_without_touching_existing_artifacts(
+    tmp_path: Path,
+) -> None:
+    recipes_root = tmp_path / "recipes"
+    recipes_root.mkdir()
+    alias_parent = recipes_root / "alias_parent"
+    alias_parent.mkdir()
+    recipe_id = "agent_recipe"
+    recipe_json = recipes_root / f"{recipe_id}.json"
+    recipe_zip = recipes_root / f"{recipe_id}.zip"
+    recipe_dir = recipes_root / recipe_id
+    recipe_dir.mkdir()
+    recipe_json.write_text(
+        json.dumps(
+            {
+                "id": recipe_id,
+                "created_at": 1,
+                "recipe": {
+                    "schema_version": 2,
+                    "mode": "sam3_steps",
+                    "steps": [{"prompt": "car", "enabled": True}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    recipe_zip.write_bytes(b"zip")
+    sentinel = recipe_dir / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    for fn in (
+        lambda: _load_agent_recipe_impl(
+            f"alias_parent/../{recipe_id}",
+            recipes_root=recipes_root,
+            path_is_within_root_fn=_within_root,
+        ),
+        lambda: _load_agent_recipe_json_only_impl(
+            f"alias_parent/../{recipe_id}",
+            recipes_root=recipes_root,
+            path_is_within_root_fn=_within_root,
+        ),
+        lambda: _delete_agent_recipe_impl(
+            f"alias_parent/../{recipe_id}",
+            recipes_root=recipes_root,
+            path_is_within_root_fn=_within_root,
+            http_exception_cls=HTTPException,
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            fn()
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "agent_recipe_path_invalid"
+
+    assert recipe_json.exists()
+    assert recipe_zip.read_bytes() == b"zip"
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+
+
 def test_list_agent_recipes_skips_symlinked_json_escape(tmp_path: Path) -> None:
     recipes_root = tmp_path / "recipes"
     outside = tmp_path / "outside.json"
@@ -1485,3 +1545,17 @@ def test_ensure_recipe_zip_rejects_symlinked_recipe_dir_escape(tmp_path: Path) -
         _ensure_recipe_zip_impl({"id": "recipe_a"}, recipes_root=recipes_root)
 
     assert exc_info.value.detail == "agent_recipe_path_invalid"
+
+
+def test_ensure_recipe_zip_rejects_nested_recipe_id_without_creating_parent(
+    tmp_path: Path,
+) -> None:
+    recipes_root = tmp_path / "recipes"
+    recipes_root.mkdir()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _ensure_recipe_zip_impl({"id": "nested/recipe_a"}, recipes_root=recipes_root)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_recipe_path_invalid"
+    assert not (recipes_root / "nested").exists()

@@ -411,6 +411,45 @@ def test_delete_agent_cascade_rejects_symlinked_nested_parent_without_target_del
     assert target_zip.read_bytes() == b"zip"
 
 
+def test_agent_cascade_rejects_path_alias_without_touching_existing_artifacts(
+    tmp_path: Path,
+) -> None:
+    cascades_root = tmp_path / "cascades"
+    cascades_root.mkdir()
+    alias_parent = cascades_root / "alias_parent"
+    alias_parent.mkdir()
+    cascade_id = "ac_victim"
+    cascade_json = cascades_root / f"{cascade_id}.json"
+    cascade_zip = cascades_root / f"{cascade_id}.zip"
+    cascade_json.write_text(
+        json.dumps({"id": cascade_id, "label": "victim", "steps": []}),
+        encoding="utf-8",
+    )
+    cascade_zip.write_bytes(b"zip")
+
+    for fn in (
+        lambda: _load_agent_cascade_impl(
+            f"alias_parent/../{cascade_id}",
+            cascades_root=cascades_root,
+            path_is_within_root_fn=_within_root,
+        ),
+        lambda: _delete_agent_cascade_impl(
+            f"alias_parent/../{cascade_id}",
+            cascades_root=cascades_root,
+            path_is_within_root_fn=_within_root,
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            fn()
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "agent_cascade_path_invalid"
+
+    assert cascade_json.read_text(encoding="utf-8") == json.dumps(
+        {"id": cascade_id, "label": "victim", "steps": []}
+    )
+    assert cascade_zip.read_bytes() == b"zip"
+
+
 def test_list_agent_cascades_skips_symlinked_json_escape(tmp_path: Path) -> None:
     cascades_root = tmp_path / "cascades"
     outside = tmp_path / "outside.json"
@@ -576,3 +615,30 @@ def test_load_agent_cascade_rejects_symlinked_json_escape(tmp_path: Path) -> Non
         )
 
     assert getattr(exc_info.value, "detail", None) == "agent_cascade_not_found"
+
+
+def test_ensure_cascade_zip_rejects_nested_cascade_id_without_creating_parent(
+    tmp_path: Path,
+) -> None:
+    cascades_root = tmp_path / "cascades"
+    recipes_root = tmp_path / "recipes"
+    classifiers_root = tmp_path / "classifiers"
+    cascades_root.mkdir()
+    recipes_root.mkdir()
+    classifiers_root.mkdir()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _ensure_cascade_zip_impl(
+            {"id": "nested/ac_bad", "steps": []},
+            cascades_root=cascades_root,
+            recipes_root=recipes_root,
+            classifiers_root=classifiers_root,
+            path_is_within_root_fn=_within_root,
+            ensure_recipe_zip_fn=lambda _recipe: recipes_root / "noop.zip",
+            load_recipe_fn=lambda _rid: {"id": _rid},
+            resolve_classifier_fn=lambda _rel: None,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_cascade_path_invalid"
+    assert not (cascades_root / "nested").exists()

@@ -77,6 +77,19 @@ def _agent_cascade_storage_root(
     return root.resolve(strict=False)
 
 
+def _agent_cascade_safe_id(cascade_id: str) -> str:
+    raw = str(cascade_id or "").strip()
+    if not raw or raw in {".", ".."}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    if "/" in raw or "\\" in raw or Path(raw).is_absolute():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    cleaned = "".join(ch if ch in allowed else "-" for ch in raw).strip("-_.")
+    if cleaned != raw:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    return raw
+
+
 def _prepare_output_file(path: Path) -> None:
     if _path_has_symlink_component(path.parent):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
@@ -178,6 +191,7 @@ def _load_agent_cascade_impl(
     cascades_root: Path,
     path_is_within_root_fn,
 ) -> Dict[str, Any]:
+    cascade_id = _agent_cascade_safe_id(cascade_id)
     path_raw = cascades_root / f"{cascade_id}.json"
     if path_raw.is_symlink():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="agent_cascade_not_found")
@@ -232,6 +246,7 @@ def _delete_agent_cascade_impl(
     cascades_root: Path,
     path_is_within_root_fn,
 ) -> None:
+    cascade_id = _agent_cascade_safe_id(cascade_id)
     root = _agent_cascade_storage_root(cascades_root)
     json_raw = root / f"{cascade_id}.json"
     zip_raw = root / f"{cascade_id}.zip"
@@ -273,10 +288,7 @@ def _ensure_cascade_zip_impl(
     cascade_id = cascade.get("id")
     if not cascade_id:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_missing_id")
-    cascade_id_text = str(cascade_id).strip()
-    cascade_id_path = Path(cascade_id_text)
-    if not cascade_id_text or cascade_id_path.is_absolute() or ".." in cascade_id_path.parts:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
+    cascade_id_text = _agent_cascade_safe_id(str(cascade_id))
     root = _agent_cascade_storage_root(cascades_root, create=True)
     recipes_base = _agent_cascade_storage_root(recipes_root)
     classifiers_base = _agent_cascade_storage_root(classifiers_root)

@@ -227,6 +227,18 @@ def _parse_agent_recipe_schema_version(recipe_obj: Dict[str, Any]) -> Optional[i
         return None
 
 
+def _agent_recipe_safe_id(recipe_id: str) -> str:
+    raw = str(recipe_id or "").strip()
+    if not raw or raw in {".", ".."}:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
+    if "/" in raw or "\\" in raw or Path(raw).is_absolute():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("-_.")
+    if safe != raw:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
+    return raw
+
+
 def _classify_agent_recipe_mode(recipe_obj: Dict[str, Any]) -> Literal["sam3_steps", "sam3_greedy", "legacy_steps"]:
     """
     Classify an agent recipe into one of:
@@ -757,6 +769,7 @@ def _delete_agent_recipe_impl(
     path_is_within_root_fn,
     http_exception_cls,
 ) -> None:
+    recipe_id = _agent_recipe_safe_id(recipe_id)
     root = _recipe_storage_root(recipes_root)
     json_raw = root / f"{recipe_id}.json"
     zip_raw = root / f"{recipe_id}.zip"
@@ -1390,6 +1403,7 @@ def _load_agent_recipe_impl(
     recipes_root: Path,
     path_is_within_root_fn,
 ) -> Dict[str, Any]:
+    recipe_id = _agent_recipe_safe_id(recipe_id)
     root = _recipe_storage_root(recipes_root)
     path = (root / f"{recipe_id}.json").resolve()
     if not path_is_within_root_fn(path, root) or not path.exists():
@@ -1476,6 +1490,7 @@ def _load_agent_recipe_json_only_impl(
     path_is_within_root_fn,
 ) -> Dict[str, Any]:
     """Load an agent recipe payload without inlining crop_base64 blobs (suitable for inference/export)."""
+    recipe_id = _agent_recipe_safe_id(recipe_id)
     root = _recipe_storage_root(recipes_root)
     path = (root / f"{recipe_id}.json").resolve()
     if not path_is_within_root_fn(path, root) or not path.exists():
@@ -1504,10 +1519,7 @@ def _ensure_recipe_zip_impl(
     recipe_id = recipe.get("id")
     if not recipe_id:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_missing_id")
-    recipe_id_text = str(recipe_id).strip()
-    recipe_id_path = Path(recipe_id_text)
-    if not recipe_id_text or recipe_id_path.is_absolute() or ".." in recipe_id_path.parts:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
+    recipe_id_text = _agent_recipe_safe_id(str(recipe_id))
     root = _recipe_storage_root(recipes_root, create=True)
     zip_raw = root / f"{recipe_id_text}.zip"
     if zip_raw.is_symlink():

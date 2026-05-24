@@ -6,6 +6,7 @@ from localinferenceapi import (
     _build_caption_overlap_guidance,
     _build_qwen_caption_prompt,
     _group_hints_by_window,
+    _normalize_caption_hints_for_decoded_image,
     _qwen_messages_with_no_think,
     _qwen_neutralize_thinking_prefill,
     _resolve_qwen_caption_refinement_model_id,
@@ -297,6 +298,27 @@ def test_window_caption_hints_include_every_intersecting_crop_with_local_coords(
     assert grouped[(100, 0)][0].bbox == [0.0, 10.0, 30.0, 50.0]
     assert grouped[(0, 0)][0].source_id == source_id
     assert grouped[(100, 0)][0].source_id == source_id
+
+
+def test_caption_hints_scale_to_decoded_image_before_windowing():
+    source_id = "123e4567-e89b-12d3-a456-426614174000"
+    hints = [
+        QwenCaptionHint(label="truck", bbox=[900, 100, 1300, 500], confidence=0.9, source_id=source_id),
+    ]
+
+    normalized = _normalize_caption_hints_for_decoded_image(
+        hints,
+        source_width=2400,
+        source_height=1200,
+        decoded_width=240,
+        decoded_height=120,
+    )
+    grouped = _group_hints_by_window(normalized, x_positions=[0, 100], y_positions=[0], window=120)
+
+    assert normalized[0].bbox == [90.0, 10.0, 130.0, 50.0]
+    assert normalized[0].source_id == source_id
+    assert grouped[(0, 0)][0].bbox == [90.0, 10.0, 120.0, 50.0]
+    assert grouped[(100, 0)][0].bbox == [0.0, 10.0, 30.0, 50.0]
 
 
 def test_caption_overlap_guidance_never_exposes_bbox_ids():
@@ -742,6 +764,25 @@ def test_qwen_caption_window_grid_honors_smaller_requested_window_size():
     assert y_positions[-1] == 900 - window
     assert all((x_positions[idx + 1] - x_positions[idx]) <= window for idx in range(len(x_positions) - 1))
     assert all((y_positions[idx + 1] - y_positions[idx]) <= window for idx in range(len(y_positions) - 1))
+
+
+def test_qwen_caption_window_size_never_exceeds_tiny_image():
+    window = _resolve_qwen_window_size(
+        None,
+        image_width=48,
+        image_height=32,
+        overlap=0.2,
+        default_size=672,
+        default_overlap=0.2,
+    )
+    x_positions = _window_positions_impl(48, window, 0.2)
+    y_positions = _window_positions_impl(32, window, 0.2)
+
+    assert window == 32
+    assert x_positions == [0, 16]
+    assert y_positions == [0]
+    assert all(x + window <= 48 for x in x_positions)
+    assert all(y + window <= 32 for y in y_positions)
 
 
 def test_format_qwen_load_error_summarizes_missing_vision_tower():

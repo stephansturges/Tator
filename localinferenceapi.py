@@ -6261,6 +6261,65 @@ def _group_hints_by_window(
     return grouped
 
 
+def _normalize_caption_hints_for_decoded_image(
+    label_hints: Sequence[QwenCaptionHint],
+    source_width: Optional[int],
+    source_height: Optional[int],
+    decoded_width: int,
+    decoded_height: int,
+) -> List[QwenCaptionHint]:
+    try:
+        safe_decoded_width = max(1.0, float(decoded_width))
+        safe_decoded_height = max(1.0, float(decoded_height))
+    except (TypeError, ValueError, OverflowError):
+        safe_decoded_width = safe_decoded_height = 1.0
+    try:
+        safe_source_width = float(source_width) if source_width is not None else safe_decoded_width
+        safe_source_height = float(source_height) if source_height is not None else safe_decoded_height
+    except (TypeError, ValueError, OverflowError):
+        safe_source_width = safe_decoded_width
+        safe_source_height = safe_decoded_height
+    if not math.isfinite(safe_source_width) or safe_source_width <= 0:
+        safe_source_width = safe_decoded_width
+    if not math.isfinite(safe_source_height) or safe_source_height <= 0:
+        safe_source_height = safe_decoded_height
+    scale_x = safe_decoded_width / safe_source_width
+    scale_y = safe_decoded_height / safe_source_height
+    normalized: List[QwenCaptionHint] = []
+    for hint in label_hints or []:
+        label = str(getattr(hint, "label", "") or "").strip()
+        if not label:
+            continue
+        bbox = getattr(hint, "bbox", None)
+        normalized_bbox: Optional[List[float]] = None
+        if bbox and len(bbox) == 4:
+            try:
+                x1, y1, x2, y2 = [float(value) for value in bbox[:4]]
+            except (TypeError, ValueError, OverflowError):
+                x1 = y1 = x2 = y2 = 0.0
+            else:
+                if all(math.isfinite(value) for value in (x1, y1, x2, y2)):
+                    x1 *= scale_x
+                    x2 *= scale_x
+                    y1 *= scale_y
+                    y2 *= scale_y
+                    x1 = max(0.0, min(safe_decoded_width, x1))
+                    x2 = max(0.0, min(safe_decoded_width, x2))
+                    y1 = max(0.0, min(safe_decoded_height, y1))
+                    y2 = max(0.0, min(safe_decoded_height, y2))
+                    if x2 > x1 and y2 > y1:
+                        normalized_bbox = [x1, y1, x2, y2]
+        normalized.append(
+            QwenCaptionHint(
+                label=label,
+                bbox=normalized_bbox,
+                confidence=getattr(hint, "confidence", None),
+                source_id=getattr(hint, "source_id", None),
+            )
+        )
+    return normalized
+
+
 def _caption_position_phrase_for_bbox(
     bbox: Sequence[float],
     image_width: int,
@@ -35571,10 +35630,18 @@ def qwen_caption(payload: QwenCaptionRequest):
         include_coords = bool(payload.include_coords)
         max_boxes = payload.max_boxes if payload.max_boxes is not None else 0
         max_new_tokens = payload.max_new_tokens if payload.max_new_tokens is not None else 1000
-        label_hints = payload.label_hints or []
+        source_image_width = payload.image_width
+        source_image_height = payload.image_height
+        image_width = pil_img.width
+        image_height = pil_img.height
+        label_hints = _normalize_caption_hints_for_decoded_image(
+            payload.label_hints or [],
+            source_image_width,
+            source_image_height,
+            image_width,
+            image_height,
+        )
         allowed_labels = _allowed_caption_labels_impl(label_hints)
-        image_width = payload.image_width or pil_img.width
-        image_height = payload.image_height or pil_img.height
         caption_mode = payload.caption_mode or "full"
         restrict_to_labels = (
             payload.restrict_to_labels if payload.restrict_to_labels is not None else True

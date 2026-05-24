@@ -1173,3 +1173,19 @@ preserving the exact validation story for storage and artifact-write fixes.
   `git diff --check`, the full pytest suite, a Playwright annotation-mode
   smoke check, and live endpoint map/method/OpenAPI sanity checks passed
   against the restarted backend.
+
+## 2026-05-24: Qwen Caption Window Geometry
+
+- Made Qwen caption window sizing clamp to the decoded image dimensions so tiny
+  images do not produce padded crop windows.
+- Normalized caption label hints from the caller's source coordinate frame into
+  the decoded image frame before full-image prompts and window grouping run.
+  This keeps window crops and bbox priors aligned when the backend decodes or
+  downsizes an oversized base64 image.
+- Added regressions for decoded-image hint scaling and tiny-image window
+  planning.
+- Validation: `1164 passed, 17 skipped`; focused Qwen caption prompt/progress
+  and runtime coverage, `py_compile` for Qwen/backend schema files,
+  `node --check ybat-master/ybat.js`, `git diff --check`, the full pytest
+  suite, and live endpoint map/method/OpenAPI sanity checks passed against the
+  restarted backend.

@@ -1631,7 +1631,7 @@ def _resolve_qwen_window_size(
     except (TypeError, ValueError, OverflowError):
         base = default_size
     base = max(128, min(base, 4096))
-    return max(64, min(base, safe_width, safe_height))
+    return max(1, min(base, safe_width, safe_height))
 
 
 def _resolve_qwen_window_overlap(requested: Optional[float], *, default_overlap: float = 0.2) -> float:

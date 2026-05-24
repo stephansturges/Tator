@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 import localinferenceapi
 
 
@@ -110,3 +112,54 @@ def test_prepare_sam3_training_split_ignores_parent_traversal_paths(
     all_names = [img["file_name"] for img in train_out["images"]] + [img["file_name"] for img in val_out["images"]]
     assert set(all_names).issubset({"img1.jpg", "img2.jpg", "img3.jpg", "img4.jpg"})
     assert len(all_names) == 4
+
+
+def test_prepare_sam3_training_split_rejects_nested_symlinked_job_root_before_mkdir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    dataset_root = tmp_path / "dataset3"
+    train_images_dir = dataset_root / "train" / "images"
+    train_images_dir.mkdir(parents=True, exist_ok=True)
+    for idx in range(1, 5):
+        (train_images_dir / f"img{idx}.jpg").write_bytes(b"img")
+    coco_train = {
+        "images": [
+            {"id": idx, "file_name": f"img{idx}.jpg"}
+            for idx in range(1, 5)
+        ],
+        "annotations": [],
+        "categories": [{"id": 1, "name": "obj"}],
+    }
+    coco_val = {"images": [], "annotations": [], "categories": [{"id": 1, "name": "obj"}]}
+    train_json = dataset_root / "train" / "_annotations.coco.json"
+    val_json = dataset_root / "val" / "_annotations.coco.json"
+    _write_json(train_json, coco_train)
+    _write_json(val_json, coco_val)
+    outside = tmp_path / "outside_jobs"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(localinferenceapi, "SAM3_JOB_ROOT", linked_parent / "nested" / "sam3_jobs")
+
+    with pytest.raises(localinferenceapi.HTTPException) as excinfo:
+        localinferenceapi._prepare_sam3_training_split(
+            dataset_root,
+            {
+                "id": "ds3",
+                "classes": ["obj"],
+                "coco_train_json": str(train_json),
+                "coco_val_json": str(val_json),
+            },
+            "job_guard_symlink_parent",
+            random_split=True,
+            val_percent=0.4,
+            split_seed=42,
+        )
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "sam3_split_path_invalid"
+    assert list(outside.iterdir()) == []

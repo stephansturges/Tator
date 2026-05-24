@@ -27041,7 +27041,10 @@ def _rfdetr_ddp_worker(
 
 def _sam3_training_split_root(job_id: str) -> Path:
     _, raw_split, split_root = _training_split_paths(
-        SAM3_JOB_ROOT, job_id, detail="sam3_split_path_invalid"
+        SAM3_JOB_ROOT,
+        job_id,
+        detail="sam3_split_path_invalid",
+        create_parent=True,
     )
     if raw_split.is_symlink():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_split_path_invalid")
@@ -27174,7 +27177,6 @@ def _prepare_sam3_training_split(
     if not train_ids or not val_ids:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="sam3_training_split_empty")
     split_root = _sam3_training_split_root(job_id)
-    split_root.parent.mkdir(parents=True, exist_ok=True)
     if split_root.exists():
         shutil.rmtree(split_root, ignore_errors=True)
     (split_root / "train" / "images").mkdir(parents=True, exist_ok=True)

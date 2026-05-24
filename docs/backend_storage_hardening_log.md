@@ -945,3 +945,16 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1132 passed, 17 skipped`; focused prompt helper/path containment
   coverage, `services/prompt_helper_presets.py` compile, the full pytest suite,
   and live endpoint sanity checks passed against the restarted backend.
+
+## 2026-05-24: Shared Helper No-Follow Temp Writes
+
+- Switched shared dataset, detector, EDR package, calibration, canonical EDR,
+  cascade, recipe-registry, and COCO JSON/text helpers to no-follow temp-file
+  writes before atomic replace.
+- Preserved existing symlink leaf replacement behavior while closing the
+  check-then-open gap for temporary write targets.
+- Added cleanup for additional temp write failure paths that previously relied
+  on the happy path reaching `os.replace`.
+- Validation: `1132 passed, 17 skipped`; focused storage/path helper coverage,
+  module compile checks for the touched helpers, the full pytest suite, and
+  live endpoint sanity checks passed against the restarted backend.

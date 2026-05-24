@@ -120,6 +120,15 @@ def canonical_deployment_job_id(dataset_id: str, recipe_fingerprint: str) -> str
     return f"canonical_edr_{dataset_slug}_{fingerprint_slug}"
 
 
+def _write_text_no_follow(path: Path, text: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
 def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> Path:
     if _path_has_symlink_component(path.parent):
         raise ValueError("canonical_json_parent_symlink")
@@ -137,8 +146,12 @@ def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> Path:
             candidate.resolve(strict=False).relative_to(parent_resolved)
         except Exception as exc:
             raise ValueError("canonical_json_path_not_allowed") from exc
-    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    os.replace(tmp_path, path)
+    try:
+        _write_text_no_follow(tmp_path, json.dumps(payload, indent=2))
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
     return path
 
 

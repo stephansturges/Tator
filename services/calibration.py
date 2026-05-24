@@ -208,11 +208,20 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
         except Exception as exc:
             raise ValueError("calibration_json_path_not_allowed") from exc
     try:
-        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _write_text_no_follow(tmp_path, json.dumps(payload, indent=2))
         tmp_path.replace(path)
     finally:
         if tmp_path.exists() or tmp_path.is_symlink():
             tmp_path.unlink(missing_ok=True)
+
+
+def _write_text_no_follow(path: Path, text: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
 
 
 def _write_text_atomic(path: Path, text: str) -> None:
@@ -233,7 +242,7 @@ def _write_text_atomic(path: Path, text: str) -> None:
         except Exception as exc:
             raise ValueError("calibration_text_path_not_allowed") from exc
     try:
-        tmp_path.write_text(text, encoding="utf-8")
+        _write_text_no_follow(tmp_path, text)
         tmp_path.replace(path)
     finally:
         if tmp_path.exists() or tmp_path.is_symlink():

@@ -87,10 +87,19 @@ def _prepare_atomic_output_file(path: Path) -> Path:
     return tmp_path
 
 
+def _write_text_no_follow(path: Path, text: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
 def _write_json_atomic(path: Path, payload: Dict[str, Any], *, sort_keys: bool = False) -> Path:
     tmp_path = _prepare_atomic_output_file(path)
     try:
-        tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=sort_keys), encoding="utf-8")
+        _write_text_no_follow(tmp_path, json.dumps(payload, indent=2, sort_keys=sort_keys))
         os.replace(tmp_path, path)
     finally:
         if tmp_path.exists() or tmp_path.is_symlink():
@@ -101,7 +110,7 @@ def _write_json_atomic(path: Path, payload: Dict[str, Any], *, sort_keys: bool =
 def _write_text_file(path: Path, text: str) -> Path:
     tmp_path = _prepare_atomic_output_file(path)
     try:
-        tmp_path.write_text(text, encoding="utf-8")
+        _write_text_no_follow(tmp_path, text)
         os.replace(tmp_path, path)
     finally:
         if tmp_path.exists() or tmp_path.is_symlink():

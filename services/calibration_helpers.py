@@ -214,6 +214,15 @@ def _calibration_safe_link(src: Path, dest: Path) -> None:
             pass
 
 
+def _write_text_no_follow(path: Path, text: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
 def _calibration_write_record_atomic(path: Path, record: Dict[str, Any]) -> None:
     if _path_has_symlink_component(path.parent):
         raise ValueError("calibration_record_parent_symlink")
@@ -231,8 +240,12 @@ def _calibration_write_record_atomic(path: Path, record: Dict[str, Any]) -> None
             candidate.resolve(strict=False).relative_to(parent_resolved)
         except Exception as exc:
             raise ValueError("calibration_record_path_not_allowed") from exc
-    tmp_path.write_text(json.dumps(record, ensure_ascii=False))
-    tmp_path.replace(path)
+    try:
+        _write_text_no_follow(tmp_path, json.dumps(record, ensure_ascii=False))
+        tmp_path.replace(path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _calibration_update(job: Any, **kwargs: Any) -> None:

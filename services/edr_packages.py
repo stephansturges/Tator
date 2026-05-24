@@ -272,13 +272,22 @@ def edr_package_meta_path(packages_root: Path, package_id: str) -> Path:
     return edr_package_dir(packages_root, package_id, create=False) / EDR_PACKAGE_META_NAME
 
 
+def _write_text_no_follow(path: Path, text: str) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
 def _write_json(path: Path, payload: Dict[str, Any]) -> Path:
     tmp_path = _prepare_atomic_output_file(path)
     try:
-        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _write_text_no_follow(tmp_path, json.dumps(payload, indent=2))
         os.replace(tmp_path, path)
     finally:
-        if tmp_path.exists():
+        if tmp_path.exists() or tmp_path.is_symlink():
             tmp_path.unlink(missing_ok=True)
     return path
 
@@ -286,7 +295,7 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> Path:
 def _write_text(path: Path, text: str) -> Path:
     tmp_path = _prepare_atomic_output_file(path)
     try:
-        tmp_path.write_text(text, encoding="utf-8")
+        _write_text_no_follow(tmp_path, text)
         os.replace(tmp_path, path)
     finally:
         if tmp_path.exists() or tmp_path.is_symlink():

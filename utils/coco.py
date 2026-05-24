@@ -57,7 +57,12 @@ def _write_coco_json_atomic(path: Path, payload: Dict[str, Any]) -> Path:
     tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     _prepare_coco_output_path(tmp_path)
     try:
-        tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp_path, flags, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload))
         os.replace(tmp_path, path)
     finally:
         if tmp_path.exists() or tmp_path.is_symlink():

@@ -811,6 +811,30 @@ def test_qwen_settings_excludes_cached_language_only_mlx_options(monkeypatch):
     assert bad_model_id not in {entry["id"] for entry in settings.mlx_models}
 
 
+def test_update_qwen_settings_rejects_invalid_inference_platform(monkeypatch):
+    monkeypatch.setattr(api, "QWEN_INFERENCE_PLATFORM", api.QWEN_PLATFORM_AUTO)
+    monkeypatch.setattr(api, "_unload_qwen_runtime", lambda: None)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.update_qwen_settings(api.QwenRuntimeSettingsUpdate(inference_platform="cuda"))
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "qwen_inference_platform_invalid"
+    assert api.QWEN_INFERENCE_PLATFORM == api.QWEN_PLATFORM_AUTO
+
+
+def test_update_qwen_settings_accepts_inference_platform_alias(monkeypatch):
+    unloads = []
+    monkeypatch.setattr(api, "QWEN_INFERENCE_PLATFORM", api.QWEN_PLATFORM_AUTO)
+    monkeypatch.setattr(api, "_unload_qwen_runtime", lambda: unloads.append("unloaded"))
+
+    settings = api.update_qwen_settings(api.QwenRuntimeSettingsUpdate(inference_platform="torch"))
+
+    assert settings.inference_platform == api.QWEN_PLATFORM_TRANSFORMERS
+    assert api.QWEN_INFERENCE_PLATFORM == api.QWEN_PLATFORM_TRANSFORMERS
+    assert unloads == ["unloaded"]
+
+
 def test_qwen_mlx_checkpoint_index_detects_missing_visual_weights(tmp_path):
     index_path = tmp_path / "model.safetensors.index.json"
     config_path = tmp_path / "config.json"

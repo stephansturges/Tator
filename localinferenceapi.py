@@ -336,6 +336,7 @@ from services.qwen_mlx import (
     QWEN_MLX_DEFAULT_MODEL,
     QWEN_MLX_MODEL_OPTIONS,
     QWEN_MLX_VISION_MODEL_OPTIONS,
+    QWEN_PLATFORM_ALIASES,
     QWEN_PLATFORM_AUTO,
     QWEN_PLATFORM_MLX,
     QWEN_PLATFORM_TRANSFORMERS,
@@ -35155,6 +35156,18 @@ def qwen_settings():
     )
 
 
+def _normalize_qwen_settings_platform(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return QWEN_PLATFORM_AUTO
+    if raw not in QWEN_PLATFORM_ALIASES:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="qwen_inference_platform_invalid",
+        )
+    return normalize_qwen_platform(raw)
+
+
 def update_qwen_settings(payload: QwenRuntimeSettingsUpdate):
     global QWEN_TRUST_REMOTE_CODE, QWEN_INFERENCE_PLATFORM, QWEN_MLX_MODEL_NAME
     needs_unload = False
@@ -35164,7 +35177,7 @@ def update_qwen_settings(payload: QwenRuntimeSettingsUpdate):
             QWEN_TRUST_REMOTE_CODE = desired
             needs_unload = True
     if payload.inference_platform is not None:
-        desired_platform = normalize_qwen_platform(payload.inference_platform)
+        desired_platform = _normalize_qwen_settings_platform(payload.inference_platform)
         if desired_platform != QWEN_INFERENCE_PLATFORM:
             QWEN_INFERENCE_PLATFORM = desired_platform
             needs_unload = True

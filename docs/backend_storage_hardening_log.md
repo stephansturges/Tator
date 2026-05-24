@@ -1026,3 +1026,15 @@ preserving the exact validation story for storage and artifact-write fixes.
   lifecycle coverage, `services/detectors.py` and `localinferenceapi.py` compile,
   `git diff --check`, the full pytest suite, and live endpoint sanity checks
   passed against the restarted backend.
+
+## 2026-05-24: Qwen Runtime Settings Platform Validation
+
+- Stopped `/qwen/settings` updates from silently accepting unknown
+  `inference_platform` strings and normalizing them to `auto`.
+- Preserved the supported aliases (`torch`, `transformers`, `mlx`, `mlx-vlm`,
+  and `mlx_vlm`) while returning `qwen_inference_platform_invalid` for typos or
+  device names such as `cuda`.
+- Added focused regressions for invalid platform rejection and alias acceptance.
+- Validation: `1151 passed, 17 skipped`; focused Qwen MLX/runtime settings
+  coverage, `localinferenceapi.py` compile, `git diff --check`, the full pytest
+  suite, and live endpoint sanity checks passed against the restarted backend.

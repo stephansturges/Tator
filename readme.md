@@ -131,6 +131,8 @@ Tator supports three dataset patterns:
 
 - **Upload a dataset** when you want Tator to own a copy. YOLO and YOLO-seg are
   the preferred internal formats; COCO uploads are converted where possible.
+  Managed deletes move the backend-owned folder into a restoreable trash area
+  first, so an accidental click does not immediately destroy image data.
 - **Open a server path transiently** when you want to inspect or label a local
   folder without committing it to the library.
 - **Register a linked dataset** when source images should stay where they are.
@@ -594,7 +596,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current verification: `1182 passed, 17 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Current verification: `1187 passed, 17 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

@@ -3577,6 +3577,8 @@ const sam3TrainState = {
         refreshBtn: null,
         refreshBtnTop: null,
         list: null,
+        trashRefresh: null,
+        trashList: null,
         deleteButtons: new Map(),
         glossaryDatasetSelect: null,
         glossaryDatasetRefresh: null,
@@ -3601,10 +3603,14 @@ const sam3TrainState = {
 
     const datasetManagerState = {
         datasets: [],
+        trash: [],
         uploading: false,
         refreshRequestId: 0,
         refreshInFlight: false,
         refreshNeedsRefresh: false,
+        trashRefreshRequestId: 0,
+        trashRefreshInFlight: false,
+        trashRefreshNeedsRefresh: false,
         glossaryLoadRequestId: 0,
         glossaryLibraryLoadRequestId: 0,
         glossaryDatasetLoadInFlight: false,
@@ -3678,6 +3684,12 @@ const sam3TrainState = {
         }
         if (datasetManagerElements.glossaryDatasetRefresh) {
             datasetManagerElements.glossaryDatasetRefresh.disabled = value;
+        }
+    }
+
+    function setDatasetTrashRefreshButtonDisabled(disabled) {
+        if (datasetManagerElements.trashRefresh) {
+            datasetManagerElements.trashRefresh.disabled = Boolean(disabled);
         }
     }
 
@@ -5253,6 +5265,80 @@ const sam3TrainState = {
         renderGlossaryDatasetOptions(datasetManagerState.datasets);
     }
 
+    function renderDatasetTrashList(list) {
+        datasetManagerState.trash = Array.isArray(list) ? list : [];
+        const container = datasetManagerElements.trashList;
+        if (!container) {
+            return;
+        }
+        container.innerHTML = "";
+        if (!datasetManagerState.trash.length) {
+            const empty = document.createElement("div");
+            empty.className = "training-history-item";
+            empty.textContent = "No deleted managed datasets.";
+            container.appendChild(empty);
+            return;
+        }
+        datasetManagerState.trash.forEach((entry) => {
+            const item = document.createElement("div");
+            item.className = "training-history-item";
+            item.setAttribute("data-testid", "card.datasets.trash_entry");
+            item.setAttribute("data-trash-id", String(entry?.trash_id || ""));
+
+            const header = document.createElement("div");
+            header.className = "training-history-row";
+            const title = document.createElement("div");
+            title.className = "training-history-title";
+            title.textContent = entry.label || entry.original_id || entry.trash_id || "deleted dataset";
+            const badge = document.createElement("span");
+            badge.className = "badge";
+            badge.textContent = "TRASH";
+            badge.title = "Managed dataset kept in backend trash until restored or manually removed on disk.";
+            header.appendChild(title);
+            header.appendChild(badge);
+
+            const actions = document.createElement("div");
+            actions.className = "training-history-actions";
+            const restoreBtn = document.createElement("button");
+            restoreBtn.type = "button";
+            restoreBtn.className = "button button-outline";
+            restoreBtn.setAttribute("data-testid", "action.datasets.trash.restore");
+            restoreBtn.textContent = "Restore";
+            restoreBtn.title = "Restore this managed dataset into the dataset library.";
+            restoreBtn.disabled = datasetManagerState.actionInFlight.has(datasetActionKey(entry.trash_id, "trash_restore"));
+            restoreBtn.addEventListener("click", () => {
+                handleDatasetTrashRestore(entry).catch((error) => {
+                    console.error("Dataset trash restore failed", error);
+                });
+            });
+            actions.appendChild(restoreBtn);
+            header.appendChild(actions);
+            item.appendChild(header);
+
+            const parts = [];
+            if (entry.source) parts.push(entry.source);
+            if (entry.original_id) parts.push(`original id ${entry.original_id}`);
+            if (typeof entry.deleted_at === "number" && Number.isFinite(entry.deleted_at)) {
+                const deletedAt = new Date(entry.deleted_at * 1000);
+                if (!Number.isNaN(deletedAt.getTime())) {
+                    parts.push(`deleted ${deletedAt.toLocaleString()}`);
+                }
+            }
+            const meta = document.createElement("div");
+            meta.className = "training-help";
+            meta.textContent = parts.join(" • ") || "Deleted managed dataset";
+            item.appendChild(meta);
+
+            if (entry.dataset_path) {
+                const pathLine = document.createElement("div");
+                pathLine.className = "training-help";
+                pathLine.textContent = `Trash path: ${entry.dataset_path}`;
+                item.appendChild(pathLine);
+            }
+            container.appendChild(item);
+        });
+    }
+
     function renderGlossaryDatasetOptions(list) {
         if (!datasetManagerElements.glossaryDatasetSelect) {
             return;
@@ -5706,12 +5792,51 @@ const sam3TrainState = {
         }
     }
 
+    async function handleDatasetTrashRestore(entry) {
+        if (!entry || !entry.trash_id) return;
+        const label = entry.label || entry.original_id || entry.trash_id;
+        const ok = window.confirm(
+            `Restore deleted dataset "${label}"? If the original id is already in use, the backend will choose a unique id.`
+        );
+        if (!ok) return;
+        const actionKey = datasetActionKey(entry.trash_id, "trash_restore");
+        if (datasetManagerState.actionInFlight.has(actionKey)) {
+            return;
+        }
+        datasetManagerState.actionInFlight.add(actionKey);
+        renderDatasetTrashList(datasetManagerState.trash);
+        setDatasetUploadMessage(`Restoring ${label}…`, "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets/trash/${encodeURIComponent(entry.trash_id)}/restore`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({}),
+            });
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `HTTP ${resp.status}`);
+            }
+            const payload = await resp.json().catch(() => ({}));
+            setDatasetUploadMessage(`Restored ${payload.id || label}.`, "success");
+            await Promise.all([
+                refreshDatasetList(),
+                refreshDatasetTrashList(),
+            ]);
+        } catch (err) {
+            console.error("Failed to restore dataset", err);
+            setDatasetUploadMessage(err.message || "Failed to restore dataset", "error");
+        } finally {
+            datasetManagerState.actionInFlight.delete(actionKey);
+            renderDatasetTrashList(datasetManagerState.trash);
+        }
+    }
+
 	    async function handleDatasetDelete(entry) {
 	        if (!entry || !entry.id) return;
             const isLinked = String(entry.storage_mode || "").toLowerCase() === "linked";
             const confirmText = isLinked
                 ? `Delete linked dataset record "${entry.label || entry.id}"? This removes library metadata/overlays only; source files stay on disk.`
-                : `Delete dataset "${entry.label || entry.id}"? This cannot be undone.`;
+                : `Move managed dataset "${entry.label || entry.id}" to deleted datasets? You can restore it from Dataset Management.`;
 	        const ok = window.confirm(confirmText);
 	        if (!ok) return;
         const actionKey = datasetActionKey(entry.id, "delete");
@@ -5728,8 +5853,16 @@ const sam3TrainState = {
                 const detail = await resp.text();
                 throw new Error(detail || `HTTP ${resp.status}`);
             }
-            setDatasetUploadMessage(`Deleted ${entry.label || entry.id}.`, "success");
-            await refreshDatasetList();
+            const payload = await resp.json().catch(() => ({}));
+            if (payload && payload.status === "trashed") {
+                setDatasetUploadMessage(`Moved ${entry.label || entry.id} to deleted datasets.`, "success");
+            } else {
+                setDatasetUploadMessage(`Deleted ${entry.label || entry.id}.`, "success");
+            }
+            await Promise.all([
+                refreshDatasetList(),
+                refreshDatasetTrashList(),
+            ]);
         } catch (err) {
             console.error("Failed to delete dataset", err);
             setDatasetUploadMessage(err.message || "Failed to delete dataset", "error");
@@ -5850,6 +5983,41 @@ const sam3TrainState = {
                 if (datasetManagerState.refreshNeedsRefresh) {
                     datasetManagerState.refreshNeedsRefresh = false;
                     refreshDatasetList().catch((err) => console.error("Queued dataset refresh failed", err));
+                }
+            }
+        }
+    }
+
+    async function refreshDatasetTrashList() {
+        if (datasetManagerState.trashRefreshInFlight) {
+            datasetManagerState.trashRefreshNeedsRefresh = true;
+            return;
+        }
+        const requestId = datasetManagerState.trashRefreshRequestId + 1;
+        datasetManagerState.trashRefreshRequestId = requestId;
+        datasetManagerState.trashRefreshInFlight = true;
+        setDatasetTrashRefreshButtonDisabled(true);
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets/trash`);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            if (requestId !== datasetManagerState.trashRefreshRequestId) {
+                return;
+            }
+            renderDatasetTrashList(data);
+        } catch (err) {
+            if (requestId !== datasetManagerState.trashRefreshRequestId) {
+                return;
+            }
+            console.error("Failed to refresh dataset trash", err);
+            setDatasetUploadMessage(`Failed to load deleted datasets: ${err.message || err}`, "error");
+        } finally {
+            if (requestId === datasetManagerState.trashRefreshRequestId) {
+                datasetManagerState.trashRefreshInFlight = false;
+                setDatasetTrashRefreshButtonDisabled(false);
+                if (datasetManagerState.trashRefreshNeedsRefresh) {
+                    datasetManagerState.trashRefreshNeedsRefresh = false;
+                    refreshDatasetTrashList().catch((err) => console.error("Queued dataset trash refresh failed", err));
                 }
             }
         }
@@ -6199,6 +6367,7 @@ const sam3TrainState = {
     async function initDatasetManagerTab() {
         if (datasetManagerElements.uploadBtn) {
             await refreshDatasetList().catch((err) => console.error("Dataset list refresh failed", err));
+            await refreshDatasetTrashList().catch((err) => console.error("Dataset trash refresh failed", err));
             await refreshSegBuilderJobs().catch((err) => console.error("Seg builder job refresh failed", err));
             await refreshGlossaryLibrary({ silent: true }).catch((err) => console.error("Glossary library refresh failed", err));
             return;
@@ -6229,6 +6398,8 @@ const sam3TrainState = {
         datasetManagerElements.refreshBtn = document.getElementById("datasetListRefresh");
         datasetManagerElements.refreshBtnTop = document.getElementById("datasetListRefreshTop");
         datasetManagerElements.list = document.getElementById("datasetList");
+        datasetManagerElements.trashRefresh = document.getElementById("datasetTrashRefresh");
+        datasetManagerElements.trashList = document.getElementById("datasetTrashList");
         datasetManagerElements.glossaryDatasetSelect = document.getElementById("datasetGlossaryDataset");
         datasetManagerElements.glossaryDatasetRefresh = document.getElementById("datasetGlossaryRefresh");
         datasetManagerElements.glossaryDatasetSummary = document.getElementById("datasetGlossarySummary");
@@ -6305,6 +6476,13 @@ const sam3TrainState = {
             datasetManagerElements.refreshBtnTop.addEventListener("click", () => {
                 refreshDatasetList().catch((error) => {
                     console.error("Dataset list top refresh failed", error);
+                });
+            });
+        }
+        if (datasetManagerElements.trashRefresh) {
+            datasetManagerElements.trashRefresh.addEventListener("click", () => {
+                refreshDatasetTrashList().catch((error) => {
+                    console.error("Dataset trash refresh failed", error);
                 });
             });
         }
@@ -6417,6 +6595,7 @@ const sam3TrainState = {
             console.error("Segmentation builder init failed", error);
         });
         await refreshDatasetList();
+        await refreshDatasetTrashList();
         await refreshSegBuilderJobs();
         await refreshGlossaryLibrary({ silent: true });
     }

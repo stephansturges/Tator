@@ -13806,6 +13806,8 @@ RFDETR_VARIANTS = [
 DATASET_REGISTRY_ROOT = Path(os.environ.get("DATASET_ROOT", "./uploads/datasets"))
 _init_storage_root(DATASET_REGISTRY_ROOT)
 DATASET_META_NAME = "dataset.json"
+DATASET_TRASH_DIRNAME = ".trash"
+DATASET_TRASH_META_NAME = "deleted_dataset.json"
 DATASET_ANNOTATION_OVERLAY_DIRNAME = ".annotation_overlay"
 DATASET_ANNOTATION_SESSION_TTL_SECONDS = max(
     15,
@@ -16107,6 +16109,326 @@ def _delete_dataset_tree_or_link(path: Path, allowed_roots: Sequence[Path]) -> N
     shutil.rmtree(resolved, ignore_errors=True)
 
 
+def _managed_dataset_roots() -> List[Path]:
+    return [DATASET_REGISTRY_ROOT, SAM3_DATASET_ROOT, QWEN_DATASET_ROOT]
+
+
+def _dataset_trash_root_for_source_root(
+    source_root: Path,
+    *,
+    create: bool = False,
+    detail: str = "dataset_trash_path_forbidden",
+) -> Path:
+    try:
+        raw_root = Path(source_root)
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("dataset source root has a symlink component")
+        if not raw_root.exists() or not raw_root.is_dir():
+            raise ValueError("dataset source root missing")
+        trash_root = raw_root / DATASET_TRASH_DIRNAME
+        if _storage_path_has_symlink_component(trash_root):
+            raise ValueError("dataset trash root has a symlink component")
+        if create:
+            trash_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(trash_root):
+            raise ValueError("dataset trash root has a symlink component")
+        if trash_root.exists() and not trash_root.is_dir():
+            raise ValueError("dataset trash root is not a directory")
+        return trash_root.resolve(strict=False)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+def _dataset_trash_child_dir(
+    trash_root: Path,
+    trash_id: str,
+    *,
+    detail: str = "dataset_trash_path_forbidden",
+) -> Path:
+    raw_id = str(trash_id or "").strip()
+    if (
+        not raw_id
+        or raw_id in {".", ".."}
+        or "/" in raw_id
+        or "\\" in raw_id
+        or Path(raw_id).is_absolute()
+    ):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    try:
+        root = trash_root.resolve(strict=False)
+        candidate = trash_root / raw_id
+        if _storage_path_has_symlink_component(candidate):
+            raise ValueError("dataset trash child has a symlink component")
+        resolved = candidate.resolve(strict=False)
+        if not _path_is_within_root_impl(resolved, root) or resolved.parent != root:
+            raise ValueError("dataset trash child escapes root")
+        return resolved
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+def _dataset_source_root_for_managed_path(
+    path: Path,
+    allowed_roots: Sequence[Path],
+) -> Tuple[Path, Path]:
+    try:
+        if path.is_symlink():
+            raise ValueError("managed dataset path is a symlink")
+        resolved = path.resolve(strict=True)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing") from exc
+    if not resolved.exists() or not resolved.is_dir():
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
+    for root in allowed_roots:
+        try:
+            root_resolved = root.resolve(strict=False)
+        except Exception:
+            continue
+        if resolved.parent == root_resolved and resolved != root_resolved:
+            return resolved, root_resolved
+    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
+
+
+def _dataset_unique_trash_id(dataset_name: str, trash_root: Path) -> str:
+    base = _sanitize_yolo_run_id_impl(
+        f"{dataset_name}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    )
+    return _unique_dataset_name(base or f"dataset-{uuid.uuid4().hex[:8]}", root=trash_root)
+
+
+def _dataset_primary_meta_name_for_source_root(source_root: Path) -> str:
+    try:
+        root = source_root.resolve(strict=False)
+        if root == QWEN_DATASET_ROOT.resolve(strict=False):
+            return QWEN_METADATA_FILENAME
+        if root == SAM3_DATASET_ROOT.resolve(strict=False):
+            return SAM3_DATASET_META_NAME
+    except Exception:
+        pass
+    return DATASET_META_NAME
+
+
+def _soft_delete_managed_dataset_tree(
+    path: Path,
+    allowed_roots: Sequence[Path],
+    *,
+    dataset_id: str,
+    entry: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not _dataset_delete_raw_path_contained(path, allowed_roots):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
+    resolved, source_root = _dataset_source_root_for_managed_path(path, allowed_roots)
+    trash_root = _dataset_trash_root_for_source_root(source_root, create=True)
+    trash_id = _dataset_unique_trash_id(resolved.name, trash_root)
+    trash_entry_dir = _dataset_trash_child_dir(trash_root, trash_id)
+    if trash_entry_dir.exists() or trash_entry_dir.is_symlink():
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="dataset_trash_target_exists")
+    trash_entry_dir.mkdir(parents=True, exist_ok=False)
+    dataset_trash_path = trash_entry_dir / resolved.name
+    try:
+        resolved.rename(dataset_trash_path)
+        deleted_at = time.time()
+        trash_meta = {
+            "trash_id": trash_id,
+            "deleted_at": deleted_at,
+            "original_id": dataset_id,
+            "original_name": resolved.name,
+            "original_path": str(resolved),
+            "source_root": str(source_root),
+            "source": entry.get("source") or "registry",
+            "storage_mode": "managed",
+            "label": entry.get("label") or dataset_id,
+            "dataset_dir_name": dataset_trash_path.name,
+            "dataset_path": str(dataset_trash_path),
+        }
+        _write_dataset_metadata_json(
+            trash_entry_dir / DATASET_TRASH_META_NAME,
+            trash_entry_dir,
+            trash_meta,
+        )
+    except Exception:
+        if dataset_trash_path.exists() and not resolved.exists():
+            try:
+                dataset_trash_path.rename(resolved)
+            except Exception:
+                pass
+        try:
+            trash_entry_dir.rmdir()
+        except Exception:
+            pass
+        raise
+    return {
+        "status": "trashed",
+        "id": dataset_id,
+        "storage_mode": "managed",
+        "trash_id": trash_id,
+        "trash_path": str(trash_entry_dir),
+        "restore_available": True,
+    }
+
+
+def _dataset_trash_dataset_dir(entry_dir: Path, meta: Dict[str, Any]) -> Optional[Path]:
+    raw_name = str(meta.get("dataset_dir_name") or "").strip()
+    candidates: List[Path] = []
+    if raw_name:
+        candidates.append(entry_dir / raw_name)
+    try:
+        candidates.extend(
+            child
+            for child in entry_dir.iterdir()
+            if child.name != DATASET_TRASH_META_NAME
+        )
+    except Exception:
+        pass
+    for candidate in candidates:
+        try:
+            if candidate.is_symlink() or _storage_path_has_symlink_component(candidate):
+                continue
+            resolved = candidate.resolve(strict=True)
+            if (
+                resolved.parent == entry_dir.resolve(strict=True)
+                and resolved.exists()
+                and resolved.is_dir()
+            ):
+                return resolved
+        except Exception:
+            continue
+    return None
+
+
+def _dataset_trash_entry_payload(
+    entry_dir: Path,
+    *,
+    source_root: Path,
+    source: str,
+) -> Optional[Dict[str, Any]]:
+    try:
+        if entry_dir.is_symlink() or _storage_path_has_symlink_component(entry_dir):
+            return None
+        entry_resolved = entry_dir.resolve(strict=True)
+        trash_root = _dataset_trash_root_for_source_root(source_root, create=False)
+        if entry_resolved.parent != trash_root.resolve(strict=False):
+            return None
+    except Exception:
+        return None
+    meta = _load_json_metadata(entry_resolved / DATASET_TRASH_META_NAME) or {}
+    dataset_dir = _dataset_trash_dataset_dir(entry_resolved, meta)
+    if dataset_dir is None:
+        return None
+    original_id = str(meta.get("original_id") or dataset_dir.name).strip() or dataset_dir.name
+    return {
+        "trash_id": entry_resolved.name,
+        "original_id": original_id,
+        "label": meta.get("label") or original_id,
+        "deleted_at": meta.get("deleted_at"),
+        "storage_mode": "managed",
+        "source": meta.get("source") or source,
+        "source_root": str(source_root),
+        "dataset_path": str(dataset_dir),
+        "restore_id": _sanitize_yolo_run_id_impl(original_id) or dataset_dir.name,
+    }
+
+
+def list_dataset_trash_entries() -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    roots = [
+        ("registry", DATASET_REGISTRY_ROOT),
+        ("sam3", SAM3_DATASET_ROOT),
+        ("qwen", QWEN_DATASET_ROOT),
+    ]
+    for source, source_root in roots:
+        try:
+            trash_root = _dataset_trash_root_for_source_root(source_root, create=False)
+        except HTTPException:
+            continue
+        if not trash_root.exists():
+            continue
+        try:
+            children = sorted(trash_root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+        except Exception:
+            continue
+        for child in children:
+            payload = _dataset_trash_entry_payload(child, source_root=source_root.resolve(strict=False), source=source)
+            if payload is not None:
+                entries.append(payload)
+    entries.sort(key=lambda item: item.get("deleted_at") or 0, reverse=True)
+    return entries
+
+
+def _resolve_dataset_trash_entry(trash_id: str) -> Tuple[Path, Path, Path, Dict[str, Any]]:
+    for source_root in _managed_dataset_roots():
+        try:
+            trash_root = _dataset_trash_root_for_source_root(source_root, create=False)
+            entry_dir = _dataset_trash_child_dir(trash_root, trash_id)
+        except HTTPException:
+            continue
+        if not entry_dir.exists():
+            continue
+        meta = _load_json_metadata(entry_dir / DATASET_TRASH_META_NAME) or {}
+        dataset_dir = _dataset_trash_dataset_dir(entry_dir, meta)
+        if dataset_dir is None:
+            continue
+        return source_root.resolve(strict=False), entry_dir, dataset_dir, meta
+    raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_trash_entry_not_found")
+
+
+def restore_dataset_trash_entry(
+    trash_id: str,
+    dataset_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    source_root, entry_dir, dataset_dir, meta = _resolve_dataset_trash_entry(trash_id)
+    requested = str(dataset_id or meta.get("original_id") or dataset_dir.name).strip()
+    base_id = _sanitize_yolo_run_id_impl(requested) or "restored_dataset"
+    restored_id = _unique_dataset_name(base_id, root=source_root)
+    target_path = source_root / restored_id
+    target_resolved: Optional[Path] = None
+    def _rollback_restore_move() -> None:
+        if target_resolved is not None and target_resolved.exists() and not dataset_dir.exists():
+            try:
+                target_resolved.rename(dataset_dir)
+            except Exception:
+                pass
+
+    try:
+        if _storage_path_has_symlink_component(target_path) or target_path.exists() or target_path.is_symlink():
+            raise ValueError("dataset restore target invalid")
+        target_resolved = target_path.resolve(strict=False)
+        if target_resolved.parent != source_root.resolve(strict=False):
+            raise ValueError("dataset restore target escapes root")
+        dataset_dir.rename(target_resolved)
+        meta_name = _dataset_primary_meta_name_for_source_root(source_root)
+        restored_meta_path = target_resolved / meta_name
+        restored_meta = _load_json_metadata(restored_meta_path) or {}
+        restored_meta["id"] = restored_id
+        restored_meta.setdefault("label", meta.get("label") or restored_id)
+        restored_meta["restored_from_trash_id"] = trash_id
+        restored_meta["restored_at"] = time.time()
+        _write_dataset_metadata_json(restored_meta_path, target_resolved, restored_meta)
+        trash_meta_path = entry_dir / DATASET_TRASH_META_NAME
+        if trash_meta_path.exists() and not trash_meta_path.is_symlink():
+            trash_meta_path.unlink(missing_ok=True)
+        try:
+            entry_dir.rmdir()
+        except OSError:
+            pass
+    except HTTPException:
+        _rollback_restore_move()
+        raise
+    except Exception as exc:
+        _rollback_restore_move()
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_restore_forbidden") from exc
+    return {
+        "status": "restored",
+        "id": restored_id,
+        "dataset_root": str(target_path),
+        "trash_id": trash_id,
+    }
+
+
 def _annotation_requested_status(payload: Dict[str, Any]) -> Optional[str]:
     if "status" not in payload:
         return None
@@ -16425,8 +16747,12 @@ def delete_dataset_entry(dataset_id: str):
             status_code=HTTP_409_CONFLICT,
             detail=f"dataset_delete_blocked_active_jobs:{blocking_registry}",
         )
-    _delete_dataset_tree_or_link(target_path, allowed_roots)
-    return {"status": "deleted", "id": dataset_id, "storage_mode": storage_mode or "managed"}
+    return _soft_delete_managed_dataset_tree(
+        target_path,
+        allowed_roots,
+        dataset_id=dataset_id,
+        entry=entry,
+    )
 
 
 def download_dataset_entry(dataset_id: str):
@@ -37891,8 +38217,10 @@ app.include_router(
 app.include_router(
     build_datasets_router(
         list_fn=list_datasets,
+        list_trash_fn=list_dataset_trash_entries,
         upload_fn=upload_dataset_zip,
         delete_fn=delete_dataset_entry,
+        restore_fn=restore_dataset_trash_entry,
         download_fn=download_dataset_entry,
         build_qwen_fn=build_qwen_dataset_from_yolo,
         check_fn=check_dataset,

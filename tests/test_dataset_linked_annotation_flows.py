@@ -160,6 +160,170 @@ def test_delete_managed_dataset_rejects_symlinked_registry_parent_without_target
     assert (target_root / "payload.bin").read_bytes() == b"target"
 
 
+def test_delete_managed_dataset_moves_to_trash_and_restores(
+    tmp_path, monkeypatch
+) -> None:
+    registry_root = tmp_path / "registry"
+    dataset_root = registry_root / "managed_ds"
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    (dataset_root / "payload.bin").write_bytes(b"dataset")
+    (dataset_root / api.DATASET_META_NAME).write_text(
+        json.dumps({"id": "managed_ds", "label": "Managed DS"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "sam3")
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", tmp_path / "qwen")
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "managed_ds",
+            "label": "Managed DS",
+            "dataset_root": str(dataset_root),
+            "registry_root": str(dataset_root),
+            "storage_mode": "managed",
+            "source": "registry",
+        },
+    )
+
+    out = api.delete_dataset_entry("managed_ds")
+
+    assert out["status"] == "trashed"
+    assert out["restore_available"] is True
+    assert not dataset_root.exists()
+    trash_entries = api.list_dataset_trash_entries()
+    assert [entry["trash_id"] for entry in trash_entries] == [out["trash_id"]]
+    assert trash_entries[0]["original_id"] == "managed_ds"
+    trashed_payload = Path(trash_entries[0]["dataset_path"]) / "payload.bin"
+    assert trashed_payload.read_bytes() == b"dataset"
+
+    restored = api.restore_dataset_trash_entry(out["trash_id"])
+
+    assert restored["status"] == "restored"
+    assert restored["id"] == "managed_ds"
+    assert dataset_root.exists()
+    assert (dataset_root / "payload.bin").read_bytes() == b"dataset"
+    restored_meta = json.loads((dataset_root / api.DATASET_META_NAME).read_text(encoding="utf-8"))
+    assert restored_meta["id"] == "managed_ds"
+    assert restored_meta["restored_from_trash_id"] == out["trash_id"]
+    assert api.list_dataset_trash_entries() == []
+
+
+def test_restore_managed_dataset_uses_unique_id_when_original_exists(
+    tmp_path, monkeypatch
+) -> None:
+    registry_root = tmp_path / "registry"
+    dataset_root = registry_root / "managed_ds"
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    (dataset_root / "payload.bin").write_bytes(b"dataset")
+    (dataset_root / api.DATASET_META_NAME).write_text(
+        json.dumps({"id": "managed_ds", "label": "Managed DS"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "sam3")
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", tmp_path / "qwen")
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "managed_ds",
+            "label": "Managed DS",
+            "dataset_root": str(dataset_root),
+            "registry_root": str(dataset_root),
+            "storage_mode": "managed",
+        },
+    )
+    trashed = api.delete_dataset_entry("managed_ds")
+    replacement = registry_root / "managed_ds"
+    replacement.mkdir()
+    (replacement / api.DATASET_META_NAME).write_text(
+        json.dumps({"id": "managed_ds", "label": "Replacement"}),
+        encoding="utf-8",
+    )
+
+    restored = api.restore_dataset_trash_entry(trashed["trash_id"])
+
+    assert restored["id"] == "managed_ds_1"
+    restored_root = registry_root / "managed_ds_1"
+    assert restored_root.exists()
+    assert (restored_root / "payload.bin").read_bytes() == b"dataset"
+    restored_meta = json.loads((restored_root / api.DATASET_META_NAME).read_text(encoding="utf-8"))
+    assert restored_meta["id"] == "managed_ds_1"
+    assert (replacement / api.DATASET_META_NAME).exists()
+
+
+def test_restore_managed_dataset_rolls_back_when_metadata_write_fails(
+    tmp_path, monkeypatch
+) -> None:
+    registry_root = tmp_path / "registry"
+    dataset_root = registry_root / "managed_ds"
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    (dataset_root / "payload.bin").write_bytes(b"dataset")
+    (dataset_root / api.DATASET_META_NAME).write_text(
+        json.dumps({"id": "managed_ds", "label": "Managed DS"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "sam3")
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", tmp_path / "qwen")
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "managed_ds",
+            "label": "Managed DS",
+            "dataset_root": str(dataset_root),
+            "registry_root": str(dataset_root),
+            "storage_mode": "managed",
+        },
+    )
+    trashed = api.delete_dataset_entry("managed_ds")
+    trash_entry = api.list_dataset_trash_entries()[0]
+    trash_dataset_root = Path(trash_entry["dataset_path"])
+
+    def fail_metadata_write(*_args, **_kwargs):
+        raise api.HTTPException(status_code=400, detail="metadata_write_failed")
+
+    monkeypatch.setattr(api, "_write_dataset_metadata_json", fail_metadata_write)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.restore_dataset_trash_entry(trashed["trash_id"])
+
+    assert exc.value.detail == "metadata_write_failed"
+    assert not dataset_root.exists()
+    assert trash_dataset_root.exists()
+    assert (trash_dataset_root / "payload.bin").read_bytes() == b"dataset"
+
+
+def test_restore_managed_dataset_rejects_symlinked_trash_entry_without_target_write(
+    tmp_path, monkeypatch
+) -> None:
+    registry_root = tmp_path / "registry"
+    trash_root = registry_root / api.DATASET_TRASH_DIRNAME
+    outside = tmp_path / "outside"
+    outside.mkdir(parents=True)
+    trash_root.mkdir(parents=True)
+    try:
+        (trash_root / "linked-trash").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    marker = outside / "payload.bin"
+    marker.write_bytes(b"outside")
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "sam3")
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", tmp_path / "qwen")
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.restore_dataset_trash_entry("linked-trash")
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "dataset_trash_entry_not_found"
+    assert marker.read_bytes() == b"outside"
+
+
 def test_delete_linked_dataset_blocks_active_annotation_lock(tmp_path, monkeypatch) -> None:
     source_root = tmp_path / "linked_source"
     source_root.mkdir(parents=True, exist_ok=True)

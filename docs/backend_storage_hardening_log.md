@@ -1281,3 +1281,22 @@ preserving the exact validation story for storage and artifact-write fixes.
   zip upload, data ingestion, dataset metadata, Qwen dataset upload, COCO/YOLO,
   Qwen runtime/training, and backend job-start coverage passed, plus
   `py_compile` for the changed backend modules.
+
+## 2026-05-24: Managed Dataset Trash/Restore
+
+- Changed managed dataset deletion from immediate tree removal to a backend
+  trash move under the owning dataset root, with symlink and root-containment
+  checks on trash creation, listing, and restore.
+- Added `GET /datasets/trash` and `POST /datasets/trash/{trash_id}/restore`,
+  including unique-id restore behavior when the original dataset id has already
+  been reused.
+- Added Dataset Management UI controls to list deleted managed datasets and
+  restore them, while keeping linked dataset deletion as registry/overlay-only.
+- Added rollback coverage for failed restore metadata writes so a dataset moved
+  out of trash is moved back instead of becoming half-restored.
+- Validation: `1187 passed, 17 skipped`; focused dataset/data-ingestion safety
+  bundle (`189 passed`), `py_compile localinferenceapi.py api/datasets.py`,
+  `node --check ybat-master/ybat.js`, `git diff --check`, and the full pytest
+  suite passed. Restarted backend on `127.0.0.1:8000` and live-checked
+  `/datasets`, `/datasets/trash`, `/data_ingestion/capabilities`, OpenAPI route
+  methods for the trash endpoints, and UI endpoint method matching.

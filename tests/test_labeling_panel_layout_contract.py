@@ -269,6 +269,34 @@ def test_data_ingestion_panel_contract():
     assert 'max_part_size=1024 * 1024 * 1024' in router
 
 
+def test_dataset_manager_delete_trash_restore_contract():
+    html = _html()
+    js = _js()
+    router = _read("api/datasets.py")
+
+    assert 'id="datasetTrashRefresh"' in html
+    assert 'id="datasetTrashList"' in html
+    assert 'data-testid="list.datasets.trash"' in html
+    assert "Deleted managed datasets" in html
+    assert "Managed dataset deletes move here first" in html
+
+    assert "trashRefresh: null" in js
+    assert "trashList: null" in js
+    assert "trashRefreshInFlight: false" in js
+    assert "function renderDatasetTrashList(list)" in js
+    assert "async function handleDatasetTrashRestore(entry)" in js
+    assert "async function refreshDatasetTrashList()" in js
+    assert "fetch(`${API_ROOT}/datasets/trash`)" in js
+    assert "fetch(`${API_ROOT}/datasets/trash/${encodeURIComponent(entry.trash_id)}/restore`" in js
+    assert 'Move managed dataset "${entry.label || entry.id}" to deleted datasets?' in js
+    delete_start = js.index("async function handleDatasetDelete")
+    delete_end = js.index("async function handleDatasetConvert")
+    assert "This cannot be undone." not in js[delete_start:delete_end]
+
+    assert '@router.get("/datasets/trash")' in router
+    assert '@router.post("/datasets/trash/{trash_id}/restore")' in router
+
+
 def test_class_scroll_contrast_and_double_w_selected_scope_contract():
     css = _css()
     js = _js()

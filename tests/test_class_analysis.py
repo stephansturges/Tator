@@ -832,6 +832,62 @@ def test_class_analysis_active_workspace_rejects_oversize_upload(
     assert upload.file.closed
 
 
+def test_class_analysis_active_workspace_upload_is_atomic_over_symlink_leaves(
+    tmp_path,
+    monkeypatch,
+):
+    class_root = tmp_path / "class_analysis"
+    job_root = class_root / "ca_fixed"
+    images_dir = job_root / "active_workspace" / "images"
+    images_dir.mkdir(parents=True)
+    outside_tmp = tmp_path / "outside_tmp.jpg"
+    outside_final = tmp_path / "outside_final.jpg"
+    outside_tmp.write_bytes(b"external tmp")
+    outside_final.write_bytes(b"external final")
+    target = images_dir / "present.jpg"
+    tmp_leaf = images_dir / "present.jpg.fixed.tmp"
+    try:
+        target.symlink_to(outside_final)
+        tmp_leaf.symlink_to(outside_tmp)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    image_buffer = BytesIO()
+    Image.new("RGB", (8, 8), (12, 24, 36)).save(image_buffer, format="JPEG")
+    image_bytes = image_buffer.getvalue()
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: types.SimpleNamespace(hex="fixed"))
+    captured = {}
+
+    def fake_enqueue(payload, *, job_id=None):
+        captured["payload"] = payload
+        return {"job_id": job_id}
+
+    monkeypatch.setattr(api, "_enqueue_class_analysis_job", fake_enqueue)
+    manifest = {
+        "labelmap": ["car"],
+        "images": [
+            {
+                "upload_name": "present.jpg",
+                "label_lines": ["0 0.5 0.5 0.2 0.2"],
+            }
+        ],
+    }
+    upload = UploadFile(filename="present.jpg", file=BytesIO(image_bytes))
+
+    result = asyncio.run(
+        api.create_class_analysis_active_workspace_job(json.dumps(manifest), [upload])
+    )
+
+    assert result == {"job_id": "ca_fixed"}
+    assert captured["payload"]["workspace_id"] == "ca_fixed"
+    assert outside_tmp.read_bytes() == b"external tmp"
+    assert outside_final.read_bytes() == b"external final"
+    assert not target.is_symlink()
+    assert target.read_bytes() == image_bytes
+    assert not tmp_leaf.exists()
+    assert upload.file.closed
+
+
 def test_class_analysis_prepare_write_path_rejects_symlinked_parent_without_write(tmp_path):
     root = tmp_path / "class_analysis"
     root.mkdir()

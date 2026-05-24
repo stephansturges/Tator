@@ -786,3 +786,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1109 passed, 17 skipped`; focused class-analysis coverage,
   `localinferenceapi.py` compile, the full pytest suite, and live endpoint
   sanity checks passed against the restarted backend.
+
+## 2026-05-24: Class Analysis Active Workspace Upload Atomic Saves
+
+- Changed active Class Split Explorer workspace image uploads from direct final
+  writes to temp-file streaming followed by atomic replace.
+- Preserved upload size/quota handling and cleanup-on-bad-manifest behavior while
+  replacing temp/final symlink leaves instead of writing through them.
+- Added a regression covering active workspace upload temp/final symlink leaves,
+  plus existing oversize and cleanup regressions.
+- Validation: `1110 passed, 17 skipped`; focused active-workspace upload coverage,
+  `localinferenceapi.py` compile, the full pytest suite, and live endpoint
+  sanity checks passed against the restarted backend.

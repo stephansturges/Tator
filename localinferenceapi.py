@@ -18973,9 +18973,21 @@ async def create_class_analysis_active_workspace_job(manifest_json: str, files: 
             target_path = _class_analysis_prepare_write_path(target, workspace_dir)
             if target_path is None:
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_path_invalid")
+            tmp_target_path = _class_analysis_prepare_write_path(
+                target_path.with_suffix(f"{target_path.suffix}.{uuid.uuid4().hex}.tmp"),
+                workspace_dir,
+            )
+            if tmp_target_path is None:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_path_invalid")
             size = 0
+            fd: Optional[int] = None
             try:
-                with target_path.open("wb") as handle:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                fd = os.open(tmp_target_path, flags, 0o644)
+                with os.fdopen(fd, "wb") as handle:
+                    fd = None
                     while True:
                         chunk = await upload.read(1024 * 1024)
                         if not chunk:
@@ -18996,18 +19008,22 @@ async def create_class_analysis_active_workspace_job(manifest_json: str, files: 
                                 detail="active_workspace_upload_quota_exceeded",
                             )
                         handle.write(chunk)
+                if size <= 0:
+                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_empty_upload")
+                os.replace(tmp_target_path, target_path)
             finally:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                if tmp_target_path.exists() or tmp_target_path.is_symlink():
+                    tmp_target_path.unlink(missing_ok=True)
                 close_fn = getattr(upload, "close", None)
                 if callable(close_fn):
                     close_result = close_fn()
                     if hasattr(close_result, "__await__"):
                         await close_result
-            if size <= 0:
-                try:
-                    target_path.unlink()
-                except OSError:
-                    pass
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_empty_upload")
             saved_uploads[original_name] = safe_name
             saved_uploads[safe_name] = safe_name
 

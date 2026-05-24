@@ -10,7 +10,7 @@ mutate, move, or remove user data to the backend guard and regression coverage.
 | Upload YOLO zip | Creates a backend-owned dataset copy under `uploads/datasets` | Zip traversal/symlink/size checks, guarded registry child path, strict metadata write, rollback on metadata failure | `tests/test_dataset_zip_upload_security.py` |
 | Upload current labeling session | Packages browser images/labels, then uses the same upload endpoint | UI geometry/labelmap validation, upload endpoint guards | `tests/ui/e2e/test_dataset_ingestion_safety_flows.py`, upload security tests |
 | Register server path | Creates a linked registry record only | Link-root allowlist, strict YOLO shape/labelmap validation, guarded registry path, guarded rollback on metadata failure | `tests/test_dataset_linked_annotation_flows.py` |
-| Open transient server path | Creates in-memory transient session only | Link-root allowlist, strict YOLO shape/labelmap validation, TTL expiry | `tests/test_dataset_linked_annotation_flows.py`, UI E2E |
+| Open transient server path | Creates in-memory transient session only | Link-root allowlist, strict YOLO shape/labelmap validation, TTL expiry, source label/text reads stay root-contained and ignore symlink escapes | `tests/test_dataset_linked_annotation_flows.py`, UI E2E |
 | List linked datasets | Reads linked source metadata and registry overlays | Linked roots are rechecked against `DATASET_LINK_ROOTS`; non-allowlisted roots are marked unavailable and not inspected. No read-time source conversion or metadata backfill writes for linked roots; registry metadata remains the mutable overlay | `tests/test_dataset_linked_root_status.py` |
 | Save transient to library | Persists linked registry metadata plus overlay labels/text | Guarded registry path, registry-only labelmap overlay, strict metadata write, guarded rollback on failure | `tests/test_dataset_linked_annotation_flows.py` |
 | Delete linked dataset | Removes linked registry record and overlays only | Source root is never passed to delete helper; active annotation/job guards block delete | `tests/test_dataset_linked_annotation_flows.py` |
@@ -28,7 +28,7 @@ mutate, move, or remove user data to the backend guard and regression coverage.
 | Build reference profile | Creates job staging data and a local reference-profile head | Guarded job root, upload size/quota checks, backend-reference source validation, guarded startup cleanup, strict local-head path checks, final cancellation check before head write | `tests/test_data_ingestion.py` |
 | Analyze candidates | Creates job staging data, result JSON, embeddings cache | Guarded job root, candidate/reference gating, matching reference-profile validation, guarded startup cleanup, guarded result reads, final cancellation check before result write | `tests/test_data_ingestion.py`, UI E2E |
 | Backend reference dataset use | Reads existing dataset images | Dataset id resolution, path containment inside selected dataset root, active-job delete blocking by dataset id | `tests/test_data_ingestion.py`, `tests/test_dataset_linked_annotation_flows.py` |
-| Cancel job | Mutates in-memory job state | Terminal jobs are not cancellable; active jobs move through `cancelling` | `tests/test_data_ingestion.py` and endpoint sanity |
+| Cancel job | Mutates in-memory job state | Terminal jobs are not cancellable; active jobs move through `cancelling`; UI checks cancel response and blocks duplicate cancel clicks | `tests/test_data_ingestion.py` and endpoint sanity |
 
 ## Current Invariant
 
@@ -71,3 +71,8 @@ dataset-derived artifacts. CLIP classifier, Qwen, YOLOv8, and RF-DETR workers
 re-check cancellation after trainer return and before durable publication, so a
 cancelled job cannot publish new model metadata or success payloads after the
 user has asked it to stop.
+
+Transient linked-dataset manifests now use the same guarded source-label read
+path as persisted linked annotation manifests. A symlinked `labels/*.txt` source
+file that resolves outside the allowlisted dataset root is ignored instead of
+being followed into external content.

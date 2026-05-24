@@ -70,6 +70,14 @@ def _path_has_symlink_component(path: Path, root: Path) -> bool:
     return False
 
 
+def _path_has_alias_component(path: Path, root: Path) -> bool:
+    try:
+        rel_path = path.relative_to(root)
+    except Exception:
+        return True
+    return any(part in {"", ".", ".."} for part in rel_path.parts)
+
+
 def _resolve_agent_clip_classifier_path_impl(
     path_str: Optional[str],
     *,
@@ -99,7 +107,7 @@ def _resolve_agent_clip_classifier_path_impl(
         if candidate_alt is None or not path_is_within_root_fn(candidate_alt, root):
             raise http_exception_cls(status_code=400, detail="agent_clip_classifier_path_not_allowed")
         candidate = candidate_alt
-    if _path_has_symlink_component(candidate_raw, root):
+    if _path_has_alias_component(candidate_raw, root) or _path_has_symlink_component(candidate_raw, root):
         raise http_exception_cls(status_code=400, detail="agent_clip_classifier_path_not_allowed")
     if candidate.suffix.lower() not in allowed_exts:
         raise http_exception_cls(status_code=400, detail="agent_clip_classifier_ext_not_allowed")
@@ -670,8 +678,9 @@ def _resolve_clip_labelmap_path_impl(
         roots = [root for root in [labelmaps_root, classifiers_root] if root is not None]
     for root in roots:
         try:
-            raw_candidate = root / raw
-            if _path_has_symlink_component(raw_candidate, root):
+            raw_path = Path(raw)
+            raw_candidate = raw_path if raw_path.is_absolute() else root / raw_path
+            if _path_has_alias_component(raw_candidate, root) or _path_has_symlink_component(raw_candidate, root):
                 continue
             candidate = raw_candidate.resolve(strict=False)
         except Exception:

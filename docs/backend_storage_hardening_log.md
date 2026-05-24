@@ -1722,3 +1722,35 @@ preserving the exact validation story for storage and artifact-write fixes.
   `/data_ingestion/capabilities` reads, plus live malformed Agent Mining recipe
   and cascade lookups returning `400 agent_recipe_path_invalid` and
   `400 agent_cascade_path_invalid`.
+
+## 2026-05-24: Dataset/Ingestion Transient Safety Recheck and CLIP Artifact Alias Hardening
+
+- Re-ran the Dataset Management and Data Ingestion data-loss audit across UI
+  actions and backend mutation paths: upload/register/open/save/delete/restore,
+  annotation snapshot/meta save, linked export, profile build, candidate
+  analysis, backend reference reads, and cancel.
+- Found one transient linked-dataset read gap: `open_path` annotation manifests
+  followed source `labels/*.txt` directly, while persisted linked manifests used
+  guarded root-contained reads. Transient manifests now use the same guarded
+  reader, so a symlinked source label that resolves outside the allowlisted
+  dataset root is ignored instead of being exposed in the UI.
+- Tightened Data Ingestion cancel UX so the Cancel button checks non-OK backend
+  responses and disables repeat clicks while cancellation is being posted.
+- Continued artifact-lifecycle hardening for CLIP classifiers and labelmaps.
+  Deletion/path resolution now rejects path-alias components like
+  `alias_parent/../target.pkl` before resolving to a real file, preventing
+  malformed relative paths from touching an existing artifact.
+- Added regressions for transient source-label symlink escapes and CLIP
+  classifier/labelmap path-alias deletes while preserving plain nested relative
+  artifact paths.
+- Validation: `py_compile localinferenceapi.py services/classifier.py
+  tests/test_dataset_linked_annotation_flows.py tests/test_clip_registry_downloads.py`,
+  focused transient/CLIP regressions (`4 passed`), the dataset/data-ingestion
+  safety bundle (`215 passed`), and the full pytest suite (`1243 passed, 20
+  skipped`) passed. With `RUN_UI_E2E=1`, the live Dataset Management/Data
+  Ingestion UI smoke tests (`2 passed`) and dataset annotation UI tests (`8
+  passed`) also passed against the restarted backend and local UI server. The
+  restarted backend passed `tools/check_ui_endpoints.py` with no missing paths or
+  method mismatches, endpoint map check (`missing=[]`), endpoint method check
+  (`failures=[]`), OpenAPI sanity (`tested=144`, `failures=[]`), and live
+  `/datasets`, `/datasets/trash`, and `/data_ingestion/capabilities` reads.

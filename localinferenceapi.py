@@ -17809,13 +17809,10 @@ def get_transient_annotation_manifest(session_id: str):
             lines = [str(x).strip() for x in (overlay_labels.get(key) or []) if str(x).strip()]
         else:
             source_path = _annotation_source_label_path(dataset_root, yolo_layout, split, rel)
+            source_text = _annotation_read_text_within_root(source_path, dataset_root)
             lines = (
-                [
-                    ln.strip()
-                    for ln in source_path.read_text(encoding="utf-8").splitlines()
-                    if ln.strip()
-                ]
-                if source_path.exists()
+                [ln.strip() for ln in source_text.splitlines() if ln.strip()]
+                if source_text is not None
                 else []
             )
         if key in overlay_text:

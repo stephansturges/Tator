@@ -270,6 +270,44 @@ def test_delete_clip_classifier_rejects_symlink_alias_without_target_unlink(
     assert alias.is_symlink()
 
 
+def test_delete_clip_classifier_rejects_path_alias_without_target_unlink(
+    tmp_path, monkeypatch
+) -> None:
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    alias_parent = classifiers_root / "alias_parent"
+    alias_parent.mkdir(parents=True)
+    target = classifiers_root / "target.pkl"
+    target.write_bytes(b"model")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", upload_root)
+
+    with pytest.raises(HTTPException) as exc_info:
+        localinferenceapi.delete_clip_classifier(rel_path="alias_parent/../target.pkl")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_clip_classifier_path_not_allowed"
+    assert target.read_bytes() == b"model"
+
+
+def test_resolve_clip_classifier_allows_plain_nested_relative_path(tmp_path) -> None:
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    nested = classifiers_root / "nested"
+    nested.mkdir(parents=True)
+    target = nested / "target.pkl"
+    target.write_bytes(b"model")
+
+    resolved = localinferenceapi._resolve_agent_clip_classifier_path_impl(
+        "nested/target.pkl",
+        allowed_root=classifiers_root,
+        allowed_exts=localinferenceapi.CLASSIFIER_ALLOWED_EXTS,
+        path_is_within_root_fn=localinferenceapi._path_is_within_root_impl,
+        http_exception_cls=HTTPException,
+    )
+
+    assert resolved == target.resolve()
+
+
 def test_rename_clip_classifier_moves_file_meta_and_active_state(tmp_path, monkeypatch) -> None:
     upload_root = tmp_path / "uploads"
     classifiers_root = upload_root / "classifiers"
@@ -567,6 +605,47 @@ def test_delete_clip_labelmap_rejects_symlink_alias_without_target_unlink(
     assert exc_info.value.detail == "labelmap_not_found"
     assert target.read_text(encoding="utf-8") == "car\n"
     assert alias.is_symlink()
+
+
+def test_delete_clip_labelmap_rejects_path_alias_without_target_unlink(
+    tmp_path, monkeypatch
+) -> None:
+    upload_root = tmp_path / "uploads"
+    labelmaps_root = upload_root / "labelmaps"
+    alias_parent = labelmaps_root / "alias_parent"
+    alias_parent.mkdir(parents=True)
+    target = labelmaps_root / "target.txt"
+    target.write_text("car\n", encoding="utf-8")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", upload_root)
+
+    with pytest.raises(HTTPException) as exc_info:
+        localinferenceapi.delete_clip_labelmap(
+            rel_path="alias_parent/../target.txt",
+            root="labelmaps",
+        )
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "labelmap_not_found"
+    assert target.read_text(encoding="utf-8") == "car\n"
+
+
+def test_resolve_clip_labelmap_allows_plain_nested_relative_path(tmp_path) -> None:
+    upload_root = tmp_path / "uploads"
+    labelmaps_root = upload_root / "labelmaps"
+    nested = labelmaps_root / "nested"
+    nested.mkdir(parents=True)
+    target = nested / "target.txt"
+    target.write_text("car\n", encoding="utf-8")
+
+    resolved = localinferenceapi._resolve_clip_labelmap_path_impl(
+        "nested/target.txt",
+        root_hint="labelmaps",
+        upload_root=upload_root,
+        labelmap_exts=localinferenceapi.LABELMAP_ALLOWED_EXTS,
+        path_is_within_root_fn=localinferenceapi._path_is_within_root_impl,
+    )
+
+    assert resolved == target.resolve()
 
 
 def test_delete_active_clip_labelmap_clears_active_label_state(tmp_path, monkeypatch) -> None:

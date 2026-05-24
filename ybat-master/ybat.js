@@ -2414,6 +2414,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         datasets: [],
         activeJobId: "",
         active: false,
+        cancelInFlight: false,
         pollTimer: null,
         pollRequestId: 0,
         preferredSaladHeadId: "",
@@ -35891,7 +35892,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const canUseReference = hasBackendReference && hasActiveReference;
         setButtonDisabled(dataIngestionElements.analyzeButton, dataIngestionState.active || candidateCount <= 0 || !headMatchesReference || !canUseReference);
         setButtonDisabled(dataIngestionElements.buildProfileButton, dataIngestionState.active || !hasTrainingReference);
-        setButtonDisabled(dataIngestionElements.cancelButton, !dataIngestionState.active || !dataIngestionState.activeJobId);
+        setButtonDisabled(dataIngestionElements.cancelButton, !dataIngestionState.active || !dataIngestionState.activeJobId || dataIngestionState.cancelInFlight);
         [
             dataIngestionElements.files,
             dataIngestionElements.referenceActive,
@@ -36202,12 +36203,21 @@ async function cancelRfDetrTrainingJobRequest() {
 
     async function cancelDataIngestionJob() {
         const jobId = dataIngestionState.activeJobId;
-        if (!jobId) return;
+        if (!jobId || dataIngestionState.cancelInFlight) return;
+        dataIngestionState.cancelInFlight = true;
+        refreshDataIngestionControls();
         try {
-            await fetch(`${API_ROOT}/data_ingestion/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
+            const resp = await fetch(`${API_ROOT}/data_ingestion/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
             setDataIngestionStatus("Cancellation requested ...", "warn");
         } catch (error) {
             setDataIngestionStatus(`Cancel failed: ${error.message || error}`, "error");
+        } finally {
+            dataIngestionState.cancelInFlight = false;
+            refreshDataIngestionControls();
         }
     }
 

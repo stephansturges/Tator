@@ -1638,6 +1638,33 @@ def test_annotation_manifest_ignores_overlay_and_source_symlink_escapes(
     assert manifest["images"][0]["text_label"] == ""
 
 
+def test_transient_annotation_manifest_ignores_source_label_symlink_escape(
+    tmp_path, monkeypatch
+) -> None:
+    dataset_root = tmp_path / "dataset"
+    (dataset_root / "images").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "labels").mkdir(parents=True, exist_ok=True)
+    _write_test_image(dataset_root / "images" / "img.jpg")
+    (dataset_root / "labelmap.txt").write_text("car\n", encoding="utf-8")
+    outside_label = tmp_path / "outside_label.txt"
+    outside_label.write_text("0 0.9 0.9 0.1 0.1\n", encoding="utf-8")
+    try:
+        (dataset_root / "labels" / "img.txt").symlink_to(outside_label)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATASET_LINK_ROOTS", [tmp_path.resolve()])
+
+    opened = api.open_dataset_path(str(dataset_root), strict=True)
+    session_id = opened["session_id"]
+    try:
+        manifest = api.get_transient_annotation_manifest(session_id)
+    finally:
+        with api.DATASET_TRANSIENT_LOCK:
+            api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
+
+    assert manifest["images"][0]["label_lines"] == []
+
+
 def test_resolve_annotation_image_path_rejects_symlink_escape(tmp_path) -> None:
     dataset_root = tmp_path / "dataset"
     images_root = dataset_root / "images"

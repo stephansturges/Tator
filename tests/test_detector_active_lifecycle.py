@@ -10,6 +10,8 @@ import pytest
 
 import localinferenceapi as api
 from services.detectors import (
+    _collect_rfdetr_artifacts_impl,
+    _collect_yolo_artifacts_impl,
     _copy_tree_within_root,
     _list_rfdetr_runs_impl,
     _list_yolo_runs_impl,
@@ -19,6 +21,7 @@ from services.detectors import (
     _rfdetr_run_dir_impl,
     _rfdetr_best_checkpoint_impl,
     _rfdetr_prepare_dataset_impl,
+    _yolo_load_run_labelmap_impl,
     _yolo_load_run_meta_impl,
     _yolo_prune_run_dir_impl,
     _yolo_run_dir_impl,
@@ -376,6 +379,82 @@ def test_rfdetr_prepare_dataset_copy_fallback_skips_symlink_escape(
 
     assert (prepared / "train" / "safe.jpg").read_text(encoding="utf-8") == "safe"
     assert not (prepared / "train" / "escape.jpg").exists()
+
+
+def test_rfdetr_prepare_dataset_rejects_split_symlink_escape(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset"
+    outside = tmp_path / "outside_train"
+    outside.mkdir(parents=True)
+    (outside / "_annotations.coco.json").write_text(
+        '{"images":[],"annotations":[],"categories":[]}', encoding="utf-8"
+    )
+    dataset_root.mkdir()
+    try:
+        (dataset_root / "train").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(RuntimeError, match="rfdetr_dataset_path_invalid"):
+        _rfdetr_prepare_dataset_impl(
+            dataset_root,
+            tmp_path / "run",
+            str(outside / "_annotations.coco.json"),
+            str(outside / "_annotations.coco.json"),
+            remap_ids_fn=lambda _src, _dest: None,
+        )
+
+
+def test_yolo_artifact_collection_ignores_symlink_escape(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    outside = tmp_path / "outside_best.pt"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (run_dir / "best.pt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    (run_dir / "metrics.json").write_text("{}", encoding="utf-8")
+
+    artifacts = _collect_yolo_artifacts_impl(run_dir, meta_name="run.json")
+
+    assert artifacts["best_pt"] is False
+    assert artifacts["metrics_json"] is True
+
+
+def test_rfdetr_artifact_collection_ignores_symlink_escape(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    outside = tmp_path / "outside_checkpoint.pth"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (run_dir / "checkpoint_best_total.pth").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    (run_dir / "results.json").write_text("{}", encoding="utf-8")
+
+    artifacts = _collect_rfdetr_artifacts_impl(run_dir, meta_name="run.json")
+
+    assert artifacts["best_total"] is False
+    assert artifacts["results_json"] is True
+
+
+def test_yolo_run_labelmap_ignores_symlinked_data_yaml_escape(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    outside = tmp_path / "outside_data.yaml"
+    outside.write_text("names: [escaped]\n", encoding="utf-8")
+    try:
+        (run_dir / "data.yaml").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    labels = _yolo_load_run_labelmap_impl(
+        run_dir,
+        yolo_load_labelmap_fn=lambda _path: [],
+        yaml_load_fn=lambda text: {"names": ["escaped"]} if text else {},
+    )
+
+    assert labels == []
 
 
 def test_detector_copy_tree_replaces_symlinked_dest_root_without_target_write(

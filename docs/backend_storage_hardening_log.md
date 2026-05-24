@@ -342,3 +342,21 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Added regressions for escaped annotation files and symlinked image roots.
 - Validation: `1038 passed, 17 skipped`; focused Qwen training/path coverage
   passed.
+
+## 2026-05-24: Detector Training Artifact and Split Guards
+
+- Moved README demo placeholders and the workflow/API table into closed
+  details blocks, added a first-layer quick start, and kept update tracking to
+  the latest validation count plus this log link.
+- Required YOLO and RF-DETR run-artifact status checks to count only regular
+  files inside the run directory, so symlinked best weights/checkpoints cannot
+  make a run appear complete.
+- Rejected symlinked YOLO head-graft base `best.pt` files during dry-run
+  preflight before dataset resolution starts.
+- Rejected RF-DETR dataset split directories that resolve outside the selected
+  dataset root before creating run-local split links.
+- Added regressions for detector artifact symlink escapes, symlinked YOLO
+  `data.yaml` labelmap fallback, YOLO head-graft base symlink escapes, and
+  RF-DETR split symlink escapes.
+- Validation: `1043 passed, 17 skipped`; focused detector lifecycle/head-graft
+  coverage, the full pytest suite, and live endpoint sanity checks passed.

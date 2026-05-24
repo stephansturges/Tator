@@ -123,6 +123,19 @@ def _active_regular_file(path_value: Any) -> Optional[Path]:
     return path
 
 
+def _regular_file_within_root(path: Path, root: Path) -> bool:
+    if path.is_symlink():
+        return False
+    try:
+        resolved_root = root.resolve(strict=False)
+        resolved_path = path.resolve(strict=True)
+    except Exception:
+        return False
+    if not _path_is_within_root_impl(resolved_path, resolved_root):
+        return False
+    return resolved_path.is_file()
+
+
 def _active_payload_has_valid_files(payload: Dict[str, Any]) -> bool:
     best_path = _active_regular_file(payload.get("best_path"))
     if best_path is None:
@@ -1249,7 +1262,7 @@ def _yolo_load_run_labelmap_impl(
     if labels:
         return labels
     data_yaml = run_dir / "data.yaml"
-    if data_yaml.exists():
+    if _regular_file_within_root(data_yaml, run_dir):
         try:
             payload = yaml_load_fn(data_yaml.read_text())
             names = payload.get("names") if isinstance(payload, dict) else None
@@ -1333,6 +1346,7 @@ def _rfdetr_prepare_dataset_impl(
     """Prepare a RF-DETR-compatible dataset layout with 0-based category ids."""
     dataset_dir = run_dir / "dataset"
     _prepare_detector_dir(dataset_dir)
+    dataset_root_resolved = dataset_root.resolve(strict=True)
     train_src = dataset_root / "train"
     valid_src = dataset_root / "valid"
     val_src = dataset_root / "val"
@@ -1347,7 +1361,9 @@ def _rfdetr_prepare_dataset_impl(
 
     def _link_split(name: str, source: Path) -> None:
         dest = dataset_dir / name
-        source_resolved = source.resolve()
+        source_resolved = source.resolve(strict=True)
+        if not _path_is_within_root_impl(source_resolved, dataset_root_resolved):
+            raise RuntimeError("rfdetr_dataset_path_invalid")
         if source_resolved == _path_identity(dest):
             return
         _unlink_self_referential_symlink(dest)
@@ -1596,27 +1612,31 @@ def _rfdetr_ddp_worker_impl(
 
 def _collect_yolo_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:
     return {
-        "best_pt": (run_dir / "best.pt").exists(),
-        "metrics_json": (run_dir / "metrics.json").exists(),
-        "metrics_series": (run_dir / "metrics_series.json").exists(),
-        "results_csv": (run_dir / "results.csv").exists(),
-        "args_yaml": (run_dir / "args.yaml").exists(),
-        "labelmap": (run_dir / "labelmap.txt").exists(),
-        "run_meta": (run_dir / meta_name).exists(),
+        "best_pt": _regular_file_within_root(run_dir / "best.pt", run_dir),
+        "metrics_json": _regular_file_within_root(run_dir / "metrics.json", run_dir),
+        "metrics_series": _regular_file_within_root(run_dir / "metrics_series.json", run_dir),
+        "results_csv": _regular_file_within_root(run_dir / "results.csv", run_dir),
+        "args_yaml": _regular_file_within_root(run_dir / "args.yaml", run_dir),
+        "labelmap": _regular_file_within_root(run_dir / "labelmap.txt", run_dir),
+        "run_meta": _regular_file_within_root(run_dir / meta_name, run_dir),
     }
 
 
 def _collect_rfdetr_artifacts_impl(run_dir: Path, *, meta_name: str) -> Dict[str, bool]:
     return {
-        "best_regular": (run_dir / "checkpoint_best_regular.pth").exists(),
-        "best_ema": (run_dir / "checkpoint_best_ema.pth").exists(),
-        "best_total": (run_dir / "checkpoint_best_total.pth").exists(),
-        "best_optimized": (run_dir / "checkpoint_best_optimized.pt").exists(),
-        "results_json": (run_dir / "results.json").exists(),
-        "metrics_series": (run_dir / "metrics_series.json").exists(),
-        "log_txt": (run_dir / "log.txt").exists(),
-        "labelmap": (run_dir / "labelmap.txt").exists(),
-        "run_meta": (run_dir / meta_name).exists(),
+        "best_regular": _regular_file_within_root(
+            run_dir / "checkpoint_best_regular.pth", run_dir
+        ),
+        "best_ema": _regular_file_within_root(run_dir / "checkpoint_best_ema.pth", run_dir),
+        "best_total": _regular_file_within_root(run_dir / "checkpoint_best_total.pth", run_dir),
+        "best_optimized": _regular_file_within_root(
+            run_dir / "checkpoint_best_optimized.pt", run_dir
+        ),
+        "results_json": _regular_file_within_root(run_dir / "results.json", run_dir),
+        "metrics_series": _regular_file_within_root(run_dir / "metrics_series.json", run_dir),
+        "log_txt": _regular_file_within_root(run_dir / "log.txt", run_dir),
+        "labelmap": _regular_file_within_root(run_dir / "labelmap.txt", run_dir),
+        "run_meta": _regular_file_within_root(run_dir / meta_name, run_dir),
     }
 
 

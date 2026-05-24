@@ -71,6 +71,40 @@ def test_yolo_head_graft_dry_run_reports_missing_best(tmp_path: Path, monkeypatc
     assert out["base_best_exists"] is False
 
 
+def test_yolo_head_graft_dry_run_rejects_symlinked_best_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_dir = tmp_path / "base_run"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside_best.pt"
+    outside.write_text("secret", encoding="utf-8")
+    try:
+        (base_dir / "best.pt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "_yolo_run_dir_impl", lambda *_args, **_kwargs: base_dir)
+    monkeypatch.setattr(
+        api,
+        "_yolo_load_run_meta_impl",
+        lambda *_args, **_kwargs: {"config": {"task": "detect", "variant": "yolov8n"}},
+    )
+    monkeypatch.setattr(
+        api,
+        "_resolve_yolo_training_dataset",
+        lambda _payload: (_ for _ in ()).throw(
+            AssertionError("dataset resolution should not run")
+        ),
+    )
+
+    payload = api.YoloHeadGraftDryRunRequest(base_run_id="base_run", dataset_root=str(tmp_path))
+    out = api.yolo_head_graft_dry_run(payload)
+
+    assert out["ok"] is False
+    assert out["error"] == "yolo_base_missing_best"
+    assert out["base_best_exists"] is False
+
+
 def test_yolo_head_graft_dry_run_reports_missing_variant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

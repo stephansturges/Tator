@@ -11,7 +11,20 @@ tools, detector passes, Qwen captions, dataset glossaries, recipe mining, and
 calibrated prelabeling so extending a dataset can become mostly review and
 correction work instead of first-draft annotation.
 
-## What Tator Looks Like In Use
+## Quick Start
+
+```bash
+poetry install --only-root
+poetry run tator-setup macos   # or: poetry run tator-setup linux
+cp .env.macos.example .env.macos
+tools/run_macos_backend.sh
+```
+
+Open `ybat-master/ybat.html` in a browser. The UI defaults to
+`http://localhost:8000`.
+
+<details>
+<summary>Workflow demos to add</summary>
 
 Tator lets you use SAM to refine bounding boxes. Draw a rough box, run SAM, and
 turn the rough annotation into a tighter object outline before accepting it.
@@ -49,6 +62,8 @@ loop instead of living in separate scripts.
 
 [Place GIF of model training and active-model selection here]
 
+</details>
+
 ## What Tator Helps With
 
 - Start a dataset from raw images with a browser labeling UI.
@@ -66,7 +81,8 @@ Tator is not meant to remove review. It is meant to automate the repetitive
 object discovery, and first-pass dataset extension. The human stays responsible
 for the final labels.
 
-## Main Workflows
+<details>
+<summary>Workflow/API map</summary>
 
 | Workflow | UI area | Backend/API surface | Primary code |
 |---|---|---|---|
@@ -80,6 +96,8 @@ for the final labels.
 | SAM3 vocabulary and recipes | SAM3 Vocabulary Explorer, SAM3 Recipe Mining | `/sam3/prompt_helper/*`, `/agent_mining/*`, `/prepass/recipes/*` | `services/prompt_helper*.py`, `services/agent_cascades.py`, `services/prepass_recipes.py` |
 | EDR prelabeling and calibration | EDR Builder, Label Images | `/qwen/prepass`, `/calibration/jobs/*`, `/edr/packages/*`, `/auto_label/jobs/*` | `services/prepass*.py`, `services/calibration*.py`, `services/edr_packages.py`, `services/auto_labeling.py` |
 | Runtime and system controls | Backend Config, SAM Predictors | `/system/*`, `/runtime/unload`, `/predictor_settings`, `/sam_slots`, `/sam_preload` | `api/system.py`, `services/runtime_unload.py`, `localinferenceapi.py` |
+
+</details>
 
 ## Repository Map
 
@@ -568,9 +586,11 @@ Broader suites are organized by feature area under `tests/`. UI tests live in
 the backend are available.
 
 <details>
-<summary>Update Tracking</summary>
+<summary>Update Tracking (latest validation)</summary>
 
-Latest: `1038 passed, 17 skipped`. Details: [maintenance log](docs/backend_storage_hardening_log.md).
+Latest local validation: `1043 passed, 17 skipped`.
+
+Full maintenance notes: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

@@ -31567,7 +31567,9 @@ def yolo_head_graft_dry_run(payload: YoloHeadGraftDryRunRequest):
     base_cfg = base_meta.get("config") or {}
     base_task = str(base_cfg.get("task") or "detect").lower()
     base_variant = base_cfg.get("variant")
-    base_best_exists = (base_run_dir / "best.pt").exists()
+    base_best_exists = _safe_regular_file_within_root(
+        base_run_dir / "best.pt", base_run_dir
+    )
     if not base_best_exists:
         return {
             "ok": False,

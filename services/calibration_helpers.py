@@ -194,7 +194,22 @@ def _calibration_safe_link(src: Path, dest: Path) -> None:
                 return
             if _path_has_symlink_component(dest.parent):
                 return
-            shutil.copy2(src, dest)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if _path_has_symlink_component(dest.parent):
+                return
+            tmp_path = dest.with_suffix(dest.suffix + f".tmp.{os.getpid()}")
+            if tmp_path.is_symlink():
+                tmp_path.unlink(missing_ok=True)
+            elif tmp_path.exists():
+                if tmp_path.is_dir():
+                    return
+                tmp_path.unlink()
+            try:
+                shutil.copy2(src, tmp_path)
+                os.replace(tmp_path, dest)
+            finally:
+                if tmp_path.exists() or tmp_path.is_symlink():
+                    tmp_path.unlink(missing_ok=True)
         except Exception:
             pass
 

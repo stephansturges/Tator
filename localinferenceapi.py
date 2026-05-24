@@ -15633,20 +15633,29 @@ def _link_or_copy_file(src: Path, dest: Path, *, overwrite: bool = False) -> Non
     dest.parent.mkdir(parents=True, exist_ok=True)
     if _storage_path_has_symlink_component(dest.parent):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
-    if src_resolved == _path_identity(dest):
+    if not dest.is_symlink() and src_resolved == _path_identity(dest):
         return
     if dest.exists() or dest.is_symlink():
         if not overwrite:
             return
         if dest.is_dir():
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
-        dest.unlink(missing_ok=True)
+    tmp_path = dest.with_suffix(dest.suffix + f".tmp.{os.getpid()}")
+    if tmp_path.is_symlink():
+        tmp_path.unlink(missing_ok=True)
+    elif tmp_path.exists():
+        if tmp_path.is_dir():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
+        tmp_path.unlink()
     try:
-        os.link(src_resolved, dest)
-        return
-    except Exception:
-        pass
-    shutil.copy2(src_resolved, dest)
+        try:
+            os.link(src_resolved, tmp_path)
+        except Exception:
+            shutil.copy2(src_resolved, tmp_path)
+        os.replace(tmp_path, dest)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _build_linked_dataset_metadata(

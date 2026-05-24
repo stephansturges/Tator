@@ -49,6 +49,56 @@ def test_link_or_copy_file_copies_when_hardlink_unavailable(tmp_path, monkeypatc
     assert not dest.is_symlink()
 
 
+def test_link_or_copy_file_removes_partial_temp_after_copy_failure(tmp_path, monkeypatch):
+    source = tmp_path / "source.bin"
+    dest = tmp_path / "dest.bin"
+    tmp_dest = dest.with_suffix(dest.suffix + f".tmp.{os.getpid()}")
+    source.write_bytes(b"payload")
+
+    def fail_link(*_args, **_kwargs):
+        raise OSError("hardlink unavailable")
+
+    def fail_copy2(_src, target):
+        target.write_bytes(b"partial")
+        raise OSError("simulated link fallback copy failure")
+
+    monkeypatch.setattr(api.os, "link", fail_link)
+    monkeypatch.setattr(api.shutil, "copy2", fail_copy2)
+
+    with pytest.raises(OSError, match="simulated link fallback copy failure"):
+        _link_or_copy_file(source, dest)
+
+    assert not dest.exists()
+    assert not tmp_dest.exists()
+
+
+def test_link_or_copy_file_preserves_existing_dest_after_copy_failure(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "source.bin"
+    dest = tmp_path / "dest.bin"
+    tmp_dest = dest.with_suffix(dest.suffix + f".tmp.{os.getpid()}")
+    source.write_bytes(b"payload")
+    dest.write_bytes(b"existing")
+
+    def fail_link(*_args, **_kwargs):
+        raise OSError("hardlink unavailable")
+
+    def fail_copy2(_src, target):
+        target.write_bytes(b"partial")
+        raise OSError("simulated overwrite copy failure")
+
+    monkeypatch.setattr(api.os, "link", fail_link)
+    monkeypatch.setattr(api.shutil, "copy2", fail_copy2)
+
+    with pytest.raises(OSError, match="simulated overwrite copy failure"):
+        _link_or_copy_file(source, dest, overwrite=True)
+
+    assert dest.read_bytes() == b"existing"
+    assert not tmp_dest.exists()
+
+
 def test_link_or_copy_file_rejects_nested_symlinked_parent_before_mkdir(tmp_path):
     source = tmp_path / "source.bin"
     source.write_bytes(b"payload")

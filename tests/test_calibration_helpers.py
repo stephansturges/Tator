@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -184,3 +185,28 @@ def test_calibration_safe_link_skips_nested_symlinked_parent_before_mkdir(
     _calibration_safe_link(src, linked_parent / "nested" / "cache" / "source.jpg")
 
     assert list(outside.iterdir()) == []
+
+
+def test_calibration_safe_link_removes_partial_temp_after_copy_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / "source.jpg"
+    src.write_bytes(b"image")
+    dest = tmp_path / "cache" / "source.jpg"
+    tmp_dest = dest.with_suffix(dest.suffix + f".tmp.{os.getpid()}")
+
+    def fail_symlink(*_args, **_kwargs):
+        raise OSError("symlink unavailable")
+
+    def fail_copy2(_src: Path, target: Path) -> None:
+        target.write_bytes(b"partial")
+        raise OSError("simulated calibration copy failure")
+
+    monkeypatch.setattr("services.calibration_helpers.os.symlink", fail_symlink)
+    monkeypatch.setattr("services.calibration_helpers.shutil.copy2", fail_copy2)
+
+    _calibration_safe_link(src, dest)
+
+    assert not dest.exists()
+    assert not tmp_dest.exists()

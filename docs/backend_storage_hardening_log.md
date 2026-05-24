@@ -871,3 +871,17 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1121 passed, 17 skipped`; focused copy-helper/prepass/EDR/
   canonical coverage, compile checks for changed modules, and the full pytest
   suite passed; live endpoint sanity checks passed against the restarted backend.
+
+## 2026-05-24: Link Fallback Copy Atomic Saves
+
+- Changed `_link_or_copy_file` fallback copies to create a hardlink or copied
+  temp sibling first, then atomically replace the final destination.
+- Preserved existing destinations when overwrite fallback copies fail.
+- Changed calibration cache symlink fallback copies to use temp-file copies
+  followed by atomic replace.
+- Added regressions proving link fallback and calibration fallback copy failures
+  leave no partial final artifact or temp file behind.
+- Validation: `1124 passed, 17 skipped`; focused link/copy and calibration
+  helper coverage, `localinferenceapi.py` and `services/calibration_helpers.py`
+  compile checks, the full pytest suite, and live endpoint sanity checks passed
+  against the restarted backend.

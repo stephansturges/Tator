@@ -3325,10 +3325,127 @@ def _clear_missing_active_sam3_checkpoint() -> None:
         return
     try:
         if Path(active_sam3_checkpoint).exists():
-            return
+            try:
+                _resolve_sam3_activation_checkpoint(active_sam3_checkpoint)
+            except HTTPException:
+                pass
+            else:
+                return
     except Exception:
         pass
     _set_active_sam3_model_default()
+
+
+SAM3_ACTIVATION_CHECKPOINT_EXTS = {".ckpt", ".pth", ".pt"}
+
+
+def _sam3_checkpoint_source_for_configured_path() -> str:
+    if os.environ.get("SAM3_CHECKPOINT_PATH"):
+        return "env"
+    if SAM3_CHECKPOINT_PATH:
+        return "hf_cache"
+    return "huggingface"
+
+
+def _sam3_checkpoint_suffix_allowed(*paths: Path) -> bool:
+    return any(path.suffix.lower() in SAM3_ACTIVATION_CHECKPOINT_EXTS for path in paths)
+
+
+def _sam3_activation_candidate_path(raw_path: str) -> Path:
+    candidate = Path(str(raw_path or "").strip()).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    return Path.cwd() / candidate
+
+
+def _paths_match_resolved(path: Path, other: Path) -> bool:
+    try:
+        if path == other:
+            return True
+    except Exception:
+        pass
+    try:
+        return path.resolve(strict=False) == other.resolve(strict=False)
+    except Exception:
+        return False
+
+
+def _resolve_sam3_activation_checkpoint(raw_path: str) -> Tuple[str, str, Path]:
+    candidate = _sam3_activation_candidate_path(raw_path)
+    configured_raw = str(SAM3_CHECKPOINT_PATH or "").strip()
+    if configured_raw:
+        configured = _sam3_activation_candidate_path(configured_raw)
+        if _paths_match_resolved(candidate, configured):
+            if not _sam3_checkpoint_suffix_allowed(candidate, configured):
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="sam3_checkpoint_path_invalid",
+                )
+            try:
+                resolved = configured.resolve(strict=True)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=HTTP_404_NOT_FOUND,
+                    detail="sam3_checkpoint_not_found",
+                ) from exc
+            if not resolved.is_file():
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="sam3_checkpoint_path_invalid",
+                )
+            return str(configured), _sam3_checkpoint_source_for_configured_path(), resolved
+
+    if not _sam3_checkpoint_suffix_allowed(candidate):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="sam3_checkpoint_path_invalid",
+        )
+    try:
+        raw_root = SAM3_JOB_ROOT
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("SAM3 job root is a symlink")
+        root = raw_root.resolve(strict=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="sam3_checkpoint_path_invalid",
+        ) from exc
+    try:
+        candidate_identity = candidate.resolve(strict=False)
+    except Exception:
+        candidate_identity = candidate
+    if not _path_is_within_root_impl(candidate_identity, root):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="sam3_checkpoint_path_invalid",
+        )
+    if _storage_path_has_symlink_component(candidate):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="sam3_checkpoint_path_invalid",
+        )
+    if not candidate.exists():
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail="sam3_checkpoint_not_found",
+        )
+    try:
+        resolved = candidate.resolve(strict=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail="sam3_checkpoint_not_found",
+        ) from exc
+    if (
+        not _path_is_within_root_impl(resolved, root)
+        or not resolved.is_file()
+        or resolved.parent.name != "checkpoints"
+    ):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="sam3_checkpoint_path_invalid",
+        )
+    return str(resolved), "custom", resolved
 
 
 def _resolve_sam1_devices() -> List[torch.device]:
@@ -33841,6 +33958,12 @@ def list_sam3_available_models(
     # Always expose the base/active env model if available
     # Env/base model entry (always listed)
     env_base_path = SAM3_CHECKPOINT_PATH if SAM3_CHECKPOINT_PATH else None
+    base_active = active_sam3_checkpoint is None
+    if active_sam3_checkpoint and env_base_path:
+        base_active = _paths_match_resolved(
+            _sam3_activation_candidate_path(active_sam3_checkpoint),
+            _sam3_activation_candidate_path(env_base_path),
+        )
     models.append(
         {
             "id": "Base SAM3",
@@ -33849,14 +33972,14 @@ def list_sam3_available_models(
             "path": env_base_path,
             "size_bytes": None,
             "promoted": False,
-            "active": active_sam3_checkpoint in {None, env_base_path},
+            "active": base_active,
             "variant": "sam3",
             "run_path": None,
             "source": "env",
         }
     )
     # Current active model entry (if different from env/base)
-    if active_sam3_checkpoint and active_sam3_checkpoint != env_base_path:
+    if active_sam3_checkpoint and not base_active:
         models.append(
             {
                 "id": active_sam3_metadata.get("label")
@@ -33909,11 +34032,7 @@ def activate_sam3_model(payload: Sam3ModelActivateRequest):
     source = "huggingface"
     resolved_path: Optional[Path] = None
     if checkpoint_path:
-        resolved_path = Path(checkpoint_path).resolve()
-        if not resolved_path.exists():
-            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="sam3_checkpoint_not_found")
-        checkpoint_path = str(resolved_path)
-        source = "custom"
+        checkpoint_path, source, resolved_path = _resolve_sam3_activation_checkpoint(checkpoint_path)
     enable_seg = active_sam3_enable_segmentation if checkpoint_path is not None else True
     if payload.enable_segmentation is not None:
         enable_seg = bool(payload.enable_segmentation)

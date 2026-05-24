@@ -586,10 +586,10 @@ Broader suites are organized by feature area under `tests/`. UI tests live in
 the backend are available.
 
 <details>
-<summary>Update Tracking</summary>
+<summary>Maintainer checkpoint</summary>
 
-Latest checkpoint: `1139 passed, 17 skipped`.
-Full maintainer log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Latest full local suite: `1144 passed, 17 skipped`; details live in [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+
 </details>
 
 ## Runtime Artifacts

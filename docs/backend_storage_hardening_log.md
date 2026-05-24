@@ -996,3 +996,18 @@ preserving the exact validation story for storage and artifact-write fixes.
   coverage, module compile checks for the cascade importer and backend wiring,
   the full pytest suite, and live endpoint sanity checks passed against the
   restarted backend.
+
+## 2026-05-24: SAM3 Activation Path Guard
+
+- Restricted SAM3 model activation to the configured base checkpoint or regular
+  checkpoint files inside SAM3 run `checkpoints/` directories.
+- Rejected arbitrary existing checkpoint-looking files outside SAM3 storage,
+  checkpoint symlink escapes, invalid checkpoint suffixes, and stale active
+  custom checkpoints that no longer pass the activation guard.
+- Kept configured base checkpoints usable, including paths outside the SAM3 run
+  root, and made base-active detection compare resolved paths.
+- Collapsed the README maintainer checkpoint to one closed line so first-layer
+  README content stays focused on the product and getting started.
+- Validation: `1144 passed, 17 skipped`; focused SAM3 lifecycle coverage,
+  `localinferenceapi.py` compile, `git diff --check`, the full pytest suite, and
+  live endpoint sanity checks passed against the restarted backend.

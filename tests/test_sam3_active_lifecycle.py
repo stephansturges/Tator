@@ -90,6 +90,38 @@ def test_list_sam3_models_clears_missing_custom_active_checkpoint(tmp_path: Path
     assert api.active_sam3_model_id == "default"
 
 
+def test_list_sam3_models_clears_arbitrary_existing_active_checkpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outside_checkpoint = tmp_path / "outside.pt"
+    outside_checkpoint.write_text("weights", encoding="utf-8")
+
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", tmp_path / "sam3_runs")
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "sam3_runs" / "datasets")
+    monkeypatch.setattr(api, "SAM3_CHECKPOINT_PATH", None)
+    monkeypatch.setattr(api, "active_sam3_checkpoint", str(outside_checkpoint))
+    monkeypatch.setattr(api, "active_sam3_model_id", "outside_custom")
+    monkeypatch.setattr(api, "active_sam3_enable_segmentation", False)
+    monkeypatch.setattr(
+        api,
+        "active_sam3_metadata",
+        {
+            "id": "outside_custom",
+            "label": "Outside Custom",
+            "checkpoint": str(outside_checkpoint),
+            "source": "custom",
+            "enable_segmentation": False,
+        },
+    )
+
+    models = api.list_sam3_available_models()
+
+    assert models[0]["active"] is True
+    assert models[0]["key"] == "base"
+    assert api.active_sam3_checkpoint is None
+    assert api.active_sam3_model_id == "default"
+
+
 def test_list_sam3_models_skips_checkpoint_symlink_escape(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -135,6 +167,103 @@ def test_list_sam3_models_skips_symlinked_run_dir_escape(
     models = api.list_sam3_available_models()
 
     assert all(model.get("id") != "linked_run" for model in models)
+
+
+def test_activate_sam3_model_accepts_run_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    checkpoint = tmp_path / "runs" / "run_ok" / "checkpoints" / "last.ckpt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_text("weights", encoding="utf-8")
+
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(api, "SAM3_CHECKPOINT_PATH", None)
+    monkeypatch.setattr(api, "active_sam3_checkpoint", None)
+    monkeypatch.setattr(api, "active_sam3_model_id", "default")
+    monkeypatch.setattr(api, "active_sam3_enable_segmentation", True)
+    monkeypatch.setattr(api, "_reset_sam3_runtime", lambda: None)
+
+    out = api.activate_sam3_model(
+        api.Sam3ModelActivateRequest(
+            checkpoint_path=str(checkpoint),
+            label="Run OK",
+            enable_segmentation=False,
+        )
+    )
+
+    assert out["active"]["checkpoint"] == str(checkpoint.resolve())
+    assert out["active"]["source"] == "custom"
+    assert out["active"]["enable_segmentation"] is False
+    assert api.active_sam3_model_id == "Run OK"
+
+
+def test_activate_sam3_model_allows_configured_base_checkpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    configured = tmp_path / "configured_base.pt"
+    configured.write_text("weights", encoding="utf-8")
+
+    monkeypatch.setenv("SAM3_CHECKPOINT_PATH", str(configured))
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "runs" / "datasets")
+    monkeypatch.setattr(api, "SAM3_CHECKPOINT_PATH", str(configured))
+    monkeypatch.setattr(api, "active_sam3_checkpoint", None)
+    monkeypatch.setattr(api, "active_sam3_model_id", "default")
+    monkeypatch.setattr(api, "active_sam3_enable_segmentation", True)
+    monkeypatch.setattr(api, "_reset_sam3_runtime", lambda: None)
+
+    out = api.activate_sam3_model(
+        api.Sam3ModelActivateRequest(checkpoint_path=str(configured), label="Base")
+    )
+
+    assert out["active"]["checkpoint"] == str(configured)
+    assert out["active"]["source"] == "env"
+    assert api.list_sam3_available_models()[0]["active"] is True
+
+
+def test_activate_sam3_model_rejects_arbitrary_existing_checkpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outside = tmp_path / "outside.pt"
+    outside.write_text("weights", encoding="utf-8")
+    runs_root = tmp_path / "runs"
+    runs_root.mkdir()
+
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", runs_root)
+    monkeypatch.setattr(api, "SAM3_CHECKPOINT_PATH", None)
+    monkeypatch.setattr(api, "_reset_sam3_runtime", lambda: None)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.activate_sam3_model(api.Sam3ModelActivateRequest(checkpoint_path=str(outside)))
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "sam3_checkpoint_path_invalid"
+
+
+def test_activate_sam3_model_rejects_checkpoint_symlink_escape(
+    tmp_path: Path, monkeypatch
+) -> None:
+    checkpoint_dir = tmp_path / "runs" / "run_symlink" / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.pt"
+    outside.write_text("weights", encoding="utf-8")
+    try:
+        (checkpoint_dir / "last.ckpt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(api, "SAM3_CHECKPOINT_PATH", None)
+    monkeypatch.setattr(api, "active_sam3_checkpoint", None)
+    monkeypatch.setattr(api, "_reset_sam3_runtime", lambda: None)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.activate_sam3_model(
+            api.Sam3ModelActivateRequest(checkpoint_path=str(checkpoint_dir / "last.ckpt"))
+        )
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "sam3_checkpoint_path_invalid"
+    assert outside.read_text(encoding="utf-8") == "weights"
+    assert api.active_sam3_checkpoint is None
 
 
 def test_promote_sam3_run_rejects_checkpoint_symlink_escape(

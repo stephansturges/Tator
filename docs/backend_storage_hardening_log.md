@@ -655,3 +655,16 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1089 passed, 17 skipped`; focused glossary/path coverage, module
   compile checks, the full pytest suite, and live endpoint sanity checks passed
   against the restarted backend.
+
+## 2026-05-24: Text Artifact Atomic Saves
+
+- Switched dataset, prepass recipe, EDR package, and calibration recipe-registry
+  text artifact writes from direct final-path writes to guarded temp-file writes
+  followed by atomic replace.
+- Preserved existing symlink/root containment checks while ensuring labelmaps,
+  copied canonical recipe text, and package text artifacts cannot be left
+  partially written at their final paths.
+- Added regressions proving temp and final symlink leaves are replaced without
+  mutating external targets for all four text-writer families.
+- Validation: `1093 passed, 17 skipped`; focused dataset/prepass/EDR/registry
+  coverage and the full pytest suite passed.

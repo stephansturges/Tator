@@ -168,6 +168,31 @@ def test_recipe_registry_text_write_rejects_nested_symlinked_parent_before_mkdir
     assert list(outside.iterdir()) == []
 
 
+def test_recipe_registry_text_write_is_atomic_and_replaces_symlink_targets_without_target_write(
+    tmp_path: Path,
+) -> None:
+    text_path = tmp_path / "registry" / "canonical_edr.json"
+    text_path.parent.mkdir()
+    outside_tmp = tmp_path / "outside_tmp.json"
+    outside_final = tmp_path / "outside_final.json"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    tmp_link = text_path.with_suffix(text_path.suffix + f".tmp.{os.getpid()}")
+    try:
+        tmp_link.symlink_to(outside_tmp)
+        text_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _write_text_within_parent(text_path, "{}")
+
+    assert not tmp_link.exists()
+    assert not text_path.is_symlink()
+    assert text_path.read_text(encoding="utf-8") == "{}"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
+
+
 def test_register_promoted_recipe_replaces_symlinked_recipe_dir_without_target_write(
     tmp_path: Path,
 ) -> None:

@@ -92,8 +92,13 @@ def _write_json_file(path: Path, payload: Dict[str, Any]) -> Path:
 
 
 def _write_text_file(path: Path, text: str) -> Path:
-    _prepare_output_file(path)
-    path.write_text(text, encoding="utf-8")
+    tmp_path = _prepare_atomic_output_file(path)
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
     return path
 
 

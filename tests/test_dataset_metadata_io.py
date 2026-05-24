@@ -13,6 +13,7 @@ from services.datasets import (
     _persist_dataset_metadata_impl,
     _persist_sam3_dataset_metadata_impl,
     _prepare_output_file,
+    _write_text_file,
 )
 from utils.io import _load_json_metadata
 
@@ -39,6 +40,31 @@ def test_persist_dataset_metadata_replaces_symlink_targets_without_target_write(
     assert not tmp_link.exists()
     assert not meta_path.is_symlink()
     assert json.loads(meta_path.read_text(encoding="utf-8"))["id"] == "dataset"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
+
+
+def test_dataset_text_write_is_atomic_and_replaces_symlink_targets_without_target_write(
+    tmp_path: Path,
+) -> None:
+    labelmap_path = tmp_path / "dataset" / "labelmap.txt"
+    labelmap_path.parent.mkdir()
+    outside_tmp = tmp_path / "outside_tmp.txt"
+    outside_final = tmp_path / "outside_final.txt"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    tmp_link = labelmap_path.with_suffix(labelmap_path.suffix + f".tmp.{os.getpid()}")
+    try:
+        tmp_link.symlink_to(outside_tmp)
+        labelmap_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _write_text_file(labelmap_path, "person\ncar\n")
+
+    assert not tmp_link.exists()
+    assert not labelmap_path.is_symlink()
+    assert labelmap_path.read_text(encoding="utf-8") == "person\ncar\n"
     assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
     assert outside_final.read_text(encoding="utf-8") == "external final"
 

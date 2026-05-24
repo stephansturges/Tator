@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 from pathlib import Path
 from typing import Any, Dict
@@ -13,6 +14,7 @@ from services.prepass_recipes import (
     _copy_tree_filtered_impl,
     _ensure_recipe_zip_impl,
     _prepare_output_file,
+    _write_text_file,
 )
 
 
@@ -169,6 +171,31 @@ def test_prepass_prepare_output_file_rejects_nested_symlinked_parent_before_mkdi
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "prepass_recipe_path_invalid"
     assert list(outside.iterdir()) == []
+
+
+def test_prepass_text_write_is_atomic_and_replaces_symlink_targets_without_target_write(
+    tmp_path: Path,
+) -> None:
+    text_path = tmp_path / "recipes" / "labelmap.txt"
+    text_path.parent.mkdir()
+    outside_tmp = tmp_path / "outside_tmp.txt"
+    outside_final = tmp_path / "outside_final.txt"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    tmp_link = text_path.with_suffix(text_path.suffix + f".tmp.{os.getpid()}")
+    try:
+        tmp_link.symlink_to(outside_tmp)
+        text_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _write_text_file(text_path, "vehicle\n")
+
+    assert not tmp_link.exists()
+    assert not text_path.is_symlink()
+    assert text_path.read_text(encoding="utf-8") == "vehicle\n"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
 
 
 def test_prepass_copy2_if_different_replaces_symlink_to_source(tmp_path: Path) -> None:

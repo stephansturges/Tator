@@ -138,15 +138,22 @@ def _write_text_within_parent(path: Path, text: str) -> Path:
     if _path_has_symlink_component(path.parent):
         raise ValueError("recipe_registry_text_parent_symlink")
     parent_resolved = path.parent.resolve(strict=True)
-    if path.is_symlink():
-        path.unlink(missing_ok=True)
-    elif path.exists() and path.is_dir():
-        raise ValueError("recipe_registry_text_target_is_directory")
+    tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    for candidate in (tmp_path, path):
+        if candidate.is_symlink():
+            candidate.unlink(missing_ok=True)
+        elif candidate.exists() and candidate.is_dir():
+            raise ValueError("recipe_registry_text_target_is_directory")
+        try:
+            candidate.resolve(strict=False).relative_to(parent_resolved)
+        except Exception as exc:
+            raise ValueError("recipe_registry_text_path_not_allowed") from exc
     try:
-        path.resolve(strict=False).relative_to(parent_resolved)
-    except Exception as exc:
-        raise ValueError("recipe_registry_text_path_not_allowed") from exc
-    path.write_text(text, encoding="utf-8")
+        tmp_path.write_text(text, encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
     return path
 
 

@@ -21,6 +21,7 @@ from services.edr_packages import (
     _prepare_output_file,
     _stage_tree_if_needed,
     _write_json,
+    _write_text,
     edr_package_dir,
     export_edr_package,
     get_edr_package,
@@ -138,6 +139,31 @@ def test_resolve_edr_package_runtime_replaces_symlinked_labelmap_without_target_
     assert runtime["labelmap"] == ["car", "person"]
     assert not (payload_root / "labelmap.txt").is_symlink()
     assert outside.read_text(encoding="utf-8") == "external\n"
+
+
+def test_edr_text_write_is_atomic_and_replaces_symlink_targets_without_target_write(
+    tmp_path: Path,
+) -> None:
+    labelmap_path = tmp_path / "package" / "payload" / "labelmap.txt"
+    labelmap_path.parent.mkdir(parents=True)
+    outside_tmp = tmp_path / "outside_tmp.txt"
+    outside_final = tmp_path / "outside_final.txt"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    tmp_link = labelmap_path.with_suffix(labelmap_path.suffix + f".tmp.{os.getpid()}")
+    try:
+        tmp_link.symlink_to(outside_tmp)
+        labelmap_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _write_text(labelmap_path, "building\n")
+
+    assert not tmp_link.exists()
+    assert not labelmap_path.is_symlink()
+    assert labelmap_path.read_text(encoding="utf-8") == "building\n"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
 
 
 def test_resolve_edr_package_runtime_stages_classifier_not_meta(tmp_path: Path) -> None:

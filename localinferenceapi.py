@@ -14719,6 +14719,7 @@ _list_all_datasets = functools.partial(
     count_dataset_images_fn=lambda path: _count_dataset_images_impl(
         path, iter_images_fn=_iter_yolo_images
     ),
+    linked_root_allowed_fn=lambda path: _linked_dataset_root_is_allowlisted(Path(path)),
     logger=logger,
 )
 
@@ -15302,6 +15303,18 @@ def _dataset_meta_path_for_entry(entry: Dict[str, Any]) -> Path:
 
 
 def _dataset_effective_root_from_entry(entry: Dict[str, Any]) -> Path:
+    storage_mode = str(entry.get("storage_mode") or "managed").strip().lower()
+    if storage_mode == "linked":
+        linked_status = str(entry.get("linked_root_status") or "").strip().lower()
+        if linked_status in {"missing", "invalid", "not_allowlisted"}:
+            if linked_status == "missing":
+                raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
+            detail = (
+                "dataset_path_not_allowlisted"
+                if linked_status == "not_allowlisted"
+                else "dataset_path_not_found"
+            )
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     root = Path(str(entry.get("dataset_root") or "")).resolve()
     if not root.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
@@ -15415,6 +15428,21 @@ def _annotation_write_labelmap_file(
             tmp_path.unlink(missing_ok=True)
 
 
+def _linked_dataset_root_is_allowlisted(path: Path) -> bool:
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except Exception:
+        return False
+    for root in DATASET_LINK_ROOTS:
+        try:
+            root_resolved = Path(root).expanduser().resolve()
+            if _path_is_within_root_impl(resolved, root_resolved):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _validate_linked_dataset_path(path_str: str) -> Path:
     raw = str(path_str or "").strip()
     if not raw:
@@ -15427,15 +15455,7 @@ def _validate_linked_dataset_path(path_str: str) -> Path:
     resolved = candidate.resolve()
     if not resolved.exists() or not resolved.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_path_not_found")
-    allowed = False
-    for root in DATASET_LINK_ROOTS:
-        try:
-            resolved.relative_to(root)
-            allowed = True
-            break
-        except Exception:
-            continue
-    if not allowed:
+    if not _linked_dataset_root_is_allowlisted(resolved):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_path_not_allowlisted")
     return resolved
 
@@ -16852,9 +16872,7 @@ def delete_dataset_entry(dataset_id: str):
 
 def download_dataset_entry(dataset_id: str):
     entry = _resolve_dataset_entry(dataset_id)
-    dataset_root = Path(entry.get("dataset_root") or "").resolve()
-    if not dataset_root.exists():
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
+    dataset_root = _dataset_effective_root_from_entry(entry)
     override_entries = _annotation_overlay_archive_entries(entry)
     override_entries.update(_dataset_labelmap_archive_entries(entry, dataset_root))
     tmp_dir = Path(tempfile.mkdtemp(prefix="dataset_export_"))
@@ -17117,6 +17135,7 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
 
 def check_dataset(dataset_id: str):
     entry = _resolve_dataset_entry(dataset_id)
+    _dataset_effective_root_from_entry(entry)
     if entry.get("yolo_ready") and entry.get("yolo_images_dir") and entry.get("yolo_labels_dir"):
         inputs = {
             "images_dir": entry.get("yolo_images_dir"),

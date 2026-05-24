@@ -657,6 +657,28 @@ def test_data_ingestion_backend_dataset_rows_and_training_queue(tmp_path, monkey
     assert job.request["train_uploads"][0]["source_dataset_id"] == "unit_dataset"
 
 
+def test_data_ingestion_backend_dataset_rejects_not_allowlisted_linked_record(tmp_path, monkeypatch):
+    dataset_root = tmp_path / "outside_dataset"
+    (dataset_root / "images").mkdir(parents=True)
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(dataset_root / "images" / "a.jpg")
+    entry = {
+        "id": "blocked_link",
+        "label": "Blocked Link",
+        "dataset_root": str(dataset_root),
+        "storage_mode": "linked",
+        "linked_root": str(dataset_root),
+        "linked_root_status": "not_allowlisted",
+        "yolo_layout": "flat",
+    }
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._data_ingestion_dataset_media_rows("blocked_link", field_name="reference")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "dataset_path_not_allowlisted"
+
+
 def test_data_ingestion_backend_dataset_rows_skip_symlinked_image_root_escape(tmp_path, monkeypatch):
     dataset_root = tmp_path / "dataset"
     dataset_root.mkdir()

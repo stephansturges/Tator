@@ -393,6 +393,7 @@ def _list_all_datasets_impl(
     glossary_preview_fn,
     count_caption_labels_fn,
     count_dataset_images_fn,
+    linked_root_allowed_fn=None,
     logger=None,
 ) -> list[Dict[str, Any]]:
     entries: list[Dict[str, Any]] = []
@@ -458,6 +459,9 @@ def _list_all_datasets_impl(
                     elif not candidate.is_dir():
                         linked_root_status = "invalid"
                         effective_root = candidate
+                    elif linked_root_allowed_fn is not None and not bool(linked_root_allowed_fn(candidate)):
+                        linked_root_status = "not_allowlisted"
+                        linked_root = str(candidate)
                     else:
                         linked_root_status = "ok"
                         linked_root = str(candidate)

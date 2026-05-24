@@ -40,6 +40,7 @@ def _list_entries(registry_root: Path):
         glossary_preview_fn=lambda glossary, _labels: glossary,
         count_caption_labels_fn=lambda _path: (0, False),
         count_dataset_images_fn=lambda _path: 0,
+        linked_root_allowed_fn=lambda _path: True,
     )
 
 
@@ -102,6 +103,74 @@ def test_linked_root_status_ok_for_available_link(tmp_path) -> None:
     assert entry["linked_root"] == str(linked_source.resolve())
     assert entry["dataset_root"] == str(linked_source.resolve())
     assert entry["yolo_ready"] is True
+
+
+def test_linked_root_status_not_allowlisted_does_not_inspect_source(tmp_path) -> None:
+    registry_root = tmp_path / "registry"
+    registry_root.mkdir(parents=True, exist_ok=True)
+    linked_source = tmp_path / "outside_linked_src"
+    (linked_source / "images").mkdir(parents=True, exist_ok=True)
+    (linked_source / "labels").mkdir(parents=True, exist_ok=True)
+    (linked_source / "labelmap.txt").write_text("car\n", encoding="utf-8")
+
+    dataset_dir = registry_root / "linked_blocked"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    (dataset_dir / "dataset_meta.json").write_text(
+        json.dumps(
+            {
+                "id": "linked_blocked",
+                "label": "linked_blocked",
+                "storage_mode": "linked",
+                "linked_root": str(linked_source),
+                "source": "registry",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entries = datasets_service._list_all_datasets_impl(
+        prefer_registry=True,
+        dataset_registry_root=registry_root,
+        sam3_dataset_root=registry_root / "_empty_sam3",
+        qwen_dataset_root=registry_root / "_empty_qwen",
+        load_registry_meta_fn=_load_registry_meta,
+        load_sam3_meta_fn=lambda _path: None,
+        load_qwen_meta_fn=lambda _path: None,
+        coerce_meta_fn=lambda path, raw_meta, source: datasets_service._coerce_dataset_metadata_impl(
+            path,
+            raw_meta,
+            source,
+        ),
+        yolo_labels_have_polygons_fn=lambda _path: False,
+        convert_qwen_dataset_to_coco_fn=lambda _path: (_ for _ in ()).throw(
+            RuntimeError("blocked_source_must_not_convert_qwen")
+        ),
+        convert_coco_dataset_to_yolo_fn=lambda _path: (_ for _ in ()).throw(
+            RuntimeError("blocked_source_must_not_convert_coco")
+        ),
+        load_dataset_glossary_fn=lambda _path: "",
+        glossary_preview_fn=lambda glossary, _labels: glossary,
+        count_caption_labels_fn=lambda path: (_ for _ in ()).throw(
+            RuntimeError(f"blocked_source_must_not_count_captions:{path}")
+        )
+        if path == linked_source
+        else (0, False),
+        count_dataset_images_fn=lambda path: (_ for _ in ()).throw(
+            RuntimeError(f"blocked_source_must_not_count_images:{path}")
+        )
+        if path == linked_source
+        else 0,
+        linked_root_allowed_fn=lambda _path: False,
+    )
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["id"] == "linked_blocked"
+    assert entry["storage_mode"] == "linked"
+    assert entry["linked_root_status"] == "not_allowlisted"
+    assert entry["linked_root"] == str(linked_source.resolve())
+    assert entry["dataset_root"] != str(linked_source.resolve())
+    assert entry["yolo_ready"] is False
 
 
 def test_linked_registry_labelmap_overrides_source_labelmap(tmp_path) -> None:

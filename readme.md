@@ -142,7 +142,7 @@ Tator supports three dataset patterns:
 Dataset records also carry:
 
 - labelmap and class order
-- linked-root health (`ok`, `missing`, or `invalid`)
+- linked-root health (`ok`, `missing`, `invalid`, or `not_allowlisted`)
 - canonical glossary text for SAM3 and Qwen-assisted prompting
 - optional dataset context for captions, prompt expansion, and recipe building
 - annotation lock state so concurrent writes fail loudly instead of silently
@@ -596,7 +596,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current verification: `1228 passed, 20 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Current verification: `1231 passed, 20 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

@@ -1641,3 +1641,27 @@ preserving the exact validation story for storage and artifact-write fixes.
   method mismatches, endpoint map check (`missing=[]`), endpoint method check
   (`failures=[]`), OpenAPI sanity (`tested=144`, `failures=[]`), and live
   `/datasets`, `/datasets/trash`, and `/data_ingestion/capabilities` reads.
+
+## 2026-05-24: Linked Dataset Allowlist Revalidation
+
+- Continued the Dataset Management/Data Ingestion audit from the legacy-record
+  angle. Normal UI registration already required linked source roots to sit under
+  `DATASET_LINK_ROOTS`, but hand-edited or stale registry records could still list
+  an existing linked root after the allowlist changed.
+- Dataset listing now revalidates linked roots against the current allowlist.
+  Non-allowlisted roots are marked `not_allowlisted`, are not inspected for YOLO,
+  caption, glossary, Qwen, or COCO readiness, and therefore cannot silently expose
+  source files through discovery.
+- Backend use-sites now reject linked records with `missing`, `invalid`, or
+  `not_allowlisted` status before export, dataset checks, annotation access, or
+  Data Ingestion reference media collection can touch the source tree.
+- Validation so far: `py_compile localinferenceapi.py services/datasets.py
+  tests/test_dataset_linked_root_status.py
+  tests/test_dataset_linked_annotation_flows.py tests/test_data_ingestion.py`,
+  `git diff --check`, the dataset/data-ingestion safety bundle (`173 passed`),
+  the adjacent dataset/Qwen safety bundle (`229 passed`), and the full pytest
+  suite (`1231 passed, 20 skipped`) passed. The restarted backend passed
+  `tools/check_ui_endpoints.py` with no missing paths or method mismatches,
+  endpoint map check (`missing=[]`), endpoint method check (`failures=[]`),
+  OpenAPI sanity (`tested=144`, `failures=[]`), and live `/datasets`,
+  `/datasets/trash`, and `/data_ingestion/capabilities` reads.

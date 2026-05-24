@@ -801,6 +801,35 @@ def test_download_dataset_entry_applies_overlay_files(tmp_path, monkeypatch) -> 
         assert zf.read(text_name).decode("utf-8").strip() == "new"
 
 
+def test_download_dataset_entry_rejects_not_allowlisted_linked_record(tmp_path, monkeypatch) -> None:
+    source_root = tmp_path / "outside_linked_source"
+    (source_root / "images").mkdir(parents=True, exist_ok=True)
+    (source_root / "labels").mkdir(parents=True, exist_ok=True)
+    (source_root / "labelmap.txt").write_text("car\n", encoding="utf-8")
+    record_root = tmp_path / "registry" / "ds_linked"
+    record_root.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds_linked",
+            "dataset_root": str(source_root),
+            "registry_root": str(record_root),
+            "storage_mode": "linked",
+            "linked_root": str(source_root),
+            "linked_root_status": "not_allowlisted",
+            "yolo_layout": "flat",
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.download_dataset_entry("ds_linked")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "dataset_path_not_allowlisted"
+
+
 def test_download_linked_dataset_applies_registry_labelmap_override(
     tmp_path, monkeypatch
 ) -> None:

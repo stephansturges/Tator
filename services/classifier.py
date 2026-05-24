@@ -12,6 +12,18 @@ from utils.embedding_recipe import normalize_embedding_aggregation
 from utils.classifier_utils import _classifier_classes_list
 
 
+def _path_has_symlink_component_absolute(path: Path) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    checks = [candidate]
+    checks.extend(candidate.parents)
+    for component in checks:
+        if component == component.parent:
+            continue
+        if component.is_symlink():
+            return True
+    return False
+
+
 def _predict_proba_batched_impl(
     crops: Sequence[Any],
     head: Dict[str, Any],
@@ -32,7 +44,7 @@ def _predict_proba_batched_impl(
 
 def _safe_classifier_registry_root(root: Path) -> Optional[Path]:
     try:
-        if root.is_symlink() or root.parent.is_symlink():
+        if _path_has_symlink_component_absolute(root):
             return None
         if root.exists() and not root.is_dir():
             return None

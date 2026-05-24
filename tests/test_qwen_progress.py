@@ -361,6 +361,23 @@ def test_qwen_caption_io_append_replaces_symlinked_run_log(monkeypatch, tmp_path
     assert records[-1]["event"] == "input"
 
 
+def test_qwen_caption_io_prepare_rejects_nested_symlinked_parent_before_mkdir(tmp_path):
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    safe_path = api._qwen_caption_io_prepare_file(
+        linked_parent / "nested" / "logs" / "qwen_caption_io_latest.jsonl"
+    )
+
+    assert safe_path is None
+    assert list(outside.iterdir()) == []
+
+
 def test_qwen_prepass_trace_reset_replaces_symlinked_latest_logs(tmp_path):
     full_root = tmp_path / "prepass_full"
     readable_root = tmp_path / "prepass_readable"

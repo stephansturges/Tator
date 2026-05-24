@@ -270,6 +270,31 @@ def test_delete_clip_classifier_rejects_symlink_alias_without_target_unlink(
     assert alias.is_symlink()
 
 
+def test_resolve_clip_classifier_rejects_nested_symlinked_registry_parent_without_write(
+    tmp_path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        localinferenceapi._resolve_agent_clip_classifier_path_impl(
+            "head.pkl",
+            allowed_root=linked_parent / "nested" / "classifiers",
+            allowed_exts=(".pkl",),
+            path_is_within_root_fn=localinferenceapi._path_is_within_root_impl,
+            http_exception_cls=HTTPException,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_clip_classifier_path_not_allowed"
+    assert list(outside.iterdir()) == []
+
+
 def test_active_classifier_head_for_inference_drops_missing_cached_head(tmp_path, monkeypatch) -> None:
     missing_path = tmp_path / "missing.pkl"
     stale_head = {"classes": ["car"]}

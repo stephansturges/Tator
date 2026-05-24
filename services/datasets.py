@@ -44,9 +44,23 @@ def _path_within_root(path: Path, root: Path) -> bool:
     return True
 
 
+def _path_has_symlink_component(path: Path) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    checks = [candidate]
+    checks.extend(candidate.parents)
+    for component in checks:
+        if component == component.parent:
+            continue
+        if component.is_symlink():
+            return True
+    return False
+
+
 def _prepare_output_file(path: Path) -> None:
+    if _path_has_symlink_component(path.parent):
+        raise RuntimeError("dataset_path_invalid")
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.is_symlink():
+    if _path_has_symlink_component(path.parent):
         raise RuntimeError("dataset_path_invalid")
     parent_resolved = path.parent.resolve(strict=True)
     if path.is_symlink():
@@ -1541,8 +1555,10 @@ def _convert_coco_dataset_to_yolo_impl(
     dataset_type = "seg" if has_segmentation else "bbox"
     for split_name, ann_path, images_dir in ann_paths:
         labels_dir = dataset_root / split_name / "labels"
+        if _path_has_symlink_component(labels_dir):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_label_path_invalid")
         labels_dir.mkdir(parents=True, exist_ok=True)
-        if labels_dir.is_symlink():
+        if _path_has_symlink_component(labels_dir):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_label_path_invalid")
         labels_root = labels_dir.resolve(strict=True)
         try:
@@ -1592,8 +1608,10 @@ def _convert_coco_dataset_to_yolo_impl(
                 raise
             except Exception as exc:
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_label_path_invalid") from exc
+            if _path_has_symlink_component(label_path.parent):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_label_path_invalid")
             label_path.parent.mkdir(parents=True, exist_ok=True)
-            if label_path.parent.is_symlink():
+            if _path_has_symlink_component(label_path.parent):
                 raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="coco_label_path_invalid")
             lines: List[str] = []
             for ann in ann_by_image.get(img_id, []):

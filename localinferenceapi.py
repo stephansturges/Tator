@@ -2485,8 +2485,10 @@ def _qwen_caption_io_paths(run_id: Optional[str]) -> Tuple[Path, Path, Path, Pat
 
 def _qwen_caption_io_prepare_file(path: Path) -> Optional[Path]:
     try:
+        if _storage_path_has_symlink_component(path.parent):
+            return None
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.parent.is_symlink():
+        if _storage_path_has_symlink_component(path.parent):
             return None
         parent_root = path.parent.resolve(strict=True)
         if path.is_symlink():

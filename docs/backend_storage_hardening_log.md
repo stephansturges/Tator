@@ -154,3 +154,18 @@ preserving the exact validation story for storage and artifact-write fixes.
   cache parents.
 - Validation: `1006 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Dataset, Classifier, and Qwen Caption IO Roots
+
+- Rejected symlink components in dataset metadata output parents, COCO-to-YOLO
+  label roots and label output parents, classifier registry roots, and Qwen
+  caption IO log parents.
+- Moved dataset and caption IO parent checks ahead of parent creation.
+- Added regressions for nested symlinked dataset metadata parents,
+  COCO-to-YOLO label roots, classifier registry parents, and caption IO log
+  parents.
+- Validation: `1010 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.
+- Residual direct-parent symlink scan:
+  `rg -n "\.parent\.is_symlink\(|is_symlink\(\) or .*\.parent\.is_symlink\(|\.is_symlink\(\) or .*parent" services api localinferenceapi.py utils models tools tests`
+  returned no hits.

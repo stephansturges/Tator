@@ -570,7 +570,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current verification: `1001 passed, 17 skipped`; live UI/OpenAPI smoke checks pass.
+Current verification: `1006 passed, 17 skipped`; live UI/OpenAPI smoke checks pass.
 Detailed hardening notes live in [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>

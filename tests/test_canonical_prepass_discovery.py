@@ -18,6 +18,7 @@ from services.canonical_edr_completion import (
     persist_canonical_edr_completion,
     repair_persisted_canonical_completion,
     rewrite_canonical_deployment_bundle_metadata,
+    _copy2_if_different,
     _write_json_atomic,
 )
 from tools import run_canonical_prepass_discovery as runner
@@ -51,6 +52,45 @@ def test_canonical_write_json_atomic_replaces_symlink_targets_without_target_wri
     assert json.loads(json_path.read_text(encoding="utf-8"))["status"] == "ok"
     assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
     assert outside_final.read_text(encoding="utf-8") == "external final"
+
+
+def test_canonical_write_json_atomic_rejects_nested_symlinked_parent_before_mkdir(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(ValueError, match="canonical_json_parent_symlink"):
+        _write_json_atomic(
+            linked_parent / "nested" / "canonical_jobs" / "summary.json",
+            {"status": "ok"},
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_canonical_copy_rejects_nested_symlinked_parent_before_mkdir(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "source.json"
+    src.write_text("source", encoding="utf-8")
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(ValueError, match="canonical_copy_parent_symlink"):
+        _copy2_if_different(src, linked_parent / "nested" / "canonical_jobs" / "source.json")
+
+    assert list(outside.iterdir()) == []
 
 
 def _write_deployment_source_bundle(
@@ -739,6 +779,32 @@ def test_materialize_canonical_deployment_bundle_rejects_symlinked_jobs_parent_w
     with pytest.raises(ValueError, match="canonical_jobs_root_symlink"):
         materialize_canonical_deployment_bundle(
             calibration_jobs_root=jobs_parent / "calibration_jobs",
+            run_root=run_root,
+            dataset_id="qwen_dataset",
+            recipe_fingerprint="8a922d9945b17c16f4ed9dc39f50f5e66b28f614",
+            canonical_recipe_payload=canonical_recipe_payload,
+            canonical_recipe_json=canonical_recipe_json,
+            report_bundle_json=None,
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_materialize_canonical_deployment_bundle_rejects_nested_symlinked_jobs_parent_without_target_write(
+    tmp_path: Path,
+) -> None:
+    run_root, canonical_recipe_json, canonical_recipe_payload = _write_materialize_fixture(tmp_path)
+    outside = tmp_path / "outside_jobs_parent"
+    outside.mkdir()
+    jobs_parent = tmp_path / "linked_parent"
+    try:
+        jobs_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(ValueError, match="canonical_jobs_root_symlink"):
+        materialize_canonical_deployment_bundle(
+            calibration_jobs_root=jobs_parent / "nested" / "calibration_jobs",
             run_root=run_root,
             dataset_id="qwen_dataset",
             recipe_fingerprint="8a922d9945b17c16f4ed9dc39f50f5e66b28f614",

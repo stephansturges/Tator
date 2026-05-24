@@ -7,6 +7,7 @@ import pytest
 
 from services.calibration_helpers import (
     _calibration_list_images,
+    _calibration_safe_link,
     _calibration_write_record_atomic,
 )
 
@@ -82,3 +83,41 @@ def test_calibration_write_record_atomic_replaces_final_symlink_without_target_w
     assert not record_path.is_symlink()
     assert json.loads(record_path.read_text(encoding="utf-8"))["status"] == "ok"
     assert outside.read_text(encoding="utf-8") == "external"
+
+
+def test_calibration_write_record_atomic_rejects_nested_symlinked_parent_before_mkdir(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(ValueError, match="calibration_record_parent_symlink"):
+        _calibration_write_record_atomic(
+            linked_parent / "nested" / "cache" / "sample.json",
+            {"status": "ok"},
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_calibration_safe_link_skips_nested_symlinked_parent_before_mkdir(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "source.jpg"
+    src.write_bytes(b"image")
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _calibration_safe_link(src, linked_parent / "nested" / "cache" / "source.jpg")
+
+    assert list(outside.iterdir()) == []

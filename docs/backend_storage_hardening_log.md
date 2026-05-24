@@ -141,3 +141,16 @@ preserving the exact validation story for storage and artifact-write fixes.
   parents, text output parents, and discovery locks.
 - Validation: `1001 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Canonical Completion and Calibration Helper Writes
+
+- Rejected symlink components in canonical deployment roots, canonical JSON
+  output parents, canonical copy destinations, and calibration worker record
+  parents.
+- Moved canonical JSON/copy and calibration record checks ahead of parent
+  creation; safe-link cache helpers now skip nested symlinked parents.
+- Added regressions for nested symlinked canonical output parents, copy
+  destinations, deployment roots, calibration record parents, and safe-link
+  cache parents.
+- Validation: `1006 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

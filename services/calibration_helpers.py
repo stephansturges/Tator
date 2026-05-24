@@ -67,6 +67,18 @@ def _path_identity(path: Path) -> Path:
         return path.absolute()
 
 
+def _path_has_symlink_component(path: Path) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    checks = [candidate]
+    checks.extend(candidate.parents)
+    for component in checks:
+        if component == component.parent:
+            continue
+        if component.is_symlink():
+            return True
+    return False
+
+
 def _unlink_self_referential_symlink(path: Path) -> bool:
     if not path.is_symlink():
         return False
@@ -92,7 +104,11 @@ def _calibration_safe_link(src: Path, dest: Path) -> None:
             dest.unlink()
         if dest.exists() or dest.is_symlink():
             return
+        if _path_has_symlink_component(dest.parent):
+            return
         dest.parent.mkdir(parents=True, exist_ok=True)
+        if _path_has_symlink_component(dest.parent):
+            return
         os.symlink(str(src_resolved), dest)
     except Exception:
         try:
@@ -101,14 +117,18 @@ def _calibration_safe_link(src: Path, dest: Path) -> None:
             _unlink_self_referential_symlink(dest)
             if dest.exists():
                 return
+            if _path_has_symlink_component(dest.parent):
+                return
             shutil.copy2(src, dest)
         except Exception:
             pass
 
 
 def _calibration_write_record_atomic(path: Path, record: Dict[str, Any]) -> None:
+    if _path_has_symlink_component(path.parent):
+        raise ValueError("calibration_record_parent_symlink")
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.is_symlink():
+    if _path_has_symlink_component(path.parent):
         raise ValueError("calibration_record_parent_symlink")
     parent_resolved = path.parent.resolve(strict=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")

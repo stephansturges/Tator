@@ -14679,12 +14679,13 @@ def _validate_qwen_dataset_upload_source_tree(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
-def _qwen_upload_write_text_within_root(
+def _qwen_write_text_within_root(
     path: Path,
     root: Path,
     text: str,
     *,
-    detail: str = "qwen_dataset_source_path_invalid",
+    detail: str,
+    context: str,
 ) -> None:
     tmp_path = path.with_suffix(f"{path.suffix}.{uuid.uuid4().hex}.tmp")
     try:
@@ -14692,21 +14693,21 @@ def _qwen_upload_write_text_within_root(
         if _storage_path_has_symlink_component(root) or _storage_path_has_symlink_component(
             path.parent
         ):
-            raise ValueError("qwen upload write path contains a symlink")
+            raise ValueError(f"{context} write path contains a symlink")
         path.parent.mkdir(parents=True, exist_ok=True)
         if _storage_path_has_symlink_component(path.parent):
-            raise ValueError("qwen upload write parent contains a symlink")
+            raise ValueError(f"{context} write parent contains a symlink")
         parent_resolved = path.parent.resolve(strict=True)
         if not _path_is_within_root_impl(parent_resolved, root_resolved):
-            raise ValueError("qwen upload write parent escapes root")
+            raise ValueError(f"{context} write parent escapes root")
         for candidate in (tmp_path, path):
             if candidate.is_symlink():
                 candidate.unlink(missing_ok=True)
             elif candidate.exists() and candidate.is_dir():
-                raise ValueError("qwen upload write target is a directory")
+                raise ValueError(f"{context} write target is a directory")
             target_resolved = candidate.resolve(strict=False)
             if not _path_is_within_root_impl(target_resolved, root_resolved):
-                raise ValueError("qwen upload write target escapes root")
+                raise ValueError(f"{context} write target escapes root")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -14721,6 +14722,38 @@ def _qwen_upload_write_text_within_root(
     finally:
         if tmp_path.exists() or tmp_path.is_symlink():
             tmp_path.unlink(missing_ok=True)
+
+
+def _qwen_upload_write_text_within_root(
+    path: Path,
+    root: Path,
+    text: str,
+    *,
+    detail: str = "qwen_dataset_source_path_invalid",
+) -> None:
+    _qwen_write_text_within_root(
+        path,
+        root,
+        text,
+        detail=detail,
+        context="qwen upload",
+    )
+
+
+def _qwen_training_write_text_within_root(
+    path: Path,
+    root: Path,
+    text: str,
+    *,
+    detail: str = "qwen_split_path_invalid",
+) -> None:
+    _qwen_write_text_within_root(
+        path,
+        root,
+        text,
+        detail=detail,
+        context="qwen training split",
+    )
 
 
 def _dataset_registry_storage_root(
@@ -24317,22 +24350,21 @@ def _prepare_qwen_training_split(
 
     def _write_split(split_name: str, split_entries: Sequence[Tuple[Dict[str, Any], Path]]) -> int:
         ann_path = split_root / split_name / "annotations.jsonl"
-        count = 0
-        with ann_path.open("w", encoding="utf-8") as handle:
-            for idx, (payload, source) in enumerate(split_entries):
-                try:
-                    rel = _normalise_relative_path(payload.get("image"))
-                except HTTPException:
-                    continue
-                safe_name = f"{idx:06d}_{rel.name or 'image'}"
-                rel_out = Path(safe_name)
-                dst = split_root / split_name / "images" / rel_out
-                _link_or_copy_file(source, dst, overwrite=True)
-                payload_out = dict(payload)
-                payload_out["image"] = rel_out.as_posix()
-                handle.write(json.dumps(payload_out, ensure_ascii=False, separators=(",", ":")) + "\n")
-                count += 1
-        return count
+        lines: List[str] = []
+        for idx, (payload, source) in enumerate(split_entries):
+            try:
+                rel = _normalise_relative_path(payload.get("image"))
+            except HTTPException:
+                continue
+            safe_name = f"{idx:06d}_{rel.name or 'image'}"
+            rel_out = Path(safe_name)
+            dst = split_root / split_name / "images" / rel_out
+            _link_or_copy_file(source, dst, overwrite=True)
+            payload_out = dict(payload)
+            payload_out["image"] = rel_out.as_posix()
+            lines.append(json.dumps(payload_out, ensure_ascii=False, separators=(",", ":")) + "\n")
+        _qwen_training_write_text_within_root(ann_path, split_root, "".join(lines))
+        return len(lines)
 
     train_count = _write_split("train", train_entries)
     val_count_written = _write_split("val", val_entries)
@@ -24356,8 +24388,10 @@ def _prepare_qwen_training_split(
         "signature": _compute_dir_signature_impl(split_root),
         "type": source_meta.get("type") or "bbox",
     }
-    (split_root / QWEN_METADATA_FILENAME).write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    _qwen_training_write_text_within_root(
+        split_root / QWEN_METADATA_FILENAME,
+        split_root,
+        json.dumps(meta, ensure_ascii=False, indent=2),
     )
     summary = (
         f"Qwen split: {train_count} train / {val_count_written} val "

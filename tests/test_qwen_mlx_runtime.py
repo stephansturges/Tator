@@ -247,6 +247,42 @@ def test_qwen_training_config_random_split_materializes_qwen_split(tmp_path, mon
     assert any("Qwen split:" in entry for entry in logs)
 
 
+def test_qwen_training_split_text_write_is_atomic_over_symlink_leaves(
+    tmp_path, monkeypatch
+):
+    class FixedUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    split_root = tmp_path / "split"
+    annotations_path = split_root / "train" / "annotations.jsonl"
+    annotations_path.parent.mkdir(parents=True)
+    tmp_path_link = annotations_path.with_suffix(
+        f"{annotations_path.suffix}.{FixedUUID.hex}.tmp"
+    )
+    outside_tmp = tmp_path / "outside_tmp.jsonl"
+    outside_final = tmp_path / "outside_final.jsonl"
+    outside_tmp.write_text("external tmp\n", encoding="utf-8")
+    outside_final.write_text("external final\n", encoding="utf-8")
+    try:
+        tmp_path_link.symlink_to(outside_tmp)
+        annotations_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: FixedUUID())
+
+    api._qwen_training_write_text_within_root(
+        annotations_path,
+        split_root,
+        '{"image":"sample.png"}\n',
+    )
+
+    assert not tmp_path_link.exists()
+    assert not annotations_path.is_symlink()
+    assert annotations_path.read_text(encoding="utf-8") == '{"image":"sample.png"}\n'
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp\n"
+    assert outside_final.read_text(encoding="utf-8") == "external final\n"
+
+
 def test_qwen_training_random_split_copies_when_hardlink_unavailable(tmp_path, monkeypatch):
     if api.QwenTrainingConfig is None:
         pytest.skip("Qwen training dependencies are not importable in this environment")

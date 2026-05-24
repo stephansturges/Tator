@@ -738,3 +738,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1103 passed, 17 skipped`; focused Qwen upload coverage and the
   full pytest suite passed, and live endpoint sanity checks passed against the
   restarted backend.
+
+## 2026-05-24: Qwen Training Split Atomic Saves
+
+- Shared the guarded Qwen text writer across upload staging and training split
+  materialization.
+- Routed random-split `annotations.jsonl` and split metadata writes through
+  temp-file writes followed by atomic replace.
+- Added a regression proving Qwen training split temp/final symlink leaves are
+  replaced without mutating external targets.
+- Validation: `1104 passed, 17 skipped`; focused Qwen training coverage and the
+  full pytest suite passed, and live endpoint sanity checks passed against the
+  restarted backend.

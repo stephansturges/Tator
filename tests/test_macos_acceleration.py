@@ -8,7 +8,11 @@ from services.sam3_runtime import (
     _resolve_sam3_device_impl,
     _resolve_sam3_mining_devices_impl,
 )
-from services.detectors import _yolo_device_arg_impl, _yolo_resolve_device_impl
+from services.detectors import (
+    _rfdetr_resolve_device_impl,
+    _yolo_device_arg_impl,
+    _yolo_resolve_device_impl,
+)
 from utils.gpu import _resolve_torch_inference_device_impl, _torch_mps_available_impl
 
 
@@ -145,3 +149,34 @@ def test_yolo_training_can_force_cpu_on_macos() -> None:
 
     assert out["resolved_accelerator"] == "cpu"
     assert out["device_arg"] == "cpu"
+
+
+def test_rfdetr_training_uses_cpu_when_cuda_absent() -> None:
+    torch = _fake_torch(cuda=False, mps=True)
+
+    out = _rfdetr_resolve_device_impl(None, torch_module=torch)
+
+    assert out["resolved_accelerator"] == "cpu"
+    assert out["device_arg"] == "cpu"
+    assert out["devices"] == []
+
+
+def test_rfdetr_training_rejects_cuda_device_ids_when_cuda_absent() -> None:
+    torch = _fake_torch(cuda=False, mps=True)
+
+    with pytest.raises(ValueError, match="rfdetr_cuda_devices_unavailable"):
+        _rfdetr_resolve_device_impl([0], torch_module=torch)
+
+
+def test_rfdetr_training_rejects_out_of_range_cuda_device_ids() -> None:
+    torch = _fake_torch(cuda=True, mps=False, cuda_count=1)
+
+    with pytest.raises(ValueError, match="rfdetr_invalid_devices:available=0-0"):
+        _rfdetr_resolve_device_impl([1], torch_module=torch)
+
+
+def test_rfdetr_training_rejects_duplicate_cuda_device_ids() -> None:
+    torch = _fake_torch(cuda=True, mps=False, cuda_count=2)
+
+    with pytest.raises(ValueError, match="rfdetr_duplicate_devices"):
+        _rfdetr_resolve_device_impl([0, "0"], torch_module=torch)

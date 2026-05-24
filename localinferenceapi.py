@@ -219,14 +219,12 @@ from utils.parsing import (
     _normalise_optional_path,
     _parse_bool,
     _safe_run_name,
-    _normalize_device_list,
     _agent_extract_json_array,
 )
 from utils.gpu import (
     _resolve_torch_inference_device_impl as _resolve_torch_inference_device_impl,
     _torch_mps_available_impl as _torch_mps_available_impl,
     _torch_mps_built_impl as _torch_mps_built_impl,
-    _validate_cuda_device_ids_impl as _validate_cuda_device_ids_impl,
 )
 from utils.sam3_compat import (
     _sam3_finalize_macos_import_impl as _sam3_finalize_macos_import_impl,
@@ -713,6 +711,7 @@ from services.detectors import (
     _yolo_write_run_meta_impl as _yolo_write_run_meta_impl,
     _yolo_prune_run_dir_impl as _yolo_prune_run_dir_impl,
     _yolo_resolve_device_impl as _yolo_resolve_device_impl,
+    _rfdetr_resolve_device_impl as _rfdetr_resolve_device_impl,
     _yolo_p2_scale_impl as _yolo_p2_scale_impl,
     _rfdetr_variant_info_impl as _rfdetr_variant_info_impl,
     _rfdetr_best_checkpoint_impl as _rfdetr_best_checkpoint_impl,
@@ -29567,6 +29566,19 @@ def _resolve_yolo_training_device_config(config: Dict[str, Any]) -> Dict[str, An
     return resolution
 
 
+def _resolve_rfdetr_training_device_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        resolution = _rfdetr_resolve_device_impl(
+            config.get("devices"),
+            torch_module=torch,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    config["devices"] = resolution.get("devices") or []
+    config["device_resolution"] = resolution
+    return resolution
+
+
 def _cleanup_detector_run_dir(run_dir: Path, job_root: Path) -> None:
     try:
         raw_path = Path(run_dir)
@@ -30461,13 +30473,17 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
             )
             if labelmap:
                 _write_detector_text_file(run_dir / "labelmap.txt", "\n".join(labelmap) + "\n")
+            device_resolution = config.get(
+                "device_resolution"
+            ) or _resolve_rfdetr_training_device_config(config)
+            job.config = config
             model_kwargs: Dict[str, Any] = {}
             if config.get("resolution"):
                 try:
                     model_kwargs["resolution"] = int(config.get("resolution"))
                 except Exception:
                     pass
-            model_kwargs["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+            model_kwargs["device"] = device_resolution.get("device_arg") or "cpu"
             if config.get("from_scratch"):
                 model_kwargs["pretrain_weights"] = None
             elif config.get("pretrain_weights"):
@@ -30515,22 +30531,21 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
             if task == "segment":
                 train_kwargs["segmentation_head"] = True
             train_kwargs = {k: v for k, v in train_kwargs.items() if v is not None}
-            device_ids = _normalize_device_list(config.get("devices"))
-            if not device_ids and torch.cuda.is_available():
-                device_ids = list(range(torch.cuda.device_count()))
-            if device_ids:
-                _validate_cuda_device_ids_impl(
-                    device_ids,
-                    torch_module=torch,
-                    http_exception_cls=HTTPException,
-                )
-            cuda_visible = ",".join(str(d) for d in device_ids) if device_ids else None
+            device_ids = list(device_resolution.get("devices") or [])
+            cuda_visible = device_resolution.get("cuda_visible_devices")
             prev_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES")
             if cuda_visible:
                 os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible
-            train_kwargs["device"] = "cuda" if torch.cuda.is_available() else "cpu"
-            use_distributed = torch.cuda.is_available() and len(device_ids) > 1
+            train_kwargs["device"] = device_resolution.get("device_arg") or "cpu"
+            use_distributed = (
+                device_resolution.get("resolved_accelerator") == "cuda"
+                and len(device_ids) > 1
+            )
             _rfdetr_job_log(job, f"Model variant: {variant_id}")
+            _rfdetr_job_log(
+                job,
+                f"Training device: {device_resolution.get('device_label') or train_kwargs['device']}",
+            )
             if use_distributed:
                 dist_url = f"tcp://127.0.0.1:{_find_free_port_impl()}"
                 world_size = len(device_ids)
@@ -30633,7 +30648,7 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 try:
                     export_kwargs = dict(model_kwargs)
                     export_kwargs["pretrain_weights"] = best_path
-                    export_kwargs["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+                    export_kwargs["device"] = device_resolution.get("device_arg") or "cpu"
                     export_model = model_cls(**export_kwargs)
                     export_model.optimize_for_inference()
                     optimized_path = run_dir / "checkpoint_best_optimized.pt"
@@ -32976,6 +32991,8 @@ def create_rfdetr_training_job(payload: RfDetrTrainRequest):
     if not payload.accept_tos:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="rfdetr_tos_required")
     dataset_info = _resolve_rfdetr_training_dataset(payload)
+    config = model_dump_compat(payload, exclude_none=True)
+    _resolve_rfdetr_training_device_config(config)
     job_id = uuid.uuid4().hex
     run_dir = _rfdetr_run_dir_impl(
         job_id,
@@ -32984,7 +33001,6 @@ def create_rfdetr_training_job(payload: RfDetrTrainRequest):
         sanitize_fn=_sanitize_rfdetr_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    config = model_dump_compat(payload, exclude_none=True)
     config["paths"] = {"run_dir": str(run_dir)}
     config["dataset"] = dataset_info
     message = "Queued (training not started)"

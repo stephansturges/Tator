@@ -886,6 +886,88 @@ def _yolo_device_arg_impl(
     ).get("device_arg")
 
 
+def _clean_rfdetr_cuda_devices_impl(devices: Optional[List[int]]) -> List[int]:
+    if not devices:
+        return []
+    cleaned: List[int] = []
+    seen: set[int] = set()
+    for device in devices:
+        raw = str(device).strip()
+        if not re.fullmatch(r"\d+", raw):
+            raise ValueError("rfdetr_invalid_devices")
+        value = int(raw)
+        if value in seen:
+            raise ValueError("rfdetr_duplicate_devices")
+        seen.add(value)
+        cleaned.append(value)
+    return cleaned
+
+
+def _rfdetr_resolve_device_impl(
+    devices: Optional[List[int]],
+    *,
+    torch_module: Any = None,
+) -> Dict[str, Any]:
+    cuda_devices = _clean_rfdetr_cuda_devices_impl(devices)
+    cuda_available = _torch_cuda_available(torch_module)
+
+    if cuda_devices:
+        if torch_module is not None:
+            if not cuda_available:
+                raise ValueError("rfdetr_cuda_devices_unavailable")
+            try:
+                device_count = int(torch_module.cuda.device_count())
+            except Exception:
+                device_count = 0
+            if device_count <= 0:
+                raise ValueError("rfdetr_cuda_devices_unavailable")
+            invalid = [device for device in cuda_devices if device >= device_count]
+            if invalid:
+                raise ValueError(f"rfdetr_invalid_devices:available=0-{device_count - 1}")
+        return {
+            "resolved_accelerator": "cuda",
+            "device_arg": "cuda",
+            "device_label": f"CUDA devices {','.join(str(device) for device in cuda_devices)}",
+            "devices": cuda_devices,
+            "cuda_visible_devices": ",".join(str(device) for device in cuda_devices),
+        }
+
+    if torch_module is None:
+        return {
+            "resolved_accelerator": "auto",
+            "device_arg": None,
+            "device_label": "RF-DETR default",
+            "devices": [],
+            "cuda_visible_devices": None,
+        }
+    if cuda_available:
+        try:
+            device_count = int(torch_module.cuda.device_count())
+        except Exception:
+            device_count = 0
+        cuda_devices = list(range(max(0, device_count)))
+        return {
+            "resolved_accelerator": "cuda",
+            "device_arg": "cuda",
+            "device_label": (
+                f"CUDA devices {','.join(str(device) for device in cuda_devices)}"
+                if cuda_devices
+                else "CUDA"
+            ),
+            "devices": cuda_devices,
+            "cuda_visible_devices": ",".join(str(device) for device in cuda_devices)
+            if cuda_devices
+            else None,
+        }
+    return {
+        "resolved_accelerator": "cpu",
+        "device_arg": "cpu",
+        "device_label": "CPU",
+        "devices": [],
+        "cuda_visible_devices": None,
+    }
+
+
 def _yolo_p2_scale_impl(model_id: str) -> Optional[str]:
     match = re.match(r"^yolov8([nsmlx])-p2$", model_id)
     if match:

@@ -1234,3 +1234,18 @@ preserving the exact validation story for storage and artifact-write fixes.
   job-start coverage, `py_compile services/detectors.py localinferenceapi.py`,
   `git diff --check`, the full pytest suite, and live endpoint
   map/method/OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: RF-DETR CUDA Device Preflight
+
+- Added RF-DETR-specific device resolution so explicit CUDA device IDs are
+  rejected before queueing when CUDA is unavailable, duplicated, or outside the
+  detected device range.
+- Stored the resolved RF-DETR training device in the job config and reused it in
+  the worker, avoiding stale worker-only validation and Qwen-labeled CUDA error
+  details.
+- Added resolver coverage and backend job-start coverage proving invalid CUDA
+  IDs fail before the worker or run directory is created.
+- Validation: `1175 passed, 17 skipped`; focused macOS acceleration and backend
+  job-start coverage, `py_compile services/detectors.py localinferenceapi.py`,
+  `git diff --check`, the full pytest suite, and live endpoint
+  map/method/OpenAPI sanity checks passed against the restarted backend.

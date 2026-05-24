@@ -651,6 +651,35 @@ def test_rfdetr_train_missing_dataset_rejects_before_run_dir(monkeypatch, tmp_pa
     assert api.RFDETR_TRAINING_JOBS == {}
 
 
+def test_rfdetr_train_rejects_cuda_devices_on_macos_before_queue(monkeypatch, tmp_path):
+    with api.RFDETR_TRAINING_JOBS_LOCK:
+        api.RFDETR_TRAINING_JOBS.clear()
+
+    monkeypatch.setattr(
+        api,
+        "_resolve_rfdetr_training_dataset",
+        lambda _payload: {"dataset_root": str(tmp_path / "dataset"), "task": "detect"},
+    )
+    monkeypatch.setattr(
+        api,
+        "_rfdetr_run_dir_impl",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("RF-DETR run dir should not be created")
+        ),
+    )
+    monkeypatch.setattr(api, "torch", _FakeTorch(cuda=False, mps=True))
+    monkeypatch.setattr(api.threading, "Thread", _NoThread)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.create_rfdetr_training_job(
+            api.RfDetrTrainRequest(dataset_id="dataset_1", devices=[0], accept_tos=True)
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "rfdetr_cuda_devices_unavailable"
+    assert api.RFDETR_TRAINING_JOBS == {}
+
+
 def test_rfdetr_train_cleans_run_dir_when_worker_start_fails(monkeypatch, tmp_path):
     rfdetr_root = tmp_path / "rfdetr_runs"
     monkeypatch.setattr(api, "RFDETR_JOB_ROOT", rfdetr_root)

@@ -2530,6 +2530,28 @@ def _qwen_caption_io_write_file(path: Path, text: str, *, append: bool) -> None:
         handle.write(text)
 
 
+def _write_temp_text_no_follow(path: Path, text: str, *, exclusive: bool = False) -> None:
+    flags = os.O_WRONLY | os.O_CREAT
+    flags |= os.O_EXCL if exclusive else os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o644)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+
+
+def _write_temp_binary_no_follow(
+    path: Path, writer: Callable[[Any], None], *, exclusive: bool = False
+) -> None:
+    flags = os.O_WRONLY | os.O_CREAT
+    flags |= os.O_EXCL if exclusive else os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o644)
+    with os.fdopen(fd, "wb") as handle:
+        writer(handle)
+
+
 def _qwen_caption_io_reset_latest(run_id: Optional[str]) -> None:
     jsonl_path, text_path, latest_jsonl_path, latest_text_path = _qwen_caption_io_paths(run_id)
     for path in (latest_jsonl_path, latest_text_path):
@@ -9250,8 +9272,10 @@ def _save_clip_head_artifacts(
     tmp_head_path = clip_dir / f".head.npz.{uuid.uuid4().hex}.tmp"
     _prepare_clip_head_file(tmp_head_path, clip_root)
     try:
-        with tmp_head_path.open("wb") as handle:
-            np.savez(handle, head=np.array([head], dtype=object))
+        _write_temp_binary_no_follow(
+            tmp_head_path,
+            lambda handle: np.savez(handle, head=np.array([head], dtype=object)),
+        )
         os.replace(tmp_head_path, head_path)
     finally:
         if tmp_head_path.exists() or tmp_head_path.is_symlink():
@@ -9270,7 +9294,7 @@ def _save_clip_head_artifacts(
     tmp_meta_path = clip_dir / f".meta.json.{uuid.uuid4().hex}.tmp"
     _prepare_clip_head_file(tmp_meta_path, clip_root)
     try:
-        tmp_meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=True), encoding="utf-8")
+        _write_temp_text_no_follow(tmp_meta_path, json.dumps(meta, indent=2, ensure_ascii=True))
         os.replace(tmp_meta_path, meta_path)
     finally:
         if tmp_meta_path.exists() or tmp_meta_path.is_symlink():
@@ -12031,20 +12055,21 @@ def _agent_apply_ensemble_filter(
             tmp_dir / f"ensemble_{stamp}.scored.jsonl", tmp_dir
         )
         tmp_paths = [jsonl_path, features_path, scored_path]
-        with jsonl_path.open("w", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "image": image_name,
-                        "detections": detections,
-                        "provenance": (
-                            prepass_provenance if isinstance(prepass_provenance, dict) else None
-                        ),
-                    },
-                    ensure_ascii=True,
-                )
-                + "\n"
+        _write_temp_text_no_follow(
+            jsonl_path,
+            json.dumps(
+                {
+                    "image": image_name,
+                    "detections": detections,
+                    "provenance": (
+                        prepass_provenance if isinstance(prepass_provenance, dict) else None
+                    ),
+                },
+                ensure_ascii=True,
             )
+            + "\n",
+            exclusive=True,
+        )
         root_dir = Path(__file__).resolve().parent
         contract = dict(feature_contract or {})
         support_iou = float(contract.get("support_iou") or 0.5)
@@ -14072,7 +14097,7 @@ def _write_auto_label_result_json(job_id: str, payload: Dict[str, Any]) -> None:
     tmp_path = result_path.with_suffix(f".json.tmp.{os.getpid()}")
     if tmp_path.is_symlink():
         tmp_path.unlink(missing_ok=True)
-    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _write_temp_text_no_follow(tmp_path, json.dumps(payload, indent=2))
     os.replace(tmp_path, result_path)
 
 
@@ -15125,7 +15150,7 @@ def _annotation_write_labelmap_file(
             target_resolved = candidate.resolve(strict=False)
             if not any(_path_is_within_root_impl(target_resolved, root) for root in allowed_roots):
                 raise ValueError("labelmap target escapes allowed roots")
-        tmp_path.write_text("\n".join(labels) + "\n", encoding="utf-8")
+        _write_temp_text_no_follow(tmp_path, "\n".join(labels) + "\n")
         os.replace(tmp_path, labelmap_path)
     except HTTPException:
         raise
@@ -15360,7 +15385,7 @@ def _annotation_write_text_within_root(path: Path, root: Path, text: str) -> Non
                     status_code=HTTP_400_BAD_REQUEST,
                     detail="annotation_overlay_path_forbidden",
                 )
-        tmp_path.write_text(text, encoding="utf-8")
+        _write_temp_text_no_follow(tmp_path, text)
         os.replace(tmp_path, path)
     finally:
         if tmp_path.exists() or tmp_path.is_symlink():
@@ -20591,7 +20616,11 @@ def _write_glossary_entry_atomic(path: Path, safe: str, payload: Dict[str, Any])
     except Exception as exc:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_path_invalid") from exc
     try:
-        with tmp_path.open("w", encoding="utf-8") as handle:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp_path, flags, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
         os.replace(tmp_path, path)
     except Exception as exc:
@@ -23547,7 +23576,7 @@ def _ensure_agent_mining_sample(
         tmp_path = cache_path.with_suffix(f".json.tmp.{os.getpid()}")
         if tmp_path.is_symlink():
             tmp_path.unlink(missing_ok=True)
-        tmp_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_temp_text_no_follow(tmp_path, json.dumps(result, ensure_ascii=False, indent=2))
         os.replace(tmp_path, cache_path)
     except Exception:
         pass
@@ -28531,7 +28560,7 @@ def _segmentation_write_text_within_root(path: Path, root: Path, text: str) -> N
             target_resolved = candidate.resolve(strict=False)
             if not _path_is_within_root_impl(target_resolved, root_resolved):
                 raise ValueError("segmentation output target escapes root")
-        tmp_path.write_text(text, encoding="utf-8")
+        _write_temp_text_no_follow(tmp_path, text)
         os.replace(tmp_path, path)
     except HTTPException:
         raise
@@ -30607,7 +30636,11 @@ async def _write_upload_file(
     written = 0
     existing = _dir_size_bytes_impl(quota_root) if quota_root and quota_limit else 0
     try:
-        with tmp_path.open("wb") as handle:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp_path, flags, 0o644)
+        with os.fdopen(fd, "wb") as handle:
             while True:
                 chunk = await upload.read(1024 * 1024)
                 if not chunk:

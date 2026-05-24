@@ -958,3 +958,16 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1132 passed, 17 skipped`; focused storage/path helper coverage,
   module compile checks for the touched helpers, the full pytest suite, and
   live endpoint sanity checks passed against the restarted backend.
+
+## 2026-05-24: Local API No-Follow Temp Writes
+
+- Routed local API temp writes for clip-head artifacts, ensemble-filter
+  JSONL inputs, auto-label results, annotation labelmaps/overlays, glossary
+  entries, agent-mining sample caches, segmentation outputs, and active uploads
+  through no-follow temp-file opens before atomic replace.
+- Preserved existing serializer failure coverage for glossary saves while
+  keeping the temp write no-follow.
+- Validation: `1132 passed, 17 skipped`; focused linked annotation, glossary,
+  prepass recipe, data-ingestion, calibration, and auto-label coverage,
+  `localinferenceapi.py` compile, the full pytest suite, and live endpoint
+  sanity checks passed against the restarted backend.

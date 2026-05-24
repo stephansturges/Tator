@@ -120,3 +120,14 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Added regressions for nested symlinked package and stage parent paths.
 - Validation: `991 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Output File Preflight and Calibration Roots
+
+- Rejected symlink components in calibration job roots and calibration JSON
+  output parents.
+- Moved output-file symlink checks ahead of `mkdir(parents=True)` in prepass
+  recipe, agent cascade, EDR package, and calibration writers so nested symlink
+  ancestors cannot receive newly created directories before rejection.
+- Added regressions that assert nested symlinked output parents stay untouched.
+- Validation: `996 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

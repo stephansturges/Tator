@@ -81,6 +81,8 @@ def _path_has_symlink_component(path: Path) -> bool:
 
 
 def _prepare_output_file(path: Path) -> None:
+    if _path_has_symlink_component(path.parent):
+        raise RuntimeError("edr_package_path_invalid")
     path.parent.mkdir(parents=True, exist_ok=True)
     if _path_has_symlink_component(path.parent):
         raise RuntimeError("edr_package_path_invalid")

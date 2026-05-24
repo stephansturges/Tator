@@ -15,6 +15,7 @@ from services.agent_cascades import (
     _list_agent_cascades_impl,
     _load_agent_cascade_impl,
     _persist_agent_cascade_impl,
+    _prepare_output_file,
 )
 
 
@@ -205,6 +206,25 @@ def test_ensure_cascade_zip_rejects_nested_symlinked_cascade_parent_without_writ
             load_recipe_fn=lambda _rid: {"id": "r1"},
             resolve_classifier_fn=lambda _rel: None,
         )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_cascade_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_agent_cascade_prepare_output_file_rejects_nested_symlinked_parent_before_mkdir(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _prepare_output_file(linked_parent / "nested" / "cascades" / "ac_test.zip")
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "agent_cascade_path_invalid"

@@ -16,6 +16,7 @@ from services.edr_packages import (
     EDR_PACKAGE_ZIP_NAME,
     _copy2_if_different,
     _copy_tree,
+    _prepare_output_file,
     _stage_tree_if_needed,
     _write_json,
     edr_package_dir,
@@ -670,6 +671,23 @@ def test_stage_tree_rejects_nested_symlinked_stage_parent_without_target_write(
             package_sha256="sha",
             kind="yolo_run",
         )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_edr_prepare_output_file_rejects_nested_symlinked_parent_before_mkdir(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(RuntimeError, match="edr_package_path_invalid"):
+        _prepare_output_file(linked_parent / "nested" / "edr_packages" / "pkg1" / "package.meta.json")
 
     assert list(outside.iterdir()) == []
 

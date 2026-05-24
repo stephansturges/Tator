@@ -132,14 +132,26 @@ def _resolve_calibration_storage_root(
     error_prefix: str = "calibration_root",
 ) -> Path:
     raw_root = Path(root_path)
-    if raw_root.is_symlink() or raw_root.parent.is_symlink():
+    if _path_has_symlink_component(raw_root):
         raise ValueError(f"{error_prefix}_symlink")
     if create:
         raw_root.mkdir(parents=True, exist_ok=True)
-        if raw_root.is_symlink() or raw_root.parent.is_symlink():
+        if _path_has_symlink_component(raw_root):
             raise ValueError(f"{error_prefix}_symlink")
         return raw_root.resolve(strict=True)
     return raw_root.resolve(strict=False)
+
+
+def _path_has_symlink_component(path: Path) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    checks = [candidate]
+    checks.extend(candidate.parents)
+    for component in checks:
+        if component == component.parent:
+            continue
+        if component.is_symlink():
+            return True
+    return False
 
 
 def _repo_tool_subprocess_env(root_dir: Path, base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -156,8 +168,10 @@ def _repo_tool_subprocess_env(root_dir: Path, base_env: Optional[Dict[str, str]]
 
 
 def _write_json_atomic(path: Path, payload: Any) -> None:
+    if _path_has_symlink_component(path.parent):
+        raise ValueError("calibration_json_parent_symlink")
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.is_symlink():
+    if _path_has_symlink_component(path.parent):
         raise ValueError("calibration_json_parent_symlink")
     parent_resolved = path.parent.resolve(strict=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")

@@ -63,6 +63,8 @@ def _agent_cascade_storage_root(
 
 
 def _prepare_output_file(path: Path) -> None:
+    if _path_has_symlink_component(path.parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
     path.parent.mkdir(parents=True, exist_ok=True)
     if _path_has_symlink_component(path.parent):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")

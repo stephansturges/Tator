@@ -7,6 +7,7 @@ import localinferenceapi as api
 from services.calibration import (
     CALIBRATION_JOB_STATE_FILENAME,
     CalibrationJob,
+    _resolve_calibration_storage_root,
     _write_json_atomic,
 )
 
@@ -259,6 +260,43 @@ def test_calibration_write_json_atomic_replaces_final_symlink_without_target_wri
     assert not state_path.is_symlink()
     assert json.loads(state_path.read_text(encoding="utf-8"))["job_id"] == "cal_safe"
     assert outside.read_text(encoding="utf-8") == "external"
+
+
+def test_resolve_calibration_storage_root_rejects_nested_symlinked_parent_without_write(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(ValueError, match="calibration_root_symlink"):
+        _resolve_calibration_storage_root(linked_parent / "nested" / "calibration_jobs", create=True)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_calibration_write_json_atomic_rejects_nested_symlinked_parent_without_write(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(ValueError, match="calibration_json_parent_symlink"):
+        _write_json_atomic(
+            linked_parent / "nested" / "calibration_jobs" / "cal_safe" / CALIBRATION_JOB_STATE_FILENAME,
+            {"job_id": "cal_safe"},
+        )
+
+    assert list(outside.iterdir()) == []
 
 
 def test_ensemble_filter_rejects_traversal_job_id_before_artifact_resolution(

@@ -14666,6 +14666,39 @@ def _annotation_labelmap_write_path(entry: Dict[str, Any], dataset_root: Path) -
     return labelmap_path
 
 
+def _annotation_labelmap_read_path(
+    entry: Dict[str, Any], dataset_root: Path, storage_root: Path
+) -> Path:
+    raw_path = entry.get("yolo_labelmap_path")
+    labelmap_path = Path(str(raw_path)) if raw_path else (dataset_root / "labelmap.txt")
+    allowed_roots = [dataset_root.resolve(), storage_root.resolve()]
+    try:
+        target_resolved = labelmap_path.resolve(strict=False)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="labelmap_path_forbidden",
+        ) from exc
+    if not any(_path_is_within_root_impl(target_resolved, root) for root in allowed_roots):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_forbidden")
+    if not labelmap_path.exists():
+        return labelmap_path
+    try:
+        if _storage_path_has_symlink_component(labelmap_path.parent) or labelmap_path.is_symlink():
+            raise ValueError("labelmap path has a symlink component")
+        existing_resolved = labelmap_path.resolve(strict=True)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="labelmap_path_forbidden",
+        ) from exc
+    if not existing_resolved.is_file() or not any(
+        _path_is_within_root_impl(existing_resolved, root) for root in allowed_roots
+    ):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_forbidden")
+    return labelmap_path
+
+
 def _annotation_write_labelmap_file(
     labelmap_path: Path, allowed_roots: Sequence[Path], labels: Sequence[str]
 ) -> None:
@@ -15760,8 +15793,12 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
     if not entry.get("yolo_ready"):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_not_yolo_ready")
     dataset_root = _dataset_effective_root_from_entry(entry)
-    storage_root = _dataset_meta_storage_root_from_entry(entry)
-    labelmap_path = Path(entry.get("yolo_labelmap_path") or dataset_root / "labelmap.txt")
+    storage_root = _dataset_guarded_meta_storage_root_from_entry(
+        entry,
+        ensure=False,
+        detail="dataset_metadata_path_forbidden",
+    )
+    labelmap_path = _annotation_labelmap_read_path(entry, dataset_root, storage_root)
     labelmap = [str(item).strip() for item in (entry.get("classes") or []) if str(item).strip()]
     if labelmap_path.exists():
         labelmap = [

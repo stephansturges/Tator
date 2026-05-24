@@ -424,3 +424,16 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1056 passed, 17 skipped`; focused linked annotation,
   auto-label runner, dataset download cleanup coverage, the full pytest suite,
   and live endpoint sanity checks passed.
+
+## 2026-05-24: Qwen Dataset Labelmap Source Guards
+
+- Hardened YOLO-to-Qwen dataset builds so `yolo_labelmap_path` is validated
+  against the source dataset root and guarded metadata root before it is read.
+- Rejected symlinked labelmap files and symlinked linked-dataset registry roots
+  before creating any Qwen output dataset directories.
+- Kept the existing class-list fallback when no safe labelmap file exists.
+- Added regressions for outside labelmap paths, symlinked labelmaps, and
+  symlinked registry metadata roots.
+- Validation: `1059 passed, 17 skipped`; focused linked annotation,
+  Qwen dataset upload/training/runtime coverage, the full pytest suite, and
+  live endpoint sanity checks passed.

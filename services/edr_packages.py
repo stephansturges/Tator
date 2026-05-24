@@ -135,8 +135,10 @@ def _copy_tree_filtered(src: Path, dest: Path) -> List[Path]:
             target_resolved.relative_to(dest_root)
         except Exception:
             continue
+        if _path_has_symlink_component(target.parent):
+            continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(item.resolve(strict=True), target)
+        _copy2_if_different(item.resolve(strict=True), target)
         copied.append(target)
     return copied
 
@@ -322,7 +324,6 @@ def _remove_existing_child_path(path: Path, root: Path) -> None:
 
 
 def _copy_file(src: Path, dest: Path, *, assets: List[Dict[str, Any]], kind: str) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
     _copy2_if_different(src, dest)
     assets.append(
         {

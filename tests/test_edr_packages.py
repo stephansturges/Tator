@@ -15,7 +15,9 @@ from services.edr_packages import (
     EDR_PACKAGE_STAGE_META_NAME,
     EDR_PACKAGE_ZIP_NAME,
     _copy2_if_different,
+    _copy_file,
     _copy_tree,
+    _copy_tree_filtered,
     _prepare_output_file,
     _stage_tree_if_needed,
     _write_json,
@@ -690,6 +692,51 @@ def test_edr_prepare_output_file_rejects_nested_symlinked_parent_before_mkdir(
         _prepare_output_file(linked_parent / "nested" / "edr_packages" / "pkg1" / "package.meta.json")
 
     assert list(outside.iterdir()) == []
+
+
+def test_edr_copy_file_rejects_nested_symlinked_parent_before_mkdir(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "source.bin"
+    src.write_bytes(b"source")
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(RuntimeError, match="edr_package_path_invalid"):
+        _copy_file(
+            src,
+            linked_parent / "nested" / "payload" / "source.bin",
+            assets=[],
+            kind="test_asset",
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_edr_copy_tree_filtered_skips_internal_symlinked_parent(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "source_tree"
+    src_nested = src / "linked_parent"
+    src_nested.mkdir(parents=True)
+    (src_nested / "source.bin").write_bytes(b"source")
+    dest = tmp_path / "dest_tree"
+    actual = dest / "actual"
+    actual.mkdir(parents=True)
+    try:
+        (dest / "linked_parent").symlink_to(actual, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    copied = _copy_tree_filtered(src, dest)
+
+    assert copied == []
+    assert list(actual.iterdir()) == []
 
 
 def test_zip_payload_skips_symlink_escape(tmp_path: Path) -> None:

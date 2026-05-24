@@ -203,3 +203,14 @@ preserving the exact validation story for storage and artifact-write fixes.
   trace file parents, and calibration cache parents.
 - Validation: `1018 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: EDR Package Copy Destinations
+
+- Removed the remaining raw parent creation before EDR package asset copies so
+  destination parents are preflighted by the hardened output-file helper first.
+- Hardened runtime tree staging so symlink components inside a destination tree
+  are skipped before parent creation and file copy.
+- Added regressions for nested symlinked EDR asset-copy parents and internal
+  symlinked runtime tree parents.
+- Validation: `1020 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

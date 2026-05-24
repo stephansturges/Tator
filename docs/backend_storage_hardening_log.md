@@ -542,3 +542,16 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1076 passed, 17 skipped`; focused Qwen upload coverage, the full
   pytest suite, and live endpoint sanity checks passed against the restarted
   backend.
+
+## 2026-05-24: Agent Recipe and Cascade Delete Parent Guards
+
+- Rejected agent recipe and cascade delete targets whose nested parent path
+  contains a symlink before resolving or unlinking JSON, ZIP, or recipe
+  directory artifacts.
+- Preserved safe cleanup of final symlinked recipe/cascade artifacts by
+  unlinking the symlink entry itself.
+- Added regressions proving nested symlink parents cannot delete another
+  in-root recipe or cascade target.
+- Validation: `1078 passed, 17 skipped`; focused recipe/cascade coverage, the
+  full pytest suite, and live endpoint sanity checks passed against the
+  restarted backend.

@@ -381,6 +381,36 @@ def test_delete_agent_cascade_unlinks_symlinked_zip_without_touching_target(
     assert outside.read_bytes() == b"keep"
 
 
+def test_delete_agent_cascade_rejects_symlinked_nested_parent_without_target_delete(
+    tmp_path: Path,
+) -> None:
+    cascades_root = tmp_path / "cascades"
+    cascades_root.mkdir()
+    target_parent = cascades_root / "target_parent"
+    target_parent.mkdir()
+    target_json = target_parent / "ac.json"
+    target_zip = target_parent / "ac.zip"
+    target_json.write_text(json.dumps({"id": "ac"}), encoding="utf-8")
+    target_zip.write_bytes(b"zip")
+    linked_parent = cascades_root / "linked_parent"
+    try:
+        linked_parent.symlink_to(target_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _delete_agent_cascade_impl(
+            "linked_parent/ac",
+            cascades_root=cascades_root,
+            path_is_within_root_fn=_within_root,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_cascade_path_invalid"
+    assert target_json.read_text(encoding="utf-8") == json.dumps({"id": "ac"})
+    assert target_zip.read_bytes() == b"zip"
+
+
 def test_list_agent_cascades_skips_symlinked_json_escape(tmp_path: Path) -> None:
     cascades_root = tmp_path / "cascades"
     outside = tmp_path / "outside.json"

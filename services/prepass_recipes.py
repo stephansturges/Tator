@@ -732,6 +732,9 @@ def _delete_agent_recipe_impl(
     json_raw = root / f"{recipe_id}.json"
     zip_raw = root / f"{recipe_id}.zip"
     recipe_dir_raw = root / recipe_id
+    for raw_path in (json_raw, zip_raw, recipe_dir_raw):
+        if _path_has_symlink_component(raw_path.parent):
+            raise http_exception_cls(status_code=400, detail="agent_recipe_path_invalid")
     json_path = json_raw.resolve()
     if not path_is_within_root_fn(json_path, root):
         raise http_exception_cls(status_code=400, detail="agent_recipe_path_invalid")

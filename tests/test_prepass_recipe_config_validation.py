@@ -969,6 +969,41 @@ def test_delete_agent_recipe_unlinks_symlinked_recipe_dir_without_touching_targe
     assert sentinel.read_text(encoding="utf-8") == "keep"
 
 
+def test_delete_agent_recipe_rejects_symlinked_nested_parent_without_target_delete(
+    tmp_path: Path,
+) -> None:
+    recipes_root = tmp_path / "recipes"
+    recipes_root.mkdir()
+    target_parent = recipes_root / "target_parent"
+    target_parent.mkdir()
+    target_json = target_parent / "agent_recipe.json"
+    target_zip = target_parent / "agent_recipe.zip"
+    target_dir = target_parent / "agent_recipe"
+    target_dir.mkdir()
+    target_json.write_text(json.dumps({"id": "agent_recipe"}), encoding="utf-8")
+    target_zip.write_bytes(b"zip")
+    (target_dir / "sentinel.txt").write_text("keep", encoding="utf-8")
+    linked_parent = recipes_root / "linked_parent"
+    try:
+        linked_parent.symlink_to(target_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _delete_agent_recipe_impl(
+            "linked_parent/agent_recipe",
+            recipes_root=recipes_root,
+            path_is_within_root_fn=_within_root,
+            http_exception_cls=HTTPException,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_recipe_path_invalid"
+    assert target_json.read_text(encoding="utf-8") == json.dumps({"id": "agent_recipe"})
+    assert target_zip.read_bytes() == b"zip"
+    assert (target_dir / "sentinel.txt").read_text(encoding="utf-8") == "keep"
+
+
 def test_list_agent_recipes_skips_symlinked_json_escape(tmp_path: Path) -> None:
     recipes_root = tmp_path / "recipes"
     outside = tmp_path / "outside.json"

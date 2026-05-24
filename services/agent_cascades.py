@@ -193,8 +193,11 @@ def _delete_agent_cascade_impl(
     path_is_within_root_fn,
 ) -> None:
     root = _agent_cascade_storage_root(cascades_root)
-    json_raw = cascades_root / f"{cascade_id}.json"
-    zip_raw = cascades_root / f"{cascade_id}.zip"
+    json_raw = root / f"{cascade_id}.json"
+    zip_raw = root / f"{cascade_id}.zip"
+    for raw_path in (json_raw, zip_raw):
+        if _path_has_symlink_component(raw_path.parent):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")
     json_path = json_raw.resolve()
     if not path_is_within_root_fn(json_path, root):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_path_invalid")

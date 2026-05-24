@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from services.classifier import _validate_clip_dataset_impl
 from services.datasets import _resolve_dataset_legacy_impl
 from services.detectors import _rfdetr_run_dir_impl, _yolo_run_dir_impl
+import services.prompt_helper_presets as prompt_helper_presets_service
 from services.prompt_helper_presets import (
     _list_prompt_helper_presets_impl,
     _load_prompt_helper_preset_impl,
@@ -226,6 +227,35 @@ def test_save_prompt_helper_preset_rejects_nested_symlinked_parent_without_write
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "prompt_helper_preset_path_invalid"
     assert list(outside.iterdir()) == []
+
+
+def test_save_prompt_helper_preset_failure_does_not_leave_partial_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FixedUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    def partial_dump(_payload, handle, **_kwargs) -> None:
+        handle.write("{partial")
+        raise RuntimeError("serializer failed")
+
+    presets_root = tmp_path / "presets"
+    monkeypatch.setattr(prompt_helper_presets_service.uuid, "uuid4", lambda: FixedUUID())
+    monkeypatch.setattr(prompt_helper_presets_service.json, "dump", partial_dump)
+
+    with pytest.raises(HTTPException) as exc_info:
+        _save_prompt_helper_preset_impl(
+            "demo",
+            "dataset",
+            {0: ["prompt"]},
+            presets_root=presets_root,
+            path_is_within_root_fn=_path_within_root,
+        )
+
+    assert exc_info.value.status_code == 500
+    assert str(exc_info.value.detail).startswith("prompt_helper_preset_save_failed:")
+    assert not (presets_root / "phset_deadbeef.json").exists()
+    assert list(presets_root.iterdir()) == []
 
 
 def test_yolo_run_lookup_rejects_symlinked_run_id_without_target_delete(tmp_path: Path) -> None:

@@ -631,3 +631,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1087 passed, 17 skipped`; focused calibration/ensemble coverage,
   module compile checks, the full pytest suite, and live endpoint sanity checks
   passed against the restarted backend.
+
+## 2026-05-24: Prompt Helper Preset Atomic Saves
+
+- Switched SAM3 prompt-helper preset saves from direct final-path JSON writes
+  to guarded temp-file writes followed by atomic replace.
+- Preserved the existing symlink/root containment checks while ensuring
+  serializer or disk errors do not leave partial preset JSON at the final path.
+- Added a regression that forces a mid-write JSON failure and proves no partial
+  preset file or temp artifact remains.
+- Validation: `1088 passed, 17 skipped`; focused backend path/job-start
+  coverage, module compile checks, the full pytest suite, and live endpoint
+  sanity checks passed against the restarted backend.

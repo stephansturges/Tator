@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from pathlib import Path
@@ -70,6 +71,23 @@ def _path_within_root(path: Path, root: Path) -> bool:
         return False
 
 
+def _prepare_preset_output_file(path: Path, root: Path, *, path_is_within_root_fn) -> Path:
+    try:
+        if _path_has_symlink_component(root) or _path_has_symlink_component(path.parent):
+            raise ValueError("prompt helper preset path has a symlink component")
+        if path.is_symlink() or (path.exists() and path.is_dir()):
+            raise ValueError("prompt helper preset target is not writable")
+        target = path.resolve(strict=False)
+        if not path_is_within_root_fn(target, root):
+            raise ValueError("prompt helper preset target escapes root")
+        return path
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="prompt_helper_preset_path_invalid",
+        ) from exc
+
+
 def _load_prompt_helper_preset_impl(
     preset_id: str,
     *,
@@ -113,11 +131,25 @@ def _save_prompt_helper_preset_impl(
     if root is None:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_helper_preset_path_invalid")
     raw_path = root / f"{preset_id}.json"
-    if raw_path.is_symlink() or (raw_path.exists() and raw_path.is_dir()):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_helper_preset_path_invalid")
-    path = raw_path.resolve(strict=False)
-    if not path_is_within_root_fn(path, root):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prompt_helper_preset_path_invalid")
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    path = _prepare_preset_output_file(
+        raw_path, root, path_is_within_root_fn=path_is_within_root_fn
+    )
+    tmp_path = root / f".{preset_id}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    tmp_path = _prepare_preset_output_file(
+        tmp_path, root, path_is_within_root_fn=path_is_within_root_fn
+    )
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"prompt_helper_preset_save_failed:{exc}",
+        ) from exc
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
     return payload

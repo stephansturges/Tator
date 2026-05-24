@@ -30600,36 +30600,37 @@ async def _write_upload_file(
     if dest.is_symlink():
         if not allow_overwrite:
             raise HTTPException(status_code=HTTP_409_CONFLICT, detail="upload_exists")
-        dest.unlink()
     if dest.exists() and not allow_overwrite:
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="upload_exists")
+    tmp_path = dest.with_suffix(dest.suffix + f".tmp.{os.getpid()}")
+    if tmp_path.is_symlink():
+        tmp_path.unlink(missing_ok=True)
+    elif tmp_path.exists():
+        if tmp_path.is_dir():
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
+        tmp_path.unlink()
     written = 0
     existing = _dir_size_bytes_impl(quota_root) if quota_root and quota_limit else 0
-    with dest.open("wb") as handle:
-        while True:
-            chunk = await upload.read(1024 * 1024)
-            if not chunk:
-                break
-            written += len(chunk)
-            if max_bytes and written > max_bytes:
-                handle.close()
-                try:
-                    dest.unlink()
-                except Exception:
-                    pass
-                raise HTTPException(
-                    status_code=HTTP_413_CONTENT_TOO_LARGE, detail="upload_too_large"
-                )
-            if quota_root and quota_limit and existing + written > quota_limit:
-                handle.close()
-                try:
-                    dest.unlink()
-                except Exception:
-                    pass
-                raise HTTPException(
-                    status_code=HTTP_413_CONTENT_TOO_LARGE, detail="upload_quota_exceeded"
-                )
-            handle.write(chunk)
+    try:
+        with tmp_path.open("wb") as handle:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if max_bytes and written > max_bytes:
+                    raise HTTPException(
+                        status_code=HTTP_413_CONTENT_TOO_LARGE, detail="upload_too_large"
+                    )
+                if quota_root and quota_limit and existing + written > quota_limit:
+                    raise HTTPException(
+                        status_code=HTTP_413_CONTENT_TOO_LARGE, detail="upload_quota_exceeded"
+                    )
+                handle.write(chunk)
+        os.replace(tmp_path, dest)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
     await upload.close()
 
 

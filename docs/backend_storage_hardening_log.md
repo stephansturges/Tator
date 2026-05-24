@@ -885,3 +885,15 @@ preserving the exact validation story for storage and artifact-write fixes.
   helper coverage, `localinferenceapi.py` and `services/calibration_helpers.py`
   compile checks, the full pytest suite, and live endpoint sanity checks passed
   against the restarted backend.
+
+## 2026-05-24: Upload File Atomic Saves
+
+- Changed `_write_upload_file` to stream uploads into a checked temp sibling and
+  atomically replace the final destination only after size/quota checks pass.
+- Preserved existing files and symlink targets when overwrite uploads fail size
+  validation.
+- Added regressions proving overwrite uploads replace symlink leaves without
+  target writes and preserve existing destination files on oversize failure.
+- Validation: `1126 passed, 17 skipped`; focused data-ingestion upload coverage,
+  `localinferenceapi.py` compile, the full pytest suite, and live endpoint
+  sanity checks passed against the restarted backend.

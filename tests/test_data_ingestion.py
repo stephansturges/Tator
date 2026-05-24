@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -347,6 +348,46 @@ def test_write_upload_file_overwrite_unlinks_symlink_destination(tmp_path):
     assert not dest.is_symlink()
     assert dest.read_bytes() == b"payload"
     assert not outside.exists()
+
+
+def test_write_upload_file_overwrite_replaces_symlink_without_target_write(tmp_path):
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"external")
+    dest = tmp_path / "upload.bin"
+    dest.symlink_to(outside)
+
+    asyncio.run(
+        api._write_upload_file(
+            _FakeUpload("upload.bin", b"payload"),
+            dest,
+            allow_overwrite=True,
+        )
+    )
+
+    assert not dest.is_symlink()
+    assert dest.read_bytes() == b"payload"
+    assert outside.read_bytes() == b"external"
+
+
+def test_write_upload_file_overwrite_preserves_existing_file_on_size_failure(tmp_path):
+    dest = tmp_path / "upload.bin"
+    dest.write_bytes(b"existing")
+    tmp_dest = dest.with_suffix(dest.suffix + f".tmp.{os.getpid()}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        asyncio.run(
+            api._write_upload_file(
+                _FakeUpload("upload.bin", b"payload"),
+                dest,
+                max_bytes=3,
+                allow_overwrite=True,
+            )
+        )
+
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.detail == "upload_too_large"
+    assert dest.read_bytes() == b"existing"
+    assert not tmp_dest.exists()
 
 
 def test_write_upload_file_rejects_symlinked_parent_without_write(tmp_path):

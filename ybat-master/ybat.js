@@ -20036,9 +20036,7 @@ async function cancelRfDetrTrainingJobRequest() {
         option.textContent = label || optionValue;
         option.title = optionValue;
         if (isResolvedQwenModelId(optionValue)) {
-            option.dataset.runtimePlatform = optionValue.startsWith("mlx-community/")
-                ? "mlx_vlm"
-                : "transformers";
+            option.dataset.runtimePlatform = inferQwenRuntimePlatform(optionValue);
         }
         select.appendChild(option);
     }

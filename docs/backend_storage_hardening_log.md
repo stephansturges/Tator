@@ -1847,3 +1847,22 @@ preserving the exact validation story for storage and artifact-write fixes.
   focused Qwen fallback and local-SALAD UI contract coverage (`2 passed`),
   `tools/check_ui_endpoints.py http://127.0.0.1:8000`, `git diff --check`, and
   the full pytest suite (`1248 passed, 20 skipped`) passed.
+
+## 2026-05-24: Qwen Runtime Select MLX Resolver Alignment
+
+- Audited the remaining Qwen caption/prepass runtime model controls after the
+  training fallback update.
+- Found that recipe-loaded explicit model IDs were injected through
+  `ensureQwenSelectOption`, but that helper only marked `mlx-community/*`
+  models as MLX. Compatible abliterated MLX IDs from other namespaces, such as
+  `*-mlx` and `*-mlx-*`, were therefore tagged as Transformers in the injected
+  option even though the runtime resolver treats them as MLX-VLM.
+- Routed injected Qwen select options through the shared
+  `inferQwenRuntimePlatform` resolver so recipe-loaded MLX IDs use the same
+  platform detection as training presets and runtime controls.
+- Added a UI contract test requiring the shared resolver path and the non-
+  `mlx-community` MLX heuristics used for abliterated model IDs.
+- Validation: `py_compile tests/test_labeling_panel_layout_contract.py`,
+  focused Qwen runtime-select contract coverage (`2 passed`),
+  `tools/check_ui_endpoints.py http://127.0.0.1:8000`, `git diff --check`, and
+  the full pytest suite (`1249 passed, 20 skipped`) passed.

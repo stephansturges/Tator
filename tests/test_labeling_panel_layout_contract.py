@@ -220,6 +220,19 @@ def test_qwen_training_fallback_catalog_covers_mlx_and_abliterated_paths():
     assert 'training_model_id: "huihui-ai/Huihui-Qwen3-VL-8B-Thinking-abliterated"' in fallback_block
 
 
+def test_qwen_injected_runtime_options_use_shared_mlx_resolver():
+    js = _js()
+    start = js.index("function ensureQwenSelectOption")
+    end = js.index("function populateQwenRuntimeModelSelects", start)
+    helper = js[start:end]
+
+    assert "option.dataset.runtimePlatform = inferQwenRuntimePlatform(optionValue);" in helper
+    assert 'optionValue.startsWith("mlx-community/")' not in helper
+    assert 'lowered.includes("-mlx-")' in js
+    assert 'lowered.endsWith("-mlx")' in js
+    assert "goekdeniz-guelmez/josiefied-qwen3-vl-" in js
+
+
 def test_data_ingestion_panel_contract():
     html = _html()
     css = _css()

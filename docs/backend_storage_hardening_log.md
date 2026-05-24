@@ -506,3 +506,14 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1071 passed, 17 skipped`; focused agent-mining/auto-label
   coverage, the full pytest suite, and live endpoint sanity checks passed
   against the restarted backend.
+
+## 2026-05-24: Detector Training Cleanup Symlink Guards
+
+- Hardened YOLO/RF-DETR failed-run cleanup so swapped symlink run directories
+  are unlinked only when the symlink entry itself lives under the configured job
+  root and the parent path has no symlink components.
+- Added regressions proving cleanup does not delete another in-root detector run
+  through a symlink target and does not unlink out-of-root symlink paths.
+- Validation: `1073 passed, 17 skipped`; focused detector lifecycle/path
+  containment coverage, the full pytest suite, and live endpoint sanity checks
+  passed against the restarted backend.

@@ -28699,24 +28699,34 @@ def _resolve_yolo_training_device_config(config: Dict[str, Any]) -> Dict[str, An
     return resolution
 
 
-def _cleanup_yolo_run_dir(run_dir: Path) -> None:
+def _cleanup_detector_run_dir(run_dir: Path, job_root: Path) -> None:
     try:
-        run_resolved = run_dir.resolve(strict=False)
-        root_resolved = YOLO_JOB_ROOT.resolve(strict=False)
+        raw_path = Path(run_dir)
+        root_resolved = Path(job_root).resolve(strict=False)
+        if _storage_path_has_symlink_component(raw_path.parent):
+            return
+        raw_parent_resolved = raw_path.parent.resolve(strict=False)
+    except Exception:
+        return
+    if not _path_is_within_root_impl(raw_parent_resolved, root_resolved):
+        return
+    try:
+        if raw_path.is_symlink():
+            raw_path.unlink(missing_ok=True)
+            return
+        run_resolved = raw_path.resolve(strict=False)
     except Exception:
         return
     if _path_is_within_root_impl(run_resolved, root_resolved) and run_resolved.exists():
         shutil.rmtree(run_resolved, ignore_errors=True)
+
+
+def _cleanup_yolo_run_dir(run_dir: Path) -> None:
+    _cleanup_detector_run_dir(run_dir, YOLO_JOB_ROOT)
 
 
 def _cleanup_rfdetr_run_dir(run_dir: Path) -> None:
-    try:
-        run_resolved = run_dir.resolve(strict=False)
-        root_resolved = RFDETR_JOB_ROOT.resolve(strict=False)
-    except Exception:
-        return
-    if _path_is_within_root_impl(run_resolved, root_resolved) and run_resolved.exists():
-        shutil.rmtree(run_resolved, ignore_errors=True)
+    _cleanup_detector_run_dir(run_dir, RFDETR_JOB_ROOT)
 
 
 def _start_yolo_training_worker(job: YoloTrainingJob) -> None:

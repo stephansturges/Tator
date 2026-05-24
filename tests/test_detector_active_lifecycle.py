@@ -565,6 +565,43 @@ def test_yolo_prune_run_dir_unlinks_symlink_directory_without_target_delete(tmp_
     assert (outside / "payload.bin").read_bytes() == b"external"
 
 
+def test_yolo_cleanup_run_dir_unlinks_in_root_symlink_without_target_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "yolo_runs"
+    root.mkdir()
+    target = root / "target_run"
+    target.mkdir()
+    payload = target / "best.pt"
+    payload.write_bytes(b"keep")
+    in_root_link = root / "failed_run"
+    outside_link = tmp_path / "outside_link"
+    parent_target = root / "parent_target"
+    parent_target.mkdir()
+    run_through_parent_link = parent_target / "failed_parent_run"
+    run_through_parent_link.mkdir()
+    parent_payload = run_through_parent_link / "best.pt"
+    parent_payload.write_bytes(b"parent")
+    parent_link = root / "linked_parent"
+    try:
+        in_root_link.symlink_to(target, target_is_directory=True)
+        outside_link.symlink_to(target, target_is_directory=True)
+        parent_link.symlink_to(parent_target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "YOLO_JOB_ROOT", root)
+
+    api._cleanup_yolo_run_dir(in_root_link)
+    api._cleanup_yolo_run_dir(outside_link)
+    api._cleanup_yolo_run_dir(parent_link / "failed_parent_run")
+
+    assert not in_root_link.exists()
+    assert outside_link.is_symlink()
+    assert payload.read_bytes() == b"keep"
+    assert parent_payload.read_bytes() == b"parent"
+
+
 def test_rfdetr_prune_run_dir_unlinks_symlink_directory_without_target_delete(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
@@ -587,6 +624,43 @@ def test_rfdetr_prune_run_dir_unlinks_symlink_directory_without_target_delete(tm
     assert result["freed_bytes"] == 0
     assert not (run_dir / "linked").exists()
     assert (outside / "payload.bin").read_bytes() == b"external"
+
+
+def test_rfdetr_cleanup_run_dir_unlinks_in_root_symlink_without_target_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "rfdetr_runs"
+    root.mkdir()
+    target = root / "target_run"
+    target.mkdir()
+    payload = target / "checkpoint_best_total.pth"
+    payload.write_bytes(b"keep")
+    in_root_link = root / "failed_run"
+    outside_link = tmp_path / "outside_link"
+    parent_target = root / "parent_target"
+    parent_target.mkdir()
+    run_through_parent_link = parent_target / "failed_parent_run"
+    run_through_parent_link.mkdir()
+    parent_payload = run_through_parent_link / "checkpoint_best_total.pth"
+    parent_payload.write_bytes(b"parent")
+    parent_link = root / "linked_parent"
+    try:
+        in_root_link.symlink_to(target, target_is_directory=True)
+        outside_link.symlink_to(target, target_is_directory=True)
+        parent_link.symlink_to(parent_target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "RFDETR_JOB_ROOT", root)
+
+    api._cleanup_rfdetr_run_dir(in_root_link)
+    api._cleanup_rfdetr_run_dir(outside_link)
+    api._cleanup_rfdetr_run_dir(parent_link / "failed_parent_run")
+
+    assert not in_root_link.exists()
+    assert outside_link.is_symlink()
+    assert payload.read_bytes() == b"keep"
+    assert parent_payload.read_bytes() == b"parent"
 
 
 def test_rfdetr_detector_runtime_rejects_best_symlink_escape(

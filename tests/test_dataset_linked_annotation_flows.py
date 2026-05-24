@@ -414,6 +414,15 @@ def _entry_for_annotation(tmp_path: Path) -> dict:
     dataset_root = tmp_path / "dataset"
     (dataset_root / "images").mkdir(parents=True, exist_ok=True)
     (dataset_root / "labels").mkdir(parents=True, exist_ok=True)
+    for relpath in (
+        "img.jpg",
+        "img_ok.jpg",
+        "nested/img.jpg",
+        "sub/img.jpg",
+        "sub_a/img.jpg",
+        "sub_b/img.png",
+    ):
+        _write_test_image(dataset_root / "images" / relpath)
     registry_root = tmp_path / "registry" / "ds"
     registry_root.mkdir(parents=True, exist_ok=True)
     return {
@@ -574,6 +583,73 @@ def test_persistent_snapshot_normalises_all_records_before_overlay_writes(
     assert exc.value.detail == "invalid_relative_path"
     overlay_root = Path(entry["registry_root"]) / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
     assert not (overlay_root / "labels" / "train" / "img_ok.txt").exists()
+
+
+def test_persistent_snapshot_rejects_records_for_missing_images(tmp_path, monkeypatch) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    meta = {"annotation_lock": _active_lock("sess-lock")}
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api, "_annotation_load_or_create_meta", lambda _entry: (Path("/tmp/meta.json"), meta)
+    )
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: {"progress": {}})
+    monkeypatch.setattr(api, "_annotation_persist_meta", lambda _entry, _meta: None)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.save_dataset_annotation_snapshot(
+            "ds",
+            {
+                "session_id": "sess-lock",
+                "records": [
+                    {
+                        "split": "train",
+                        "image_relpath": "missing.jpg",
+                        "label_lines": ["0 0.5 0.5 0.1 0.1"],
+                    }
+                ],
+            },
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "annotation_image_not_found"
+    overlay_root = Path(entry["registry_root"]) / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    assert not (overlay_root / "labels" / "train" / "missing.txt").exists()
+
+
+def test_persistent_snapshot_text_only_update_preserves_existing_label_overlay(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    meta = {"annotation_lock": _active_lock("sess-lock")}
+    overlay_root = Path(entry["registry_root"]) / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    label_path = overlay_root / "labels" / "train" / "img.txt"
+    label_path.parent.mkdir(parents=True, exist_ok=True)
+    label_path.write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api, "_annotation_load_or_create_meta", lambda _entry: (Path("/tmp/meta.json"), meta)
+    )
+    monkeypatch.setattr(api, "_annotation_manifest_for_entry", lambda _entry: {"progress": {}})
+    monkeypatch.setattr(api, "_annotation_persist_meta", lambda _entry, _meta: None)
+
+    out = api.save_dataset_annotation_snapshot(
+        "ds",
+        {
+            "session_id": "sess-lock",
+            "records": [
+                {
+                    "split": "train",
+                    "image_relpath": "img.jpg",
+                    "text_label": "new caption",
+                }
+            ],
+        },
+    )
+
+    assert out["status"] == "saved"
+    assert label_path.read_text(encoding="utf-8") == "0 0.5 0.5 0.2 0.2\n"
+    text_path = overlay_root / "text_labels" / "img.txt"
+    assert text_path.read_text(encoding="utf-8") == "new caption"
 
 
 def test_persistent_snapshot_replaces_overlay_file_symlink_without_touching_target(
@@ -984,6 +1060,47 @@ def test_transient_snapshot_validates_status_before_overlay_mutation(monkeypatch
         assert session["overlay_labels"] == {}
         assert session["overlay_text"] == {}
         assert "annotation_status" not in session
+        api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
+
+
+def test_transient_snapshot_rejects_records_for_missing_images(tmp_path, monkeypatch) -> None:
+    session_id = "transient-missing-image"
+    source_root = tmp_path / "source"
+    (source_root / "images").mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    with api.DATASET_TRANSIENT_LOCK:
+        api.DATASET_TRANSIENT_SESSIONS[session_id] = {
+            "session_id": session_id,
+            "dataset_root": str(source_root),
+            "yolo_layout": "flat",
+            "overlay_labels": {},
+            "overlay_text": {},
+            "annotation_lock": _active_lock("sess-lock"),
+            "expires_at": now + 300.0,
+        }
+    monkeypatch.setattr(api, "_validate_linked_dataset_path", lambda _path: source_root)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.save_transient_annotation_snapshot(
+            session_id,
+            {
+                "session_id": "sess-lock",
+                "records": [
+                    {
+                        "split": "train",
+                        "image_relpath": "missing.jpg",
+                        "label_lines": ["0 0.5 0.5 0.1 0.1"],
+                    }
+                ],
+            },
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "annotation_image_not_found"
+    with api.DATASET_TRANSIENT_LOCK:
+        session = api.DATASET_TRANSIENT_SESSIONS[session_id]
+        assert session["overlay_labels"] == {}
+        assert session["overlay_text"] == {}
         api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
 
 

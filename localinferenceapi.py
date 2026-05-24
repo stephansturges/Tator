@@ -15310,6 +15310,15 @@ def _normalise_annotation_snapshot_records(
     return normalised
 
 
+def _validate_annotation_snapshot_record_images(
+    dataset_root: Path,
+    yolo_layout: str,
+    records: Sequence[Tuple[str, Path, bool, List[str], bool, str]],
+) -> None:
+    for split, rel, _has_label_lines, _label_lines, _has_text_label, _text_value in records:
+        _resolve_annotation_image_path(dataset_root, yolo_layout, split, rel)
+
+
 def _annotation_overlay_key_to_split_rel(key: str) -> Tuple[str, Path]:
     raw = str(key or "").strip()
     if ":" not in raw:
@@ -16279,19 +16288,25 @@ def get_dataset_annotation_image(dataset_id: str, split: str, image_relpath: str
 def save_dataset_annotation_snapshot(dataset_id: str, payload: Dict[str, Any]):
     payload = payload or {}
     entry = _resolve_dataset_entry(dataset_id)
-    _dataset_effective_root_from_entry(entry)
+    dataset_root = _dataset_effective_root_from_entry(entry)
     _meta_path, meta = _annotation_load_or_create_meta(entry)
     _require_annotation_lock_owner(meta, payload)
     status_value = _annotation_requested_status(payload)
     normalised_records = _normalise_annotation_snapshot_records(payload.get("records"))
+    _validate_annotation_snapshot_record_images(
+        dataset_root,
+        str(entry.get("yolo_layout") or "flat"),
+        normalised_records,
+    )
     overlay_root = _dataset_overlay_root_from_entry(entry, ensure=True)
-    for split, rel, _has_label_lines, label_lines, has_text_label, text_value in normalised_records:
-        label_path = _annotation_overlay_label_path(entry, split, rel)
-        _annotation_write_text_within_root(
-            label_path,
-            overlay_root,
-            "\n".join(label_lines) + ("\n" if label_lines else ""),
-        )
+    for split, rel, has_label_lines, label_lines, has_text_label, text_value in normalised_records:
+        if has_label_lines:
+            label_path = _annotation_overlay_label_path(entry, split, rel)
+            _annotation_write_text_within_root(
+                label_path,
+                overlay_root,
+                "\n".join(label_lines) + ("\n" if label_lines else ""),
+            )
         if has_text_label:
             text_path = _annotation_overlay_text_path(entry, rel)
             _annotation_write_text_within_root(text_path, overlay_root, text_value)
@@ -16494,6 +16509,13 @@ def save_transient_annotation_snapshot(session_id: str, payload: Dict[str, Any])
     _require_annotation_lock_owner(session, payload)
     status_value = _annotation_requested_status(payload)
     normalised_records = _normalise_annotation_snapshot_records(payload.get("records"))
+    if normalised_records:
+        dataset_root = _validate_linked_dataset_path(str(session.get("dataset_root") or ""))
+        _validate_annotation_snapshot_record_images(
+            dataset_root,
+            str(session.get("yolo_layout") or "flat"),
+            normalised_records,
+        )
     overlay_labels = (
         session.get("overlay_labels") if isinstance(session.get("overlay_labels"), dict) else {}
     )

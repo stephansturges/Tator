@@ -395,3 +395,17 @@ preserving the exact validation story for storage and artifact-write fixes.
   worker prepass reads from `val/images`, and symlink/traversal escape handling.
 - Validation: `1051 passed, 17 skipped`; focused calibration/EDR coverage,
   the full pytest suite, and live endpoint sanity checks passed.
+
+## 2026-05-24: Annotation Snapshot Record Guards
+
+- Collapsed README update tracking into a short closed detail so the first
+  layer stays focused on product overview and setup.
+- Required persistent and transient annotation snapshot records to resolve to
+  real dataset images before writing overlay labels or captions.
+- Fixed persistent annotation snapshots so text-only records update captions
+  without clearing existing bbox/segmentation overlay labels.
+- Added regressions for missing-image snapshot writes and text-only persistent
+  caption updates.
+- Validation: `1054 passed, 17 skipped`; focused linked annotation and
+  auto-label runner coverage, the full pytest suite, and live endpoint sanity
+  checks passed.

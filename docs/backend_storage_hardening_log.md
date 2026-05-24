@@ -1665,3 +1665,29 @@ preserving the exact validation story for storage and artifact-write fixes.
   endpoint map check (`missing=[]`), endpoint method check (`failures=[]`),
   OpenAPI sanity (`tested=144`, `failures=[]`), and live `/datasets`,
   `/datasets/trash`, and `/data_ingestion/capabilities` reads.
+
+## 2026-05-24: Prepass Recipe ID Alias Hardening
+
+- Continued the backend artifact-lifecycle audit outside Dataset Management and
+  Data Ingestion, focusing on saved prepass recipes that can be exported,
+  bundled into cascades, or deleted from the UI.
+- Found that existing-recipe paths reused the create-time sanitizer. A malformed
+  request such as `recipe a` could silently resolve to an existing `recipe-a`
+  directory, allowing get/export/delete/save calls to touch the wrong recipe
+  artifact.
+- Prepass recipe IDs are now exact identifiers at the shared path resolver:
+  callers must pass an already-safe ID, and sanitized aliases are rejected with
+  `prepass_recipe_path_invalid` before any recipe metadata, zip, or directory is
+  read or removed.
+- Added regressions proving malformed aliases cannot delete, read, export, or
+  create a sanitized recipe directory.
+- Validation so far: `py_compile services/prepass_recipes.py
+  tests/test_prepass_recipe_config_validation.py`, focused prepass recipe
+  coverage (`38 passed`), the prepass/agent-recipe/cascade bundle (`96 passed`),
+  `git diff --check`, and the full pytest suite (`1234 passed, 20 skipped`)
+  passed. The restarted backend passed `tools/check_ui_endpoints.py` with no
+  missing paths or method mismatches, endpoint map check (`missing=[]`),
+  endpoint method check (`failures=[]`), OpenAPI sanity (`tested=144`,
+  `failures=[]`), live `/datasets`, `/datasets/trash`, and
+  `/data_ingestion/capabilities` reads, and a live malformed prepass lookup
+  returned `400 prepass_recipe_path_invalid`.

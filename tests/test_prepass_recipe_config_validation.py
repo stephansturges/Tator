@@ -15,6 +15,7 @@ from services.prepass_recipes import (
     _delete_prepass_recipe_impl,
     _ensure_recipe_zip_impl,
     _export_prepass_recipe_impl,
+    _get_prepass_recipe_impl,
     _import_prepass_recipe_from_zip_impl,
     _list_agent_recipes_impl,
     _list_prepass_recipes_impl,
@@ -95,6 +96,108 @@ def test_save_prepass_recipe_preserves_created_at(tmp_path):
     )
     assert updated["created_at"] == first["created_at"]
     assert updated["updated_at"] >= first["updated_at"]
+
+
+def test_prepass_recipe_existing_id_rejects_sanitized_alias_without_delete(tmp_path):
+    recipes_root = tmp_path / "prepass_recipes"
+    recipe_dir = recipes_root / "recipe-a"
+    recipe_dir.mkdir(parents=True)
+    _write_prepass_recipe_meta(
+        recipe_dir,
+        {
+            "id": "recipe-a",
+            "schema_version": 1,
+            "name": "Recipe A",
+            "description": "",
+            "config": {},
+            "glossary": "",
+            "created_at": 1.0,
+            "updated_at": 1.0,
+        },
+    )
+    sentinel = recipe_dir / "sentinel.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _delete_prepass_recipe_impl(
+            "recipe a",
+            recipes_root=recipes_root,
+            sanitize_run_id_fn=localinferenceapi._sanitize_yolo_run_id_impl,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prepass_recipe_path_invalid"
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert (recipe_dir / "prepass.meta.json").exists()
+
+
+def test_prepass_recipe_get_export_reject_sanitized_alias(tmp_path):
+    recipes_root = tmp_path / "prepass_recipes"
+    export_root = tmp_path / "exports"
+    export_root.mkdir()
+    recipe_dir = recipes_root / "recipe-a"
+    recipe_dir.mkdir(parents=True)
+    _write_prepass_recipe_meta(
+        recipe_dir,
+        {
+            "id": "recipe-a",
+            "schema_version": 1,
+            "name": "Recipe A",
+            "description": "",
+            "config": {},
+            "glossary": "",
+            "created_at": 1.0,
+            "updated_at": 1.0,
+        },
+    )
+
+    with pytest.raises(HTTPException) as get_exc:
+        _get_prepass_recipe_impl(
+            "recipe a",
+            recipes_root=recipes_root,
+            sanitize_run_id_fn=localinferenceapi._sanitize_yolo_run_id_impl,
+            load_meta_fn=_load_prepass_recipe_meta,
+            prepass_schema_version=1,
+        )
+    with pytest.raises(HTTPException) as export_exc:
+        _export_prepass_recipe_impl(
+            "recipe a",
+            prepass_recipe_meta="prepass.meta.json",
+            prepass_schema_version=1,
+            prepass_recipe_export_root=export_root,
+            prepass_recipe_root=recipes_root,
+            sanitize_run_id_fn=localinferenceapi._sanitize_yolo_run_id_impl,
+            load_meta_fn=_load_prepass_recipe_meta,
+            collect_assets_fn=lambda meta, temp_dir: {"copied": [], "missing": []},
+        )
+
+    assert get_exc.value.status_code == 400
+    assert get_exc.value.detail == "prepass_recipe_path_invalid"
+    assert export_exc.value.status_code == 400
+    assert export_exc.value.detail == "prepass_recipe_path_invalid"
+    assert (recipe_dir / "prepass.meta.json").exists()
+
+
+def test_save_prepass_recipe_rejects_sanitized_alias_id(tmp_path):
+    with pytest.raises(HTTPException) as exc_info:
+        _save_prepass_recipe_impl(
+            {
+                "name": "Recipe A",
+                "description": "",
+                "config": {"enable_yolo": True},
+                "glossary": "",
+            },
+            recipe_id="recipe a",
+            prepass_schema_version=1,
+            recipes_root=tmp_path / "prepass_recipes",
+            sanitize_run_id_fn=localinferenceapi._sanitize_yolo_run_id_impl,
+            normalize_glossary_fn=lambda value: value or "",
+            write_meta_fn=_write_prepass_recipe_meta,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prepass_recipe_path_invalid"
+    assert not (tmp_path / "prepass_recipes" / "recipe-a").exists()
 
 
 def test_write_prepass_recipe_meta_replaces_symlink_targets_without_target_write(tmp_path):

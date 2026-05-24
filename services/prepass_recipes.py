@@ -1760,8 +1760,9 @@ def _prepass_recipe_dir_impl(
     recipes_root: Path,
     sanitize_id_fn,
 ) -> Path:
-    safe = sanitize_id_fn(recipe_id)
-    if not safe:
+    raw = str(recipe_id or "").strip()
+    safe = str(sanitize_id_fn(raw) or "").strip()
+    if not raw or not safe or safe != raw:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     root = _recipe_storage_root(
         recipes_root,

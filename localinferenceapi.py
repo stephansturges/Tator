@@ -4093,7 +4093,7 @@ class SamPreloadManager:
     def __init__(self):
         self.queue: "queue.Queue[Optional[SamPreloadJob]]" = queue.Queue()
         self.lock = threading.Lock()
-        self.latest_request_id: Dict[str, int] = {}
+        self.latest_request_id: Dict[Tuple[str, str], int] = {}
         self.latest_generation: Dict[str, int] = {}
         self.stop_event = threading.Event()
         self.worker = threading.Thread(target=self._worker, name="sam-preload-worker", daemon=True)
@@ -4124,8 +4124,9 @@ class SamPreloadManager:
             slot=slot,
             event=threading.Event(),
         )
+        request_key = self._request_key(job.slot, job.variant)
         with self.lock:
-            self.latest_request_id[variant] = job.request_id
+            self.latest_request_id[request_key] = job.request_id
             if generation is not None:
                 prev = self.latest_generation.get(variant)
                 if prev is None or generation > prev:
@@ -4155,9 +4156,13 @@ class SamPreloadManager:
                 job.event.set()
                 self.queue.task_done()
 
+    @staticmethod
+    def _request_key(slot: str, variant: str) -> Tuple[str, str]:
+        return (slot or "current", variant)
+
     def _is_superseded(self, job: SamPreloadJob) -> bool:
         with self.lock:
-            latest_id = self.latest_request_id.get(job.variant)
+            latest_id = self.latest_request_id.get(self._request_key(job.slot, job.variant))
             latest_generation = self.latest_generation.get(job.variant)
         if latest_id is not None and job.request_id < latest_id:
             return True

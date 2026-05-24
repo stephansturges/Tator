@@ -1038,3 +1038,16 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1151 passed, 17 skipped`; focused Qwen MLX/runtime settings
   coverage, `localinferenceapi.py` compile, `git diff --check`, the full pytest
   suite, and live endpoint sanity checks passed against the restarted backend.
+
+## 2026-05-24: SAM Preload Slot Supersession Scope
+
+- Scoped SAM preload request-id supersession by `(slot, variant)` so concurrent
+  `current`, `next`, and `previous` preloads no longer cancel each other when
+  they use the same SAM variant.
+- Kept generation-based supersession variant-wide so stale current-image
+  navigation preloads still get skipped.
+- Renamed the README's closed maintenance summary to `Update Tracking` and kept
+  the first-layer content to one validation sentence plus this log link.
+- Validation: `1154 passed, 17 skipped`; focused SAM preload slot coverage,
+  `localinferenceapi.py` compile, `git diff --check`, the full pytest suite,
+  and live endpoint sanity checks passed against the restarted backend.

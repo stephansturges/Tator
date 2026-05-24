@@ -1189,3 +1189,18 @@ preserving the exact validation story for storage and artifact-write fixes.
   `node --check ybat-master/ybat.js`, `git diff --check`, the full pytest
   suite, and live endpoint map/method/OpenAPI sanity checks passed against the
   restarted backend.
+
+## 2026-05-24: EDR Recipe Caption Replay
+
+- Fixed Qwen/EDR recipe replay so loaded recipe configs that explicitly set
+  `prepass_caption: false` keep captioning disabled instead of the browser
+  forcing captions back on for every non-package recipe.
+- Preserved the same flag when a loaded recipe is re-saved, so imported or
+  canonical no-caption recipes are not silently rewritten with different
+  runtime behavior.
+- Added a UI contract regression covering both the live payload builder and the
+  saved recipe config builder.
+- Validation: `1165 passed, 17 skipped`; focused labeling panel, prepass recipe,
+  and EDR runtime coverage, `node --check ybat-master/ybat.js`,
+  `git diff --check`, the full pytest suite, and live endpoint
+  map/method/OpenAPI sanity checks passed.

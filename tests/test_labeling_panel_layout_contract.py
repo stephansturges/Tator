@@ -107,6 +107,17 @@ def test_caption_dataset_picker_is_locked_to_annotation_dataset():
     assert "updateQwenCaptionDatasetRefreshButton" not in js
 
 
+def test_loaded_edr_recipe_prepass_caption_flag_is_honored():
+    js = _js()
+
+    assert "const prepassCaptionEnabled = usePackageRuntime\n            ? false\n            : (useRecipeConfig ? getConfigEnabled(\"prepass_caption\", true) : true);" in js
+    assert "prepass_caption: prepassCaptionEnabled," in js
+    assert "prepass_caption: usePackageRuntime ? false : true," not in js
+    assert "const inheritedPrepassCaption = activeRecipeConfig\n            && Object.prototype.hasOwnProperty.call(activeRecipeConfig, \"prepass_caption\")\n            ? activeRecipeConfig.prepass_caption !== false\n            : true;" in js
+    assert "const prepassCaptionEnabled = edrPackageId ? false : inheritedPrepassCaption;" in js
+    assert "prepass_caption: edrPackageId ? false : true," not in js
+
+
 def test_keyboard_image_navigation_shortcuts_are_documented_and_guarded():
     html = _html()
     js = _js()

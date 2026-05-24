@@ -28322,6 +28322,9 @@ async function cancelRfDetrTrainingJobRequest() {
         const gridOverlap = useRecipeConfig ? getConfigFloat("grid_overlap_ratio") : parseFloat(qwenElements.agentGridOverlap?.value || "");
         const edrPackageId = useRecipeConfig ? (getConfigString("edr_package_id") || null) : (qwenAgentSelectedEdrPackageId || null);
         const usePackageRuntime = !!edrPackageId;
+        const prepassCaptionEnabled = usePackageRuntime
+            ? false
+            : (useRecipeConfig ? getConfigEnabled("prepass_caption", true) : true);
         const classifierId = useRecipeConfig
             ? (getConfigString("resolved_classifier_id") || getConfigString("classifier_id") || null)
             : ((qwenElements.agentClassifierId?.value || "").trim() || null);
@@ -28419,7 +28422,7 @@ async function cancelRfDetrTrainingJobRequest() {
             iou: Number.isFinite(iou) ? iou : 0.75,
             cross_class_dedupe_enabled: crossClassConfig.enabled,
             cross_class_dedupe_iou: crossClassConfig.iou,
-            prepass_caption: usePackageRuntime ? false : true,
+            prepass_caption: prepassCaptionEnabled,
             prepass_caption_profile: captionProfile || null,
             prepass_caption_variant: requestCaptionVariant || null,
             prepass_caption_model_id: captionModelId,
@@ -28504,6 +28507,12 @@ async function cancelRfDetrTrainingJobRequest() {
         const expandGlossary = qwenElements.agentSam3ExpandGlossary?.checked !== false;
         const sam3SynBudgetValue = Number.isFinite(sam3SynBudget) ? sam3SynBudget : null;
         const edrPackageId = qwenAgentSelectedEdrPackageId || null;
+        const activeRecipeConfig = getActiveInferenceRecipe()?.config;
+        const inheritedPrepassCaption = activeRecipeConfig
+            && Object.prototype.hasOwnProperty.call(activeRecipeConfig, "prepass_caption")
+            ? activeRecipeConfig.prepass_caption !== false
+            : true;
+        const prepassCaptionEnabled = edrPackageId ? false : inheritedPrepassCaption;
         const agentModelId = resolveAgentModelId();
         const requestVariant = variantForResolvedQwenModel(agentModelId, variant);
         const captionModelId = resolveCaptionModelId();
@@ -28554,7 +28563,7 @@ async function cancelRfDetrTrainingJobRequest() {
             iou: Number.isFinite(iou) ? iou : 0.75,
             cross_class_dedupe_enabled: crossClassConfig.enabled,
             cross_class_dedupe_iou: crossClassConfig.iou,
-            prepass_caption: edrPackageId ? false : true,
+            prepass_caption: prepassCaptionEnabled,
             prepass_caption_profile: captionProfile || null,
             prepass_caption_variant: requestCaptionVariant || null,
             prepass_caption_model_id: captionModelId,

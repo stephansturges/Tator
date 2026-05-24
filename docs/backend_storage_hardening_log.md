@@ -750,3 +750,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1104 passed, 17 skipped`; focused Qwen training coverage and the
   full pytest suite passed, and live endpoint sanity checks passed against the
   restarted backend.
+
+## 2026-05-24: Qwen Dataset Conversion Atomic Saves
+
+- Routed YOLO-to-Qwen conversion annotations, labelmap, metadata, and dataset
+  sidecar writes through the guarded Qwen text writer.
+- Changed conversion annotation assembly from per-image append writes to
+  in-memory line collection followed by atomic split-file replacement.
+- Added a regression proving Qwen dataset conversion temp/final symlink leaves
+  are replaced without mutating external targets.
+- Validation: `1105 passed, 17 skipped`; focused linked dataset/Qwen conversion
+  coverage, the full pytest suite, and live endpoint sanity checks passed
+  against the restarted backend.

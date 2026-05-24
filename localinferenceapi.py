@@ -14756,6 +14756,22 @@ def _qwen_training_write_text_within_root(
     )
 
 
+def _qwen_dataset_write_text_within_root(
+    path: Path,
+    root: Path,
+    text: str,
+    *,
+    detail: str = "qwen_dataset_target_invalid",
+) -> None:
+    _qwen_write_text_within_root(
+        path,
+        root,
+        text,
+        detail=detail,
+        context="qwen dataset",
+    )
+
+
 def _dataset_registry_storage_root(
     *,
     create: bool = True,
@@ -16194,14 +16210,12 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
     )
     (target_root / "train").mkdir(parents=True, exist_ok=True)
     (target_root / "val").mkdir(parents=True, exist_ok=True)
-    (target_root / "train").joinpath("annotations.jsonl").write_text("", encoding="utf-8")
-    (target_root / "val").joinpath("annotations.jsonl").write_text("", encoding="utf-8")
 
     context_line = _build_qwen_context(labelmap, context)
     counts = {"train": 0, "val": 0}
+    annotation_lines: Dict[str, List[str]] = {"train": [], "val": []}
 
     def _process_image(split: str, image_relpath: Path, image_path: Path):
-        ann_path = target_root / split / "annotations.jsonl"
         try:
             image_resolved = image_path.resolve()
         except Exception:
@@ -16250,8 +16264,7 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
             "context": context_line,
             "detections": detections,
         }
-        with ann_path.open("a", encoding="utf-8") as ann_handle:
-            ann_handle.write(json.dumps(payload) + "\n")
+        annotation_lines[split].append(json.dumps(payload) + "\n")
         counts[split] += 1
 
     for row in _annotation_collect_images(entry):
@@ -16265,7 +16278,17 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
             continue
         _process_image(split, image_relpath, Path(str(image_path_raw)))
 
-    (target_root / "labelmap.txt").write_text("\n".join(labelmap) + "\n", encoding="utf-8")
+    for split in ("train", "val"):
+        _qwen_dataset_write_text_within_root(
+            target_root / split / "annotations.jsonl",
+            target_root,
+            "".join(annotation_lines[split]),
+        )
+    _qwen_dataset_write_text_within_root(
+        target_root / "labelmap.txt",
+        target_root,
+        "\n".join(labelmap) + "\n",
+    )
     metadata = {
         "id": qwen_id,
         "label": qwen_id,
@@ -16280,12 +16303,16 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
     }
     if glossary:
         metadata["labelmap_glossary"] = glossary
-    (target_root / "metadata.json").write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    _qwen_dataset_write_text_within_root(
+        target_root / "metadata.json",
+        target_root,
+        json.dumps(metadata, ensure_ascii=False, indent=2),
     )
     dataset_meta = {"context": context, "classes": labelmap, "created_at": int(time.time() * 1000)}
-    (target_root / "dataset_meta.json").write_text(
-        json.dumps(dataset_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    _qwen_dataset_write_text_within_root(
+        target_root / "dataset_meta.json",
+        target_root,
+        json.dumps(dataset_meta, ensure_ascii=False, indent=2),
     )
     return metadata
 

@@ -1745,6 +1745,42 @@ def test_build_qwen_dataset_from_yolo_uses_flat_annotation_overlay_and_registry_
     assert (qwen_root / out["id"] / "train" / "nested" / "img.jpg").exists()
 
 
+def test_qwen_dataset_text_write_is_atomic_over_symlink_leaves(
+    tmp_path, monkeypatch
+) -> None:
+    class FixedUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    qwen_root = tmp_path / "qwen_dataset"
+    annotations_path = qwen_root / "train" / "annotations.jsonl"
+    annotations_path.parent.mkdir(parents=True)
+    tmp_path_link = annotations_path.with_suffix(
+        f"{annotations_path.suffix}.{FixedUUID.hex}.tmp"
+    )
+    outside_tmp = tmp_path / "outside_tmp.jsonl"
+    outside_final = tmp_path / "outside_final.jsonl"
+    outside_tmp.write_text("external tmp\n", encoding="utf-8")
+    outside_final.write_text("external final\n", encoding="utf-8")
+    try:
+        tmp_path_link.symlink_to(outside_tmp)
+        annotations_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: FixedUUID())
+
+    api._qwen_dataset_write_text_within_root(
+        annotations_path,
+        qwen_root,
+        '{"image":"nested/img.jpg"}\n',
+    )
+
+    assert not tmp_path_link.exists()
+    assert not annotations_path.is_symlink()
+    assert annotations_path.read_text(encoding="utf-8") == '{"image":"nested/img.jpg"}\n'
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp\n"
+    assert outside_final.read_text(encoding="utf-8") == "external final\n"
+
+
 def test_build_qwen_dataset_from_yolo_rejects_symlinked_qwen_root_before_write(
     tmp_path, monkeypatch
 ) -> None:

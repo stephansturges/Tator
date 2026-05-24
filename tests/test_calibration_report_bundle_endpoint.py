@@ -383,3 +383,49 @@ def test_ensemble_filter_rejects_symlinked_job_dir_escape(tmp_path: Path, monkey
 
     assert result is detections
     assert warnings == ["ensemble_filter_job_invalid"]
+
+
+def test_ensemble_filter_rejects_symlinked_tmp_dir_before_write(
+    tmp_path: Path, monkeypatch
+):
+    calibration_root = tmp_path / "calibration_jobs"
+    job_dir = calibration_root / "cal_ok"
+    job_dir.mkdir(parents=True)
+    (job_dir / "ensemble_xgb.json").write_text("{}", encoding="utf-8")
+    (job_dir / "ensemble_xgb.meta.json").write_text("{}", encoding="utf-8")
+    upload_root = tmp_path / "uploads"
+    outside_tmp = tmp_path / "outside_tmp_ensemble"
+    upload_root.mkdir()
+    outside_tmp.mkdir()
+    try:
+        (upload_root / "tmp_ensemble").symlink_to(outside_tmp, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "CALIBRATION_ROOT", calibration_root)
+    monkeypatch.setattr(api, "UPLOAD_ROOT", upload_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_agent_clip_classifier_path_impl",
+        lambda *args, **kwargs: upload_root / "classifiers" / "head.pkl",
+    )
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid temp dir should stop before scoring subprocesses")
+        ),
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._agent_apply_ensemble_filter(
+            [{"bbox": [0, 0, 1, 1], "label": "car"}],
+            dataset_id="dataset",
+            image_name="image.jpg",
+            classifier_id="head.pkl",
+            job_id="cal_ok",
+            warnings=[],
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "ensemble_filter_tmp_path_invalid"
+    assert list(outside_tmp.iterdir()) == []

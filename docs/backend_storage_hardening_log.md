@@ -617,3 +617,17 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1086 passed, 17 skipped`; focused agent recipe/import/export
   coverage, module compile checks, the full pytest suite, and live endpoint
   sanity checks passed against the restarted backend.
+
+## 2026-05-24: Ensemble Filter Scratch Guards
+
+- Hardened the EDR/agent ensemble-filter scratch path under
+  `uploads/tmp_ensemble` so symlinked scratch roots or parents are rejected
+  before request JSONL, feature NPZ, or scored JSONL files are written.
+- Prepared the three expected scratch leaves explicitly and cleaned only those
+  owned temp files after scoring, reducing stale scratch artifacts from
+  repeated EDR applications.
+- Added a regression proving a symlinked `tmp_ensemble` directory cannot
+  receive ensemble-filter inputs or trigger scoring subprocesses.
+- Validation: `1087 passed, 17 skipped`; focused calibration/ensemble coverage,
+  module compile checks, the full pytest suite, and live endpoint sanity checks
+  passed against the restarted backend.

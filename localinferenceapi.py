@@ -11890,6 +11890,60 @@ def _agent_tool_submit_annotations(
     }
 
 
+def _agent_ensemble_filter_tmp_dir() -> Path:
+    try:
+        raw_dir = UPLOAD_ROOT / "tmp_ensemble"
+        if _storage_path_has_symlink_component(raw_dir):
+            raise ValueError("ensemble filter temp dir has a symlink component")
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_dir) or not raw_dir.is_dir():
+            raise ValueError("ensemble filter temp path is not a safe directory")
+        resolved = raw_dir.resolve(strict=True)
+        upload_root = UPLOAD_ROOT.resolve(strict=False)
+        if not _path_is_within_root_impl(resolved, upload_root):
+            raise ValueError("ensemble filter temp dir escapes upload root")
+        return raw_dir
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="ensemble_filter_tmp_path_invalid",
+        ) from exc
+
+
+def _agent_prepare_ensemble_filter_tmp_file(path: Path, tmp_dir: Path) -> Path:
+    try:
+        tmp_root = tmp_dir.resolve(strict=True)
+        if _storage_path_has_symlink_component(path.parent):
+            raise ValueError("ensemble filter temp parent has a symlink component")
+        if path.is_symlink() or (path.exists() and path.is_dir()):
+            raise ValueError("ensemble filter temp leaf is not writable")
+        target = path.resolve(strict=False)
+        if not _path_is_within_root_impl(target, tmp_root):
+            raise ValueError("ensemble filter temp leaf escapes temp root")
+        return path
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="ensemble_filter_tmp_path_invalid",
+        ) from exc
+
+
+def _agent_cleanup_ensemble_filter_tmp_file(path: Path, tmp_dir: Path) -> None:
+    try:
+        tmp_root = tmp_dir.resolve(strict=True)
+        parent = path.parent.resolve(strict=False)
+        if parent != tmp_root:
+            return
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+    except Exception:
+        return
+
+
 def _agent_apply_ensemble_filter(
     detections: List[Dict[str, Any]],
     *,
@@ -11951,13 +12005,20 @@ def _agent_apply_ensemble_filter(
             warnings.append("ensemble_filter_classifier_missing")
         return detections
 
-    tmp_dir = UPLOAD_ROOT / "tmp_ensemble"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    stamp = uuid.uuid4().hex[:8]
-    jsonl_path = tmp_dir / f"ensemble_{stamp}.jsonl"
-    features_path = tmp_dir / f"ensemble_{stamp}.npz"
-    scored_path = tmp_dir / f"ensemble_{stamp}.scored.jsonl"
+    tmp_dir = _agent_ensemble_filter_tmp_dir()
+    tmp_paths: List[Path] = []
     try:
+        stamp = uuid.uuid4().hex[:8]
+        jsonl_path = _agent_prepare_ensemble_filter_tmp_file(
+            tmp_dir / f"ensemble_{stamp}.jsonl", tmp_dir
+        )
+        features_path = _agent_prepare_ensemble_filter_tmp_file(
+            tmp_dir / f"ensemble_{stamp}.npz", tmp_dir
+        )
+        scored_path = _agent_prepare_ensemble_filter_tmp_file(
+            tmp_dir / f"ensemble_{stamp}.scored.jsonl", tmp_dir
+        )
+        tmp_paths = [jsonl_path, features_path, scored_path]
         with jsonl_path.open("w", encoding="utf-8") as handle:
             handle.write(
                 json.dumps(
@@ -12077,6 +12138,8 @@ def _agent_apply_ensemble_filter(
                 f"ensemble filter: accepted={len(accepted)} total={len(detections)} job={job_id}"
             )
         return accepted
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         if warnings is not None:
             warnings.append(f"ensemble_filter_failed:{exc}")
@@ -12086,6 +12149,9 @@ def _agent_apply_ensemble_filter(
             status_code=HTTP_412_PRECONDITION_FAILED,
             detail=f"ensemble_filter_failed:{exc}",
         ) from exc
+    finally:
+        for tmp_path in tmp_paths:
+            _agent_cleanup_ensemble_filter_tmp_file(tmp_path, tmp_dir)
 
 
 def _agent_apply_edr_package_runtime(

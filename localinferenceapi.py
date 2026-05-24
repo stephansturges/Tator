@@ -37903,8 +37903,27 @@ def get_calibration_report_bundle(job_id: str):
         calibration_root = _resolve_calibration_storage_root_impl(CALIBRATION_ROOT)
     except ValueError as exc:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found") from exc
-    path = (calibration_root / safe_job_id / "report_bundle.json").resolve()
-    if not _path_is_within_root_impl(path, calibration_root):
+    job_dir_raw = calibration_root / safe_job_id
+    if job_dir_raw.is_symlink() or _storage_path_has_symlink_component(job_dir_raw.parent):
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
+    job_dir = job_dir_raw.resolve(strict=False)
+    if not _path_is_within_root_impl(job_dir, calibration_root) or job_dir.parent != calibration_root:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
+
+    def _resolve_job_report_path(candidate_raw: Path) -> Optional[Path]:
+        try:
+            raw = candidate_raw if candidate_raw.is_absolute() else job_dir_raw / candidate_raw
+            if raw.is_symlink() or _storage_path_has_symlink_component(raw.parent):
+                return None
+            resolved = raw.resolve(strict=False)
+        except Exception:
+            return None
+        if not _path_is_within_root_impl(resolved, job_dir):
+            return None
+        return resolved
+
+    path = _resolve_job_report_path(job_dir_raw / "report_bundle.json")
+    if path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
     if not path.exists():
         with CALIBRATION_JOBS_LOCK:
@@ -37913,8 +37932,14 @@ def get_calibration_report_bundle(job_id: str):
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
         result = job.result if isinstance(job.result, dict) else {}
         report_path = result.get("report_bundle_json")
-        path = Path(str(report_path)).resolve() if report_path else path
-        if not _path_is_within_root_impl(path, calibration_root):
+        if report_path:
+            resolved_report_path = _resolve_job_report_path(Path(str(report_path)))
+            if resolved_report_path is None:
+                raise HTTPException(
+                    status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found"
+                )
+            path = resolved_report_path
+        if not _path_is_within_root_impl(path, job_dir):
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_job_not_found")
     if not path.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="calibration_report_bundle_not_found")

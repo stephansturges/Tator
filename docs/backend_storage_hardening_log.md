@@ -1574,3 +1574,22 @@ preserving the exact validation story for storage and artifact-write fixes.
   backend also passed the live UI endpoint map check with no missing paths or
   method mismatches, live OpenAPI sanity (`tested=144`, `failures=[]`), and a
   live `/sam3/models` registry read.
+
+## 2026-05-24: Calibration Report Bundle Job Scoping
+
+- Audited the calibration report bundle endpoint, which reads durable job
+  artifacts and live-job result paths.
+- Tightened report lookup from calibration-root containment to requested-job
+  containment. A `report_bundle.json` symlink inside one calibration job can no
+  longer redirect reads to a sibling job under the same calibration root, and a
+  live job result cannot point `report_bundle_json` at another job's report.
+- Added regressions for persisted symlink redirection and live-job sibling
+  result paths.
+- Validation: `py_compile localinferenceapi.py
+  tests/test_calibration_report_bundle_endpoint.py`, focused report-bundle
+  regressions (`2 passed`), calibration report/job-start coverage (`50 passed`),
+  calibration helper/registry/resilience coverage (`44 passed`), and the full
+  pytest suite (`1223 passed, 20 skipped`) passed. The restarted backend also
+  passed the live UI endpoint map check with no missing paths or method
+  mismatches, live OpenAPI sanity (`tested=144`, `failures=[]`), and a live
+  `/calibration/jobs` read.

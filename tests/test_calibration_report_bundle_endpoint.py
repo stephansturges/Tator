@@ -53,6 +53,59 @@ def test_get_calibration_report_bundle_reads_persisted_artifact_without_live_job
         job_dir.rmdir()
 
 
+def test_get_calibration_report_bundle_rejects_symlink_to_sibling_job(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calibration_root = tmp_path / "jobs"
+    job_dir = calibration_root / "cal_report"
+    sibling_dir = calibration_root / "cal_other"
+    job_dir.mkdir(parents=True)
+    sibling_dir.mkdir(parents=True)
+    sibling_report = sibling_dir / "report_bundle.json"
+    sibling_report.write_text('{"escaped": true}', encoding="utf-8")
+    try:
+        (job_dir / "report_bundle.json").symlink_to(sibling_report)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "CALIBRATION_ROOT", calibration_root)
+    with api.CALIBRATION_JOBS_LOCK:
+        api.CALIBRATION_JOBS.clear()
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.get_calibration_report_bundle("cal_report")
+
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.detail == "calibration_job_not_found"
+
+
+def test_get_calibration_report_bundle_rejects_live_job_sibling_result_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    calibration_root = tmp_path / "jobs"
+    job_dir = calibration_root / "cal_live"
+    sibling_dir = calibration_root / "cal_other"
+    job_dir.mkdir(parents=True)
+    sibling_dir.mkdir(parents=True)
+    sibling_report = sibling_dir / "report_bundle.json"
+    sibling_report.write_text('{"escaped": true}', encoding="utf-8")
+    job = CalibrationJob(job_id="cal_live")
+    job.result = {"report_bundle_json": str(sibling_report)}
+    monkeypatch.setattr(api, "CALIBRATION_ROOT", calibration_root)
+    with api.CALIBRATION_JOBS_LOCK:
+        api.CALIBRATION_JOBS.clear()
+        api.CALIBRATION_JOBS[job.job_id] = job
+
+    try:
+        with pytest.raises(api.HTTPException) as excinfo:
+            api.get_calibration_report_bundle(job.job_id)
+
+        assert excinfo.value.status_code == 404
+        assert excinfo.value.detail == "calibration_job_not_found"
+    finally:
+        with api.CALIBRATION_JOBS_LOCK:
+            api.CALIBRATION_JOBS.clear()
+
+
 def test_get_calibration_report_bundle_404_for_missing_job():
     with pytest.raises(api.HTTPException) as excinfo:
         api.get_calibration_report_bundle("missing-job")

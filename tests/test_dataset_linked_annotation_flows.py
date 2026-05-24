@@ -524,6 +524,75 @@ def test_set_dataset_glossary_for_linked_dataset_writes_registry_meta(
     assert not (source_root / api.DATASET_META_NAME).exists()
 
 
+def test_set_dataset_glossary_rejects_symlinked_registry_parent_without_write(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "linked_source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    outside_registry = tmp_path / "outside_registry"
+    outside_registry.mkdir()
+    linked_registry = tmp_path / "linked_registry"
+    try:
+        linked_registry.symlink_to(outside_registry, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds_linked",
+            "dataset_root": str(source_root),
+            "registry_root": str(linked_registry / "ds_linked"),
+            "storage_mode": "linked",
+            "linked_root": str(source_root),
+            "classes": ["gas_tank"],
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.set_dataset_glossary("ds_linked", '{"car": ["vehicle"]}')
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "dataset_metadata_path_forbidden"
+    assert list(outside_registry.iterdir()) == []
+
+
+def test_set_dataset_glossary_rejects_symlinked_metadata_without_target_write(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "linked_source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    record_root = tmp_path / "registry" / "ds_linked"
+    record_root.mkdir(parents=True, exist_ok=True)
+    outside_meta = tmp_path / "outside_meta.json"
+    outside_meta.write_text('{"secret": true}', encoding="utf-8")
+    try:
+        (record_root / api.DATASET_META_NAME).symlink_to(outside_meta)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds_linked",
+            "dataset_root": str(source_root),
+            "registry_root": str(record_root),
+            "storage_mode": "linked",
+            "linked_root": str(source_root),
+            "classes": ["gas_tank"],
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.set_dataset_glossary("ds_linked", '{"car": ["vehicle"]}')
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "dataset_metadata_path_forbidden"
+    assert outside_meta.read_text(encoding="utf-8") == '{"secret": true}'
+
+
 def _entry_for_annotation(tmp_path: Path) -> dict:
     dataset_root = tmp_path / "dataset"
     (dataset_root / "images").mkdir(parents=True, exist_ok=True)

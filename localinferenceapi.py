@@ -427,6 +427,7 @@ from services.datasets import (
     _compute_dataset_signature_impl as _compute_dataset_signature_impl,
     _load_registry_dataset_metadata_impl as _load_registry_dataset_metadata_impl,
     _persist_dataset_metadata_impl as _persist_dataset_metadata_impl,
+    _write_json_file as _write_dataset_json_file,
     _coerce_dataset_metadata_impl as _coerce_dataset_metadata_impl,
     _load_qwen_dataset_metadata_impl as _load_qwen_dataset_metadata_impl,
     _load_sam3_dataset_metadata_impl as _load_sam3_dataset_metadata_impl,
@@ -16097,6 +16098,28 @@ def _load_dataset_meta_candidates(dataset_root: Path) -> List[Tuple[Path, Dict[s
     return metas
 
 
+def _write_dataset_metadata_json(path: Path, root: Path, meta: Dict[str, Any]) -> None:
+    try:
+        if _storage_path_has_symlink_component(root):
+            raise ValueError("dataset metadata root has a symlink component")
+        if _storage_path_has_symlink_component(path.parent):
+            raise ValueError("dataset metadata parent has a symlink component")
+        if path.is_symlink():
+            raise ValueError("dataset metadata path is a symlink")
+        root_resolved = root.resolve(strict=False)
+        target_resolved = path.resolve(strict=False)
+        if not _path_is_within_root_impl(target_resolved, root_resolved):
+            raise ValueError("dataset metadata path escapes root")
+        _write_dataset_json_file(path, meta)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="dataset_metadata_path_forbidden",
+        ) from exc
+
+
 def get_dataset_glossary(dataset_id: str):
     entry = _resolve_dataset_entry(dataset_id)
     dataset_root = _dataset_effective_root_from_entry(entry)
@@ -16141,19 +16164,20 @@ def get_dataset_glossary(dataset_id: str):
 
 def set_dataset_glossary(dataset_id: str, glossary: str):
     entry = _resolve_dataset_entry(dataset_id)
-    storage_root = _dataset_meta_storage_root_from_entry(entry)
+    storage_root = _dataset_guarded_meta_storage_root_from_entry(
+        entry,
+        ensure=True,
+        detail="dataset_metadata_path_forbidden",
+    )
     normalized = _normalize_labelmap_glossary(glossary or "")
     updated = False
     for path, meta in _load_dataset_meta_candidates(storage_root):
         meta["labelmap_glossary"] = normalized
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(meta, handle, ensure_ascii=False, indent=2)
+        _write_dataset_metadata_json(path, storage_root, meta)
         updated = True
     if not updated:
         meta = {"id": dataset_id, "labelmap_glossary": normalized}
-        _persist_dataset_metadata_impl(
-            storage_root, meta, meta_name=DATASET_META_NAME, logger=logger
-        )
+        _write_dataset_metadata_json(storage_root / DATASET_META_NAME, storage_root, meta)
     return {"dataset_id": dataset_id, "glossary": normalized}
 
 

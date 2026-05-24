@@ -585,3 +585,18 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1082 passed, 17 skipped`; focused agent import endpoint/service
   coverage, the full pytest suite, and live endpoint sanity checks passed
   against the restarted backend.
+
+## 2026-05-24: Dataset Glossary Metadata Guards
+
+- Routed dataset glossary saves through the guarded metadata storage root so
+  symlinked linked-dataset registry parents are rejected before any metadata
+  directory or JSON file is created.
+- Rejected symlinked dataset metadata files during glossary updates instead of
+  treating them as missing metadata and recreating the entry.
+- Switched glossary metadata persistence from raw JSON writes to the existing
+  guarded atomic dataset metadata writer.
+- Added regressions proving symlinked registry parents and symlinked metadata
+  leaves cannot write outside the dataset registry or mutate external targets.
+- Validation: `1084 passed, 17 skipped`; focused linked dataset/glossary/path
+  coverage, the full pytest suite, and live endpoint sanity checks passed
+  against the restarted backend.

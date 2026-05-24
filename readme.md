@@ -586,9 +586,11 @@ Broader suites are organized by feature area under `tests/`. UI tests live in
 the backend are available.
 
 <details>
-<summary>Update Tracking</summary>
+<summary>Update tracking</summary>
 
-`1082 passed, 17 skipped`; [backend storage hardening log](docs/backend_storage_hardening_log.md).
+Latest full backend validation: `1084 passed, 17 skipped`.
+Detailed maintenance notes live in
+[docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

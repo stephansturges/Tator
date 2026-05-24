@@ -737,6 +737,68 @@ def test_delete_prepass_recipe_rejects_canonical_edr(tmp_path):
     assert exc_info.value.detail == "prepass_recipe_canonical_delete_forbidden"
 
 
+def test_delete_prepass_recipe_rejects_symlinked_recipe_dir_without_target_delete(
+    tmp_path: Path,
+) -> None:
+    recipes_root = tmp_path / "prepass_recipes"
+    outside = tmp_path / "outside_recipe"
+    recipes_root.mkdir()
+    outside.mkdir()
+    _write_prepass_recipe_meta(outside, {"id": "linked_recipe", "name": "external", "config": {}})
+    marker = outside / "sentinel.txt"
+    marker.write_text("keep", encoding="utf-8")
+    link_path = recipes_root / "linked_recipe"
+    try:
+        link_path.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _delete_prepass_recipe_impl(
+            "linked_recipe",
+            recipes_root=recipes_root,
+            sanitize_run_id_fn=lambda value: value,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prepass_recipe_path_invalid"
+    assert link_path.is_symlink()
+    assert marker.read_text(encoding="utf-8") == "keep"
+    assert (outside / "prepass.meta.json").exists()
+
+
+def test_delete_prepass_recipe_rejects_symlinked_nested_parent_without_target_delete(
+    tmp_path: Path,
+) -> None:
+    recipes_root = tmp_path / "prepass_recipes"
+    recipes_root.mkdir()
+    target_parent = recipes_root / "target_parent"
+    target_parent.mkdir()
+    target_recipe = target_parent / "victim_recipe"
+    target_recipe.mkdir()
+    _write_prepass_recipe_meta(target_recipe, {"id": "victim_recipe", "name": "victim", "config": {}})
+    marker = target_recipe / "sentinel.txt"
+    marker.write_text("keep", encoding="utf-8")
+    linked_parent = recipes_root / "linked_parent"
+    try:
+        linked_parent.symlink_to(target_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _delete_prepass_recipe_impl(
+            "linked_parent/victim_recipe",
+            recipes_root=recipes_root,
+            sanitize_run_id_fn=lambda value: value,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prepass_recipe_path_invalid"
+    assert linked_parent.is_symlink()
+    assert marker.read_text(encoding="utf-8") == "keep"
+    assert (target_recipe / "prepass.meta.json").exists()
+
+
 def test_collect_recipe_assets_includes_canonical_artifacts_and_bundle(tmp_path):
     export_root = tmp_path / "export"
     export_root.mkdir(parents=True, exist_ok=True)

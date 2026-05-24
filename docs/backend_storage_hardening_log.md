@@ -1380,3 +1380,16 @@ preserving the exact validation story for storage and artifact-write fixes.
   safety bundle (`158 passed`), `py_compile` for the changed UI test helpers,
   and the full pytest suite (`1194 passed, 19 skipped`) passed against the
   running backend.
+
+## 2026-05-24: Prepass Recipe Delete Symlink Parents
+
+- Hardened prepass recipe path resolution so delete/export/load helpers reject
+  any symlink component in the resolved recipe directory path, not just a
+  symlink as the recipe leaf.
+- Added regressions proving a symlinked recipe directory and a symlinked nested
+  parent cannot make prepass recipe delete remove the symlink target.
+- Validation: focused prepass delete regressions (`3 passed`), broader
+  destructive-endpoint safety bundle (`170 passed`), `py_compile
+  services/prepass_recipes.py tests/test_prepass_recipe_config_validation.py`,
+  `git diff --check`, and the full pytest suite (`1196 passed, 19 skipped`)
+  passed.

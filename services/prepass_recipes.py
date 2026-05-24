@@ -1769,6 +1769,8 @@ def _prepass_recipe_dir_impl(
         detail="prepass_recipe_path_invalid",
     )
     path = root / safe
+    if _path_has_symlink_component(path):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     try:
         resolved_path = path.resolve(strict=False)
     except Exception:
@@ -1777,7 +1779,7 @@ def _prepass_recipe_dir_impl(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     if create:
         path.mkdir(parents=True, exist_ok=True)
-        if path.is_symlink():
+        if _path_has_symlink_component(path) or path.is_symlink():
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     return path
 

@@ -30040,9 +30040,48 @@ def _artifacts_to_payload(artifacts: TrainingArtifacts) -> Dict[str, Any]:
     return data
 
 
+def _clip_training_cleanup_path(temp_dir: Optional[str]) -> Optional[Path]:
+    raw = str(temp_dir or "").strip()
+    if not raw:
+        return None
+    raw_path = Path(raw)
+    if not raw_path.name.startswith("clip_train_"):
+        return None
+    try:
+        temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+        if _storage_path_has_symlink_component(raw_path.parent):
+            return None
+        parent_resolved = raw_path.parent.resolve(strict=False)
+    except Exception:
+        return None
+    if parent_resolved != temp_root:
+        return None
+    if raw_path.is_symlink():
+        return raw_path
+    try:
+        resolved = raw_path.resolve(strict=False)
+    except Exception:
+        return None
+    if not _path_is_within_root_impl(resolved, temp_root) or resolved.parent != temp_root:
+        return None
+    return resolved
+
+
+def _cleanup_clip_training_temp_dir(temp_dir: Optional[str]) -> None:
+    cleanup_path = _clip_training_cleanup_path(temp_dir)
+    if cleanup_path is None:
+        return
+    try:
+        if cleanup_path.is_symlink():
+            cleanup_path.unlink(missing_ok=True)
+        elif cleanup_path.exists() and cleanup_path.is_dir():
+            shutil.rmtree(cleanup_path, ignore_errors=True)
+    except Exception:
+        return
+
+
 def _cleanup_job(job: ClipTrainingJob) -> None:
-    if job.temp_dir and os.path.isdir(job.temp_dir):
-        shutil.rmtree(job.temp_dir, ignore_errors=True)
+    _cleanup_clip_training_temp_dir(job.temp_dir)
 
 
 def _publish_clip_training_artifacts(artifacts: TrainingArtifacts) -> TrainingArtifacts:
@@ -31098,7 +31137,7 @@ async def start_clip_training(
         )
     except Exception:
         if temp_root:
-            shutil.rmtree(temp_root, ignore_errors=True)
+            _cleanup_clip_training_temp_dir(temp_root)
         raise
     logger.info(
         "Starting training job %s (encoder=%s, model=%s, native_paths=%s)",

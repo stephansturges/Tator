@@ -555,3 +555,18 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1078 passed, 17 skipped`; focused recipe/cascade coverage, the
   full pytest suite, and live endpoint sanity checks passed against the
   restarted backend.
+
+## 2026-05-24: CLIP Training Temp Cleanup Guard
+
+- Hardened CLIP/classifier training cleanup so `job.temp_dir` cleanup only
+  removes owned `clip_train_` staging directories directly under the system
+  temp root.
+- Prevented arbitrary `staged_temp_dir` form values from being used as broad
+  filesystem cleanup targets.
+- Preserved cleanup of owned final symlink entries by unlinking the symlink
+  without touching its target.
+- Added regressions for unowned cleanup paths, final symlink cleanup, and the
+  existing class-analysis staging cleanup contract.
+- Validation: `1080 passed, 17 skipped`; focused CLIP/job-start/class-analysis
+  coverage, the full pytest suite, and live endpoint sanity checks passed
+  against the restarted backend.

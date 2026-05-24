@@ -291,6 +291,7 @@ def test_auto_class_training_cleans_staged_upload_on_dataset_validation_error(
         return str(staged_root)
 
     monkeypatch.setattr(api.tempfile, "mkdtemp", fake_mkdtemp)
+    monkeypatch.setattr(api.tempfile, "gettempdir", lambda: str(tmp_path))
     image = UploadFile(filename="a.jpg", file=BytesIO(b"image-bytes"))
     empty_label = UploadFile(filename="a.txt", file=BytesIO(b""))
 

@@ -313,6 +313,7 @@ def test_clip_training_worker_rolls_back_when_thread_start_fails(monkeypatch, tm
     temp_dir = tmp_path / "clip_train_staging"
     temp_dir.mkdir()
     job = api.ClipTrainingJob(job_id="clip_fail", temp_dir=str(temp_dir))
+    monkeypatch.setattr(api.tempfile, "gettempdir", lambda: str(tmp_path))
     monkeypatch.setattr(api.threading, "Thread", _FailStartThread)
 
     with pytest.raises(RuntimeError, match="thread start failed"):
@@ -394,6 +395,41 @@ def test_clip_training_worker_rolls_back_when_thread_start_fails(monkeypatch, tm
 
     assert api.TRAINING_JOBS == {}
     assert not temp_dir.exists()
+
+
+def test_clip_training_cleanup_ignores_unowned_temp_dir(monkeypatch, tmp_path):
+    system_tmp = tmp_path / "system_tmp"
+    system_tmp.mkdir()
+    unowned = tmp_path / "important"
+    unowned.mkdir()
+    (unowned / "payload.bin").write_bytes(b"keep")
+    monkeypatch.setattr(api.tempfile, "gettempdir", lambda: str(system_tmp))
+
+    api._cleanup_job(api.ClipTrainingJob(job_id="clip_unowned", temp_dir=str(unowned)))
+
+    assert (unowned / "payload.bin").read_bytes() == b"keep"
+
+
+def test_clip_training_cleanup_unlinks_owned_symlink_without_target_delete(
+    monkeypatch, tmp_path
+):
+    system_tmp = tmp_path / "system_tmp"
+    system_tmp.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    marker = outside / "payload.bin"
+    marker.write_bytes(b"keep")
+    link = system_tmp / "clip_train_link"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api.tempfile, "gettempdir", lambda: str(system_tmp))
+
+    api._cleanup_job(api.ClipTrainingJob(job_id="clip_link", temp_dir=str(link)))
+
+    assert not link.exists()
+    assert marker.read_bytes() == b"keep"
 
 
 def test_calibration_rolls_back_persisted_state_when_thread_start_fails(monkeypatch, tmp_path):

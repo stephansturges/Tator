@@ -1412,3 +1412,24 @@ preserving the exact validation story for storage and artifact-write fixes.
   `git diff --check`, live UI endpoint map check with no missing paths or
   method mismatches, live OpenAPI sanity (`tested=144`, `failures=[]`), and the
   full pytest suite (`1198 passed, 19 skipped`) passed.
+
+## 2026-05-24: Dataset Metadata Write Rollback
+
+- Added a focused Dataset Management/Data Ingestion safety audit:
+  [docs/dataset_data_ingestion_safety_audit.md](dataset_data_ingestion_safety_audit.md).
+- Routed upload, linked registration, transient-save, annotation metadata, and
+  labelmap metadata updates through the strict guarded dataset metadata writer
+  instead of the permissive helper that only logged write failures.
+- Added rollback on metadata-write failure for backend-owned dataset zip
+  uploads, linked dataset registration, and transient-session saves, preventing
+  half-created library entries after a failed durable metadata write.
+- Added regressions for upload/register/transient-save metadata failures.
+- Validation: focused metadata rollback regressions (`3 passed`), affected
+  dataset files (`101 passed`), focused dataset/data-ingestion safety bundle
+  (`150 passed, 9 skipped`), live browser dataset/ingestion E2E (`9 passed`),
+  `py_compile localinferenceapi.py tests/test_dataset_zip_upload_security.py
+  tests/test_dataset_linked_annotation_flows.py`, `node --check
+  ybat-master/ybat.js`, `git diff --check`, live UI endpoint map check with no
+  missing paths or method mismatches, live OpenAPI sanity (`tested=144`,
+  `failures=[]`), and the full pytest suite (`1201 passed, 19 skipped`) passed
+  against the restarted backend.

@@ -245,6 +245,35 @@ def test_upload_dataset_zip_rejects_target_symlink_without_target_write(
     assert marker.read_text(encoding="utf-8") == "keep"
 
 
+def test_upload_dataset_zip_rolls_back_when_metadata_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry_root = tmp_path / "registry"
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+
+    def fail_metadata_write(*_args, **_kwargs):
+        raise HTTPException(status_code=400, detail="metadata_write_failed")
+
+    monkeypatch.setattr(api, "_write_dataset_metadata_json", fail_metadata_write)
+    upload = UploadFile(
+        filename="demo.zip",
+        file=BytesIO(_zip_bytes({"labelmap.txt": b"building\n", "images/a.jpg": b"img"})),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        api.upload_dataset_zip(
+            file=upload,
+            dataset_id="demo",
+            dataset_type=None,
+            context=None,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "metadata_write_failed"
+    assert upload.file.closed
+    assert not (registry_root / "demo").exists()
+
+
 def test_import_prepass_recipe_closes_upload_handle(monkeypatch: pytest.MonkeyPatch) -> None:
     upload = UploadFile(filename="recipe.zip", file=BytesIO(b"zip-bytes"))
     monkeypatch.setattr(api, "_import_prepass_recipe_from_zip", lambda _path: {"status": "ok"})

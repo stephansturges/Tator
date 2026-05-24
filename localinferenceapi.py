@@ -15852,7 +15852,7 @@ def _annotation_persist_meta(entry: Dict[str, Any], meta: Dict[str, Any]) -> Non
         ensure=True,
         detail="dataset_metadata_path_forbidden",
     )
-    _persist_dataset_metadata_impl(storage_root, meta, meta_name=DATASET_META_NAME, logger=logger)
+    _write_dataset_metadata_json(storage_root / DATASET_META_NAME, storage_root, meta)
 
 
 def _annotation_lock_is_active(lock: Dict[str, Any]) -> bool:
@@ -16660,7 +16660,7 @@ def list_datasets():
 
 
 def _persist_dataset_meta(dataset_root: Path, meta: Dict[str, Any]) -> Dict[str, Any]:
-    _persist_dataset_metadata_impl(dataset_root, meta, meta_name=DATASET_META_NAME, logger=logger)
+    _write_dataset_metadata_json(dataset_root / DATASET_META_NAME, dataset_root, meta)
     return meta
 
 
@@ -16671,6 +16671,8 @@ def upload_dataset_zip(
     context: Optional[str],
 ):
     temp_dir = Path(tempfile.mkdtemp(prefix="dataset_upload_"))
+    target_root: Optional[Path] = None
+    registry_root: Optional[Path] = None
     try:
         zip_path = temp_dir / "upload.zip"
         written = 0
@@ -16751,6 +16753,13 @@ def upload_dataset_zip(
         meta["signature"] = _compute_dir_signature_impl(target_root)
         _persist_dataset_meta(target_root, meta)
         return meta
+    except Exception:
+        if target_root is not None and registry_root is not None:
+            try:
+                _delete_dataset_tree_or_link(target_root, [registry_root])
+            except Exception:
+                pass
+        raise
     finally:
         try:
             file.file.close()
@@ -17283,22 +17292,26 @@ def register_dataset_path(
     )
     if registry_dir.exists() or registry_dir.is_symlink():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="dataset_register_target_exists")
-    registry_dir.mkdir(parents=True, exist_ok=True)
-    meta = _build_linked_dataset_metadata(
-        dataset_id=dataset_id_final,
-        dataset_root=dataset_root,
-        label=label,
-        context=context,
-        notes=notes,
-    )
-    meta["signature"] = source_signature
-    _persist_dataset_metadata_impl(registry_dir, meta, meta_name=DATASET_META_NAME, logger=logger)
-    entry = _resolve_dataset_entry_impl(dataset_id_final, list_all_datasets_fn=_list_all_datasets)
-    if not entry:
-        raise HTTPException(
-            status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dataset_register_failed"
+    try:
+        registry_dir.mkdir(parents=True, exist_ok=True)
+        meta = _build_linked_dataset_metadata(
+            dataset_id=dataset_id_final,
+            dataset_root=dataset_root,
+            label=label,
+            context=context,
+            notes=notes,
         )
-    return entry
+        meta["signature"] = source_signature
+        _write_dataset_metadata_json(registry_dir / DATASET_META_NAME, registry_dir, meta)
+        entry = _resolve_dataset_entry_impl(dataset_id_final, list_all_datasets_fn=_list_all_datasets)
+        if not entry:
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dataset_register_failed"
+            )
+        return entry
+    except Exception:
+        shutil.rmtree(registry_dir, ignore_errors=True)
+        raise
 
 
 def _purge_expired_transient_sessions(now_ts: Optional[float] = None) -> int:
@@ -17441,46 +17454,50 @@ def save_transient_dataset(
     )
     if registry_dir.exists() or registry_dir.is_symlink():
         raise HTTPException(status_code=HTTP_409_CONFLICT, detail="dataset_register_target_exists")
-    registry_dir.mkdir(parents=True, exist_ok=True)
-    meta = _build_linked_dataset_metadata(
-        dataset_id=dataset_id_final,
-        dataset_root=dataset_root,
-        label=label or session.get("label"),
-        context=context,
-        notes=notes or session.get("annotation_notes"),
-    )
-    session_classes = [
-        str(item).strip() for item in (session.get("classes") or []) if str(item).strip()
-    ]
-    if session_classes:
-        meta["classes"] = session_classes
-        meta["yolo_labelmap_path"] = str(registry_dir / "labelmap.txt")
-        meta["labelmap_source"] = "registry_overlay"
-    if isinstance(session.get("annotation_progress"), dict):
-        meta["annotation_progress"] = dict(session.get("annotation_progress") or {})
-    if session.get("annotation_cursor") is not None:
-        meta["annotation_cursor"] = session.get("annotation_cursor")
-    if session.get("annotation_status"):
-        meta["annotation_status"] = session.get("annotation_status")
-    if session_classes:
-        _annotation_write_labelmap_file(
-            registry_dir / "labelmap.txt",
-            [registry_dir.resolve()],
-            session_classes,
+    try:
+        registry_dir.mkdir(parents=True, exist_ok=True)
+        meta = _build_linked_dataset_metadata(
+            dataset_id=dataset_id_final,
+            dataset_root=dataset_root,
+            label=label or session.get("label"),
+            context=context,
+            notes=notes or session.get("annotation_notes"),
         )
-    _persist_dataset_metadata_impl(registry_dir, meta, meta_name=DATASET_META_NAME, logger=logger)
-    persisted_entry = {
-        "dataset_root": str(dataset_root),
-        "registry_root": str(registry_dir),
-        "yolo_layout": str(session.get("yolo_layout") or "flat"),
-    }
-    _persist_transient_overlays_to_entry(persisted_entry, session)
-    entry = _resolve_dataset_entry_impl(dataset_id_final, list_all_datasets_fn=_list_all_datasets)
-    if not entry:
-        raise HTTPException(
-            status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dataset_register_failed"
-        )
-    return entry
+        session_classes = [
+            str(item).strip() for item in (session.get("classes") or []) if str(item).strip()
+        ]
+        if session_classes:
+            meta["classes"] = session_classes
+            meta["yolo_labelmap_path"] = str(registry_dir / "labelmap.txt")
+            meta["labelmap_source"] = "registry_overlay"
+        if isinstance(session.get("annotation_progress"), dict):
+            meta["annotation_progress"] = dict(session.get("annotation_progress") or {})
+        if session.get("annotation_cursor") is not None:
+            meta["annotation_cursor"] = session.get("annotation_cursor")
+        if session.get("annotation_status"):
+            meta["annotation_status"] = session.get("annotation_status")
+        if session_classes:
+            _annotation_write_labelmap_file(
+                registry_dir / "labelmap.txt",
+                [registry_dir.resolve()],
+                session_classes,
+            )
+        _write_dataset_metadata_json(registry_dir / DATASET_META_NAME, registry_dir, meta)
+        persisted_entry = {
+            "dataset_root": str(dataset_root),
+            "registry_root": str(registry_dir),
+            "yolo_layout": str(session.get("yolo_layout") or "flat"),
+        }
+        _persist_transient_overlays_to_entry(persisted_entry, session)
+        entry = _resolve_dataset_entry_impl(dataset_id_final, list_all_datasets_fn=_list_all_datasets)
+        if not entry:
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dataset_register_failed"
+            )
+        return entry
+    except Exception:
+        shutil.rmtree(registry_dir, ignore_errors=True)
+        raise
 
 
 def start_dataset_annotation_session(dataset_id: str, payload: Dict[str, Any]):
@@ -17650,9 +17667,7 @@ def patch_dataset_annotation_meta(dataset_id: str, payload: Dict[str, Any]):
         if storage_mode == "linked":
             meta["labelmap_source"] = "registry_overlay"
         meta["signature"] = dataset_meta["signature"]
-        _persist_dataset_metadata_impl(
-            storage_root, dataset_meta, meta_name=DATASET_META_NAME, logger=logger
-        )
+        _write_dataset_metadata_json(storage_root / DATASET_META_NAME, storage_root, dataset_meta)
     if status_value:
         meta["annotation_status"] = status_value
     if "notes" in payload:

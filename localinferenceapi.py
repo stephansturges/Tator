@@ -20651,6 +20651,8 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             progress_start=0.72,
             progress_end=0.88,
         )
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
         keep_fraction = _data_ingestion_keep_fraction(request.get("keep_fraction"), 0.2)
         selected, novelty_scores = _data_ingestion_greedy_indices(
             candidate_embeddings,
@@ -20709,6 +20711,8 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         }
         result = {"summary": summary, "items": ranked_items}
         result_path = out_dir / "result.json"
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
         _class_analysis_write_json(result_path, out_dir, result)
         _class_analysis_write_npz(
             out_dir / "embeddings.npz",
@@ -20964,8 +20968,12 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                     progress=progress,
                     message=f"{stage} • epoch {epoch + 1}/{epochs}, step {step}/{total_steps}, loss {recent:.4f}",
                 )
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
         requested_name = str(request.get("head_name") or "").strip() or f"local_salad_{time.strftime('%Y%m%d_%H%M%S')}"
         with LOCAL_SALAD_HEAD_LOCK:
+            if job.cancel_event.is_set():
+                raise RuntimeError("cancelled")
             head_id = _unique_local_salad_head_id(requested_name)
             head_path = _local_salad_head_path(head_id)
             head_root = _local_salad_head_root(create=True)
@@ -27961,6 +27969,7 @@ def _run_auto_label_job(job: AutoLabelJob, payload: AutoLabelRequest) -> None:
                 continue
 
             new_lines: List[str] = []
+            per_class_new_lines: Dict[str, int] = {}
             for candidate in kept:
                 class_id = int(candidate.get("class_id", -1))
                 if class_id < 0:
@@ -27999,12 +28008,25 @@ def _run_auto_label_job(job: AutoLabelJob, payload: AutoLabelRequest) -> None:
                     if 0 <= class_id < len(labelmap)
                     else str(candidate.get("class_name") or class_id)
                 )
-                result_summary["per_class_added"][class_name] = (
-                    int(result_summary["per_class_added"].get(class_name) or 0) + 1
-                )
-            result_summary["writes_attempted"] += len(new_lines)
+                per_class_new_lines[class_name] = int(per_class_new_lines.get(class_name) or 0) + 1
+            if not new_lines:
+                image_elapsed = time.perf_counter() - image_started
+                result_summary["zero_write_images"] += 1
+                result_summary["timings_sec"]["total"] += image_elapsed
+                result_summary["image_times_sec"].append(image_elapsed)
+                result_summary["images_processed"] += 1
+                job.result = dict(result_summary)
+                job.progress = max(0.0, min(1.0, float(idx) / float(max(1, len(selected_rows)))))
+                continue
+            if job.cancel_event.is_set():
+                _auto_label_log(job, f"cancelled before saving {image_relpath.as_posix()}")
+                break
             final_lines = list(current_lines) + new_lines
             _maybe_lock_heartbeat()
+            if job.cancel_event.is_set():
+                _auto_label_log(job, f"cancelled before saving {image_relpath.as_posix()}")
+                break
+            result_summary["writes_attempted"] += len(new_lines)
             save_started = time.perf_counter()
             save_dataset_annotation_snapshot(
                 payload.dataset_id,
@@ -28024,6 +28046,10 @@ def _run_auto_label_job(job: AutoLabelJob, payload: AutoLabelRequest) -> None:
             result_summary["images_with_changes"] += 1
             result_summary["labels_added"] += len(new_lines)
             result_summary["writes_applied"] += len(new_lines)
+            for class_name, count in per_class_new_lines.items():
+                result_summary["per_class_added"][class_name] = (
+                    int(result_summary["per_class_added"].get(class_name) or 0) + int(count)
+                )
             result_summary["images_processed"] += 1
             image_elapsed = time.perf_counter() - image_started
             result_summary["timings_sec"]["total"] += image_elapsed

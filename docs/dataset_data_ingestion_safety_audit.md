@@ -24,8 +24,8 @@ mutate, move, or remove user data to the backend guard and regression coverage.
 
 | Flow | Data touched | Guard | Coverage |
 |---|---|---|---|
-| Build reference profile | Creates job staging data and a local reference-profile head | Guarded job root, upload size/quota checks, backend-reference source validation, strict local-head path checks | `tests/test_data_ingestion.py` |
-| Analyze candidates | Creates job staging data, result JSON, embeddings cache | Guarded job root, candidate/reference gating, matching reference-profile validation, guarded result reads | `tests/test_data_ingestion.py`, UI E2E |
+| Build reference profile | Creates job staging data and a local reference-profile head | Guarded job root, upload size/quota checks, backend-reference source validation, strict local-head path checks, final cancellation check before head write | `tests/test_data_ingestion.py` |
+| Analyze candidates | Creates job staging data, result JSON, embeddings cache | Guarded job root, candidate/reference gating, matching reference-profile validation, guarded result reads, final cancellation check before result write | `tests/test_data_ingestion.py`, UI E2E |
 | Backend reference dataset use | Reads existing dataset images | Dataset id resolution, path containment inside selected dataset root, active-job delete blocking by dataset id | `tests/test_data_ingestion.py`, `tests/test_dataset_linked_annotation_flows.py` |
 | Cancel job | Mutates in-memory job state | Terminal jobs are not cancellable; active jobs move through `cancelling` | `tests/test_data_ingestion.py` and endpoint sanity |
 
@@ -47,3 +47,9 @@ queues another save instead of clearing the newer edit's dirty flag.
 Linked dataset exports must be self-consistent: registry-owned labelmap edits are
 included in the downloaded `labelmap.txt`, matching the overlaid labels and text
 labels, while the user's original linked source labelmap remains untouched.
+
+Data ingestion cancellation must stop finalization before creating new result
+artifacts. If cancellation is observed after candidate/reference encoding but
+before the analysis result write, no `result.json` or embeddings cache is
+published. If cancellation is observed after local reference-profile training but
+before the head write, no local SALAD head is added.

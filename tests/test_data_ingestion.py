@@ -890,6 +890,61 @@ def test_data_ingestion_analysis_summary_uses_local_salad_head_metadata(tmp_path
     assert summary["salad_head_backend"] == "mlx"
 
 
+def test_data_ingestion_analysis_cancelled_before_result_write_leaves_no_result_artifact(tmp_path, monkeypatch):
+    jobs_root = tmp_path / "jobs"
+    heads_root = tmp_path / "heads"
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+    _write_unit_local_salad_head(
+        heads_root,
+        "active_head",
+        {"reference_source": "active_label_images"},
+    )
+    prepared = [
+        {
+            "image_path": str(tmp_path / "image.jpg"),
+            "filename": "image.jpg",
+            "saved_name": "image.jpg",
+            "source_type": "image",
+            "frame_index": 0,
+            "width": 8,
+            "height": 8,
+        }
+    ]
+    monkeypatch.setattr(api, "_data_ingestion_prepare_media", lambda *_args, **_kwargs: list(prepared))
+    job = api.DataIngestionJob(
+        job_id="di_cancel_before_result",
+        kind="analysis",
+        request={
+            "encoder": "local_salad",
+            "salad_head_id": "active_head",
+            "reference_source": "active_label_images",
+            "candidate_uploads": [{"path": str(tmp_path / "candidate.jpg"), "filename": "candidate.jpg"}],
+            "reference_uploads": [{"path": str(tmp_path / "reference.jpg"), "filename": "reference.jpg"}],
+        },
+    )
+    encode_calls = {"count": 0}
+
+    def fake_encode(prepared_rows, **_kwargs):
+        encode_calls["count"] += 1
+        if encode_calls["count"] == 2:
+            job.cancel_event.set()
+        values = np.zeros((len(prepared_rows), 3), dtype=np.float32)
+        values[:, 0] = 1.0
+        return values
+
+    monkeypatch.setattr(api, "_data_ingestion_encode_prepared_images", fake_encode)
+
+    api._run_data_ingestion_analysis_job(job)
+
+    assert job.status == "cancelled"
+    assert job.result is None
+    assert job.result_path is None
+    assert not (jobs_root / job.job_id / "result.json").exists()
+    assert not (jobs_root / job.job_id / "embeddings.npz").exists()
+
+
 def test_data_ingestion_result_rejects_symlinked_result_escape(tmp_path, monkeypatch):
     ingestion_root = tmp_path / "data_ingestion"
     job_root = ingestion_root / "job_escape"
@@ -1137,6 +1192,77 @@ def test_local_salad_training_job_uses_mlx_backend_and_saves_compatible_head(tmp
     desc = api._encode_local_salad_head_np(loaded, test_patches, test_global)
     assert desc.shape == (2, summary["descriptor_dim"])
     assert np.allclose(np.linalg.norm(desc, axis=1), np.ones(2), atol=1e-5)
+
+
+def test_local_salad_training_cancelled_before_head_write_leaves_no_head(tmp_path, monkeypatch):
+    jobs_root = tmp_path / "jobs"
+    heads_root = tmp_path / "heads"
+    jobs_root.mkdir()
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+
+    image_a = tmp_path / "a.jpg"
+    image_b = tmp_path / "b.jpg"
+    Image.new("RGB", (24, 24), (30, 80, 120)).save(image_a)
+    Image.new("RGB", (24, 24), (140, 70, 20)).save(image_b)
+    prepared = [
+        {"image_path": str(image_a), "filename": "a.jpg", "width": 24, "height": 24, "source_type": "image"},
+        {"image_path": str(image_b), "filename": "b.jpg", "width": 24, "height": 24, "source_type": "image"},
+    ]
+
+    class DummyDino:
+        class Config:
+            hidden_size = 8
+
+        config = Config()
+
+    job = api.DataIngestionJob(
+        job_id="salad_cancel_before_head",
+        kind="local_salad_train",
+        request={
+            "train_uploads": prepared,
+            "encoder_type": "dinov3",
+            "encoder_model": "unit-dino",
+            "head_name": "Cancelled Head",
+            "local_salad_backend": "torch",
+            "epochs": 1,
+            "batch_size": 2,
+            "num_clusters": 4,
+            "cluster_dim": 8,
+            "token_dim": 8,
+            "hidden_dim": 64,
+            "dropout": 0.0,
+            "seed": 7,
+        },
+    )
+    token_calls = {"count": 0}
+
+    monkeypatch.setattr(api, "_data_ingestion_prepare_media", lambda *_args, **_kwargs: list(prepared))
+    monkeypatch.setattr(api, "_data_ingestion_get_dinov3", lambda model_name: (DummyDino(), object(), "unit-dino", "cpu"))
+
+    def fake_dinov3_tokens(_model_obj, _processor_obj, _device_name, images):
+        token_calls["count"] += 1
+        if token_calls["count"] >= 2:
+            job.cancel_event.set()
+        patches = []
+        globals_ = []
+        ramp = torch.arange(48, dtype=torch.float32).reshape(6, 8) / 100.0
+        for img in images:
+            base = float(np.asarray(img.convert("RGB"), dtype=np.float32).mean() / 255.0)
+            sample = ramp + base
+            patches.append(sample)
+            globals_.append(sample.mean(dim=0))
+        return torch.stack(patches), torch.stack(globals_)
+
+    monkeypatch.setattr(api, "_data_ingestion_dinov3_tokens", fake_dinov3_tokens)
+
+    api._run_local_salad_training_job(job)
+
+    assert job.status == "cancelled"
+    assert job.result is None
+    assert list(heads_root.glob("*.pt")) == []
+    assert not (jobs_root / job.job_id / "result.json").exists()
 
 
 def test_local_salad_head_loader_rejects_external_or_stale_payloads(tmp_path, monkeypatch):

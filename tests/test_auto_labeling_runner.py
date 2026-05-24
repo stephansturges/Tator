@@ -329,6 +329,97 @@ def test_auto_label_runner_respects_image_relpath_subset_and_records_zero_write_
 
 
 @pytest.mark.auto_label_smoke
+def test_auto_label_runner_cancelled_before_save_does_not_write_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _build_auto_label_fixture(
+        tmp_path,
+        monkeypatch,
+        rows=[{"split": "train", "image_relpath": "img1.jpg", "label_lines": []}],
+        labelmap=["car"],
+    )
+    job = api.AutoLabelJob(job_id="al_cancel_before_save")
+
+    def _fake_prepass(*_args, **_kwargs):
+        job.cancel_event.set()
+        return _prepass_response(
+            [{"label": "car", "bbox_yolo": [0.5, 0.5, 0.25, 0.25], "score": 0.9}]
+        )
+
+    monkeypatch.setattr(api, "_run_prepass_annotation_qwen", _fake_prepass)
+    monkeypatch.setattr(api, "_auto_label_falcon_candidates_for_window", lambda **_kwargs: [])
+
+    payload = api.AutoLabelRequest(
+        dataset_id="ds_auto",
+        target_mode="detection",
+        image_relpaths=["img1.jpg"],
+        class_names=["car"],
+        edr_package_id="canonical_edr_pkg",
+        enable_yolo=False,
+        enable_rfdetr=False,
+    )
+    api._run_auto_label_job(job, payload)
+
+    assert job.status == "cancelled"
+    assert job.result["labels_added"] == 0
+    assert job.result["writes_attempted"] == 0
+    assert job.result["writes_applied"] == 0
+    assert job.result["per_class_added"] == {}
+    assert state["saved_payloads"] == []
+    assert state["overlay"][("train", "img1.jpg")] == []
+
+
+@pytest.mark.auto_label_smoke
+def test_auto_label_runner_does_not_write_noop_snapshot_when_candidates_cannot_serialize(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _build_auto_label_fixture(
+        tmp_path,
+        monkeypatch,
+        rows=[{"split": "train", "image_relpath": "img1.jpg", "label_lines": []}],
+        labelmap=["car"],
+    )
+    monkeypatch.setattr(api, "_run_prepass_annotation_qwen", lambda *_args, **_kwargs: _prepass_response([]))
+    monkeypatch.setattr(
+        api,
+        "_auto_label_falcon_candidates_for_window",
+        lambda **_kwargs: [
+            {
+                "class_id": -1,
+                "class_name": "unknown",
+                "bbox_xyxy": (10.0, 10.0, 20.0, 20.0),
+                "mask": None,
+                "score": 0.9,
+                "source": "falcon",
+            }
+        ],
+    )
+
+    payload = api.AutoLabelRequest(
+        dataset_id="ds_auto",
+        target_mode="detection",
+        image_relpaths=["img1.jpg"],
+        class_names=["car"],
+        falcon_window_mode="full_image",
+        enable_yolo=False,
+        enable_rfdetr=False,
+        enable_falcon=True,
+    )
+    job = api.AutoLabelJob(job_id="al_unserializable_candidates")
+    api._run_auto_label_job(job, payload)
+
+    assert job.status == "completed"
+    assert job.result["kept_candidate_count"] == 1
+    assert job.result["zero_write_images"] == 1
+    assert job.result["images_with_changes"] == 0
+    assert job.result["labels_added"] == 0
+    assert job.result["per_class_added"] == {}
+    assert state["saved_payloads"] == []
+
+
+@pytest.mark.auto_label_smoke
 def test_auto_label_runner_does_not_require_falcon_when_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

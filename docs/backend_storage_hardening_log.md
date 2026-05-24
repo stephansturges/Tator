@@ -1491,3 +1491,25 @@ preserving the exact validation story for storage and artifact-write fixes.
   method mismatches, live OpenAPI sanity (`tested=144`, `failures=[]`), and
   `/data_ingestion/capabilities` returned `local_salad` with MLX C-RADIO
   available.
+
+## 2026-05-24: Late-Cancel Finalization Guards
+
+- Hardened auto-label finalization so a cancellation observed immediately before
+  `save_dataset_annotation_snapshot` prevents the pending image write instead of
+  committing labels after the user has cancelled.
+- Moved auto-label per-class counters to update only after the snapshot save
+  succeeds, and treat unserializable kept candidates as zero-write images instead
+  of writing a no-op snapshot.
+- Hardened data ingestion finalization so a cancellation observed after
+  candidate/reference encoding but before result publication leaves no
+  `result.json` or embeddings cache, and a cancellation observed after local
+  SALAD training but before profile finalization writes no local head.
+- Validation: `py_compile localinferenceapi.py
+  tests/test_data_ingestion.py tests/test_auto_labeling_runner.py`, auto-label
+  smoke regressions (`17 passed`), data-ingestion regressions (`45 passed`), and
+  the dataset-management/data-ingestion safety bundle (`127 passed, 10 skipped`)
+  passed. The full pytest suite also passed (`1213 passed, 20 skipped`). The
+  restarted backend also passed the live UI endpoint map check with no missing
+  paths or method mismatches, live OpenAPI sanity (`tested=144`, `failures=[]`),
+  and `/data_ingestion/capabilities` returned the local-SALAD reference-profile
+  flow with MLX C-RADIO available.

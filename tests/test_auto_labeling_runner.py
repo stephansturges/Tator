@@ -328,6 +328,43 @@ def test_auto_label_runner_respects_image_relpath_subset_and_records_zero_write_
     assert not state["saved_payloads"]
 
 
+@pytest.mark.auto_label_smoke
+def test_auto_label_runner_does_not_write_result_through_symlinked_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outside = tmp_path / "outside_auto_label"
+    outside.mkdir()
+    auto_label_root = tmp_path / "auto_label_jobs"
+    try:
+        auto_label_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "AUTO_LABEL_ROOT", auto_label_root)
+    _build_auto_label_fixture(
+        tmp_path,
+        monkeypatch,
+        rows=[{"split": "train", "image_relpath": "img1.jpg", "label_lines": []}],
+        labelmap=["car"],
+    )
+    monkeypatch.setattr(api, "_run_prepass_annotation_qwen", lambda *_args, **_kwargs: _prepass_response([]))
+    monkeypatch.setattr(api, "_auto_label_falcon_candidates_for_window", lambda **_kwargs: [])
+
+    payload = api.AutoLabelRequest(
+        dataset_id="ds_auto",
+        target_mode="detection",
+        class_names=["car"],
+        enable_yolo=False,
+        enable_rfdetr=False,
+    )
+    job = api.AutoLabelJob(job_id="al_symlink_root")
+    api._run_auto_label_job(job, payload)
+
+    assert job.status == "completed"
+    assert job.result["images_processed"] == 1
+    assert list(outside.iterdir()) == []
+
+
 @pytest.mark.auto_label_full
 def test_auto_label_runner_tracks_candidate_and_write_metrics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _build_auto_label_fixture(

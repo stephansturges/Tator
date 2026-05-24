@@ -13863,10 +13863,80 @@ AGENT_MINING_CASCADES_ROOT = AGENT_MINING_ROOT / "cascades"
 _init_storage_root(AGENT_MINING_CASCADES_ROOT)
 
 
+def _agent_mining_cache_root(cache_root: Path, *, create: bool = False) -> Path:
+    raw_root = Path(cache_root)
+    if _storage_path_has_symlink_component(raw_root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_cache_path_invalid")
+    if create:
+        raw_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_root):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_cache_path_invalid")
+    if raw_root.exists() and not raw_root.is_dir():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_cache_path_invalid")
+    if _storage_path_has_symlink_component(raw_root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_cache_path_invalid")
+    return raw_root.resolve(strict=False)
+
+
+def _agent_mining_cache_child_dir(cache_root: Path, child_name: str, *, create: bool = False) -> Path:
+    clean_name = Path(str(child_name or "")).name
+    if not clean_name or clean_name != str(child_name):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_cache_path_invalid")
+    root = _agent_mining_cache_root(cache_root, create=create)
+    raw_child = root / clean_name
+    if _storage_path_has_symlink_component(raw_child):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_cache_path_invalid")
+    if create:
+        raw_child.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_child):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_cache_path_invalid")
+    if raw_child.exists() and not raw_child.is_dir():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_cache_path_invalid")
+    try:
+        child = raw_child.resolve(strict=False)
+        child.relative_to(root)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_mining_cache_path_invalid") from exc
+    return child
+
+
+def _write_auto_label_result_json(job_id: str, payload: Dict[str, Any]) -> None:
+    job_id_text = str(job_id or "").strip()
+    job_id_path = Path(job_id_text)
+    if not job_id_text or job_id_path.is_absolute() or ".." in job_id_path.parts:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="auto_label_job_path_invalid")
+    if _storage_path_has_symlink_component(AUTO_LABEL_ROOT):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="auto_label_job_path_invalid")
+    AUTO_LABEL_ROOT.mkdir(parents=True, exist_ok=True)
+    if _storage_path_has_symlink_component(AUTO_LABEL_ROOT):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="auto_label_job_path_invalid")
+    root = AUTO_LABEL_ROOT.resolve(strict=True)
+    job_dir = root / job_id_text
+    if _storage_path_has_symlink_component(job_dir):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="auto_label_job_path_invalid")
+    job_dir.mkdir(parents=True, exist_ok=True)
+    if _storage_path_has_symlink_component(job_dir):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="auto_label_job_path_invalid")
+    try:
+        job_dir.resolve(strict=True).relative_to(root)
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="auto_label_job_path_invalid") from exc
+    result_path = job_dir / "result.json"
+    if result_path.is_symlink():
+        result_path.unlink(missing_ok=True)
+    elif result_path.exists() and not result_path.is_file():
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="auto_label_job_path_invalid")
+    tmp_path = result_path.with_suffix(f".json.tmp.{os.getpid()}")
+    if tmp_path.is_symlink():
+        tmp_path.unlink(missing_ok=True)
+    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(tmp_path, result_path)
+
+
 def _enforce_agent_mining_cache_limits(cache_root: Path, allow_when_running: bool = False) -> None:
     """Prune agent mining cache by TTL and size caps."""
     try:
-        cache_root.mkdir(parents=True, exist_ok=True)
+        cache_root = _agent_mining_cache_root(cache_root, create=True)
     except Exception:
         return
     if not allow_when_running:
@@ -22877,19 +22947,21 @@ def _ensure_agent_mining_sample(
     sample_size: int,
     seed: int,
 ) -> Dict[str, Any]:
-    cache_dir = AGENT_MINING_DET_CACHE_ROOT / "samples"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = _agent_mining_cache_child_dir(AGENT_MINING_DET_CACHE_ROOT, "samples", create=True)
     dataset_signature = _compute_dir_signature_impl(dataset_root)
     cache_key = f"{str(dataset_id).strip()}__{dataset_signature}__{int(sample_size)}__{int(seed)}"
     cache_path = cache_dir / f"{hashlib.sha256(cache_key.encode('utf-8')).hexdigest()[:16]}.json"
-    if cache_path.exists():
+    safe_cache_path = _safe_existing_regular_file_within_root_impl(cache_path, cache_dir)
+    if safe_cache_path is not None:
         try:
-            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            payload = json.loads(safe_cache_path.read_text(encoding="utf-8"))
             if isinstance(payload, dict) and isinstance(payload.get("sample_ids"), list):
                 payload["_cached"] = True
                 return payload
         except Exception:
             pass
+    elif cache_path.is_symlink():
+        cache_path.unlink(missing_ok=True)
     coco, _, images = _load_coco_index_impl(dataset_root)
     image_ids = []
     for img in coco.get("images", []) or []:
@@ -22910,7 +22982,11 @@ def _ensure_agent_mining_sample(
         "_cached": False,
     }
     try:
-        cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path = cache_path.with_suffix(f".json.tmp.{os.getpid()}")
+        if tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+        tmp_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, cache_path)
     except Exception:
         pass
     return result
@@ -26614,9 +26690,7 @@ def _run_auto_label_job(job: AutoLabelJob, payload: AutoLabelRequest) -> None:
             job.progress = 1.0
         job.result = result_summary
         try:
-            job_dir = AUTO_LABEL_ROOT / job.job_id
-            job_dir.mkdir(parents=True, exist_ok=True)
-            (job_dir / "result.json").write_text(json.dumps(result_summary, indent=2), encoding="utf-8")
+            _write_auto_label_result_json(job.job_id, result_summary)
         except Exception:
             pass
     except HTTPException as exc:
@@ -26765,7 +26839,7 @@ def get_latest_agent_mining_result():
 
 
 def agent_mining_cache_size():
-    cache_root = AGENT_MINING_DET_CACHE_ROOT
+    cache_root = _agent_mining_cache_root(AGENT_MINING_DET_CACHE_ROOT)
     # Light touch: enforce TTL/size only when no active job to avoid surprises.
     _enforce_agent_mining_cache_limits(cache_root, allow_when_running=False)
     total = 0
@@ -26791,7 +26865,7 @@ def agent_mining_cache_size():
 
 
 def agent_mining_cache_purge():
-    cache_root = AGENT_MINING_DET_CACHE_ROOT
+    cache_root = _agent_mining_cache_root(AGENT_MINING_DET_CACHE_ROOT)
     if _agent_cache_running_jobs():
         raise HTTPException(
             status_code=HTTP_409_CONFLICT, detail="agent_cache_purge_blocked_active_jobs"

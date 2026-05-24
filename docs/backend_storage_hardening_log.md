@@ -493,3 +493,16 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1067 passed, 17 skipped`; focused prepass recipe export/import
   coverage, the full pytest suite, and live endpoint sanity checks passed
   against the restarted backend.
+
+## 2026-05-24: Agent Mining Cache and Auto-Label Result Roots
+
+- Rejected symlinked agent-mining detection cache roots before sample-cache
+  reads/writes, cache-size scans, or cache purges can touch files outside the
+  configured cache tree.
+- Replaced direct auto-label result writes with a guarded result writer that
+  rejects symlinked job roots and atomically replaces stale result files.
+- Added regressions for symlinked agent-mining cache sample roots, cache-size
+  roots, cache-purge roots, and auto-label result roots.
+- Validation: `1071 passed, 17 skipped`; focused agent-mining/auto-label
+  coverage, the full pytest suite, and live endpoint sanity checks passed
+  against the restarted backend.

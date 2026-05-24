@@ -48,6 +48,27 @@ def test_agent_mining_sample_cache_invalidates_on_signature_change(tmp_path: Pat
     assert second["dataset_signature"] == "sig_b"
 
 
+def test_agent_mining_sample_cache_rejects_symlinked_root_without_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outside = tmp_path / "outside_cache"
+    outside.mkdir()
+    cache_root = tmp_path / "agent_cache"
+    try:
+        cache_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "AGENT_MINING_DET_CACHE_ROOT", cache_root)
+    monkeypatch.setattr(api, "_compute_dir_signature_impl", lambda _root: "sig_a")
+    monkeypatch.setattr(api, "_load_coco_index_impl", lambda _root: _fake_coco_index([1, 2, 3]))
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._ensure_agent_mining_sample("ds1", tmp_path / "dataset", sample_size=2, seed=42)
+
+    assert exc_info.value.detail == "agent_mining_cache_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_agent_mining_cache_size_skips_symlink_file_escape(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -66,6 +87,26 @@ def test_agent_mining_cache_size_skips_symlink_file_escape(
 
     assert out["bytes"] == 4
     assert out["files"] == 1
+
+
+def test_agent_mining_cache_size_rejects_symlinked_root_without_scanning_target(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outside = tmp_path / "outside_cache"
+    outside.mkdir()
+    (outside / "payload.bin").write_bytes(b"external")
+    cache_root = tmp_path / "agent_cache"
+    try:
+        cache_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "AGENT_MINING_DET_CACHE_ROOT", cache_root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.agent_mining_cache_size()
+
+    assert exc_info.value.detail == "agent_mining_cache_path_invalid"
+    assert (outside / "payload.bin").read_bytes() == b"external"
 
 
 def test_agent_mining_cache_purge_unlinks_symlink_without_counting_target_bytes(
@@ -88,6 +129,28 @@ def test_agent_mining_cache_purge_unlinks_symlink_without_counting_target_bytes(
     assert out == {"status": "ok", "deleted_bytes": 0, "deleted_files": 1}
     assert not (cache_root / "escape.bin").exists()
     assert outside.read_bytes() == b"external"
+
+
+def test_agent_mining_cache_purge_rejects_symlinked_root_without_target_delete(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outside = tmp_path / "outside_cache"
+    outside.mkdir()
+    (outside / "payload.bin").write_bytes(b"external")
+    cache_root = tmp_path / "agent_cache"
+    try:
+        cache_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "AGENT_MINING_DET_CACHE_ROOT", cache_root)
+    with api.AGENT_MINING_JOBS_LOCK:
+        api.AGENT_MINING_JOBS.clear()
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.agent_mining_cache_purge()
+
+    assert exc_info.value.detail == "agent_mining_cache_path_invalid"
+    assert (outside / "payload.bin").read_bytes() == b"external"
 
 
 def test_agent_mining_cache_ttl_prune_unlinks_symlink_dir_without_target_delete(

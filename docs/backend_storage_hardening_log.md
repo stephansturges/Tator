@@ -86,3 +86,14 @@ preserving the exact validation story for storage and artifact-write fixes.
   `trace_parent/nested/prepass_traces`.
 - Validation: `986 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Prepass Recipe Artifact Roots
+
+- Rejected symlink components anywhere in prepass recipe roots before and after
+  recipe root creation.
+- Rejected symlink components in prepass recipe output-file parent paths before
+  writing JSON, text, and zip artifacts.
+- Added a regression for nested symlinked recipe parent paths such as
+  `linked_parent/nested/recipes`.
+- Validation: `987 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

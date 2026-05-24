@@ -570,9 +570,8 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-- Validation: `986 passed, 17 skipped`
-- Live smoke: UI endpoint map/method checks and OpenAPI sanity passing
-- Details: commit history plus `docs/backend_storage_hardening_log.md`
+Current verification: `987 passed, 17 skipped`; live UI/OpenAPI smoke checks pass.
+Detailed hardening notes live in [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

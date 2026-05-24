@@ -129,6 +129,28 @@ def test_ensure_recipe_zip_rejects_symlinked_recipe_parent_without_write(
     assert list(outside.iterdir()) == []
 
 
+def test_ensure_recipe_zip_rejects_nested_symlinked_recipe_parent_without_write(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    recipes_parent = tmp_path / "linked_parent"
+    try:
+        recipes_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _ensure_recipe_zip_impl(
+            {"id": "r6", "label": "demo", "config": {"x": 1}},
+            recipes_root=recipes_parent / "nested" / "recipes",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_recipe_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_prepass_copy2_if_different_replaces_symlink_to_source(tmp_path: Path) -> None:
     src = tmp_path / "source.bin"
     src.write_text("source", encoding="utf-8")

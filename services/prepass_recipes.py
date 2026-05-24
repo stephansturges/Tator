@@ -56,28 +56,40 @@ def _path_within_root(path: Path, root: Path) -> bool:
     return True
 
 
+def _path_has_symlink_component(path: Path) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    checks = [candidate]
+    checks.extend(candidate.parents)
+    for component in checks:
+        if component == component.parent:
+            continue
+        if component.is_symlink():
+            return True
+    return False
+
+
 def _recipe_storage_root(
     root: Path,
     *,
     create: bool = False,
     detail: str = "agent_recipe_path_invalid",
 ) -> Path:
-    if root.is_symlink() or root.parent.is_symlink():
+    if _path_has_symlink_component(root):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     if create:
         root.mkdir(parents=True, exist_ok=True)
-        if root.is_symlink() or root.parent.is_symlink():
+        if _path_has_symlink_component(root):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     if root.exists() and not root.is_dir():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
-    if root.is_symlink() or root.parent.is_symlink():
+    if _path_has_symlink_component(root):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     return root.resolve(strict=False)
 
 
 def _prepare_output_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.is_symlink():
+    if _path_has_symlink_component(path.parent):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     parent_resolved = path.parent.resolve(strict=True)
     if path.is_symlink():

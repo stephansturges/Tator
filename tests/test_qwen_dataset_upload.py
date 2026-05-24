@@ -398,3 +398,34 @@ def test_cancel_qwen_dataset_upload_unlinks_symlinked_staging_job_without_target
     assert marker.read_text(encoding="utf-8") == "keep"
     with api.QWEN_DATASET_UPLOADS_LOCK:
         assert job.job_id not in api.QWEN_DATASET_UPLOADS
+
+
+def test_cancel_qwen_dataset_upload_rejects_symlinked_staging_parent_without_target_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside_uploads"
+    outside.mkdir()
+    target_job = outside / "qwen_upload_job_parent_link"
+    target_job.mkdir()
+    marker = target_job / "keep.txt"
+    marker.write_text("keep", encoding="utf-8")
+    upload_parent_link = tmp_path / "dataset_uploads"
+    try:
+        upload_parent_link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "DATASET_UPLOAD_ROOT", upload_parent_link)
+    job = api.QwenDatasetUploadJob(
+        job_id="job_parent_link",
+        root_dir=upload_parent_link / "qwen_upload_job_parent_link",
+    )
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        api.QWEN_DATASET_UPLOADS.clear()
+        api.QWEN_DATASET_UPLOADS[job.job_id] = job
+
+    out = api.cancel_qwen_dataset_upload(job.job_id)
+
+    assert out == {"status": "cancelled", "job_id": job.job_id}
+    assert marker.read_text(encoding="utf-8") == "keep"
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        assert job.job_id not in api.QWEN_DATASET_UPLOADS

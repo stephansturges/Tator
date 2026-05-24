@@ -529,3 +529,16 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1075 passed, 17 skipped`; focused dataset/Qwen lifecycle
   coverage, the full pytest suite, and live endpoint sanity checks passed
   against the restarted backend.
+
+## 2026-05-24: Qwen Upload Cancel Parent Guard
+
+- Hardened Qwen dataset upload cancellation so stale upload jobs are removed
+  from memory without traversing a symlinked staging parent during filesystem
+  cleanup.
+- Preserved safe cleanup of a final symlinked staging job entry by unlinking the
+  symlink itself without touching its target.
+- Added a regression proving cancellation does not delete a target reached
+  through a swapped staging-parent symlink.
+- Validation: `1076 passed, 17 skipped`; focused Qwen upload coverage, the full
+  pytest suite, and live endpoint sanity checks passed against the restarted
+  backend.

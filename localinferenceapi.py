@@ -20412,6 +20412,29 @@ def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name
         return meta
 
 
+def _cleanup_qwen_dataset_upload_root(root_dir: Path) -> None:
+    try:
+        raw_root = Path(root_dir)
+        if raw_root.is_symlink():
+            raw_root.unlink(missing_ok=True)
+            return
+        if _storage_path_has_symlink_component(raw_root.parent):
+            return
+        upload_root = _qwen_dataset_upload_storage_root(
+            create=False, detail="qwen_dataset_upload_path_invalid"
+        )
+        resolved = raw_root.resolve(strict=True)
+    except Exception:
+        return
+    if (
+        not resolved.is_dir()
+        or not _path_is_within_root_impl(resolved, upload_root)
+        or resolved.parent != upload_root
+    ):
+        return
+    shutil.rmtree(resolved, ignore_errors=True)
+
+
 def cancel_qwen_dataset_upload(job_id: str):
     with QWEN_DATASET_UPLOADS_LOCK:
         job = QWEN_DATASET_UPLOADS.get(job_id)
@@ -20422,13 +20445,7 @@ def cancel_qwen_dataset_upload(job_id: str):
             if QWEN_DATASET_UPLOADS.get(job_id) is not job:
                 return {"status": "missing", "job_id": job_id}
             QWEN_DATASET_UPLOADS.pop(job_id, None)
-        if job.root_dir.is_symlink():
-            try:
-                job.root_dir.unlink(missing_ok=True)
-            except Exception:
-                pass
-        else:
-            shutil.rmtree(job.root_dir, ignore_errors=True)
+        _cleanup_qwen_dataset_upload_root(job.root_dir)
         return {"status": "cancelled", "job_id": job_id}
 
 

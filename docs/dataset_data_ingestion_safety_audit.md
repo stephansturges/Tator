@@ -11,6 +11,7 @@ mutate, move, or remove user data to the backend guard and regression coverage.
 | Upload current labeling session | Packages browser images/labels, then uses the same upload endpoint | UI geometry/labelmap validation, upload endpoint guards | `tests/ui/e2e/test_dataset_ingestion_safety_flows.py`, upload security tests |
 | Register server path | Creates a linked registry record only | Link-root allowlist, strict YOLO shape/labelmap validation, guarded registry path, rollback on metadata failure | `tests/test_dataset_linked_annotation_flows.py` |
 | Open transient server path | Creates in-memory transient session only | Link-root allowlist, strict YOLO shape/labelmap validation, TTL expiry | `tests/test_dataset_linked_annotation_flows.py`, UI E2E |
+| List linked datasets | Reads linked source metadata and registry overlays | No read-time source conversion or metadata backfill writes for linked roots; registry metadata remains the mutable overlay | `tests/test_dataset_linked_root_status.py` |
 | Save transient to library | Persists linked registry metadata plus overlay labels/text | Guarded registry path, registry-only labelmap overlay, strict metadata write, rollback on failure | `tests/test_dataset_linked_annotation_flows.py` |
 | Delete linked dataset | Removes linked registry record and overlays only | Source root is never passed to delete helper; active annotation/job guards block delete | `tests/test_dataset_linked_annotation_flows.py` |
 | Delete managed dataset | Moves backend-owned dataset to trash | Managed-root containment, symlink rejection, active annotation/job guards, rollback during trash metadata failure | `tests/test_dataset_linked_annotation_flows.py`, UI E2E |
@@ -47,6 +48,9 @@ queues another save instead of clearing the newer edit's dirty flag.
 Linked dataset exports must be self-consistent: registry-owned labelmap edits are
 included in the downloaded `labelmap.txt`, matching the overlaid labels and text
 labels, while the user's original linked source labelmap remains untouched.
+Dataset listing follows the same rule: linked source roots are never auto-converted
+or metadata-backfilled during read-time discovery. Any mutable state for a linked
+dataset must live in the backend registry overlay.
 
 Data ingestion cancellation must stop finalization before creating new result
 artifacts. If cancellation is observed after candidate/reference encoding but

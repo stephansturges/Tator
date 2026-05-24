@@ -1593,3 +1593,27 @@ preserving the exact validation story for storage and artifact-write fixes.
   passed the live UI endpoint map check with no missing paths or method
   mismatches, live OpenAPI sanity (`tested=144`, `failures=[]`), and a live
   `/calibration/jobs` read.
+
+## 2026-05-24: Linked Dataset Listing Is Read-Only
+
+- Re-audited Dataset Management and Data Ingestion from the data-loss angle,
+  especially linked datasets where source files are user-owned.
+- Found that dataset listing could still trigger read-time Qwen/COCO conversion
+  or SAM3/glossary metadata backfills against a linked source root if a linked
+  record pointed at a Qwen/COCO/SAM3-shaped tree. Normal UI registration is
+  strict YOLO, but the backend invariant must hold for legacy or direct API
+  records too.
+- Changed linked dataset discovery so mutable discovery work stays in the
+  backend registry overlay. Linked source roots are not auto-converted, not
+  SAM3 metadata-backfilled, and not used for write-capable glossary discovery
+  during listing.
+- Added a regression that makes linked listing fail if source conversion,
+  source metadata backfill, or source glossary backfill is attempted.
+- Validation: `py_compile services/datasets.py
+  tests/test_dataset_linked_root_status.py`, focused linked-listing regression
+  (`1 passed`), dataset/data-ingestion safety bundle (`166 passed`), skipped UI
+  E2E dataset checks in this environment (`10 skipped`), and the full pytest
+  suite (`1224 passed, 20 skipped`) passed. The restarted backend also passed
+  the live UI endpoint map check with no missing paths or method mismatches,
+  live OpenAPI sanity (`tested=144`, `failures=[]`), and live `/datasets` plus
+  `/data_ingestion/capabilities` reads.

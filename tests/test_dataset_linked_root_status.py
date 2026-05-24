@@ -139,6 +139,87 @@ def test_linked_registry_labelmap_overrides_source_labelmap(tmp_path) -> None:
     assert entry["yolo_ready"] is True
 
 
+def test_linked_listing_does_not_auto_convert_or_backfill_source(tmp_path) -> None:
+    registry_root = tmp_path / "registry"
+    registry_root.mkdir(parents=True, exist_ok=True)
+    linked_source = tmp_path / "linked_qwen_source"
+    (linked_source / "train").mkdir(parents=True, exist_ok=True)
+    (linked_source / "val").mkdir(parents=True, exist_ok=True)
+    (linked_source / "metadata.json").write_text(
+        json.dumps({"id": "source_qwen", "classes": ["car"]}),
+        encoding="utf-8",
+    )
+    (linked_source / "train" / "annotations.jsonl").write_text("", encoding="utf-8")
+    (linked_source / "val" / "annotations.jsonl").write_text("", encoding="utf-8")
+
+    dataset_dir = registry_root / "linked_qwen"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    (dataset_dir / "dataset_meta.json").write_text(
+        json.dumps(
+            {
+                "id": "linked_qwen",
+                "label": "linked_qwen",
+                "storage_mode": "linked",
+                "linked_root": str(linked_source),
+                "source": "registry",
+                "classes": ["car"],
+                "labelmap_glossary": "car: vehicle",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    source_sam3_reads: list[Path] = []
+
+    def load_sam3_meta(path: Path):
+        source_sam3_reads.append(path)
+        return None
+
+    entries = datasets_service._list_all_datasets_impl(
+        prefer_registry=True,
+        dataset_registry_root=registry_root,
+        sam3_dataset_root=registry_root / "_empty_sam3",
+        qwen_dataset_root=registry_root / "_empty_qwen",
+        load_registry_meta_fn=_load_registry_meta,
+        load_sam3_meta_fn=load_sam3_meta,
+        load_qwen_meta_fn=lambda path: json.loads((path / "metadata.json").read_text(encoding="utf-8"))
+        if (path / "metadata.json").exists()
+        else None,
+        coerce_meta_fn=lambda path, raw_meta, source: datasets_service._coerce_dataset_metadata_impl(
+            path,
+            raw_meta,
+            source,
+        ),
+        yolo_labels_have_polygons_fn=lambda _path: False,
+        convert_qwen_dataset_to_coco_fn=lambda _path: (_ for _ in ()).throw(
+            RuntimeError("linked_source_must_not_convert_qwen")
+        ),
+        convert_coco_dataset_to_yolo_fn=lambda _path: (_ for _ in ()).throw(
+            RuntimeError("linked_source_must_not_convert_coco")
+        ),
+        load_dataset_glossary_fn=lambda _path: (_ for _ in ()).throw(
+            RuntimeError("linked_source_must_not_backfill_glossary")
+        ),
+        glossary_preview_fn=lambda glossary, _labels: glossary,
+        count_caption_labels_fn=lambda _path: (0, False),
+        count_dataset_images_fn=lambda _path: 0,
+    )
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["id"] == "linked_qwen"
+    assert entry["storage_mode"] == "linked"
+    assert entry["linked_root_status"] == "ok"
+    assert entry["qwen_ready"] is False
+    assert entry["coco_ready"] is False
+    assert entry["glossary_preview"] == "car: vehicle"
+    assert source_sam3_reads == []
+    assert not (linked_source / "labelmap.txt").exists()
+    assert not (linked_source / "sam3_dataset.json").exists()
+    assert not (linked_source / "train" / "_annotations.coco.json").exists()
+    assert not (linked_source / "train" / "labels").exists()
+
+
 def test_dataset_listing_skips_symlinked_registry_record(tmp_path) -> None:
     registry_root = tmp_path / "registry"
     registry_root.mkdir(parents=True, exist_ok=True)

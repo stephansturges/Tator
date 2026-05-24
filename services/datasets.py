@@ -463,7 +463,15 @@ def _list_all_datasets_impl(
                         linked_root = str(candidate)
                         effective_root = candidate
 
-            sam3_meta = load_sam3_meta_fn(effective_root) if source != "sam3" else meta
+            # Linked datasets point at user-owned source trees. Listing must stay
+            # read-only for those roots; registry metadata is the durable overlay.
+            allow_source_mutation = storage_mode != "linked"
+            if source == "sam3":
+                sam3_meta = meta
+            elif allow_source_mutation:
+                sam3_meta = load_sam3_meta_fn(effective_root)
+            else:
+                sam3_meta = None
             coco_train = None
             coco_val = None
             coco_ready = False
@@ -507,13 +515,22 @@ def _list_all_datasets_impl(
                     yolo_labels_dir = str(root_labels)
                     yolo_layout = "flat"
             yolo_ready = bool(labelmap_path.exists() and yolo_images_dir and yolo_labels_dir)
-            qwen_meta = load_qwen_meta_fn(effective_root)
+            qwen_meta = (
+                load_qwen_meta_fn(effective_root)
+                if allow_source_mutation or source == "qwen"
+                else None
+            )
             qwen_ready = bool(
                 qwen_meta
                 and (effective_root / "train" / "annotations.jsonl").exists()
                 and (effective_root / "val" / "annotations.jsonl").exists()
             )
-            if not yolo_ready and effective_root.exists() and effective_root.is_dir():
+            if (
+                allow_source_mutation
+                and not yolo_ready
+                and effective_root.exists()
+                and effective_root.is_dir()
+            ):
                 try:
                     coco_exists = (
                         effective_root / "train" / "_annotations.coco.json"
@@ -565,9 +582,12 @@ def _list_all_datasets_impl(
                         labelmap = [line.strip() for line in handle if line.strip()]
                 except Exception:
                     labelmap = []
-            glossary_text = load_dataset_glossary_fn(effective_root)
-            if not glossary_text:
+            if storage_mode == "linked":
                 glossary_text = _normalize_labelmap_glossary(meta.get("labelmap_glossary") or "")
+            else:
+                glossary_text = load_dataset_glossary_fn(effective_root)
+                if not glossary_text:
+                    glossary_text = _normalize_labelmap_glossary(meta.get("labelmap_glossary") or "")
             glossary_preview = glossary_preview_fn(glossary_text, labelmap)
             signature = meta.get("signature") or ""
             caption_count, caption_dir_present = count_caption_labels_fn(effective_root)

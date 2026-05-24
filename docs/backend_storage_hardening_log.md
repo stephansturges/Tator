@@ -97,3 +97,14 @@ preserving the exact validation story for storage and artifact-write fixes.
   `linked_parent/nested/recipes`.
 - Validation: `987 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Agent Cascade Artifact Roots
+
+- Rejected symlink components anywhere in agent cascade roots before and after
+  cascade root creation.
+- Rejected symlink components in agent cascade output-file parent paths before
+  writing JSON and zip artifacts.
+- Added regressions for nested symlinked cascade parent paths such as
+  `linked_parent/nested/cascades`.
+- Validation: `989 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

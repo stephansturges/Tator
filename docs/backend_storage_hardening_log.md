@@ -909,3 +909,16 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1127 passed, 17 skipped`; focused linked annotation coverage,
   `localinferenceapi.py` compile, the full pytest suite, and live endpoint
   sanity checks passed against the restarted backend.
+
+## 2026-05-24: COCO Annotation JSON Atomic Saves
+
+- Routed shared COCO annotation JSON writes and COCO metadata backfills through
+  a guarded atomic writer.
+- Replaced direct `_annotations.coco.json` rewrites with temp-file writes
+  followed by atomic replace, including symlink leaf replacement and symlinked
+  parent rejection.
+- Added focused regressions for final symlink replacement, stale temp symlink
+  cleanup, and symlinked parent rejection.
+- Validation: `1130 passed, 17 skipped`; focused COCO/dataset conversion
+  coverage, `utils/coco.py` compile, the full pytest suite, and live endpoint
+  sanity checks passed against the restarted backend.

@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,6 +21,48 @@ except Exception:  # pragma: no cover - optional
     ConvexHull = None
 
 logger = logging.getLogger(__name__)
+
+
+def _coco_path_has_symlink_component(path: Path) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    checks = [candidate]
+    checks.extend(candidate.parents)
+    for component in checks:
+        if component == component.parent:
+            continue
+        if component.is_symlink():
+            return True
+    return False
+
+
+def _prepare_coco_output_path(path: Path) -> None:
+    if _coco_path_has_symlink_component(path.parent):
+        raise RuntimeError("coco_output_path_invalid")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if _coco_path_has_symlink_component(path.parent):
+        raise RuntimeError("coco_output_path_invalid")
+    parent_resolved = path.parent.resolve(strict=True)
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+    elif path.exists() and path.is_dir():
+        raise RuntimeError("coco_output_path_invalid")
+    try:
+        path.resolve(strict=False).relative_to(parent_resolved)
+    except Exception as exc:
+        raise RuntimeError("coco_output_path_invalid") from exc
+
+
+def _write_coco_json_atomic(path: Path, payload: Dict[str, Any]) -> Path:
+    _prepare_coco_output_path(path)
+    tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    _prepare_coco_output_path(tmp_path)
+    try:
+        tmp_path.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+    return path
 
 
 def _coco_has_invalid_image_refs_impl(path: Path) -> bool:
@@ -99,8 +143,7 @@ def _write_coco_annotations_impl(
         "annotations": annotations,
         "categories": categories,
     }
-    with output_path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle)
+    _write_coco_json_atomic(output_path, payload)
 
 
 def _ensure_coco_info_fields_impl(path: Path, dataset_id: str, categories: List[Dict[str, Any]]) -> str:
@@ -125,8 +168,7 @@ def _ensure_coco_info_fields_impl(path: Path, dataset_id: str, categories: List[
         modified = True
     if modified:
         try:
-            with path.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle)
+            _write_coco_json_atomic(path, data)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to rewrite COCO file %s: %s", path, exc)
     return str(path)
@@ -153,8 +195,7 @@ def _ensure_coco_supercategory_impl(path: Path, default: str = "object") -> bool
             modified = True
     if modified:
         try:
-            with path.open("w", encoding="utf-8") as handle:
-                json.dump(data, handle)
+            _write_coco_json_atomic(path, data)
         except Exception:
             return False
     return modified

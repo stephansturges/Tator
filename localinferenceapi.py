@@ -27215,12 +27215,42 @@ def agent_mining_export_recipe(recipe_id: str):
     )
 
 
-async def agent_mining_import_recipe(file: UploadFile = File(...)):
-    staging_dir = Path(
-        tempfile.mkdtemp(prefix="agent_recipe_import_", dir=str(AGENT_MINING_RECIPES_ROOT))
-    )
-    zip_path = staging_dir / "payload.zip"
+def _agent_mining_import_staging_dir(root: Path, *, prefix: str, detail: str) -> Path:
+    staging_dir: Optional[Path] = None
     try:
+        raw_root = Path(root)
+        if _storage_path_has_symlink_component(raw_root):
+            raise ValueError("agent import root has a symlink component")
+        raw_root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(raw_root) or not raw_root.is_dir():
+            raise ValueError("agent import root is invalid")
+        root_resolved = raw_root.resolve(strict=True)
+        staging_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=str(root_resolved)))
+        if _storage_path_has_symlink_component(staging_dir.parent):
+            raise ValueError("agent import staging parent has a symlink component")
+        staging_resolved = staging_dir.resolve(strict=True)
+        if (
+            not staging_resolved.is_dir()
+            or staging_resolved.parent != root_resolved
+            or not _path_is_within_root_impl(staging_resolved, root_resolved)
+        ):
+            raise ValueError("agent import staging dir escapes root")
+        return staging_resolved
+    except Exception as exc:
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+async def agent_mining_import_recipe(file: UploadFile = File(...)):
+    staging_dir: Optional[Path] = None
+    try:
+        staging_dir = _agent_mining_import_staging_dir(
+            AGENT_MINING_RECIPES_ROOT,
+            prefix="agent_recipe_import_",
+            detail="agent_recipe_import_invalid_path",
+        )
+        zip_path = staging_dir / "payload.zip"
         await _write_upload_file(
             file,
             zip_path,
@@ -27238,7 +27268,12 @@ async def agent_mining_import_recipe(file: UploadFile = File(...)):
             status_code=HTTP_400_BAD_REQUEST, detail=f"agent_recipe_import_failed:{exc}"
         ) from exc
     finally:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        try:
+            file.file.close()
+        except Exception:
+            pass
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 def agent_mining_delete_recipe(recipe_id: str):
@@ -27283,11 +27318,14 @@ def agent_mining_export_cascade(cascade_id: str):
 
 
 async def agent_mining_import_cascade(file: UploadFile = File(...)):
-    staging_dir = Path(
-        tempfile.mkdtemp(prefix="agent_cascade_import_", dir=str(AGENT_MINING_CASCADES_ROOT))
-    )
-    zip_path = staging_dir / "payload.zip"
+    staging_dir: Optional[Path] = None
     try:
+        staging_dir = _agent_mining_import_staging_dir(
+            AGENT_MINING_CASCADES_ROOT,
+            prefix="agent_cascade_import_",
+            detail="agent_cascade_import_invalid_path",
+        )
+        zip_path = staging_dir / "payload.zip"
         await _write_upload_file(
             file,
             zip_path,
@@ -27304,7 +27342,12 @@ async def agent_mining_import_cascade(file: UploadFile = File(...)):
             status_code=HTTP_400_BAD_REQUEST, detail=f"agent_cascade_import_failed:{exc}"
         ) from exc
     finally:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        try:
+            file.file.close()
+        except Exception:
+            pass
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 app.include_router(

@@ -570,3 +570,18 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1080 passed, 17 skipped`; focused CLIP/job-start/class-analysis
   coverage, the full pytest suite, and live endpoint sanity checks passed
   against the restarted backend.
+
+## 2026-05-24: Agent Import Endpoint Staging Guards
+
+- Hardened agent recipe and cascade import endpoints so staging directories are
+  created only after the configured recipe/cascade root is proven free of
+  symlink components.
+- Prevented endpoint-level temp writes under symlinked import roots before the
+  service import validators run.
+- Closed upload handles when import staging setup fails before `_write_upload_file`
+  takes ownership of the stream.
+- Added endpoint regressions for symlinked recipe/cascade import roots proving
+  no outside staging directory is created and the upload handle is closed.
+- Validation: `1082 passed, 17 skipped`; focused agent import endpoint/service
+  coverage, the full pytest suite, and live endpoint sanity checks passed
+  against the restarted backend.

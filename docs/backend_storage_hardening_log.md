@@ -1346,3 +1346,17 @@ preserving the exact validation story for storage and artifact-write fixes.
   tools/run_ui_contract_tests.py tools/check_ui_endpoints.py`,
   `git diff --check`, live UI endpoint check with no missing paths or method
   mismatches, and the full pytest suite passed.
+
+## 2026-05-24: Validation Cleanup Path Containment
+
+- Replaced string-prefix cleanup allow-list checks in the GPU validation runner
+  with path-aware containment checks, so sibling paths such as `uploads_evil`
+  or `tmp_evil` cannot be removed just because their names share a prefix with
+  an allowed root.
+- Added a regression proving `_safe_remove_path` rejects an
+  `uploads_evil/unit_payload` sibling even when it contains the current run id.
+- Validation: `1194 passed, 17 skipped`; focused dataset/data-ingestion safety
+  coverage (`184 passed`), cleanup-tool coverage (`5 passed`), live UI endpoint
+  map check with no missing paths or method mismatches, live OpenAPI sanity
+  (`tested=144`, `failures=[]`), `py_compile tools/run_gpu_validation_suite.py`,
+  and the full pytest suite passed.

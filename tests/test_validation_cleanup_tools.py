@@ -109,3 +109,28 @@ def test_gpu_validation_cleanup_keeps_unscoped_dataset_trash(tmp_path: Path) -> 
     assert trash_dir.exists()
     assert removed == []
     assert skipped == [str(trash_dir)]
+
+
+def test_gpu_validation_safe_remove_rejects_allowed_root_prefix_sibling(
+    tmp_path: Path,
+) -> None:
+    tool = _load_tool_module("run_gpu_validation_suite", "tools/run_gpu_validation_suite.py")
+    suite = tool.GpuValidationSuite(
+        repo_root=tmp_path,
+        base_url="http://127.0.0.1:8000",
+        timeout_s=5,
+        run_id="unit",
+        cleanup=True,
+    )
+    sibling = tmp_path / "uploads_evil" / "unit_payload"
+    sibling.mkdir(parents=True)
+    (sibling / "payload.bin").write_bytes(b"outside")
+    removed: list[str] = []
+    skipped: list[str] = []
+
+    suite._safe_remove_path(sibling, removed, skipped)
+
+    assert sibling.exists()
+    assert (sibling / "payload.bin").read_bytes() == b"outside"
+    assert removed == []
+    assert skipped == [str(sibling.resolve())]

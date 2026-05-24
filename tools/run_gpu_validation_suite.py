@@ -1299,8 +1299,11 @@ class GpuValidationSuite:
         except Exception:
             skipped.append(str(path))
             return
-        allow_roots = [self.repo_root / "tmp", self.repo_root / "uploads"]
-        if not any(str(rp).startswith(str(root.resolve())) for root in allow_roots):
+        allow_roots = [
+            (self.repo_root / "tmp").resolve(),
+            (self.repo_root / "uploads").resolve(),
+        ]
+        if not any(self._path_within_root(rp, root) for root in allow_roots):
             skipped.append(str(rp))
             return
         allowed_specific = {
@@ -1320,6 +1323,14 @@ class GpuValidationSuite:
             removed.append(str(rp))
         except Exception:
             skipped.append(str(rp))
+
+    @staticmethod
+    def _path_within_root(path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            return False
+        return True
 
     def _cleanup_dataset_trash_payload(
         self,

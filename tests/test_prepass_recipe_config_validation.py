@@ -324,6 +324,112 @@ def test_persist_agent_recipe_writes_zip_atomically_over_symlink_leaves(
         assert "recipe.json" in zf.namelist()
 
 
+def test_persist_agent_recipe_writes_imported_binary_assets_atomically_over_symlink_leaves(
+    tmp_path, monkeypatch
+) -> None:
+    class FixedUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    recipes_root = tmp_path / "recipes"
+    recipe_dir = recipes_root / "ar_deadbeef"
+    clip_dir = recipe_dir / "clip_head"
+    crops_dir = recipe_dir / "crops"
+    clip_dir.mkdir(parents=True)
+    crops_dir.mkdir(parents=True)
+    head_path = clip_dir / "head.npz"
+    meta_path = clip_dir / "meta.json"
+    crop_path = crops_dir / "step.png"
+    head_tmp = head_path.with_suffix(head_path.suffix + f".tmp.{os.getpid()}")
+    meta_tmp = meta_path.with_suffix(meta_path.suffix + f".tmp.{os.getpid()}")
+    crop_tmp = crop_path.with_suffix(crop_path.suffix + f".tmp.{os.getpid()}")
+    outside_head = tmp_path / "outside_head.npz"
+    outside_head_tmp = tmp_path / "outside_head_tmp.npz"
+    outside_meta = tmp_path / "outside_meta.json"
+    outside_meta_tmp = tmp_path / "outside_meta_tmp.json"
+    outside_crop = tmp_path / "outside_crop.png"
+    outside_crop_tmp = tmp_path / "outside_crop_tmp.png"
+    outside_head.write_bytes(b"external head")
+    outside_head_tmp.write_bytes(b"external head tmp")
+    outside_meta.write_bytes(b"external meta")
+    outside_meta_tmp.write_bytes(b"external meta tmp")
+    outside_crop.write_bytes(b"external crop")
+    outside_crop_tmp.write_bytes(b"external crop tmp")
+    try:
+        head_path.symlink_to(outside_head)
+        head_tmp.symlink_to(outside_head_tmp)
+        meta_path.symlink_to(outside_meta)
+        meta_tmp.symlink_to(outside_meta_tmp)
+        crop_path.symlink_to(outside_crop)
+        crop_tmp.symlink_to(outside_crop_tmp)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(prepass_recipes.uuid, "uuid4", lambda: FixedUUID())
+
+    saved = _persist_agent_recipe_impl(
+        dataset_id=None,
+        class_id=None,
+        class_name="person",
+        label="person recipe",
+        recipe={
+            "schema_version": 2,
+            "steps": [
+                {
+                    "prompt": "person",
+                    "exemplar": {"crop_path": "crops/step.png"},
+                }
+            ],
+        },
+        crop_overrides={"crops/step.png": b"crop-bytes"},
+        clip_head_overrides={
+            "clip_head/head.npz": b"head-bytes",
+            "clip_head/meta.json": b'{"clip_model":"test"}',
+        },
+        meta_overrides={
+            "dataset_signature": "dataset-signature",
+            "labelmap_hash": "labelmap-hash",
+            "labelmap": ["person"],
+        },
+        recipes_root=recipes_root,
+        max_clip_head_bytes=1024 * 1024,
+        max_crops=10,
+        max_crop_bytes=1024 * 1024,
+        resolve_dataset_fn=lambda _dataset_id: tmp_path,
+        load_coco_index_fn=lambda _root: ({"categories": []}, {}, {}),
+        compute_dataset_signature_fn=lambda *_args: "dataset-signature",
+        compute_labelmap_hash_fn=lambda _categories: ("labelmap-hash", ["person"]),
+        resolve_clip_classifier_fn=lambda _path: tmp_path / "classifier.pkl",
+        load_clip_head_fn=lambda _path: None,
+        save_clip_head_artifacts_fn=lambda **_kwargs: None,
+        load_clip_head_artifacts_fn=lambda **_kwargs: {
+            "classes": ["person"],
+            "clip_model": "test",
+            "proba_mode": "softmax",
+            "min_prob": 0.5,
+            "margin": 0.0,
+        },
+        save_exemplar_crop_fn=lambda **_kwargs: None,
+        sanitize_prompts_fn=lambda prompts: prompts,
+        path_is_within_root_fn=_within_root,
+    )
+
+    assert saved["id"] == "ar_deadbeef"
+    assert head_path.read_bytes() == b"head-bytes"
+    assert meta_path.read_bytes() == b'{"clip_model":"test"}'
+    assert crop_path.read_bytes() == b"crop-bytes"
+    assert not head_path.is_symlink()
+    assert not meta_path.is_symlink()
+    assert not crop_path.is_symlink()
+    assert not head_tmp.exists()
+    assert not meta_tmp.exists()
+    assert not crop_tmp.exists()
+    assert outside_head.read_bytes() == b"external head"
+    assert outside_head_tmp.read_bytes() == b"external head tmp"
+    assert outside_meta.read_bytes() == b"external meta"
+    assert outside_meta_tmp.read_bytes() == b"external meta tmp"
+    assert outside_crop.read_bytes() == b"external crop"
+    assert outside_crop_tmp.read_bytes() == b"external crop tmp"
+
+
 def test_persist_agent_recipe_rejects_symlinked_recipe_dir_without_write(
     tmp_path, monkeypatch
 ) -> None:

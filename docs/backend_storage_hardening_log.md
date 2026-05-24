@@ -812,3 +812,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1111 passed, 17 skipped`; focused Qwen upload security coverage,
   `localinferenceapi.py` compile, the full pytest suite, and live endpoint
   sanity checks passed against the restarted backend.
+
+## 2026-05-24: Prepass Recipe Binary Artifact Atomic Saves
+
+- Added guarded binary writes for prepass recipe persistence.
+- Routed generated exemplar crops, imported portable CLIP head payloads, and
+  embedded recipe crop payloads through temp-file writes followed by atomic
+  replace.
+- Added a regression proving imported CLIP head and crop temp/final symlink leaves
+  are replaced without mutating external targets.
+- Validation: `1112 passed, 17 skipped`; focused prepass recipe persistence
+  coverage, `services/prepass_recipes.py` compile, the full pytest suite, and
+  live endpoint sanity checks passed against the restarted backend.

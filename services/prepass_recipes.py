@@ -168,6 +168,30 @@ def _write_text_file(path: Path, text: str) -> Path:
     return path
 
 
+def _write_binary_file(path: Path, writer) -> Path:
+    tmp_path = _prepare_atomic_output_file(path)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp_path, flags, 0o644)
+        with os.fdopen(fd, "wb") as handle:
+            writer(handle)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+    return path
+
+
+def _write_bytes_file(path: Path, payload: bytes) -> Path:
+    return _write_binary_file(path, lambda handle: handle.write(payload))
+
+
+def _write_png_file(path: Path, image: Image.Image) -> Path:
+    return _write_binary_file(path, lambda handle: image.save(handle, format="PNG"))
+
+
 def _zip_write_safe_file(zf: zipfile.ZipFile, path: Path, root: Path, arcname: str) -> bool:
     if not _safe_regular_file_within_root(path, root):
         return False
@@ -407,7 +431,7 @@ def _save_exemplar_crop_impl(
             crop_dir.mkdir(parents=True, exist_ok=True)
             filename = crop_name or f"step_{step_idx:02d}_exemplar.png"
             crop_path = crop_dir / filename
-            crop.save(crop_path, format="PNG")
+            _write_png_file(crop_path, crop)
     except Exception:
         return None
     bbox_norm = None
@@ -946,8 +970,7 @@ def _persist_agent_recipe_impl(
         if head_npz_bytes:
             try:
                 head_path = clip_dir / "head.npz"
-                _prepare_output_file(head_path)
-                head_path.write_bytes(head_npz_bytes)
+                _write_bytes_file(head_path, head_npz_bytes)
                 clip_head_written = True
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
@@ -957,8 +980,7 @@ def _persist_agent_recipe_impl(
         if head_meta_bytes:
             try:
                 meta_path = clip_dir / "meta.json"
-                _prepare_output_file(meta_path)
-                meta_path.write_bytes(head_meta_bytes)
+                _write_bytes_file(meta_path, head_meta_bytes)
                 clip_head_written = True
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
@@ -1071,8 +1093,7 @@ def _persist_agent_recipe_impl(
             if crop_bytes is not None:
                 crop_path = crops_dir / filename
                 try:
-                    with crop_path.open("wb") as fp:
-                        fp.write(crop_bytes)
+                    _write_bytes_file(crop_path, crop_bytes)
                     entry_copy["crop_path"] = str(Path("crops") / crop_path.name)
                     entry_copy.pop("path", None)
                     entry_copy.pop("embed_id", None)
@@ -1133,8 +1154,7 @@ def _persist_agent_recipe_impl(
                     if crop_bytes is not None:
                         crop_path = crops_dir / Path(crop_key).name
                         try:
-                            with crop_path.open("wb") as fp:
-                                fp.write(crop_bytes)
+                            _write_bytes_file(crop_path, crop_bytes)
                             if crop_path.exists():
                                 pass
                             enriched = {

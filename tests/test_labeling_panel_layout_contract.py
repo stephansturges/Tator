@@ -233,6 +233,17 @@ def test_qwen_injected_runtime_options_use_shared_mlx_resolver():
     assert "goekdeniz-guelmez/josiefied-qwen3-vl-" in js
 
 
+def test_qwen_caption_model_defaults_to_active_runtime():
+    html = _html()
+    select_match = re.search(r'<select id="qwenCaptionModel">(.*?)</select>', html, re.S)
+
+    assert select_match
+    options = select_match.group(1)
+    assert '<option value="active" selected>Use active model</option>' in options
+    assert 'value="Qwen/Qwen3-VL-30B-A3B-Thinking" selected' not in options
+    assert options.count(" selected") == 1
+
+
 def test_data_ingestion_panel_contract():
     html = _html()
     css = _css()

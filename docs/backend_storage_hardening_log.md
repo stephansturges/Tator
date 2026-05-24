@@ -1866,3 +1866,21 @@ preserving the exact validation story for storage and artifact-write fixes.
   focused Qwen runtime-select contract coverage (`2 passed`),
   `tools/check_ui_endpoints.py http://127.0.0.1:8000`, `git diff --check`, and
   the full pytest suite (`1249 passed, 20 skipped`) passed.
+
+## 2026-05-24: Qwen Caption Default Model Safety
+
+- Continued the Qwen inference-control sweep after aligning injected runtime
+  platform detection.
+- Found that the captioning model selector defaulted to
+  `Qwen/Qwen3-VL-30B-A3B-Thinking` instead of the active backend model. That
+  made an ordinary captioning run unexpectedly choose the heaviest listed
+  preset when the user had not made an explicit model choice.
+- Changed the captioning selector to default to `Use active model`, keeping
+  explicit 30B-A3B Thinking selection available but opt-in.
+- Added a UI contract test so future changes keep exactly one default selection
+  in the captioning model selector and keep it on the active runtime option.
+- Validation: `py_compile tests/test_labeling_panel_layout_contract.py`,
+  focused Qwen caption/runtime-select contract coverage (`2 passed`),
+  `node --check ybat-master/ybat.js`,
+  `tools/check_ui_endpoints.py http://127.0.0.1:8000`, `git diff --check`, and
+  the full pytest suite (`1250 passed, 20 skipped`) passed.

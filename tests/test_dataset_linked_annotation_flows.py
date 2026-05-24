@@ -2497,6 +2497,40 @@ def test_write_segmentation_output_labelmap_skips_source_symlink_escape(
     assert not outside.exists()
 
 
+def test_segmentation_output_text_write_is_atomic_over_symlink_leaves(
+    tmp_path, monkeypatch
+) -> None:
+    class FixedUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    output_root = tmp_path / "output"
+    label_path = output_root / "train" / "labels" / "img.txt"
+    label_path.parent.mkdir(parents=True)
+    tmp_path_link = label_path.with_suffix(f"{label_path.suffix}.{FixedUUID.hex}.tmp")
+    outside_tmp = tmp_path / "outside_tmp.txt"
+    outside_final = tmp_path / "outside_final.txt"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    try:
+        tmp_path_link.symlink_to(outside_tmp)
+        label_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: FixedUUID())
+
+    api._segmentation_write_text_within_root(
+        label_path,
+        output_root,
+        "0 0.1 0.1 0.2 0.1 0.2 0.2\n",
+    )
+
+    assert not tmp_path_link.exists()
+    assert not label_path.is_symlink()
+    assert label_path.read_text(encoding="utf-8") == "0 0.1 0.1 0.2 0.1 0.2 0.2\n"
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
+
+
 def test_register_path_dedupes_existing_linked_entry(tmp_path, monkeypatch) -> None:
     dataset_root = tmp_path / "linked_ds"
     (dataset_root / "images").mkdir(parents=True, exist_ok=True)

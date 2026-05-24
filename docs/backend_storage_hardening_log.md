@@ -715,3 +715,15 @@ preserving the exact validation story for storage and artifact-write fixes.
   are replaced without mutating external targets.
 - Validation: `1100 passed, 17 skipped`; focused linked annotation coverage and
   the full pytest suite passed.
+
+## 2026-05-24: Segmentation Output Atomic Label Writes
+
+- Switched SAM3 segmentation-builder label text writes from direct final-path
+  writes to guarded temp-file writes followed by atomic replace.
+- Preserved the segmentation output-root containment checks while ensuring temp
+  and final symlink leaves are replaced instead of written through.
+- Added a regression proving generated segmentation label writes do not mutate
+  external symlink targets.
+- Validation: `1101 passed, 17 skipped`; focused linked annotation/segmentation
+  coverage, the full pytest suite, and live endpoint sanity checks passed
+  against the restarted backend.

@@ -28175,6 +28175,7 @@ def _prepare_segmentation_output_root(
 
 
 def _segmentation_write_text_within_root(path: Path, root: Path, text: str) -> None:
+    tmp_path = path.with_suffix(f"{path.suffix}.{uuid.uuid4().hex}.tmp")
     try:
         root_resolved = root.resolve(strict=True)
         if _storage_path_has_symlink_component(root) or _storage_path_has_symlink_component(
@@ -28187,20 +28188,25 @@ def _segmentation_write_text_within_root(path: Path, root: Path, text: str) -> N
         parent_resolved = path.parent.resolve(strict=True)
         if not _path_is_within_root_impl(parent_resolved, root_resolved):
             raise ValueError("segmentation output parent escapes root")
-        if path.is_symlink():
-            path.unlink(missing_ok=True)
-        elif path.exists() and path.is_dir():
-            raise ValueError("segmentation output target is a directory")
-        target_resolved = path.resolve(strict=False)
-        if not _path_is_within_root_impl(target_resolved, root_resolved):
-            raise ValueError("segmentation output target escapes root")
-        path.write_text(text, encoding="utf-8")
+        for candidate in (tmp_path, path):
+            if candidate.is_symlink():
+                candidate.unlink(missing_ok=True)
+            elif candidate.exists() and candidate.is_dir():
+                raise ValueError("segmentation output target is a directory")
+            target_resolved = candidate.resolve(strict=False)
+            if not _path_is_within_root_impl(target_resolved, root_resolved):
+                raise ValueError("segmentation output target escapes root")
+        tmp_path.write_text(text, encoding="utf-8")
+        os.replace(tmp_path, path)
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(
             status_code=HTTP_400_BAD_REQUEST, detail="segmentation_output_path_invalid"
         ) from exc
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _write_segmentation_output_labelmap(

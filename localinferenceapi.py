@@ -27602,6 +27602,91 @@ def _plan_segmentation_build(
     return planned_meta, planned_layout
 
 
+def _prepare_segmentation_output_root(
+    planned_meta: Dict[str, Any], planned_layout: Dict[str, Any]
+) -> Path:
+    output_id = str(planned_meta.get("id") or Path(planned_layout["dataset_root"]).name)
+    output_root = _sam3_dataset_child_dir(
+        output_id,
+        detail="segmentation_output_path_invalid",
+    )
+    planned_root = Path(str(planned_layout.get("dataset_root") or "")).resolve(strict=False)
+    if planned_root != output_root:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="segmentation_output_path_invalid"
+        )
+    if output_root.exists() or output_root.is_symlink():
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="segmentation_output_exists")
+    if _storage_path_has_symlink_component(output_root.parent):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="segmentation_output_path_invalid"
+        )
+    try:
+        output_root.mkdir(parents=False, exist_ok=False)
+    except FileExistsError as exc:
+        detail = (
+            "segmentation_output_path_invalid"
+            if output_root.is_symlink()
+            else "segmentation_output_exists"
+        )
+        status = HTTP_400_BAD_REQUEST if output_root.is_symlink() else HTTP_409_CONFLICT
+        raise HTTPException(status_code=status, detail=detail) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="segmentation_output_path_invalid"
+        ) from exc
+    if _storage_path_has_symlink_component(output_root):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="segmentation_output_path_invalid"
+        )
+    return output_root.resolve(strict=True)
+
+
+def _segmentation_write_text_within_root(path: Path, root: Path, text: str) -> None:
+    try:
+        root_resolved = root.resolve(strict=True)
+        if _storage_path_has_symlink_component(root) or _storage_path_has_symlink_component(
+            path.parent
+        ):
+            raise ValueError("segmentation output path contains a symlink")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(path.parent):
+            raise ValueError("segmentation output parent contains a symlink")
+        parent_resolved = path.parent.resolve(strict=True)
+        if not _path_is_within_root_impl(parent_resolved, root_resolved):
+            raise ValueError("segmentation output parent escapes root")
+        if path.is_symlink():
+            path.unlink(missing_ok=True)
+        elif path.exists() and path.is_dir():
+            raise ValueError("segmentation output target is a directory")
+        target_resolved = path.resolve(strict=False)
+        if not _path_is_within_root_impl(target_resolved, root_resolved):
+            raise ValueError("segmentation output target escapes root")
+        path.write_text(text, encoding="utf-8")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST, detail="segmentation_output_path_invalid"
+        ) from exc
+
+
+def _write_segmentation_output_labelmap(
+    *, output_root: Path, dataset_root: Path, classes: Sequence[str]
+) -> None:
+    labelmap_file = dataset_root / "labelmap.txt"
+    output_labelmap = output_root / "labelmap.txt"
+    if labelmap_file.exists() and not labelmap_file.is_symlink():
+        _copy2_if_different(labelmap_file, output_labelmap)
+        return
+    text = "\n".join(str(label).strip() for label in classes if str(label).strip())
+    _segmentation_write_text_within_root(
+        output_labelmap,
+        output_root,
+        text + ("\n" if text else ""),
+    )
+
+
 def _start_segmentation_build_job(request: SegmentationBuildRequest) -> SegmentationBuildJob:
     planned_meta, planned_layout = _plan_segmentation_build(request)
     job_id = str(uuid.uuid4())
@@ -27668,23 +27753,18 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
                     ),
                 )
             )
-            labelmap_file = dataset_root / "labelmap.txt"
-            if not labelmap_file.exists() and classes:
-                # Backfill labelmap file if missing.
-                try:
-                    labelmap_file.write_text("\n".join(classes), encoding="utf-8")
-                except Exception:
-                    pass
-            output_root = Path(planned_layout["dataset_root"]).resolve()
+            output_root = _prepare_segmentation_output_root(planned_meta, planned_layout)
             train_out = output_root / "train"
             val_out = output_root / "val"
             (train_out / "images").mkdir(parents=True, exist_ok=True)
             (train_out / "labels").mkdir(parents=True, exist_ok=True)
             (val_out / "images").mkdir(parents=True, exist_ok=True)
             (val_out / "labels").mkdir(parents=True, exist_ok=True)
-            # Copy/link labelmap.
-            if labelmap_file.exists():
-                        _copy2_if_different(labelmap_file, output_root / "labelmap.txt")
+            _write_segmentation_output_labelmap(
+                output_root=output_root,
+                dataset_root=dataset_root,
+                classes=classes,
+            )
             splits = []
             image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
@@ -27900,10 +27980,13 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
                         dest_images = (
                             (train_out if split == "train" else val_out) / "images" / rel_path
                         )
-                        dest_labels.parent.mkdir(parents=True, exist_ok=True)
                         dest_images.parent.mkdir(parents=True, exist_ok=True)
                         _link_or_copy(image_path, dest_images)
-                        dest_labels.write_text("\n".join(label_lines), encoding="utf-8")
+                        _segmentation_write_text_within_root(
+                            dest_labels,
+                            output_root,
+                            "\n".join(label_lines),
+                        )
                 finally:
                     with progress_lock:
                         processed += 1

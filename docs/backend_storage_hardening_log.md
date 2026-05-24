@@ -360,3 +360,19 @@ preserving the exact validation story for storage and artifact-write fixes.
   RF-DETR split symlink escapes.
 - Validation: `1043 passed, 17 skipped`; focused detector lifecycle/head-graft
   coverage, the full pytest suite, and live endpoint sanity checks passed.
+
+## 2026-05-24: Segmentation Build Output Guards
+
+- Revalidated segmentation-builder output dataset roots at worker time instead
+  of trusting the path string produced during planning.
+- Rejected symlink swaps and pre-existing output directories before creating
+  segmentation output trees.
+- Stopped backfilling source `labelmap.txt` files during segmentation builds;
+  the worker now copies a safe source labelmap when present or writes the class
+  list directly into the guarded output dataset.
+- Routed generated segmentation label files through a root-contained text writer
+  so output label parents cannot be swapped through symlinks.
+- Added regressions for post-plan output symlink swaps and source labelmap
+  symlink escapes.
+- Validation: `1045 passed, 17 skipped`; focused SAM3/segmentation coverage,
+  the full pytest suite, and live endpoint sanity checks passed.

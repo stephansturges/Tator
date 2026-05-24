@@ -1861,6 +1861,53 @@ def test_plan_segmentation_build_rejects_symlinked_sam3_output_parent(
     assert list(outside.iterdir()) == []
 
 
+def test_prepare_segmentation_output_root_rejects_symlink_swap(
+    tmp_path, monkeypatch
+) -> None:
+    sam3_root = tmp_path / "sam3_outputs"
+    sam3_root.mkdir()
+    outside = tmp_path / "outside_output"
+    outside.mkdir()
+    try:
+        (sam3_root / "ds_seg").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", sam3_root)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api._prepare_segmentation_output_root(
+            {"id": "ds_seg"},
+            {"dataset_root": str(sam3_root / "ds_seg")},
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "segmentation_output_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_write_segmentation_output_labelmap_skips_source_symlink_escape(
+    tmp_path,
+) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    dataset_root = tmp_path / "source"
+    dataset_root.mkdir()
+    outside = tmp_path / "outside_labelmap.txt"
+    try:
+        (dataset_root / "labelmap.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    api._write_segmentation_output_labelmap(
+        output_root=output_root,
+        dataset_root=dataset_root,
+        classes=["building", "vehicle"],
+    )
+
+    assert (output_root / "labelmap.txt").read_text(encoding="utf-8") == "building\nvehicle\n"
+    assert not outside.exists()
+
+
 def test_register_path_dedupes_existing_linked_entry(tmp_path, monkeypatch) -> None:
     dataset_root = tmp_path / "linked_ds"
     (dataset_root / "images").mkdir(parents=True, exist_ok=True)

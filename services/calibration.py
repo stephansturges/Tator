@@ -142,6 +142,28 @@ def _resolve_calibration_storage_root(
     return raw_root.resolve(strict=False)
 
 
+def _prepare_calibration_storage_dir(
+    path: Path,
+    *,
+    root: Optional[Path] = None,
+    error_prefix: str = "calibration_path",
+) -> Path:
+    raw_path = Path(path)
+    if _path_has_symlink_component(raw_path):
+        raise ValueError(f"{error_prefix}_symlink")
+    raw_path.mkdir(parents=True, exist_ok=True)
+    if _path_has_symlink_component(raw_path):
+        raise ValueError(f"{error_prefix}_symlink")
+    resolved = raw_path.resolve(strict=True)
+    if not resolved.is_dir():
+        raise ValueError(f"{error_prefix}_not_directory")
+    if root is not None:
+        root_resolved = Path(root).resolve(strict=True)
+        if not _path_is_within_root_impl(resolved, root_resolved):
+            raise ValueError(f"{error_prefix}_escape")
+    return resolved
+
+
 def _path_has_symlink_component(path: Path) -> bool:
     candidate = path if path.is_absolute() else path.absolute()
     checks = [candidate]
@@ -1083,7 +1105,10 @@ def _ensure_prepass_jsonl(
     cache_image_fn: Callable[[Image.Image, Optional[str]], str],
     run_prepass_fn: Callable[..., Dict[str, Any]],
 ) -> Dict[str, Any]:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _prepare_calibration_storage_dir(
+        output_path.parent,
+        error_prefix="calibration_prepass_output_parent",
+    )
     labelmap_hash = hashlib.sha1(",".join(labelmap).encode("utf-8")).hexdigest()
     prepass_glossary_text = glossary or ""
     glossary_hash = hashlib.sha1(prepass_glossary_text.encode("utf-8")).hexdigest()
@@ -1106,7 +1131,16 @@ def _ensure_prepass_jsonl(
     )
     prepass_cache_dir = calibration_cache_root / "prepass" / prepass_config_key
     image_cache_dir = prepass_cache_dir / "images"
-    image_cache_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_calibration_storage_dir(
+        prepass_cache_dir,
+        root=calibration_cache_root,
+        error_prefix="calibration_prepass_cache_dir",
+    )
+    _prepare_calibration_storage_dir(
+        image_cache_dir,
+        root=calibration_cache_root,
+        error_prefix="calibration_prepass_image_cache_dir",
+    )
     prepass_cache_meta = prepass_cache_dir / "prepass.meta.json"
     glossary_path = prepass_cache_dir / "glossary.json"
 
@@ -1516,8 +1550,11 @@ def _run_calibration_job(
     with jobs_lock:
         jobs[job.job_id] = job
     calibration_root_resolved = _resolve_calibration_storage_root(calibration_root, create=True)
-    output_dir = calibration_root_resolved / job.job_id
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = _prepare_calibration_storage_dir(
+        calibration_root_resolved / job.job_id,
+        root=calibration_root_resolved,
+        error_prefix="calibration_job_dir",
+    )
 
     def _persisting_update_fn(inner_job: Any, **kwargs: Any) -> None:
         update_fn(inner_job, **kwargs)
@@ -2353,7 +2390,11 @@ def _run_calibration_job(
             }
         )
         features_cache_dir = calibration_cache_root / "features" / features_key
-        features_cache_dir.mkdir(parents=True, exist_ok=True)
+        _prepare_calibration_storage_dir(
+            features_cache_dir,
+            root=calibration_cache_root,
+            error_prefix="calibration_features_cache_dir",
+        )
         features_cache_path = features_cache_dir / "ensemble_features.npz"
         features_cache_meta = features_cache_dir / "features.meta.json"
         cached_features = features_cache_path.exists()
@@ -2447,7 +2488,11 @@ def _run_calibration_job(
             }
         )
         labeled_cache_dir = calibration_cache_root / "labeled" / labeled_key
-        labeled_cache_dir.mkdir(parents=True, exist_ok=True)
+        _prepare_calibration_storage_dir(
+            labeled_cache_dir,
+            root=calibration_cache_root,
+            error_prefix="calibration_labeled_cache_dir",
+        )
         labeled_cache_path = labeled_cache_dir / f"ensemble_features_iou{label_iou:.2f}.npz"
         labeled_cache_meta = labeled_cache_dir / "labeled.meta.json"
         cached_labeled = labeled_cache_path.exists()

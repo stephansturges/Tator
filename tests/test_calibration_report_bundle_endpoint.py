@@ -7,6 +7,7 @@ import localinferenceapi as api
 from services.calibration import (
     CALIBRATION_JOB_STATE_FILENAME,
     CalibrationJob,
+    _prepare_calibration_storage_dir,
     _resolve_calibration_storage_root,
     _write_json_atomic,
 )
@@ -294,6 +295,29 @@ def test_calibration_write_json_atomic_rejects_nested_symlinked_parent_without_w
         _write_json_atomic(
             linked_parent / "nested" / "calibration_jobs" / "cal_safe" / CALIBRATION_JOB_STATE_FILENAME,
             {"job_id": "cal_safe"},
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_prepare_calibration_storage_dir_rejects_nested_symlinked_parent_without_write(
+    tmp_path: Path,
+) -> None:
+    cache_root = tmp_path / "calibration_cache"
+    cache_root.mkdir()
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = cache_root / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(ValueError, match="calibration_cache_dir_symlink"):
+        _prepare_calibration_storage_dir(
+            linked_parent / "nested" / "images",
+            root=cache_root,
+            error_prefix="calibration_cache_dir",
         )
 
     assert list(outside.iterdir()) == []

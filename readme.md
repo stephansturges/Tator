@@ -570,8 +570,8 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current verification: `1015 passed, 17 skipped`; live UI/OpenAPI smoke checks pass.
-Detailed hardening notes live in [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Latest full suite: `1018 passed, 17 skipped`.
+Full maintenance log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

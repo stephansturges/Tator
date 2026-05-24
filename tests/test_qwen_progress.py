@@ -378,6 +378,23 @@ def test_qwen_caption_io_prepare_rejects_nested_symlinked_parent_before_mkdir(tm
     assert list(outside.iterdir()) == []
 
 
+def test_qwen_caption_io_reset_rejects_nested_symlinked_run_parent_before_mkdir(
+    monkeypatch, tmp_path
+):
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api, "LOG_ROOT", linked_parent / "nested" / "logs")
+
+    api._qwen_caption_io_reset_latest("run-through-linked-parent")
+
+    assert list(outside.iterdir()) == []
+
+
 def test_qwen_prepass_trace_reset_replaces_symlinked_latest_logs(tmp_path):
     full_root = tmp_path / "prepass_full"
     readable_root = tmp_path / "prepass_readable"
@@ -492,6 +509,28 @@ def test_qwen_prepass_trace_rejects_nested_symlinked_parent_root(tmp_path):
 
     written = api._qwen_prepass_trace_write_file(
         trace_root / "latest.jsonl",
+        trace_root,
+        "{\"event\":\"escaped\"}\n",
+        append=True,
+    )
+
+    assert written is False
+    assert list(outside_parent.iterdir()) == []
+
+
+def test_qwen_prepass_trace_rejects_nested_symlinked_file_parent_before_mkdir(tmp_path):
+    trace_root = tmp_path / "prepass_traces"
+    trace_root.mkdir()
+    outside_parent = tmp_path / "outside_parent"
+    outside_parent.mkdir()
+    linked_parent = trace_root / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside_parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    written = api._qwen_prepass_trace_write_file(
+        linked_parent / "nested" / "latest.jsonl",
         trace_root,
         "{\"event\":\"escaped\"}\n",
         append=True,

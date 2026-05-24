@@ -191,3 +191,15 @@ preserving the exact validation story for storage and artifact-write fixes.
   copy parents.
 - Validation: `1015 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Caption, Prepass Trace, and Calibration Cache Parents
+
+- Kept README update tracking collapsed and reduced it to the latest validation
+  count plus a link to this log.
+- Rejected symlink components before creating Qwen caption per-run log parents,
+  Qwen prepass trace file parents, calibration job directories, and calibration
+  prepass/features/labeled cache directories.
+- Added regressions for nested symlinked Qwen caption log parents, Qwen prepass
+  trace file parents, and calibration cache parents.
+- Validation: `1018 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

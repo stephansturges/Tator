@@ -2483,7 +2483,7 @@ def _qwen_caption_io_paths(run_id: Optional[str]) -> Tuple[Path, Path, Path, Pat
     )
 
 
-def _qwen_caption_io_prepare_file(path: Path) -> Optional[Path]:
+def _qwen_caption_io_prepare_parent(path: Path) -> Optional[Path]:
     try:
         if _storage_path_has_symlink_component(path.parent):
             return None
@@ -2491,6 +2491,18 @@ def _qwen_caption_io_prepare_file(path: Path) -> Optional[Path]:
         if _storage_path_has_symlink_component(path.parent):
             return None
         parent_root = path.parent.resolve(strict=True)
+        if not parent_root.is_dir():
+            return None
+        return parent_root
+    except Exception:
+        return None
+
+
+def _qwen_caption_io_prepare_file(path: Path) -> Optional[Path]:
+    try:
+        parent_root = _qwen_caption_io_prepare_parent(path)
+        if parent_root is None:
+            return None
         if path.is_symlink():
             path.unlink(missing_ok=True)
         elif path.exists() and not path.is_file():
@@ -2526,7 +2538,7 @@ def _qwen_caption_io_reset_latest(run_id: Optional[str]) -> None:
             logger.debug("[qwen-caption-io] failed to reset %s: %s", path, exc)
     for path in (jsonl_path, text_path):
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            _qwen_caption_io_prepare_parent(path)
         except Exception:
             pass
 
@@ -12594,6 +12606,8 @@ def _qwen_prepass_trace_prepare_file(path: Path, root: Path) -> Optional[Path]:
         if _storage_path_has_symlink_component(root):
             return None
         root_resolved = root.resolve(strict=True)
+        if _storage_path_has_symlink_component(path.parent):
+            return None
         path.parent.mkdir(parents=True, exist_ok=True)
         if _storage_path_has_symlink_component(path.parent):
             return None

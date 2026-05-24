@@ -439,6 +439,24 @@ def _list_all_datasets_impl(
                 coco_val = sam3_meta.get("coco_val_json")
                 coco_ready = bool(coco_train and coco_val)
             labelmap_path = effective_root / "labelmap.txt"
+            metadata_labelmap_path: Optional[Path] = None
+            metadata_labelmap_raw = str(meta.get("yolo_labelmap_path") or "").strip()
+            if source == "registry" and metadata_labelmap_raw:
+                try:
+                    candidate_labelmap = Path(metadata_labelmap_raw).expanduser()
+                    if (
+                        not candidate_labelmap.is_symlink()
+                        and candidate_labelmap.exists()
+                        and candidate_labelmap.is_file()
+                    ):
+                        candidate_resolved = candidate_labelmap.resolve(strict=True)
+                        registry_resolved = path.resolve(strict=True)
+                        if _path_is_within_root_impl(candidate_resolved, registry_resolved):
+                            metadata_labelmap_path = candidate_labelmap
+                except Exception:
+                    metadata_labelmap_path = None
+            if metadata_labelmap_path is not None:
+                labelmap_path = metadata_labelmap_path
             train_images = effective_root / "train" / "images"
             train_labels = effective_root / "train" / "labels"
             root_images = effective_root / "images"
@@ -536,7 +554,7 @@ def _list_all_datasets_impl(
                 "image_count": meta.get("image_count"),
                 "train_count": meta.get("train_count"),
                 "val_count": meta.get("val_count"),
-                "classes": meta.get("classes", []),
+                "classes": labelmap,
                 "context": meta.get("context", "") or meta.get("dataset_context", ""),
                 "signature": signature,
                 "source": meta.get("source") or source,

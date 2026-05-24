@@ -134,8 +134,8 @@ Tator supports three dataset patterns:
 - **Open a server path transiently** when you want to inspect or label a local
   folder without committing it to the library.
 - **Register a linked dataset** when source images should stay where they are.
-  Tator stores metadata, overlays, glossaries, and labels, but linked dataset
-  deletion does not remove source files.
+  Tator stores metadata, labelmap overrides, overlays, glossaries, and labels in
+  its registry; linked dataset deletion does not remove source files.
 
 Dataset records also carry:
 
@@ -594,7 +594,7 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current verification: `1180 passed, 17 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Current verification: `1182 passed, 17 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

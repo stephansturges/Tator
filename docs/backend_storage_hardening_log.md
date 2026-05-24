@@ -1265,3 +1265,19 @@ preserving the exact validation story for storage and artifact-write fixes.
   job-start coverage, `py_compile localinferenceapi.py tools/qwen_training.py`,
   `git diff --check`, the full pytest suite, and live endpoint
   map/method/OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Linked Dataset Labelmap Overlays
+
+- Routed linked-dataset labelmap saves to the registry record instead of the
+  source dataset root, so class-list edits cannot overwrite a user's
+  `labelmap.txt` in a linked source tree.
+- Kept transient server-path labelmap edits in the transient session until the
+  user explicitly saves the session to the library; saving then writes the
+  labelmap snapshot under the registry record, not the source folder.
+- Made dataset listing prefer registry-owned labelmap overrides and return the
+  effective class list, so SAM3/YOLO materialization sees the saved override
+  without mutating source files.
+- Validation: `1182 passed, 17 skipped`; focused dataset annotation, linked-root,
+  zip upload, data ingestion, dataset metadata, Qwen dataset upload, COCO/YOLO,
+  Qwen runtime/training, and backend job-start coverage passed, plus
+  `py_compile` for the changed backend modules.

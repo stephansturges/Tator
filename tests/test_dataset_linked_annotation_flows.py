@@ -288,9 +288,12 @@ def test_save_transient_dataset_persists_overlay_content(tmp_path, monkeypatch) 
         record_root / api.DATASET_ANNOTATION_OVERLAY_DIRNAME / "labels" / "train" / "img1.txt"
     )
     overlay_text = record_root / api.DATASET_ANNOTATION_OVERLAY_DIRNAME / "text_labels" / "img1.txt"
+    registry_labelmap = record_root / "labelmap.txt"
     meta_path = record_root / api.DATASET_META_NAME
 
     assert out["id"] == "saved_linked"
+    assert not (source_root / "labelmap.txt").exists()
+    assert registry_labelmap.read_text(encoding="utf-8") == "car\n"
     assert overlay_label.exists()
     assert overlay_label.read_text(encoding="utf-8").strip() == "0 0.5 0.5 0.2 0.2"
     assert overlay_text.exists()
@@ -299,6 +302,9 @@ def test_save_transient_dataset_persists_overlay_content(tmp_path, monkeypatch) 
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert meta["annotation_status"] == "in_progress"
     assert meta["annotation_notes"] == "notes"
+    assert meta["classes"] == ["car"]
+    assert meta["yolo_labelmap_path"] == str(registry_labelmap)
+    assert meta["labelmap_source"] == "registry_overlay"
 
 
 def test_save_transient_dataset_rejects_symlinked_registry_root(
@@ -1176,6 +1182,9 @@ def test_persistent_meta_patch_rejects_labelmap_path_outside_dataset_roots(
     tmp_path, monkeypatch
 ) -> None:
     entry = _entry_for_annotation(tmp_path)
+    entry["storage_mode"] = "managed"
+    entry["linked_root"] = None
+    entry["registry_root"] = None
     outside = tmp_path / "outside" / "labelmap.txt"
     entry["yolo_labelmap_path"] = str(outside)
     meta = {"annotation_lock": _active_lock("sess-lock")}
@@ -1198,6 +1207,45 @@ def test_persistent_meta_patch_rejects_labelmap_path_outside_dataset_roots(
     assert exc.value.detail == "labelmap_path_forbidden"
     assert not outside.exists()
     assert set(meta) == {"annotation_lock"}
+
+
+def test_persistent_meta_patch_linked_labelmap_stays_in_registry(
+    tmp_path, monkeypatch
+) -> None:
+    entry = _entry_for_annotation(tmp_path)
+    dataset_root = Path(entry["dataset_root"])
+    registry_root = Path(entry["registry_root"])
+    source_labelmap = dataset_root / "labelmap.txt"
+    source_labelmap.write_text("car\n", encoding="utf-8")
+    meta = {
+        "id": "ds",
+        "label": "ds",
+        "annotation_lock": _active_lock("sess-lock"),
+        "classes": ["car"],
+    }
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    monkeypatch.setattr(
+        api,
+        "_annotation_load_or_create_meta",
+        lambda _entry: (registry_root / api.DATASET_META_NAME, meta),
+    )
+
+    out = api.patch_dataset_annotation_meta(
+        "ds",
+        {
+            "session_id": "sess-lock",
+            "labelmap": ["car", "truck"],
+        },
+    )
+
+    registry_labelmap = registry_root / "labelmap.txt"
+    saved_meta = json.loads((registry_root / api.DATASET_META_NAME).read_text(encoding="utf-8"))
+    assert out["labelmap"] == ["car", "truck"]
+    assert source_labelmap.read_text(encoding="utf-8") == "car\n"
+    assert registry_labelmap.read_text(encoding="utf-8") == "car\ntruck\n"
+    assert saved_meta["classes"] == ["car", "truck"]
+    assert saved_meta["yolo_labelmap_path"] == str(registry_labelmap)
+    assert saved_meta["labelmap_source"] == "registry_overlay"
 
 
 def test_annotation_labelmap_write_is_atomic_over_symlink_leaves(
@@ -1456,7 +1504,7 @@ def test_transient_meta_patch_validates_status_before_labelmap_write(
         api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
 
 
-def test_transient_meta_patch_revalidates_dataset_root_before_labelmap_write(
+def test_transient_meta_patch_does_not_touch_forbidden_source_root(
     tmp_path, monkeypatch
 ) -> None:
     session_id = "transient-forbidden-root"
@@ -1477,25 +1525,24 @@ def test_transient_meta_patch_revalidates_dataset_root_before_labelmap_write(
 
     monkeypatch.setattr(api, "_validate_linked_dataset_path", reject_linked_path)
 
-    with pytest.raises(api.HTTPException) as exc:
-        api.patch_transient_annotation_meta(
-            session_id,
-            {
-                "session_id": "sess-lock",
-                "labelmap": ["car", "truck"],
-            },
-        )
+    out = api.patch_transient_annotation_meta(
+        session_id,
+        {
+            "session_id": "sess-lock",
+            "labelmap": ["car", "truck"],
+        },
+    )
 
-    assert exc.value.status_code == 400
-    assert exc.value.detail == "dataset_path_not_allowlisted"
+    assert out["labelmap"] == ["car", "truck"]
     assert not (source_root / "labelmap.txt").exists()
     with api.DATASET_TRANSIENT_LOCK:
         session = api.DATASET_TRANSIENT_SESSIONS[session_id]
-        assert session["classes"] == ["old"]
+        assert session["classes"] == ["car", "truck"]
+        assert session["labelmap_source"] == "transient_session"
         api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
 
 
-def test_transient_meta_patch_writes_labelmap_after_revalidation(
+def test_transient_meta_patch_keeps_labelmap_in_session_memory(
     tmp_path, monkeypatch
 ) -> None:
     session_id = "transient-allowed-root"
@@ -1510,8 +1557,6 @@ def test_transient_meta_patch_writes_labelmap_after_revalidation(
             "annotation_lock": _active_lock("sess-lock"),
             "expires_at": now + 300.0,
         }
-    monkeypatch.setattr(api, "_validate_linked_dataset_path", lambda _path: source_root)
-
     out = api.patch_transient_annotation_meta(
         session_id,
         {
@@ -1521,14 +1566,15 @@ def test_transient_meta_patch_writes_labelmap_after_revalidation(
     )
 
     assert out["labelmap"] == ["car", "truck"]
-    assert (source_root / "labelmap.txt").read_text(encoding="utf-8") == "car\ntruck\n"
+    assert not (source_root / "labelmap.txt").exists()
     with api.DATASET_TRANSIENT_LOCK:
         session = api.DATASET_TRANSIENT_SESSIONS[session_id]
         assert session["classes"] == ["car", "truck"]
+        assert session["labelmap_source"] == "transient_session"
         api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
 
 
-def test_transient_meta_patch_replaces_labelmap_symlink_without_target_write(
+def test_transient_meta_patch_never_replaces_source_labelmap_symlink(
     tmp_path, monkeypatch
 ) -> None:
     session_id = "transient-labelmap-symlink"
@@ -1546,9 +1592,6 @@ def test_transient_meta_patch_replaces_labelmap_symlink_without_target_write(
     except OSError as exc:
         pytest.skip(f"symlink unsupported: {exc}")
 
-    class FixedUUID:
-        hex = "feedface"
-
     now = time.time()
     with api.DATASET_TRANSIENT_LOCK:
         api.DATASET_TRANSIENT_SESSIONS[session_id] = {
@@ -1558,9 +1601,6 @@ def test_transient_meta_patch_replaces_labelmap_symlink_without_target_write(
             "annotation_lock": _active_lock("sess-lock"),
             "expires_at": now + 300.0,
         }
-    monkeypatch.setattr(api, "_validate_linked_dataset_path", lambda _path: source_root)
-    monkeypatch.setattr(api.uuid, "uuid4", lambda: FixedUUID())
-
     out = api.patch_transient_annotation_meta(
         session_id,
         {
@@ -1570,9 +1610,8 @@ def test_transient_meta_patch_replaces_labelmap_symlink_without_target_write(
     )
 
     assert out["labelmap"] == ["car", "truck"]
-    assert not labelmap_path.is_symlink()
-    assert not tmp_link.exists()
-    assert labelmap_path.read_text(encoding="utf-8") == "car\ntruck\n"
+    assert labelmap_path.is_symlink()
+    assert tmp_link.is_symlink()
     assert outside_final.read_text(encoding="utf-8") == "external final"
     assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
     with api.DATASET_TRANSIENT_LOCK:

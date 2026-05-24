@@ -15269,14 +15269,17 @@ def _normalize_labelmap_payload(raw_labelmap: Any) -> List[str]:
 
 
 def _annotation_labelmap_write_path(entry: Dict[str, Any], dataset_root: Path) -> Path:
-    raw_path = entry.get("yolo_labelmap_path")
-    labelmap_path = Path(str(raw_path)) if raw_path else (dataset_root / "labelmap.txt")
-    labelmap_resolved = labelmap_path.resolve(strict=False)
     storage_root = _dataset_guarded_meta_storage_root_from_entry(
         entry,
         ensure=False,
         detail="labelmap_path_forbidden",
     ).resolve()
+    storage_mode = str(entry.get("storage_mode") or "managed").strip().lower()
+    if storage_mode == "linked":
+        return storage_root / "labelmap.txt"
+    raw_path = entry.get("yolo_labelmap_path")
+    labelmap_path = Path(str(raw_path)) if raw_path else (dataset_root / "labelmap.txt")
+    labelmap_resolved = labelmap_path.resolve(strict=False)
     allowed_roots = [dataset_root.resolve(), storage_root]
     if not any(_path_is_within_root_impl(labelmap_resolved, root) for root in allowed_roots):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="labelmap_path_forbidden")
@@ -17060,12 +17063,25 @@ def save_transient_dataset(
         context=context,
         notes=notes or session.get("annotation_notes"),
     )
+    session_classes = [
+        str(item).strip() for item in (session.get("classes") or []) if str(item).strip()
+    ]
+    if session_classes:
+        meta["classes"] = session_classes
+        meta["yolo_labelmap_path"] = str(registry_dir / "labelmap.txt")
+        meta["labelmap_source"] = "registry_overlay"
     if isinstance(session.get("annotation_progress"), dict):
         meta["annotation_progress"] = dict(session.get("annotation_progress") or {})
     if session.get("annotation_cursor") is not None:
         meta["annotation_cursor"] = session.get("annotation_cursor")
     if session.get("annotation_status"):
         meta["annotation_status"] = session.get("annotation_status")
+    if session_classes:
+        _annotation_write_labelmap_file(
+            registry_dir / "labelmap.txt",
+            [registry_dir.resolve()],
+            session_classes,
+        )
     _persist_dataset_metadata_impl(registry_dir, meta, meta_name=DATASET_META_NAME, logger=logger)
     persisted_entry = {
         "dataset_root": str(dataset_root),
@@ -17213,7 +17229,12 @@ def patch_dataset_annotation_meta(dataset_id: str, payload: Dict[str, Any]):
             ensure=False,
             detail="labelmap_path_forbidden",
         )
-        allowed_labelmap_roots = [dataset_root.resolve(), storage_root.resolve()]
+        storage_mode = str(entry.get("storage_mode") or "managed").strip().lower()
+        allowed_labelmap_roots = (
+            [storage_root.resolve()]
+            if storage_mode == "linked"
+            else [dataset_root.resolve(), storage_root.resolve()]
+        )
         try:
             _annotation_write_labelmap_file(
                 labelmap_path,
@@ -17235,7 +17256,14 @@ def patch_dataset_annotation_meta(dataset_id: str, payload: Dict[str, Any]):
         dataset_meta = _load_json_metadata(_dataset_meta_path_for_entry(entry)) or dict(entry)
         dataset_meta["classes"] = list(saved_labelmap)
         dataset_meta["yolo_labelmap_path"] = str(labelmap_path)
+        if storage_mode == "linked":
+            dataset_meta["labelmap_source"] = "registry_overlay"
         dataset_meta["signature"] = _compute_dir_signature_impl(dataset_root)
+        meta["classes"] = list(saved_labelmap)
+        meta["yolo_labelmap_path"] = str(labelmap_path)
+        if storage_mode == "linked":
+            meta["labelmap_source"] = "registry_overlay"
+        meta["signature"] = dataset_meta["signature"]
         _persist_dataset_metadata_impl(
             storage_root, dataset_meta, meta_name=DATASET_META_NAME, logger=logger
         )
@@ -17425,15 +17453,8 @@ def patch_transient_annotation_meta(session_id: str, payload: Dict[str, Any]):
     saved_labelmap: Optional[List[str]] = None
     if "labelmap" in payload:
         saved_labelmap = _normalize_labelmap_payload(payload.get("labelmap"))
-        dataset_root_raw = str(session.get("dataset_root") or "").strip()
-        dataset_root = _validate_linked_dataset_path(dataset_root_raw) if dataset_root_raw else None
-        if dataset_root is not None:
-            _annotation_write_labelmap_file(
-                dataset_root / "labelmap.txt",
-                [dataset_root.resolve()],
-                saved_labelmap,
-            )
         session["classes"] = list(saved_labelmap)
+        session["labelmap_source"] = "transient_session"
     if status_value:
         session["annotation_status"] = status_value
     if "notes" in payload:

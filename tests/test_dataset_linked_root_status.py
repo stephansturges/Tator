@@ -104,6 +104,41 @@ def test_linked_root_status_ok_for_available_link(tmp_path) -> None:
     assert entry["yolo_ready"] is True
 
 
+def test_linked_registry_labelmap_overrides_source_labelmap(tmp_path) -> None:
+    registry_root = tmp_path / "registry"
+    registry_root.mkdir(parents=True, exist_ok=True)
+    linked_source = tmp_path / "linked_src"
+    (linked_source / "images").mkdir(parents=True, exist_ok=True)
+    (linked_source / "labels").mkdir(parents=True, exist_ok=True)
+    (linked_source / "labelmap.txt").write_text("car\n", encoding="utf-8")
+
+    dataset_dir = registry_root / "linked_overlay"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    registry_labelmap = dataset_dir / "labelmap.txt"
+    registry_labelmap.write_text("car\ntruck\n", encoding="utf-8")
+    (dataset_dir / "dataset_meta.json").write_text(
+        json.dumps(
+            {
+                "id": "linked_overlay",
+                "label": "linked_overlay",
+                "storage_mode": "linked",
+                "linked_root": str(linked_source),
+                "source": "registry",
+                "classes": ["car", "truck"],
+                "yolo_labelmap_path": str(registry_labelmap),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entries = _list_entries(registry_root)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["classes"] == ["car", "truck"]
+    assert entry["yolo_labelmap_path"] == str(registry_labelmap)
+    assert entry["yolo_ready"] is True
+
+
 def test_dataset_listing_skips_symlinked_registry_record(tmp_path) -> None:
     registry_root = tmp_path / "registry"
     registry_root.mkdir(parents=True, exist_ok=True)

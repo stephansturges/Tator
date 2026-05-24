@@ -933,3 +933,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1131 passed, 17 skipped`; focused SAM3 lifecycle coverage,
   `localinferenceapi.py` compile, the full pytest suite, and live endpoint
   sanity checks passed against the restarted backend.
+
+## 2026-05-24: Prompt Helper Preset Atomic Saves
+
+- Tightened prompt helper preset saves to replace stale symlink leaves instead
+  of rejecting or following them.
+- Switched temp preset creation to exclusive no-follow opens before atomic
+  replace.
+- Added a regression proving preset saves replace final and temp symlink leaves
+  without mutating external targets.
+- Validation: `1132 passed, 17 skipped`; focused prompt helper/path containment
+  coverage, `services/prompt_helper_presets.py` compile, the full pytest suite,
+  and live endpoint sanity checks passed against the restarted backend.

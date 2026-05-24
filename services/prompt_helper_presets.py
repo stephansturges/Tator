@@ -75,7 +75,9 @@ def _prepare_preset_output_file(path: Path, root: Path, *, path_is_within_root_f
     try:
         if _path_has_symlink_component(root) or _path_has_symlink_component(path.parent):
             raise ValueError("prompt helper preset path has a symlink component")
-        if path.is_symlink() or (path.exists() and path.is_dir()):
+        if path.is_symlink():
+            path.unlink(missing_ok=True)
+        elif path.exists() and path.is_dir():
             raise ValueError("prompt helper preset target is not writable")
         target = path.resolve(strict=False)
         if not path_is_within_root_fn(target, root):
@@ -139,7 +141,11 @@ def _save_prompt_helper_preset_impl(
         tmp_path, root, path_is_within_root_fn=path_is_within_root_fn
     )
     try:
-        with tmp_path.open("w", encoding="utf-8") as handle:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp_path, flags, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=2)
         os.replace(tmp_path, path)
     except HTTPException:

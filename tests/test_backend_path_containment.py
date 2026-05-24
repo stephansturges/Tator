@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -256,6 +257,49 @@ def test_save_prompt_helper_preset_failure_does_not_leave_partial_file(
     assert str(exc_info.value.detail).startswith("prompt_helper_preset_save_failed:")
     assert not (presets_root / "phset_deadbeef.json").exists()
     assert list(presets_root.iterdir()) == []
+
+
+def test_save_prompt_helper_preset_replaces_symlink_leaves_without_target_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class PresetUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    class TempUUID:
+        hex = "feedface000000000000000000000000"
+
+    uuids = iter([PresetUUID(), TempUUID()])
+    presets_root = tmp_path / "presets"
+    presets_root.mkdir()
+    outside_final = tmp_path / "outside_preset.json"
+    outside_tmp = tmp_path / "outside_tmp.json"
+    outside_final.write_text('{"external":"final"}', encoding="utf-8")
+    outside_tmp.write_text('{"external":"tmp"}', encoding="utf-8")
+    preset_path = presets_root / "phset_deadbeef.json"
+    tmp_path_link = presets_root / (
+        f".phset_deadbeef.{os.getpid()}.feedface000000000000000000000000.tmp"
+    )
+    try:
+        preset_path.symlink_to(outside_final)
+        tmp_path_link.symlink_to(outside_tmp)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(prompt_helper_presets_service.uuid, "uuid4", lambda: next(uuids))
+
+    out = _save_prompt_helper_preset_impl(
+        "demo",
+        "dataset",
+        {0: ["prompt"]},
+        presets_root=presets_root,
+        path_is_within_root_fn=_path_within_root,
+    )
+
+    assert out["id"] == "phset_deadbeef"
+    assert not preset_path.is_symlink()
+    assert not tmp_path_link.exists()
+    assert '"external"' not in preset_path.read_text(encoding="utf-8")
+    assert outside_final.read_text(encoding="utf-8") == '{"external":"final"}'
+    assert outside_tmp.read_text(encoding="utf-8") == '{"external":"tmp"}'
 
 
 def test_yolo_run_lookup_rejects_symlinked_run_id_without_target_delete(tmp_path: Path) -> None:

@@ -131,6 +131,41 @@ def test_qwen_training_image_resolver_handles_bad_entries(tmp_path):
     assert training._resolve_image_path(dataset_root, "train", "loop.png") is None
 
 
+def test_qwen_training_image_resolver_rejects_symlinked_image_root_escape(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    split_root = dataset_root / "train"
+    split_root.mkdir(parents=True)
+    outside_images = tmp_path / "outside_images"
+    outside_images.mkdir()
+    (outside_images / "external.png").write_bytes(b"external")
+    try:
+        (split_root / "images").symlink_to(outside_images, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert training._resolve_image_path(dataset_root, "train", "external.png") is None
+
+
+def test_qwen_conversation_dataset_rejects_symlinked_annotation_escape(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    split_root = dataset_root / "train"
+    image_root = split_root / "images"
+    image_root.mkdir(parents=True)
+    Image.new("RGB", (2, 2), (0, 0, 0)).save(image_root / "sample.png")
+    outside_annotations = tmp_path / "outside_annotations.jsonl"
+    outside_annotations.write_text(
+        '{"image":"sample.png","conversations":[{"from":"human","value":"<image> find car"},{"from":"gpt","value":"{}"}]}\n',
+        encoding="utf-8",
+    )
+    try:
+        (split_root / "annotations.jsonl").symlink_to(outside_annotations)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(training.TrainingError, match="qwen_annotations_missing"):
+        training.QwenConversationDataset(dataset_root, "train", processor=object())
+
+
 def test_qwen_conversation_collator_masks_prompt_vision_and_padding_tokens():
     class FakeTokenizer:
         pad_token_id = 0

@@ -332,3 +332,13 @@ preserving the exact validation story for storage and artifact-write fixes.
   symlink swaps.
 - Validation: `1035 passed, 17 skipped`; focused Qwen upload/security/backend
   coverage passed.
+
+## 2026-05-24: Qwen Training Split Source Guards
+
+- Required Qwen training annotations to resolve inside the selected dataset
+  root before direct training or random-split materialization.
+- Hardened the Qwen training image resolver so split/image directory symlinks
+  cannot make direct training read images outside the dataset root.
+- Added regressions for escaped annotation files and symlinked image roots.
+- Validation: `1038 passed, 17 skipped`; focused Qwen training/path coverage
+  passed.

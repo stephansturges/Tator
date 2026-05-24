@@ -307,6 +307,28 @@ def test_qwen_training_config_rejects_existing_run_name(tmp_path, monkeypatch):
     assert excinfo.value.detail == "run_name_exists"
 
 
+def test_qwen_training_config_rejects_symlinked_annotation_escape(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    dataset_root = _make_qwen_train_dataset(tmp_path, monkeypatch)
+    outside_annotations = tmp_path / "outside_annotations.jsonl"
+    outside_annotations.write_text("{}\n", encoding="utf-8")
+    train_annotations = dataset_root / "train" / "annotations.jsonl"
+    train_annotations.unlink()
+    try:
+        train_annotations.symlink_to(outside_annotations)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    payload = api.QwenTrainRequest(dataset_id="demo", run_name="annotation-link")
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._build_qwen_config(payload, "job-annotation-link")
+
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail == "qwen_train_split_missing"
+
+
 def test_qwen_training_job_rejects_active_duplicate_run_name(tmp_path, monkeypatch):
     if api.QwenTrainingConfig is None:
         pytest.skip("Qwen training dependencies are not importable in this environment")

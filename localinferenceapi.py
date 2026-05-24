@@ -23699,6 +23699,22 @@ def _cleanup_qwen_training_split(job_id: str) -> None:
     _cleanup_training_split(QWEN_JOB_ROOT, job_id, detail="qwen_split_path_invalid")
 
 
+def _qwen_training_annotation_path(dataset_root: Path, split_name: str) -> Optional[Path]:
+    split_norm = str(split_name or "").strip().lower()
+    if split_norm not in {"train", "val"}:
+        return None
+    try:
+        dataset_root_resolved = dataset_root.resolve(strict=True)
+        ann_path = (dataset_root / split_norm / "annotations.jsonl").resolve(strict=True)
+    except Exception:
+        return None
+    if not _path_is_within_root_impl(ann_path, dataset_root_resolved):
+        return None
+    if not ann_path.is_file():
+        return None
+    return ann_path
+
+
 def _prepare_qwen_training_split(
     dataset_root: Path,
     job_id: str,
@@ -23710,8 +23726,8 @@ def _prepare_qwen_training_split(
     dataset_root = dataset_root.resolve()
 
     def _annotation_entries(split_name: str) -> List[Tuple[Dict[str, Any], Path]]:
-        ann_path = dataset_root / split_name / "annotations.jsonl"
-        if not ann_path.exists():
+        ann_path = _qwen_training_annotation_path(dataset_root, split_name)
+        if ann_path is None:
             return []
         entries: List[Tuple[Dict[str, Any], Path]] = []
         with ann_path.open("r", encoding="utf-8") as handle:
@@ -23867,11 +23883,11 @@ def _build_qwen_config(
             split_seed=_qwen_train_int(payload.split_seed, 42, minimum=0, maximum=2**32 - 1),
             log_messages=prep_logs,
         )
-    train_jsonl = dataset_root / "train" / "annotations.jsonl"
-    val_jsonl = dataset_root / "val" / "annotations.jsonl"
-    if not train_jsonl.exists():
+    train_jsonl = _qwen_training_annotation_path(dataset_root, "train")
+    val_jsonl = _qwen_training_annotation_path(dataset_root, "val")
+    if train_jsonl is None:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_train_split_missing")
-    if not val_jsonl.exists():
+    if val_jsonl is None:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="qwen_val_split_missing")
     run_name = _safe_run_name(payload.run_name, f"qwen_{payload.dataset_id}_{job_id[:8]}")
     runs_root = _qwen_training_runs_root(create=True, detail="qwen_run_path_invalid")

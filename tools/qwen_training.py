@@ -267,6 +267,10 @@ def _resolve_image_path(dataset_root: Path, split: str, image_rel: str) -> Optio
         return None
     if any(part == ".." for part in rel_path.parts):
         return None
+    try:
+        dataset_root_resolved = dataset_root.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
     roots = [
         dataset_root / split / "images",
         dataset_root / split,
@@ -277,6 +281,8 @@ def _resolve_image_path(dataset_root: Path, split: str, image_rel: str) -> Optio
         try:
             root_resolved = root.resolve(strict=False)
             candidate = (root / rel_path).resolve(strict=False)
+            root_resolved.relative_to(dataset_root_resolved)
+            candidate.relative_to(dataset_root_resolved)
             candidate.relative_to(root_resolved)
         except (OSError, RuntimeError, ValueError):
             continue
@@ -287,6 +293,24 @@ def _resolve_image_path(dataset_root: Path, split: str, image_rel: str) -> Optio
         if is_file:
             return candidate
     return None
+
+
+def _resolve_annotation_path(dataset_root: Path, split: str) -> Optional[Path]:
+    split_norm = str(split or "").strip().lower()
+    if split_norm not in {"train", "val"}:
+        return None
+    try:
+        dataset_root_resolved = dataset_root.resolve(strict=False)
+        ann_path = (dataset_root / split_norm / "annotations.jsonl").resolve(strict=False)
+        ann_path.relative_to(dataset_root_resolved)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    try:
+        if not ann_path.is_file():
+            return None
+    except OSError:
+        return None
+    return ann_path
 
 
 def _conversation_to_messages(
@@ -353,9 +377,9 @@ class QwenConversationDataset(Dataset):
         self.processor = processor
         self.system_prompt = system_prompt
         self.entries: List[Dict[str, Any]] = []
-        jsonl_path = dataset_root / split / "annotations.jsonl"
-        if not jsonl_path.exists():
-            raise TrainingError(f"qwen_annotations_missing:{jsonl_path}")
+        jsonl_path = _resolve_annotation_path(dataset_root, split)
+        if jsonl_path is None:
+            raise TrainingError(f"qwen_annotations_missing:{dataset_root / split / 'annotations.jsonl'}")
         with jsonl_path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()

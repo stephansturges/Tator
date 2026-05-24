@@ -215,19 +215,10 @@ def main() -> int:
             ],
             "class_separation": [
                 {
-                    "id": "local_salad",
-                    "encoder_type": args.train_encoder,
-                    "encoder_model": args.cradio_model if args.train_encoder == "cradio" else api.CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL,
-                    "cradio_pooling": args.cradio_pooling if args.train_encoder == "cradio" else None,
-                    "embedding_aggregation": "local_salad",
-                    "embedding_salad_head_id": salad_head_id,
-                    "reason": "Use the same locally trained SALAD head as a crop-token aggregator in Class Split or auto-class training.",
-                },
-                {
                     "id": "precise",
                     "encoder_type": "dinov3",
                     "embedding_aggregation": "pooled",
-                    "reason": "Measured pooled crop baseline.",
+                    "reason": "Measured pooled crop baseline. Local SALAD heads remain limited to whole-image Data Ingestion diversity scoring.",
                 },
             ],
         }

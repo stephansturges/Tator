@@ -185,6 +185,15 @@ def test_local_salad_is_data_ingestion_only_in_ui():
     assert 'targetTag === "textarea"' in js
 
 
+def test_local_salad_benchmark_does_not_recommend_crop_workflows():
+    benchmark = _read("tools/benchmark_salad_diversity.py")
+
+    assert '"embedding_aggregation": "local_salad"' not in benchmark
+    assert "crop-token aggregator" not in benchmark
+    assert "Class Split or auto-class training" not in benchmark
+    assert "Data Ingestion diversity scoring" in benchmark
+
+
 def test_data_ingestion_panel_contract():
     html = _html()
     css = _css()

@@ -1780,3 +1780,23 @@ preserving the exact validation story for storage and artifact-write fixes.
   `/data_ingestion/capabilities`, `/yolo/runs`, `/rfdetr/runs`, and
   `/sam3/storage/runs` succeeded. With `RUN_UI_E2E=1`, the Dataset
   Management/Data Ingestion UI smoke tests passed (`2 passed`).
+
+## 2026-05-24: Inference Documentation Tidy Before Pause
+
+- Rechecked the product docs around Qwen/MLX, detector, local SALAD, and
+  hardening summaries before pausing this hardening cycle for manual testing.
+- Found one stale benchmark-helper recommendation that still suggested reusing
+  a locally trained SALAD head for crop-level Class Split or auto-class work.
+  That conflicted with the current product decision and backend/UI enforcement:
+  local SALAD remains limited to whole-image Data Ingestion diversity scoring.
+- Removed the stale Class Split/auto-class local-SALAD recommendation from
+  `tools/benchmark_salad_diversity.py`; the helper now reports the pooled crop
+  baseline for class separation while keeping local SALAD recommendations in
+  the Data Ingestion recipe section only.
+- Added a contract test so future benchmark-helper edits cannot reintroduce
+  crop-level local-SALAD guidance without failing the focused UI/product
+  contract suite.
+- Validation: `py_compile tools/benchmark_salad_diversity.py
+  tests/test_labeling_panel_layout_contract.py`, focused local-SALAD UI/product
+  contract coverage (`3 passed`), `git diff --check`, and the full pytest suite
+  (`1247 passed, 20 skipped`) passed.

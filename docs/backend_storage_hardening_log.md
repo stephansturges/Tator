@@ -679,3 +679,16 @@ preserving the exact validation story for storage and artifact-write fixes.
   replaced without mutating external targets.
 - Validation: `1094 passed, 17 skipped`; focused detector metadata IO coverage
   and the full pytest suite passed.
+
+## 2026-05-24: Calibration Cache and Eval Atomic Saves
+
+- Routed calibration prepass, feature, and labeled cache metadata writes through
+  the guarded atomic JSON helper instead of direct final-path writes.
+- Added a guarded atomic text helper for calibration eval JSON and prepass JSONL
+  outputs.
+- Changed prepass JSONL output assembly so an incomplete cache raises before
+  replacing an existing final artifact, preventing partial final prepass files.
+- Added regressions for calibration text symlink replacement and incomplete
+  prepass cache preservation.
+- Validation: `1096 passed, 17 skipped`; focused calibration IO coverage and
+  the full pytest suite passed.

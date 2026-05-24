@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -7,9 +8,11 @@ import localinferenceapi as api
 from services.calibration import (
     CALIBRATION_JOB_STATE_FILENAME,
     CalibrationJob,
+    _ensure_prepass_jsonl,
     _prepare_calibration_storage_dir,
     _resolve_calibration_storage_root,
     _write_json_atomic,
+    _write_text_atomic,
 )
 
 
@@ -261,6 +264,66 @@ def test_calibration_write_json_atomic_replaces_final_symlink_without_target_wri
     assert not state_path.is_symlink()
     assert json.loads(state_path.read_text(encoding="utf-8"))["job_id"] == "cal_safe"
     assert outside.read_text(encoding="utf-8") == "external"
+
+
+def test_calibration_write_text_atomic_replaces_symlink_targets_without_target_write(
+    tmp_path: Path,
+) -> None:
+    eval_path = tmp_path / "job" / "ensemble_xgb.eval.json"
+    eval_path.parent.mkdir()
+    outside_tmp = tmp_path / "outside_tmp.json"
+    outside_final = tmp_path / "outside_final.json"
+    outside_tmp.write_text("external tmp", encoding="utf-8")
+    outside_final.write_text("external final", encoding="utf-8")
+    tmp_link = eval_path.with_suffix(eval_path.suffix + ".tmp")
+    try:
+        tmp_link.symlink_to(outside_tmp)
+        eval_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _write_text_atomic(eval_path, '{"f1": 1.0}')
+
+    assert not tmp_link.exists()
+    assert not eval_path.is_symlink()
+    assert eval_path.read_text(encoding="utf-8") == '{"f1": 1.0}'
+    assert outside_tmp.read_text(encoding="utf-8") == "external tmp"
+    assert outside_final.read_text(encoding="utf-8") == "external final"
+
+
+def test_calibration_prepass_jsonl_keeps_existing_output_when_cache_incomplete(
+    tmp_path: Path,
+) -> None:
+    output_path = tmp_path / "job" / "prepass.jsonl"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_text("old final\n", encoding="utf-8")
+    job = SimpleNamespace(cancel_event=SimpleNamespace(is_set=lambda: False))
+
+    with pytest.raises(RuntimeError, match="prepass_cache_incomplete"):
+        _ensure_prepass_jsonl(
+            job=job,
+            update_fn=lambda *_args, **_kwargs: None,
+            selected=["missing.jpg"],
+            total=0,
+            dataset_id="dataset",
+            labelmap=["object"],
+            glossary="",
+            prepass_payload=SimpleNamespace(sam_variant=None),
+            prepass_config={},
+            prepass_config_for_hash={},
+            output_path=output_path,
+            calibration_cache_root=tmp_path / "calibration_cache",
+            write_record_fn=_write_json_atomic,
+            hash_payload_fn=lambda payload: "cachekey",
+            prepass_worker_fn=lambda *_args, **_kwargs: None,
+            unload_inference_runtimes_fn=lambda: None,
+            resolve_dataset_fn=lambda _dataset_id: tmp_path / "dataset",
+            cache_image_fn=lambda *_args, **_kwargs: "token",
+            run_prepass_fn=lambda *_args, **_kwargs: {"detections": []},
+        )
+
+    assert output_path.read_text(encoding="utf-8") == "old final\n"
+    assert not output_path.with_suffix(output_path.suffix + ".tmp").exists()
 
 
 def test_resolve_calibration_storage_root_rejects_nested_symlinked_parent_without_write(

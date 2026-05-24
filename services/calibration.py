@@ -207,8 +207,37 @@ def _write_json_atomic(path: Path, payload: Any) -> None:
             candidate.resolve(strict=False).relative_to(parent_resolved)
         except Exception as exc:
             raise ValueError("calibration_json_path_not_allowed") from exc
-    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    tmp_path.replace(path)
+    try:
+        tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    if _path_has_symlink_component(path.parent):
+        raise ValueError("calibration_text_parent_symlink")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if _path_has_symlink_component(path.parent):
+        raise ValueError("calibration_text_parent_symlink")
+    parent_resolved = path.parent.resolve(strict=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    for candidate in (tmp_path, path):
+        if candidate.is_symlink():
+            candidate.unlink(missing_ok=True)
+        elif candidate.exists() and candidate.is_dir():
+            raise ValueError("calibration_text_target_is_directory")
+        try:
+            candidate.resolve(strict=False).relative_to(parent_resolved)
+        except Exception as exc:
+            raise ValueError("calibration_text_path_not_allowed") from exc
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+        tmp_path.replace(path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
 
 
 def _calibration_job_state_path(calibration_root: Path, job_id: str) -> Path:
@@ -1358,31 +1387,31 @@ def _ensure_prepass_jsonl(
                 update_fn(job, processed=processed, progress=progress)
 
     missing_records: List[str] = []
-    with output_path.open("w", encoding="utf-8") as handle:
-        for image_name in selected:
-            record = cached_records.get(image_name) or _load_cached_record(image_name)
-            if not record:
-                missing_records.append(image_name)
-                continue
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    output_records: List[Dict[str, Any]] = []
+    for image_name in selected:
+        record = cached_records.get(image_name) or _load_cached_record(image_name)
+        if not record:
+            missing_records.append(image_name)
+            continue
+        output_records.append(record)
     if missing_records:
         sample = ",".join(missing_records[:5])
         raise RuntimeError(f"prepass_cache_incomplete:{len(missing_records)}:{sample}")
+    output_text = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in output_records)
+    _write_text_atomic(output_path, output_text)
 
-    prepass_cache_meta.write_text(
-        json.dumps(
-            {
-                "dataset_id": dataset_id,
-                "labelmap_hash": labelmap_hash,
-                "glossary_hash": glossary_hash,
-                "glossary_text": prepass_glossary_text,
-                "prepass_config": prepass_config,
-                "cached_images": len(list(image_cache_dir.glob("*.json"))),
-                "updated_at": time.time(),
-                "config_key": prepass_config_key,
-            },
-            indent=2,
-        )
+    _write_json_atomic(
+        prepass_cache_meta,
+        {
+            "dataset_id": dataset_id,
+            "labelmap_hash": labelmap_hash,
+            "glossary_hash": glossary_hash,
+            "glossary_text": prepass_glossary_text,
+            "prepass_config": prepass_config,
+            "cached_images": len(list(image_cache_dir.glob("*.json"))),
+            "updated_at": time.time(),
+            "config_key": prepass_config_key,
+        },
     )
     return {
         "prepass_path": output_path,
@@ -2460,20 +2489,18 @@ def _run_calibration_job(
                     status_code=412,
                     detail=f"calibration_classifier_features_invalid:{exc}",
                 ) from exc
-            features_cache_meta.write_text(
-                json.dumps(
-                    {
-                        "prepass_key": prepass_key,
-                        "features_key": features_key,
-                        "features_version": calibration_features_version,
-                        "embed_proj_dim": int(embed_proj_dim),
-                        "embed_proj_seed": int(embed_proj_seed),
-                        "image_embed_proj_dim": int(image_embed_proj_dim),
-                        "image_embed_proj_seed": int(image_embed_proj_seed),
-                        "embed_l2_normalize": bool(embed_l2_normalize),
-                    },
-                    indent=2,
-                )
+            _write_json_atomic(
+                features_cache_meta,
+                {
+                    "prepass_key": prepass_key,
+                    "features_key": features_key,
+                    "features_version": calibration_features_version,
+                    "embed_proj_dim": int(embed_proj_dim),
+                    "embed_proj_seed": int(embed_proj_seed),
+                    "image_embed_proj_dim": int(image_embed_proj_dim),
+                    "image_embed_proj_seed": int(image_embed_proj_seed),
+                    "embed_l2_normalize": bool(embed_l2_normalize),
+                },
             )
             safe_link_fn(features_cache_path, features_path)
 
@@ -2520,15 +2547,13 @@ def _run_calibration_job(
                     str(label_iou),
                 ],
             )
-            labeled_cache_meta.write_text(
-                json.dumps(
-                    {
-                        "features_key": features_key,
-                        "labeled_key": labeled_key,
-                        "label_iou": label_iou,
-                    },
-                    indent=2,
-                )
+            _write_json_atomic(
+                labeled_cache_meta,
+                {
+                    "features_key": features_key,
+                    "labeled_key": labeled_key,
+                    "label_iou": label_iou,
+                },
             )
             safe_link_fn(labeled_cache_path, labeled_path)
         if calibration_model == "xgb":
@@ -2834,7 +2859,7 @@ def _run_calibration_job(
         eval_run = _run_subprocess_cancellable(eval_cmd, capture_output=True, text=True)
         eval_text = eval_run.stdout.strip()
         if eval_text:
-            eval_path.write_text(eval_text)
+            _write_text_atomic(eval_path, eval_text)
 
         metrics = {}
         try:

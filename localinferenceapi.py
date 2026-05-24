@@ -14679,6 +14679,50 @@ def _validate_qwen_dataset_upload_source_tree(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
+def _qwen_upload_write_text_within_root(
+    path: Path,
+    root: Path,
+    text: str,
+    *,
+    detail: str = "qwen_dataset_source_path_invalid",
+) -> None:
+    tmp_path = path.with_suffix(f"{path.suffix}.{uuid.uuid4().hex}.tmp")
+    try:
+        root_resolved = root.resolve(strict=True)
+        if _storage_path_has_symlink_component(root) or _storage_path_has_symlink_component(
+            path.parent
+        ):
+            raise ValueError("qwen upload write path contains a symlink")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(path.parent):
+            raise ValueError("qwen upload write parent contains a symlink")
+        parent_resolved = path.parent.resolve(strict=True)
+        if not _path_is_within_root_impl(parent_resolved, root_resolved):
+            raise ValueError("qwen upload write parent escapes root")
+        for candidate in (tmp_path, path):
+            if candidate.is_symlink():
+                candidate.unlink(missing_ok=True)
+            elif candidate.exists() and candidate.is_dir():
+                raise ValueError("qwen upload write target is a directory")
+            target_resolved = candidate.resolve(strict=False)
+            if not _path_is_within_root_impl(target_resolved, root_resolved):
+                raise ValueError("qwen upload write target escapes root")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(tmp_path, flags, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_path, path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+
+
 def _dataset_registry_storage_root(
     *,
     create: bool = True,
@@ -20575,7 +20619,11 @@ def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name
                 if labelmap_path.is_symlink():
                     labelmap_path.unlink(missing_ok=True)
                 if labelmap:
-                    labelmap_path.write_text("\n".join(labelmap) + "\n", encoding="utf-8")
+                    _qwen_upload_write_text_within_root(
+                        labelmap_path,
+                        source_root,
+                        "\n".join(labelmap) + "\n",
+                    )
                 else:
                     labelmap_path.unlink(missing_ok=True)
                 meta = {
@@ -20590,16 +20638,20 @@ def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name
                     "signature": _compute_dir_signature_impl(source_root),
                     "type": "bbox",
                 }
-                (source_root / "metadata.json").write_text(
-                    json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+                _qwen_upload_write_text_within_root(
+                    source_root / "metadata.json",
+                    source_root,
+                    json.dumps(meta, ensure_ascii=False, indent=2),
                 )
                 dataset_meta = {
                     "context": meta["context"],
                     "classes": labelmap,
                     "created_at": int(created_at * 1000),
                 }
-                (source_root / "dataset_meta.json").write_text(
-                    json.dumps(dataset_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+                _qwen_upload_write_text_within_root(
+                    source_root / "dataset_meta.json",
+                    source_root,
+                    json.dumps(dataset_meta, ensure_ascii=False, indent=2),
                 )
                 _validate_qwen_dataset_upload_source_tree(source_root)
                 shutil.move(str(source_root), target_root)

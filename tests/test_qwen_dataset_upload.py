@@ -374,6 +374,67 @@ def test_finalize_qwen_dataset_upload_replaces_labelmap_symlink_without_target_w
     assert outside.read_text(encoding="utf-8") == "external\n"
 
 
+def test_qwen_upload_text_write_is_atomic_over_symlink_leaves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FixedUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    upload_root = tmp_path / "upload"
+    upload_root.mkdir()
+    metadata_path = upload_root / "metadata.json"
+    tmp_path_link = metadata_path.with_suffix(f"{metadata_path.suffix}.{FixedUUID.hex}.tmp")
+    outside_tmp = tmp_path / "outside_tmp.json"
+    outside_final = tmp_path / "outside_final.json"
+    outside_tmp.write_text('{"external":"tmp"}', encoding="utf-8")
+    outside_final.write_text('{"external":"final"}', encoding="utf-8")
+    try:
+        tmp_path_link.symlink_to(outside_tmp)
+        metadata_path.symlink_to(outside_final)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: FixedUUID())
+
+    api._qwen_upload_write_text_within_root(
+        metadata_path,
+        upload_root,
+        '{"ok":true}',
+    )
+
+    assert not tmp_path_link.exists()
+    assert not metadata_path.is_symlink()
+    assert metadata_path.read_text(encoding="utf-8") == '{"ok":true}'
+    assert outside_tmp.read_text(encoding="utf-8") == '{"external":"tmp"}'
+    assert outside_final.read_text(encoding="utf-8") == '{"external":"final"}'
+
+
+def test_finalize_qwen_dataset_upload_replaces_metadata_symlinks_without_target_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job = _register_non_empty_upload(tmp_path, monkeypatch, "job_metadata_link")
+    outside_meta = tmp_path / "outside_metadata.json"
+    outside_dataset_meta = tmp_path / "outside_dataset_meta.json"
+    outside_meta.write_text('{"external":"metadata"}', encoding="utf-8")
+    outside_dataset_meta.write_text('{"external":"dataset_meta"}', encoding="utf-8")
+    try:
+        (job.root_dir / "metadata.json").symlink_to(outside_meta)
+        (job.root_dir / "dataset_meta.json").symlink_to(outside_dataset_meta)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    api.finalize_qwen_dataset_upload(job.job_id, {"classes": ["building"]}, "demo")
+
+    target_root = api.QWEN_DATASET_ROOT / "demo"
+    target_meta = target_root / "metadata.json"
+    target_dataset_meta = target_root / "dataset_meta.json"
+    assert not target_meta.is_symlink()
+    assert not target_dataset_meta.is_symlink()
+    assert api._load_json_metadata(target_meta)["id"] == "demo"
+    assert api._load_json_metadata(target_dataset_meta)["classes"] == ["building"]
+    assert outside_meta.read_text(encoding="utf-8") == '{"external":"metadata"}'
+    assert outside_dataset_meta.read_text(encoding="utf-8") == '{"external":"dataset_meta"}'
+
+
 def test_cancel_qwen_dataset_upload_unlinks_symlinked_staging_job_without_target_delete(
     tmp_path: Path,
 ) -> None:

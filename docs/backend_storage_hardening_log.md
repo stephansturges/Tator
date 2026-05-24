@@ -727,3 +727,14 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1101 passed, 17 skipped`; focused linked annotation/segmentation
   coverage, the full pytest suite, and live endpoint sanity checks passed
   against the restarted backend.
+
+## 2026-05-24: Qwen Upload Metadata Atomic Saves
+
+- Added a guarded text writer for Qwen dataset-upload staging files.
+- Routed upload finalization labelmap, metadata, and dataset-sidecar writes
+  through temp-file writes followed by atomic replace before moving the dataset.
+- Added regressions proving temp/final symlink leaves are replaced without
+  mutating external targets and stale metadata symlinks are not written through.
+- Validation: `1103 passed, 17 skipped`; focused Qwen upload coverage and the
+  full pytest suite passed, and live endpoint sanity checks passed against the
+  restarted backend.

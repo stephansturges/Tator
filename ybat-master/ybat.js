@@ -35455,7 +35455,7 @@ async function cancelRfDetrTrainingJobRequest() {
         selectEl.innerHTML = "";
         const empty = document.createElement("option");
         empty.value = "";
-        empty.textContent = availableHeads.length ? "Choose matching reference profile" : (emptyLabel || "No local SALAD heads trained");
+        empty.textContent = availableHeads.length ? "Choose matching reference profile" : (emptyLabel || "No reference profiles built");
         selectEl.appendChild(empty);
         availableHeads.forEach((head) => {
             const option = document.createElement("option");
@@ -35485,7 +35485,7 @@ async function cancelRfDetrTrainingJobRequest() {
             dataIngestionElements.saladHead,
             matchingHeads,
             preferred,
-            { emptyLabel: heads.length ? "No profiles for selected reference" : "No local SALAD heads trained" },
+            { emptyLabel: heads.length ? "No profiles for selected reference" : "No reference profiles built" },
         );
         if (preferred) {
             const values = Array.from(dataIngestionElements.saladHead?.options || []).map((option) => option.value);
@@ -35709,7 +35709,7 @@ async function cancelRfDetrTrainingJobRequest() {
             .replace(/[^a-z0-9._-]+/g, "_")
             .replace(/^[_ .-]+|[_ .-]+$/g, "")
             .slice(0, 80);
-        return `${cleaned || "active_dataset"}_salad`;
+        return `${cleaned || "active_dataset"}_profile`;
     }
 
     async function appendActiveWorkspaceTrainingFiles(formData, cap) {
@@ -35797,7 +35797,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const referenceDatasetId = getDataIngestionReferenceDatasetId();
         const activeKeys = getClassSplitImageKeys();
         if (referenceSource === "active_label_images" && activeKeys.length < 2) {
-            setDataIngestionStatus("Open at least two images in Label Images before training SALAD from the active dataset.", "warn");
+            setDataIngestionStatus("Open at least two images in Label Images before building a reference profile from the active dataset.", "warn");
             return;
         }
         if (referenceSource === "backend_dataset" && !referenceDatasetId) {
@@ -35820,10 +35820,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 packagedCount = await appendActiveWorkspaceTrainingFiles(formData, maxTrainImages);
             }
             if (referenceSource === "active_label_images" && packagedCount < 2) {
-                throw new Error("SALAD training needs at least two usable images or frames.");
+                throw new Error("Reference profile build needs at least two usable images or frames.");
             }
             const requestedHeadName = String(dataIngestionElements.headName?.value || "").trim();
-            const genericHeadName = !requestedHeadName || requestedHeadName === "reference_salad_profile" || requestedHeadName === "local_salad_head";
+            const genericHeadName = !requestedHeadName || requestedHeadName === "reference_profile" || requestedHeadName === "reference_salad_profile" || requestedHeadName === "local_salad_head";
             const manifest = {
                 head_name: genericHeadName
                     ? activeDatasetSaladHeadName(getDataIngestionReferenceLabel())
@@ -35850,17 +35850,25 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
             const payload = parseJsonObjectSafe(detail, {});
             const jobId = String(payload.job_id || "").trim();
-            if (!jobId) throw new Error("Local SALAD training did not return a job id.");
+            if (!jobId) throw new Error("Reference profile build did not return a job id.");
             dataIngestionState.activeJobId = jobId;
             setDataIngestionStatus("Queued reference profile build");
             pollDataIngestionJob(jobId);
         } catch (error) {
-            console.error("Local SALAD training failed to start", error);
+            console.error("Reference profile build failed to start", error);
             dataIngestionState.active = false;
             setDataIngestionStatus(`Failed: ${error.message || error}`, "error");
             renderDataIngestionProgress({ progress: 1, message: `Failed: ${error.message || error}` });
             refreshDataIngestionControls();
         }
+    }
+
+    function formatDataIngestionProfilePolicy(value) {
+        const raw = String(value || "").trim();
+        if (!raw || raw === "local_training_only") {
+            return "reference profile only";
+        }
+        return raw.replace(/_/g, " ");
     }
 
     function stopDataIngestionPoll() {
@@ -35966,7 +35974,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     ["Reference", summary.reference_dataset_label || summary.reference_label || summary.source_mode || ""],
                     ["Source", summary.reference_source || summary.source_mode || ""],
                     ["Encoder", summary.encoder_type || summary.encoder || "local_salad"],
-                    ["SALAD policy", summary.local_salad_policy || summary.policy || "local_training_only"],
+                    ["Profile policy", formatDataIngestionProfilePolicy(summary.local_salad_policy || summary.policy)],
                     ["Candidates", summary.candidate_image_count ?? summary.train_image_count ?? summary.item_count ?? 0],
                     ["Reference images", summary.reference_count ?? 0],
                     ["Keep fraction", summary.keep_fraction ?? ""],

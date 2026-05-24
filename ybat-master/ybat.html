@@ -705,7 +705,7 @@
                         <div>
                             <h2>Data Ingestion</h2>
                             <div class="training-help">Build a reference profile from an existing dataset, then score new images or video frames by novelty against that profile before deciding what to keep.</div>
-                            <div class="training-help warn">Reference profiles train local SALAD from your own dataset images only. On Mac, SALAD and C-RADIOv4 use MLX by default when available, with Torch fallback.</div>
+                            <div class="training-help warn">Reference profiles are built from your own dataset images only. On Mac, profile building and C-RADIOv4 use MLX by default when available, with Torch fallback.</div>
                         </div>
                         <span id="dataIngestionStatus" class="qwen-caption-status"></span>
                     </header>
@@ -713,7 +713,7 @@
                         <div class="data-ingestion-panel__header">
                             <div>
                                 <strong id="dataIngestionReferenceTitle">Reference dataset profile</strong>
-                                <div class="training-help">Choose the accepted dataset that defines what you already have, then build or select its local SALAD reference profile.</div>
+                                <div class="training-help">Choose the accepted dataset that defines what you already have, then build or select its matching reference profile.</div>
                             </div>
                         </div>
                         <div class="data-ingestion-grid">
@@ -729,22 +729,22 @@
                                 <select id="dataIngestionReferenceDataset"></select>
                             </div>
                             <div class="data-ingestion-field">
-                                <label for="dataIngestionSaladHead">Reference profile<span class="help-icon" title="Local SALAD head trained from the selected reference dataset. Build a fresh profile when the reference dataset changes materially.">?</span></label>
+                                <label for="dataIngestionSaladHead">Reference profile<span class="help-icon" title="Saved profile built from the selected reference dataset. Build a fresh profile when the reference dataset changes materially.">?</span></label>
                                 <select id="dataIngestionSaladHead"></select>
                             </div>
                             <div class="data-ingestion-field">
-                                <label for="dataIngestionHeadName">Profile name<span class="help-icon" title="Human-readable name for the saved local SALAD profile. Tator makes it unique if another profile already uses the same name.">?</span></label>
-                                <input type="text" id="dataIngestionHeadName" value="reference_salad_profile" />
+                                <label for="dataIngestionHeadName">Profile name<span class="help-icon" title="Human-readable name for the saved reference profile. Tator makes it unique if another profile already uses the same name.">?</span></label>
+                                <input type="text" id="dataIngestionHeadName" value="reference_profile" />
                             </div>
                             <div class="data-ingestion-field">
-                                <label for="dataIngestionTrainEncoder">SALAD base encoder<span class="help-icon" title="Frozen spatial-token encoder used to train the local SALAD profile. DINOv3 is the default; C-RADIOv4 is an explicit comparison path.">?</span></label>
+                                <label for="dataIngestionTrainEncoder">Profile encoder<span class="help-icon" title="Frozen spatial-token encoder used to build the reference profile. DINOv3 is the default; C-RADIOv4 is an explicit comparison path.">?</span></label>
                                 <select id="dataIngestionTrainEncoder">
                                     <option value="dinov3" selected>DINOv3</option>
                                     <option value="cradio">C-RADIOv4</option>
                                 </select>
                             </div>
                             <div class="data-ingestion-field">
-                                <label for="dataIngestionTrainCradioModel">Training C-RADIOv4 model<span class="help-icon" title="Used only when the SALAD base encoder is C-RADIOv4. This model id is saved into the profile metadata.">?</span></label>
+                                <label for="dataIngestionTrainCradioModel">Training C-RADIOv4 model<span class="help-icon" title="Used only when the profile encoder is C-RADIOv4. This model id is saved into the profile metadata.">?</span></label>
                                 <select id="dataIngestionTrainCradioModel"></select>
                             </div>
                             <div class="data-ingestion-field">
@@ -756,7 +756,7 @@
                                 <input type="number" id="dataIngestionEpochs" min="1" max="100" step="1" value="3" />
                             </div>
                             <div class="data-ingestion-field">
-                                <label for="dataIngestionBatchSize">Batch size<span class="help-icon" title="Number of paired augmented reference images processed per SALAD optimization step. Larger batches improve contrastive signal but need more memory.">?</span></label>
+                                <label for="dataIngestionBatchSize">Batch size<span class="help-icon" title="Number of paired augmented reference images processed per profile optimization step. Larger batches improve contrastive signal but need more memory.">?</span></label>
                                 <input type="number" id="dataIngestionBatchSize" min="2" max="128" step="1" value="8" />
                             </div>
                         </div>

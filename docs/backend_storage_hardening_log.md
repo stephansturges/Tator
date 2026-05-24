@@ -299,3 +299,14 @@ preserving the exact validation story for storage and artifact-write fixes.
   symlinked storage-root parents while normal roots still initialize.
 - Validation: `1031 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Data Ingestion Reference Profile Wording
+
+- Kept README update tracking collapsed and trimmed the visible line to the
+  latest validation count plus the detailed maintenance-log link.
+- Removed product-facing "local SALAD training/head" wording from Data
+  Ingestion while preserving the internal API names and backend model flow.
+- Clarified the user-facing flow as reference-profile building followed by
+  candidate diversity review.
+- Validation: `1031 passed, 17 skipped`; focused Data Ingestion/UI contract
+  checks passed.

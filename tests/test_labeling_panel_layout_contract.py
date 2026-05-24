@@ -133,6 +133,7 @@ def test_local_salad_is_data_ingestion_only_in_ui():
     assert '<option value="local_salad">Local SALAD separation</option>' not in html
     assert '<option value="local_salad">Local SALAD head</option>' not in html
     assert "Local SALAD requires a trained local head" not in html
+    assert "Reference profiles are built from your own dataset images only" in html
     assert "classSplitElements.embeddingAggregation" not in js
     assert "classSplitElements.saladHead" not in js
     assert "trainingElements.embeddingAggregationSelect" not in js
@@ -159,7 +160,11 @@ def test_data_ingestion_panel_contract():
     assert "Reference dataset profile" in html
     assert "Candidate review" in html
     assert "Build a reference profile from an existing dataset" in html
-    assert "Reference profiles train local SALAD from your own dataset images only" in html
+    assert "Reference profiles are built from your own dataset images only" in html
+    assert "Reference profiles train local SALAD" not in html
+    assert "local SALAD reference profile" not in html
+    assert "SALAD base encoder" not in html
+    assert "value=\"reference_profile\"" in html
     assert 'id="dataIngestionFiles"' in html
     assert 'id="dataIngestionRecipe"' not in html
     assert 'id="dataIngestionTrainFiles"' not in html
@@ -219,8 +224,16 @@ def test_data_ingestion_panel_contract():
     assert "Profile ready for candidate review" in js
     assert "heads.filter((head) => dataIngestionHeadMatchesReference(head))" in js
     assert "Choose matching reference profile" in js
+    assert "No reference profiles built" in js
+    assert "No local SALAD heads trained" not in js
     assert "No profiles for selected reference" in js
     assert "Selected reference profile does not match the chosen reference dataset" in js
+    assert "Open at least two images in Label Images before building a reference profile" in js
+    assert "Reference profile build needs at least two usable images or frames." in js
+    assert "Reference profile build did not return a job id." in js
+    assert "Profile policy" in js
+    assert "SALAD policy" not in js
+    assert "function formatDataIngestionProfilePolicy" in js
     assert "encoder: \"local_salad\"" in js
     assert "dataIngestionElements.trainEncoder" in js
     assert "dataIngestionElements.trainCradioModel" in js

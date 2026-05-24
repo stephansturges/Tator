@@ -753,10 +753,16 @@ def _clean_yolo_cuda_devices_impl(devices: Optional[List[int]]) -> List[str]:
     if not devices:
         return []
     cleaned: List[str] = []
+    seen: set[str] = set()
     for device in devices:
         raw = str(device).strip()
-        if re.fullmatch(r"\d+", raw):
-            cleaned.append(str(int(raw)))
+        if not re.fullmatch(r"\d+", raw):
+            raise ValueError("yolo_invalid_devices")
+        value = str(int(raw))
+        if value in seen:
+            raise ValueError("yolo_duplicate_devices")
+        seen.add(value)
+        cleaned.append(value)
     return cleaned
 
 
@@ -778,9 +784,23 @@ def _yolo_resolve_device_impl(
 ) -> Dict[str, Any]:
     requested = _normalize_yolo_accelerator_impl(accelerator)
     cuda_devices = _clean_yolo_cuda_devices_impl(devices)
+    cuda_available = _torch_cuda_available(torch_module)
+    mps_available = bool(allow_mps and _torch_mps_available(torch_module))
     if cuda_devices:
         if requested not in {"auto", "cuda"}:
             raise ValueError("yolo_cuda_devices_conflict")
+        if torch_module is not None:
+            if not cuda_available:
+                raise ValueError("yolo_cuda_devices_unavailable")
+            try:
+                device_count = int(torch_module.cuda.device_count())
+            except Exception:
+                device_count = 0
+            if device_count <= 0:
+                raise ValueError("yolo_cuda_devices_unavailable")
+            invalid = [int(device) for device in cuda_devices if int(device) >= device_count]
+            if invalid:
+                raise ValueError(f"yolo_invalid_devices:available=0-{device_count - 1}")
         return {
             "requested_accelerator": requested,
             "resolved_accelerator": "cuda",
@@ -788,9 +808,6 @@ def _yolo_resolve_device_impl(
             "device_label": f"CUDA devices {','.join(cuda_devices)}",
             "devices": [int(device) for device in cuda_devices],
         }
-
-    cuda_available = _torch_cuda_available(torch_module)
-    mps_available = bool(allow_mps and _torch_mps_available(torch_module))
 
     if requested == "cpu":
         return {

@@ -21,11 +21,12 @@ class _FakeDevice:
         return self.name
 
 
-def _fake_torch(*, cuda: bool = False, mps: bool = False):
+def _fake_torch(*, cuda: bool = False, mps: bool = False, cuda_count: int | None = None):
+    resolved_cuda_count = cuda_count if cuda_count is not None else (1 if cuda else 0)
     return SimpleNamespace(
         cuda=SimpleNamespace(
             is_available=lambda: cuda,
-            device_count=lambda: 1 if cuda else 0,
+            device_count=lambda: resolved_cuda_count,
         ),
         backends=SimpleNamespace(
             mps=SimpleNamespace(
@@ -100,13 +101,34 @@ def test_yolo_training_auto_uses_mps_when_cuda_absent() -> None:
 
 
 def test_yolo_training_preserves_cuda_device_ids() -> None:
-    torch = _fake_torch(cuda=True, mps=True)
+    torch = _fake_torch(cuda=True, mps=True, cuda_count=2)
 
     out = _yolo_resolve_device_impl([0, "1"], "auto", torch_module=torch, allow_mps=True)
 
     assert out["resolved_accelerator"] == "cuda"
     assert out["device_arg"] == "0,1"
     assert _yolo_device_arg_impl([0, "1"], torch_module=torch) == "0,1"
+
+
+def test_yolo_training_rejects_cuda_device_ids_when_cuda_absent() -> None:
+    torch = _fake_torch(cuda=False, mps=True)
+
+    with pytest.raises(ValueError, match="yolo_cuda_devices_unavailable"):
+        _yolo_resolve_device_impl([0], "auto", torch_module=torch, allow_mps=True)
+
+
+def test_yolo_training_rejects_out_of_range_cuda_device_ids() -> None:
+    torch = _fake_torch(cuda=True, mps=False, cuda_count=1)
+
+    with pytest.raises(ValueError, match="yolo_invalid_devices:available=0-0"):
+        _yolo_resolve_device_impl([1], "auto", torch_module=torch, allow_mps=True)
+
+
+def test_yolo_training_rejects_duplicate_cuda_device_ids() -> None:
+    torch = _fake_torch(cuda=True, mps=False, cuda_count=2)
+
+    with pytest.raises(ValueError, match="yolo_duplicate_devices"):
+        _yolo_resolve_device_impl([0, "0"], "auto", torch_module=torch, allow_mps=True)
 
 
 def test_yolo_training_explicit_mps_requires_available_backend() -> None:

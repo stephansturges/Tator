@@ -1219,3 +1219,18 @@ preserving the exact validation story for storage and artifact-write fixes.
   start, and EDR runtime coverage, `py_compile localinferenceapi.py`,
   `git diff --check`, the full pytest suite, and live endpoint
   map/method/OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: YOLO CUDA Device Preflight
+
+- Tightened YOLO training device resolution so explicit CUDA device IDs are
+  rejected before queueing when CUDA is unavailable, duplicated, or outside the
+  detected device range.
+- This prevents Mac `auto` runs with stale CUDA IDs from creating run
+  directories and failing later inside Ultralytics instead of at request
+  validation.
+- Added resolver coverage and backend job-start coverage proving invalid CUDA
+  IDs fail before the worker or run directory is created.
+- Validation: `1170 passed, 17 skipped`; focused macOS acceleration and backend
+  job-start coverage, `py_compile services/detectors.py localinferenceapi.py`,
+  `git diff --check`, the full pytest suite, and live endpoint
+  map/method/OpenAPI sanity checks passed against the restarted backend.

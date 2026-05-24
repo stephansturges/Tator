@@ -421,6 +421,7 @@ def _import_agent_cascade_zip_obj_impl(
     persist_cascade_fn,
     max_entry_bytes: Optional[int] = None,
     max_recipe_zip_bytes: Optional[int] = None,
+    max_total_uncompressed_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
     names = zf.namelist()
     cascade_name = None
@@ -450,6 +451,7 @@ def _import_agent_cascade_zip_obj_impl(
 
     recipe_zip_names: List[str] = []
     classifier_file_names: List[str] = []
+    total_uncompressed = 0
     for name in names:
         if _zip_member_path_is_unsafe(name):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
@@ -465,6 +467,13 @@ def _import_agent_cascade_zip_obj_impl(
         mode = (member_info.external_attr >> 16) & 0xFFFF
         if stat.S_ISLNK(mode):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_symlink_unsupported")
+        if max_total_uncompressed_bytes and max_total_uncompressed_bytes > 0:
+            total_uncompressed += max(int(member_info.file_size or 0), 0)
+            if total_uncompressed > max_total_uncompressed_bytes:
+                raise HTTPException(
+                    status_code=HTTP_413_CONTENT_TOO_LARGE,
+                    detail="agent_cascade_import_uncompressed_too_large",
+                )
         if max_entry_bytes and member_info.file_size > max_entry_bytes:
             raise HTTPException(
                 status_code=HTTP_413_CONTENT_TOO_LARGE,
@@ -638,6 +647,7 @@ def _import_agent_cascade_zip_bytes_impl(
     persist_cascade_fn,
     max_entry_bytes: Optional[int] = None,
     max_recipe_zip_bytes: Optional[int] = None,
+    max_total_uncompressed_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
     if not zip_bytes:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_zip_only")
@@ -655,6 +665,7 @@ def _import_agent_cascade_zip_bytes_impl(
                 persist_cascade_fn=persist_cascade_fn,
                 max_entry_bytes=max_entry_bytes,
                 max_recipe_zip_bytes=max_recipe_zip_bytes,
+                max_total_uncompressed_bytes=max_total_uncompressed_bytes,
             )
     except HTTPException:
         raise
@@ -675,6 +686,7 @@ def _import_agent_cascade_zip_file_impl(
     persist_cascade_fn,
     max_entry_bytes: Optional[int] = None,
     max_recipe_zip_bytes: Optional[int] = None,
+    max_total_uncompressed_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
     if not zip_path.exists() or not zip_path.is_file():
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_zip_only")
@@ -692,6 +704,7 @@ def _import_agent_cascade_zip_file_impl(
                 persist_cascade_fn=persist_cascade_fn,
                 max_entry_bytes=max_entry_bytes,
                 max_recipe_zip_bytes=max_recipe_zip_bytes,
+                max_total_uncompressed_bytes=max_total_uncompressed_bytes,
             )
     except HTTPException:
         raise

@@ -984,3 +984,15 @@ preserving the exact validation story for storage and artifact-write fixes.
   agent cascade import coverage, module compile checks for touched importers,
   the full pytest suite, and live endpoint sanity checks passed against the
   restarted backend.
+
+## 2026-05-24: Agent Cascade Import Total Size Cap
+
+- Added a cumulative uncompressed-size cap to agent cascade archive imports.
+- Reused the existing cascade archive byte limit as the default total
+  uncompressed ceiling, while preserving per-entry and nested-recipe limits.
+- Added a regression where individually small cascade entries exceed the
+  allowed archive total and are rejected before classifier or recipe materialization.
+- Validation: `1139 passed, 17 skipped`; focused agent cascade import/endpoint
+  coverage, module compile checks for the cascade importer and backend wiring,
+  the full pytest suite, and live endpoint sanity checks passed against the
+  restarted backend.

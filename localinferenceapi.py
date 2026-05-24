@@ -22215,6 +22215,7 @@ _import_agent_cascade_zip_file = functools.partial(
     max_json_bytes=AGENT_CASCADE_MAX_JSON_BYTES,
     max_entry_bytes=AGENT_CASCADE_MAX_BYTES,
     max_recipe_zip_bytes=AGENT_RECIPE_MAX_BYTES,
+    max_total_uncompressed_bytes=AGENT_CASCADE_MAX_BYTES,
     classifier_allowed_exts=CLASSIFIER_ALLOWED_EXTS,
     path_is_within_root_fn=_path_is_within_root_impl,
     import_recipe_fn=_import_agent_recipe_zip_bytes,

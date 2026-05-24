@@ -43,6 +43,7 @@ def _call_import(zip_bytes: bytes, tmp_path: Path, **kwargs: Any) -> Dict[str, A
         return {"label": label, **payload}
 
     max_entry_bytes = kwargs.pop("max_entry_bytes", 1024 * 1024)
+    max_total_uncompressed_bytes = kwargs.pop("max_total_uncompressed_bytes", None)
     import_recipe_fn = kwargs.pop("import_recipe_fn", _import_recipe)
     import_recipe_file_fn = kwargs.pop("import_recipe_file_fn", None)
     cascades_root = kwargs.pop("cascades_root", tmp_path / "cascades")
@@ -53,6 +54,7 @@ def _call_import(zip_bytes: bytes, tmp_path: Path, **kwargs: Any) -> Dict[str, A
         classifiers_root=classifiers_root,
         max_json_bytes=1024 * 1024,
         max_entry_bytes=max_entry_bytes,
+        max_total_uncompressed_bytes=max_total_uncompressed_bytes,
         classifier_allowed_exts=[".pkl", ".joblib"],
         path_is_within_root_fn=_within_root,
         import_recipe_fn=import_recipe_fn,
@@ -136,6 +138,30 @@ def test_agent_cascade_import_rejects_oversize_entries(tmp_path: Path) -> None:
 
     assert exc_info.value.status_code == 413
     assert exc_info.value.detail == "agent_cascade_import_entry_too_large"
+
+
+def test_agent_cascade_import_rejects_oversize_total_uncompressed(
+    tmp_path: Path,
+) -> None:
+    cascade = {"label": "demo", "steps": [{"recipe_id": "r1"}], "dedupe": {}}
+    payload = _make_zip(
+        {
+            "cascade.json": json.dumps(cascade).encode("utf-8"),
+            "recipes/r1.zip": b"r" * 400,
+            "classifiers/head.pkl": b"c" * 400,
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _call_import(
+            payload,
+            tmp_path,
+            max_entry_bytes=1024,
+            max_total_uncompressed_bytes=600,
+        )
+
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.detail == "agent_cascade_import_uncompressed_too_large"
 
 
 def test_agent_cascade_import_uses_file_recipe_importer_when_available(tmp_path: Path) -> None:

@@ -364,6 +364,54 @@ def test_delete_linked_dataset_blocks_active_annotation_lock(tmp_path, monkeypat
     assert source_root.exists()
 
 
+def test_delete_linked_dataset_blocks_active_job_reference(tmp_path, monkeypatch) -> None:
+    source_root = tmp_path / "linked_source"
+    source_root.mkdir(parents=True, exist_ok=True)
+
+    registry_root = tmp_path / "registry"
+    registry_root.mkdir(parents=True, exist_ok=True)
+    record_root = registry_root / "ds_linked"
+    record_root.mkdir(parents=True, exist_ok=True)
+    (record_root / api.DATASET_META_NAME).write_text(
+        json.dumps({"id": "ds_linked"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds_linked",
+            "dataset_root": str(source_root),
+            "registry_root": str(record_root),
+            "storage_mode": "linked",
+            "linked_root": str(source_root),
+        },
+    )
+    with api.DATA_INGESTION_JOBS_LOCK:
+        original_jobs = dict(api.DATA_INGESTION_JOBS)
+        api.DATA_INGESTION_JOBS.clear()
+        api.DATA_INGESTION_JOBS["di_active"] = api.DataIngestionJob(
+            job_id="di_active",
+            status="running",
+            request={"reference_dataset_id": "ds_linked"},
+        )
+
+    try:
+        with pytest.raises(api.HTTPException) as exc:
+            api.delete_dataset_entry("ds_linked")
+    finally:
+        with api.DATA_INGESTION_JOBS_LOCK:
+            api.DATA_INGESTION_JOBS.clear()
+            api.DATA_INGESTION_JOBS.update(original_jobs)
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "dataset_delete_blocked_active_jobs:data_ingestion"
+    assert record_root.exists()
+    assert source_root.exists()
+
+
 def test_delete_managed_dataset_blocks_active_annotation_lock(tmp_path, monkeypatch) -> None:
     registry_root = tmp_path / "registry"
     dataset_root = registry_root / "managed_ds"
@@ -398,6 +446,59 @@ def test_delete_managed_dataset_blocks_active_annotation_lock(tmp_path, monkeypa
     assert exc.value.status_code == 409
     assert exc.value.detail == "dataset_delete_blocked_annotation_lock"
     assert dataset_root.exists()
+
+
+def test_delete_managed_dataset_ignores_completed_job_reference(
+    tmp_path, monkeypatch
+) -> None:
+    registry_root = tmp_path / "registry"
+    dataset_root = registry_root / "managed_ds"
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    (dataset_root / "payload.bin").write_bytes(b"dataset")
+    (dataset_root / api.DATASET_META_NAME).write_text(
+        json.dumps({"id": "managed_ds", "label": "Managed DS"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", tmp_path / "sam3")
+    monkeypatch.setattr(api, "QWEN_DATASET_ROOT", tmp_path / "qwen")
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "managed_ds",
+            "label": "Managed DS",
+            "dataset_root": str(dataset_root),
+            "registry_root": str(dataset_root),
+            "storage_mode": "managed",
+            "source": "registry",
+        },
+    )
+    with api.DATA_INGESTION_JOBS_LOCK:
+        original_jobs = dict(api.DATA_INGESTION_JOBS)
+        api.DATA_INGESTION_JOBS.clear()
+        api.DATA_INGESTION_JOBS["di_done"] = api.DataIngestionJob(
+            job_id="di_done",
+            status="completed",
+            request={
+                "reference_dataset_id": "managed_ds",
+                "reference_uploads": [{"path": str(dataset_root / "payload.bin")}],
+            },
+        )
+
+    try:
+        out = api.delete_dataset_entry("managed_ds")
+    finally:
+        with api.DATA_INGESTION_JOBS_LOCK:
+            api.DATA_INGESTION_JOBS.clear()
+            api.DATA_INGESTION_JOBS.update(original_jobs)
+
+    assert out["status"] == "trashed"
+    assert not dataset_root.exists()
+    trash_entries = api.list_dataset_trash_entries()
+    assert len(trash_entries) == 1
+    assert trash_entries[0]["original_id"] == "managed_ds"
 
 
 def test_save_transient_dataset_persists_overlay_content(tmp_path, monkeypatch) -> None:

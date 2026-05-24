@@ -14378,7 +14378,7 @@ def _purge_directory(root: Path) -> int:
     return removed
 
 
-_TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
+_TERMINAL_JOB_STATUSES = {"succeeded", "completed", "failed", "cancelled"}
 _DESTRUCTIVE_DELETE_ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 
 
@@ -14478,7 +14478,7 @@ def _active_jobs_reference_path_root(
         jobs = list(registry.values())
     for job in jobs:
         status = str(getattr(job, "status", "") or "").strip().lower()
-        if status in _TERMINAL_JOB_STATUSES:
+        if status not in _DESTRUCTIVE_DELETE_ACTIVE_STATUSES:
             continue
         payloads = [
             getattr(job, "config", {}) or {},
@@ -14494,6 +14494,38 @@ def _active_jobs_reference_path_root(
                 continue
             if _path_is_within_root_impl(candidate, root):
                 return True
+    return False
+
+
+def _job_payload_references_dataset_id(payload: Any, dataset_id: str) -> bool:
+    dataset_id_norm = str(dataset_id or "").strip()
+    if not dataset_id_norm:
+        return False
+    for key, value in _iter_nested_key_values(payload):
+        key_norm = str(key or "").strip().lower()
+        if key_norm != "dataset_id" and not key_norm.endswith("_dataset_id"):
+            continue
+        if str(value or "").strip() == dataset_id_norm:
+            return True
+    return False
+
+
+def _active_jobs_reference_dataset_id(
+    registry: Dict[str, Any], lock: threading.Lock, dataset_id: str
+) -> bool:
+    with lock:
+        jobs = list(registry.values())
+    for job in jobs:
+        status = str(getattr(job, "status", "") or "").strip().lower()
+        if status not in _DESTRUCTIVE_DELETE_ACTIVE_STATUSES:
+            continue
+        payloads = [
+            getattr(job, "config", {}) or {},
+            getattr(job, "request", {}) or {},
+            getattr(job, "result", {}) or {},
+        ]
+        if any(_job_payload_references_dataset_id(payload, dataset_id) for payload in payloads):
+            return True
     return False
 
 
@@ -14515,6 +14547,28 @@ def _active_job_registry_referencing_path_root(path_root: Path) -> Optional[str]
     ]
     for name, registry, lock in registries:
         if _active_jobs_reference_path_root(registry, lock, path_root):
+            return name
+    return None
+
+
+def _active_job_registry_referencing_dataset_id(dataset_id: str) -> Optional[str]:
+    registries = [
+        ("clip_training", TRAINING_JOBS, TRAINING_JOBS_LOCK),
+        ("qwen_training", QWEN_TRAINING_JOBS, QWEN_TRAINING_JOBS_LOCK),
+        ("sam3_training", SAM3_TRAINING_JOBS, SAM3_TRAINING_JOBS_LOCK),
+        ("yolo_training", YOLO_TRAINING_JOBS, YOLO_TRAINING_JOBS_LOCK),
+        ("yolo_head_graft", YOLO_HEAD_GRAFT_JOBS, YOLO_HEAD_GRAFT_JOBS_LOCK),
+        ("rfdetr_training", RFDETR_TRAINING_JOBS, RFDETR_TRAINING_JOBS_LOCK),
+        ("segmentation_build", SEGMENTATION_BUILD_JOBS, SEGMENTATION_BUILD_JOBS_LOCK),
+        ("prompt_helper", PROMPT_HELPER_JOBS, PROMPT_HELPER_JOBS_LOCK),
+        ("agent_mining", AGENT_MINING_JOBS, AGENT_MINING_JOBS_LOCK),
+        ("auto_label", AUTO_LABEL_JOBS, AUTO_LABEL_JOBS_LOCK),
+        ("class_analysis", CLASS_ANALYSIS_JOBS, CLASS_ANALYSIS_JOBS_LOCK),
+        ("data_ingestion", DATA_INGESTION_JOBS, DATA_INGESTION_JOBS_LOCK),
+        ("calibration", CALIBRATION_JOBS, CALIBRATION_JOBS_LOCK),
+    ]
+    for name, registry, lock in registries:
+        if _active_jobs_reference_dataset_id(registry, lock, dataset_id):
             return name
     return None
 
@@ -16720,6 +16774,12 @@ def delete_dataset_entry(dataset_id: str):
     if _dataset_entry_has_active_annotation_lock(entry):
         raise HTTPException(
             status_code=HTTP_409_CONFLICT, detail="dataset_delete_blocked_annotation_lock"
+        )
+    blocking_registry_by_id = _active_job_registry_referencing_dataset_id(dataset_id)
+    if blocking_registry_by_id:
+        raise HTTPException(
+            status_code=HTTP_409_CONFLICT,
+            detail=f"dataset_delete_blocked_active_jobs:{blocking_registry_by_id}",
         )
 
     # Linked entries should remove only the registry record + overlay metadata, never the source dataset itself.

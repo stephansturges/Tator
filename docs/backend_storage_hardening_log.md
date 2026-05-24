@@ -1393,3 +1393,22 @@ preserving the exact validation story for storage and artifact-write fixes.
   services/prepass_recipes.py tests/test_prepass_recipe_config_validation.py`,
   `git diff --check`, and the full pytest suite (`1196 passed, 19 skipped`)
   passed.
+
+## 2026-05-24: Dataset Delete Active-Job Guards
+
+- Added dataset-id based active-job blocking before dataset delete, so linked
+  dataset records and overlays cannot be removed while a running backend job
+  still references that dataset id.
+- Narrowed path-root delete blocking to actually active job states
+  (`queued`, `running`, `cancelling`) and treated `completed` as terminal, so
+  historical completed jobs do not permanently block safe managed trash moves.
+- Added regressions for linked dataset delete blocked by an active Data
+  Ingestion job and managed dataset delete allowed after a completed job
+  reference.
+- Validation: focused dataset/data-ingestion/storage safety bundle
+  (`149 passed`), live browser dataset/ingestion E2E (`9 passed`),
+  `py_compile localinferenceapi.py tests/test_dataset_linked_annotation_flows.py
+  tests/test_data_ingestion.py`, `node --check ybat-master/ybat.js`,
+  `git diff --check`, live UI endpoint map check with no missing paths or
+  method mismatches, live OpenAPI sanity (`tested=144`, `failures=[]`), and the
+  full pytest suite (`1198 passed, 19 skipped`) passed.

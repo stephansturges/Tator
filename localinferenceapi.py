@@ -31960,7 +31960,10 @@ def rename_clip_classifier(
     parent = classifier_path.parent.resolve()
     if not _path_is_within_root_impl(parent, classifiers_root):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_path_invalid")
-    target_path = (parent / target_name).resolve()
+    target_raw = parent / target_name
+    if _classifier_path_has_symlink_component(target_raw.parent, classifiers_root):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_path_invalid")
+    target_path = target_raw.resolve(strict=False)
     if not _path_is_within_root_impl(target_path, classifiers_root):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="classifier_path_invalid")
 
@@ -31970,12 +31973,17 @@ def rename_clip_classifier(
             "rel_path": str(classifier_path.relative_to(classifiers_root)),
         }
 
-    if target_path.exists():
-        stem = target_path.stem
-        suffix = target_path.suffix
+    if target_raw.exists() or target_raw.is_symlink():
+        stem = Path(target_name).stem
+        suffix = Path(target_name).suffix
         for idx in range(1, 1000):
-            candidate = (parent / f"{stem}_{idx}{suffix}").resolve()
-            if not candidate.exists():
+            candidate_raw = parent / f"{stem}_{idx}{suffix}"
+            if _classifier_path_has_symlink_component(candidate_raw, classifiers_root):
+                continue
+            candidate = candidate_raw.resolve(strict=False)
+            if not _path_is_within_root_impl(candidate, classifiers_root):
+                continue
+            if not candidate_raw.exists() and not candidate_raw.is_symlink():
                 target_path = candidate
                 break
         else:

@@ -1535,3 +1535,23 @@ preserving the exact validation story for storage and artifact-write fixes.
   OpenAPI sanity (`tested=144`, `failures=[]`), and
   `/data_ingestion/capabilities` returned the local-SALAD reference-profile
   flow with MLX C-RADIO available.
+
+## 2026-05-24: CLIP Classifier Rename Symlink Guards
+
+- Audited the CLIP classifier registry mutation surface after the dataset/data
+  ingestion pass and found the rename endpoint had no direct regressions.
+- Changed classifier rename target selection to treat an existing symlink leaf
+  as an occupied name instead of resolving through it. A requested rename such
+  as `alias.pkl` where `alias.pkl` is a symlink now selects a safe suffixed
+  destination like `alias_1.pkl` inside the classifier registry, leaving the
+  symlink untouched.
+- Added regressions for normal file/meta rename with active-classifier state
+  update and for the symlink-target case.
+- Validation: `py_compile localinferenceapi.py
+  tests/test_clip_registry_downloads.py`, focused rename regressions
+  (`2 passed`), CLIP registry coverage (`26 passed`), prepass/EDR artifact
+  package coverage (`79 passed`), agent cascade import/export coverage
+  (`30 passed`), and the full pytest suite (`1219 passed, 20 skipped`) passed.
+  The restarted backend also passed the live UI endpoint map check with no
+  missing paths or method mismatches, live OpenAPI sanity (`tested=144`,
+  `failures=[]`), and a live `/clip/classifiers` registry read.

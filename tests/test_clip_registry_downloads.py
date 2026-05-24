@@ -270,6 +270,64 @@ def test_delete_clip_classifier_rejects_symlink_alias_without_target_unlink(
     assert alias.is_symlink()
 
 
+def test_rename_clip_classifier_moves_file_meta_and_active_state(tmp_path, monkeypatch) -> None:
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    classifiers_root.mkdir(parents=True)
+    classifier_path = classifiers_root / "head.pkl"
+    meta_path = classifiers_root / "head.meta.pkl"
+    classifier_path.write_bytes(b"model")
+    meta_path.write_bytes(b"meta")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", upload_root)
+    monkeypatch.setattr(localinferenceapi, "active_classifier_path", str(classifier_path))
+
+    response = localinferenceapi.rename_clip_classifier(
+        rel_path="head.pkl",
+        new_name="renamed",
+    )
+
+    renamed_path = classifiers_root / "renamed.pkl"
+    renamed_meta = classifiers_root / "renamed.meta.pkl"
+    assert response["status"] == "renamed"
+    assert response["old_rel_path"] == "head.pkl"
+    assert response["new_rel_path"] == "renamed.pkl"
+    assert renamed_path.read_bytes() == b"model"
+    assert renamed_meta.read_bytes() == b"meta"
+    assert not classifier_path.exists()
+    assert not meta_path.exists()
+    assert localinferenceapi.active_classifier_path == str(renamed_path)
+
+
+def test_rename_clip_classifier_does_not_follow_existing_target_symlink(
+    tmp_path, monkeypatch
+) -> None:
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    classifiers_root.mkdir(parents=True)
+    classifier_path = classifiers_root / "head.pkl"
+    classifier_path.write_bytes(b"model")
+    symlink_target = classifiers_root / "hidden.pkl"
+    alias = classifiers_root / "alias.pkl"
+    try:
+        alias.symlink_to(symlink_target)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", upload_root)
+
+    response = localinferenceapi.rename_clip_classifier(
+        rel_path="head.pkl",
+        new_name="alias.pkl",
+    )
+
+    safe_target = classifiers_root / "alias_1.pkl"
+    assert response["status"] == "renamed"
+    assert response["new_rel_path"] == "alias_1.pkl"
+    assert safe_target.read_bytes() == b"model"
+    assert alias.is_symlink()
+    assert not symlink_target.exists()
+    assert not classifier_path.exists()
+
+
 def test_resolve_clip_classifier_rejects_nested_symlinked_registry_parent_without_write(
     tmp_path,
 ) -> None:

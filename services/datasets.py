@@ -157,6 +157,7 @@ def _persist_dataset_metadata_impl(
     *,
     meta_name: str,
     logger=None,
+    suppress_errors: bool = False,
 ) -> None:
     meta_path = dataset_dir / meta_name
     try:
@@ -164,6 +165,11 @@ def _persist_dataset_metadata_impl(
     except Exception as exc:
         if logger is not None:
             logger.warning("Failed to write dataset metadata for %s: %s", dataset_dir, exc)
+        if not suppress_errors:
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="dataset_metadata_write_failed",
+            ) from exc
 
 
 def _coerce_dataset_metadata_impl(
@@ -250,11 +256,32 @@ def _persist_qwen_dataset_metadata_impl(
     *,
     meta_name: str = QWEN_METADATA_FILENAME,
     write_qwen_metadata_fn=None,
+    suppress_errors: bool = False,
 ) -> None:
     if write_qwen_metadata_fn is not None:
-        write_qwen_metadata_fn(dataset_dir / meta_name, metadata)
+        try:
+            write_qwen_metadata_fn(dataset_dir / meta_name, metadata)
+        except Exception as exc:
+            if not suppress_errors:
+                raise HTTPException(
+                    status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="qwen_dataset_metadata_write_failed",
+                ) from exc
         return
-    _persist_dataset_metadata_impl(dataset_dir, metadata, meta_name=meta_name, logger=logger)
+    try:
+        _persist_dataset_metadata_impl(
+            dataset_dir,
+            metadata,
+            meta_name=meta_name,
+            logger=logger,
+            suppress_errors=suppress_errors,
+        )
+    except HTTPException as exc:
+        if not suppress_errors:
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="qwen_dataset_metadata_write_failed",
+            ) from exc
 
 
 def _load_sam3_dataset_metadata_impl(
@@ -287,6 +314,7 @@ def _persist_sam3_dataset_metadata_impl(
     *,
     meta_name: str = SAM3_DATASET_META_NAME,
     logger=None,
+    suppress_errors: bool = False,
 ) -> None:
     meta_path = dataset_dir / meta_name
     try:
@@ -294,6 +322,11 @@ def _persist_sam3_dataset_metadata_impl(
     except Exception as exc:
         if logger is not None:
             logger.warning("Failed to write SAM3 dataset metadata for %s: %s", dataset_dir, exc)
+        if not suppress_errors:
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="sam3_dataset_metadata_write_failed",
+            ) from exc
 
 
 def _count_dataset_images_impl(dataset_root: Path, *, iter_images_fn) -> int:

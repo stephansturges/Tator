@@ -8689,6 +8689,7 @@ def _agent_load_labelmap_meta(dataset_id: Optional[str]) -> Tuple[List[str], str
                 metadata,
                 meta_name=SAM3_DATASET_META_NAME,
                 logger=logger,
+                suppress_errors=True,
             ),
         ),
         load_qwen_meta=lambda dataset_dir: _load_qwen_dataset_metadata_impl(
@@ -14648,6 +14649,7 @@ _list_all_datasets = functools.partial(
             metadata,
             meta_name=SAM3_DATASET_META_NAME,
             logger=logger,
+            suppress_errors=True,
         ),
     ),
     load_qwen_meta_fn=lambda dataset_dir: _load_qwen_dataset_metadata_impl(
@@ -14666,6 +14668,7 @@ _list_all_datasets = functools.partial(
             metadata,
             meta_name=DATASET_META_NAME,
             logger=logger,
+            suppress_errors=True,
         ),
     ),
     yolo_labels_have_polygons_fn=_yolo_labels_have_polygons_impl,
@@ -14681,6 +14684,7 @@ _list_all_datasets = functools.partial(
                 metadata,
                 meta_name=SAM3_DATASET_META_NAME,
                 logger=logger,
+                suppress_errors=True,
             ),
         ),
         persist_meta_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
@@ -14701,6 +14705,7 @@ _list_all_datasets = functools.partial(
                 metadata,
                 meta_name=SAM3_DATASET_META_NAME,
                 logger=logger,
+                suppress_errors=True,
             ),
         ),
         load_qwen_meta=lambda dataset_root: _load_qwen_dataset_metadata_impl(
@@ -16926,7 +16931,11 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
             meta_name=SAM3_DATASET_META_NAME,
             load_json_metadata_fn=_load_json_metadata,
             persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
-                dataset_dir_inner, metadata, meta_name=SAM3_DATASET_META_NAME, logger=logger
+                dataset_dir_inner,
+                metadata,
+                meta_name=SAM3_DATASET_META_NAME,
+                logger=logger,
+                suppress_errors=True,
             ),
         ),
         load_qwen_meta=lambda dataset_dir: _load_qwen_dataset_metadata_impl(
@@ -16941,7 +16950,11 @@ def build_qwen_dataset_from_yolo(dataset_id: str):
                 meta_name=SAM3_DATASET_META_NAME,
                 load_json_metadata_fn=_load_json_metadata,
                 persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
-                    dataset_dir_inner, metadata, meta_name=SAM3_DATASET_META_NAME, logger=logger
+                    dataset_dir_inner,
+                    metadata,
+                    meta_name=SAM3_DATASET_META_NAME,
+                    logger=logger,
+                    suppress_errors=True,
                 ),
             ),
             load_qwen_meta=lambda dataset_dir: _load_qwen_dataset_metadata_impl(
@@ -17153,7 +17166,11 @@ def get_dataset_glossary(dataset_id: str):
             meta_name=SAM3_DATASET_META_NAME,
             load_json_metadata_fn=_load_json_metadata,
             persist_metadata_fn=lambda dataset_dir_inner, metadata: _persist_sam3_dataset_metadata_impl(
-                dataset_dir_inner, metadata, meta_name=SAM3_DATASET_META_NAME, logger=logger
+                dataset_dir_inner,
+                metadata,
+                meta_name=SAM3_DATASET_META_NAME,
+                logger=logger,
+                suppress_errors=True,
             ),
         ),
         load_qwen_meta=lambda dataset_dir: _load_qwen_dataset_metadata_impl(
@@ -21980,6 +21997,7 @@ _rfdetr_training_dataset_base_resolver = functools.partial(
             metadata,
             meta_name=SAM3_DATASET_META_NAME,
             logger=logger,
+            suppress_errors=True,
         ),
     ),
     detect_yolo_layout_fn=_detect_yolo_layout_impl,
@@ -29171,6 +29189,7 @@ def _plan_segmentation_build(
                 metadata,
                 meta_name=SAM3_DATASET_META_NAME,
                 logger=logger,
+                suppress_errors=True,
             ),
         )
     if not source_meta:
@@ -29675,6 +29694,7 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
                         metadata,
                         meta_name=SAM3_DATASET_META_NAME,
                         logger=logger,
+                        suppress_errors=True,
                     ),
                 )
                 or coco_meta

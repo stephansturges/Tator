@@ -1433,3 +1433,26 @@ preserving the exact validation story for storage and artifact-write fixes.
   missing paths or method mismatches, live OpenAPI sanity (`tested=144`,
   `failures=[]`), and the full pytest suite (`1201 passed, 19 skipped`) passed
   against the restarted backend.
+
+## 2026-05-24: SAM3 and Qwen Dataset Metadata Persistence
+
+- Made the shared dataset, Qwen dataset, and SAM3 dataset metadata persistence
+  helpers fail loudly by default instead of logging write failures and returning
+  success.
+- Kept passive read/list metadata normalization best-effort by explicitly
+  suppressing those write-back failures in dataset listing, glossary reads,
+  Qwen-from-YOLO source glossary reads, RF-DETR dataset resolution, and
+  segmentation-result metadata reads.
+- Left conversion/materialization mutation paths strict, so YOLO-to-COCO,
+  Qwen-to-COCO, COCO-to-YOLO, SAM3 annotation-overlay materialization, and SAM3
+  split writes cannot report success without their final metadata record.
+- Added regressions for dataset/Qwen/SAM3 metadata write failures and a
+  YOLO-to-COCO conversion whose `sam3_dataset.json` cannot be written.
+- Validation: `py_compile services/datasets.py localinferenceapi.py
+  tests/test_dataset_metadata_io.py`, focused metadata IO (`11 passed`),
+  affected dataset/Qwen/SAM3 backend bundle (`184 passed`), and the full pytest
+  suite (`1206 passed, 19 skipped`) passed. The restarted backend also passed
+  the live UI endpoint map check with no missing paths or method mismatches,
+  live OpenAPI sanity (`tested=144`, `failures=[]`), and
+  `/data_ingestion/capabilities` returned `local_salad` with MLX C-RADIO
+  available.

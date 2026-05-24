@@ -6,11 +6,14 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from PIL import Image
 
 from services.datasets import (
     _convert_coco_dataset_to_yolo_impl,
+    _convert_yolo_dataset_to_coco_impl,
     _load_qwen_dataset_metadata_impl,
     _persist_dataset_metadata_impl,
+    _persist_qwen_dataset_metadata_impl,
     _persist_sam3_dataset_metadata_impl,
     _prepare_output_file,
     _write_text_file,
@@ -135,6 +138,85 @@ def test_persist_sam3_dataset_metadata_replaces_symlink_without_target_write(
     assert not meta_path.is_symlink()
     assert json.loads(meta_path.read_text(encoding="utf-8"))["id"] == "sam3"
     assert outside.read_text(encoding="utf-8") == json.dumps({"id": "outside"})
+
+
+def test_persist_dataset_metadata_raises_when_final_path_is_unwritable(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / "dataset_meta.json").mkdir()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _persist_dataset_metadata_impl(
+            dataset_dir,
+            {"id": "dataset"},
+            meta_name="dataset_meta.json",
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "dataset_metadata_write_failed"
+
+
+def test_persist_dataset_metadata_can_suppress_read_time_write_failure(
+    tmp_path: Path,
+) -> None:
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / "dataset_meta.json").mkdir()
+
+    _persist_dataset_metadata_impl(
+        dataset_dir,
+        {"id": "dataset"},
+        meta_name="dataset_meta.json",
+        suppress_errors=True,
+    )
+
+
+def test_persist_sam3_dataset_metadata_raises_when_final_path_is_unwritable(
+    tmp_path: Path,
+) -> None:
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / "sam3_dataset.json").mkdir()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _persist_sam3_dataset_metadata_impl(dataset_dir, {"id": "sam3"})
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "sam3_dataset_metadata_write_failed"
+
+
+def test_persist_qwen_dataset_metadata_raises_qwen_detail_on_write_failure(
+    tmp_path: Path,
+) -> None:
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / "metadata.json").mkdir()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _persist_qwen_dataset_metadata_impl(dataset_dir, {"id": "qwen"})
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "qwen_dataset_metadata_write_failed"
+
+
+def test_convert_yolo_to_coco_fails_when_sam3_metadata_cannot_be_written(
+    tmp_path: Path,
+) -> None:
+    dataset_root = tmp_path / "dataset"
+    train_images = dataset_root / "train" / "images"
+    train_labels = dataset_root / "train" / "labels"
+    train_images.mkdir(parents=True)
+    train_labels.mkdir(parents=True)
+    Image.new("RGB", (16, 16), color="white").save(train_images / "img.jpg")
+    (train_labels / "img.txt").write_text("0 0.5 0.5 0.5 0.5\n", encoding="utf-8")
+    (dataset_root / "labelmap.txt").write_text("object\n", encoding="utf-8")
+    (dataset_root / "sam3_dataset.json").mkdir()
+
+    with pytest.raises(HTTPException) as exc_info:
+        _convert_yolo_dataset_to_coco_impl(dataset_root)
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "sam3_dataset_metadata_write_failed"
 
 
 def test_load_json_metadata_skips_symlink_escape(tmp_path: Path) -> None:

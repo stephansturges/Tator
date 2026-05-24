@@ -17,6 +17,7 @@ mutate, move, or remove user data to the backend guard and regression coverage.
 | Restore managed dataset | Moves trash entry back into library | Trash-id validation, target-id uniqueness, symlink rejection, metadata rollback on failure | `tests/test_dataset_linked_annotation_flows.py`, UI E2E |
 | Annotation snapshot/meta save | Writes backend overlay labels/text and metadata | Active-lock ownership, image existence checks, guarded overlay roots, atomic no-follow writes | `tests/test_dataset_linked_annotation_flows.py` |
 | Dataset glossary save | Writes canonical glossary into backend metadata | Guarded metadata root and strict metadata write | `tests/test_dataset_linked_annotation_flows.py`, `tests/test_glossary_library.py` |
+| Dataset conversion/materialization | Writes COCO sidecars plus SAM3/Qwen metadata for training/build views | Strict final metadata writes; read-time metadata backfills are best-effort only | `tests/test_dataset_metadata_io.py`, `tests/test_dataset_linked_annotation_flows.py` |
 
 ## Data Ingestion
 
@@ -32,4 +33,7 @@ mutate, move, or remove user data to the backend guard and regression coverage.
 Dataset Management should not report success for a library mutation unless the
 durable metadata record was actually written. Upload, register, and transient
 save paths now roll back their backend-created dataset directory if the metadata
-write fails, avoiding half-created library records.
+write fails, avoiding half-created library records. SAM3/Qwen dataset conversion
+and materialized training-view writes now also fail the mutation when final
+metadata cannot be written, while passive read/list metadata cleanup stays
+best-effort so existing datasets remain browseable.

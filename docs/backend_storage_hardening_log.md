@@ -131,3 +131,13 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Added regressions that assert nested symlinked output parents stay untouched.
 - Validation: `996 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Calibration Recipe Registry Roots
+
+- Rejected symlink components in recipe-registry cache roots, discovery roots,
+  registry roots, JSON/text output parents, and lock parents.
+- Moved registry writer and lock symlink checks ahead of parent creation.
+- Added regressions for nested symlinked cache parents, registry output
+  parents, text output parents, and discovery locks.
+- Validation: `1001 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

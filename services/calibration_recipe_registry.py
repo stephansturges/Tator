@@ -82,9 +82,23 @@ def discovery_runs_root(cache_root: Path) -> Path:
     return cache_root / "discovery_runs"
 
 
+def _path_has_symlink_component(path: Path) -> bool:
+    candidate = path if path.is_absolute() else path.absolute()
+    checks = [candidate]
+    checks.extend(candidate.parents)
+    for component in checks:
+        if component == component.parent:
+            continue
+        if component.is_symlink():
+            return True
+    return False
+
+
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> Path:
+    if _path_has_symlink_component(path.parent):
+        raise ValueError("recipe_registry_json_parent_symlink")
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.is_symlink():
+    if _path_has_symlink_component(path.parent):
         raise ValueError("recipe_registry_json_parent_symlink")
     parent_resolved = path.parent.resolve(strict=True)
     tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
@@ -118,8 +132,10 @@ def _safe_child_name(value: str, detail: str) -> str:
 
 
 def _write_text_within_parent(path: Path, text: str) -> Path:
+    if _path_has_symlink_component(path.parent):
+        raise ValueError("recipe_registry_text_parent_symlink")
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.is_symlink():
+    if _path_has_symlink_component(path.parent):
         raise ValueError("recipe_registry_text_parent_symlink")
     parent_resolved = path.parent.resolve(strict=True)
     if path.is_symlink():
@@ -135,17 +151,17 @@ def _write_text_within_parent(path: Path, text: str) -> Path:
 
 
 def _prepare_recipe_registry_root(cache_root: Path) -> Path:
-    if cache_root.is_symlink() or cache_root.parent.is_symlink():
+    if _path_has_symlink_component(cache_root):
         raise ValueError("recipe_registry_cache_root_symlink")
     cache_root.mkdir(parents=True, exist_ok=True)
-    if cache_root.is_symlink() or cache_root.parent.is_symlink():
+    if _path_has_symlink_component(cache_root):
         raise ValueError("recipe_registry_cache_root_symlink")
     cache_resolved = cache_root.resolve(strict=True)
     root = registry_root(cache_root)
-    if root.is_symlink():
+    if _path_has_symlink_component(root):
         raise ValueError("recipe_registry_root_symlink")
     root.mkdir(parents=True, exist_ok=True)
-    if root.is_symlink():
+    if _path_has_symlink_component(root):
         raise ValueError("recipe_registry_root_symlink")
     try:
         root_resolved = root.resolve(strict=True)
@@ -157,17 +173,17 @@ def _prepare_recipe_registry_root(cache_root: Path) -> Path:
 
 
 def _prepare_discovery_runs_root(cache_root: Path) -> Path:
-    if cache_root.is_symlink() or cache_root.parent.is_symlink():
+    if _path_has_symlink_component(cache_root):
         raise ValueError("recipe_discovery_cache_root_symlink")
     cache_root.mkdir(parents=True, exist_ok=True)
-    if cache_root.is_symlink() or cache_root.parent.is_symlink():
+    if _path_has_symlink_component(cache_root):
         raise ValueError("recipe_discovery_cache_root_symlink")
     cache_resolved = cache_root.resolve(strict=True)
     root = discovery_runs_root(cache_root)
-    if root.is_symlink():
+    if _path_has_symlink_component(root):
         raise ValueError("recipe_discovery_root_symlink")
     root.mkdir(parents=True, exist_ok=True)
-    if root.is_symlink():
+    if _path_has_symlink_component(root):
         raise ValueError("recipe_discovery_root_symlink")
     try:
         root_resolved = root.resolve(strict=True)
@@ -199,8 +215,10 @@ def _prepare_recipe_dir(root: Path, fingerprint: str) -> Path:
 
 @contextmanager
 def _exclusive_lock(lock_path: Path) -> Iterator[None]:
+    if _path_has_symlink_component(lock_path.parent):
+        raise ValueError("recipe_registry_lock_parent_symlink")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    if lock_path.parent.is_symlink():
+    if _path_has_symlink_component(lock_path.parent):
         raise ValueError("recipe_registry_lock_parent_symlink")
     parent_resolved = lock_path.parent.resolve(strict=True)
     if lock_path.is_symlink():
@@ -232,10 +250,10 @@ def discovery_lock(cache_root: Path, fingerprint: str) -> Iterator[None]:
 
 
 def load_registry(cache_root: Path) -> Dict[str, Any]:
-    if cache_root.is_symlink() or cache_root.parent.is_symlink():
+    if _path_has_symlink_component(cache_root):
         return {"version": CALIBRATION_RECIPE_REGISTRY_VERSION, "entries": {}}
     root = registry_root(cache_root)
-    if root.is_symlink():
+    if _path_has_symlink_component(root):
         return {"version": CALIBRATION_RECIPE_REGISTRY_VERSION, "entries": {}}
     try:
         cache_resolved = cache_root.resolve(strict=False)

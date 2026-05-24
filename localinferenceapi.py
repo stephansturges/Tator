@@ -9185,10 +9185,65 @@ def _save_clip_head_artifacts(
     min_prob: float,
     margin: float,
 ) -> None:
+    def _prepare_clip_head_dir() -> Path:
+        try:
+            if _storage_path_has_symlink_component(recipe_dir):
+                raise ValueError("recipe directory has a symlink component")
+            recipe_dir.mkdir(parents=True, exist_ok=True)
+            if _storage_path_has_symlink_component(recipe_dir) or not recipe_dir.is_dir():
+                raise ValueError("recipe path is not a safe directory")
+            recipe_root = recipe_dir.resolve(strict=True)
+            raw_clip_dir = recipe_dir / "clip_head"
+            if _storage_path_has_symlink_component(raw_clip_dir):
+                raise ValueError("clip head directory has a symlink component")
+            raw_clip_dir.mkdir(parents=True, exist_ok=True)
+            if _storage_path_has_symlink_component(raw_clip_dir) or not raw_clip_dir.is_dir():
+                raise ValueError("clip head path is not a safe directory")
+            clip_root = raw_clip_dir.resolve(strict=True)
+            if not _path_is_within_root_impl(clip_root, recipe_root):
+                raise ValueError("clip head directory escapes recipe root")
+            return raw_clip_dir
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail="agent_recipe_clip_head_path_invalid",
+            ) from exc
+
+    def _prepare_clip_head_file(path: Path, clip_root: Path) -> None:
+        try:
+            if _storage_path_has_symlink_component(path.parent):
+                raise ValueError("clip head artifact parent has a symlink component")
+            if path.is_symlink():
+                path.unlink(missing_ok=True)
+            elif path.exists() and path.is_dir():
+                raise ValueError("clip head artifact is a directory")
+            target = path.resolve(strict=False)
+            if not _path_is_within_root_impl(target, clip_root):
+                raise ValueError("clip head artifact escapes clip root")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail="agent_recipe_clip_head_path_invalid",
+            ) from exc
+
     clip_dir = recipe_dir / "clip_head"
-    clip_dir.mkdir(parents=True, exist_ok=True)
+    clip_dir = _prepare_clip_head_dir()
+    clip_root = clip_dir.resolve(strict=True)
     head_path = clip_dir / "head.npz"
-    np.savez(head_path, head=np.array([head], dtype=object))
+    _prepare_clip_head_file(head_path, clip_root)
+    tmp_head_path = clip_dir / f".head.npz.{uuid.uuid4().hex}.tmp"
+    _prepare_clip_head_file(tmp_head_path, clip_root)
+    try:
+        with tmp_head_path.open("wb") as handle:
+            np.savez(handle, head=np.array([head], dtype=object))
+        os.replace(tmp_head_path, head_path)
+    finally:
+        if tmp_head_path.exists() or tmp_head_path.is_symlink():
+            tmp_head_path.unlink(missing_ok=True)
     meta = {
         "min_prob": float(min_prob),
         "margin": float(margin),
@@ -9198,7 +9253,16 @@ def _save_clip_head_artifacts(
         "proba_mode": head.get("proba_mode"),
         "background_margin": head.get("background_margin"),
     }
-    (clip_dir / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=True))
+    meta_path = clip_dir / "meta.json"
+    _prepare_clip_head_file(meta_path, clip_root)
+    tmp_meta_path = clip_dir / f".meta.json.{uuid.uuid4().hex}.tmp"
+    _prepare_clip_head_file(tmp_meta_path, clip_root)
+    try:
+        tmp_meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=True), encoding="utf-8")
+        os.replace(tmp_meta_path, meta_path)
+    finally:
+        if tmp_meta_path.exists() or tmp_meta_path.is_symlink():
+            tmp_meta_path.unlink(missing_ok=True)
 
 
 def _load_clip_head_artifacts(

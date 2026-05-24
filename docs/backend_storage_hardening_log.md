@@ -600,3 +600,20 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1084 passed, 17 skipped`; focused linked dataset/glossary/path
   coverage, the full pytest suite, and live endpoint sanity checks passed
   against the restarted backend.
+
+## 2026-05-24: Agent Recipe CLIP-Head Artifact Guards
+
+- Hardened agent-recipe persistence so the per-recipe directory is prepared
+  through the guarded recipe-dir helper before crops, JSON, ZIP, or CLIP-head
+  artifacts are written.
+- Routed imported CLIP-head override files through guarded output-file
+  preparation before writing `clip_head/head.npz` or `clip_head/meta.json`.
+- Hardened saved CLIP-head artifact export from trained classifier heads so
+  symlinked `clip_head` directories and artifact leaves are rejected or safely
+  replaced before atomic NPZ/JSON writes.
+- Added regressions proving a pre-seeded recipe-dir symlink and a symlinked
+  `clip_head` directory cannot receive recipe artifacts or mutate external
+  targets.
+- Validation: `1086 passed, 17 skipped`; focused agent recipe/import/export
+  coverage, module compile checks, the full pytest suite, and live endpoint
+  sanity checks passed against the restarted backend.

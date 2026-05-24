@@ -588,7 +588,7 @@ the backend are available.
 <details>
 <summary>Update tracking</summary>
 
-Latest full backend validation: `1084 passed, 17 skipped`.
+Latest full backend validation: `1086 passed, 17 skipped`.
 Detailed maintenance notes live in
 [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 

@@ -7,6 +7,8 @@ import numpy as np
 import pytest
 from fastapi import HTTPException
 
+import localinferenceapi
+import services.prepass_recipes as prepass_recipes
 from services.prepass_recipes import (
     _collect_recipe_assets_impl,
     _delete_agent_recipe_impl,
@@ -216,6 +218,79 @@ def test_persist_agent_recipe_preserves_numpy_clip_head_classes(tmp_path):
 
     assert saved["recipe"]["clip_head"]["classes"] == ["person", "vehicle"]
     assert saved["recipe"]["clip_head"]["min_prob"] == 0.6
+
+
+def test_persist_agent_recipe_rejects_symlinked_recipe_dir_without_write(
+    tmp_path, monkeypatch
+) -> None:
+    class FixedUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    outside = tmp_path / "outside_recipe"
+    outside.mkdir()
+    recipe_root = tmp_path / "recipes"
+    recipe_root.mkdir()
+    try:
+        (recipe_root / "ar_deadbeef").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+    monkeypatch.setattr(prepass_recipes.uuid, "uuid4", lambda: FixedUUID())
+
+    with pytest.raises(HTTPException) as exc_info:
+        _persist_agent_recipe_impl(
+            dataset_id=None,
+            class_id=None,
+            class_name="person",
+            label="person recipe",
+            recipe={"text_prompts": ["person"]},
+            meta_overrides={
+                "dataset_signature": "dataset-signature",
+                "labelmap_hash": "labelmap-hash",
+                "labelmap": ["person"],
+            },
+            recipes_root=recipe_root,
+            max_clip_head_bytes=1024 * 1024,
+            max_crops=10,
+            max_crop_bytes=1024 * 1024,
+            resolve_dataset_fn=lambda _dataset_id: tmp_path,
+            load_coco_index_fn=lambda _root: ({"categories": []}, {}, {}),
+            compute_dataset_signature_fn=lambda *_args: "dataset-signature",
+            compute_labelmap_hash_fn=lambda _categories: ("labelmap-hash", ["person"]),
+            resolve_clip_classifier_fn=lambda _path: tmp_path / "classifier.pkl",
+            load_clip_head_fn=lambda _path: None,
+            save_clip_head_artifacts_fn=lambda **_kwargs: None,
+            load_clip_head_artifacts_fn=lambda **_kwargs: None,
+            save_exemplar_crop_fn=lambda **_kwargs: None,
+            sanitize_prompts_fn=lambda prompts: prompts,
+            path_is_within_root_fn=_within_root,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prepass_recipe_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
+def test_save_clip_head_artifacts_rejects_symlinked_clip_dir_without_write(tmp_path) -> None:
+    recipe_dir = tmp_path / "recipe"
+    recipe_dir.mkdir()
+    outside = tmp_path / "outside_clip_head"
+    outside.mkdir()
+    try:
+        (recipe_dir / "clip_head").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        localinferenceapi._save_clip_head_artifacts(
+            recipe_dir=recipe_dir,
+            head={"classes": np.asarray(["person"], dtype=object), "clip_model": "ViT-B/32"},
+            min_prob=0.5,
+            margin=0.0,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_recipe_clip_head_path_invalid"
+    assert list(outside.iterdir()) == []
 
 
 def test_load_prepass_recipe_meta_supports_legacy_recipe_json(tmp_path):

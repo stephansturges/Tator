@@ -105,12 +105,12 @@ def _prepare_output_file(path: Path) -> None:
 
 
 def _prepare_recipe_dir(path: Path) -> Path:
-    if _path_has_symlink_component(path):
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
-    path.mkdir(parents=True, exist_ok=True)
-    if _path_has_symlink_component(path) or not path.is_dir():
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     try:
+        if _path_has_symlink_component(path):
+            raise ValueError("recipe directory has a symlink component")
+        path.mkdir(parents=True, exist_ok=True)
+        if _path_has_symlink_component(path) or not path.is_dir():
+            raise ValueError("recipe path is not a safe directory")
         return path.resolve(strict=True)
     except Exception as exc:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid") from exc
@@ -915,6 +915,7 @@ def _persist_agent_recipe_impl(
     recipe_dir = root / recipe_id
     cleanup_recipe_dir = True
     try:
+        recipe_dir = _prepare_recipe_dir(recipe_dir)
         crops_dir = recipe_dir / "crops"
         crops_dir.mkdir(parents=True, exist_ok=True)
         # Optional portable CLIP head artifacts (embedded into the recipe package).
@@ -939,8 +940,9 @@ def _persist_agent_recipe_impl(
             head_meta_bytes = clip_head_overrides.get("clip_head/meta.json") or clip_head_overrides.get("meta.json")
         if head_npz_bytes:
             try:
-                clip_dir.mkdir(parents=True, exist_ok=True)
-                (clip_dir / "head.npz").write_bytes(head_npz_bytes)
+                head_path = clip_dir / "head.npz"
+                _prepare_output_file(head_path)
+                head_path.write_bytes(head_npz_bytes)
                 clip_head_written = True
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
@@ -949,8 +951,9 @@ def _persist_agent_recipe_impl(
                 ) from exc
         if head_meta_bytes:
             try:
-                clip_dir.mkdir(parents=True, exist_ok=True)
-                (clip_dir / "meta.json").write_bytes(head_meta_bytes)
+                meta_path = clip_dir / "meta.json"
+                _prepare_output_file(meta_path)
+                meta_path.write_bytes(head_meta_bytes)
                 clip_head_written = True
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
@@ -1297,15 +1300,20 @@ def _persist_agent_recipe_impl(
                 "summary": recipe_body.get("summary") or recipe.get("summary"),
             },
         }
-        path = (root / f"{recipe_id}.json").resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path = root / f"{recipe_id}.json"
+        _prepare_output_file(raw_path)
+        path = raw_path.resolve(strict=False)
         if not path_is_within_root_fn(path, root):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
         try:
             with path.open("w", encoding="utf-8") as fp:
                 json.dump(payload, fp, ensure_ascii=False, indent=2)
             # Persist a portable zip alongside the JSON for download.
-            zip_path = (root / f"{recipe_id}.zip").resolve()
+            zip_raw = root / f"{recipe_id}.zip"
+            _prepare_output_file(zip_raw)
+            zip_path = zip_raw.resolve(strict=False)
+            if not path_is_within_root_fn(zip_path, root):
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_path_invalid")
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr("recipe.json", json.dumps(payload, ensure_ascii=False, indent=2))
                 if crops_dir.exists():

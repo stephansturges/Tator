@@ -643,3 +643,15 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `1088 passed, 17 skipped`; focused backend path/job-start
   coverage, module compile checks, the full pytest suite, and live endpoint
   sanity checks passed against the restarted backend.
+
+## 2026-05-24: Glossary Library Atomic Saves
+
+- Switched saved glossary-library entries from direct final-path JSON writes to
+  guarded temp-file writes followed by atomic replace.
+- Preserved replacement of a symlinked glossary leaf without writing through to
+  its target, while keeping root and parent symlink checks intact.
+- Added a regression that forces a mid-write JSON failure and proves no partial
+  glossary file or temp artifact remains.
+- Validation: `1089 passed, 17 skipped`; focused glossary/path coverage, module
+  compile checks, the full pytest suite, and live endpoint sanity checks passed
+  against the restarted backend.

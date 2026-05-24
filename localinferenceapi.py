@@ -20246,16 +20246,49 @@ def get_glossary_entry(name: str):
     return {"name": data.get("name") or safe, "glossary": glossary or ""}
 
 
+def _write_glossary_entry_atomic(path: Path, safe: str, payload: Dict[str, Any]) -> None:
+    root = _glossary_library_root(create=True)
+    try:
+        if _storage_path_has_symlink_component(path.parent):
+            raise ValueError("glossary parent has a symlink component")
+        parent = path.parent.resolve(strict=False)
+        if parent != root or not _path_is_within_root_impl(parent, root):
+            raise ValueError("glossary parent escapes root")
+        if not path.is_symlink():
+            target = path.resolve(strict=False)
+            if not _path_is_within_root_impl(target, root):
+                raise ValueError("glossary target escapes root")
+        if path.exists() and not path.is_file() and not path.is_symlink():
+            raise ValueError("glossary target is not a file")
+        tmp_path = root / f".{safe}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        if _storage_path_has_symlink_component(tmp_path.parent) or tmp_path.is_symlink():
+            raise ValueError("glossary temp path invalid")
+        tmp_target = tmp_path.resolve(strict=False)
+        if not _path_is_within_root_impl(tmp_target, root):
+            raise ValueError("glossary temp path escapes root")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_path_invalid") from exc
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"glossary_save_failed:{exc}",
+        ) from exc
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+
+
 def save_glossary_entry(name: str, glossary: str):
     _glossary_library_root(create=True)
-    path, _safe = _glossary_library_path(name)
-    if path.is_symlink():
-        path.unlink(missing_ok=True)
-    elif path.exists() and not path.is_file():
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="glossary_path_invalid")
+    path, safe = _glossary_library_path(name)
     payload = {"name": name, "glossary": glossary}
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    _write_glossary_entry_atomic(path, safe, payload)
     return {"status": "saved", "name": name}
 
 

@@ -81,6 +81,31 @@ def test_glossary_library_save_replaces_symlink_without_target_write(
     assert json.loads(outside.read_text(encoding="utf-8"))["glossary"] == "external"
 
 
+def test_glossary_library_save_failure_does_not_leave_partial_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FixedUUID:
+        hex = "deadbeef000000000000000000000000"
+
+    def partial_dump(_payload, handle, **_kwargs) -> None:
+        handle.write("{partial")
+        raise RuntimeError("serializer failed")
+
+    root = tmp_path / "glossaries"
+    monkeypatch.setattr(api, "GLOSSARY_LIBRARY_ROOT", root)
+    monkeypatch.setattr(api.uuid, "uuid4", lambda: FixedUUID())
+    monkeypatch.setattr(api.json, "dump", partial_dump)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.save_glossary_entry("Object class", "local")
+
+    assert exc_info.value.status_code == 500
+    assert str(exc_info.value.detail).startswith("glossary_save_failed:")
+    assert not (root / "Object-class.json").exists()
+    assert list(root.iterdir()) == []
+
+
 def test_glossary_library_list_skips_symlink_escape(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

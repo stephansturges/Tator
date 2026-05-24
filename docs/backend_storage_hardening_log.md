@@ -1332,3 +1332,17 @@ preserving the exact validation story for storage and artifact-write fixes.
   tools/check_ui_endpoints.py`, `git diff --check`, live
   `tools/check_ui_endpoints.py http://127.0.0.1:8000` with no missing paths or
   method mismatches, and the full pytest suite passed.
+
+## 2026-05-24: Validation Cleanup Handles Dataset Trash
+
+- Updated the GPU validation cleanup runner to consume `trash_path` from
+  generated dataset deletes and remove only run-scoped trash entries.
+- Updated the UI contract runner to parse dataset delete JSON and purge only
+  its own `ui_contract_upload_*` trash entries under local `uploads/`.
+- Added tool-level regressions proving generated validation trash is removed
+  while non-contract or non-run-scoped trash is preserved.
+- Validation: `1193 passed, 17 skipped`; focused cleanup/tooling coverage
+  (`6 passed`), `py_compile tools/run_gpu_validation_suite.py
+  tools/run_ui_contract_tests.py tools/check_ui_endpoints.py`,
+  `git diff --check`, live UI endpoint check with no missing paths or method
+  mismatches, and the full pytest suite passed.

@@ -1321,6 +1321,23 @@ class GpuValidationSuite:
         except Exception:
             skipped.append(str(rp))
 
+    def _cleanup_dataset_trash_payload(
+        self,
+        body: Any,
+        dataset_id: str,
+        removed: List[str],
+        skipped: List[str],
+    ) -> None:
+        if not isinstance(body, dict) or body.get("status") != "trashed":
+            return
+        trash_path = str(body.get("trash_path") or "").strip()
+        if not trash_path:
+            return
+        if self.run_id not in dataset_id and self.run_id not in trash_path:
+            skipped.append(trash_path)
+            return
+        self._safe_remove_path(Path(trash_path), removed, skipped)
+
     def cleanup(self) -> Dict[str, Any]:
         assert self.ctx is not None
         ctx = self.ctx
@@ -1331,6 +1348,8 @@ class GpuValidationSuite:
         for dataset_id in list(dict.fromkeys(ctx.created_dataset_ids)):
             status, body, _elapsed, err = self._request("DELETE", f"/datasets/{dataset_id}")
             ok = err is None and status == 200
+            if ok:
+                self._cleanup_dataset_trash_payload(body, dataset_id, removed, skipped)
             self._emit_event(
                 {
                     "type": "cleanup_dataset",
@@ -1349,7 +1368,9 @@ class GpuValidationSuite:
                     continue
                 dataset_id = str(entry.get("id") or "")
                 if self.run_id in dataset_id:
-                    self._request("DELETE", f"/datasets/{dataset_id}")
+                    status, body, _elapsed, err = self._request("DELETE", f"/datasets/{dataset_id}")
+                    if err is None and status == 200:
+                        self._cleanup_dataset_trash_payload(body, dataset_id, removed, skipped)
 
         # 2) Delete run-scoped run artifacts by name prefix where APIs exist.
         # YOLO runs

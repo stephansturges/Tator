@@ -5,6 +5,7 @@ import time
 import urllib.request
 from urllib.error import HTTPError, URLError
 from pathlib import Path
+import shutil
 import tempfile
 import zipfile
 import base64
@@ -78,6 +79,31 @@ def _safe_allow(label, fn, ok_statuses=None):
         return {"ok": False, "error": f"URL error: {exc}"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+def _delete_dataset(url: str):
+    req = urllib.request.Request(url, method="DELETE")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        text = resp.read().decode("utf-8")
+        return json.loads(text) if text else {}
+
+
+def _cleanup_contract_dataset_trash(delete_payload, dataset_id: str) -> None:
+    if not isinstance(delete_payload, dict) or delete_payload.get("status") != "trashed":
+        return
+    if not str(dataset_id or "").startswith("ui_contract_upload_"):
+        return
+    trash_path = str(delete_payload.get("trash_path") or "").strip()
+    if not trash_path:
+        return
+    path = Path(trash_path).resolve()
+    repo_uploads = (Path.cwd() / "uploads").resolve()
+    if repo_uploads not in path.parents:
+        return
+    if dataset_id not in str(path):
+        return
+    if path.exists() and path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _backend_reachable(base: str, timeout: int = 20) -> bool:
@@ -360,10 +386,13 @@ def main() -> int:
         if uploaded_id:
             results["DELETE /datasets/{uploaded}"] = _safe(
                 "dataset_delete",
-                lambda: urllib.request.urlopen(
-                    urllib.request.Request(base + f"/datasets/{uploaded_id}", method="DELETE")
-                ).read().decode("utf-8"),
+                lambda: _delete_dataset(base + f"/datasets/{uploaded_id}"),
             )
+            if results["DELETE /datasets/{uploaded}"].get("ok"):
+                _cleanup_contract_dataset_trash(
+                    results["DELETE /datasets/{uploaded}"].get("result"),
+                    uploaded_id,
+                )
     except Exception as exc:
         results["POST /datasets/upload"] = {"ok": False, "error": str(exc)}
 

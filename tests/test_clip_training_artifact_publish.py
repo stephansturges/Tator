@@ -49,6 +49,25 @@ def test_link_or_copy_file_copies_when_hardlink_unavailable(tmp_path, monkeypatc
     assert not dest.is_symlink()
 
 
+def test_link_or_copy_file_rejects_nested_symlinked_parent_before_mkdir(tmp_path):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"payload")
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        _link_or_copy_file(source, linked_parent / "nested" / "artifacts" / "dest.bin")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "invalid_relative_path"
+    assert list(outside.iterdir()) == []
+
+
 def test_logistic_regression_constructor_matches_installed_sklearn():
     clf = clip_training._make_logistic_regression(
         random_state=0,
@@ -280,6 +299,25 @@ def test_copy_helpers_replace_symlink_destination_without_target_write(tmp_path,
     assert outside.read_bytes() == b"external"
 
 
+def test_api_copy_helper_rejects_nested_symlinked_parent_before_mkdir(tmp_path):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"payload")
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        _api_copy2_if_different(source, linked_parent / "nested" / "artifacts" / "dest.bin")
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "artifact_path_invalid"
+    assert list(outside.iterdir()) == []
+
+
 def test_startup_copy_helper_replaces_symlink_destination_without_target_write(tmp_path):
     source = tmp_path / "source.bin"
     dest = tmp_path / "dest.bin"
@@ -293,6 +331,22 @@ def test_startup_copy_helper_replaces_symlink_destination_without_target_write(t
     assert dest.read_bytes() == b"payload"
     assert not dest.is_symlink()
     assert outside.read_bytes() == b"external"
+
+
+def test_startup_copy_helper_skips_nested_symlinked_parent_before_mkdir(tmp_path):
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"payload")
+    outside = tmp_path / "outside_parent"
+    outside.mkdir()
+    linked_parent = tmp_path / "linked_parent"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    _startup_copy2_if_different(source, linked_parent / "nested" / "artifacts" / "dest.bin")
+
+    assert list(outside.iterdir()) == []
 
 
 def test_startup_copy_helper_replaces_source_target_symlink(tmp_path):

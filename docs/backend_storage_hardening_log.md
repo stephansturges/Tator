@@ -180,3 +180,14 @@ preserving the exact validation story for storage and artifact-write fixes.
   materialization root.
 - Validation: `1012 passed, 17 skipped`; live endpoint map/method checks and
   OpenAPI sanity checks passed against the restarted backend.
+
+## 2026-05-24: Shared Local Artifact Copy Helpers
+
+- Rejected symlink components in shared artifact copy destination parents before
+  creating parent directories or writing copied artifacts.
+- `link_or_copy` now rejects nested symlinked destination parents; startup
+  artifact mirroring skips them rather than writing through them during import.
+- Added regressions for nested symlinked API copy, link-or-copy, and startup
+  copy parents.
+- Validation: `1015 passed, 17 skipped`; live endpoint map/method checks and
+  OpenAPI sanity checks passed against the restarted backend.

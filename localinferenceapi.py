@@ -2918,7 +2918,13 @@ def _startup_copy2_if_different(src: Path, dst: Path) -> None:
         logger.warning("Removed startup artifact symlink before copy: %s", dst)
     elif src_resolved == _startup_path_identity(dst):
         return
+    if _storage_path_has_symlink_component(dst.parent):
+        logger.warning("Skipped startup artifact copy through symlinked parent: %s", dst)
+        return
     dst.parent.mkdir(parents=True, exist_ok=True)
+    if _storage_path_has_symlink_component(dst.parent):
+        logger.warning("Skipped startup artifact copy through symlinked parent: %s", dst)
+        return
     shutil.copy2(src_resolved, dst)
 
 
@@ -14856,16 +14862,24 @@ def _copy2_if_different(src: Path, dest: Path) -> None:
     src_resolved = src.resolve()
     if src_resolved == _path_identity(dest):
         return
+    if _storage_path_has_symlink_component(dest.parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="artifact_path_invalid")
     if dest.is_symlink():
         dest.unlink(missing_ok=True)
         logger.warning("Removed artifact symlink before copy: %s", dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if _storage_path_has_symlink_component(dest.parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="artifact_path_invalid")
     shutil.copy2(src_resolved, dest)
 
 
 def _link_or_copy_file(src: Path, dest: Path, *, overwrite: bool = False) -> None:
     src_resolved = src.resolve()
+    if _storage_path_has_symlink_component(dest.parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
     dest.parent.mkdir(parents=True, exist_ok=True)
+    if _storage_path_has_symlink_component(dest.parent):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="invalid_relative_path")
     if src_resolved == _path_identity(dest):
         return
     if dest.exists() or dest.is_symlink():

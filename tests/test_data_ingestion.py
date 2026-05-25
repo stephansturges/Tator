@@ -278,6 +278,8 @@ def _register_completed_ingestion_job(api_module, job_id: str, job_dir: Path, im
                 "width": 16,
                 "height": 10,
                 "image_path": str(image_path),
+                "source_path": str(image_path),
+                "resolved_path": str(image_path),
             },
             {
                 "item_id": "item_skip",
@@ -292,6 +294,7 @@ def _register_completed_ingestion_job(api_module, job_id: str, job_dir: Path, im
                 "width": 16,
                 "height": 10,
                 "image_path": str(image_path),
+                "path": str(image_path),
             },
         ],
         "reference_items": [
@@ -304,6 +307,7 @@ def _register_completed_ingestion_job(api_module, job_id: str, job_dir: Path, im
                 "width": 20,
                 "height": 18,
                 "has_thumbnail": True,
+                "image_path": str(image_path),
             }
         ],
     }
@@ -335,6 +339,9 @@ def test_data_ingestion_result_hides_source_paths_and_exposes_candidate_thumbnai
 
     assert public_result["items"][0]["thumbnail_url"] == "/data_ingestion/jobs/di_public_result/candidate_thumbnail/item_keep"
     assert "image_path" not in public_result["items"][0]
+    assert "source_path" not in public_result["items"][0]
+    assert "resolved_path" not in public_result["items"][0]
+    assert "path" not in public_result["items"][1]
     assert str(tmp_path) not in json.dumps(public_result)
 
 
@@ -375,6 +382,32 @@ def test_data_ingestion_reference_thumbnail_uses_cached_job_artifact(tmp_path, m
     assert job_dir in thumb_path.parents
     with Image.open(thumb_path) as img:
         assert img.size == (20, 18)
+
+
+def test_data_ingestion_reference_thumbnail_lazily_generates_from_internal_path(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_reference_thumb_lazy"
+    media_dir = job_dir / "media" / "references"
+    media_dir.mkdir(parents=True)
+    image_path = media_dir / "reference_a.jpg"
+    Image.new("RGB", (900, 300), (20, 100, 180)).save(image_path)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_reference_thumb_lazy", job_dir, image_path)
+    cached_thumb, _thumb_dir = api._data_ingestion_thumbnail_cache_path(
+        job_dir,
+        "reference_thumbnails",
+        "reference_000000",
+    )
+    cached_thumb.unlink()
+
+    response = api.get_data_ingestion_reference_thumbnail("di_reference_thumb_lazy", "reference_000000")
+
+    thumb_path = Path(response.path)
+    assert thumb_path == cached_thumb
+    assert thumb_path.exists()
+    with Image.open(thumb_path) as img:
+        assert max(img.size) == api.DATA_INGESTION_REFERENCE_THUMB_SIZE
 
 
 def test_data_ingestion_distribution_projects_candidates_without_paths(tmp_path, monkeypatch):

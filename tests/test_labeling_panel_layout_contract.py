@@ -689,7 +689,10 @@ def test_class_split_explorer_panel_contract():
     assert "function renderClassSplitReport" in js
     assert "function runClassSplitDatasetAnalysis" in js
     assert "computeDatasetImageValueAnalysis(points)" in js
+    assert "function isClassSplitDatasetAnalysisPanelOpen" in js
     assert "function renderClassSplitDatasetAnalysisGraph" in js
+    assert 'classSplitElements.datasetAnalysisPanel.addEventListener("toggle"' in js
+    assert "renderClassSplitDatasetAnalysisGraph(classSplitState.datasetAnalysis, { force: true })" in js
     assert "classSplitDatasetAnalysisHoverPreview" in js
     assert "dataset_image_value_score" in js
     assert "scheduleAnnotationDiversityMetricRefresh();" in js

@@ -36837,6 +36837,7 @@ async function cancelRfDetrTrainingJobRequest() {
             const panel = classSplitElements.datasetAnalysisPanel || document.getElementById("classSplitDatasetAnalysisPanel");
             if (panel) {
                 panel.open = true;
+                renderClassSplitDatasetAnalysisGraph(classSplitState.datasetAnalysis, { force: true });
             }
             const setupTarget = document.getElementById("classSplitTitle")?.closest(".class-split-panel") || classSplitElements.runButton || panel;
             if (setupTarget) {
@@ -38377,123 +38378,130 @@ async function cancelRfDetrTrainingJobRequest() {
         updateClassSplitBulkClassOptions();
     }
 
-	    function clearClassSplitBulkSelection({ render = false } = {}) {
-	        classSplitState.lassoPointIds = new Set();
-	        renderClassSplitBulkPanel();
-	        if (render) {
-	            renderClassSplitPlot();
-	        }
-	    }
+    function clearClassSplitBulkSelection({ render = false } = {}) {
+        classSplitState.lassoPointIds = new Set();
+        renderClassSplitBulkPanel();
+        if (render) {
+            renderClassSplitPlot();
+        }
+    }
 
-	    function classSplitHasAllClassResult() {
-	        const scope = String(classSplitState.result?.summary?.analysis_scope || classSplitState.lastRequest?.analysis_scope || "");
-	        return scope === "all_classes";
-	    }
+    function classSplitHasAllClassResult() {
+        const scope = String(classSplitState.result?.summary?.analysis_scope || classSplitState.lastRequest?.analysis_scope || "");
+        return scope === "all_classes";
+    }
 
-	    function clearClassSplitDatasetAnalysis({ render = false } = {}) {
-	        classSplitState.datasetAnalysis = null;
-	        (Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : []).forEach((point) => {
-	            delete point.dataset_image_value_score;
-	            delete point.dataset_image_value_rank;
-	        });
-	        if (render) {
-	            renderClassSplitDatasetAnalysis();
-	        }
-	    }
+    function isClassSplitDatasetAnalysisPanelOpen() {
+        return !!classSplitElements.datasetAnalysisPanel?.open;
+    }
 
-	    function refreshClassSplitDatasetAnalysisControls() {
-	        const hasAllClassResult = classSplitHasAllClassResult();
-	        setButtonDisabled(classSplitElements.datasetAnalysisRun, classSplitState.active || !hasAllClassResult);
-	    }
+    function clearClassSplitDatasetAnalysis({ render = false } = {}) {
+        classSplitState.datasetAnalysis = null;
+        (Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : []).forEach((point) => {
+            delete point.dataset_image_value_score;
+            delete point.dataset_image_value_rank;
+        });
+        if (render) {
+            renderClassSplitDatasetAnalysis();
+        }
+    }
 
-	    function applyClassSplitDatasetAnalysisToPoints(analysis) {
-	        (Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : []).forEach((point) => {
-	            delete point.dataset_image_value_score;
-	            delete point.dataset_image_value_rank;
-	        });
-	        (Array.isArray(analysis?.items) ? analysis.items : []).forEach((item, index) => {
-	            const score = Number(item.image_value_score);
-	            (Array.isArray(item.point_ids) ? item.point_ids : []).forEach((pointId) => {
-	                const point = getClassSplitPointById(pointId);
-	                if (!point) {
-	                    return;
-	                }
-	                point.dataset_image_value_score = Number.isFinite(score) ? score : 0;
-	                point.dataset_image_value_rank = index + 1;
-	            });
-	        });
-	    }
+    function refreshClassSplitDatasetAnalysisControls() {
+        const hasAllClassResult = classSplitHasAllClassResult();
+        setButtonDisabled(classSplitElements.datasetAnalysisRun, classSplitState.active || !hasAllClassResult);
+    }
 
-	    function getClassSplitDatasetHoverPreview() {
-	        let preview = document.getElementById("classSplitDatasetAnalysisHoverPreview");
-	        if (!preview) {
-	            preview = document.createElement("div");
-	            preview.id = "classSplitDatasetAnalysisHoverPreview";
-	            preview.className = "class-split-dataset-hover-preview";
-	            preview.hidden = true;
-	            preview.innerHTML = `<img alt="Representative crop preview"><span></span>`;
-	            document.body.appendChild(preview);
-	        }
-	        return preview;
-	    }
+    function applyClassSplitDatasetAnalysisToPoints(analysis) {
+        (Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : []).forEach((point) => {
+            delete point.dataset_image_value_score;
+            delete point.dataset_image_value_rank;
+        });
+        (Array.isArray(analysis?.items) ? analysis.items : []).forEach((item, index) => {
+            const score = Number(item.image_value_score);
+            (Array.isArray(item.point_ids) ? item.point_ids : []).forEach((pointId) => {
+                const point = getClassSplitPointById(pointId);
+                if (!point) {
+                    return;
+                }
+                point.dataset_image_value_score = Number.isFinite(score) ? score : 0;
+                point.dataset_image_value_rank = index + 1;
+            });
+        });
+    }
 
-	    function moveClassSplitDatasetHoverPreview(event) {
-	        const preview = document.getElementById("classSplitDatasetAnalysisHoverPreview");
-	        if (!preview || preview.hidden) {
-	            return;
-	        }
-	        const gap = 18;
-	        const rect = preview.getBoundingClientRect();
-	        let left = event.clientX + gap;
-	        let top = event.clientY + gap;
-	        if (left + rect.width > window.innerWidth - gap) {
-	            left = Math.max(gap, event.clientX - rect.width - gap);
-	        }
-	        if (top + rect.height > window.innerHeight - gap) {
-	            top = Math.max(gap, window.innerHeight - rect.height - gap);
-	        }
-	        preview.style.left = `${Math.round(left)}px`;
-	        preview.style.top = `${Math.round(top)}px`;
-	    }
+    function getClassSplitDatasetHoverPreview() {
+        let preview = document.getElementById("classSplitDatasetAnalysisHoverPreview");
+        if (!preview) {
+            preview = document.createElement("div");
+            preview.id = "classSplitDatasetAnalysisHoverPreview";
+            preview.className = "class-split-dataset-hover-preview";
+            preview.hidden = true;
+            preview.innerHTML = `<img alt="Representative crop preview"><span></span>`;
+            document.body.appendChild(preview);
+        }
+        return preview;
+    }
 
-	    function showClassSplitDatasetHoverPreview(event, previewUrl, label) {
-	        if (!previewUrl) {
-	            return;
-	        }
-	        const preview = getClassSplitDatasetHoverPreview();
-	        const img = preview.querySelector("img");
-	        const caption = preview.querySelector("span");
-	        if (img && img.getAttribute("src") !== previewUrl) {
-	            img.setAttribute("src", previewUrl);
-	        }
-	        if (caption) {
-	            caption.textContent = label || "";
-	        }
-	        preview.hidden = false;
-	        moveClassSplitDatasetHoverPreview(event);
-	    }
+    function moveClassSplitDatasetHoverPreview(event) {
+        const preview = document.getElementById("classSplitDatasetAnalysisHoverPreview");
+        if (!preview || preview.hidden) {
+            return;
+        }
+        const gap = 18;
+        const rect = preview.getBoundingClientRect();
+        let left = event.clientX + gap;
+        let top = event.clientY + gap;
+        if (left + rect.width > window.innerWidth - gap) {
+            left = Math.max(gap, event.clientX - rect.width - gap);
+        }
+        if (top + rect.height > window.innerHeight - gap) {
+            top = Math.max(gap, window.innerHeight - rect.height - gap);
+        }
+        preview.style.left = `${Math.round(left)}px`;
+        preview.style.top = `${Math.round(top)}px`;
+    }
 
-	    function hideClassSplitDatasetHoverPreview() {
-	        const preview = document.getElementById("classSplitDatasetAnalysisHoverPreview");
-	        if (preview) {
-	            preview.hidden = true;
-	        }
-	    }
+    function showClassSplitDatasetHoverPreview(event, previewUrl, label) {
+        if (!previewUrl) {
+            return;
+        }
+        const preview = getClassSplitDatasetHoverPreview();
+        const img = preview.querySelector("img");
+        const caption = preview.querySelector("span");
+        if (img && img.getAttribute("src") !== previewUrl) {
+            img.setAttribute("src", previewUrl);
+        }
+        if (caption) {
+            caption.textContent = label || "";
+        }
+        preview.hidden = false;
+        moveClassSplitDatasetHoverPreview(event);
+    }
 
-	    function renderClassSplitDatasetAnalysisGraph(analysis) {
-	        const graphEl = classSplitElements.datasetAnalysisGraph;
-	        if (!graphEl) {
-	            return Promise.resolve(false);
-	        }
-	        const items = Array.isArray(analysis?.items) ? analysis.items : [];
-	        if (!items.length) {
-	            graphEl.innerHTML = `<div class="training-help">No image-value points yet.</div>`;
-	            return Promise.resolve(false);
-	        }
-	        if (!window.Plotly) {
-	            graphEl.innerHTML = `<div class="training-help">Plotly did not load; cannot render dataset value graph.</div>`;
-	            return Promise.resolve(false);
-	        }
+    function hideClassSplitDatasetHoverPreview() {
+        const preview = document.getElementById("classSplitDatasetAnalysisHoverPreview");
+        if (preview) {
+            preview.hidden = true;
+        }
+    }
+
+    function renderClassSplitDatasetAnalysisGraph(analysis, { force = false } = {}) {
+        const graphEl = classSplitElements.datasetAnalysisGraph;
+        if (!graphEl) {
+            return Promise.resolve(false);
+        }
+        const items = Array.isArray(analysis?.items) ? analysis.items : [];
+        if (!items.length) {
+            graphEl.innerHTML = `<div class="training-help">No image-value points yet.</div>`;
+            return Promise.resolve(false);
+        }
+        if (!force && !isClassSplitDatasetAnalysisPanelOpen()) {
+            return Promise.resolve(false);
+        }
+        if (!window.Plotly) {
+            graphEl.innerHTML = `<div class="training-help">Plotly did not load; cannot render dataset value graph.</div>`;
+            return Promise.resolve(false);
+        }
 	        const theme = getClassSplitPlotTheme();
 	        const trace = {
 	            type: "scatter",
@@ -38567,53 +38575,53 @@ async function cancelRfDetrTrainingJobRequest() {
 	        });
 	    }
 
-	    function renderClassSplitDatasetAnalysisList(analysis) {
-	        const listEl = classSplitElements.datasetAnalysisList;
-	        if (!listEl) {
-	            return;
-	        }
-	        const items = Array.isArray(analysis?.items) ? analysis.items : [];
-	        if (!items.length) {
-	            listEl.innerHTML = `<div class="training-help">No image-value results yet.</div>`;
-	            return;
-	        }
-	        listEl.innerHTML = items.slice(0, 80).map((item, index) => {
-	            const point = getClassSplitPointById(item.preview_point_id);
-	            const previewUrl = point ? getClassSplitThumbnailUrl(point) : "";
-	            const classes = (Array.isArray(item.classes) ? item.classes : []).slice(0, 4).join(", ");
-	            const rarity = Math.round((((Number(item.bbox_rarity) || 0) + (Number(item.feature_rarity) || 0)) / 2) * 100);
-	            const edge = Math.round((Number(item.projection_rarity) || 0) * 100);
-	            return [
-	                `<div class="class-split-dataset-list__item" data-point-id="${escapeHtml(item.preview_point_id || "")}" data-preview-url="${escapeHtml(previewUrl)}" data-preview-label="${escapeHtml(item.image_relpath || item.image_name || "")}">`,
-	                `<strong>#${index + 1} • value ${escapeHtml(item.image_value ?? 0)}/100 • ${escapeHtml(item.image_name || "image")}</strong>`,
-	                `<span>${escapeHtml(item.object_count || 0)} objects • ${escapeHtml(item.class_count || 0)} classes${classes ? ` • ${escapeHtml(classes)}` : ""}</span><br>`,
-	                `<span>edge ${edge}% • bbox/feature rarity ${rarity}%</span>`,
-	                `</div>`,
-	            ].join("");
-	        }).join("");
-	        listEl.querySelectorAll(".class-split-dataset-list__item").forEach((node) => {
-	            const pointId = String(node.getAttribute("data-point-id") || "");
-	            const previewUrl = String(node.getAttribute("data-preview-url") || "");
-	            const previewLabel = String(node.getAttribute("data-preview-label") || "");
-	            node.addEventListener("click", () => {
-	                if (pointId) {
-	                    selectClassSplitPoint(pointId, { jump: false, focusPlot: true, flash: true });
-	                }
-	            });
-	            if (previewUrl) {
-	                node.addEventListener("mouseenter", (event) => showClassSplitDatasetHoverPreview(event, previewUrl, previewLabel));
-	                node.addEventListener("mousemove", moveClassSplitDatasetHoverPreview);
-	                node.addEventListener("mouseleave", hideClassSplitDatasetHoverPreview);
-	            }
-	        });
-	    }
+    function renderClassSplitDatasetAnalysisList(analysis) {
+        const listEl = classSplitElements.datasetAnalysisList;
+        if (!listEl) {
+            return;
+        }
+        const items = Array.isArray(analysis?.items) ? analysis.items : [];
+        if (!items.length) {
+            listEl.innerHTML = `<div class="training-help">No image-value results yet.</div>`;
+            return;
+        }
+        listEl.innerHTML = items.slice(0, 80).map((item, index) => {
+            const point = getClassSplitPointById(item.preview_point_id);
+            const previewUrl = point ? getClassSplitThumbnailUrl(point) : "";
+            const classes = (Array.isArray(item.classes) ? item.classes : []).slice(0, 4).join(", ");
+            const rarity = Math.round((((Number(item.bbox_rarity) || 0) + (Number(item.feature_rarity) || 0)) / 2) * 100);
+            const edge = Math.round((Number(item.projection_rarity) || 0) * 100);
+            return [
+                `<div class="class-split-dataset-list__item" data-point-id="${escapeHtml(item.preview_point_id || "")}" data-preview-url="${escapeHtml(previewUrl)}" data-preview-label="${escapeHtml(item.image_relpath || item.image_name || "")}">`,
+                `<strong>#${index + 1} • value ${escapeHtml(item.image_value ?? 0)}/100 • ${escapeHtml(item.image_name || "image")}</strong>`,
+                `<span>${escapeHtml(item.object_count || 0)} objects • ${escapeHtml(item.class_count || 0)} classes${classes ? ` • ${escapeHtml(classes)}` : ""}</span><br>`,
+                `<span>edge ${edge}% • bbox/feature rarity ${rarity}%</span>`,
+                `</div>`,
+            ].join("");
+        }).join("");
+        listEl.querySelectorAll(".class-split-dataset-list__item").forEach((node) => {
+            const pointId = String(node.getAttribute("data-point-id") || "");
+            const previewUrl = String(node.getAttribute("data-preview-url") || "");
+            const previewLabel = String(node.getAttribute("data-preview-label") || "");
+            node.addEventListener("click", () => {
+                if (pointId) {
+                    selectClassSplitPoint(pointId, { jump: false, focusPlot: true, flash: true });
+                }
+            });
+            if (previewUrl) {
+                node.addEventListener("mouseenter", (event) => showClassSplitDatasetHoverPreview(event, previewUrl, previewLabel));
+                node.addEventListener("mousemove", moveClassSplitDatasetHoverPreview);
+                node.addEventListener("mouseleave", hideClassSplitDatasetHoverPreview);
+            }
+        });
+    }
 
-	    function renderClassSplitDatasetAnalysis() {
-	        refreshClassSplitDatasetAnalysisControls();
-	        const hasResult = !!classSplitState.result;
-	        const hasAllClassResult = classSplitHasAllClassResult();
-	        const points = Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : [];
-	        const analysis = classSplitState.datasetAnalysis;
+    function renderClassSplitDatasetAnalysis() {
+        refreshClassSplitDatasetAnalysisControls();
+        const hasResult = !!classSplitState.result;
+        const hasAllClassResult = classSplitHasAllClassResult();
+        const points = Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : [];
+        const analysis = classSplitState.datasetAnalysis;
         const items = Array.isArray(analysis?.items) ? analysis.items : [];
         if (classSplitElements.datasetAnalysisStatus) {
             if (!hasResult) {
@@ -38623,9 +38631,9 @@ async function cancelRfDetrTrainingJobRequest() {
             } else if (!items.length) {
                 classSplitElements.datasetAnalysisStatus.textContent = `Ready for ${points.length} objects.`;
             } else {
-	                classSplitElements.datasetAnalysisStatus.textContent = `${items.length} images scored.`;
-	            }
-	        }
+                classSplitElements.datasetAnalysisStatus.textContent = `${items.length} images scored.`;
+            }
+        }
         if (classSplitElements.datasetAnalysisReport) {
             if (!items.length) {
                 classSplitElements.datasetAnalysisReport.innerHTML = `<div class="training-help">${
@@ -38634,42 +38642,42 @@ async function cancelRfDetrTrainingJobRequest() {
                         : "Dataset Analysis is optional and separate from Data Ingestion. It needs an all-class Class Split result before it can score image value."
                 }</div>`;
             } else {
-	                const summary = analysis.summary || {};
-	                const rows = [
-	                    ["Images", summary.image_count ?? items.length],
-	                    ["Objects", summary.object_count ?? points.length],
-	                    ["Mean value", `${summary.mean_image_value ?? 0}/100`],
-	                    ["Edge images", summary.high_value_count ?? 0],
-	                    ["Central images", summary.central_count ?? 0],
-	                ];
-	                classSplitElements.datasetAnalysisReport.innerHTML = `<div class="class-split-dataset-report__grid">${
-	                    rows.map(([label, value]) => `<div class="class-split-dataset-report__item"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`).join("")
-	                }</div>`;
-	            }
-	        }
-	        renderClassSplitDatasetAnalysisList(analysis);
-	        renderClassSplitDatasetAnalysisGraph(analysis);
-	    }
+                const summary = analysis.summary || {};
+                const rows = [
+                    ["Images", summary.image_count ?? items.length],
+                    ["Objects", summary.object_count ?? points.length],
+                    ["Mean value", `${summary.mean_image_value ?? 0}/100`],
+                    ["Edge images", summary.high_value_count ?? 0],
+                    ["Central images", summary.central_count ?? 0],
+                ];
+                classSplitElements.datasetAnalysisReport.innerHTML = `<div class="class-split-dataset-report__grid">${
+                    rows.map(([label, value]) => `<div class="class-split-dataset-report__item"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`).join("")
+                }</div>`;
+            }
+        }
+        renderClassSplitDatasetAnalysisList(analysis);
+        renderClassSplitDatasetAnalysisGraph(analysis);
+    }
 
-	    function runClassSplitDatasetAnalysis() {
-	        const api = getAnnotationDiversityApi();
-	        const points = Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : [];
-	        if (!classSplitHasAllClassResult()) {
-	            setClassSplitJobStatus("Run Class Split with Scope = All classes before Dataset Analysis.", "warn");
-	            renderClassSplitDatasetAnalysis();
-	            return;
-	        }
-	        if (!api?.computeDatasetImageValueAnalysis) {
-	            setClassSplitJobStatus("Dataset analysis helper is unavailable.", "error");
-	            return;
-	        }
-	        const analysis = api.computeDatasetImageValueAnalysis(points);
-	        classSplitState.datasetAnalysis = analysis;
-	        applyClassSplitDatasetAnalysisToPoints(analysis);
-	        renderClassSplitDatasetAnalysis();
-	        renderClassSplitPlot();
-	        setClassSplitJobStatus(`Dataset analysis scored ${analysis.summary?.image_count || 0} images.`, "success");
-	    }
+    function runClassSplitDatasetAnalysis() {
+        const api = getAnnotationDiversityApi();
+        const points = Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : [];
+        if (!classSplitHasAllClassResult()) {
+            setClassSplitJobStatus("Run Class Split with Scope = All classes before Dataset Analysis.", "warn");
+            renderClassSplitDatasetAnalysis();
+            return;
+        }
+        if (!api?.computeDatasetImageValueAnalysis) {
+            setClassSplitJobStatus("Dataset analysis helper is unavailable.", "error");
+            return;
+        }
+        const analysis = api.computeDatasetImageValueAnalysis(points);
+        classSplitState.datasetAnalysis = analysis;
+        applyClassSplitDatasetAnalysisToPoints(analysis);
+        renderClassSplitDatasetAnalysis();
+        renderClassSplitPlot();
+        setClassSplitJobStatus(`Dataset analysis scored ${analysis.summary?.image_count || 0} images.`, "success");
+    }
 
 	    function rememberClassSplitSelectionFromPlot(event) {
         const ids = new Set();
@@ -39538,17 +39546,17 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.colorMode = document.getElementById("classSplitColorMode");
         classSplitElements.filterClass = document.getElementById("classSplitFilterClass");
         classSplitElements.graph = document.getElementById("classSplitGraph");
-	        classSplitElements.report = document.getElementById("classSplitReport");
-	        classSplitElements.wrongPanel = document.getElementById("classSplitWrongPanel");
-	        classSplitElements.wrongList = document.getElementById("classSplitWrongList");
-	        classSplitElements.inspector = document.getElementById("classSplitInspector");
-	        classSplitElements.datasetAnalysisPanel = document.getElementById("classSplitDatasetAnalysisPanel");
-	        classSplitElements.datasetAnalysisRun = document.getElementById("classSplitDatasetAnalysisRun");
-	        classSplitElements.datasetAnalysisStatus = document.getElementById("classSplitDatasetAnalysisStatus");
-	        classSplitElements.datasetAnalysisReport = document.getElementById("classSplitDatasetAnalysisReport");
-	        classSplitElements.datasetAnalysisGraph = document.getElementById("classSplitDatasetAnalysisGraph");
-	        classSplitElements.datasetAnalysisList = document.getElementById("classSplitDatasetAnalysisList");
-	        classSplitElements.bulkPanel = document.getElementById("classSplitBulkPanel");
+        classSplitElements.report = document.getElementById("classSplitReport");
+        classSplitElements.wrongPanel = document.getElementById("classSplitWrongPanel");
+        classSplitElements.wrongList = document.getElementById("classSplitWrongList");
+        classSplitElements.inspector = document.getElementById("classSplitInspector");
+        classSplitElements.datasetAnalysisPanel = document.getElementById("classSplitDatasetAnalysisPanel");
+        classSplitElements.datasetAnalysisRun = document.getElementById("classSplitDatasetAnalysisRun");
+        classSplitElements.datasetAnalysisStatus = document.getElementById("classSplitDatasetAnalysisStatus");
+        classSplitElements.datasetAnalysisReport = document.getElementById("classSplitDatasetAnalysisReport");
+        classSplitElements.datasetAnalysisGraph = document.getElementById("classSplitDatasetAnalysisGraph");
+        classSplitElements.datasetAnalysisList = document.getElementById("classSplitDatasetAnalysisList");
+        classSplitElements.bulkPanel = document.getElementById("classSplitBulkPanel");
         classSplitElements.bulkCount = document.getElementById("classSplitBulkCount");
         classSplitElements.bulkClass = document.getElementById("classSplitBulkClass");
         classSplitElements.bulkApply = document.getElementById("classSplitBulkApply");
@@ -39625,13 +39633,22 @@ async function cancelRfDetrTrainingJobRequest() {
                 });
             });
         }
-	        if (classSplitElements.bulkClear) {
-	            classSplitElements.bulkClear.addEventListener("click", () => clearClassSplitBulkSelection({ render: true }));
-	        }
-	        if (classSplitElements.datasetAnalysisRun) {
-	            classSplitElements.datasetAnalysisRun.addEventListener("click", runClassSplitDatasetAnalysis);
-	        }
-	        applyEmbeddingRecipePresetToClassSplit(classSplitElements.recipePreset?.value || "precise");
+        if (classSplitElements.bulkClear) {
+            classSplitElements.bulkClear.addEventListener("click", () => clearClassSplitBulkSelection({ render: true }));
+        }
+        if (classSplitElements.datasetAnalysisRun) {
+            classSplitElements.datasetAnalysisRun.addEventListener("click", runClassSplitDatasetAnalysis);
+        }
+        if (classSplitElements.datasetAnalysisPanel) {
+            classSplitElements.datasetAnalysisPanel.addEventListener("toggle", () => {
+                if (classSplitElements.datasetAnalysisPanel.open) {
+                    renderClassSplitDatasetAnalysisGraph(classSplitState.datasetAnalysis, { force: true });
+                } else {
+                    hideClassSplitDatasetHoverPreview();
+                }
+            });
+        }
+        applyEmbeddingRecipePresetToClassSplit(classSplitElements.recipePreset?.value || "precise");
         populateClassSplitClasses({ preserveSelection: true });
         refreshClassSplitControls();
         loadClassSplitClipBackbones()

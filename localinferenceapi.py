@@ -20625,20 +20625,6 @@ def _data_ingestion_thumbnail_cache_path(job_dir: Path, cache_dir_name: str, key
     return prepared_thumb_dir / f"{safe_key}.jpg", prepared_thumb_dir
 
 
-def _data_ingestion_write_reference_thumbnail(row: Dict[str, Any], job_dir: Path, point_id: str) -> bool:
-    try:
-        thumb_path, _thumb_dir = _data_ingestion_thumbnail_cache_path(job_dir, "reference_thumbnails", point_id)
-        source_path = Path(str(row.get("image_path") or ""))
-        if source_path.suffix.lower() not in DATA_INGESTION_IMAGE_EXTS:
-            return False
-        with _data_ingestion_open_image(source_path) as image:
-            image.thumbnail((DATA_INGESTION_REFERENCE_THUMB_SIZE, DATA_INGESTION_REFERENCE_THUMB_SIZE))
-            _class_analysis_write_jpeg(thumb_path, job_dir, image, quality=86)
-        return _safe_existing_regular_file_within_root_impl(thumb_path, job_dir) is not None
-    except Exception:
-        return False
-
-
 def _data_ingestion_public_reference_item(row: Dict[str, Any], idx: int, *, has_thumbnail: bool) -> Dict[str, Any]:
     point_id = f"reference_{idx:06d}"
     return {
@@ -20650,6 +20636,7 @@ def _data_ingestion_public_reference_item(row: Dict[str, Any], idx: int, *, has_
         "width": _coerce_int(row.get("width"), 0, minimum=0),
         "height": _coerce_int(row.get("height"), 0, minimum=0),
         "has_thumbnail": bool(has_thumbnail),
+        "image_path": str(row.get("image_path") or ""),
     }
 
 
@@ -21197,8 +21184,8 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             )
         reference_items: List[Dict[str, Any]] = []
         for idx, row in enumerate(references):
-            point_id = f"reference_{idx:06d}"
-            has_thumbnail = _data_ingestion_write_reference_thumbnail(row, out_dir, point_id)
+            source_path = Path(str(row.get("image_path") or ""))
+            has_thumbnail = source_path.suffix.lower() in DATA_INGESTION_IMAGE_EXTS
             reference_items.append(_data_ingestion_public_reference_item(row, idx, has_thumbnail=has_thumbnail))
         result = {"summary": summary, "items": ranked_items}
         if reference_items:
@@ -21692,11 +21679,7 @@ def _data_ingestion_public_result(job_id: str, result: Dict[str, Any]) -> Dict[s
     for item in result.get("items") or []:
         if not isinstance(item, dict):
             continue
-        item_public = {
-            str(key): json_sanitize(value)
-            for key, value in item.items()
-            if str(key) != "image_path" and not str(key).startswith("_")
-        }
+        item_public = _data_ingestion_public_payload(item)
         item_id = _data_ingestion_result_item_id(item_public)
         if item_id:
             item_public["item_id"] = item_id
@@ -21926,6 +21909,17 @@ def get_data_ingestion_reference_thumbnail(job_id: str, point_id: str):
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_reference_thumbnail_not_found")
     thumb_path, _thumb_dir = _data_ingestion_thumbnail_cache_path(job_dir, "reference_thumbnails", wanted)
     safe_thumb_path = _safe_existing_regular_file_within_root_impl(thumb_path, job_dir)
+    if safe_thumb_path is None:
+        source_path = _safe_existing_regular_file_within_root_impl(
+            Path(str(item.get("image_path") or "")),
+            job_dir,
+        )
+        if source_path is None or source_path.suffix.lower() not in DATA_INGESTION_IMAGE_EXTS:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_reference_thumbnail_not_found")
+        with _data_ingestion_open_image(source_path) as image:
+            image.thumbnail((DATA_INGESTION_REFERENCE_THUMB_SIZE, DATA_INGESTION_REFERENCE_THUMB_SIZE))
+            _class_analysis_write_jpeg(thumb_path, job_dir, image, quality=86)
+        safe_thumb_path = _safe_existing_regular_file_within_root_impl(thumb_path, job_dir)
     if safe_thumb_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_reference_thumbnail_not_found")
     return FileResponse(str(safe_thumb_path), media_type="image/jpeg")

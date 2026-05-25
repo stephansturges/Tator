@@ -90,6 +90,9 @@ Flow checks:
 
 - Raw reference distance is diagnostic; selection is based on coverage rank.
 - Candidate source paths are stripped from public result payloads.
+- Reference hover thumbnails are generated lazily from internal job media, so
+  large reference datasets do not pay thumbnail cost unless the user previews
+  those points.
 - Accepted output preview/download reads from the job directory only and creates
   new thumbnails or ZIPs. It does not overwrite candidate inputs.
 

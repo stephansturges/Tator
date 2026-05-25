@@ -27,9 +27,9 @@ mutate, move, or remove user data to the backend guard and regression coverage.
 |---|---|---|---|
 | Build reference profile | Creates job staging data and a local reference-profile head | Guarded job root, upload extension/size/quota checks, bounded generated filenames, backend-reference source validation, backend video frame safety cap, guarded startup cleanup, strict local-head path checks, final cancellation check before head write | `tests/test_data_ingestion.py` |
 | Import/export reference profile | Reads or creates a local reference-profile head bundle | Zip traversal/symlink/size checks, checksum verification, bundle-version validation, strict local-head path checks, preserved provenance metadata and reference fingerprint | `tests/test_data_ingestion.py` |
-| Analyze candidates | Creates job staging data, result JSON, embeddings cache | Guarded job root, candidate/reference gating, matching reference-profile validation, guarded startup cleanup, guarded result reads with public source-path stripping, final cancellation check before result write | `tests/test_data_ingestion.py`, UI E2E |
+| Analyze candidates | Creates job staging data, result JSON, embeddings cache | Guarded job root, candidate/reference gating, matching reference-profile validation, guarded startup cleanup, guarded result reads with public source-path stripping, redacted backend capability diagnostics, final cancellation check before result write | `tests/test_data_ingestion.py`, UI E2E |
 | Preview/download accepted candidates | Creates candidate/accepted preview thumbnails and a transient export ZIP | Completed-analysis gating, selected-item/output validation without empty-selection fallback, source-path containment inside the job root, output-count and target-geometry limits, duplicate output-path rejection, explicit crop/resize/tile policy, source files read-only | `tests/test_data_ingestion.py`, UI contract |
-| Backend reference dataset use | Reads existing dataset images | Dataset id resolution, symlinked dataset roots rejected, path containment inside selected dataset root, active-job delete blocking by dataset id | `tests/test_data_ingestion.py`, `tests/test_dataset_linked_annotation_flows.py` |
+| Backend reference dataset use | Reads existing dataset images | Dataset id resolution, symlinked dataset roots rejected, path containment inside selected dataset root for scoring and lazy reference thumbnails, active-job delete blocking by dataset id | `tests/test_data_ingestion.py`, `tests/test_dataset_linked_annotation_flows.py` |
 | Cancel job | Mutates in-memory job state | Terminal jobs are not cancellable; active jobs move through `cancelling`; UI checks cancel response and blocks duplicate cancel clicks | `tests/test_data_ingestion.py` and endpoint sanity |
 
 ## Current Invariant
@@ -85,7 +85,10 @@ instead of falling back to the original keep defaults. Direct API callers cannot
 request unbounded crop/resize geometry, and `drop_partials` tiling emits no
 tiles for sources smaller than the requested tile. Public analysis results carry
 candidate thumbnail URLs and reference-novelty ranks/percentiles, but omit the
-internal source paths used by export rendering.
+internal source paths used by export rendering. Backend-dataset reference
+thumbnails are generated only after the source image is revalidated inside the
+selected dataset root; public capability payloads also strip local checkpoint and
+profile paths.
 
 The same late-cancel boundary now applies to adjacent training jobs that create
 dataset-derived artifacts. CLIP classifier, Qwen, YOLOv8, and RF-DETR workers

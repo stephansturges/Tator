@@ -95,6 +95,37 @@ def test_data_ingestion_capabilities_expose_reference_profile_flow():
     assert api._local_salad_training_stage(0.99) == "Finalizing reference profile"
 
 
+def test_data_ingestion_capabilities_redact_backend_paths(tmp_path, monkeypatch):
+    checkpoint_path = tmp_path / "cradio" / "model.safetensors"
+
+    monkeypatch.setattr(
+        api,
+        "cradio_capabilities",
+        lambda: {
+            "backend": {
+                "default": "auto",
+                "auto_resolved": "mlx",
+                "mlx": {
+                    "available": True,
+                    "detail": f"Local MLX C-RADIOv4 backend ({checkpoint_path})",
+                    "checkpoint_path": str(checkpoint_path),
+                },
+                "torch_cpu": {"available": True, "detail": "CPU Torch backend"},
+            },
+        },
+    )
+
+    caps = api._data_ingestion_capabilities()
+    class_caps = api._class_analysis_capabilities()
+
+    assert str(tmp_path) not in json.dumps(caps)
+    assert str(tmp_path) not in json.dumps(class_caps)
+    assert caps["cradio_backend"]["mlx"]["detail"] == "Local MLX C-RADIOv4 backend (<local-path>)"
+    assert class_caps["cradio_backend"]["mlx"]["detail"] == "Local MLX C-RADIOv4 backend (<local-path>)"
+    assert "checkpoint_path" not in caps["cradio_backend"]["mlx"]
+    assert "checkpoint_path" not in class_caps["cradio_backend"]["mlx"]
+
+
 class _FakeUpload:
     def __init__(self, filename: str, payload: bytes):
         self.filename = filename
@@ -243,7 +274,14 @@ def test_data_ingestion_job_serialization_hides_private_paths(tmp_path):
             "reference_uploads": [{"image_path": str(tmp_path / "reference.jpg"), "filename": "reference.jpg"}],
             "keep_fraction": 0.2,
         },
-        result={"summary": {"path": str(tmp_path / "profile.pt"), "selected_count": 1}},
+        result={
+            "summary": {
+                "path": str(tmp_path / "profile.pt"),
+                "cache_path": str(tmp_path / "cache"),
+                "checkpoint_path": str(tmp_path / "checkpoint.pt"),
+                "selected_count": 1,
+            }
+        },
     )
 
     serialized = api._serialize_data_ingestion_job(job)
@@ -408,6 +446,146 @@ def test_data_ingestion_reference_thumbnail_lazily_generates_from_internal_path(
     assert thumb_path.exists()
     with Image.open(thumb_path) as img:
         assert max(img.size) == api.DATA_INGESTION_REFERENCE_THUMB_SIZE
+
+
+def test_data_ingestion_reference_thumbnail_allows_backend_dataset_root(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_reference_thumb_dataset"
+    candidate_dir = job_dir / "media" / "candidates"
+    candidate_dir.mkdir(parents=True)
+    candidate_path = candidate_dir / "candidate_a.jpg"
+    Image.new("RGB", (24, 16), (20, 100, 180)).save(candidate_path)
+    dataset_root = tmp_path / "backend_dataset"
+    dataset_images = dataset_root / "images"
+    dataset_images.mkdir(parents=True)
+    reference_path = dataset_images / "reference_a.jpg"
+    Image.new("RGB", (900, 300), (180, 120, 20)).save(reference_path)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda dataset_id: {
+            "id": dataset_id,
+            "dataset_root": str(dataset_root),
+            "storage_mode": "managed",
+        },
+    )
+    result = {
+        "summary": {"salad_head_id": "unit_profile", "selected_count": 1},
+        "items": [
+            {
+                "item_id": "item_keep",
+                "index": 0,
+                "rank": 1,
+                "keep": True,
+                "diversity_score": 0.92,
+                "filename": "candidate_a.jpg",
+                "saved_name": "candidate_a.jpg",
+                "source_type": "image",
+                "image_path": str(candidate_path),
+            }
+        ],
+        "reference_items": [
+            {
+                "point_id": "reference_000000",
+                "index": 0,
+                "filename": "reference_a.jpg",
+                "source_type": "image",
+                "width": 900,
+                "height": 300,
+                "has_thumbnail": True,
+                "image_path": str(reference_path),
+                "_source_dataset_id": "reference_ds",
+            }
+        ],
+    }
+    result_path = job_dir / "result.json"
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    api.DATA_INGESTION_JOBS.clear()
+    api.DATA_INGESTION_JOBS["di_reference_thumb_dataset"] = api.DataIngestionJob(
+        job_id="di_reference_thumb_dataset",
+        kind="analysis",
+        status="completed",
+        progress=1.0,
+        result=result,
+        result_path=str(result_path),
+    )
+
+    response = api.get_data_ingestion_reference_thumbnail("di_reference_thumb_dataset", "reference_000000")
+    public_result = api.get_data_ingestion_result("di_reference_thumb_dataset")
+
+    thumb_path = Path(response.path)
+    assert job_dir in thumb_path.parents
+    with Image.open(thumb_path) as img:
+        assert max(img.size) == api.DATA_INGESTION_REFERENCE_THUMB_SIZE
+    assert str(dataset_root) not in json.dumps(public_result)
+    assert "_source_dataset_id" not in json.dumps(public_result)
+
+
+def test_data_ingestion_reference_thumbnail_rejects_backend_dataset_escape(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_reference_thumb_escape"
+    candidate_dir = job_dir / "media" / "candidates"
+    candidate_dir.mkdir(parents=True)
+    candidate_path = candidate_dir / "candidate_a.jpg"
+    Image.new("RGB", (24, 16), (20, 100, 180)).save(candidate_path)
+    dataset_root = tmp_path / "backend_dataset"
+    dataset_root.mkdir()
+    outside_path = tmp_path / "outside_reference.jpg"
+    Image.new("RGB", (900, 300), (180, 120, 20)).save(outside_path)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda dataset_id: {
+            "id": dataset_id,
+            "dataset_root": str(dataset_root),
+            "storage_mode": "managed",
+        },
+    )
+    result = {
+        "summary": {"salad_head_id": "unit_profile", "selected_count": 1},
+        "items": [
+            {
+                "item_id": "item_keep",
+                "index": 0,
+                "rank": 1,
+                "keep": True,
+                "diversity_score": 0.92,
+                "filename": "candidate_a.jpg",
+                "source_type": "image",
+                "image_path": str(candidate_path),
+            }
+        ],
+        "reference_items": [
+            {
+                "point_id": "reference_000000",
+                "index": 0,
+                "filename": "reference_a.jpg",
+                "source_type": "image",
+                "has_thumbnail": True,
+                "image_path": str(outside_path),
+                "_source_dataset_id": "reference_ds",
+            }
+        ],
+    }
+    result_path = job_dir / "result.json"
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    api.DATA_INGESTION_JOBS.clear()
+    api.DATA_INGESTION_JOBS["di_reference_thumb_escape"] = api.DataIngestionJob(
+        job_id="di_reference_thumb_escape",
+        kind="analysis",
+        status="completed",
+        progress=1.0,
+        result=result,
+        result_path=str(result_path),
+    )
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.get_data_ingestion_reference_thumbnail("di_reference_thumb_escape", "reference_000000")
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "data_ingestion_reference_thumbnail_not_found"
 
 
 def test_data_ingestion_distribution_projects_candidates_without_paths(tmp_path, monkeypatch):
@@ -2099,7 +2277,12 @@ def test_list_local_salad_heads_omits_filesystem_paths(tmp_path, monkeypatch):
             "label": "Profile",
             "encoder_type": "dinov3",
             "train_image_count": 3,
-            "config": {"token_dim": 2, "num_clusters": 1, "cluster_dim": 4},
+            "config": {
+                "token_dim": 2,
+                "num_clusters": 1,
+                "cluster_dim": 4,
+                "cache_path": str(tmp_path / "cache"),
+            },
         }
 
     monkeypatch.setattr(api, "load_local_salad_head_file", fake_load)
@@ -2109,6 +2292,26 @@ def test_list_local_salad_heads_omits_filesystem_paths(tmp_path, monkeypatch):
     assert len(heads) == 1
     assert heads[0]["id"] == "profile"
     assert "path" not in heads[0]
+    assert "cache_path" not in heads[0]["config"]
+    assert str(tmp_path) not in json.dumps(heads)
+
+
+def test_list_local_salad_heads_redacts_unreadable_errors(tmp_path, monkeypatch):
+    heads_root = tmp_path / "heads"
+    heads_root.mkdir()
+    (heads_root / "bad.pt").write_bytes(b"placeholder")
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+
+    def fake_load(path, device_name="cpu"):
+        raise RuntimeError(f"failed to load {path}")
+
+    monkeypatch.setattr(api, "load_local_salad_head_file", fake_load)
+
+    heads = api._list_local_salad_heads()
+
+    assert len(heads) == 1
+    assert heads[0]["status"].startswith("unreadable:")
+    assert str(tmp_path) not in json.dumps(heads)
 
 
 def test_local_salad_head_ids_do_not_overwrite_existing_heads(tmp_path, monkeypatch):

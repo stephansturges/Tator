@@ -37122,6 +37122,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 const previewUrl = getDataIngestionDistributionPreviewUrl(point);
                 if (point && previewUrl && event?.event) {
                     showDataIngestionHoverPreview(event.event, previewUrl, point.filename || "candidate");
+                } else {
+                    hideDataIngestionHoverPreview();
                 }
             });
             graphEl.on("plotly_unhover", hideDataIngestionHoverPreview);
@@ -38502,78 +38504,89 @@ async function cancelRfDetrTrainingJobRequest() {
             graphEl.innerHTML = `<div class="training-help">Plotly did not load; cannot render dataset value graph.</div>`;
             return Promise.resolve(false);
         }
-	        const theme = getClassSplitPlotTheme();
-	        const trace = {
-	            type: "scatter",
-	            mode: "markers",
-	            name: "Images",
-	            x: items.map((item) => Number(item.projection_rarity) || 0),
-	            y: items.map((item) => ((Number(item.bbox_rarity) || 0) + (Number(item.feature_rarity) || 0)) / 2),
-	            customdata: items.map((item) => String(item.preview_point_id || "")),
-	            text: items.map((item) => [
-	                item.image_relpath || item.image_name || "image",
-	                `value ${Number(item.image_value) || 0}/100`,
-	                `${Number(item.object_count) || 0} objects`,
-	            ].join("<br>")),
-	            hovertemplate: "%{text}<br>image edge %{x:.2f}<br>object rarity %{y:.2f}<extra></extra>",
-	            marker: {
-	                size: items.map((item) => Math.max(9, Math.min(28, 7 + Math.sqrt(Number(item.object_count) || 1) * 5))),
-	                color: items.map((item) => Number(item.image_value) || 0),
-	                cmin: 0,
-	                cmax: 100,
-	                colorscale: [
-	                    [0, "#22c55e"],
-	                    [0.55, "#f59e0b"],
-	                    [1, "#be123c"],
-	                ],
-	                colorbar: { title: "value" },
-	                opacity: 0.86,
-	                line: { color: "rgba(15, 23, 42, 0.38)", width: 0.75 },
-	            },
-	        };
-	        const layout = {
-	            paper_bgcolor: theme.paper,
-	            plot_bgcolor: theme.plot,
-	            font: { color: theme.text, family: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif" },
-	            margin: { l: 46, r: 28, t: 16, b: 48 },
-	            xaxis: {
-	                title: "image edge",
-	                range: [-0.04, 1.04],
-	                zeroline: false,
-	                gridcolor: theme.grid,
-	                linecolor: theme.grid,
-	            },
-	            yaxis: {
-	                title: "bbox / feature rarity",
-	                range: [-0.04, 1.04],
-	                zeroline: false,
-	                gridcolor: theme.grid,
-	                linecolor: theme.grid,
-	            },
-	            showlegend: false,
-	            uirevision: `class-split-dataset:${classSplitState.currentJobId || "live"}`,
-	        };
-	        return window.Plotly.react(graphEl, [trace], layout, {
-	            responsive: true,
-	            displaylogo: false,
-	            modeBarButtonsToRemove: ["toImage"],
-	        }).then(() => {
-	            if (typeof graphEl.removeAllListeners === "function") {
-	                graphEl.removeAllListeners("plotly_click");
-	            }
-	            graphEl.on("plotly_click", (event) => {
-	                const pointId = String(event?.points?.[0]?.customdata || "");
-	                if (pointId) {
-	                    selectClassSplitPoint(pointId, { jump: false, focusPlot: true, flash: true });
-	                }
-	            });
-	            return true;
-	        }).catch((error) => {
-	            console.warn("Class Split dataset graph render failed", error);
-	            graphEl.innerHTML = `<div class="training-help error">Dataset graph failed: ${escapeHtml(error.message || error)}</div>`;
-	            return false;
-	        });
-	    }
+        const theme = getClassSplitPlotTheme();
+        const trace = {
+            type: "scatter",
+            mode: "markers",
+            name: "Images",
+            x: items.map((item) => Number(item.projection_rarity) || 0),
+            y: items.map((item) => ((Number(item.bbox_rarity) || 0) + (Number(item.feature_rarity) || 0)) / 2),
+            customdata: items.map((item) => String(item.preview_point_id || "")),
+            text: items.map((item) => [
+                item.image_relpath || item.image_name || "image",
+                `value ${Number(item.image_value) || 0}/100`,
+                `${Number(item.object_count) || 0} objects`,
+            ].join("<br>")),
+            hovertemplate: "%{text}<br>image edge %{x:.2f}<br>object rarity %{y:.2f}<extra></extra>",
+            marker: {
+                size: items.map((item) => Math.max(9, Math.min(28, 7 + Math.sqrt(Number(item.object_count) || 1) * 5))),
+                color: items.map((item) => Number(item.image_value) || 0),
+                cmin: 0,
+                cmax: 100,
+                colorscale: [
+                    [0, "#22c55e"],
+                    [0.55, "#f59e0b"],
+                    [1, "#be123c"],
+                ],
+                colorbar: { title: "value" },
+                opacity: 0.86,
+                line: { color: "rgba(15, 23, 42, 0.38)", width: 0.75 },
+            },
+        };
+        const layout = {
+            paper_bgcolor: theme.paper,
+            plot_bgcolor: theme.plot,
+            font: { color: theme.text, family: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif" },
+            margin: { l: 46, r: 28, t: 16, b: 48 },
+            xaxis: {
+                title: "image edge",
+                range: [-0.04, 1.04],
+                zeroline: false,
+                gridcolor: theme.grid,
+                linecolor: theme.grid,
+            },
+            yaxis: {
+                title: "bbox / feature rarity",
+                range: [-0.04, 1.04],
+                zeroline: false,
+                gridcolor: theme.grid,
+                linecolor: theme.grid,
+            },
+            showlegend: false,
+            uirevision: `class-split-dataset:${classSplitState.currentJobId || "live"}`,
+        };
+        return window.Plotly.react(graphEl, [trace], layout, {
+            responsive: true,
+            displaylogo: false,
+            modeBarButtonsToRemove: ["toImage"],
+        }).then(() => {
+            if (typeof graphEl.removeAllListeners === "function") {
+                ["plotly_click", "plotly_hover", "plotly_unhover"].forEach((eventName) => graphEl.removeAllListeners(eventName));
+            }
+            graphEl.on("plotly_click", (event) => {
+                const pointId = String(event?.points?.[0]?.customdata || "");
+                if (pointId) {
+                    selectClassSplitPoint(pointId, { jump: false, focusPlot: true, flash: true });
+                }
+            });
+            graphEl.on("plotly_hover", (event) => {
+                const pointId = String(event?.points?.[0]?.customdata || "");
+                const point = getClassSplitPointById(pointId);
+                const previewUrl = point ? getClassSplitThumbnailUrl(point) : "";
+                if (previewUrl && event?.event) {
+                    showClassSplitDatasetHoverPreview(event.event, previewUrl, point.image_relpath || point.class_name || "image");
+                } else {
+                    hideClassSplitDatasetHoverPreview();
+                }
+            });
+            graphEl.on("plotly_unhover", hideClassSplitDatasetHoverPreview);
+            return true;
+        }).catch((error) => {
+            console.warn("Class Split dataset graph render failed", error);
+            graphEl.innerHTML = `<div class="training-help error">Dataset graph failed: ${escapeHtml(error.message || error)}</div>`;
+            return false;
+        });
+    }
 
     function renderClassSplitDatasetAnalysisList(analysis) {
         const listEl = classSplitElements.datasetAnalysisList;
@@ -38679,7 +38692,7 @@ async function cancelRfDetrTrainingJobRequest() {
         setClassSplitJobStatus(`Dataset analysis scored ${analysis.summary?.image_count || 0} images.`, "success");
     }
 
-	    function rememberClassSplitSelectionFromPlot(event) {
+    function rememberClassSplitSelectionFromPlot(event) {
         const ids = new Set();
         (Array.isArray(event?.points) ? event.points : []).forEach((plotPoint) => {
             const pointId = String(plotPoint?.customdata || "");
@@ -39096,12 +39109,12 @@ async function cancelRfDetrTrainingJobRequest() {
         );
         renderClassSplitFilterOptions();
         renderClassSplitReport();
-	        renderClassSplitWrongList();
-	        renderClassSplitInspector();
-	        renderClassSplitBulkPanel();
-	        renderClassSplitDatasetAnalysis();
-	        renderClassSplitPlot();
-	    }
+        renderClassSplitWrongList();
+        renderClassSplitInspector();
+        renderClassSplitBulkPanel();
+        renderClassSplitDatasetAnalysis();
+        renderClassSplitPlot();
+    }
 
     function selectClassSplitPoint(pointId, { jump = false, focusPlot = false, flash = false } = {}) {
         const safeId = String(pointId || "");
@@ -39314,12 +39327,12 @@ async function cancelRfDetrTrainingJobRequest() {
             updateSam3ClassOptions({ preserveSelection: true });
             syncClassSplitCurrentClassSelection();
             markOnlyBboxRecord(match.bbox);
-	        }
-	        captureAnnotationDirtyStateForImage(imageKey);
-	        scheduleAnnotationDiversityMetricRefresh();
-	        clearClassSplitDatasetAnalysis();
-	        return true;
-	    }
+        }
+        captureAnnotationDirtyStateForImage(imageKey);
+        scheduleAnnotationDiversityMetricRefresh();
+        clearClassSplitDatasetAnalysis();
+        return true;
+    }
 
     async function changeClassSplitSelectedPointsClass(newClass) {
         const targetClass = String(newClass || "").trim();
@@ -39355,11 +39368,11 @@ async function cancelRfDetrTrainingJobRequest() {
             });
             clearClassSplitBulkSelection();
             renderClassSplitFilterOptions();
-	            renderClassSplitWrongList();
-	            renderClassSplitInspector();
-	            renderClassSplitReport();
-	            renderClassSplitDatasetAnalysis();
-	            renderClassSplitPlot();
+            renderClassSplitWrongList();
+            renderClassSplitInspector();
+            renderClassSplitReport();
+            renderClassSplitDatasetAnalysis();
+            renderClassSplitPlot();
             const suffix = failed.length ? ` ${failed.length} failed.` : " Save labels when ready.";
             const variant = failed.length && !changed ? "error" : failed.length ? "warn" : "success";
             setSamStatus(`Changed ${changed} selected object${changed === 1 ? "" : "s"} to ${targetClass}.${suffix}`, {
@@ -39499,11 +39512,11 @@ async function cancelRfDetrTrainingJobRequest() {
             syncQwenClassToCurrent();
             updateSam3ClassOptions({ preserveSelection: true });
             syncClassSplitCurrentClassSelection();
-	            markOnlyBboxRecord(match.bbox);
-	            captureAnnotationDirtyStateForImage(imageKey);
-	            scheduleAnnotationDiversityMetricRefresh();
-	            clearClassSplitDatasetAnalysis({ render: true });
-	            setSamStatus(`Changed class to ${targetClass}; rerunning analysis.`, { variant: "success", duration: 3500 });
+            markOnlyBboxRecord(match.bbox);
+            captureAnnotationDirtyStateForImage(imageKey);
+            scheduleAnnotationDiversityMetricRefresh();
+            clearClassSplitDatasetAnalysis({ render: true });
+            setSamStatus(`Changed class to ${targetClass}; rerunning analysis.`, { variant: "success", duration: 3500 });
             await startClassSplitAnalysis({ reuseLast: true });
         } finally {
             classSplitState.relabelInFlight = false;

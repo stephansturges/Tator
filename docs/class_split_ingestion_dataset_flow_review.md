@@ -72,7 +72,8 @@ Flow checks:
 - The reference profile is an artifact, not a source dataset copy.
 - Profile exports include checksums and reference metadata.
 - Imported profiles are selected only when they match the selected reference.
-- Capabilities no longer expose local filesystem paths for profile files.
+- Capabilities no longer expose local filesystem paths for profile files or
+  backend model diagnostics.
 
 ## Journey 4: Analyze Candidate Media And Decide What To Keep
 
@@ -90,9 +91,10 @@ Flow checks:
 
 - Raw reference distance is diagnostic; selection is based on coverage rank.
 - Candidate source paths are stripped from public result payloads.
-- Reference hover thumbnails are generated lazily from internal job media, so
-  large reference datasets do not pay thumbnail cost unless the user previews
-  those points.
+- Reference hover thumbnails are generated lazily. Uploaded references are read
+  from job media, while backend-dataset references are revalidated against the
+  selected dataset root before thumbnailing. Large reference datasets do not pay
+  thumbnail cost unless the user previews those points.
 - Accepted output preview/download reads from the job directory only and creates
   new thumbnails or ZIPs. It does not overwrite candidate inputs.
 
@@ -106,6 +108,8 @@ Fixes from this pass:
   candidates.
 - The distribution-map panel explicitly states that Class Split Dataset Analysis
   is not required for the map.
+- Hover previews on the ingestion map hide cleanly when the next point has no
+  preview image, avoiding stale candidate/reference previews.
 
 ## Journey 5: Export Accepted Ingestion Output
 
@@ -174,6 +178,8 @@ Fix from this pass:
 - Dataset Analysis now starts collapsed as a bottom panel instead of occupying
   the Class Split right-hand review stack or rendering large empty boxes during
   the normal cluster-audit workflow.
+- Dataset Analysis graph points now show the same crop hover preview used by the
+  ranked image list, so image-value outliers can be inspected before clicking.
 
 ## Backend Invariants Reviewed
 

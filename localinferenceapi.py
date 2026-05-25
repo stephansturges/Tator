@@ -17972,7 +17972,7 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
         "cradio_models": list(CRADIO_SUPPORTED_MODELS),
         "cradio_pooling_modes": ["summary", "spatial_mean", "summary_spatial_concat"],
         "default_cradio_pooling": "summary",
-        "cradio_backend": cradio_capabilities()["backend"],
+        "cradio_backend": _public_cradio_backend_capabilities(),
         "projection_methods": projection_methods,
         "default_projection": "pca",
         "preprocess_modes": ["canonical"],
@@ -20014,7 +20014,7 @@ def _data_ingestion_public_payload(value: Any) -> Any:
         out: Dict[str, Any] = {}
         for key, item in value.items():
             key_str = str(key)
-            if key_str.startswith("_") or key_str in {"path", "image_path", "source_path", "resolved_path"}:
+            if key_str.startswith("_") or key_str == "path" or key_str.endswith("_path"):
                 continue
             out[key_str] = _data_ingestion_public_payload(item)
         return out
@@ -20023,6 +20023,31 @@ def _data_ingestion_public_payload(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_data_ingestion_public_payload(item) for item in value]
     return json_sanitize(value)
+
+
+def _redact_public_path_text(value: Any) -> str:
+    raw = str(value or "")
+    if not raw:
+        return ""
+    raw = re.sub(r"(?<![A-Za-z0-9_.-])(?:~|/)[^\s\"'<>)]*", "<local-path>", raw)
+    raw = re.sub(r"[A-Za-z]:\\[^\s\"'<>)]*", "<local-path>", raw)
+    return raw
+
+
+def _public_cradio_backend_capabilities() -> Dict[str, Any]:
+    backend = dict(cradio_capabilities().get("backend") or {})
+    public: Dict[str, Any] = {}
+    for key, value in backend.items():
+        if isinstance(value, dict):
+            entry = _data_ingestion_public_payload(value)
+            if isinstance(entry, dict):
+                for text_key in ("detail", "error", "message", "status"):
+                    if text_key in entry:
+                        entry[text_key] = _redact_public_path_text(entry.get(text_key))
+            public[str(key)] = entry
+        else:
+            public[str(key)] = json_sanitize(value)
+    return public
 
 
 def _serialize_data_ingestion_job(job: DataIngestionJob) -> Dict[str, Any]:
@@ -20230,11 +20255,11 @@ def _list_local_salad_heads() -> List[Dict[str, Any]]:
                     "reference_fingerprint": metadata.get("reference_fingerprint") if isinstance(metadata.get("reference_fingerprint"), dict) else None,
                     "descriptor_dim": int(config.get("token_dim") or 0)
                     + int(config.get("num_clusters") or 0) * int(config.get("cluster_dim") or 0),
-                    "config": config,
+                    "config": _data_ingestion_public_payload(config),
                 }
             )
         except Exception as exc:
-            entry["status"] = f"unreadable:{exc}"
+            entry["status"] = f"unreadable:{_redact_public_path_text(exc)}"
             entry["label"] = path.stem
         entries.append(entry)
     return entries
@@ -20569,7 +20594,7 @@ def _data_ingestion_capabilities() -> Dict[str, Any]:
         "cradio_models": list(CRADIO_SUPPORTED_MODELS),
         "cradio_pooling_modes": ["summary", "spatial_mean", "summary_spatial_concat"],
         "default_cradio_pooling": "summary",
-        "cradio_backend": cradio_capabilities()["backend"],
+        "cradio_backend": _public_cradio_backend_capabilities(),
         "local_salad_heads": _list_local_salad_heads(),
         "ffmpeg_available": bool(shutil.which("ffmpeg")),
         "image_exts": sorted(DATA_INGESTION_IMAGE_EXTS),
@@ -20637,6 +20662,7 @@ def _data_ingestion_public_reference_item(row: Dict[str, Any], idx: int, *, has_
         "height": _coerce_int(row.get("height"), 0, minimum=0),
         "has_thumbnail": bool(has_thumbnail),
         "image_path": str(row.get("image_path") or ""),
+        "_source_dataset_id": str(row.get("source_dataset_id") or ""),
     }
 
 
@@ -21910,12 +21936,7 @@ def get_data_ingestion_reference_thumbnail(job_id: str, point_id: str):
     thumb_path, _thumb_dir = _data_ingestion_thumbnail_cache_path(job_dir, "reference_thumbnails", wanted)
     safe_thumb_path = _safe_existing_regular_file_within_root_impl(thumb_path, job_dir)
     if safe_thumb_path is None:
-        source_path = _safe_existing_regular_file_within_root_impl(
-            Path(str(item.get("image_path") or "")),
-            job_dir,
-        )
-        if source_path is None or source_path.suffix.lower() not in DATA_INGESTION_IMAGE_EXTS:
-            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_reference_thumbnail_not_found")
+        source_path = _data_ingestion_safe_reference_source_file(item, job_dir)
         with _data_ingestion_open_image(source_path) as image:
             image.thumbnail((DATA_INGESTION_REFERENCE_THUMB_SIZE, DATA_INGESTION_REFERENCE_THUMB_SIZE))
             _class_analysis_write_jpeg(thumb_path, job_dir, image, quality=86)
@@ -21975,6 +21996,22 @@ def _data_ingestion_safe_source_file(item: Dict[str, Any], job_dir: Path) -> Pat
     if safe_path.suffix.lower() not in DATA_INGESTION_IMAGE_EXTS:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_source_not_image")
     return safe_path
+
+
+def _data_ingestion_safe_reference_source_file(item: Dict[str, Any], job_dir: Path) -> Path:
+    raw_path = Path(str(item.get("image_path") or ""))
+    safe_job_path = _safe_existing_regular_file_within_root_impl(raw_path, job_dir)
+    if safe_job_path is not None and safe_job_path.suffix.lower() in DATA_INGESTION_IMAGE_EXTS:
+        return safe_job_path
+    source_dataset_id = str(item.get("_source_dataset_id") or item.get("source_dataset_id") or "").strip()
+    if not source_dataset_id:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_reference_thumbnail_not_found")
+    entry = _resolve_dataset_entry(source_dataset_id)
+    dataset_root = _dataset_effective_root_from_entry(entry).resolve()
+    safe_dataset_path = _safe_existing_regular_file_within_root_impl(raw_path, dataset_root)
+    if safe_dataset_path is None or safe_dataset_path.suffix.lower() not in DATA_INGESTION_IMAGE_EXTS:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_reference_thumbnail_not_found")
+    return safe_dataset_path
 
 
 def _data_ingestion_selected_result_items(items: List[Dict[str, Any]], payload: Dict[str, Any]) -> List[Dict[str, Any]]:

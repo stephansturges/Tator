@@ -694,6 +694,8 @@ def test_class_split_explorer_panel_contract():
     assert 'classSplitElements.datasetAnalysisPanel.addEventListener("toggle"' in js
     assert "renderClassSplitDatasetAnalysisGraph(classSplitState.datasetAnalysis, { force: true })" in js
     assert "classSplitDatasetAnalysisHoverPreview" in js
+    assert 'graphEl.on("plotly_hover", (event) => {' in js
+    assert "showClassSplitDatasetHoverPreview(event.event, previewUrl" in js
     assert "dataset_image_value_score" in js
     assert "scheduleAnnotationDiversityMetricRefresh();" in js
     assert "Projection neighbors" in js

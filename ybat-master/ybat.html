@@ -763,8 +763,8 @@
                                 <input type="number" id="dataIngestionMaxTrainImages" min="0" max="1000000" step="1" value="0" />
                             </div>
                             <div class="data-ingestion-field">
-                                <label for="dataIngestionEpochs">Profile epochs<span class="help-icon" title="Number of contrastive passes over reference images. More epochs can improve the profile but increase runtime and overfitting risk.">?</span></label>
-                                <input type="number" id="dataIngestionEpochs" min="1" max="100" step="1" value="3" />
+                                <label for="dataIngestionEpochs">Profile epochs<span class="help-icon" title="Number of contrastive passes over reference images. Reference profile training now uses strong color, geometry, blur, noise, compression, and erasing augmentation; more epochs help the head learn those invariances.">?</span></label>
+                                <input type="number" id="dataIngestionEpochs" min="1" max="100" step="1" value="8" />
                             </div>
                             <div class="data-ingestion-field">
                                 <label for="dataIngestionBatchSize">Batch size<span class="help-icon" title="Number of paired augmented reference images processed per profile optimization step. Larger batches improve contrastive signal but need more memory.">?</span></label>
@@ -789,8 +789,16 @@
                                 <input type="file" id="dataIngestionFiles" multiple accept="image/*,video/*" />
                             </div>
                             <div class="data-ingestion-field">
-                                <label for="dataIngestionKeepFraction">Keep fraction<span class="help-icon" title="Fraction of candidate images/frames to keep after greedy farthest-first diversity ranking. 0.2 keeps the top 20%.">?</span></label>
+                                <label for="dataIngestionKeepFraction">Keep fraction<span class="help-icon" title="Fraction of all candidate images and sampled video frames in this analysis run to keep after diversity ranking. 0.2 keeps the top 20% across the whole upload batch, not 20% of each file or video.">?</span></label>
                                 <input type="number" id="dataIngestionKeepFraction" min="0.01" max="1" step="0.01" value="0.2" />
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionLocalVendiEnabled">Favor Local Vendi<span class="help-icon" title="Adds a light bonus for images whose patch embeddings have high Vendi-style effective rank. High means many distinct local visual regions, not raw pixel entropy.">?</span></label>
+                                <label><input type="checkbox" id="dataIngestionLocalVendiEnabled" checked /> Use Local Vendi</label>
+                            </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionLocalVendiWeight">Local Vendi weight<span class="help-icon" title="How much Local Vendi can influence automatic keeps. 0 shows the metric without affecting selection; 0.2 is a light bonus.">?</span></label>
+                                <input type="number" id="dataIngestionLocalVendiWeight" min="0" max="0.5" step="0.05" value="0.2" />
                             </div>
                             <div class="data-ingestion-field">
                                 <label for="dataIngestionFrameInterval">Video frame interval (s)<span class="help-icon" title="Seconds between sampled frames for uploaded videos. Smaller values keep more frames and run slower.">?</span></label>
@@ -816,7 +824,7 @@
                             <div id="dataIngestionReport" class="data-ingestion-report"></div>
                         </div>
                         <div>
-                            <strong id="dataIngestionListTitle">Top diverse candidates</strong>
+                            <strong id="dataIngestionListTitle">Candidate priority ranking</strong>
                             <div id="dataIngestionList" class="data-ingestion-list"></div>
                         </div>
                         <div class="data-ingestion-distribution" id="dataIngestionDistribution" hidden>

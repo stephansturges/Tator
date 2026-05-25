@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64, hashlib, io, zipfile, uuid, os, tempfile, shutil, time, logging, subprocess, sys, json, re, signal, random, gc, queue, functools, math, stat, importlib, warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import ContextVar
 from pathlib import Path, PureWindowsPath
 import numpy as np
@@ -22,7 +23,7 @@ from typing import (
 )
 from collections import Counter, deque
 import torch, clip, joblib
-from PIL import Image
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException, Request
 
 logger = logging.getLogger("localinferenceapi")
@@ -295,12 +296,16 @@ from services.classifier_jobs import (
 )
 from services.data_ingestion import (
     IMAGE_EXTS as DATA_INGESTION_IMAGE_EXTS,
+    LOCAL_VENDI_MAX_PATCHES as DATA_INGESTION_LOCAL_VENDI_MAX_PATCHES_DEFAULT,
     VIDEO_EXTS as DATA_INGESTION_VIDEO_EXTS,
     diversity_summary as _data_ingestion_diversity_summary,
-    greedy_diverse_indices as _data_ingestion_greedy_indices,
+    greedy_diverse_indices_with_scores as _data_ingestion_greedy_indices_with_scores,
+    greedy_diverse_indices_with_local_scores as _data_ingestion_greedy_indices_with_local_scores,
+    local_vendi_metrics_from_patch_tokens as _data_ingestion_local_vendi_metrics_from_patch_tokens,
     normalize_keep_fraction as _data_ingestion_keep_fraction,
     normalize_rows as _data_ingestion_normalize_rows,
     safe_media_name as _data_ingestion_safe_media_name,
+    score_percentiles as _data_ingestion_score_percentiles,
 )
 from services.detector_jobs import (
     _rfdetr_job_append_metric_impl as _rfdetr_job_append_metric_impl,
@@ -1019,6 +1024,17 @@ DATA_INGESTION_UPLOAD_QUOTA_BYTES = _env_int(
 )
 DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO = _env_int(
     "DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO", 10000
+)
+DATA_INGESTION_MEDIA_PREPARE_WORKERS = _env_int("DATA_INGESTION_MEDIA_PREPARE_WORKERS", 4)
+DATA_INGESTION_IMAGE_LOAD_WORKERS = _env_int("DATA_INGESTION_IMAGE_LOAD_WORKERS", 4)
+DATA_INGESTION_LOCAL_VENDI_DEFAULT_ENABLED = _env_bool("DATA_INGESTION_LOCAL_VENDI_DEFAULT_ENABLED", True)
+DATA_INGESTION_LOCAL_VENDI_DEFAULT_WEIGHT = max(
+    0.0,
+    min(1.0, _env_float("DATA_INGESTION_LOCAL_VENDI_DEFAULT_WEIGHT", 0.2)),
+)
+DATA_INGESTION_LOCAL_VENDI_MAX_PATCHES = max(
+    1,
+    _env_int("DATA_INGESTION_LOCAL_VENDI_MAX_PATCHES", DATA_INGESTION_LOCAL_VENDI_MAX_PATCHES_DEFAULT),
 )
 CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES = _env_int(
     "CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES", 10 * 1024 * 1024 * 1024
@@ -13877,6 +13893,9 @@ _init_storage_root(DATA_INGESTION_ROOT)
 LOCAL_SALAD_HEAD_ROOT = Path(os.environ.get("LOCAL_SALAD_HEAD_ROOT", "./uploads/salad_heads"))
 _init_storage_root(LOCAL_SALAD_HEAD_ROOT)
 LOCAL_SALAD_HEAD_LOCK = threading.Lock()
+LOCAL_SALAD_AUGMENTATION_PROFILE = "strong_photometric_spatial_v2"
+LOCAL_SALAD_DEFAULT_EPOCHS = 8
+LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE = 768
 REFERENCE_PROFILE_BUNDLE_VERSION = "tator-reference-profile-v1"
 REFERENCE_PROFILE_BUNDLE_MAX_BYTES = 512 * 1024 * 1024
 REFERENCE_PROFILE_BUNDLE_MAX_UNCOMPRESSED_BYTES = 768 * 1024 * 1024
@@ -20600,9 +20619,26 @@ def _data_ingestion_capabilities() -> Dict[str, Any]:
         "image_exts": sorted(DATA_INGESTION_IMAGE_EXTS),
         "video_exts": sorted(DATA_INGESTION_VIDEO_EXTS),
         "max_extracted_frames_per_video": DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO,
+        "media_prepare_workers": _data_ingestion_worker_count(
+            DATA_INGESTION_MEDIA_PREPARE_WORKERS,
+            max(1, DATA_INGESTION_MEDIA_PREPARE_WORKERS),
+        ),
+        "image_load_workers": _data_ingestion_worker_count(
+            DATA_INGESTION_IMAGE_LOAD_WORKERS,
+            max(1, DATA_INGESTION_IMAGE_LOAD_WORKERS),
+        ),
         "salad_policy": "local_training_only",
         "local_salad_policy": LOCAL_SALAD_POLICY,
         "local_salad_trainer": LOCAL_SALAD_TRAINER,
+        "local_salad_augmentation_profile": LOCAL_SALAD_AUGMENTATION_PROFILE,
+        "local_salad_default_epochs": LOCAL_SALAD_DEFAULT_EPOCHS,
+        "local_vendi": {
+            "enabled": True,
+            "default_enabled": DATA_INGESTION_LOCAL_VENDI_DEFAULT_ENABLED,
+            "default_weight": DATA_INGESTION_LOCAL_VENDI_DEFAULT_WEIGHT,
+            "max_patches": DATA_INGESTION_LOCAL_VENDI_MAX_PATCHES,
+            "description": "Vendi-style effective-rank score over local patch embeddings for each candidate image/frame.",
+        },
         "local_salad_backend": {
             "default": "auto",
             "auto_resolved": resolve_local_salad_backend("auto"),
@@ -20637,6 +20673,64 @@ def _data_ingestion_novelty_score_metadata(scores: Sequence[float]) -> List[Dict
         }
         for idx in range(total)
     ]
+
+
+def _data_ingestion_local_vendi_enabled(value: Any) -> bool:
+    if value is None:
+        return DATA_INGESTION_LOCAL_VENDI_DEFAULT_ENABLED
+    if isinstance(value, bool):
+        return bool(value)
+    raw = str(value).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return DATA_INGESTION_LOCAL_VENDI_DEFAULT_ENABLED
+
+
+def _data_ingestion_local_vendi_weight(value: Any) -> float:
+    if value is None:
+        return DATA_INGESTION_LOCAL_VENDI_DEFAULT_WEIGHT
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = DATA_INGESTION_LOCAL_VENDI_DEFAULT_WEIGHT
+    if not math.isfinite(parsed):
+        parsed = DATA_INGESTION_LOCAL_VENDI_DEFAULT_WEIGHT
+    return max(0.0, min(1.0, parsed))
+
+
+def _data_ingestion_local_vendi_metadata(metrics: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rows = [dict(item or {}) for item in (metrics or [])]
+    scores = np.asarray([float(item.get("local_vendi_score") or 0.0) for item in rows], dtype=np.float32)
+    percentiles = _data_ingestion_score_percentiles(scores) * 100.0 if len(rows) else np.empty((0,), dtype=np.float32)
+    ranks = np.zeros(len(rows), dtype=np.int32)
+    for rank, idx in enumerate(sorted(range(len(rows)), key=lambda pos: (-float(scores[pos]), pos)), start=1):
+        ranks[int(idx)] = int(rank)
+    out: List[Dict[str, Any]] = []
+    for idx, item in enumerate(rows):
+        out.append(
+            {
+                "local_vendi_score": float(scores[idx]) if idx < len(scores) else 0.0,
+                "local_vendi_effective_patches": float(item.get("local_vendi_effective_patches") or 0.0),
+                "local_vendi_patch_count": int(round(float(item.get("local_vendi_patch_count") or 0.0))),
+                "local_vendi_used_patch_count": int(round(float(item.get("local_vendi_used_patch_count") or 0.0))),
+                "local_vendi_percentile": float(percentiles[idx]) if idx < len(percentiles) else 0.0,
+                "local_vendi_rank": int(ranks[idx]) if idx < len(ranks) else None,
+            }
+        )
+    return out
+
+
+def _data_ingestion_patch_token_local_vendi_metrics(tokens: Any) -> List[Dict[str, float]]:
+    if isinstance(tokens, torch.Tensor):
+        token_array = tokens.detach().float().cpu().numpy()
+    else:
+        token_array = np.asarray(tokens, dtype=np.float32)
+    return _data_ingestion_local_vendi_metrics_from_patch_tokens(
+        token_array,
+        max_patches=DATA_INGESTION_LOCAL_VENDI_MAX_PATCHES,
+    )
 
 
 def _data_ingestion_thumbnail_cache_path(job_dir: Path, cache_dir_name: str, key: str) -> Tuple[Path, Path]:
@@ -20794,6 +20888,124 @@ def _data_ingestion_open_image(path: Path) -> Image.Image:
         return img.convert("RGB")
 
 
+def _data_ingestion_worker_count(configured: int, item_count: int) -> int:
+    if item_count <= 1:
+        return 1
+    cpu_count = os.cpu_count() or 2
+    requested = max(1, int(configured or 1))
+    return max(1, min(item_count, requested, max(1, cpu_count), 8))
+
+
+def _data_ingestion_open_images_for_batch(batch_rows: Sequence[Dict[str, Any]]) -> List[Image.Image]:
+    paths = [Path(str(row.get("image_path") or "")) for row in batch_rows]
+    workers = _data_ingestion_worker_count(DATA_INGESTION_IMAGE_LOAD_WORKERS, len(paths))
+    if workers <= 1:
+        return [_data_ingestion_open_image(path) for path in paths]
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ingest-image-load") as executor:
+        return list(executor.map(_data_ingestion_open_image, paths))
+
+
+def _data_ingestion_prepare_media_row(
+    row: Dict[str, Any],
+    idx: int,
+    *,
+    out_dir: Path,
+    frame_interval: float,
+    max_frames_per_video: int,
+    ffmpeg_path: Optional[str],
+) -> Tuple[int, List[Dict[str, Any]], List[str]]:
+    prepared: List[Dict[str, Any]] = []
+    logs: List[str] = []
+    path = Path(str(row.get("path") or ""))
+    ext = path.suffix.lower()
+    if ext in DATA_INGESTION_IMAGE_EXTS:
+        try:
+            with _data_ingestion_open_image(path) as img:
+                width, height = img.size
+            try:
+                stat_result = path.stat()
+                size = int(stat_result.st_size)
+                mtime_ns = int(stat_result.st_mtime_ns)
+            except OSError:
+                size = _coerce_int(row.get("size"), 0, minimum=0)
+                mtime_ns = _coerce_int(row.get("mtime_ns"), 0, minimum=0)
+            prepared.append(
+                {
+                    **row,
+                    "image_path": str(path),
+                    "source_type": "image",
+                    "frame_index": 0,
+                    "width": width,
+                    "height": height,
+                    "size": size,
+                    "mtime_ns": mtime_ns,
+                }
+            )
+        except Exception as exc:
+            logs.append(f"Skipped unreadable image {path.name}: {exc}")
+        return idx, prepared, logs
+    if ext in DATA_INGESTION_VIDEO_EXTS:
+        if not ffmpeg_path:
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="ffmpeg_required_for_video_ingestion")
+        video_dir = out_dir / _data_ingestion_safe_media_name(path.name, f"video_{idx:05d}")
+        if _storage_path_has_symlink_component(video_dir):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_path_invalid")
+        video_dir.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(video_dir):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_path_invalid")
+        fps_expr = f"fps=1/{max(0.1, float(frame_interval or 1.0)):.3f}"
+        pattern = video_dir / "frame_%06d.jpg"
+        cmd = [
+            ffmpeg_path,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(path),
+            "-vf",
+            fps_expr,
+        ]
+        requested_max_frames = _coerce_int(max_frames_per_video, 200, minimum=0)
+        hard_max_frames = max(1, int(DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO or 10000))
+        effective_max_frames = requested_max_frames if 0 < requested_max_frames <= hard_max_frames else hard_max_frames
+        cmd += ["-frames:v", str(effective_max_frames)]
+        cmd += [str(pattern)]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or str(exc)).strip()
+            logs.append(f"Video frame extraction failed for {path.name}: {detail[:500]}")
+            return idx, prepared, logs
+        frames = sorted(video_dir.glob("frame_*.jpg"))
+        for frame_idx, frame_path in enumerate(frames):
+            try:
+                with _data_ingestion_open_image(frame_path) as img:
+                    width, height = img.size
+                try:
+                    stat_result = frame_path.stat()
+                    size = int(stat_result.st_size)
+                    mtime_ns = int(stat_result.st_mtime_ns)
+                except OSError:
+                    size = 0
+                    mtime_ns = 0
+                prepared.append(
+                    {
+                        **row,
+                        "image_path": str(frame_path),
+                        "source_type": "video_frame",
+                        "frame_index": frame_idx,
+                        "width": width,
+                        "height": height,
+                        "size": size,
+                        "mtime_ns": mtime_ns,
+                    }
+                )
+            except Exception:
+                continue
+        logs.append(f"Extracted {len(frames)} frames from {path.name}.")
+    return idx, prepared, logs
+
+
 def _data_ingestion_prepare_media(
     job: DataIngestionJob,
     rows: Sequence[Dict[str, Any]],
@@ -20807,98 +21019,53 @@ def _data_ingestion_prepare_media(
     prepared: List[Dict[str, Any]] = []
     total = max(1, len(rows))
     ffmpeg_path = shutil.which("ffmpeg")
-    for idx, row in enumerate(rows):
-        if job.cancel_event.is_set():
-            raise RuntimeError("cancelled")
-        path = Path(str(row.get("path") or ""))
-        ext = path.suffix.lower()
-        pct = progress_start + (progress_end - progress_start) * (idx / total)
-        _data_ingestion_update(job, progress=pct, message=f"Preparing media {idx + 1}/{len(rows)} ...")
-        if ext in DATA_INGESTION_IMAGE_EXTS:
-            try:
-                with _data_ingestion_open_image(path) as img:
-                    width, height = img.size
-                try:
-                    stat_result = path.stat()
-                    size = int(stat_result.st_size)
-                    mtime_ns = int(stat_result.st_mtime_ns)
-                except OSError:
-                    size = _coerce_int(row.get("size"), 0, minimum=0)
-                    mtime_ns = _coerce_int(row.get("mtime_ns"), 0, minimum=0)
-                prepared.append(
-                    {
-                        **row,
-                        "image_path": str(path),
-                        "source_type": "image",
-                        "frame_index": 0,
-                        "width": width,
-                        "height": height,
-                        "size": size,
-                        "mtime_ns": mtime_ns,
-                    }
+    workers = _data_ingestion_worker_count(DATA_INGESTION_MEDIA_PREPARE_WORKERS, len(rows))
+    if workers <= 1:
+        indexed_results: List[Tuple[int, List[Dict[str, Any]], List[str]]] = []
+        for idx, row in enumerate(rows):
+            if job.cancel_event.is_set():
+                raise RuntimeError("cancelled")
+            pct = progress_start + (progress_end - progress_start) * (idx / total)
+            _data_ingestion_update(job, progress=pct, message=f"Preparing media {idx + 1}/{len(rows)} ...")
+            indexed_results.append(
+                _data_ingestion_prepare_media_row(
+                    row,
+                    idx,
+                    out_dir=out_dir,
+                    frame_interval=frame_interval,
+                    max_frames_per_video=max_frames_per_video,
+                    ffmpeg_path=ffmpeg_path,
                 )
-            except Exception as exc:
-                _data_ingestion_log(job, f"Skipped unreadable image {path.name}: {exc}")
-            continue
-        if ext in DATA_INGESTION_VIDEO_EXTS:
-            if not ffmpeg_path:
-                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="ffmpeg_required_for_video_ingestion")
-            video_dir = out_dir / _data_ingestion_safe_media_name(path.name, f"video_{idx:05d}")
-            if _storage_path_has_symlink_component(video_dir):
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_path_invalid")
-            video_dir.mkdir(parents=True, exist_ok=True)
-            if _storage_path_has_symlink_component(video_dir):
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_path_invalid")
-            fps_expr = f"fps=1/{max(0.1, float(frame_interval or 1.0)):.3f}"
-            pattern = video_dir / "frame_%06d.jpg"
-            cmd = [
-                ffmpeg_path,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                str(path),
-                "-vf",
-                fps_expr,
+            )
+    else:
+        indexed_results = []
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ingest-media") as executor:
+            futures = [
+                executor.submit(
+                    _data_ingestion_prepare_media_row,
+                    row,
+                    idx,
+                    out_dir=out_dir,
+                    frame_interval=frame_interval,
+                    max_frames_per_video=max_frames_per_video,
+                    ffmpeg_path=ffmpeg_path,
+                )
+                for idx, row in enumerate(rows)
             ]
-            requested_max_frames = _coerce_int(max_frames_per_video, 200, minimum=0)
-            hard_max_frames = max(1, int(DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO or 10000))
-            effective_max_frames = requested_max_frames if 0 < requested_max_frames <= hard_max_frames else hard_max_frames
-            cmd += ["-frames:v", str(effective_max_frames)]
-            cmd += [str(pattern)]
-            try:
-                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            except subprocess.CalledProcessError as exc:
-                detail = (exc.stderr or exc.stdout or str(exc)).strip()
-                _data_ingestion_log(job, f"Video frame extraction failed for {path.name}: {detail[:500]}")
-                continue
-            frames = sorted(video_dir.glob("frame_*.jpg"))
-            for frame_idx, frame_path in enumerate(frames):
-                try:
-                    with _data_ingestion_open_image(frame_path) as img:
-                        width, height = img.size
-                    try:
-                        stat_result = frame_path.stat()
-                        size = int(stat_result.st_size)
-                        mtime_ns = int(stat_result.st_mtime_ns)
-                    except OSError:
-                        size = 0
-                        mtime_ns = 0
-                    prepared.append(
-                        {
-                            **row,
-                            "image_path": str(frame_path),
-                            "source_type": "video_frame",
-                            "frame_index": frame_idx,
-                            "width": width,
-                            "height": height,
-                            "size": size,
-                            "mtime_ns": mtime_ns,
-                        }
-                    )
-                except Exception:
-                    continue
-            _data_ingestion_log(job, f"Extracted {len(frames)} frames from {path.name}.")
+            for done_count, future in enumerate(as_completed(futures), start=1):
+                if job.cancel_event.is_set():
+                    raise RuntimeError("cancelled")
+                indexed_results.append(future.result())
+                pct = progress_start + (progress_end - progress_start) * (done_count / total)
+                _data_ingestion_update(
+                    job,
+                    progress=pct,
+                    message=f"Preparing media {done_count}/{len(rows)} with {workers} workers ...",
+                )
+    for _idx, rows_for_item, logs in sorted(indexed_results, key=lambda item: item[0]):
+        for line in logs:
+            _data_ingestion_log(job, line)
+        prepared.extend(rows_for_item)
     return prepared
 
 
@@ -20930,8 +21097,11 @@ def _data_ingestion_encode_prepared_images(
     batch_size: int = 16,
     progress_start: float = 0.35,
     progress_end: float = 0.82,
-) -> np.ndarray:
+    return_local_vendi: bool = False,
+) -> np.ndarray | Tuple[np.ndarray, List[Dict[str, float]]]:
     if not prepared:
+        if return_local_vendi:
+            return np.empty((0, 0), dtype=np.float32), []
         return np.empty((0, 0), dtype=np.float32)
     encoder_norm = str(encoder or "dinov3_pooled").strip().lower()
     salad_head: Optional[Any] = None
@@ -20963,6 +21133,7 @@ def _data_ingestion_encode_prepared_images(
             salad_head, salad_meta = _load_local_salad_head(salad_head_id, device_name=device_name)
     resolved_batch = max(1, min(int(batch_size or 16), len(prepared)))
     features: List[np.ndarray] = []
+    local_vendi_metrics: List[Dict[str, float]] = []
     total = len(prepared)
     started = time.time()
     for start in range(0, total, resolved_batch):
@@ -20971,8 +21142,7 @@ def _data_ingestion_encode_prepared_images(
         batch_rows = prepared[start : start + resolved_batch]
         images: List[Image.Image] = []
         try:
-            for row in batch_rows:
-                images.append(_data_ingestion_open_image(Path(str(row.get("image_path") or ""))))
+            images = _data_ingestion_open_images_for_batch(batch_rows)
             if base_encoder == "cradio":
                 pooling = normalize_cradio_pooling(
                     salad_meta.get("cradio_pooling") if encoder_norm == "local_salad" else cradio_pooling
@@ -20989,6 +21159,8 @@ def _data_ingestion_encode_prepared_images(
                     )
                     if spatial_tokens.ndim != 3 or spatial_tokens.shape[1] <= 0:
                         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="cradio_spatial_tokens_missing")
+                    if return_local_vendi:
+                        local_vendi_metrics.extend(_data_ingestion_patch_token_local_vendi_metrics(spatial_tokens))
                     assert salad_head is not None
                     if is_mlx_local_salad_head(salad_head):
                         features.append(_encode_local_salad_head_np(salad_head, spatial_tokens, summary_tokens))
@@ -21025,6 +21197,8 @@ def _data_ingestion_encode_prepared_images(
                         global_token = getattr(outputs, "pooler_output", None)
                         if global_token is None:
                             global_token = last_hidden[:, 0, :]
+                        if return_local_vendi:
+                            local_vendi_metrics.extend(_data_ingestion_patch_token_local_vendi_metrics(last_hidden[:, 1:, :]))
                         assert salad_head is not None
                         features.append(_encode_local_salad_head_np(salad_head, last_hidden[:, 1:, :], global_token))
                         continue
@@ -21052,8 +21226,13 @@ def _data_ingestion_encode_prepared_images(
             + (f" ({speed})" if speed else ""),
         )
     if not features:
+        if return_local_vendi:
+            return np.empty((0, 0), dtype=np.float32), local_vendi_metrics
         return np.empty((0, 0), dtype=np.float32)
-    return np.concatenate(features, axis=0).astype(np.float32, copy=False)
+    encoded = np.concatenate(features, axis=0).astype(np.float32, copy=False)
+    if return_local_vendi:
+        return encoded, local_vendi_metrics
+    return encoded
 
 
 def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
@@ -21114,7 +21293,9 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         if not references:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_images")
         batch_size = _coerce_int(request.get("batch_size"), 16, minimum=1)
-        candidate_embeddings = _data_ingestion_encode_prepared_images(
+        local_vendi_enabled = _data_ingestion_local_vendi_enabled(request.get("local_vendi_enabled"))
+        local_vendi_weight = _data_ingestion_local_vendi_weight(request.get("local_vendi_weight")) if local_vendi_enabled else 0.0
+        candidate_encoded = _data_ingestion_encode_prepared_images(
             candidates,
             job=job,
             encoder=encoder,
@@ -21124,7 +21305,16 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             batch_size=batch_size,
             progress_start=0.30,
             progress_end=0.72,
+            return_local_vendi=local_vendi_enabled,
         )
+        if isinstance(candidate_encoded, tuple):
+            candidate_embeddings, local_vendi_raw_metrics = candidate_encoded
+        else:
+            candidate_embeddings = candidate_encoded
+            local_vendi_raw_metrics = []
+        if len(local_vendi_raw_metrics) != len(candidates):
+            local_vendi_raw_metrics = []
+            local_vendi_weight = 0.0
         reference_embeddings = _data_ingestion_encode_prepared_images(
             references,
             job=job,
@@ -21139,18 +21329,40 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         if job.cancel_event.is_set():
             raise RuntimeError("cancelled")
         keep_fraction = _data_ingestion_keep_fraction(request.get("keep_fraction"), 0.2)
-        selected, novelty_scores = _data_ingestion_greedy_indices(
-            candidate_embeddings,
-            keep_fraction=keep_fraction,
-            reference_embeddings=reference_embeddings,
-        )
+        local_vendi_metadata = _data_ingestion_local_vendi_metadata(local_vendi_raw_metrics)
+        local_vendi_scores = [float(item.get("local_vendi_score") or 0.0) for item in local_vendi_metadata]
+        if local_vendi_weight > 0.0 and len(local_vendi_scores) == len(candidates):
+            selected, novelty_scores, coverage_scores, selection_scores = _data_ingestion_greedy_indices_with_local_scores(
+                candidate_embeddings,
+                keep_fraction=keep_fraction,
+                reference_embeddings=reference_embeddings,
+                local_scores=local_vendi_scores,
+                local_weight=local_vendi_weight,
+            )
+            selection_method = "farthest_first_coverage_plus_local_vendi"
+            selection_score_kind = "coverage_percentile_plus_local_vendi"
+            selection_score_description = "coverage percentile plus Local Vendi percentile"
+        else:
+            selected, novelty_scores, coverage_scores = _data_ingestion_greedy_indices_with_scores(
+                candidate_embeddings,
+                keep_fraction=keep_fraction,
+                reference_embeddings=reference_embeddings,
+            )
+            selection_scores = coverage_scores.astype(np.float32, copy=True)
+            selection_method = "farthest_first_coverage"
+            selection_score_kind = "coverage_distance"
+            selection_score_description = "coverage distance to the reference/kept set"
+            local_vendi_weight = 0.0
         selected_set = set(selected)
         ranked_items: List[Dict[str, Any]] = []
         rank_by_idx = {idx: rank + 1 for rank, idx in enumerate(selected)}
         novelty_metadata = _data_ingestion_novelty_score_metadata(novelty_scores)
         for idx, row in enumerate(candidates):
             novelty_meta = novelty_metadata[idx] if idx < len(novelty_metadata) else {}
+            local_vendi_meta = local_vendi_metadata[idx] if idx < len(local_vendi_metadata) else {}
             novelty_score = float(novelty_scores[idx]) if idx < len(novelty_scores) else 0.0
+            coverage_score = float(coverage_scores[idx]) if idx < len(coverage_scores) else novelty_score
+            selection_score = float(selection_scores[idx]) if idx < len(selection_scores) else coverage_score
             ranked_items.append(
                 {
                     "item_id": f"item_{idx:06d}",
@@ -21158,7 +21370,11 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
                     "rank": rank_by_idx.get(idx),
                     "keep": idx in selected_set,
                     "diversity_score": novelty_score,
+                    "coverage_score": coverage_score,
+                    "selection_score": selection_score,
+                    "selection_score_kind": selection_score_kind,
                     **novelty_meta,
+                    **local_vendi_meta,
                     "filename": row.get("filename") or Path(str(row.get("image_path") or "")).name,
                     "saved_name": row.get("saved_name") or "",
                     "source_type": row.get("source_type") or "image",
@@ -21172,9 +21388,13 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             key=lambda item: (
                 0 if item.get("keep") else 1,
                 int(item.get("rank") or 10**9),
-                -float(item.get("diversity_score") or 0.0),
+                -float(item.get("selection_score") or 0.0),
             )
         )
+        for priority_rank, item in enumerate(ranked_items, start=1):
+            item["selection_priority_rank"] = priority_rank
+            item["selection_priority_total"] = len(ranked_items)
+            item["selection_priority_group"] = "keep" if item.get("keep") else "reject"
         summary = {
             **_data_ingestion_diversity_summary(
                 candidate_embeddings,
@@ -21196,6 +21416,11 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             "reference_label": str(request.get("reference_label") or ""),
             "candidate_upload_count": len(candidate_rows),
             "candidate_image_count": len(candidates),
+            "local_vendi_enabled": bool(local_vendi_enabled and len(local_vendi_metadata) == len(candidates)),
+            "local_vendi_weight": local_vendi_weight,
+            "local_vendi_max_patches": DATA_INGESTION_LOCAL_VENDI_MAX_PATCHES,
+            "selection_score_kind": selection_score_kind,
+            "selection_score_description": selection_score_description,
             "local_salad_policy": LOCAL_SALAD_POLICY,
             "local_salad_trainer": LOCAL_SALAD_TRAINER,
         }
@@ -21205,7 +21430,25 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
                     "reference_novelty_min": float(np.min(novelty_scores)),
                     "reference_novelty_max": float(np.max(novelty_scores)),
                     "reference_novelty_mean": float(np.mean(novelty_scores)),
-                    "selection_method": "farthest_first_coverage",
+                    "coverage_score_min": float(np.min(coverage_scores)) if len(coverage_scores) else None,
+                    "coverage_score_max": float(np.max(coverage_scores)) if len(coverage_scores) else None,
+                    "coverage_score_mean": float(np.mean(coverage_scores)) if len(coverage_scores) else None,
+                    "selection_score_min": float(np.min(selection_scores)) if len(selection_scores) else None,
+                    "selection_score_max": float(np.max(selection_scores)) if len(selection_scores) else None,
+                    "selection_score_mean": float(np.mean(selection_scores)) if len(selection_scores) else None,
+                    "selection_method": selection_method,
+                }
+            )
+        if local_vendi_metadata:
+            local_vendi_score_values = np.asarray(
+                [float(item.get("local_vendi_score") or 0.0) for item in local_vendi_metadata],
+                dtype=np.float32,
+            )
+            summary.update(
+                {
+                    "local_vendi_min": float(np.min(local_vendi_score_values)),
+                    "local_vendi_max": float(np.max(local_vendi_score_values)),
+                    "local_vendi_mean": float(np.mean(local_vendi_score_values)),
                 }
             )
         reference_items: List[Dict[str, Any]] = []
@@ -21225,6 +21468,7 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             out_dir,
             candidate_embeddings=candidate_embeddings,
             reference_embeddings=reference_embeddings if reference_embeddings is not None else np.empty((0, 0), dtype=np.float32),
+            candidate_local_vendi_scores=np.asarray(local_vendi_scores, dtype=np.float32),
         )
         with DATA_INGESTION_JOBS_LOCK:
             job.result_path = str(result_path)
@@ -21244,19 +21488,165 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             _data_ingestion_update(job, status="failed", progress=1.0, message="Data ingestion crashed.", error=str(exc))
 
 
-def _data_ingestion_train_view(img: Image.Image, rng: random.Random) -> Image.Image:
-    work = img.convert("RGB")
-    width, height = work.size
-    if width > 8 and height > 8:
-        scale = rng.uniform(0.72, 1.0)
-        crop_w = max(8, int(width * scale))
-        crop_h = max(8, int(height * scale))
-        left = rng.randint(0, max(0, width - crop_w))
-        top = rng.randint(0, max(0, height - crop_h))
-        work = work.crop((left, top, left + crop_w, top + crop_h))
+def _data_ingestion_average_rgb(img: Image.Image) -> Tuple[int, int, int]:
+    pixel = img.convert("RGB").resize((1, 1), Image.Resampling.BILINEAR).getpixel((0, 0))
+    return tuple(int(max(0, min(255, value))) for value in pixel[:3])
+
+
+def _data_ingestion_resize_train_view(img: Image.Image) -> Image.Image:
+    width, height = img.size
+    max_side = max(width, height)
+    if max_side <= LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE:
+        return img
+    scale = float(LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE) / float(max_side)
+    new_size = (max(8, int(round(width * scale))), max(8, int(round(height * scale))))
+    return img.resize(new_size, Image.Resampling.LANCZOS)
+
+
+def _data_ingestion_random_resized_crop(img: Image.Image, rng: random.Random) -> Image.Image:
+    width, height = img.size
+    if width <= 8 or height <= 8:
+        return img
+    area = float(width * height)
+    for _ in range(10):
+        target_area = area * rng.uniform(0.35, 1.0)
+        aspect = math.exp(rng.uniform(math.log(0.65), math.log(1.55)))
+        crop_w = int(round(math.sqrt(target_area * aspect)))
+        crop_h = int(round(math.sqrt(target_area / aspect)))
+        if rng.random() < 0.5:
+            crop_w, crop_h = crop_h, crop_w
+        if 8 <= crop_w <= width and 8 <= crop_h <= height:
+            left = rng.randint(0, max(0, width - crop_w))
+            top = rng.randint(0, max(0, height - crop_h))
+            return img.crop((left, top, left + crop_w, top + crop_h))
+    scale = rng.uniform(0.55, 1.0)
+    crop_w = max(8, min(width, int(round(width * scale))))
+    crop_h = max(8, min(height, int(round(height * scale))))
+    left = rng.randint(0, max(0, width - crop_w))
+    top = rng.randint(0, max(0, height - crop_h))
+    return img.crop((left, top, left + crop_w, top + crop_h))
+
+
+def _data_ingestion_perspective_coefficients(
+    source_points: Sequence[Tuple[float, float]],
+    target_points: Sequence[Tuple[float, float]],
+) -> Tuple[float, ...]:
+    matrix: List[List[float]] = []
+    values: List[float] = []
+    for (target_x, target_y), (source_x, source_y) in zip(target_points, source_points):
+        matrix.append([target_x, target_y, 1.0, 0.0, 0.0, 0.0, -source_x * target_x, -source_x * target_y])
+        matrix.append([0.0, 0.0, 0.0, target_x, target_y, 1.0, -source_y * target_x, -source_y * target_y])
+        values.extend([source_x, source_y])
+    coeffs, *_unused = np.linalg.lstsq(np.asarray(matrix, dtype=np.float64), np.asarray(values, dtype=np.float64), rcond=None)
+    return tuple(float(value) for value in coeffs)
+
+
+def _data_ingestion_apply_spatial_augments(img: Image.Image, rng: random.Random) -> Image.Image:
+    work = _data_ingestion_random_resized_crop(img, rng)
+    work = _data_ingestion_resize_train_view(work)
+    fill = _data_ingestion_average_rgb(work)
     if rng.random() < 0.5:
         work = work.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    if min(work.size) >= 16 and rng.random() < 0.55:
+        degrees = rng.uniform(-12.0, 12.0)
+        work = work.rotate(degrees, resample=Image.Resampling.BICUBIC, expand=False, fillcolor=fill)
+    if min(work.size) >= 32 and rng.random() < 0.40:
+        width, height = work.size
+        warp = float(min(width, height)) * rng.uniform(0.025, 0.10)
+        source = [(0.0, 0.0), (float(width), 0.0), (float(width), float(height)), (0.0, float(height))]
+        target = [
+            (rng.uniform(0.0, warp), rng.uniform(0.0, warp)),
+            (float(width) - rng.uniform(0.0, warp), rng.uniform(0.0, warp)),
+            (float(width) - rng.uniform(0.0, warp), float(height) - rng.uniform(0.0, warp)),
+            (rng.uniform(0.0, warp), float(height) - rng.uniform(0.0, warp)),
+        ]
+        coeffs = _data_ingestion_perspective_coefficients(source, target)
+        try:
+            work = work.transform(
+                (width, height),
+                Image.Transform.PERSPECTIVE,
+                coeffs,
+                Image.Resampling.BICUBIC,
+                fillcolor=fill,
+            )
+        except TypeError:
+            work = work.transform((width, height), Image.Transform.PERSPECTIVE, coeffs, Image.Resampling.BICUBIC)
     return work
+
+
+def _data_ingestion_apply_photometric_augments(img: Image.Image, rng: random.Random) -> Image.Image:
+    work = img.convert("RGB")
+    enhancers: List[Tuple[Callable[[Image.Image], Any], float, float]] = [
+        (ImageEnhance.Brightness, 0.45, 1.70),
+        (ImageEnhance.Contrast, 0.45, 1.85),
+        (ImageEnhance.Color, 0.15, 1.95),
+        (ImageEnhance.Sharpness, 0.35, 2.20),
+    ]
+    rng.shuffle(enhancers)
+    for enhancer, low, high in enhancers:
+        if rng.random() < 0.90:
+            work = enhancer(work).enhance(rng.uniform(low, high))
+    if rng.random() < 0.70:
+        gamma = rng.uniform(0.55, 1.80)
+        table = [int(max(0, min(255, round(255.0 * ((idx / 255.0) ** gamma))))) for idx in range(256)]
+        work = work.point(table * 3)
+    if rng.random() < 0.40:
+        hsv = work.convert("HSV")
+        hue, sat, val = hsv.split()
+        shift = rng.randint(-22, 22)
+        hue = hue.point([(idx + shift) % 256 for idx in range(256)])
+        work = Image.merge("HSV", (hue, sat, val)).convert("RGB")
+    if rng.random() < 0.25:
+        work = ImageOps.autocontrast(work)
+    if rng.random() < 0.22:
+        work = ImageOps.grayscale(work).convert("RGB")
+    return work
+
+
+def _data_ingestion_apply_degradation_augments(img: Image.Image, rng: random.Random) -> Image.Image:
+    work = img.convert("RGB")
+    if rng.random() < 0.35:
+        work = work.filter(ImageFilter.GaussianBlur(radius=rng.uniform(0.2, 2.2)))
+    if rng.random() < 0.35:
+        arr = np.asarray(work, dtype=np.float32)
+        np_rng = np.random.default_rng(rng.randrange(0, 2**32 - 1))
+        arr = arr + np_rng.normal(0.0, rng.uniform(3.0, 22.0), size=arr.shape).astype(np.float32)
+        work = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8)).convert("RGB")
+    if min(work.size) >= 24 and rng.random() < 0.55:
+        width, height = work.size
+        draw = ImageDraw.Draw(work)
+        erase_count = rng.randint(1, 3)
+        base_fill = _data_ingestion_average_rgb(work)
+        for _ in range(erase_count):
+            erase_area = float(width * height) * rng.uniform(0.02, 0.16)
+            aspect = math.exp(rng.uniform(math.log(0.25), math.log(4.0)))
+            erase_w = max(4, min(width, int(round(math.sqrt(erase_area * aspect)))))
+            erase_h = max(4, min(height, int(round(math.sqrt(erase_area / aspect)))))
+            if erase_w >= width or erase_h >= height:
+                continue
+            left = rng.randint(0, max(0, width - erase_w))
+            top = rng.randint(0, max(0, height - erase_h))
+            if rng.random() < 0.45:
+                fill = tuple(rng.randint(0, 255) for _ in range(3))
+            else:
+                jitter = rng.randint(-35, 35)
+                fill = tuple(int(max(0, min(255, value + jitter))) for value in base_fill)
+            draw.rectangle((left, top, left + erase_w, top + erase_h), fill=fill)
+    if rng.random() < 0.50:
+        quality = rng.randint(22, 78)
+        buffer = io.BytesIO()
+        work.save(buffer, format="JPEG", quality=quality)
+        buffer.seek(0)
+        with Image.open(buffer) as compressed:
+            work = compressed.convert("RGB").copy()
+    return work
+
+
+def _data_ingestion_train_view(img: Image.Image, rng: random.Random) -> Image.Image:
+    work = _data_ingestion_apply_spatial_augments(img.convert("RGB"), rng)
+    work = _data_ingestion_apply_photometric_augments(work, rng)
+    work = _data_ingestion_apply_degradation_augments(work, rng)
+    return work.convert("RGB")
 
 
 def _local_salad_training_stage(progress: float) -> str:
@@ -21388,7 +21778,7 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                 lr=learning_rate,
                 weight_decay=weight_decay,
             )
-        epochs = _coerce_int(request.get("epochs"), 3, minimum=1)
+        epochs = _coerce_int(request.get("epochs"), LOCAL_SALAD_DEFAULT_EPOCHS, minimum=1)
         batch_size = max(2, _coerce_int(request.get("batch_size"), 8, minimum=2))
         temperature = _coerce_float(request.get("temperature"), 0.07, minimum=0.001)
         seed = _coerce_int(request.get("seed"), 42)
@@ -21510,6 +21900,7 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                 "reference_fingerprint": reference_fingerprint,
                 "active_image_count": _coerce_int(request.get("active_image_count"), 0, minimum=0),
                 "epochs": epochs,
+                "augmentation_profile": LOCAL_SALAD_AUGMENTATION_PROFILE,
                 "batch_size": batch_size,
                 "learning_rate": learning_rate,
                 "weight_decay": weight_decay,
@@ -21842,9 +22233,21 @@ def get_data_ingestion_distribution(job_id: str) -> Dict[str, Any]:
             "width": item.get("width") or 0,
             "height": item.get("height") or 0,
             "diversity_score": float(item.get("diversity_score") or 0.0),
+            "coverage_score": item.get("coverage_score"),
+            "selection_score": item.get("selection_score"),
+            "selection_score_kind": item.get("selection_score_kind"),
+            "selection_priority_rank": item.get("selection_priority_rank"),
+            "selection_priority_total": item.get("selection_priority_total"),
+            "selection_priority_group": item.get("selection_priority_group"),
             "reference_novelty_score": item.get("reference_novelty_score"),
             "reference_novelty_percentile": item.get("reference_novelty_percentile"),
             "reference_novelty_rank": item.get("reference_novelty_rank"),
+            "local_vendi_score": item.get("local_vendi_score"),
+            "local_vendi_effective_patches": item.get("local_vendi_effective_patches"),
+            "local_vendi_patch_count": item.get("local_vendi_patch_count"),
+            "local_vendi_used_patch_count": item.get("local_vendi_used_patch_count"),
+            "local_vendi_percentile": item.get("local_vendi_percentile"),
+            "local_vendi_rank": item.get("local_vendi_rank"),
             "thumbnail_url": f"/data_ingestion/jobs/{job_id}/candidate_thumbnail/{item_id}",
         }
         points.append(point)
@@ -21860,6 +22263,8 @@ def get_data_ingestion_distribution(job_id: str) -> Dict[str, Any]:
                 "projection_fit_basis": projection_meta.get("fit_basis"),
                 "explained_variance_ratio": projection_meta.get("explained_variance_ratio") or [],
                 "selection_method": summary.get("selection_method") or "farthest_first_coverage",
+                "selection_score_kind": summary.get("selection_score_kind") or "",
+                "selection_score_description": summary.get("selection_score_description") or "",
             },
             "points": points,
         }

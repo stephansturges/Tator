@@ -78,18 +78,49 @@ Flow checks:
 ## Journey 4: Analyze Candidate Media And Decide What To Keep
 
 1. User selects candidate images or videos.
-2. User chooses keep fraction and video sampling controls.
+2. User chooses keep fraction and video sampling controls. The candidate file
+   input accepts multiple images and videos in one analysis run.
 3. UI posts `/data_ingestion/jobs` with candidate files, selected profile id,
    and reference source metadata.
-4. Backend extracts frames when needed, embeds candidates and reference media,
-   computes farthest-first coverage rank, saves result metadata, embeddings, and
-   thumbnails under the ingestion job directory.
-5. UI shows report, ranked candidate list, accepted-output controls, and an
+4. Backend extracts frames when needed, using bounded worker parallelism across
+   uploaded media, then embeds candidates and reference media in batches with
+   parallel image loading inside each batch. Model inference remains batched on
+   the selected encoder backend.
+5. Backend pools every uploaded image and every sampled video frame into one
+   candidate matrix, computes the keep fraction once across that whole upload
+   batch, then saves result metadata, embeddings, and thumbnails under the
+   ingestion job directory.
+6. UI shows report, ranked candidate list, accepted-output controls, and an
    optional reference distribution map.
 
 Flow checks:
 
-- Raw reference distance is diagnostic; selection is based on coverage rank.
+- Raw reference distance is diagnostic. Selection is based on farthest-first
+  coverage: each candidate is initialized by distance to the reference profile,
+  then selected candidates reduce the score of nearby remaining candidates so
+  the kept set covers candidate-candidate diversity too. Result items expose
+  `coverage_score` for selection and `reference_novelty_score` for the
+  nearest-reference diagnostic.
+- Local Vendi is a Vendi-style effective-rank score over each candidate
+  image/frame's patch embeddings. It is computed from the same frozen
+  DINOv3/C-RADIO spatial tokens used by the selected reference profile, then
+  normalized within the full candidate pool. By default it contributes a light
+  ranking bonus (`local_vendi_weight=0.2`) so visually dense frames can win
+  close calls without replacing reference novelty or upload-batch coverage.
+- Keep fraction is global to the current analysis run. `0.2` on 30 uploaded
+  videos means top 20% of all sampled frames after all files are blended, not
+  20% of each video.
+- The UI list is ordered by `selection_priority_rank`. Kept rows are the greedy
+  selection order up to the keep cutoff; rejected rows continue below that
+  cutoff ordered by final `selection_score` after the kept coverage set is
+  chosen. Result summaries expose `selection_score_kind` and
+  `selection_score_description` so the UI can label whether that score is raw
+  coverage distance or the coverage-percentile-plus-Local-Vendi priority score.
+- Reference profile training uses the `strong_photometric_spatial_v2`
+  augmentation profile: random resized crops, aspect/rotation/perspective
+  jitter, brightness/contrast/saturation/hue/gamma changes, optional grayscale,
+  blur, noise, JPEG compression, and random erasing. The UI default is 8 epochs
+  so the local head sees enough hard positive views to learn those invariances.
 - Candidate source paths are stripped from public result payloads.
 - Reference hover thumbnails are generated lazily. Uploaded references are read
   from job media, while backend-dataset references are revalidated against the
@@ -199,14 +230,12 @@ Fix from this pass:
 Current focused verification for this review:
 
 ```bash
-python3 -m py_compile api/data_ingestion.py localinferenceapi.py
+NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m py_compile localinferenceapi.py services/data_ingestion.py
 node --check ybat-master/ybat.js
-node --check ybat-master/annotation_diversity.js
 git diff --check
-.venv-macos/bin/pytest tests/test_data_ingestion.py tests/test_dataset_linked_annotation_flows.py tests/test_annotation_diversity_metric.py tests/test_labeling_panel_layout_contract.py::test_data_ingestion_panel_contract tests/test_labeling_panel_layout_contract.py::test_class_split_explorer_panel_contract
-.venv-macos/bin/pytest tests/test_dataset_linked_root_status.py tests/test_dataset_download_cleanup.py tests/test_dataset_zip_upload_security.py tests/test_ui_endpoint_checker.py tests/test_api_route_uniqueness.py
-python3 tools/check_ui_endpoints.py
-.venv-macos/bin/pytest tests --ignore=tests/ui/e2e --ignore=tests/ui/test_dataset_annotation_flow_playwright.py
+NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest tests/test_data_ingestion.py -q
+NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py tests/ui/e2e/test_dataset_ingestion_safety_flows.py -q
+curl -fsS http://127.0.0.1:8000/data_ingestion/capabilities
 ```
 
 Interactive browser smoke is still a separate manual/Playwright concern; the

@@ -2733,6 +2733,39 @@ body.annotation-focus-mode .class-scroll-indicator {
     gap: 8px;
 }
 
+.data-ingestion-list__content {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+.data-ingestion-list__title {
+    display: block;
+    overflow-wrap: anywhere;
+}
+
+.data-ingestion-list__metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 4px 12px;
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.data-ingestion-list__metrics span {
+    display: grid;
+    grid-template-columns: 86px minmax(0, 1fr);
+    gap: 6px;
+    min-width: 0;
+}
+
+.data-ingestion-list__metrics b {
+    color: #334155;
+    font-size: 10px;
+    letter-spacing: 0;
+    text-transform: uppercase;
+}
+
 .data-ingestion-list__item input[type="checkbox"] {
     flex: 0 0 auto;
     margin-top: 2px;
@@ -4844,6 +4877,10 @@ html.theme-dark .data-ingestion-list__item.is-keep {
     border-color: rgba(96, 165, 250, 0.45);
 }
 
+html.theme-dark .data-ingestion-list__metrics b {
+    color: #94a3b8;
+}
+
 html.theme-dark .class-split-report__item strong,
 html.theme-dark .class-split-dataset-report__item strong,
 html.theme-dark .class-split-dataset-list__item strong,
@@ -5591,6 +5628,10 @@ html.theme-pipboy .data-ingestion-distribution-details__meta span {
 html.theme-pipboy .data-ingestion-list__item.is-keep {
     background: color-mix(in srgb, var(--pip-green) 14%, var(--pip-panel));
     border-color: var(--pip-border-strong);
+}
+
+html.theme-pipboy .data-ingestion-list__metrics b {
+    color: var(--pip-green-muted);
 }
 
 html.theme-pipboy .class-split-report__item strong,

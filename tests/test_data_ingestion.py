@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 import shutil
 import warnings
 import zipfile
@@ -11,7 +12,16 @@ import pytest
 import torch
 
 import localinferenceapi as api
-from services.data_ingestion import greedy_diverse_indices, normalize_keep_fraction, safe_media_name
+from services.data_ingestion import (
+    greedy_diverse_indices,
+    greedy_diverse_indices_with_local_scores,
+    greedy_diverse_indices_with_scores,
+    local_vendi_metric,
+    local_vendi_metrics_from_patch_tokens,
+    normalize_keep_fraction,
+    safe_media_name,
+    score_percentiles,
+)
 from utils.local_salad import LocalSALADConfig, LocalSALADHead
 from utils.local_salad_mlx import local_salad_mlx_available
 from PIL import Image
@@ -35,6 +45,124 @@ def test_diverse_indices_use_reference_novelty_and_keep_fraction():
     assert selected[0] == 3
     assert len(selected) == 2
     assert novelty[3] > novelty[2] > novelty[1]
+
+
+def test_diverse_indices_return_candidate_coverage_scores():
+    embeddings = np.asarray(
+        [
+            [1.0, 0.0],
+            [-0.98, 0.02],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    reference = np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    selected, novelty, coverage = greedy_diverse_indices_with_scores(
+        embeddings,
+        keep_fraction=0.5,
+        reference_embeddings=reference,
+    )
+
+    assert selected == [3, 2]
+    assert novelty[3] > novelty[1] > novelty[2]
+    assert coverage[3] == pytest.approx(novelty[3])
+    assert coverage[2] <= novelty[2]
+    assert coverage[1] < novelty[1]
+
+
+def test_local_vendi_metric_tracks_patch_token_effective_rank():
+    identical = np.ones((8, 4), dtype=np.float32)
+    diverse = np.eye(8, dtype=np.float32)
+
+    identical_metric = local_vendi_metric(identical)
+    diverse_metric = local_vendi_metric(diverse)
+
+    assert identical_metric["local_vendi_effective_patches"] == pytest.approx(1.0)
+    assert identical_metric["local_vendi_score"] == pytest.approx(0.0, abs=1e-6)
+    assert diverse_metric["local_vendi_effective_patches"] == pytest.approx(8.0)
+    assert diverse_metric["local_vendi_score"] > 0.99
+
+
+def test_local_vendi_batch_metrics_use_deterministic_patch_cap():
+    tokens = np.arange(2 * 12 * 4, dtype=np.float32).reshape(2, 12, 4)
+
+    first = local_vendi_metrics_from_patch_tokens(tokens, max_patches=5)
+    second = local_vendi_metrics_from_patch_tokens(tokens, max_patches=5)
+
+    assert first == second
+    assert all(metric["local_vendi_patch_count"] == 12 for metric in first)
+    assert all(metric["local_vendi_used_patch_count"] == 5 for metric in first)
+
+
+def test_score_percentiles_handles_nonfinite_values():
+    scores = score_percentiles([0.5, np.nan, np.inf, -np.inf])
+
+    assert np.all(np.isfinite(scores))
+    assert scores[2] == pytest.approx(1.0)
+    assert scores[3] == pytest.approx(0.0)
+
+
+def test_diverse_indices_local_vendi_weight_can_break_coverage_ties():
+    embeddings = np.asarray(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, -1.0],
+        ],
+        dtype=np.float32,
+    )
+    reference = np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    selected_base, _novelty, _coverage = greedy_diverse_indices_with_scores(
+        embeddings,
+        keep_fraction=1 / 3,
+        reference_embeddings=reference,
+    )
+    selected_vendi, _novelty_vendi, coverage_vendi, selection_scores = greedy_diverse_indices_with_local_scores(
+        embeddings,
+        keep_fraction=1 / 3,
+        reference_embeddings=reference,
+        local_scores=[0.1, 0.2, 1.0],
+        local_weight=0.2,
+    )
+
+    assert selected_base == [1]
+    assert selected_vendi == [2]
+    assert coverage_vendi[selected_vendi[0]] == pytest.approx(1.0)
+    assert selection_scores[selected_vendi[0]] == pytest.approx(0.8)
+
+
+def test_diverse_indices_local_vendi_zero_weight_preserves_coverage_selection():
+    embeddings = np.asarray(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, -1.0],
+            [-1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    reference = np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    selected_base, novelty_base, coverage_base = greedy_diverse_indices_with_scores(
+        embeddings,
+        keep_fraction=0.5,
+        reference_embeddings=reference,
+    )
+    selected_vendi, novelty_vendi, coverage_vendi, selection_vendi = greedy_diverse_indices_with_local_scores(
+        embeddings,
+        keep_fraction=0.5,
+        reference_embeddings=reference,
+        local_scores=[1.0, 0.0, 0.0, 0.0],
+        local_weight=0.0,
+    )
+
+    assert selected_vendi == selected_base
+    assert np.allclose(novelty_vendi, novelty_base)
+    assert np.allclose(coverage_vendi, coverage_base)
+    assert np.allclose(selection_vendi, coverage_base)
 
 
 def test_safe_media_name_bounds_generated_filename_length():
@@ -83,16 +211,48 @@ def test_data_ingestion_capabilities_expose_reference_profile_flow():
     assert caps["salad_policy"] == "local_training_only"
     assert caps["local_salad_policy"] == api.LOCAL_SALAD_POLICY
     assert caps["local_salad_trainer"] == api.LOCAL_SALAD_TRAINER
+    assert caps["local_salad_augmentation_profile"] == api.LOCAL_SALAD_AUGMENTATION_PROFILE
+    assert caps["local_salad_default_epochs"] == api.LOCAL_SALAD_DEFAULT_EPOCHS
+    assert caps["local_vendi"]["enabled"] is True
+    assert caps["local_vendi"]["default_enabled"] == api.DATA_INGESTION_LOCAL_VENDI_DEFAULT_ENABLED
+    assert caps["local_vendi"]["default_weight"] == api.DATA_INGESTION_LOCAL_VENDI_DEFAULT_WEIGHT
+    assert caps["local_vendi"]["max_patches"] == api.DATA_INGESTION_LOCAL_VENDI_MAX_PATCHES
     assert caps["local_salad_backend"]["default"] == "auto"
     assert caps["local_salad_backend"]["auto_resolved"] in {"mlx", "torch"}
     assert "local_salad_heads" in caps
     assert caps["max_extracted_frames_per_video"] == api.DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO
+    assert caps["media_prepare_workers"] >= 1
+    assert caps["image_load_workers"] >= 1
     assert "data_ingestion_recipes" not in caps
     assert api._local_salad_training_stage(0.02) == "Preparing reference media"
     assert api._local_salad_training_stage(0.20) == "Encoding reference views"
     assert api._local_salad_training_stage(0.50) == "Training reference profile"
     assert api._local_salad_training_stage(0.80) == "Optimizing reference profile"
     assert api._local_salad_training_stage(0.99) == "Finalizing reference profile"
+
+
+def test_local_salad_train_view_uses_strong_deterministic_augmentation():
+    axis = np.linspace(0, 255, 128, dtype=np.uint8)
+    xx, yy = np.meshgrid(axis, axis)
+    img = Image.fromarray(np.dstack([xx, yy, np.full_like(xx, 128)]))
+
+    first = api._data_ingestion_train_view(img, random.Random(7))
+    repeated = api._data_ingestion_train_view(img, random.Random(7))
+    assert first.mode == "RGB"
+    assert np.array_equal(np.asarray(first), np.asarray(repeated))
+
+    views = [api._data_ingestion_train_view(img, random.Random(seed)) for seed in range(1, 12)]
+    assert len({view.size for view in views}) > 1
+    channel_equal_fractions = []
+    for view in views:
+        arr = np.asarray(view)
+        channel_equal_fractions.append(float(np.mean((arr[..., 0] == arr[..., 1]) & (arr[..., 1] == arr[..., 2]))))
+    assert max(channel_equal_fractions) > 0.95
+    assert min(channel_equal_fractions) < 0.05
+
+    large = Image.new("RGB", (1600, 1200), (80, 110, 140))
+    large_view = api._data_ingestion_train_view(large, random.Random(13))
+    assert max(large_view.size) <= api.LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE
 
 
 def test_data_ingestion_capabilities_redact_backend_paths(tmp_path, monkeypatch):
@@ -1397,6 +1557,44 @@ def test_data_ingestion_video_extraction_applies_backend_frame_cap(tmp_path, mon
     assert rows[0]["source_type"] == "video_frame"
 
 
+def test_data_ingestion_prepare_media_handles_multiple_videos_with_workers(tmp_path, monkeypatch):
+    video_a = tmp_path / "a.mp4"
+    video_b = tmp_path / "b.mp4"
+    video_a.write_bytes(b"fake-video-a")
+    video_b.write_bytes(b"fake-video-b")
+    out_dir = tmp_path / "frames"
+    monkeypatch.setattr(api, "DATA_INGESTION_MEDIA_PREPARE_WORKERS", 2)
+    monkeypatch.setattr(api.shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(list(cmd))
+        pattern = Path(cmd[-1])
+        pattern.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 8), (10, 20, 30)).save(pattern.parent / "frame_000001.jpg")
+        return api.subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    job = api.DataIngestionJob(job_id="di_multi_video")
+
+    rows = api._data_ingestion_prepare_media(
+        job,
+        [
+            {"path": str(video_a), "filename": "a.mp4", "saved_name": "a.mp4", "size": len(b"fake-video-a")},
+            {"path": str(video_b), "filename": "b.mp4", "saved_name": "b.mp4", "size": len(b"fake-video-b")},
+        ],
+        out_dir=out_dir,
+        frame_interval=1.0,
+        max_frames_per_video=2,
+        progress_start=0.0,
+        progress_end=1.0,
+    )
+
+    assert len(commands) == 2
+    assert [row["filename"] for row in rows] == ["a.mp4", "b.mp4"]
+    assert all(row["source_type"] == "video_frame" for row in rows)
+
+
 def test_local_salad_training_rejects_bad_encoder_before_saving_uploads(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "DATA_INGESTION_ROOT", tmp_path)
 
@@ -1801,6 +1999,91 @@ def test_data_ingestion_analysis_summary_uses_local_salad_head_metadata(tmp_path
     assert summary["salad_head_backend"] == "mlx"
 
 
+def test_data_ingestion_keep_fraction_applies_to_blended_upload_batch(tmp_path, monkeypatch):
+    jobs_root = tmp_path / "jobs"
+    heads_root = tmp_path / "heads"
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+    _write_unit_local_salad_head(
+        heads_root,
+        "active_head",
+        {"reference_source": "active_label_images"},
+    )
+
+    def fake_prepare(_job, rows, *, out_dir, **_kwargs):
+        is_candidate = "candidates" in str(out_dir)
+        prepared = []
+        for row_idx, row in enumerate(rows):
+            count = 5 if is_candidate else 1
+            for frame_idx in range(count):
+                prepared.append(
+                    {
+                        "image_path": str(tmp_path / f"{row.get('filename', 'item')}_{frame_idx}.jpg"),
+                        "filename": row.get("filename") or "item.jpg",
+                        "saved_name": row.get("saved_name") or "",
+                        "source_type": "video_frame" if is_candidate else "image",
+                        "frame_index": frame_idx,
+                        "width": 8,
+                        "height": 8,
+                        "row_idx": row_idx,
+                    }
+                )
+        return prepared
+
+    def fake_encode(prepared, **kwargs):
+        values = np.zeros((len(prepared), 3), dtype=np.float32)
+        for idx in range(len(prepared)):
+            values[idx, idx % 3] = 1.0
+            values[idx, 2] += idx * 0.01
+        if kwargs.get("return_local_vendi"):
+            metrics = [
+                {
+                    "local_vendi_score": float(idx / max(1, len(prepared) - 1)),
+                    "local_vendi_effective_patches": float(idx + 1),
+                    "local_vendi_patch_count": 8,
+                    "local_vendi_used_patch_count": 8,
+                }
+                for idx in range(len(prepared))
+            ]
+            return values, metrics
+        return values
+
+    monkeypatch.setattr(api, "_data_ingestion_prepare_media", fake_prepare)
+    monkeypatch.setattr(api, "_data_ingestion_encode_prepared_images", fake_encode)
+    job = api.DataIngestionJob(
+        job_id="di_global_keep_fraction",
+        kind="analysis",
+        request={
+            "encoder": "local_salad",
+            "salad_head_id": "active_head",
+            "reference_source": "active_label_images",
+            "keep_fraction": 0.2,
+            "candidate_uploads": [
+                {"path": str(tmp_path / "a.mp4"), "filename": "a.mp4"},
+                {"path": str(tmp_path / "b.mp4"), "filename": "b.mp4"},
+            ],
+            "reference_uploads": [{"path": str(tmp_path / "reference.jpg"), "filename": "reference.jpg"}],
+        },
+    )
+
+    api._run_data_ingestion_analysis_job(job)
+
+    assert job.status == "completed"
+    summary = job.result["summary"]
+    assert summary["candidate_upload_count"] == 2
+    assert summary["candidate_image_count"] == 10
+    assert summary["selected_count"] == 2
+    assert len([item for item in job.result["items"] if item["keep"]]) == 2
+    assert summary["local_vendi_enabled"] is True
+    assert summary["selection_score_kind"] == "coverage_percentile_plus_local_vendi"
+    assert "Local Vendi" in summary["selection_score_description"]
+    assert "local_vendi_score" in job.result["items"][0]
+    assert all(item["selection_score_kind"] == summary["selection_score_kind"] for item in job.result["items"])
+    assert [item["selection_priority_rank"] for item in job.result["items"]] == list(range(1, 11))
+    assert all(item["selection_priority_total"] == 10 for item in job.result["items"])
+
+
 def test_data_ingestion_analysis_cancelled_before_result_write_leaves_no_result_artifact(tmp_path, monkeypatch):
     jobs_root = tmp_path / "jobs"
     heads_root = tmp_path / "heads"
@@ -2122,6 +2405,7 @@ def test_local_salad_training_job_uses_mlx_backend_and_saves_compatible_head(tmp
     summary = job.result["summary"]
     assert summary["salad_backend"] == "mlx"
     assert summary["head_id"] == "MLX_Unit_Head"
+    assert summary["augmentation_profile"] == api.LOCAL_SALAD_AUGMENTATION_PROFILE
     assert Path(summary["path"]).exists()
 
     loaded, meta = api._load_local_salad_head(summary["head_id"], device_name="cpu", backend="torch")
@@ -2129,6 +2413,7 @@ def test_local_salad_training_job_uses_mlx_backend_and_saves_compatible_head(tmp
     assert meta["salad_backend"] == "mlx"
     assert meta["encoder_type"] == "dinov3"
     assert meta["encoder_model"] == "unit-dino"
+    assert meta["augmentation_profile"] == api.LOCAL_SALAD_AUGMENTATION_PROFILE
     with Image.open(image_a) as opened_a, Image.open(image_b) as opened_b:
         test_patches, test_global = fake_dinov3_tokens(None, None, "cpu", [opened_a, opened_b])
     desc = api._encode_local_salad_head_np(loaded, test_patches, test_global)

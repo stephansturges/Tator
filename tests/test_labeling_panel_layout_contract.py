@@ -294,10 +294,14 @@ def test_data_ingestion_panel_contract():
     assert 'id="dataIngestionMaxTrainImages" min="0" max="1000000" step="1" value="0"' in html
     assert 'id="dataIngestionReferenceCap"' not in html
     assert 'id="dataIngestionKeepFraction"' in html
+    assert 'id="dataIngestionLocalVendiEnabled"' in html
+    assert 'id="dataIngestionLocalVendiWeight" min="0" max="0.5" step="0.05" value="0.2"' in html
+    assert "whole upload batch, not 20% of each file or video" in html
+    assert "Vendi-style effective rank" in html
     assert 'id="dataIngestionUseActiveReference"' not in html
     assert 'id="dataIngestionSaladHead"' in html
     assert 'id="dataIngestionReportTitle">Ingestion report</strong>' in html
-    assert 'id="dataIngestionListTitle">Top diverse candidates</strong>' in html
+    assert 'id="dataIngestionListTitle">Candidate priority ranking</strong>' in html
     assert 'id="dataIngestionDistribution"' in html
     assert 'id="dataIngestionDistributionButton"' in html
     assert 'id="dataIngestionOpenDatasetAnalysisButton"' in html
@@ -331,6 +335,7 @@ def test_data_ingestion_panel_contract():
     assert ".data-ingestion-distribution-details__actions" in css
     assert ".data-ingestion-tile-preview" in css
     assert ".data-ingestion-list-controls" in css
+    assert ".data-ingestion-list__metrics" in css
     assert ".embedding-benchmark-note__grid" in css
     assert "html.theme-dark .data-ingestion-panel" in css
     assert "html.theme-dark .embedding-benchmark-note" in css
@@ -376,11 +381,15 @@ def test_data_ingestion_panel_contract():
     assert "data-data-ingestion-output-id" not in js
     assert "acceptedOutputFilterActive" not in js
     assert "function formatDataIngestionCoverageRank" in js
-    assert "coverage rank" in js
-    assert "outside selected coverage set" in js
-    assert "raw reference distance" in js
-    assert "Selection uses farthest-first coverage rank" in js
-    assert "reference novelty" in js
+    assert "Selection priority #" in js
+    assert "priority score" in js
+    assert "selection_score_description" in js
+    assert "Coverage after cutoff" in js
+    assert "Reference novelty p" in js
+    assert "Ordered by selection priority across the whole pooled upload batch" in js
+    assert "formatDataIngestionLocalVendi" in js
+    assert "local_vendi_enabled" in js
+    assert "Reference novelty" in js
     assert "dataIngestionHoverPreview" in js
     assert "existing reference data" in js
     assert "Class Split Dataset Analysis is not required for this map" in js

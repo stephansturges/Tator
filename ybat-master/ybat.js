@@ -2396,6 +2396,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         profileUploadButton: null,
         profileUploadInput: null,
         keepFraction: null,
+        localVendiEnabled: null,
+        localVendiWeight: null,
         frameInterval: null,
         maxFrames: null,
         analyzeButton: null,
@@ -2455,6 +2457,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         distribution: null,
         selectedDistributionItemId: "",
         visibleItemLimit: 120,
+        localVendiDefaultsApplied: false,
     };
     const sam3RecipeElements = {
         fileInput: null,
@@ -36285,6 +36288,8 @@ async function cancelRfDetrTrainingJobRequest() {
             dataIngestionElements.referenceDataset,
             dataIngestionElements.saladHead,
             dataIngestionElements.keepFraction,
+            dataIngestionElements.localVendiEnabled,
+            dataIngestionElements.localVendiWeight,
             dataIngestionElements.frameInterval,
             dataIngestionElements.maxFrames,
             dataIngestionElements.headName,
@@ -36307,6 +36312,9 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (dataIngestionElements.trainCradioModel) {
             dataIngestionElements.trainCradioModel.disabled = dataIngestionState.active || !trainingUsesCradio;
+        }
+        if (dataIngestionElements.localVendiWeight) {
+            dataIngestionElements.localVendiWeight.disabled = dataIngestionState.active || !dataIngestionElements.localVendiEnabled?.checked;
         }
         [
             dataIngestionElements.targetWidth,
@@ -36353,6 +36361,17 @@ async function cancelRfDetrTrainingJobRequest() {
         } else {
             console.warn("Failed to refresh Data Ingestion capabilities", capabilitiesResult.reason);
             dataIngestionState.capabilities = { local_salad_heads: [] };
+        }
+        if (!dataIngestionState.localVendiDefaultsApplied) {
+            const localVendi = dataIngestionState.capabilities?.local_vendi || {};
+            if (dataIngestionElements.localVendiEnabled && typeof localVendi.default_enabled === "boolean") {
+                dataIngestionElements.localVendiEnabled.checked = localVendi.default_enabled;
+            }
+            if (dataIngestionElements.localVendiWeight && Number.isFinite(Number(localVendi.default_weight))) {
+                const weightDefault = Number(localVendi.default_weight);
+                dataIngestionElements.localVendiWeight.value = String(Math.max(0, Math.min(0.5, weightDefault)));
+            }
+            dataIngestionState.localVendiDefaultsApplied = true;
         }
         populateDataIngestionSaladHeads();
         populateDataIngestionCradioModels();
@@ -36453,6 +36472,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 reference_label: getDataIngestionReferenceLabel(),
                 max_reference_images: maxReferenceImages,
                 keep_fraction: getDataIngestionNumber(dataIngestionElements.keepFraction, 0.2, { min: 0.01, max: 1 }),
+                local_vendi_enabled: !!dataIngestionElements.localVendiEnabled?.checked,
+                local_vendi_weight: getDataIngestionNumber(dataIngestionElements.localVendiWeight, 0.2, { min: 0, max: 1 }),
                 frame_interval: getDataIngestionNumber(dataIngestionElements.frameInterval, 1.0, { min: 0.1 }),
                 max_frames_per_video: Math.round(getDataIngestionNumber(dataIngestionElements.maxFrames, 200, { min: 0 })),
                 reference_count: referenceCount,
@@ -36528,7 +36549,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 reference_dataset_label: referenceSource === "backend_dataset" ? getDataIngestionReferenceLabel() : "",
                 reference_label: getDataIngestionReferenceLabel(),
                 active_image_count: referenceSource === "active_label_images" ? packagedCount : 0,
-                epochs: Math.round(getDataIngestionNumber(dataIngestionElements.epochs, 3, { min: 1 })),
+                epochs: Math.round(getDataIngestionNumber(dataIngestionElements.epochs, 8, { min: 1 })),
                 batch_size: Math.round(getDataIngestionNumber(dataIngestionElements.batchSize, 8, { min: 2 })),
                 max_train_images: maxTrainImages,
                 frame_interval: getDataIngestionNumber(dataIngestionElements.frameInterval, 1.0, { min: 0.1 }),
@@ -36778,21 +36799,67 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function formatDataIngestionCoverageRank(item, selectedCount) {
         const rankValue = Number(item.rank);
+        const scoreValue = Number(item.coverage_score ?? item.selection_score);
+        const scoreLabel = Number.isFinite(scoreValue) ? `distance ${scoreValue.toFixed(3)}` : "";
         if (Number.isFinite(rankValue) && rankValue > 0) {
             const suffix = selectedCount > 0 ? `/${selectedCount}` : "";
-            return `coverage rank ${Math.round(rankValue)}${suffix}`;
+            return [`Coverage #${Math.round(rankValue)}${suffix}`, scoreLabel].filter(Boolean).join(" · ");
         }
-        return "outside selected coverage set";
+        return ["Coverage after cutoff", scoreLabel ? `distance to keep set ${scoreValue.toFixed(3)}` : ""].filter(Boolean).join(" · ");
     }
 
     function formatDataIngestionReferenceNovelty(item, totalItems) {
         const rawScore = item.reference_novelty_score ?? item.diversity_score ?? 0;
         const score = Number(rawScore) || 0;
         const percentileValue = Number(item.reference_novelty_percentile);
-        const percentile = Number.isFinite(percentileValue) ? `reference novelty p${Math.round(percentileValue)}` : "";
+        const percentile = Number.isFinite(percentileValue) ? `Reference novelty p${Math.round(percentileValue)}` : "";
         const rankValue = Number(item.reference_novelty_rank);
-        const rank = Number.isFinite(rankValue) && rankValue > 0 && totalItems > 0 ? `novelty rank ${rankValue}/${totalItems}` : "";
-        return [percentile, rank, `raw reference distance ${score.toFixed(3)}`].filter(Boolean).join(" • ");
+        const rank = Number.isFinite(rankValue) && rankValue > 0 && totalItems > 0 ? `rank ${rankValue}/${totalItems}` : "";
+        return [percentile, rank, `distance ${score.toFixed(3)}`].filter(Boolean).join(" · ");
+    }
+
+    function formatDataIngestionLocalVendi(item, totalItems) {
+        const scoreValue = Number(item?.local_vendi_score);
+        if (!Number.isFinite(scoreValue)) {
+            return "";
+        }
+        const percentileValue = Number(item.local_vendi_percentile);
+        const percentile = Number.isFinite(percentileValue) ? `Local Vendi p${Math.round(percentileValue)}` : "";
+        const rankValue = Number(item.local_vendi_rank);
+        const rank = Number.isFinite(rankValue) && rankValue > 0 && totalItems > 0 ? `rank ${rankValue}/${totalItems}` : "";
+        const effective = Number(item.local_vendi_effective_patches);
+        const effectiveText = Number.isFinite(effective) ? `eff patches ${effective.toFixed(1)}` : "";
+        return [percentile, rank, `Vendi score ${scoreValue.toFixed(3)}`, effectiveText].filter(Boolean).join(" · ");
+    }
+
+    function dataIngestionSelectionScoreLabel(item = null) {
+        const kind = String(
+            item?.selection_score_kind ||
+            dataIngestionState.currentResult?.summary?.selection_score_kind ||
+            dataIngestionState.distribution?.summary?.selection_score_kind ||
+            ""
+        );
+        if (kind === "coverage_percentile_plus_local_vendi") {
+            return "priority score";
+        }
+        if (kind === "coverage_distance") {
+            return "coverage distance";
+        }
+        return "selection score";
+    }
+
+    function formatDataIngestionSelectionPriority(item, totalItems, selectedCount = 0, fallbackRank = 0) {
+        const rankValue = Number(item?.selection_priority_rank ?? fallbackRank);
+        const totalValue = Number(item?.selection_priority_total ?? totalItems);
+        const scoreValue = Number(item?.selection_score);
+        const rankLabel = Number.isFinite(rankValue) && rankValue > 0
+            ? `Selection priority #${Math.round(rankValue)}/${Number.isFinite(totalValue) && totalValue > 0 ? Math.round(totalValue) : totalItems}`
+            : "Selection priority";
+        const scoreLabel = Number.isFinite(scoreValue) ? `${dataIngestionSelectionScoreLabel(item)} ${scoreValue.toFixed(3)}` : "";
+        const cutoffLabel = selectedCount > 0
+            ? (Number.isFinite(rankValue) && rankValue > selectedCount ? `after top-${selectedCount} keep cutoff` : "inside keep cutoff")
+            : (item?.keep ? "inside keep cutoff" : "after keep cutoff");
+        return [rankLabel, scoreLabel, cutoffLabel].filter(Boolean).join(" · ");
     }
 
     function setDataIngestionDistributionStatus(message, variant = "") {
@@ -36913,8 +36980,10 @@ async function cancelRfDetrTrainingJobRequest() {
         return [
             `<b>${escapeHtml(point.filename || "candidate")}</b>`,
             accepted ? "selected to keep" : "not selected",
-            point.rank ? `coverage rank ${escapeHtml(point.rank)}` : "outside selected coverage set",
+            escapeHtml(formatDataIngestionSelectionPriority(point, totalItems, 0)),
+            escapeHtml(formatDataIngestionCoverageRank(point, 0)),
             escapeHtml(formatDataIngestionReferenceNovelty(point, totalItems)),
+            escapeHtml(formatDataIngestionLocalVendi(point, totalItems)),
             dims ? escapeHtml(dims) : "",
         ].filter(Boolean).join("<br>");
     }
@@ -36951,8 +37020,10 @@ async function cancelRfDetrTrainingJobRequest() {
         const totalItems = getDataIngestionDistributionPoints("candidate").length;
         const meta = [
             accepted ? "selected to keep" : "not selected",
-            point.rank ? `coverage rank ${point.rank}` : "outside selected coverage set",
+            formatDataIngestionSelectionPriority(point, totalItems, 0),
+            formatDataIngestionCoverageRank(point, 0),
             formatDataIngestionReferenceNovelty(point, totalItems),
+            formatDataIngestionLocalVendi(point, totalItems),
             `${point.source_type || "image"}${point.width || point.height ? ` • ${point.width || ""}x${point.height || ""}` : ""}`,
         ].filter(Boolean);
         details.innerHTML = [
@@ -37331,7 +37402,7 @@ async function cancelRfDetrTrainingJobRequest() {
             dataIngestionElements.reportTitle.textContent = isProfileBuild ? "Reference profile report" : "Ingestion report";
         }
         if (dataIngestionElements.listTitle) {
-            dataIngestionElements.listTitle.textContent = isProfileBuild ? "Next step" : "Top diverse candidates";
+            dataIngestionElements.listTitle.textContent = isProfileBuild ? "Next step" : "Candidate priority ranking";
         }
         if (dataIngestionElements.report) {
             const rows = isProfileBuild
@@ -37355,6 +37426,8 @@ async function cancelRfDetrTrainingJobRequest() {
                     ["Reference images", summary.reference_count ?? 0],
                     ["Keep fraction", summary.keep_fraction ?? ""],
                     ["Selected", summary.selected_count ?? ""],
+                    ["Selection", summary.selection_method || ""],
+                    ["Local Vendi", summary.local_vendi_enabled ? `weight ${Number(summary.local_vendi_weight || 0).toFixed(2)} • mean ${Number(summary.local_vendi_mean || 0).toFixed(3)}` : "off"],
                     ["Mean NN distance", Number(summary.mean_nearest_neighbor_distance || 0).toFixed(3)],
                     ["Mean reference distance", summary.mean_reference_distance == null ? "n/a" : Number(summary.mean_reference_distance || 0).toFixed(3)],
                 ];
@@ -37369,9 +37442,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 dataIngestionElements.list.innerHTML = `<div class="training-help">No ranked candidates for this job.</div>`;
             } else {
                 const selectedCount = Number(summary.selected_count ?? items.filter((entry) => !!entry.keep).length) || 0;
+                const selectionDescription = String(summary.selection_score_description || "").trim();
                 const scoreNote = [
                     `<div class="training-help data-ingestion-score-note">`,
-                    `Selection uses farthest-first coverage rank. Reference novelty is a percentile/rank diagnostic, so raw distances can overlap between kept and skipped images.`,
+                    `Ordered by selection priority across the whole pooled upload batch. The top ${selectedCount} are kept by the keep fraction; rejected frames continue below the cutoff by final ${dataIngestionSelectionScoreLabel()}.`,
+                    selectionDescription ? ` Score basis: ${escapeHtml(selectionDescription)}.` : "",
                     `</div>`,
                 ].join("");
                 const visibleLimit = Math.max(1, Number(dataIngestionState.visibleItemLimit) || 120);
@@ -37384,26 +37459,45 @@ async function cancelRfDetrTrainingJobRequest() {
                         `</div>`,
                     ].join("")
                     : "";
-                dataIngestionElements.list.innerHTML = scoreNote + listControls + visibleItems.map((item) => {
+                dataIngestionElements.list.innerHTML = scoreNote + listControls + visibleItems.map((item, visibleIndex) => {
                     const itemId = dataIngestionResultItemId(item);
                     const accepted = dataIngestionState.acceptedItemIds.has(itemId);
                     const originalKeep = !!item.keep;
                     const checked = accepted ? " checked" : "";
                     const previewUrl = item.thumbnail_url ? `${API_ROOT}${item.thumbnail_url}` : "";
-                    const sourceType = escapeHtml(item.source_type || "image");
+                    const sourceType = String(item.source_type || "image");
                     const dimensions = `${escapeHtml(item.width || "")}x${escapeHtml(item.height || "")}`;
+                    const priority = formatDataIngestionSelectionPriority(item, items.length, selectedCount, visibleIndex + 1);
                     const coverage = formatDataIngestionCoverageRank(item, selectedCount);
                     const novelty = formatDataIngestionReferenceNovelty(item, items.length);
-                    const title = "Keep rank is the farthest-first coverage order against the reference and already selected candidates. Reference novelty is nearest-reference cosine distance, not the selection threshold.";
+                    const vendi = formatDataIngestionLocalVendi(item, items.length);
+                    const title = [
+                        "Rows are ordered by selection priority.",
+                        "Coverage distance measures upload-batch diversity.",
+                        "Reference novelty is nearest-reference cosine distance.",
+                        "Local Vendi is a Vendi-style local patch diversity bonus.",
+                        selectionDescription ? `Score basis: ${selectionDescription}.` : "",
+                    ].filter(Boolean).join(" ");
                     const stateLabel = accepted
                         ? (originalKeep ? `Keep #${escapeHtml(item.rank || "")}` : "Keep manual")
-                        : (originalKeep ? `Discarded keep #${escapeHtml(item.rank || "")}` : "Skip");
+                        : (originalKeep ? `Discarded keep #${escapeHtml(item.rank || "")}` : "Reject");
+                    const metricRows = [
+                        ["Priority", priority],
+                        ["Coverage", coverage],
+                        ["Reference", novelty],
+                        vendi ? ["Local Vendi", vendi] : null,
+                        ["Source", `${sourceType} · ${dimensions}`],
+                    ].filter(Boolean);
                     return [
                         `<div class="data-ingestion-list__item${accepted ? " is-keep" : ""}" data-data-ingestion-preview-url="${escapeHtml(previewUrl)}" data-data-ingestion-preview-label="${escapeHtml(item.filename || item.saved_name || "candidate")}" title="${escapeHtml(title)}">`,
                         `<label>`,
                         `<input type="checkbox" data-data-ingestion-item-id="${escapeHtml(itemId)}"${checked}>`,
-                        `<span><strong>${stateLabel}</strong> ${escapeHtml(item.filename || item.saved_name || "candidate")}<br>`,
-                        `<span>${sourceType} • ${escapeHtml(coverage)} • ${escapeHtml(novelty)} • ${dimensions}</span></span>`,
+                        `<span class="data-ingestion-list__content">`,
+                        `<span class="data-ingestion-list__title"><strong>${stateLabel}</strong> ${escapeHtml(item.filename || item.saved_name || "candidate")}</span>`,
+                        `<span class="data-ingestion-list__metrics">`,
+                        metricRows.map(([label, value]) => `<span><b>${escapeHtml(label)}</b>${escapeHtml(value)}</span>`).join(""),
+                        `</span>`,
+                        `</span>`,
                         `</label>`,
                         `</div>`,
                     ].join("");
@@ -37448,6 +37542,8 @@ async function cancelRfDetrTrainingJobRequest() {
         dataIngestionElements.profileUploadButton = document.getElementById("dataIngestionProfileUploadButton");
         dataIngestionElements.profileUploadInput = document.getElementById("dataIngestionProfileUpload");
         dataIngestionElements.keepFraction = document.getElementById("dataIngestionKeepFraction");
+        dataIngestionElements.localVendiEnabled = document.getElementById("dataIngestionLocalVendiEnabled");
+        dataIngestionElements.localVendiWeight = document.getElementById("dataIngestionLocalVendiWeight");
         dataIngestionElements.frameInterval = document.getElementById("dataIngestionFrameInterval");
         dataIngestionElements.maxFrames = document.getElementById("dataIngestionMaxFrames");
         dataIngestionElements.analyzeButton = document.getElementById("dataIngestionAnalyzeButton");
@@ -37499,6 +37595,8 @@ async function cancelRfDetrTrainingJobRequest() {
             dataIngestionElements.trainEncoder,
             dataIngestionElements.trainCradioModel,
             dataIngestionElements.keepFraction,
+            dataIngestionElements.localVendiEnabled,
+            dataIngestionElements.localVendiWeight,
             dataIngestionElements.frameInterval,
             dataIngestionElements.maxFrames,
             dataIngestionElements.outputMode,

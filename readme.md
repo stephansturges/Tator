@@ -89,7 +89,7 @@ for the final labels.
 | Workflow | UI area | Backend/API surface | Primary code |
 |---|---|---|---|
 | Manual and assisted labeling | Label Images | `/predict_base64`, `/sam_*`, `/sam3/*_prompt`, `/yolo/predict_*`, `/rfdetr/predict_*` | `ybat-master/`, `localinferenceapi.py`, `api/sam3_prompts.py`, `services/detectors.py` |
-| Dataset library | Dataset Management | `/datasets/*`, `/glossaries/*`, `/qwen/dataset/*`, `/sam3/datasets/*`, `/segmentation/build/*` | `api/datasets.py`, `services/datasets.py`, `services/segmentation.py`, `utils/coco.py`, `utils/glossary.py` |
+| Dataset library | Dataset Management | `/datasets/*`, `/datasets/upload_session/*`, `/glossaries/*`, `/qwen/dataset/*`, `/sam3/datasets/*`, `/segmentation/build/*` | `api/datasets.py`, `services/datasets.py`, `services/segmentation.py`, `utils/coco.py`, `utils/glossary.py` |
 | Qwen captions and VLM inference | Qwen Models, Label Images | `/qwen/status`, `/qwen/settings`, `/qwen/caption`, `/qwen/infer`, `/qwen/prepass` | `services/qwen*.py`, `qwen_agent_llm.py`, `qwen_agent_tools.py` |
 | Class predictor training | Train Class Predictor | `/clip/train`, `/clip/classifiers/*`, `/clip/active_model` | `services/classifier*.py`, `services/clip_runtime.py`, `services/dinov3_runtime.py` |
 | Class split and outlier audit | Class Split Explorer | `/class_analysis/*`, `/clip/backbones` | `api/class_analysis.py`, `localinferenceapi.py`, `ybat-master/plotly-2.35.2.min.js`, `ybat-master/ybat.js` |
@@ -145,6 +145,14 @@ Tator supports three dataset patterns:
 Dataset cards can be opened for annotation or sent directly to Data Ingestion as
 the backend reference dataset.
 
+When the browser needs to save the current Label Images workspace as a managed
+dataset, small uploads can still use the single-ZIP endpoint. Large active
+workspaces use `/datasets/upload_session/*`: the browser streams image batches,
+the backend stages them under `uploads/yolo_dataset_upload_sessions`, and
+finalization atomically promotes the complete YOLO layout into
+`uploads/datasets`. Interrupted sessions have sidecar metadata, are listable,
+and can be cancelled without touching already registered datasets.
+
 Dataset records also carry:
 
 - labelmap and class order
@@ -178,6 +186,14 @@ Class Split Dataset Analysis, which is a separate all-class image-value review.
 Accepted exports create new preview thumbnails and ZIPs only; candidate source
 files are not moved, renamed, overwritten, or deleted. Candidate keep/discard
 state can be changed from either the ranked list or the distribution-map preview.
+
+If the selected reference is the current Label Images workspace and it is not
+already backed by a matching registered or transient backend dataset, Data
+Ingestion uses the same chunked dataset-upload session described above.
+Registered active references are reused only when their image count matches the
+open Label Images list. The reference profile job receives only the resulting
+backend dataset id, avoiding thousands of multipart reference-file fields and
+keeping the staged upload cancelable and inspectable.
 
 The detailed Class Split, Data Ingestion, and Dataset Management journey review
 lives in
@@ -631,7 +647,9 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current verification: `1269 passed, 20 skipped`. Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Current verification: focused upload-session, Data Ingestion, route, and UI
+contract suites passed (`126 passed`). Full log:
+[docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>
 

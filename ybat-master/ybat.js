@@ -2443,6 +2443,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         datasets: [],
         activeJobId: "",
         active: false,
+        activeUploadSessionId: "",
+        activeUploadAbortController: null,
         cancelInFlight: false,
         profileImportInFlight: false,
         acceptedPreviewInFlight: false,
@@ -2458,6 +2460,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         selectedDistributionItemId: "",
         visibleItemLimit: 120,
         localVendiDefaultsApplied: false,
+        activeReferenceDatasetUpload: null,
     };
     const sam3RecipeElements = {
         fileInput: null,
@@ -3674,6 +3677,7 @@ const sam3TrainState = {
     const ANNOTATION_EDITOR_NAME = "webui";
     const ANNOTATION_EDITOR_STORAGE_KEY = "tator.annotationEditorId";
     const ANNOTATION_DIVERSITY_METRIC_STORAGE_KEY = "tator.annotationDiversityMetric.enabled";
+    const DATA_INGESTION_ACTIVE_REFERENCE_UPLOADS_STORAGE_KEY = "tator.dataIngestion.activeReferenceUploads.v1";
 
     const annotationSourceState = {
         mode: "none", // "none" | "linked" | "transient"
@@ -5062,7 +5066,14 @@ const sam3TrainState = {
             const parsed = JSON.parse(text);
             const msg = parsed?.detail || parsed?.message || parsed?.error;
             if (typeof msg === "string" && msg.trim()) {
-                return msg.trim();
+                const normalized = msg.trim();
+                if (normalized === "data_ingestion_too_many_uploaded_files_use_backend_reference") {
+                    return "Too many reference files were uploaded. Refresh datasets/profiles and use the backend-backed reference dataset path.";
+                }
+                if (normalized === "transient_session_not_found" || normalized === "transient_session_expired") {
+                    return "The active local-path dataset session is no longer available after the backend restart. Reopen the dataset in Label Images, then retry.";
+                }
+                return normalized;
             }
             return text;
         } catch {
@@ -6361,7 +6372,103 @@ const sam3TrainState = {
         return arr;
     }
 
-    async function uploadCurrentDatasetToCache() {
+    async function uploadCurrentDatasetToCacheChunked({
+        runName,
+        datasetTypeValue,
+        contextText,
+        labelmapEntries,
+        uploadRows,
+        options = {},
+    }) {
+        const classNames = labelmapEntries.map((entry) => entry.name);
+        const total = uploadRows.length;
+        const startResp = await fetch(`${API_ROOT}/datasets/upload_session/start`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                dataset_id: runName,
+                dataset_type: datasetTypeValue,
+                context: contextText,
+                classes: classNames,
+                total_images: total,
+            }),
+        });
+        const startDetail = await startResp.text();
+        if (!startResp.ok) {
+            throw new Error(parseApiError(startDetail, `HTTP ${startResp.status}`));
+        }
+        const startData = parseJsonObjectSafe(startDetail, {});
+        const sessionId = String(startData.session_id || startData.job_id || "").trim();
+        if (!sessionId) {
+            throw new Error("Dataset upload session did not return an id.");
+        }
+        const abortController = new AbortController();
+        if (typeof options.onSessionStart === "function") {
+            options.onSessionStart({ sessionId, abortController });
+        }
+        const batchSizeRaw = Number(options.chunkSize || options.batchSize || 48);
+        const batchSize = Math.max(1, Math.min(96, Number.isFinite(batchSizeRaw) ? Math.round(batchSizeRaw) : 48));
+        let completed = 0;
+        const reportProgress = (message) => {
+            const progress = total > 0 ? Math.min(0.98, completed / total) : 0;
+            if (typeof options.onProgress === "function") {
+                options.onProgress({ completed, total, progress, message });
+            }
+        };
+        try {
+            for (let start = 0; start < uploadRows.length; start += batchSize) {
+                const batch = uploadRows.slice(start, start + batchSize);
+                const formData = new FormData();
+                formData.append("manifest", JSON.stringify({
+                    rows: batch.map((row) => ({
+                        filename: row.safeName,
+                        split: row.splitName,
+                        label_text: row.labelText,
+                    })),
+                }));
+                batch.forEach((row) => {
+                    formData.append("files", row.imageRecord.meta, row.safeName);
+                });
+                reportProgress(`Uploading active dataset ${completed}/${total} images ...`);
+                const resp = await fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(sessionId)}/batch`, {
+                    method: "POST",
+                    body: formData,
+                    signal: abortController.signal,
+                });
+                const detail = await resp.text();
+                if (!resp.ok) {
+                    throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+                }
+                completed += batch.length;
+                reportProgress(`Uploaded active dataset ${completed}/${total} images ...`);
+            }
+            const finalizeResp = await fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(sessionId)}/finalize`, {
+                method: "POST",
+                signal: abortController.signal,
+            });
+            const finalizeDetail = await finalizeResp.text();
+            if (!finalizeResp.ok) {
+                throw new Error(parseApiError(finalizeDetail, `HTTP ${finalizeResp.status}`));
+            }
+            if (typeof options.onProgress === "function") {
+                options.onProgress({ completed: total, total, progress: 1, message: "Registered backend dataset." });
+            }
+            return parseJsonObjectSafe(finalizeDetail, {});
+        } catch (error) {
+            try {
+                await fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" });
+            } catch (cancelError) {
+                console.warn("Dataset upload session cleanup failed", cancelError);
+            }
+            throw error;
+        } finally {
+            if (typeof options.onSessionEnd === "function") {
+                options.onSessionEnd({ sessionId });
+            }
+        }
+    }
+
+    async function uploadCurrentDatasetToCache(options = {}) {
         if (datasetManagerState.uploading) {
             setDatasetUploadMessage("Dataset upload already in progress. Please wait.", "info");
             return null;
@@ -6381,21 +6488,47 @@ const sam3TrainState = {
 			            if (!classNames.length) {
 			                setDatasetUploadMessage("Load a labelmap in the labeling tab first.", "warn");
 			                return null;
-			            }
-            setDatasetUploadMessage("Packaging current dataset as YOLO zip…", "info");
+            }
+            const statusPrefix = options.statusPrefix || "current dataset";
+            const useChunkedUpload = options.transport === "chunked" || options.chunked === true;
+            setDatasetUploadMessage(
+                useChunkedUpload
+                    ? `Preparing ${statusPrefix} for chunked backend upload...`
+                    : `Packaging ${statusPrefix} as YOLO zip...`,
+                "info",
+            );
             datasetManagerState.uploading = true;
             updateDatasetUploadButtons();
-            const runNameRaw = datasetManagerElements.uploadCurrentName?.value?.trim() || "";
-            const contextText = datasetManagerElements.uploadCurrentContext?.value?.trim() || "";
-            const wantSplit = Boolean(datasetManagerElements.uploadCurrentSplit?.checked);
-            const valPercentRaw = parseFloat(datasetManagerElements.uploadCurrentValPercent?.value || "");
+            const runNameRaw = String(
+                options.runName !== undefined
+                    ? options.runName
+                    : (datasetManagerElements.uploadCurrentName?.value?.trim() || "")
+            ).trim();
+            const contextText = String(
+                options.context !== undefined
+                    ? options.context
+                    : (datasetManagerElements.uploadCurrentContext?.value?.trim() || "")
+            ).trim();
+            const wantSplit = options.split !== undefined
+                ? Boolean(options.split)
+                : Boolean(datasetManagerElements.uploadCurrentSplit?.checked);
+            const valPercentRaw = parseFloat(
+                options.valPercent !== undefined
+                    ? String(options.valPercent)
+                    : (datasetManagerElements.uploadCurrentValPercent?.value || "")
+            );
             const valPercent = Number.isFinite(valPercentRaw) ? Math.max(1, Math.min(50, valPercentRaw)) : 10;
-            const valSeed = parseInt(datasetManagerElements.uploadCurrentValSeed?.value || "", 10) || 42;
+            const valSeed = parseInt(
+                options.valSeed !== undefined
+                    ? String(options.valSeed)
+                    : (datasetManagerElements.uploadCurrentValSeed?.value || ""),
+                10
+            ) || 42;
             const runName = runNameRaw || "labeling_session";
-            const JSZipCtor = ensureJsZipAvailable("dataset packaging");
-            const zip = new JSZipCtor();
             const folderName = sanitizeDatasetFilename(runName) || "labeling_session";
-            const root = zip.folder(folderName);
+            const JSZipCtor = useChunkedUpload ? null : ensureJsZipAvailable("dataset packaging");
+            const zip = JSZipCtor ? new JSZipCtor() : null;
+            const root = zip ? zip.folder(folderName) : null;
 		            let skippedInvalidClassRows = 0;
 		            const labelmapEntries = Object.keys(classes || {}).map((name) => ({
 		                name,
@@ -6409,7 +6542,9 @@ const sam3TrainState = {
             if (labelmapEntries[0].idx !== 0 || maxIdx !== labelmapEntries.length - 1) {
                 throw new Error("Labelmap indices must be contiguous starting at 0.");
             }
-            root.file("labelmap.txt", labelmapEntries.map((entry) => entry.name).join("\n"));
+            if (root) {
+                root.file("labelmap.txt", labelmapEntries.map((entry) => entry.name).join("\n"));
+            }
             const usedNames = new Map();
             let trainKeys = imageKeys;
             let valSet = null;
@@ -6422,6 +6557,7 @@ const sam3TrainState = {
                 trainKeys = shuffled.slice(valCount);
                 valSet = new Set(valKeys);
             }
+            const uploadRows = [];
             for (const imageKey of imageKeys) {
                 const imageRecord = images[imageKey];
                 if (!imageRecord || !imageRecord.meta) {
@@ -6431,7 +6567,9 @@ const sam3TrainState = {
                 const baseName = imageRecord.meta.name || imageKey;
                 const safeName = makeUniqueFilename(baseName, usedNames);
                 const splitName = valSet && valSet.has(imageKey) ? "val" : "train";
-                root.file(`${splitName}/images/${safeName}`, imageRecord.meta);
+                if (root) {
+                    root.file(`${splitName}/images/${safeName}`, imageRecord.meta);
+                }
                 const labelNameParts = safeName.split(".");
                 if (labelNameParts.length > 1) {
                     labelNameParts[labelNameParts.length - 1] = "txt";
@@ -6467,15 +6605,41 @@ const sam3TrainState = {
 		                            const h = bbox.height / imageRecord.height;
 		                            result.push(`${classIdx} ${x} ${y} ${w} ${h}`);
 		                        }
-		                    });
-		                }
-                root.file(`${splitName}/labels/${labelRel}`, result.join("\n"));
+			                    });
+			                }
+                const labelText = result.join("\n");
+                if (root) {
+                    root.file(`${splitName}/labels/${labelRel}`, labelText);
+                }
+                uploadRows.push({ imageRecord, safeName, splitName, labelText });
+            }
+            const datasetTypeValue = datasetType === "seg" ? "seg" : "bbox";
+            if (useChunkedUpload) {
+                const data = await uploadCurrentDatasetToCacheChunked({
+                    runName,
+                    datasetTypeValue,
+                    contextText,
+                    labelmapEntries,
+                    uploadRows,
+                    options,
+                });
+                const label = data?.label || data?.id || runName;
+                setDatasetUploadMessage(`Uploaded ${label} from the labeling tab.`, "success");
+                if (datasetManagerElements.uploadCurrentSummary) {
+                    const splitNote = wantSplit && valSet ? ` (train ${trainKeys.length} / val ${valSet.size})` : "";
+                    const warningNote = skippedInvalidClassRows > 0
+                        ? `, skipped ${skippedInvalidClassRows} row${skippedInvalidClassRows === 1 ? "" : "s"} with unmapped classes`
+                        : "";
+                    datasetManagerElements.uploadCurrentSummary.textContent = `Saved as ${label}${splitNote}${warningNote}`;
+                }
+                await refreshDatasetList();
+                return data;
             }
             const blob = await zip.generateAsync({ type: "blob" });
             const formData = new FormData();
             formData.append("file", blob, `${folderName}.zip`);
-		            formData.append("dataset_id", runName);
-		            formData.append("dataset_type", datasetType === "seg" ? "seg" : "bbox");
+			            formData.append("dataset_id", runName);
+			            formData.append("dataset_type", datasetTypeValue);
 		            if (contextText) {
 		                formData.append("context", contextText);
 		            }
@@ -36152,6 +36316,80 @@ async function cancelRfDetrTrainingJobRequest() {
         return dataIngestionElements.referenceBackend?.checked ? "backend_dataset" : "active_label_images";
     }
 
+    function dataIngestionActiveTransientReferenceId() {
+        if (annotationSourceState.mode !== "transient") {
+            return "";
+        }
+        return String(annotationSourceState.sessionId || "").trim();
+    }
+
+    function dataIngestionBackendDatasetExists(datasetId = "") {
+        const safeId = String(datasetId || "").trim();
+        if (!safeId) return false;
+        return (Array.isArray(dataIngestionState.datasets) ? dataIngestionState.datasets : [])
+            .some((entry) => String(entry?.id || "").trim() === safeId);
+    }
+
+    function getDataIngestionDatasetEntryImageCount(entry) {
+        const rawCount = Number(entry?.image_count ?? entry?.train_count ?? entry?.annotation_progress?.images_total);
+        return Number.isFinite(rawCount) && rawCount > 0 ? rawCount : null;
+    }
+
+    function getDataIngestionDatasetImageCount(datasetId = "") {
+        return getDataIngestionDatasetEntryImageCount(getDataIngestionReferenceDatasetEntry(datasetId));
+    }
+
+    function getDataIngestionActiveBackendDatasetId() {
+        const activeDatasetId = String(annotationSourceState.datasetId || "").trim();
+        if (annotationSourceState.mode === "linked" && activeDatasetId) {
+            const activeCount = getClassSplitImageKeys().length;
+            const backendCount = getDataIngestionDatasetImageCount(activeDatasetId);
+            if (activeCount > 0 && backendCount !== activeCount) {
+                return "";
+            }
+            return activeDatasetId;
+        }
+        return "";
+    }
+
+    function getDataIngestionServerReferenceHandle(referenceSource = getDataIngestionReferenceSource()) {
+        const source = String(referenceSource || "").trim();
+        if (source === "backend_dataset") {
+            const datasetId = getDataIngestionReferenceDatasetId();
+            return datasetId
+                ? { kind: "backend_dataset", datasetId, sessionId: "", id: datasetId }
+                : null;
+        }
+        if (source !== "active_label_images") {
+            return null;
+        }
+        const activeDatasetId = getDataIngestionActiveBackendDatasetId();
+        if (activeDatasetId) {
+            return { kind: "backend_dataset", datasetId: activeDatasetId, sessionId: "", id: activeDatasetId };
+        }
+        const sessionId = dataIngestionActiveTransientReferenceId();
+        if (sessionId) {
+            const openPath = String(annotationSourceState.transientOpenPath || datasetManagerState.transientOpenPath || "").trim();
+            return {
+                kind: "transient_session",
+                datasetId: `transient:${sessionId}`,
+                sessionId,
+                openPath,
+                id: `transient:${sessionId}`,
+            };
+        }
+        return null;
+    }
+
+    function shouldDataIngestionUseBackendReferenceDataset(referenceSource = getDataIngestionReferenceSource()) {
+        const handle = getDataIngestionServerReferenceHandle(referenceSource);
+        return handle?.kind === "backend_dataset";
+    }
+
+    function shouldDataIngestionUseServerReferenceDataset(referenceSource = getDataIngestionReferenceSource()) {
+        return !!getDataIngestionServerReferenceHandle(referenceSource);
+    }
+
     function getDataIngestionReferenceDatasetId() {
         return String(dataIngestionElements.referenceDataset?.value || "").trim();
     }
@@ -36164,10 +36402,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function getDataIngestionReferenceDatasetImageCount() {
-        const entry = getDataIngestionReferenceDatasetEntry();
-        if (!entry) return null;
-        const rawCount = Number(entry.image_count ?? entry.train_count ?? entry.annotation_progress?.images_total);
-        return Number.isFinite(rawCount) ? rawCount : null;
+        return getDataIngestionDatasetImageCount();
     }
 
     function getDataIngestionSelectedSaladHead() {
@@ -36182,14 +36417,30 @@ async function cancelRfDetrTrainingJobRequest() {
     function dataIngestionHeadMatchesReference(head) {
         if (!head) return false;
         const headReferenceSource = String(head.reference_source || head.source_mode || "").trim();
+        const headReferenceKind = String(head.reference_dataset_kind || "").trim();
         const headDatasetId = String(head.reference_dataset_id || "").trim();
+        const headSessionId = String(head.reference_session_id || "").trim();
         const selectedSource = getDataIngestionReferenceSource();
         const selectedDatasetId = getDataIngestionReferenceDatasetId();
-        if (!headReferenceSource && !headDatasetId) {
+        if (!headReferenceSource && !headDatasetId && !headSessionId) {
             return false;
         }
         if (selectedSource === "backend_dataset") {
             return !!headDatasetId && !!selectedDatasetId && headDatasetId === selectedDatasetId;
+        }
+        const activeHandle = getDataIngestionServerReferenceHandle("active_label_images");
+        if (activeHandle?.kind === "transient_session") {
+            if (headSessionId && headSessionId === activeHandle.sessionId) {
+                return true;
+            }
+            return headDatasetId === activeHandle.datasetId;
+        }
+        if (activeHandle?.kind === "backend_dataset") {
+            return !!headDatasetId && headDatasetId === activeHandle.datasetId;
+        }
+        const uploadedActiveHandle = dataIngestionHandleFromSelectedHead(head);
+        if (uploadedActiveHandle) {
+            return true;
         }
         const activeDatasetId = String(annotationSourceState.datasetId || "").trim();
         if (headDatasetId || activeDatasetId) {
@@ -36272,7 +36523,12 @@ async function cancelRfDetrTrainingJobRequest() {
         const canUseReference = hasBackendReference && hasActiveReference;
         setButtonDisabled(dataIngestionElements.analyzeButton, dataIngestionState.active || candidateCount <= 0 || !headMatchesReference || !canUseReference);
         setButtonDisabled(dataIngestionElements.buildProfileButton, dataIngestionState.active || !hasTrainingReference);
-        setButtonDisabled(dataIngestionElements.cancelButton, !dataIngestionState.active || !dataIngestionState.activeJobId || dataIngestionState.cancelInFlight);
+        setButtonDisabled(
+            dataIngestionElements.cancelButton,
+            !dataIngestionState.active
+                || (!dataIngestionState.activeJobId && !dataIngestionState.activeUploadSessionId)
+                || dataIngestionState.cancelInFlight,
+        );
         setButtonDisabled(dataIngestionElements.profileDownloadButton, dataIngestionState.active || !hasHead);
         setButtonDisabled(dataIngestionElements.profileUploadButton, dataIngestionState.active || dataIngestionState.profileImportInFlight);
         setButtonDisabled(dataIngestionElements.previewAcceptedButton, dataIngestionState.active || !hasAcceptedResult || acceptedCount <= 0 || dataIngestionState.acceptedPreviewInFlight);
@@ -36411,6 +36667,213 @@ async function cancelRfDetrTrainingJobRequest() {
         return `${cleaned || "active_dataset"}_profile`;
     }
 
+    function dataIngestionActiveWorkspaceSignature(keys = getClassSplitImageKeys()) {
+        let hash = 2166136261;
+        const append = (value) => {
+            const text = String(value || "");
+            for (let i = 0; i < text.length; i += 1) {
+                hash ^= text.charCodeAt(i);
+                hash = Math.imul(hash, 16777619) >>> 0;
+            }
+            hash ^= 0xff;
+            hash = Math.imul(hash, 16777619) >>> 0;
+        };
+        append(annotationSourceState.mode);
+        append(annotationSourceState.datasetId);
+        append(annotationSourceState.sessionId);
+        append(annotationSourceState.datasetLabel);
+        append(datasetType);
+        keys.forEach((key) => append(key));
+        Object.keys(classes || {}).sort().forEach((className) => {
+            append(`${className}:${classes[className]}`);
+        });
+        return `${keys.length}:${hash >>> 0}`;
+    }
+
+    function dataIngestionActiveReferenceUploadName(label = "") {
+        const stem = activeDatasetSaladHeadName(label)
+            .replace(/_profile$/, "")
+            .replace(/^data_ingestion_reference_/, "")
+            .slice(0, 72) || "active_dataset";
+        return `data_ingestion_reference_${stem}_${getClassSplitImageKeys().length || 0}`;
+    }
+
+    function dataIngestionUploadedReferenceContext(label = "") {
+        const safeLabel = String(label || getDataIngestionReferenceLabel() || "active Label Images dataset").trim();
+        return `Data Ingestion active reference: ${safeLabel}`;
+    }
+
+    function getDataIngestionStoredActiveReferenceUploads() {
+        try {
+            const parsed = JSON.parse(window.localStorage?.getItem(DATA_INGESTION_ACTIVE_REFERENCE_UPLOADS_STORAGE_KEY) || "{}");
+            return parsed && typeof parsed === "object" ? parsed : {};
+        } catch (error) {
+            return {};
+        }
+    }
+
+    function setDataIngestionStoredActiveReferenceUpload(signature, datasetId, imageCount) {
+        const safeSignature = String(signature || "").trim();
+        const safeDatasetId = String(datasetId || "").trim();
+        if (!safeSignature || !safeDatasetId) return;
+        try {
+            const uploads = getDataIngestionStoredActiveReferenceUploads();
+            uploads[safeSignature] = {
+                datasetId: safeDatasetId,
+                imageCount: Number(imageCount) || 0,
+                storedAt: Date.now(),
+            };
+            window.localStorage?.setItem(
+                DATA_INGESTION_ACTIVE_REFERENCE_UPLOADS_STORAGE_KEY,
+                JSON.stringify(uploads),
+            );
+        } catch (error) {
+            console.warn("Failed to store Data Ingestion reference upload cache", error);
+        }
+    }
+
+    function getDataIngestionStoredActiveReferenceUpload(signature) {
+        const safeSignature = String(signature || "").trim();
+        if (!safeSignature) return null;
+        const entry = getDataIngestionStoredActiveReferenceUploads()[safeSignature];
+        const datasetId = String(entry?.datasetId || "").trim();
+        if (!datasetId || !dataIngestionBackendDatasetExists(datasetId)) return null;
+        const cachedCount = Number(entry?.imageCount || 0) || 0;
+        const backendCount = getDataIngestionDatasetImageCount(datasetId);
+        if (cachedCount > 0 && backendCount !== cachedCount) return null;
+        return {
+            id: datasetId,
+            dataset_id: datasetId,
+            image_count: cachedCount || getClassSplitImageKeys().length,
+        };
+    }
+
+    function dataIngestionActiveReferenceHandleFromDataset(entry, signature = "") {
+        const datasetId = String(entry?.id || entry?.dataset_id || "").trim();
+        if (!datasetId) return null;
+        const imageCount = Number(entry?.image_count ?? entry?.train_count ?? getClassSplitImageKeys().length) || 0;
+        const activeCount = getClassSplitImageKeys().length;
+        if (activeCount > 0 && imageCount > 0 && imageCount !== activeCount) return null;
+        return {
+            kind: "backend_dataset",
+            datasetId,
+            sessionId: "",
+            id: datasetId,
+            uploadedActiveReference: true,
+            imageCount,
+            signature,
+        };
+    }
+
+    async function ensureDataIngestionActiveReferenceDataset({ purpose = "reference" } = {}) {
+        const existingHandle = getDataIngestionServerReferenceHandle("active_label_images");
+        if (existingHandle) {
+            return existingHandle;
+        }
+        const activeKeys = getClassSplitImageKeys();
+        if (!activeKeys.length) {
+            throw new Error("Open a reference dataset in Label Images first.");
+        }
+        const imageCount = activeKeys.length;
+        const signature = dataIngestionActiveWorkspaceSignature(activeKeys);
+        const cached = dataIngestionState.activeReferenceDatasetUpload;
+        if (cached?.signature === signature && cached?.datasetId && dataIngestionBackendDatasetExists(cached.datasetId)) {
+            return {
+                kind: "backend_dataset",
+                datasetId: cached.datasetId,
+                sessionId: "",
+                id: cached.datasetId,
+                uploadedActiveReference: true,
+                imageCount,
+                signature,
+            };
+        }
+        await initDatasetManagerTab();
+        await refreshDataIngestionDatasets();
+        const referenceLabel = getDataIngestionReferenceLabel();
+        const uploadName = dataIngestionActiveReferenceUploadName(referenceLabel);
+        const reusableEntry = getDataIngestionStoredActiveReferenceUpload(signature);
+        const reusableHandle = dataIngestionActiveReferenceHandleFromDataset(reusableEntry, signature);
+        if (reusableHandle) {
+            dataIngestionState.activeReferenceDatasetUpload = {
+                signature,
+                datasetId: reusableHandle.datasetId,
+                imageCount,
+            };
+            return reusableHandle;
+        }
+        const purposeLabel = purpose === "analysis" ? "candidate analysis" : "reference profile";
+        const uploadMessage = `Uploading active Label Images dataset (${imageCount} images) as backend reference for ${purposeLabel} ...`;
+        setDataIngestionStatus(uploadMessage, "info");
+        renderDataIngestionProgress({ progress: 0, message: uploadMessage });
+        const result = await uploadCurrentDatasetToCache({
+            runName: uploadName,
+            context: dataIngestionUploadedReferenceContext(referenceLabel),
+            split: false,
+            transport: "chunked",
+            statusPrefix: "active Label Images reference dataset",
+            onSessionStart: ({ sessionId, abortController } = {}) => {
+                dataIngestionState.activeUploadSessionId = String(sessionId || "");
+                dataIngestionState.activeUploadAbortController = abortController || null;
+                refreshDataIngestionControls();
+            },
+            onSessionEnd: ({ sessionId } = {}) => {
+                if (!sessionId || dataIngestionState.activeUploadSessionId === sessionId) {
+                    dataIngestionState.activeUploadSessionId = "";
+                    dataIngestionState.activeUploadAbortController = null;
+                    refreshDataIngestionControls();
+                }
+            },
+            onProgress: ({ progress = 0, message = "" } = {}) => {
+                const pct = Math.max(0, Math.min(0.98, Number(progress) || 0));
+                renderDataIngestionProgress({ progress: pct, message: message || uploadMessage });
+                if (message) {
+                    setDataIngestionStatus(message, "info");
+                }
+            },
+        });
+        if (!result) {
+            throw new Error("Active Label Images dataset upload did not return a backend dataset.");
+        }
+        const handle = dataIngestionActiveReferenceHandleFromDataset(result, signature);
+        if (!handle) {
+            throw new Error("Active Label Images dataset upload returned no dataset id.");
+        }
+        dataIngestionState.activeReferenceDatasetUpload = {
+            signature,
+            datasetId: handle.datasetId,
+            imageCount,
+        };
+        setDataIngestionStoredActiveReferenceUpload(signature, handle.datasetId, imageCount);
+        await refreshDataIngestionDatasets();
+        return handle;
+    }
+
+    function dataIngestionHandleFromSelectedHead(head) {
+        if (!head || getDataIngestionReferenceSource() !== "active_label_images") return null;
+        const activeHandle = getDataIngestionServerReferenceHandle("active_label_images");
+        if (activeHandle) return activeHandle;
+        const headDatasetId = String(head.reference_dataset_id || "").trim();
+        if (!headDatasetId) return null;
+        const headSource = String(head.reference_source || head.source_mode || "").trim();
+        const headKind = String(head.reference_dataset_kind || "").trim();
+        if (headSource && headSource !== "active_label_images") return null;
+        if (headKind && headKind !== "backend_dataset") return null;
+        const activeCount = getClassSplitImageKeys().length;
+        const headActiveCount = Number(head.active_image_count || head.train_image_count || 0);
+        if (Number.isFinite(headActiveCount) && headActiveCount > 0 && activeCount > 0 && headActiveCount !== activeCount) {
+            return null;
+        }
+        return {
+            kind: "backend_dataset",
+            datasetId: headDatasetId,
+            sessionId: "",
+            id: headDatasetId,
+            uploadedActiveReference: true,
+            imageCount: activeCount,
+        };
+    }
+
     async function appendActiveWorkspaceTrainingFiles(formData, cap) {
         return appendActiveWorkspaceReferenceFiles(formData, cap, "train_files");
     }
@@ -36433,8 +36896,8 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const referenceSource = getDataIngestionReferenceSource();
-        const referenceDatasetId = getDataIngestionReferenceDatasetId();
-        if (referenceSource === "backend_dataset" && !referenceDatasetId) {
+        let referenceHandle = getDataIngestionServerReferenceHandle(referenceSource) || dataIngestionHandleFromSelectedHead(selectedHead);
+        if (referenceSource === "backend_dataset" && !getDataIngestionReferenceDatasetId()) {
             setDataIngestionStatus("Choose a backend reference dataset first.", "warn");
             return;
         }
@@ -36457,7 +36920,21 @@ async function cancelRfDetrTrainingJobRequest() {
             files.forEach((file) => formData.append("candidate_files", file, file.name));
             const maxReferenceImages = Math.round(getDataIngestionNumber(dataIngestionElements.maxTrainImages, 0, { min: 0 }));
             let referenceCount = 0;
-            if (referenceSource === "active_label_images") {
+            if (referenceSource === "active_label_images" && !referenceHandle) {
+                referenceHandle = await ensureDataIngestionActiveReferenceDataset({ purpose: "analysis" });
+            }
+            const useBackendReferenceDataset = referenceHandle?.kind === "backend_dataset";
+            const useServerReferenceDataset = !!referenceHandle;
+            const referenceDatasetId = referenceHandle?.datasetId || (
+                referenceSource === "backend_dataset" ? getDataIngestionReferenceDatasetId() : String(annotationSourceState.datasetId || "")
+            );
+            const referenceSessionId = referenceHandle?.sessionId || "";
+            if (useServerReferenceDataset) {
+                referenceCount = referenceHandle?.imageCount || getClassSplitImageKeys().length;
+                setDataIngestionStatus(referenceHandle.kind === "transient_session"
+                    ? "Queueing active transient dataset by backend session ..."
+                    : "Queueing Label Images dataset by backend reference ...");
+            } else if (referenceSource === "active_label_images") {
                 referenceCount = await appendActiveWorkspaceReferenceFiles(formData, maxReferenceImages);
                 if (referenceCount < 1) {
                     throw new Error("No usable reference images were available in Label Images.");
@@ -36467,9 +36944,14 @@ async function cancelRfDetrTrainingJobRequest() {
                 encoder: "local_salad",
                 salad_head_id: saladHeadId,
                 reference_source: referenceSource,
-                reference_dataset_id: referenceSource === "backend_dataset" ? referenceDatasetId : String(annotationSourceState.datasetId || ""),
+                reference_dataset_kind: referenceHandle?.kind || (referenceSource === "backend_dataset" ? "backend_dataset" : "uploaded_workspace"),
+                reference_dataset_id: referenceDatasetId,
+                reference_session_id: referenceSessionId,
+                reference_open_path: referenceHandle?.kind === "transient_session" ? (referenceHandle.openPath || "") : "",
                 reference_dataset_label: referenceSource === "backend_dataset" ? getDataIngestionReferenceLabel() : "",
                 reference_label: getDataIngestionReferenceLabel(),
+                use_backend_reference_dataset: useBackendReferenceDataset,
+                use_server_reference_dataset: useServerReferenceDataset,
                 max_reference_images: maxReferenceImages,
                 keep_fraction: getDataIngestionNumber(dataIngestionElements.keepFraction, 0.2, { min: 0.01, max: 1 }),
                 local_vendi_enabled: !!dataIngestionElements.localVendiEnabled?.checked,
@@ -36500,13 +36982,13 @@ async function cancelRfDetrTrainingJobRequest() {
     async function startLocalSaladTraining() {
         if (dataIngestionState.active) return;
         const referenceSource = getDataIngestionReferenceSource();
-        const referenceDatasetId = getDataIngestionReferenceDatasetId();
+        let referenceHandle = getDataIngestionServerReferenceHandle(referenceSource);
         const activeKeys = getClassSplitImageKeys();
         if (referenceSource === "active_label_images" && activeKeys.length < 2) {
             setDataIngestionStatus("Open at least two images in Label Images before building a reference profile from the active dataset.", "warn");
             return;
         }
-        if (referenceSource === "backend_dataset" && !referenceDatasetId) {
+        if (referenceSource === "backend_dataset" && !getDataIngestionReferenceDatasetId()) {
             setDataIngestionStatus("Choose a backend reference dataset before building a profile.", "warn");
             return;
         }
@@ -36518,16 +37000,27 @@ async function cancelRfDetrTrainingJobRequest() {
             dataIngestionState.lastPreview = null;
             dataIngestionState.visibleItemLimit = 120;
             clearDataIngestionDistribution();
-            const packageMessage = referenceSource === "backend_dataset"
-                ? "Queueing backend dataset reference profile ..."
-                : "Packaging active Label Images dataset for reference profile ...";
-            setDataIngestionStatus(packageMessage);
-            renderDataIngestionProgress({ progress: 0, message: packageMessage });
+            const initialMessage = referenceHandle
+                ? (referenceHandle.kind === "transient_session" ? "Queueing active transient dataset reference profile ..." : "Queueing backend dataset reference profile ...")
+                : "Preparing active Label Images dataset for reference profile ...";
+            setDataIngestionStatus(initialMessage);
+            renderDataIngestionProgress({ progress: 0, message: initialMessage });
             refreshDataIngestionControls();
             const formData = new FormData();
             const maxTrainImages = Math.round(getDataIngestionNumber(dataIngestionElements.maxTrainImages, 0, { min: 0 }));
             let packagedCount = 0;
-            if (referenceSource === "active_label_images") {
+            if (referenceSource === "active_label_images" && !referenceHandle) {
+                referenceHandle = await ensureDataIngestionActiveReferenceDataset({ purpose: "profile" });
+            }
+            const useBackendReferenceDataset = referenceHandle?.kind === "backend_dataset";
+            const useServerReferenceDataset = !!referenceHandle;
+            const referenceDatasetId = referenceHandle?.datasetId || (
+                referenceSource === "backend_dataset" ? getDataIngestionReferenceDatasetId() : String(annotationSourceState.datasetId || "")
+            );
+            const referenceSessionId = referenceHandle?.sessionId || "";
+            if (useServerReferenceDataset) {
+                packagedCount = referenceHandle?.imageCount || activeKeys.length;
+            } else if (referenceSource === "active_label_images") {
                 packagedCount = await appendActiveWorkspaceTrainingFiles(formData, maxTrainImages);
             }
             if (referenceSource === "active_label_images" && packagedCount < 2) {
@@ -36545,10 +37038,15 @@ async function cancelRfDetrTrainingJobRequest() {
                     : "",
                 source_mode: referenceSource,
                 reference_source: referenceSource,
-                reference_dataset_id: referenceSource === "backend_dataset" ? referenceDatasetId : String(annotationSourceState.datasetId || ""),
+                reference_dataset_kind: referenceHandle?.kind || (referenceSource === "backend_dataset" ? "backend_dataset" : "uploaded_workspace"),
+                reference_dataset_id: referenceDatasetId,
+                reference_session_id: referenceSessionId,
+                reference_open_path: referenceHandle?.kind === "transient_session" ? (referenceHandle.openPath || "") : "",
                 reference_dataset_label: referenceSource === "backend_dataset" ? getDataIngestionReferenceLabel() : "",
                 reference_label: getDataIngestionReferenceLabel(),
                 active_image_count: referenceSource === "active_label_images" ? packagedCount : 0,
+                use_backend_reference_dataset: useBackendReferenceDataset,
+                use_server_reference_dataset: useServerReferenceDataset,
                 epochs: Math.round(getDataIngestionNumber(dataIngestionElements.epochs, 8, { min: 1 })),
                 batch_size: Math.round(getDataIngestionNumber(dataIngestionElements.batchSize, 8, { min: 2 })),
                 max_train_images: maxTrainImages,
@@ -36640,10 +37138,27 @@ async function cancelRfDetrTrainingJobRequest() {
 
     async function cancelDataIngestionJob() {
         const jobId = dataIngestionState.activeJobId;
-        if (!jobId || dataIngestionState.cancelInFlight) return;
+        const uploadSessionId = dataIngestionState.activeUploadSessionId;
+        if ((!jobId && !uploadSessionId) || dataIngestionState.cancelInFlight) return;
         dataIngestionState.cancelInFlight = true;
         refreshDataIngestionControls();
         try {
+            if (uploadSessionId) {
+                if (dataIngestionState.activeUploadAbortController) {
+                    dataIngestionState.activeUploadAbortController.abort();
+                }
+                const resp = await fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(uploadSessionId)}/cancel`, { method: "POST" });
+                const detail = await resp.text();
+                if (!resp.ok) {
+                    throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+                }
+                dataIngestionState.active = false;
+                dataIngestionState.activeUploadSessionId = "";
+                dataIngestionState.activeUploadAbortController = null;
+                setDataIngestionStatus("Dataset upload cancelled.", "warn");
+                renderDataIngestionProgress({ progress: 1, message: "Dataset upload cancelled." });
+                return;
+            }
             const resp = await fetch(`${API_ROOT}/data_ingestion/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
             const detail = await resp.text();
             if (!resp.ok) {

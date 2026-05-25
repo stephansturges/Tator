@@ -27,6 +27,30 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException, Request
 
 logger = logging.getLogger("localinferenceapi")
+
+
+def _raise_process_nofile_limit(target: int = 8192) -> None:
+    """Raise the soft file descriptor limit when the launch environment is low."""
+
+    try:
+        import resource
+    except Exception:
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft >= target:
+            return
+        if hard == resource.RLIM_INFINITY:
+            new_soft = target
+        else:
+            new_soft = min(target, int(hard))
+        if new_soft > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+    except Exception as exc:
+        logger.debug("Could not raise RLIMIT_NOFILE: %s", exc)
+
+
+_raise_process_nofile_limit()
 from api.detectors_default import build_detectors_default_router
 from api.datasets import build_datasets_router
 from api.class_analysis import build_class_analysis_router
@@ -1008,6 +1032,12 @@ def _env_float(name: str, default: float) -> float:
 MAX_PREDICTOR_SLOTS = 3
 DATASET_ZIP_MAX_BYTES = _env_int("DATASET_ZIP_MAX_BYTES", 100 * 1024 * 1024 * 1024)
 DATASET_ZIP_ENTRY_MAX_BYTES = _env_int("DATASET_ZIP_ENTRY_MAX_BYTES", 50 * 1024 * 1024 * 1024)
+DATASET_CHUNK_UPLOAD_MAX_BYTES = _env_int(
+    "DATASET_CHUNK_UPLOAD_MAX_BYTES", 10 * 1024 * 1024 * 1024
+)
+DATASET_CHUNK_UPLOAD_QUOTA_BYTES = _env_int(
+    "DATASET_CHUNK_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024
+)
 CLIP_DATASET_CHUNK_MAX_BYTES = _env_int("CLIP_DATASET_CHUNK_MAX_BYTES", 10 * 1024 * 1024 * 1024)
 CLIP_DATASET_UPLOAD_QUOTA_BYTES = _env_int(
     "CLIP_DATASET_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024
@@ -13974,6 +14004,28 @@ class QwenDatasetUploadJob:
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
+@dataclass
+class DatasetUploadSessionJob:
+    job_id: str
+    root_dir: Path
+    run_name: Optional[str] = None
+    dataset_type: str = "bbox"
+    context: str = ""
+    classes: List[str] = field(default_factory=list)
+    total_images: int = 0
+    train_count: int = 0
+    val_count: int = 0
+    bytes_written: int = 0
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+
+DATASET_UPLOAD_SESSIONS: Dict[str, DatasetUploadSessionJob] = {}
+DATASET_UPLOAD_SESSIONS_LOCK = threading.Lock()
+DATASET_UPLOAD_SESSION_FINALIZE_LOCK = threading.Lock()
+
+
 QWEN_DATASET_UPLOADS: Dict[str, QwenDatasetUploadJob] = {}
 QWEN_DATASET_UPLOADS_LOCK = threading.Lock()
 QWEN_DATASET_FINALIZE_LOCK = threading.Lock()
@@ -14196,6 +14248,9 @@ CLIP_DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "clip_dataset_uploads"
 _init_storage_root(CLIP_DATASET_UPLOAD_ROOT)
 DATASET_UPLOAD_ROOT = UPLOAD_ROOT / "dataset_uploads"
 _init_storage_root(DATASET_UPLOAD_ROOT)
+YOLO_DATASET_UPLOAD_SESSION_ROOT = UPLOAD_ROOT / "yolo_dataset_upload_sessions"
+_init_storage_root(YOLO_DATASET_UPLOAD_SESSION_ROOT)
+DATASET_UPLOAD_SESSION_META_NAME = "upload_session.json"
 CLIP_NEGATIVE_REPLAY_ROOT = UPLOAD_ROOT / "clip_negative_replay"
 _init_storage_root(CLIP_NEGATIVE_REPLAY_ROOT)
 QWEN_PREPASS_TRACE_ROOT = UPLOAD_ROOT / "qwen_prepass_traces"
@@ -16747,6 +16802,583 @@ def list_datasets():
 def _persist_dataset_meta(dataset_root: Path, meta: Dict[str, Any]) -> Dict[str, Any]:
     _write_dataset_metadata_json(dataset_root / DATASET_META_NAME, dataset_root, meta)
     return meta
+
+
+def _dataset_upload_session_storage_root(create: bool = True) -> Path:
+    root = Path(YOLO_DATASET_UPLOAD_SESSION_ROOT)
+    if _storage_path_has_symlink_component(root):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="dataset_upload_session_path_invalid",
+        )
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    resolved = root.resolve(strict=create)
+    if _storage_path_has_symlink_component(resolved):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="dataset_upload_session_path_invalid",
+        )
+    return resolved
+
+
+def _dataset_upload_session_job_dir(job_id: str, create: bool = False) -> Path:
+    safe_job_id = _sanitize_yolo_run_id_impl(str(job_id or "")) or uuid.uuid4().hex
+    root = _dataset_upload_session_storage_root(create=True)
+    path = root / safe_job_id
+    resolved = path.resolve(strict=False)
+    if not _path_is_within_root_impl(resolved, root) or resolved.parent != root:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="dataset_upload_session_path_invalid",
+        )
+    if create:
+        if path.exists() or path.is_symlink():
+            raise HTTPException(
+                status_code=HTTP_409_CONFLICT,
+                detail="dataset_upload_session_exists",
+            )
+        path.mkdir(parents=True, exist_ok=False)
+        resolved = path.resolve(strict=True)
+        if not _path_is_within_root_impl(resolved, root) or resolved.parent != root:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail="dataset_upload_session_path_invalid",
+            )
+    return path
+
+
+def _dataset_upload_session_meta_path(root_dir: Path) -> Path:
+    return Path(root_dir) / DATASET_UPLOAD_SESSION_META_NAME
+
+
+def _dataset_upload_session_to_meta(
+    job: DatasetUploadSessionJob, status: str = "active"
+) -> Dict[str, Any]:
+    return {
+        "session_id": job.job_id,
+        "run_name": job.run_name or "",
+        "dataset_type": job.dataset_type,
+        "context": job.context,
+        "classes": list(job.classes),
+        "total_images": int(job.total_images or 0),
+        "train_count": int(job.train_count or 0),
+        "val_count": int(job.val_count or 0),
+        "bytes_written": int(job.bytes_written or 0),
+        "created_at": float(job.created_at or time.time()),
+        "updated_at": float(job.updated_at or time.time()),
+        "status": status,
+    }
+
+
+def _persist_dataset_upload_session(
+    job: DatasetUploadSessionJob, status: str = "active"
+) -> None:
+    meta_path = _dataset_upload_session_meta_path(job.root_dir)
+    _write_text_within_root_atomic(
+        meta_path,
+        job.root_dir.resolve(strict=True),
+        json.dumps(_dataset_upload_session_to_meta(job, status), indent=2, sort_keys=True),
+        detail="dataset_upload_session_path_invalid",
+        context="dataset upload session",
+    )
+
+
+def _dataset_upload_session_from_meta(
+    session_id: str, root_dir: Path, meta: Mapping[str, Any]
+) -> DatasetUploadSessionJob:
+    raw_classes = meta.get("classes") or []
+    classes = (
+        [str(name).strip() for name in raw_classes if str(name).strip()]
+        if isinstance(raw_classes, list)
+        else []
+    )
+    return DatasetUploadSessionJob(
+        job_id=str(meta.get("session_id") or session_id),
+        root_dir=root_dir,
+        run_name=str(meta.get("run_name") or "").strip() or None,
+        dataset_type=str(meta.get("dataset_type") or "bbox").strip().lower() or "bbox",
+        context=str(meta.get("context") or ""),
+        classes=classes,
+        total_images=max(0, int(meta.get("total_images") or 0)),
+        train_count=max(0, int(meta.get("train_count") or 0)),
+        val_count=max(0, int(meta.get("val_count") or 0)),
+        bytes_written=max(0, int(meta.get("bytes_written") or 0)),
+        created_at=float(meta.get("created_at") or time.time()),
+        updated_at=float(meta.get("updated_at") or time.time()),
+    )
+
+
+def _load_dataset_upload_session_job(
+    session_id: str, *, required: bool = True
+) -> Optional[DatasetUploadSessionJob]:
+    safe_session_id = _sanitize_yolo_run_id_impl(str(session_id or ""))
+    if not safe_session_id or safe_session_id != str(session_id or "").strip():
+        if required:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail="dataset_upload_session_id_invalid",
+            )
+        return None
+    with DATASET_UPLOAD_SESSIONS_LOCK:
+        job = DATASET_UPLOAD_SESSIONS.get(safe_session_id)
+    if job:
+        return job
+    root_dir = _dataset_upload_session_job_dir(safe_session_id, create=False)
+    meta_path = _dataset_upload_session_meta_path(root_dir)
+    if not meta_path.exists():
+        if required:
+            raise HTTPException(
+                status_code=HTTP_404_NOT_FOUND,
+                detail="dataset_upload_session_not_found",
+            )
+        return None
+    try:
+        root_resolved = root_dir.resolve(strict=True)
+        upload_root = _dataset_upload_session_storage_root(create=True)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="dataset_upload_session_path_invalid",
+        ) from exc
+    if (
+        root_resolved.is_symlink()
+        or not root_resolved.is_dir()
+        or not _path_is_within_root_impl(root_resolved, upload_root)
+        or root_resolved.parent != upload_root
+    ):
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="dataset_upload_session_path_invalid",
+        )
+    meta = _load_json_metadata(meta_path) or {}
+    if str(meta.get("session_id") or safe_session_id) != safe_session_id:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="dataset_upload_session_metadata_invalid",
+        )
+    try:
+        job = _dataset_upload_session_from_meta(safe_session_id, root_dir, meta)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="dataset_upload_session_metadata_invalid",
+        ) from exc
+    with DATASET_UPLOAD_SESSIONS_LOCK:
+        existing = DATASET_UPLOAD_SESSIONS.get(safe_session_id)
+        if existing:
+            return existing
+        DATASET_UPLOAD_SESSIONS[safe_session_id] = job
+    return job
+
+
+def _dataset_upload_session_status(
+    job: DatasetUploadSessionJob, *, source: str = "memory"
+) -> Dict[str, Any]:
+    now = time.time()
+    total_done = int(job.train_count or 0) + int(job.val_count or 0)
+    return {
+        "session_id": job.job_id,
+        "run_name": job.run_name or "",
+        "dataset_type": job.dataset_type,
+        "context": job.context,
+        "total_images": int(job.total_images or 0),
+        "train_count": int(job.train_count or 0),
+        "val_count": int(job.val_count or 0),
+        "image_count": total_done,
+        "bytes_written": int(job.bytes_written or 0),
+        "created_at": float(job.created_at or 0),
+        "updated_at": float(job.updated_at or 0),
+        "age_seconds": max(0.0, now - float(job.created_at or now)),
+        "stale": (now - float(job.updated_at or now)) > STAGING_TTL_HOURS * 3600,
+        "status": "active",
+        "source": source,
+        "root": str(job.root_dir),
+    }
+
+
+def list_dataset_upload_sessions() -> List[Dict[str, Any]]:
+    sessions: Dict[str, Dict[str, Any]] = {}
+    with DATASET_UPLOAD_SESSIONS_LOCK:
+        jobs = list(DATASET_UPLOAD_SESSIONS.values())
+    for job in jobs:
+        sessions[job.job_id] = _dataset_upload_session_status(job, source="memory")
+    try:
+        root = _dataset_upload_session_storage_root(create=False)
+    except HTTPException:
+        return list(sessions.values())
+    if root.exists() and root.is_dir() and not root.is_symlink():
+        for child in root.iterdir():
+            if not child.is_dir() or child.is_symlink():
+                continue
+            session_id = child.name
+            if session_id in sessions:
+                continue
+            meta_path = _dataset_upload_session_meta_path(child)
+            if meta_path.exists() and meta_path.is_file() and not meta_path.is_symlink():
+                meta = _load_json_metadata(meta_path) or {}
+                try:
+                    job = _dataset_upload_session_from_meta(session_id, child, meta)
+                    sessions[session_id] = _dataset_upload_session_status(job, source="disk")
+                except Exception:
+                    sessions[session_id] = {
+                        "session_id": session_id,
+                        "status": "metadata_invalid",
+                        "source": "disk",
+                        "root": str(child),
+                        "bytes_written": _dir_size_bytes_impl(child),
+                    }
+            else:
+                sessions[session_id] = {
+                    "session_id": session_id,
+                    "status": "orphan",
+                    "source": "disk",
+                    "root": str(child),
+                    "bytes_written": _dir_size_bytes_impl(child),
+                }
+    return sorted(sessions.values(), key=lambda row: str(row.get("session_id") or ""))
+
+
+def get_dataset_upload_session(session_id: str) -> Dict[str, Any]:
+    job = _load_dataset_upload_session_job(session_id, required=True)
+    assert job is not None
+    return _dataset_upload_session_status(job, source="memory")
+
+
+def init_dataset_upload_session(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        payload = {}
+    job_id = uuid.uuid4().hex
+    root_dir = _dataset_upload_session_job_dir(job_id, create=True)
+    for rel in ("train/images", "train/labels", "val/images", "val/labels"):
+        (root_dir / rel).mkdir(parents=True, exist_ok=True)
+    raw_classes = payload.get("classes") or []
+    if not isinstance(raw_classes, list):
+        raw_classes = []
+    classes = [str(name).strip() for name in raw_classes if str(name).strip()]
+    dataset_type = str(payload.get("dataset_type") or "bbox").strip().lower()
+    if dataset_type not in {"bbox", "seg"}:
+        dataset_type = "bbox"
+    try:
+        total_images = max(0, int(payload.get("total_images") or 0))
+    except (TypeError, ValueError):
+        total_images = 0
+    job = DatasetUploadSessionJob(
+        job_id=job_id,
+        root_dir=root_dir,
+        run_name=str(payload.get("dataset_id") or payload.get("run_name") or "").strip() or None,
+        dataset_type=dataset_type,
+        context=str(payload.get("context") or ""),
+        classes=classes,
+        total_images=total_images,
+    )
+    _persist_dataset_upload_session(job)
+    with DATASET_UPLOAD_SESSIONS_LOCK:
+        DATASET_UPLOAD_SESSIONS[job_id] = job
+    return {"session_id": job_id, "job_id": job_id}
+
+
+def _dataset_upload_safe_image_name(raw_name: str) -> str:
+    safe = Path(str(raw_name or "")).name
+    safe = safe.replace("\\", "_").replace("/", "_").strip()
+    if not safe or safe in {".", ".."}:
+        safe = f"{uuid.uuid4().hex}.jpg"
+    return safe
+
+
+def _dataset_upload_label_name(image_name: str) -> str:
+    parts = image_name.split(".")
+    if len(parts) > 1:
+        parts[-1] = "txt"
+        return ".".join(parts)
+    return f"{image_name}.txt"
+
+
+def upload_dataset_session_batch(
+    session_id: str, manifest_json: str, files: List[UploadFile]
+) -> Dict[str, Any]:
+    try:
+        try:
+            manifest = json.loads(manifest_json or "{}")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="dataset_upload_manifest_invalid"
+            ) from exc
+        rows = manifest.get("rows") if isinstance(manifest, dict) else None
+        if not isinstance(rows, list):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="dataset_upload_manifest_invalid"
+            )
+        upload_files = list(files or [])
+        if len(rows) != len(upload_files):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail="dataset_upload_batch_mismatch"
+            )
+        job = _load_dataset_upload_session_job(session_id, required=True)
+        assert job is not None
+        with job.lock:
+            with DATASET_UPLOAD_SESSIONS_LOCK:
+                if DATASET_UPLOAD_SESSIONS.get(str(session_id or "")) is not job:
+                    raise HTTPException(
+                        status_code=HTTP_404_NOT_FOUND,
+                        detail="dataset_upload_session_not_found",
+                    )
+            if job.root_dir.is_symlink():
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="dataset_upload_session_path_invalid",
+                )
+            root_resolved = job.root_dir.resolve(strict=True)
+            if not root_resolved.is_dir():
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="dataset_upload_session_path_invalid",
+                )
+            added = 0
+            for row, upload in zip(rows, upload_files):
+                if not isinstance(row, dict):
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail="dataset_upload_manifest_invalid",
+                    )
+                split = str(row.get("split") or "train").strip().lower()
+                if split not in {"train", "val"}:
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail="dataset_upload_split_invalid",
+                    )
+                image_name = _dataset_upload_safe_image_name(
+                    row.get("filename") or getattr(upload, "filename", "") or ""
+                )
+                label_text = str(row.get("label_text", row.get("label", "")) or "")
+                split_root = (job.root_dir / split).resolve(strict=True)
+                if not _path_is_within_root_impl(split_root, root_resolved):
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail="dataset_upload_session_path_invalid",
+                    )
+                image_path = (split_root / "images" / image_name).resolve(strict=False)
+                label_path = (split_root / "labels" / _dataset_upload_label_name(image_name)).resolve(
+                    strict=False
+                )
+                for path in (image_path, label_path):
+                    if not _path_is_within_root_impl(path, root_resolved):
+                        raise HTTPException(
+                            status_code=HTTP_400_BAD_REQUEST,
+                            detail="dataset_upload_session_path_invalid",
+                        )
+                    if path.exists() or path.is_symlink():
+                        raise HTTPException(
+                            status_code=HTTP_409_CONFLICT,
+                            detail="dataset_upload_file_exists",
+                        )
+                written_box = {"bytes": 0}
+
+                def write_upload(handle: Any) -> None:
+                    while True:
+                        chunk = upload.file.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        written_box["bytes"] += len(chunk)
+                        if (
+                            DATASET_CHUNK_UPLOAD_MAX_BYTES
+                            and written_box["bytes"] > DATASET_CHUNK_UPLOAD_MAX_BYTES
+                        ):
+                            raise HTTPException(
+                                status_code=HTTP_413_CONTENT_TOO_LARGE,
+                                detail="dataset_upload_chunk_too_large",
+                            )
+                        if (
+                            DATASET_CHUNK_UPLOAD_QUOTA_BYTES
+                            and job.bytes_written + written_box["bytes"]
+                            > DATASET_CHUNK_UPLOAD_QUOTA_BYTES
+                        ):
+                            raise HTTPException(
+                                status_code=HTTP_413_CONTENT_TOO_LARGE,
+                                detail="dataset_upload_quota_exceeded",
+                            )
+                        handle.write(chunk)
+                    if written_box["bytes"] <= 0:
+                        raise HTTPException(
+                            status_code=HTTP_400_BAD_REQUEST,
+                            detail="dataset_upload_empty_image",
+                        )
+
+                try:
+                    _write_binary_within_root_atomic(
+                        image_path,
+                        root_resolved,
+                        write_upload,
+                        detail="dataset_upload_session_path_invalid",
+                        context="dataset upload session",
+                    )
+                    _write_text_within_root_atomic(
+                        label_path,
+                        root_resolved,
+                        label_text,
+                        detail="dataset_upload_session_path_invalid",
+                        context="dataset upload session",
+                    )
+                except Exception:
+                    try:
+                        image_path.unlink(missing_ok=True)
+                        label_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise
+                job.bytes_written += written_box["bytes"]
+                if split == "train":
+                    job.train_count += 1
+                else:
+                    job.val_count += 1
+                added += 1
+            job.updated_at = time.time()
+            _persist_dataset_upload_session(job)
+            return {
+                "status": "ok",
+                "session_id": job.job_id,
+                "added": added,
+                "train_count": job.train_count,
+                "val_count": job.val_count,
+                "bytes_written": job.bytes_written,
+            }
+    finally:
+        for upload in files or []:
+            try:
+                upload.file.close()
+            except Exception:
+                pass
+
+
+def finalize_dataset_upload_session(session_id: str) -> Dict[str, Any]:
+    job = _load_dataset_upload_session_job(session_id, required=True)
+    assert job is not None
+    with job.lock:
+        with DATASET_UPLOAD_SESSIONS_LOCK:
+            if DATASET_UPLOAD_SESSIONS.get(str(session_id or "")) is not job:
+                raise HTTPException(
+                    status_code=HTTP_404_NOT_FOUND,
+                    detail="dataset_upload_session_not_found",
+                )
+        if job.train_count + job.val_count <= 0:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_upload_empty")
+        if job.total_images > 0 and job.train_count + job.val_count != job.total_images:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail="dataset_upload_incomplete",
+            )
+        source_root = job.root_dir.resolve(strict=True)
+        upload_root = _dataset_upload_session_storage_root(create=True)
+        if (
+            source_root.is_symlink()
+            or not source_root.is_dir()
+            or not _path_is_within_root_impl(source_root, upload_root)
+            or source_root.parent != upload_root
+        ):
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST,
+                detail="dataset_upload_session_path_invalid",
+            )
+        base_id = _sanitize_yolo_run_id_impl(job.run_name or job.job_id) or "dataset"
+        created_at = time.time()
+        with DATASET_UPLOAD_SESSION_FINALIZE_LOCK:
+            registry_root = _dataset_registry_storage_root(
+                create=True, detail="dataset_upload_target_invalid"
+            )
+            dataset_id_final = _unique_dataset_name(base_id, root=registry_root)
+            target_root = _dataset_registry_child_dir(
+                dataset_id_final, detail="dataset_upload_target_invalid"
+            )
+            if target_root.exists() or target_root.is_symlink():
+                raise HTTPException(
+                    status_code=HTTP_409_CONFLICT, detail="dataset_upload_target_exists"
+                )
+            try:
+                _dataset_upload_session_meta_path(source_root).unlink(missing_ok=True)
+                if job.classes:
+                    _write_text_within_root_atomic(
+                        source_root / "labelmap.txt",
+                        source_root,
+                        "\n".join(job.classes) + "\n",
+                        detail="dataset_upload_session_path_invalid",
+                        context="dataset upload session",
+                    )
+                train_images = source_root / "train" / "images"
+                val_images = source_root / "val" / "images"
+                train_count = len(_iter_yolo_images(train_images)) if train_images.exists() else 0
+                val_count = len(_iter_yolo_images(val_images)) if val_images.exists() else 0
+                meta = {
+                    "id": dataset_id_final,
+                    "label": dataset_id_final,
+                    "type": job.dataset_type if job.dataset_type in {"bbox", "seg"} else "bbox",
+                    "context": job.context,
+                    "classes": list(job.classes),
+                    "created_at": created_at,
+                    "source": "registry",
+                    "train_count": train_count,
+                    "val_count": val_count,
+                    "image_count": train_count + val_count,
+                    "signature": _compute_dir_signature_impl(source_root),
+                }
+                _persist_dataset_meta(source_root, meta)
+                shutil.move(str(source_root), target_root)
+            except HTTPException:
+                if target_root.exists():
+                    shutil.rmtree(target_root, ignore_errors=True)
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if target_root.exists():
+                    shutil.rmtree(target_root, ignore_errors=True)
+                raise HTTPException(
+                    status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"dataset_upload_finalize_failed:{exc}",
+                ) from exc
+        with DATASET_UPLOAD_SESSIONS_LOCK:
+            if DATASET_UPLOAD_SESSIONS.get(str(session_id or "")) is job:
+                DATASET_UPLOAD_SESSIONS.pop(str(session_id or ""), None)
+        return meta
+
+
+def cancel_dataset_upload_session(session_id: str) -> Dict[str, Any]:
+    job = _load_dataset_upload_session_job(session_id, required=False)
+    if not job:
+        safe_session_id = _sanitize_yolo_run_id_impl(str(session_id or ""))
+        if safe_session_id:
+            try:
+                upload_root = _dataset_upload_session_storage_root(create=False)
+                root_dir = _dataset_upload_session_job_dir(safe_session_id, create=False)
+                root_resolved = root_dir.resolve(strict=False)
+                if (
+                    root_resolved.exists()
+                    and root_resolved.is_dir()
+                    and not root_resolved.is_symlink()
+                    and _path_is_within_root_impl(root_resolved, upload_root)
+                    and root_resolved.parent == upload_root
+                ):
+                    shutil.rmtree(root_resolved, ignore_errors=True)
+                    return {"status": "cancelled", "session_id": safe_session_id, "orphan": True}
+            except Exception:
+                pass
+        return {"status": "missing", "session_id": session_id}
+    with job.lock:
+        with DATASET_UPLOAD_SESSIONS_LOCK:
+            if DATASET_UPLOAD_SESSIONS.get(str(session_id or "")) is not job:
+                return {"status": "missing", "session_id": session_id}
+            DATASET_UPLOAD_SESSIONS.pop(str(session_id or ""), None)
+        try:
+            upload_root = _dataset_upload_session_storage_root(create=False)
+            root_resolved = job.root_dir.resolve(strict=False)
+            if (
+                root_resolved.exists()
+                and root_resolved.is_dir()
+                and not root_resolved.is_symlink()
+                and _path_is_within_root_impl(root_resolved, upload_root)
+                and root_resolved.parent == upload_root
+            ):
+                shutil.rmtree(root_resolved, ignore_errors=True)
+        except Exception:
+            pass
+        return {"status": "cancelled", "session_id": session_id}
 
 
 def upload_dataset_zip(
@@ -20135,6 +20767,53 @@ def _data_ingestion_job_dir(
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
+def _data_ingestion_cache_root(*, create: bool = True) -> Path:
+    root = _data_ingestion_storage_root(create=create) / "cache"
+    try:
+        if _storage_path_has_symlink_component(root):
+            raise ValueError("data ingestion cache root is a symlink")
+        if create:
+            root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(root):
+            raise ValueError("data ingestion cache root is a symlink")
+        if root.exists() and not root.is_dir():
+            raise ValueError("data ingestion cache root is not a directory")
+        resolved = root.resolve(strict=False)
+        ingestion_root = _data_ingestion_storage_root(create=create)
+        if not _path_is_within_root_impl(resolved, ingestion_root) or resolved.parent != ingestion_root:
+            raise ValueError("data ingestion cache root escapes ingestion root")
+        return resolved
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_cache_path_invalid") from exc
+
+
+def _data_ingestion_reference_embedding_cache_root(*, create: bool = True) -> Path:
+    root = _data_ingestion_cache_root(create=create) / "reference_embeddings"
+    try:
+        if _storage_path_has_symlink_component(root):
+            raise ValueError("reference embedding cache root is a symlink")
+        if create:
+            root.mkdir(parents=True, exist_ok=True)
+        if _storage_path_has_symlink_component(root):
+            raise ValueError("reference embedding cache root is a symlink")
+        if root.exists() and not root.is_dir():
+            raise ValueError("reference embedding cache root is not a directory")
+        resolved = root.resolve(strict=False)
+        cache_root = _data_ingestion_cache_root(create=create)
+        if not _path_is_within_root_impl(resolved, cache_root) or resolved.parent != cache_root:
+            raise ValueError("reference embedding cache root escapes cache root")
+        return resolved
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_cache_path_invalid") from exc
+
+
+def _data_ingestion_reference_embedding_cache_path(cache_key: str, *, create_root: bool = True) -> Path:
+    safe_key = str(cache_key or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", safe_key):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_cache_key_invalid")
+    return _data_ingestion_reference_embedding_cache_root(create=create_root) / f"{safe_key}.npz"
+
+
 def _cleanup_data_ingestion_job_dir(root_dir: Optional[Path]) -> None:
     if root_dir is None:
         return
@@ -20268,7 +20947,9 @@ def _list_local_salad_heads() -> List[Dict[str, Any]]:
                     "train_image_count": metadata.get("train_image_count") or 0,
                     "source_mode": metadata.get("source_mode") or "",
                     "reference_source": metadata.get("reference_source") or metadata.get("source_mode") or "",
+                    "reference_dataset_kind": metadata.get("reference_dataset_kind") or "",
                     "reference_dataset_id": metadata.get("reference_dataset_id") or "",
+                    "reference_session_id": metadata.get("reference_session_id") or "",
                     "reference_dataset_label": metadata.get("reference_dataset_label") or "",
                     "reference_label": metadata.get("reference_label") or "",
                     "reference_fingerprint": metadata.get("reference_fingerprint") if isinstance(metadata.get("reference_fingerprint"), dict) else None,
@@ -20382,7 +21063,9 @@ def _data_ingestion_profile_bundle_manifest(profile_id: str, metadata: Dict[str,
             "train_image_count",
             "source_mode",
             "reference_source",
+            "reference_dataset_kind",
             "reference_dataset_id",
+            "reference_session_id",
             "reference_dataset_label",
             "reference_label",
             "active_image_count",
@@ -20403,7 +21086,9 @@ def _data_ingestion_profile_bundle_manifest(profile_id: str, metadata: Dict[str,
         "profile": profile_meta,
         "reference": {
             "source": str(metadata.get("reference_source") or metadata.get("source_mode") or ""),
+            "dataset_kind": str(metadata.get("reference_dataset_kind") or ""),
             "dataset_id": str(metadata.get("reference_dataset_id") or ""),
+            "session_id": str(metadata.get("reference_session_id") or ""),
             "dataset_label": str(metadata.get("reference_dataset_label") or ""),
             "label": str(metadata.get("reference_label") or ""),
         },
@@ -20574,16 +21259,26 @@ async def import_data_ingestion_reference_profile(file: UploadFile = File(...)):
 
 def _local_salad_head_reference_matches_request(metadata: Dict[str, Any], request: Dict[str, Any]) -> bool:
     head_source = str(metadata.get("reference_source") or metadata.get("source_mode") or "").strip()
+    head_kind = _data_ingestion_reference_kind(metadata, head_source)
     head_dataset_id = str(metadata.get("reference_dataset_id") or "").strip()
+    head_session_id = str(metadata.get("reference_session_id") or "").strip()
     head_label = str(metadata.get("reference_label") or metadata.get("reference_dataset_label") or "").strip()
     request_source = str(request.get("reference_source") or request.get("source_mode") or "").strip()
+    request_kind = _data_ingestion_reference_kind(request, request_source)
     request_dataset_id = str(request.get("reference_dataset_id") or "").strip()
+    request_session_id = str(request.get("reference_session_id") or "").strip()
     request_label = str(request.get("reference_label") or request.get("reference_dataset_label") or "").strip()
-    if not head_source and not head_dataset_id:
+    if not head_source and not head_dataset_id and not head_session_id:
         return False
-    if request_source == "backend_dataset":
+    if request_source == "backend_dataset" or request_kind == "backend_dataset":
         return bool(head_dataset_id and request_dataset_id and head_dataset_id == request_dataset_id)
     if request_source == "active_label_images":
+        if request_kind == "transient_session" or head_kind == "transient_session" or request_session_id or head_session_id:
+            if request_session_id and head_session_id:
+                return head_session_id == request_session_id
+            if head_dataset_id and request_dataset_id:
+                return head_dataset_id == request_dataset_id
+            return False
         if head_dataset_id or request_dataset_id:
             return bool(head_dataset_id and request_dataset_id and head_dataset_id == request_dataset_id)
         if head_label and request_label and head_label != request_label:
@@ -20880,6 +21575,301 @@ def _data_ingestion_dataset_media_rows(
         if max_items > 0 and len(out) >= max_items:
             break
     return out
+
+
+def _data_ingestion_transient_session_media_rows(
+    session_id: str,
+    *,
+    field_name: str,
+    max_count: int = 0,
+    open_path: str = "",
+) -> List[Dict[str, Any]]:
+    sid = str(session_id or "").strip()
+    raw_open_path = str(open_path or "").strip()
+    if not sid and not raw_open_path:
+        return []
+    session: Dict[str, Any] = {}
+    if sid:
+        try:
+            session = _resolve_transient_session(sid)
+        except HTTPException as exc:
+            if exc.status_code not in {HTTP_404_NOT_FOUND, 410} or not raw_open_path:
+                raise
+    if session:
+        dataset_root = _validate_linked_dataset_path(str(session.get("dataset_root") or "")).resolve()
+        yolo_layout = str(session.get("yolo_layout") or "flat")
+        label = str(session.get("label") or dataset_root.name or f"transient:{sid}")
+    else:
+        dataset_root = _validate_linked_dataset_path(raw_open_path).resolve()
+        layout = _validate_linked_dataset_shape(dataset_root, strict=False)
+        yolo_layout = str(layout.get("yolo_layout") or "flat")
+        label = dataset_root.name
+    source_id = f"transient:{sid}" if sid else f"open_path:{hashlib.sha256(str(dataset_root).encode('utf-8')).hexdigest()[:16]}"
+    entry = {
+        "id": source_id,
+        "label": label,
+        "dataset_root": str(dataset_root),
+        "storage_mode": "transient",
+        "yolo_layout": yolo_layout,
+    }
+    image_rows = _annotation_collect_images(entry)
+    max_items = _coerce_int(max_count, 0, minimum=0)
+    out: List[Dict[str, Any]] = []
+    for idx, image_row in enumerate(image_rows):
+        try:
+            image_path = Path(str(image_row.get("image_path") or "")).resolve()
+        except Exception:
+            continue
+        if not _path_is_within_root_impl(image_path, dataset_root):
+            continue
+        if not image_path.exists() or not image_path.is_file():
+            continue
+        if image_path.suffix.lower() not in DATA_INGESTION_IMAGE_EXTS:
+            continue
+        try:
+            stat_result = image_path.stat()
+            size = stat_result.st_size
+            mtime_ns = stat_result.st_mtime_ns
+        except OSError:
+            size = 0
+            mtime_ns = 0
+        if size <= 0:
+            continue
+        split = str(image_row.get("split") or "train")
+        rel = str(image_row.get("image_relpath") or image_path.name)
+        out.append(
+            {
+                "path": str(image_path),
+                "filename": f"{split}/{rel}",
+                "saved_name": image_path.name,
+                "size": size,
+                "mtime_ns": mtime_ns,
+                "field": field_name,
+                "source_dataset_id": source_id,
+                "source_session_id": sid,
+                "source_open_path_recovered": bool(raw_open_path and not session),
+                "source_reference_kind": "transient_session",
+                "source_dataset_label": label,
+                "split": split,
+                "image_relpath": rel,
+                "dataset_index": idx,
+            }
+        )
+        if max_items > 0 and len(out) >= max_items:
+            break
+    return out
+
+
+def _data_ingestion_reference_kind(manifest: Mapping[str, Any], reference_source: str) -> str:
+    kind_raw = str(
+        manifest.get("reference_dataset_kind")
+        or manifest.get("reference_storage_mode")
+        or manifest.get("reference_kind")
+        or ""
+    ).strip().lower()
+    if kind_raw in {"transient", "transient_dataset", "transient_session"}:
+        return "transient_session"
+    if kind_raw in {"backend", "backend_dataset", "dataset", "linked"}:
+        return "backend_dataset"
+    if str(reference_source or "").strip() == "backend_dataset":
+        return "backend_dataset"
+    if _data_ingestion_reference_session_id(manifest):
+        return "transient_session"
+    dataset_id = str(manifest.get("reference_dataset_id") or "").strip()
+    raw_backend = manifest.get("use_backend_reference_dataset")
+    if dataset_id and (
+        raw_backend is True
+        or (
+            raw_backend is not None
+            and str(raw_backend).strip().lower() in {"1", "true", "yes", "on"}
+        )
+    ):
+        return "backend_dataset"
+    return ""
+
+
+def _data_ingestion_reference_session_id(manifest: Mapping[str, Any]) -> str:
+    session_id = str(manifest.get("reference_session_id") or "").strip()
+    if session_id:
+        return session_id
+    dataset_id = str(manifest.get("reference_dataset_id") or "").strip()
+    if dataset_id.startswith("transient:"):
+        return dataset_id.split(":", 1)[1].strip()
+    return ""
+
+
+def _data_ingestion_use_backend_reference_dataset(manifest: Mapping[str, Any], reference_source: str) -> bool:
+    """Return whether the request should resolve its reference images by dataset id."""
+
+    if str(reference_source or "").strip() == "backend_dataset":
+        return True
+    raw = manifest.get("use_backend_reference_dataset")
+    if isinstance(raw, bool):
+        return raw
+    if raw is None:
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _data_ingestion_use_server_reference(manifest: Mapping[str, Any], reference_source: str) -> bool:
+    if _data_ingestion_reference_kind(manifest, reference_source) in {"backend_dataset", "transient_session"}:
+        return True
+    raw = manifest.get("use_server_reference_dataset")
+    if isinstance(raw, bool):
+        return raw
+    if raw is not None and str(raw).strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    return _data_ingestion_use_backend_reference_dataset(manifest, reference_source)
+
+
+def _data_ingestion_server_reference_media_rows(
+    manifest: Mapping[str, Any],
+    reference_source: str,
+    *,
+    field_name: str,
+    max_count: int = 0,
+) -> List[Dict[str, Any]]:
+    if not _data_ingestion_use_server_reference(manifest, reference_source):
+        return []
+    kind = _data_ingestion_reference_kind(manifest, reference_source)
+    if kind == "transient_session":
+        return _data_ingestion_transient_session_media_rows(
+            _data_ingestion_reference_session_id(manifest),
+            field_name=field_name,
+            max_count=max_count,
+            open_path=str(manifest.get("reference_open_path") or ""),
+        )
+    reference_dataset_id = str(manifest.get("reference_dataset_id") or "").strip()
+    if kind == "backend_dataset" and reference_dataset_id:
+        return _data_ingestion_dataset_media_rows(
+            reference_dataset_id,
+            field_name=field_name,
+            max_count=max_count,
+        )
+    return []
+
+
+def _data_ingestion_reference_embedding_cache_entry(
+    request: Mapping[str, Any],
+    reference_rows: Sequence[Mapping[str, Any]],
+    salad_head_meta: Mapping[str, Any],
+    *,
+    encoder_model: str,
+    cradio_pooling: str,
+) -> Optional[Dict[str, Any]]:
+    if not reference_rows:
+        return None
+    dataset_ids = {str(row.get("source_dataset_id") or "").strip() for row in reference_rows}
+    dataset_ids.discard("")
+    if not dataset_ids:
+        return None
+    salad_head_id = str(request.get("salad_head_id") or "").strip()
+    if not salad_head_id:
+        return None
+    head_size = 0
+    head_mtime_ns = 0
+    try:
+        head_stat = _local_salad_head_path(salad_head_id).stat()
+        head_size = int(head_stat.st_size)
+        head_mtime_ns = int(head_stat.st_mtime_ns)
+    except Exception:
+        pass
+    row_payload = []
+    for idx, row in enumerate(reference_rows):
+        source_dataset_id = str(row.get("source_dataset_id") or "").strip()
+        if not source_dataset_id:
+            return None
+        row_payload.append(
+            {
+                "idx": idx,
+                "source_dataset_id": source_dataset_id,
+                "split": str(row.get("split") or ""),
+                "image_relpath": str(row.get("image_relpath") or ""),
+                "path": str(row.get("image_path") or row.get("path") or ""),
+                "size": _coerce_int(row.get("size"), 0, minimum=0),
+                "mtime_ns": _coerce_int(row.get("mtime_ns"), 0, minimum=0),
+            }
+        )
+    row_fingerprint = hashlib.sha256(
+        json.dumps(row_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    spec = {
+        "kind": "data_ingestion_reference_embeddings",
+        "version": 1,
+        "local_salad_cache_version": LOCAL_SALAD_CACHE_VERSION,
+        "salad_head_id": salad_head_id,
+        "salad_head_size": head_size,
+        "salad_head_mtime_ns": head_mtime_ns,
+        "salad_head_backend": str(salad_head_meta.get("salad_backend") or salad_head_meta.get("backend") or ""),
+        "salad_encoder_type": str(salad_head_meta.get("encoder_type") or "dinov3").strip().lower(),
+        "encoder_model": str(encoder_model or ""),
+        "cradio_pooling": str(cradio_pooling or ""),
+        "reference_dataset_ids": sorted(dataset_ids),
+        "reference_count": len(row_payload),
+        "reference_row_fingerprint": row_fingerprint,
+    }
+    cache_key = hashlib.sha256(
+        json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return {
+        "key": cache_key,
+        "spec": spec,
+        "path": str(_data_ingestion_reference_embedding_cache_path(cache_key, create_root=True)),
+    }
+
+
+def _data_ingestion_load_reference_embedding_cache(cache_entry: Mapping[str, Any]) -> Optional[np.ndarray]:
+    cache_key = str(cache_entry.get("key") or "").strip().lower()
+    if not cache_key:
+        return None
+    try:
+        cache_root = _data_ingestion_reference_embedding_cache_root(create=False)
+        cache_path = _safe_existing_regular_file_within_root_impl(
+            _data_ingestion_reference_embedding_cache_path(cache_key, create_root=False),
+            cache_root,
+        )
+        if cache_path is None:
+            return None
+        with np.load(str(cache_path), allow_pickle=False) as payload:
+            embeddings = np.asarray(payload["reference_embeddings"], dtype=np.float32)
+    except Exception:
+        return None
+    if embeddings.ndim != 2:
+        return None
+    expected_count = _coerce_int((cache_entry.get("spec") or {}).get("reference_count"), 0, minimum=0)
+    if expected_count > 0 and embeddings.shape[0] != expected_count:
+        return None
+    return embeddings
+
+
+def _data_ingestion_write_reference_embedding_cache(
+    cache_entry: Mapping[str, Any],
+    reference_embeddings: np.ndarray,
+) -> bool:
+    cache_key = str(cache_entry.get("key") or "").strip().lower()
+    if not cache_key:
+        return False
+    try:
+        cache_root = _data_ingestion_reference_embedding_cache_root(create=True)
+        cache_path = _data_ingestion_reference_embedding_cache_path(cache_key, create_root=True)
+        _class_analysis_write_npz(
+            cache_path,
+            cache_root,
+            reference_embeddings=np.asarray(reference_embeddings, dtype=np.float32),
+        )
+        _class_analysis_write_json(
+            cache_path.with_suffix(".json"),
+            cache_root,
+            {
+                "key": cache_key,
+                "spec": cache_entry.get("spec") or {},
+                "created_at": time.time(),
+            },
+        )
+        return True
+    except Exception as exc:
+        logger.warning("[data-ingestion] reference embedding cache write failed: %s", exc)
+        return False
 
 
 def _data_ingestion_open_image(path: Path) -> Image.Image:
@@ -21315,17 +22305,45 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         if len(local_vendi_raw_metrics) != len(candidates):
             local_vendi_raw_metrics = []
             local_vendi_weight = 0.0
-        reference_embeddings = _data_ingestion_encode_prepared_images(
+        reference_cache_entry = _data_ingestion_reference_embedding_cache_entry(
+            request,
             references,
-            job=job,
-            encoder=encoder,
-            model_name=model_name,
-            salad_head_id=salad_head_id,
-            cradio_pooling=cradio_pooling,
-            batch_size=batch_size,
-            progress_start=0.72,
-            progress_end=0.88,
+            salad_head_meta,
+            encoder_model=salad_encoder_model,
+            cradio_pooling=salad_cradio_pooling,
         )
+        reference_cache_hit = False
+        reference_cache_saved = False
+        reference_embeddings = (
+            _data_ingestion_load_reference_embedding_cache(reference_cache_entry)
+            if reference_cache_entry
+            else None
+        )
+        if reference_embeddings is not None:
+            reference_cache_hit = True
+            reference_cache_saved = True
+            _data_ingestion_update(
+                job,
+                progress=0.88,
+                message=f"Loaded {len(references)} cached reference embeddings.",
+            )
+        else:
+            reference_embeddings = _data_ingestion_encode_prepared_images(
+                references,
+                job=job,
+                encoder=encoder,
+                model_name=model_name,
+                salad_head_id=salad_head_id,
+                cradio_pooling=cradio_pooling,
+                batch_size=batch_size,
+                progress_start=0.72,
+                progress_end=0.88,
+            )
+            if reference_cache_entry:
+                reference_cache_saved = _data_ingestion_write_reference_embedding_cache(
+                    reference_cache_entry,
+                    reference_embeddings,
+                )
         if job.cancel_event.is_set():
             raise RuntimeError("cancelled")
         keep_fraction = _data_ingestion_keep_fraction(request.get("keep_fraction"), 0.2)
@@ -21411,7 +22429,9 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             "salad_head_backend": salad_head_meta.get("salad_backend") or salad_head_meta.get("backend") or "",
             "reference_count": len(references),
             "reference_source": str(request.get("reference_source") or request.get("source_mode") or ""),
+            "reference_dataset_kind": str(request.get("reference_dataset_kind") or ""),
             "reference_dataset_id": str(request.get("reference_dataset_id") or ""),
+            "reference_session_id": str(request.get("reference_session_id") or ""),
             "reference_dataset_label": str(request.get("reference_dataset_label") or ""),
             "reference_label": str(request.get("reference_label") or ""),
             "candidate_upload_count": len(candidate_rows),
@@ -21423,6 +22443,12 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             "selection_score_description": selection_score_description,
             "local_salad_policy": LOCAL_SALAD_POLICY,
             "local_salad_trainer": LOCAL_SALAD_TRAINER,
+            "reference_embedding_cache": {
+                "enabled": bool(reference_cache_entry),
+                "hit": bool(reference_cache_hit),
+                "saved": bool(reference_cache_saved),
+                "key": str((reference_cache_entry or {}).get("key") or ""),
+            },
         }
         if len(novelty_scores):
             summary.update(
@@ -21463,13 +22489,19 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         if job.cancel_event.is_set():
             raise RuntimeError("cancelled")
         _class_analysis_write_json(result_path, out_dir, result)
-        _class_analysis_write_npz(
-            out_dir / "embeddings.npz",
-            out_dir,
-            candidate_embeddings=candidate_embeddings,
-            reference_embeddings=reference_embeddings if reference_embeddings is not None else np.empty((0, 0), dtype=np.float32),
-            candidate_local_vendi_scores=np.asarray(local_vendi_scores, dtype=np.float32),
-        )
+        embedding_arrays: Dict[str, Any] = {
+            "candidate_embeddings": candidate_embeddings,
+            "candidate_local_vendi_scores": np.asarray(local_vendi_scores, dtype=np.float32),
+        }
+        if reference_cache_entry and reference_cache_saved:
+            embedding_arrays["reference_cache_key"] = np.asarray([str(reference_cache_entry.get("key") or "")])
+        else:
+            embedding_arrays["reference_embeddings"] = (
+                reference_embeddings
+                if reference_embeddings is not None
+                else np.empty((0, 0), dtype=np.float32)
+            )
+        _class_analysis_write_npz(out_dir / "embeddings.npz", out_dir, **embedding_arrays)
         with DATA_INGESTION_JOBS_LOCK:
             job.result_path = str(result_path)
             _data_ingestion_update(job, status="completed", progress=1.0, message="Data ingestion analysis completed.", result=result)
@@ -21894,7 +22926,9 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                 "train_image_count": len(prepared),
                 "source_mode": str(request.get("source_mode") or "uploaded_media"),
                 "reference_source": str(request.get("reference_source") or request.get("source_mode") or ""),
+                "reference_dataset_kind": str(request.get("reference_dataset_kind") or ""),
                 "reference_dataset_id": str(request.get("reference_dataset_id") or ""),
+                "reference_session_id": str(request.get("reference_session_id") or ""),
                 "reference_dataset_label": str(request.get("reference_dataset_label") or ""),
                 "reference_label": str(request.get("reference_label") or ""),
                 "reference_fingerprint": reference_fingerprint,
@@ -21966,8 +23000,8 @@ async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files
     if encoder != "local_salad":
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_encoder_unsupported")
     reference_source = str(manifest.get("reference_source") or manifest.get("source_mode") or "").strip()
-    reference_dataset_id = str(manifest.get("reference_dataset_id") or "").strip()
-    if not reference_files and not (reference_source == "backend_dataset" and reference_dataset_id):
+    use_server_reference_dataset = _data_ingestion_use_server_reference(manifest, reference_source)
+    if not reference_files and not use_server_reference_dataset:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_files")
     _validate_local_salad_head_reference(str(manifest.get("salad_head_id") or "").strip(), manifest)
     job_id = f"di_{uuid.uuid4().hex[:10]}"
@@ -21976,10 +23010,11 @@ async def create_data_ingestion_analysis_job(manifest_json: str, candidate_files
         out_dir = _data_ingestion_job_dir(job_id, create=True)
         candidate_rows = await _data_ingestion_save_uploads(candidate_files, out_dir / "uploads" / "candidates", "candidate")
         reference_rows = await _data_ingestion_save_uploads(reference_files, out_dir / "uploads" / "references", "reference")
-        if reference_source == "backend_dataset" and reference_dataset_id:
+        if use_server_reference_dataset:
             reference_rows.extend(
-                _data_ingestion_dataset_media_rows(
-                    reference_dataset_id,
+                _data_ingestion_server_reference_media_rows(
+                    manifest,
+                    reference_source,
                     field_name="reference",
                     max_count=_coerce_int(manifest.get("max_reference_images") or manifest.get("max_train_images"), 0, minimum=0),
                 )
@@ -22030,11 +23065,12 @@ async def create_local_salad_training_job(manifest_json: str, files: List[Any]) 
         out_dir = _data_ingestion_job_dir(job_id, create=True)
         rows = await _data_ingestion_save_uploads(files, out_dir / "uploads" / "train", "train")
         reference_source = str(manifest.get("reference_source") or manifest.get("source_mode") or "").strip()
-        reference_dataset_id = str(manifest.get("reference_dataset_id") or "").strip()
-        if reference_source == "backend_dataset" and reference_dataset_id:
+        use_server_reference_dataset = _data_ingestion_use_server_reference(manifest, reference_source)
+        if use_server_reference_dataset:
             rows.extend(
-                _data_ingestion_dataset_media_rows(
-                    reference_dataset_id,
+                _data_ingestion_server_reference_media_rows(
+                    manifest,
+                    reference_source,
                     field_name="train",
                     max_count=_coerce_int(manifest.get("max_train_images"), 0, minimum=0),
                 )
@@ -22118,9 +23154,24 @@ def _data_ingestion_load_embeddings(job_dir: Path) -> Tuple[np.ndarray, np.ndarr
     try:
         with np.load(str(embeddings_path), allow_pickle=False) as payload:
             candidate_embeddings = np.asarray(payload["candidate_embeddings"], dtype=np.float32)
-            reference_embeddings = np.asarray(payload["reference_embeddings"], dtype=np.float32)
+            if "reference_embeddings" in payload.files:
+                reference_embeddings = np.asarray(payload["reference_embeddings"], dtype=np.float32)
+            elif "reference_cache_key" in payload.files:
+                raw_key = np.asarray(payload["reference_cache_key"]).reshape(-1)
+                cache_key = str(raw_key[0]) if raw_key.size else ""
+                reference_embeddings_cached = _data_ingestion_load_reference_embedding_cache({"key": cache_key})
+                if reference_embeddings_cached is None:
+                    raise HTTPException(
+                        status_code=HTTP_404_NOT_FOUND,
+                        detail="data_ingestion_reference_embedding_cache_missing",
+                    )
+                reference_embeddings = reference_embeddings_cached
+            else:
+                raise KeyError("reference_embeddings")
     except KeyError as exc:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_embeddings_incomplete") from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_embeddings_invalid") from exc
     if candidate_embeddings.ndim != 2 or reference_embeddings.ndim != 2:
@@ -40024,6 +41075,12 @@ app.include_router(
         list_fn=list_datasets,
         list_trash_fn=list_dataset_trash_entries,
         upload_fn=upload_dataset_zip,
+        upload_session_list_fn=list_dataset_upload_sessions,
+        upload_session_get_fn=get_dataset_upload_session,
+        upload_session_start_fn=init_dataset_upload_session,
+        upload_session_batch_fn=upload_dataset_session_batch,
+        upload_session_finalize_fn=finalize_dataset_upload_session,
+        upload_session_cancel_fn=cancel_dataset_upload_session,
         delete_fn=delete_dataset_entry,
         restore_fn=restore_dataset_trash_entry,
         download_fn=download_dataset_entry,

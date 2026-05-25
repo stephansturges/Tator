@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import stat
 import zipfile
 from io import BytesIO
@@ -272,6 +273,140 @@ def test_upload_dataset_zip_rolls_back_when_metadata_write_fails(
     assert exc_info.value.detail == "metadata_write_failed"
     assert upload.file.closed
     assert not (registry_root / "demo").exists()
+
+
+def test_dataset_upload_session_chunks_finalize_yolo_dataset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry_root = tmp_path / "registry"
+    session_root = tmp_path / "upload_sessions"
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(api, "YOLO_DATASET_UPLOAD_SESSION_ROOT", session_root)
+    api.DATASET_UPLOAD_SESSIONS.clear()
+
+    started = api.init_dataset_upload_session(
+        {
+            "dataset_id": "active_reference",
+            "dataset_type": "bbox",
+            "context": "Data Ingestion active reference: demo",
+            "classes": ["building"],
+            "total_images": 1,
+        }
+    )
+    session_id = started["session_id"]
+    upload = UploadFile(filename="a.jpg", file=BytesIO(b"image-bytes"))
+
+    try:
+        batch = api.upload_dataset_session_batch(
+            session_id,
+            json.dumps(
+                {
+                    "rows": [
+                        {
+                            "filename": "a.jpg",
+                            "split": "train",
+                            "label_text": "0 0.5 0.5 0.25 0.25",
+                        }
+                    ]
+                }
+            ),
+            [upload],
+        )
+        assert batch["train_count"] == 1
+        assert upload.file.closed
+
+        meta = api.finalize_dataset_upload_session(session_id)
+    finally:
+        api.DATASET_UPLOAD_SESSIONS.clear()
+
+    assert meta["id"] == "active_reference"
+    assert meta["image_count"] == 1
+    assert meta["classes"] == ["building"]
+    dataset_root = registry_root / "active_reference"
+    assert (dataset_root / "train" / "images" / "a.jpg").read_bytes() == b"image-bytes"
+    assert (
+        dataset_root / "train" / "labels" / "a.txt"
+    ).read_text(encoding="utf-8") == "0 0.5 0.5 0.25 0.25"
+    assert (dataset_root / "labelmap.txt").read_text(encoding="utf-8") == "building\n"
+    assert (dataset_root / api.DATASET_META_NAME).exists()
+
+
+def test_dataset_upload_session_finalize_recovers_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry_root = tmp_path / "registry"
+    session_root = tmp_path / "upload_sessions"
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(api, "YOLO_DATASET_UPLOAD_SESSION_ROOT", session_root)
+    api.DATASET_UPLOAD_SESSIONS.clear()
+
+    started = api.init_dataset_upload_session(
+        {"dataset_id": "recover_me", "classes": ["building"], "total_images": 1}
+    )
+    session_id = started["session_id"]
+    api.upload_dataset_session_batch(
+        session_id,
+        json.dumps({"rows": [{"filename": "a.jpg", "split": "train", "label_text": ""}]}),
+        [UploadFile(filename="a.jpg", file=BytesIO(b"img"))],
+    )
+
+    api.DATASET_UPLOAD_SESSIONS.clear()
+    listed = api.list_dataset_upload_sessions()
+    assert any(row["session_id"] == session_id and row["source"] == "disk" for row in listed)
+
+    meta = api.finalize_dataset_upload_session(session_id)
+
+    assert meta["id"] == "recover_me"
+    assert (registry_root / "recover_me" / "train" / "images" / "a.jpg").exists()
+    assert not (session_root / session_id).exists()
+
+
+def test_dataset_upload_session_rejects_incomplete_finalize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", tmp_path / "registry")
+    monkeypatch.setattr(api, "YOLO_DATASET_UPLOAD_SESSION_ROOT", tmp_path / "upload_sessions")
+    api.DATASET_UPLOAD_SESSIONS.clear()
+    session_id = api.init_dataset_upload_session(
+        {"dataset_id": "partial", "classes": ["building"], "total_images": 2}
+    )["session_id"]
+    api.upload_dataset_session_batch(
+        session_id,
+        json.dumps({"rows": [{"filename": "a.jpg", "split": "train", "label_text": ""}]}),
+        [UploadFile(filename="a.jpg", file=BytesIO(b"img"))],
+    )
+
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            api.finalize_dataset_upload_session(session_id)
+    finally:
+        api.cancel_dataset_upload_session(session_id)
+        api.DATASET_UPLOAD_SESSIONS.clear()
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "dataset_upload_incomplete"
+
+
+def test_dataset_upload_session_cancel_removes_disk_session_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", tmp_path / "registry")
+    monkeypatch.setattr(api, "YOLO_DATASET_UPLOAD_SESSION_ROOT", tmp_path / "upload_sessions")
+    api.DATASET_UPLOAD_SESSIONS.clear()
+    session_id = api.init_dataset_upload_session(
+        {"dataset_id": "cancel_me", "classes": ["building"], "total_images": 1}
+    )["session_id"]
+    api.upload_dataset_session_batch(
+        session_id,
+        json.dumps({"rows": [{"filename": "a.jpg", "split": "train", "label_text": ""}]}),
+        [UploadFile(filename="a.jpg", file=BytesIO(b"img"))],
+    )
+    api.DATASET_UPLOAD_SESSIONS.clear()
+
+    result = api.cancel_dataset_upload_session(session_id)
+
+    assert result["status"] == "cancelled"
+    assert not ((tmp_path / "upload_sessions") / session_id).exists()
 
 
 def test_import_prepass_recipe_closes_upload_handle(monkeypatch: pytest.MonkeyPatch) -> None:

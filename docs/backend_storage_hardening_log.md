@@ -1970,3 +1970,35 @@ preserving the exact validation story for storage and artifact-write fixes.
   (`22 passed`), `tools/check_ui_endpoints.py http://127.0.0.1:8000`,
   `git diff --check`, and the full pytest suite (`1272 passed, 20 skipped`)
   passed against the running backend.
+
+## 2026-05-25: Chunked Current-Dataset Upload Sessions
+
+- Replaced Data Ingestion's browser-only active-reference fallback with the
+  Dataset Management upload path: browser-only Label Images workspaces are saved
+  as managed backend datasets first, then profile/analysis jobs receive the
+  resulting dataset id.
+- Added `/datasets/upload_session/*` for large current-workspace uploads. The
+  browser streams bounded batches instead of building one huge ZIP or appending
+  thousands of reference files to a Data Ingestion multipart request.
+- Added backend upload-session sidecars under
+  `uploads/yolo_dataset_upload_sessions` so interrupted sessions are visible
+  after backend restart. Sessions can be listed, inspected, finalized, or
+  explicitly cancelled; cancel removes only that guarded staging directory.
+- Hardened finalize semantics: incomplete sessions are rejected when the
+  expected image count is known; successful finalize removes the sidecar, writes
+  durable dataset metadata, and promotes the complete YOLO tree into
+  `uploads/datasets`.
+- Wired Data Ingestion cancel to abort an active current-dataset upload session
+  before any SALAD job exists, then call the upload-session cancel endpoint.
+- Guarded active Label Images reference reuse by registered image count: a
+  linked backend dataset or cached active-reference upload is reused only when
+  its backend count matches the currently open Label Images workspace, so stale
+  3.7k-image references cannot stand in for a newly opened 9.5k-image set.
+- Added regression coverage for chunked upload finalization, restart recovery,
+  incomplete-finalize rejection, and cancel cleanup.
+- Validation: `python3 -m py_compile api/datasets.py api/data_ingestion.py
+  localinferenceapi.py`, `node --check ybat-master/ybat.js`,
+  `tests/test_dataset_zip_upload_security.py tests/test_data_ingestion.py
+  tests/test_labeling_panel_layout_contract.py tests/test_api_route_uniqueness.py`
+  (`126 passed`), live upload-session start/batch/status/list/cancel smoke,
+  `tools/check_ui_endpoints.py http://127.0.0.1:8000`, and `git diff --check`.

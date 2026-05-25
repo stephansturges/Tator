@@ -10,6 +10,12 @@ def build_datasets_router(
     list_fn: Callable[[], Any],
     list_trash_fn: Callable[[], Any],
     upload_fn: Callable[[UploadFile, Optional[str], Optional[str], Optional[str]], Any],
+    upload_session_list_fn: Callable[[], Any],
+    upload_session_get_fn: Callable[[str], Any],
+    upload_session_start_fn: Callable[[dict], Any],
+    upload_session_batch_fn: Callable[[str, str, list[UploadFile]], Any],
+    upload_session_finalize_fn: Callable[[str], Any],
+    upload_session_cancel_fn: Callable[[str], Any],
     delete_fn: Callable[[str], Any],
     restore_fn: Callable[[str, Optional[str]], Any],
     download_fn: Callable[[str], Any],
@@ -66,6 +72,34 @@ def build_datasets_router(
         context: Optional[str] = Form(None),
     ):
         return upload_fn(file, dataset_id, dataset_type, context)
+
+    @router.get("/datasets/upload_sessions")
+    def list_dataset_upload_sessions():
+        return upload_session_list_fn()
+
+    @router.get("/datasets/upload_session/{session_id}")
+    def get_dataset_upload_session(session_id: str):
+        return upload_session_get_fn(session_id)
+
+    @router.post("/datasets/upload_session/start")
+    def start_dataset_upload_session(payload: dict = Body(...)):  # noqa: B008
+        return upload_session_start_fn(payload or {})
+
+    @router.post("/datasets/upload_session/{session_id}/batch")
+    def upload_dataset_session_batch(
+        session_id: str,
+        manifest: str = Form(...),  # noqa: B008
+        files: list[UploadFile] = File(...),  # noqa: B008
+    ):
+        return upload_session_batch_fn(session_id, manifest, files)
+
+    @router.post("/datasets/upload_session/{session_id}/finalize")
+    def finalize_dataset_upload_session(session_id: str):
+        return upload_session_finalize_fn(session_id)
+
+    @router.post("/datasets/upload_session/{session_id}/cancel")
+    def cancel_dataset_upload_session(session_id: str):
+        return upload_session_cancel_fn(session_id)
 
     @router.get("/datasets/trash")
     def list_dataset_trash():

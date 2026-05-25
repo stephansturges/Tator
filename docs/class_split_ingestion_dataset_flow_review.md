@@ -60,16 +60,23 @@ Flow checks:
 2. User chooses reference source:
    current Label Images dataset or backend dataset.
 3. User builds a reference profile or uploads a profile bundle.
-4. UI posts profile-build jobs to `/data_ingestion/salad_train_jobs` or imports
+4. If the current Label Images workspace is not already backend-backed with the
+   same registered image count, the UI first saves it through
+   `/datasets/upload_session/*` in bounded image batches.
+5. UI posts profile-build jobs to `/data_ingestion/salad_train_jobs` or imports
    a ZIP through `/data_ingestion/reference_profiles/import`.
-5. Backend stages reference images, trains the local profile, records provenance
-   metadata, and publishes a profile only after cancellation checks pass.
-6. UI filters profiles so only profiles matching the selected reference dataset
+6. Backend reads the selected backend dataset, trains the local profile, records
+   provenance metadata, and publishes a profile only after cancellation checks
+   pass.
+7. UI filters profiles so only profiles matching the selected reference dataset
    are selectable.
 
 Flow checks:
 
 - The reference profile is an artifact, not a source dataset copy.
+- Browser-only active workspaces become managed backend datasets through a
+  sidecar-backed upload session before profile training; the profile job receives
+  a dataset id, not thousands of multipart reference files.
 - Profile exports include checksums and reference metadata.
 - Imported profiles are selected only when they match the selected reference.
 - Capabilities no longer expose local filesystem paths for profile files or

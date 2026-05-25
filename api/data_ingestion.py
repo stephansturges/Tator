@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import inspect
 from typing import Any, Callable
 
@@ -33,11 +34,19 @@ def build_data_ingestion_router(
 
     @router.post("/data_ingestion/jobs")
     async def create_data_ingestion_job(request: Request):
-        form = await request.form(
-            max_files=float("inf"),
-            max_fields=10_000,
-            max_part_size=1024 * 1024 * 1024,
-        )
+        try:
+            form = await request.form(
+                max_files=float("inf"),
+                max_fields=10_000,
+                max_part_size=1024 * 1024 * 1024,
+            )
+        except OSError as exc:
+            if getattr(exc, "errno", None) == errno.EMFILE:
+                raise HTTPException(
+                    status_code=413,
+                    detail="data_ingestion_too_many_uploaded_files_use_backend_reference",
+                ) from exc
+            raise
         manifest = form.get("manifest")
         if manifest is None or hasattr(manifest, "filename"):
             raise HTTPException(status_code=400, detail="data_ingestion_manifest_required")
@@ -58,11 +67,19 @@ def build_data_ingestion_router(
 
     @router.post("/data_ingestion/salad_train_jobs")
     async def create_salad_training_job(request: Request):
-        form = await request.form(
-            max_files=float("inf"),
-            max_fields=10_000,
-            max_part_size=1024 * 1024 * 1024,
-        )
+        try:
+            form = await request.form(
+                max_files=float("inf"),
+                max_fields=10_000,
+                max_part_size=1024 * 1024 * 1024,
+            )
+        except OSError as exc:
+            if getattr(exc, "errno", None) == errno.EMFILE:
+                raise HTTPException(
+                    status_code=413,
+                    detail="data_ingestion_too_many_uploaded_files_use_backend_reference",
+                ) from exc
+            raise
         manifest = form.get("manifest")
         if manifest is None or hasattr(manifest, "filename"):
             raise HTTPException(status_code=400, detail="salad_train_manifest_required")

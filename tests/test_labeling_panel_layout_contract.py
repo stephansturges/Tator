@@ -347,6 +347,7 @@ def test_data_ingestion_panel_contract():
     assert "function initDataIngestionUi" in js
     assert "function startDataIngestionAnalysis" in js
     assert "function startLocalSaladTraining" in js
+    assert "function getDataIngestionDatasetEntryImageCount" in js
     assert "function downloadDataIngestionReferenceProfile" in js
     assert "function uploadDataIngestionReferenceProfile" in js
     assert "function previewDataIngestionAcceptedOutputs" in js
@@ -358,6 +359,8 @@ def test_data_ingestion_panel_contract():
     assert 'document.getElementById("classSplitTitle")?.closest(".class-split-panel")' in js
     assert "classSplitElements.runButton.focus({ preventScroll: true })" in js
     assert "function openDatasetEntryInDataIngestion" in js
+    assert 'activeCount > 0 && backendCount !== activeCount' in js
+    assert 'cachedCount > 0 && backendCount !== cachedCount' in js
     assert "appendActiveWorkspaceTrainingFiles" in js
     assert "activeDatasetSaladHeadName" in js
     assert "getDataIngestionNumber(dataIngestionElements.maxTrainImages, 0" in js
@@ -403,10 +406,23 @@ def test_data_ingestion_panel_contract():
     assert "dataIngestionElements.referenceDataset" in js
     assert "reference_dataset_id" in js
     assert "reference_source" in js
+    assert "function dataIngestionBackendDatasetExists" in js
+    assert "function dataIngestionActiveTransientReferenceId" in js
+    assert "function getDataIngestionServerReferenceHandle" in js
+    assert "function shouldDataIngestionUseBackendReferenceDataset" in js
+    assert "function shouldDataIngestionUseServerReferenceDataset" in js
+    assert "use_backend_reference_dataset" in js
+    assert "use_server_reference_dataset" in js
+    assert "reference_session_id" in js
+    assert "reference_open_path" in js
+    assert "reference_dataset_kind" in js
+    assert "Too many reference files were uploaded" in js
+    assert "activeCount > 500 && dataIngestionBackendDatasetExists(selectedDatasetId)" not in js
     assert "function dataIngestionHeadMatchesReference" in js
+    assert "const activeHandle = getDataIngestionServerReferenceHandle(\"active_label_images\");" in js
     assert "const headLabel = String(head.reference_label || head.reference_dataset_label || \"\").trim();" in js
     assert "const activeLabel = getDataIngestionReferenceLabel();" in js
-    assert 'if (!headReferenceSource && !headDatasetId) {\n            return false;' in js
+    assert 'if (!headReferenceSource && !headDatasetId && !headSessionId) {\n            return false;' in js
     assert "function handleDataIngestionReferenceChange" in js
     assert "dataIngestionElements.reportTitle" in js
     assert "dataIngestionElements.listTitle" in js

@@ -8,7 +8,7 @@ mutate, move, or remove user data to the backend guard and regression coverage.
 | Flow | Data touched | Guard | Coverage |
 |---|---|---|---|
 | Upload YOLO zip | Creates a backend-owned dataset copy under `uploads/datasets` | Zip traversal/symlink/size checks, guarded registry child path, strict metadata write, rollback on metadata failure | `tests/test_dataset_zip_upload_security.py` |
-| Upload current labeling session | Packages browser images/labels, then uses the same upload endpoint | UI geometry/labelmap validation, upload endpoint guards | `tests/ui/e2e/test_dataset_ingestion_safety_flows.py`, upload security tests |
+| Upload current labeling session | Creates a backend-owned dataset copy under `uploads/datasets`; large sessions stage batches under `uploads/yolo_dataset_upload_sessions` first | UI geometry/labelmap validation, upload endpoint guards, chunked session sidecar metadata, restart recovery, incomplete-finalize rejection, explicit cancel cleanup | `tests/ui/e2e/test_dataset_ingestion_safety_flows.py`, `tests/test_dataset_zip_upload_security.py` |
 | Register server path | Creates a linked registry record only | Link-root allowlist, strict YOLO shape/labelmap validation, guarded registry path, guarded rollback on metadata failure | `tests/test_dataset_linked_annotation_flows.py` |
 | Open transient server path | Creates in-memory transient session only | Link-root allowlist, strict YOLO shape/labelmap validation, TTL expiry, source label/text reads stay root-contained and ignore symlink escapes | `tests/test_dataset_linked_annotation_flows.py`, UI E2E |
 | List linked datasets | Reads linked source metadata and registry overlays | Dataset storage roots fail closed if the root or parent is a symlink; linked roots are rechecked against `DATASET_LINK_ROOTS`; non-allowlisted roots are marked unavailable and not inspected. No read-time source conversion or metadata backfill writes for linked roots; registry metadata remains the mutable overlay | `tests/test_dataset_linked_root_status.py` |
@@ -30,6 +30,7 @@ mutate, move, or remove user data to the backend guard and regression coverage.
 | Analyze candidates | Creates job staging data, result JSON, embeddings cache | Guarded job root, candidate/reference gating, matching reference-profile validation, guarded startup cleanup, guarded result reads with public source-path stripping, redacted backend capability diagnostics, final cancellation check before result write | `tests/test_data_ingestion.py`, UI E2E |
 | Preview/download accepted candidates | Creates candidate/accepted preview thumbnails and a transient export ZIP | Completed-analysis gating, selected-item/output validation without empty-selection fallback, source-path containment inside the job root, output-count and target-geometry limits, duplicate output-path rejection, explicit crop/resize/tile policy, source files read-only | `tests/test_data_ingestion.py`, UI contract |
 | Backend reference dataset use | Reads existing dataset images | Dataset id resolution, symlinked dataset roots rejected, path containment inside selected dataset root for scoring and lazy reference thumbnails, active-job delete blocking by dataset id | `tests/test_data_ingestion.py`, `tests/test_dataset_linked_annotation_flows.py` |
+| Active Label Images reference upload | Stages active browser images, then creates a backend-owned reference dataset | Uses `/datasets/upload_session/*` instead of thousands of reference-file multipart fields; finalizes only complete sessions; sessions are sidecar-backed, listable, restart-recoverable, and cancelable | `tests/test_dataset_zip_upload_security.py`, `tests/test_data_ingestion.py` |
 | Cancel job | Mutates in-memory job state | Terminal jobs are not cancellable; active jobs move through `cancelling`; UI checks cancel response and blocks duplicate cancel clicks | `tests/test_data_ingestion.py` and endpoint sanity |
 
 ## Current Invariant
@@ -59,6 +60,19 @@ root is outside the current `DATASET_LINK_ROOTS` allowlist are treated as
 unavailable; they are not inspected during listing and cannot be downloaded or
 used as Data Ingestion reference datasets until re-registered under an allowed
 root.
+
+Chunked current-workspace dataset uploads are treated as temporary staging until
+finalize succeeds. The browser sends bounded batches to
+`/datasets/upload_session/*`; the backend writes a session sidecar after start
+and after every batch, so interrupted or backend-restarted uploads can be listed
+and cancelled. Finalize refuses incomplete sessions when the expected image
+count is known, removes the sidecar, writes durable dataset metadata, and then
+promotes the staged tree into the managed dataset registry. Cancel deletes only
+the guarded staging directory for that upload session, never an already
+registered dataset. Data Ingestion reuses a linked backend dataset or cached
+active-reference upload only when its registered image count matches the
+currently open Label Images workspace, so stale backend references cannot stand
+in for a larger or different active workspace.
 
 Data ingestion cancellation must stop finalization before creating new result
 artifacts. If cancellation is observed after candidate/reference encoding but

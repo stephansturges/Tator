@@ -1817,6 +1817,243 @@ def test_data_ingestion_active_reference_dataset_id_is_metadata_only(tmp_path, m
     assert len(train_job.request["train_uploads"]) == 2
 
 
+def test_data_ingestion_active_linked_reference_can_use_backend_dataset_rows(tmp_path, monkeypatch):
+    dataset_root = tmp_path / "dataset"
+    images_root = dataset_root / "images"
+    images_root.mkdir(parents=True)
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(images_root / "a.jpg")
+    Image.new("RGB", (8, 8), (40, 50, 60)).save(images_root / "b.jpg")
+    entry = {
+        "id": "linked_active_dataset",
+        "label": "Linked Active Dataset",
+        "dataset_root": str(dataset_root),
+        "yolo_layout": "flat",
+    }
+    jobs_root = tmp_path / "jobs"
+    heads_root = tmp_path / "heads"
+    jobs_root.mkdir()
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda dataset_id: entry)
+
+    class DummyThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(api.threading, "Thread", DummyThread)
+    _write_unit_local_salad_head(
+        heads_root,
+        "linked_active_head",
+        {
+            "reference_source": "active_label_images",
+            "reference_dataset_id": "linked_active_dataset",
+        },
+    )
+    manifest = json.dumps({
+        "reference_source": "active_label_images",
+        "reference_dataset_id": "linked_active_dataset",
+        "use_backend_reference_dataset": True,
+        "encoder": "local_salad",
+        "salad_head_id": "linked_active_head",
+    })
+
+    analysis_result = asyncio.run(
+        api.create_data_ingestion_analysis_job(
+            manifest,
+            [_FakeUpload("candidate.jpg", b"candidate")],
+            [],
+        )
+    )
+    analysis_job = api.DATA_INGESTION_JOBS[analysis_result["job_id"]]
+    assert len(analysis_job.request["reference_uploads"]) == 2
+    assert analysis_job.request["reference_uploads"][0]["source_dataset_id"] == "linked_active_dataset"
+
+    train_result = asyncio.run(api.create_local_salad_training_job(manifest, []))
+    train_job = api.DATA_INGESTION_JOBS[train_result["job_id"]]
+    assert len(train_job.request["train_uploads"]) == 2
+    assert train_job.request["train_uploads"][0]["source_dataset_id"] == "linked_active_dataset"
+
+
+def test_data_ingestion_active_transient_reference_uses_session_rows(tmp_path, monkeypatch):
+    dataset_root = tmp_path / "transient_dataset"
+    images_root = dataset_root / "images"
+    images_root.mkdir(parents=True)
+    Image.new("RGB", (8, 8), (10, 20, 30)).save(images_root / "a.jpg")
+    Image.new("RGB", (8, 8), (40, 50, 60)).save(images_root / "b.jpg")
+    session_id = "transient_active_session"
+    jobs_root = tmp_path / "jobs"
+    heads_root = tmp_path / "heads"
+    jobs_root.mkdir()
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+    monkeypatch.setattr(api, "DATASET_LINK_ROOTS", [tmp_path])
+    with api.DATASET_TRANSIENT_LOCK:
+        api.DATASET_TRANSIENT_SESSIONS[session_id] = {
+            "session_id": session_id,
+            "dataset_root": str(dataset_root),
+            "label": "Transient Active",
+            "yolo_layout": "flat",
+            "created_at": api.time.time(),
+            "updated_at": api.time.time(),
+            "expires_at": api.time.time() + 3600,
+        }
+
+    class DummyThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(api.threading, "Thread", DummyThread)
+    _write_unit_local_salad_head(
+        heads_root,
+        "transient_active_head",
+        {
+            "reference_source": "active_label_images",
+            "reference_dataset_kind": "transient_session",
+            "reference_dataset_id": f"transient:{session_id}",
+            "reference_session_id": session_id,
+        },
+    )
+    rows = api._data_ingestion_transient_session_media_rows(
+        session_id,
+        field_name="reference",
+        max_count=1,
+    )
+    assert len(rows) == 1
+    assert rows[0]["source_dataset_id"] == f"transient:{session_id}"
+    assert rows[0]["source_session_id"] == session_id
+
+    manifest = json.dumps({
+        "reference_source": "active_label_images",
+        "reference_dataset_kind": "transient_session",
+        "reference_dataset_id": f"transient:{session_id}",
+        "reference_session_id": session_id,
+        "reference_open_path": str(dataset_root),
+        "use_server_reference_dataset": True,
+        "encoder": "local_salad",
+        "salad_head_id": "transient_active_head",
+    })
+
+    analysis_result = asyncio.run(
+        api.create_data_ingestion_analysis_job(
+            manifest,
+            [_FakeUpload("candidate.jpg", b"candidate")],
+            [],
+        )
+    )
+    analysis_job = api.DATA_INGESTION_JOBS[analysis_result["job_id"]]
+    assert len(analysis_job.request["reference_uploads"]) == 2
+    assert analysis_job.request["reference_uploads"][0]["source_session_id"] == session_id
+
+    train_result = asyncio.run(api.create_local_salad_training_job(manifest, []))
+    train_job = api.DATA_INGESTION_JOBS[train_result["job_id"]]
+    assert len(train_job.request["train_uploads"]) == 2
+    assert train_job.request["train_uploads"][0]["source_session_id"] == session_id
+
+    with api.DATASET_TRANSIENT_LOCK:
+        api.DATASET_TRANSIENT_SESSIONS.pop(session_id, None)
+    fallback_train_result = asyncio.run(api.create_local_salad_training_job(manifest, []))
+    fallback_train_job = api.DATA_INGESTION_JOBS[fallback_train_result["job_id"]]
+    assert len(fallback_train_job.request["train_uploads"]) == 2
+    assert fallback_train_job.request["train_uploads"][0]["source_open_path_recovered"] is True
+
+
+def test_data_ingestion_backend_reference_embeddings_are_cached(tmp_path, monkeypatch):
+    jobs_root = tmp_path / "jobs"
+    heads_root = tmp_path / "heads"
+    jobs_root.mkdir()
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+    _write_unit_local_salad_head(
+        heads_root,
+        "cache_head",
+        {
+            "reference_source": "active_label_images",
+            "reference_dataset_id": "dataset_cache",
+        },
+    )
+
+    candidate_path = tmp_path / "candidate.jpg"
+    ref_a_path = tmp_path / "ref_a.jpg"
+    ref_b_path = tmp_path / "ref_b.jpg"
+    Image.new("RGB", (8, 8), (200, 10, 10)).save(candidate_path)
+    Image.new("RGB", (8, 8), (10, 200, 10)).save(ref_a_path)
+    Image.new("RGB", (8, 8), (10, 10, 200)).save(ref_b_path)
+
+    def media_row(path: Path, filename: str, *, source_dataset_id: str = "") -> dict:
+        stat = path.stat()
+        row = {
+            "path": str(path),
+            "filename": filename,
+            "saved_name": path.name,
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "field": "reference" if source_dataset_id else "candidate",
+        }
+        if source_dataset_id:
+            row.update(
+                {
+                    "source_dataset_id": source_dataset_id,
+                    "source_dataset_label": "Dataset Cache",
+                    "split": "train",
+                    "image_relpath": filename,
+                    "dataset_index": 0,
+                }
+            )
+        return row
+
+    request = {
+        "encoder": "local_salad",
+        "salad_head_id": "cache_head",
+        "reference_source": "active_label_images",
+        "reference_dataset_id": "dataset_cache",
+        "candidate_uploads": [media_row(candidate_path, "candidate.jpg")],
+        "reference_uploads": [
+            media_row(ref_a_path, "ref_a.jpg", source_dataset_id="dataset_cache"),
+            media_row(ref_b_path, "ref_b.jpg", source_dataset_id="dataset_cache"),
+        ],
+    }
+    reference_encode_calls = {"count": 0}
+
+    def fake_encode(prepared_rows, **_kwargs):
+        rows = list(prepared_rows)
+        if rows and all(str(row.get("source_dataset_id") or "") == "dataset_cache" for row in rows):
+            reference_encode_calls["count"] += 1
+        encoded = np.zeros((len(rows), 4), dtype=np.float32)
+        for idx in range(len(rows)):
+            encoded[idx, idx % 4] = 1.0
+        return encoded
+
+    monkeypatch.setattr(api, "_data_ingestion_encode_prepared_images", fake_encode)
+
+    job_one = api.DataIngestionJob(job_id="di_cache_one", kind="analysis", request=dict(request))
+    api._run_data_ingestion_analysis_job(job_one)
+    assert job_one.status == "completed"
+    assert reference_encode_calls["count"] == 1
+
+    cache_files = list((jobs_root / "cache" / "reference_embeddings").glob("*.npz"))
+    assert len(cache_files) == 1
+    with np.load(jobs_root / job_one.job_id / "embeddings.npz", allow_pickle=False) as payload:
+        assert "reference_cache_key" in payload.files
+        assert "reference_embeddings" not in payload.files
+
+    job_two = api.DataIngestionJob(job_id="di_cache_two", kind="analysis", request=dict(request))
+    api._run_data_ingestion_analysis_job(job_two)
+    assert job_two.status == "completed"
+    assert reference_encode_calls["count"] == 1
+    candidate_embeddings, reference_embeddings = api._data_ingestion_load_embeddings(jobs_root / job_two.job_id)
+    assert candidate_embeddings.shape == (1, 4)
+    assert reference_embeddings.shape == (2, 4)
+
+
 def test_local_salad_reference_matching_requires_specific_metadata():
     assert not api._local_salad_head_reference_matches_request(
         {},
@@ -1845,6 +2082,34 @@ def test_local_salad_reference_matching_requires_specific_metadata():
     assert not api._local_salad_head_reference_matches_request(
         {"reference_source": "active_label_images", "reference_dataset_id": "dataset_a"},
         {"reference_source": "backend_dataset", "reference_dataset_id": "dataset_b"},
+    )
+    assert api._local_salad_head_reference_matches_request(
+        {
+            "reference_source": "active_label_images",
+            "reference_dataset_kind": "transient_session",
+            "reference_dataset_id": "transient:session_a",
+            "reference_session_id": "session_a",
+        },
+        {
+            "reference_source": "active_label_images",
+            "reference_dataset_kind": "transient_session",
+            "reference_dataset_id": "transient:session_a",
+            "reference_session_id": "session_a",
+        },
+    )
+    assert not api._local_salad_head_reference_matches_request(
+        {
+            "reference_source": "active_label_images",
+            "reference_dataset_kind": "transient_session",
+            "reference_dataset_id": "transient:session_a",
+            "reference_session_id": "session_a",
+        },
+        {
+            "reference_source": "active_label_images",
+            "reference_dataset_kind": "transient_session",
+            "reference_dataset_id": "transient:session_b",
+            "reference_session_id": "session_b",
+        },
     )
 
 

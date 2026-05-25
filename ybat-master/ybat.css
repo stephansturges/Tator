@@ -2256,6 +2256,121 @@ body.annotation-focus-mode .class-scroll-indicator {
     max-height: none;
 }
 
+.class-split-dataset-analysis {
+    min-width: 0;
+    display: block;
+}
+
+.class-split-dataset-analysis > summary {
+    cursor: pointer;
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.class-split-dataset-analysis__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+}
+
+.class-split-dataset-analysis__body {
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
+    gap: 10px;
+    align-items: stretch;
+}
+
+.class-split-dataset-report {
+    margin-bottom: 8px;
+}
+
+.class-split-dataset-report__grid {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.class-split-dataset-report__item,
+.class-split-dataset-list__item {
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 7px;
+    padding: 7px;
+    background: rgba(248, 250, 252, 0.82);
+}
+
+.class-split-dataset-report__item strong,
+.class-split-dataset-list__item strong {
+    display: block;
+    color: #0f172a;
+}
+
+.class-split-dataset-report__item span,
+.class-split-dataset-list__item span {
+    color: #475569;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
+.class-split-dataset-graph {
+    min-height: 360px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.class-split-dataset-list {
+    max-height: 360px;
+    overflow: auto;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 8px;
+}
+
+.class-split-dataset-list__item {
+    margin-bottom: 6px;
+    cursor: pointer;
+}
+
+.class-split-dataset-list__item:hover {
+    border-color: rgba(14, 165, 233, 0.55);
+}
+
+.class-split-dataset-hover-preview {
+    position: fixed;
+    z-index: 10000;
+    width: min(360px, calc(100vw - 24px));
+    box-sizing: border-box;
+    pointer-events: none;
+    border: 1px solid rgba(15, 23, 42, 0.18);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.98);
+    box-shadow: 0 18px 42px rgba(15, 23, 42, 0.24);
+    padding: 8px;
+}
+
+.class-split-dataset-hover-preview[hidden] {
+    display: none;
+}
+
+.class-split-dataset-hover-preview img {
+    display: block;
+    width: 100%;
+    max-height: 60vh;
+    object-fit: contain;
+    border-radius: 5px;
+    background: rgba(15, 23, 42, 0.06);
+}
+
+.class-split-dataset-hover-preview span {
+    display: block;
+    margin-top: 6px;
+    font-size: 12px;
+    color: #475569;
+    overflow-wrap: anywhere;
+}
+
 .class-split-report__grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2507,6 +2622,60 @@ body.annotation-focus-mode .class-scroll-indicator {
     padding-top: 10px;
 }
 
+.data-ingestion-distribution {
+    grid-column: 1 / -1;
+    border-top: 1px solid rgba(148, 163, 184, 0.32);
+    padding-top: 10px;
+}
+
+.data-ingestion-distribution[hidden] {
+    display: none;
+}
+
+.data-ingestion-distribution__body {
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(260px, 0.75fr);
+    gap: 10px;
+    align-items: stretch;
+}
+
+.data-ingestion-distribution-graph,
+.data-ingestion-distribution-details {
+    min-height: 340px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #ffffff;
+    overflow: hidden;
+}
+
+.data-ingestion-distribution-details {
+    padding: 8px;
+    overflow: auto;
+}
+
+.data-ingestion-distribution-details img {
+    display: block;
+    width: 100%;
+    max-height: 280px;
+    object-fit: contain;
+    border-radius: 5px;
+    background: rgba(15, 23, 42, 0.06);
+    margin-bottom: 8px;
+}
+
+.data-ingestion-distribution-details__meta strong {
+    display: block;
+    color: #0f172a;
+    overflow-wrap: anywhere;
+}
+
+.data-ingestion-distribution-details__meta span {
+    display: block;
+    color: #475569;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
 .data-ingestion-report,
 .data-ingestion-list {
     min-height: 220px;
@@ -2534,6 +2703,19 @@ body.annotation-focus-mode .class-scroll-indicator {
 
 .data-ingestion-list__item {
     margin-bottom: 6px;
+}
+
+.data-ingestion-score-note {
+    margin-bottom: 8px;
+}
+
+.data-ingestion-list-controls,
+.data-ingestion-distribution-details__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
 }
 
 .data-ingestion-list__item:hover {
@@ -2592,6 +2774,7 @@ body.annotation-focus-mode .class-scroll-indicator {
     z-index: 10000;
     width: min(400px, calc(100vw - 24px));
     max-width: 400px;
+    box-sizing: border-box;
     pointer-events: none;
     border: 1px solid rgba(15, 23, 42, 0.18);
     border-radius: 7px;
@@ -2607,6 +2790,7 @@ body.annotation-focus-mode .class-scroll-indicator {
 .data-ingestion-hover-preview img {
     display: block;
     width: 100%;
+    min-height: 120px;
     max-height: 70vh;
     object-fit: contain;
     border-radius: 5px;
@@ -2648,6 +2832,12 @@ body.annotation-focus-mode .class-scroll-indicator {
     }
 
     .data-ingestion-results {
+        grid-template-columns: 1fr;
+    }
+
+    .data-ingestion-distribution__body,
+    .class-split-dataset-analysis__body,
+    .class-split-dataset-report__grid {
         grid-template-columns: 1fr;
     }
 }
@@ -4477,6 +4667,8 @@ html.theme-dark .data-ingestion-header,
 html.theme-dark .data-ingestion-panel,
 html.theme-dark .data-ingestion-report,
 html.theme-dark .data-ingestion-list,
+html.theme-dark .data-ingestion-distribution-graph,
+html.theme-dark .data-ingestion-distribution-details,
 html.theme-dark .class-split-workspace__header,
 html.theme-dark .class-split-panel,
 html.theme-dark .class-split-bulk-panel,
@@ -4485,6 +4677,9 @@ html.theme-dark .class-split-review-section--inspector,
 html.theme-dark .class-split-report,
 html.theme-dark .class-split-wrong-list,
 html.theme-dark .class-split-inspector,
+html.theme-dark .class-split-dataset-analysis,
+html.theme-dark .class-split-dataset-graph,
+html.theme-dark .class-split-dataset-list,
 html.theme-dark .qwen-models-list,
 html.theme-dark .qwen-model-details,
 html.theme-dark .training-card,
@@ -4573,6 +4768,7 @@ html.theme-dark .class-split-field label,
 html.theme-dark .data-ingestion-field label,
 html.theme-dark .class-split-toolbar label,
 html.theme-dark .class-split-advanced summary,
+html.theme-dark .class-split-dataset-analysis > summary,
 html.theme-dark .class-split-review-section > strong,
 html.theme-dark .class-split-wrong-panel > summary,
 html.theme-dark .class-split-report__note,
@@ -4581,7 +4777,9 @@ html.theme-dark .class-split-inspector__meta {
     color: #b9c5c0;
 }
 
-html.theme-dark .class-split-report__item {
+html.theme-dark .class-split-report__item,
+html.theme-dark .class-split-dataset-report__item,
+html.theme-dark .class-split-dataset-list__item {
     background: rgba(15, 23, 42, 0.72);
     border-color: rgba(148, 163, 184, 0.28);
 }
@@ -4633,17 +4831,29 @@ html.theme-dark .data-ingestion-tile-card {
     border-color: rgba(148, 163, 184, 0.28);
 }
 
+html.theme-dark .data-ingestion-distribution-details__meta strong {
+    color: #f8fafc;
+}
+
+html.theme-dark .data-ingestion-distribution-details__meta span {
+    color: #cbd5e1;
+}
+
 html.theme-dark .data-ingestion-list__item.is-keep {
     background: rgba(30, 64, 175, 0.28);
     border-color: rgba(96, 165, 250, 0.45);
 }
 
 html.theme-dark .class-split-report__item strong,
+html.theme-dark .class-split-dataset-report__item strong,
+html.theme-dark .class-split-dataset-list__item strong,
 html.theme-dark .class-split-inspector__crop-status {
     color: #94a3b8;
 }
 
-html.theme-dark .class-split-report__item span {
+html.theme-dark .class-split-report__item span,
+html.theme-dark .class-split-dataset-report__item span,
+html.theme-dark .class-split-dataset-list__item span {
     color: #f8fafc;
 }
 
@@ -5206,6 +5416,8 @@ html.theme-pipboy .data-ingestion-header,
 html.theme-pipboy .data-ingestion-panel,
 html.theme-pipboy .data-ingestion-report,
 html.theme-pipboy .data-ingestion-list,
+html.theme-pipboy .data-ingestion-distribution-graph,
+html.theme-pipboy .data-ingestion-distribution-details,
 html.theme-pipboy .class-split-workspace__header,
 html.theme-pipboy .class-split-panel,
 html.theme-pipboy .class-split-bulk-panel,
@@ -5214,6 +5426,9 @@ html.theme-pipboy .class-split-review-section--inspector,
 html.theme-pipboy .class-split-report,
 html.theme-pipboy .class-split-wrong-list,
 html.theme-pipboy .class-split-inspector,
+html.theme-pipboy .class-split-dataset-analysis,
+html.theme-pipboy .class-split-dataset-graph,
+html.theme-pipboy .class-split-dataset-list,
 html.theme-pipboy .qwen-models-list,
 html.theme-pipboy .qwen-model-details,
 html.theme-pipboy .training-card,
@@ -5302,6 +5517,7 @@ html.theme-pipboy .class-split-field label,
 html.theme-pipboy .data-ingestion-field label,
 html.theme-pipboy .class-split-toolbar label,
 html.theme-pipboy .class-split-advanced summary,
+html.theme-pipboy .class-split-dataset-analysis > summary,
 html.theme-pipboy .class-split-review-section > strong,
 html.theme-pipboy .class-split-wrong-panel > summary,
 html.theme-pipboy .class-split-report__note,
@@ -5310,7 +5526,9 @@ html.theme-pipboy .class-split-inspector__meta {
     color: var(--pip-green-muted);
 }
 
-html.theme-pipboy .class-split-report__item {
+html.theme-pipboy .class-split-report__item,
+html.theme-pipboy .class-split-dataset-report__item,
+html.theme-pipboy .class-split-dataset-list__item {
     background: color-mix(in srgb, var(--pip-panel) 80%, transparent);
     border-color: color-mix(in srgb, var(--pip-green) 35%, transparent);
 }
@@ -5362,17 +5580,29 @@ html.theme-pipboy .data-ingestion-tile-card {
     border-color: color-mix(in srgb, var(--pip-green) 35%, transparent);
 }
 
+html.theme-pipboy .data-ingestion-distribution-details__meta strong {
+    color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .data-ingestion-distribution-details__meta span {
+    color: var(--pip-green-muted);
+}
+
 html.theme-pipboy .data-ingestion-list__item.is-keep {
     background: color-mix(in srgb, var(--pip-green) 14%, var(--pip-panel));
     border-color: var(--pip-border-strong);
 }
 
 html.theme-pipboy .class-split-report__item strong,
+html.theme-pipboy .class-split-dataset-report__item strong,
+html.theme-pipboy .class-split-dataset-list__item strong,
 html.theme-pipboy .class-split-inspector__crop-status {
     color: var(--pip-green-muted);
 }
 
-html.theme-pipboy .class-split-report__item span {
+html.theme-pipboy .class-split-report__item span,
+html.theme-pipboy .class-split-dataset-report__item span,
+html.theme-pipboy .class-split-dataset-list__item span {
     color: var(--pip-green);
 }
 

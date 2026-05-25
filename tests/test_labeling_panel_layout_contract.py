@@ -298,6 +298,12 @@ def test_data_ingestion_panel_contract():
     assert 'id="dataIngestionSaladHead"' in html
     assert 'id="dataIngestionReportTitle">Ingestion report</strong>' in html
     assert 'id="dataIngestionListTitle">Top diverse candidates</strong>' in html
+    assert 'id="dataIngestionDistribution"' in html
+    assert 'id="dataIngestionDistributionButton"' in html
+    assert 'id="dataIngestionOpenDatasetAnalysisButton"' in html
+    assert "Open Class Split setup" in html
+    assert 'id="dataIngestionDistributionGraph"' in html
+    assert 'id="dataIngestionDistributionDetails"' in html
     assert 'id="dataIngestionAcceptance"' in html
     assert 'id="dataIngestionOutputMode"' in html
     assert 'value="tile" selected>Tile into crops</option>' in html
@@ -320,7 +326,11 @@ def test_data_ingestion_panel_contract():
     assert ".data-ingestion-workspace" in css
     assert ".data-ingestion-results" in css
     assert ".data-ingestion-acceptance" in css
+    assert ".data-ingestion-distribution" in css
+    assert ".data-ingestion-distribution-graph" in css
+    assert ".data-ingestion-distribution-details__actions" in css
     assert ".data-ingestion-tile-preview" in css
+    assert ".data-ingestion-list-controls" in css
     assert ".embedding-benchmark-note__grid" in css
     assert "html.theme-dark .data-ingestion-panel" in css
     assert "html.theme-dark .embedding-benchmark-note" in css
@@ -336,6 +346,13 @@ def test_data_ingestion_panel_contract():
     assert "function uploadDataIngestionReferenceProfile" in js
     assert "function previewDataIngestionAcceptedOutputs" in js
     assert "function downloadDataIngestionAcceptedZip" in js
+    assert "function setDataIngestionItemAccepted" in js
+    assert "function loadDataIngestionDistribution" in js
+    assert "function renderDataIngestionDistributionGraph" in js
+    assert "function openClassSplitDatasetAnalysisFromIngestion" in js
+    assert 'document.getElementById("classSplitTitle")?.closest(".class-split-panel")' in js
+    assert "classSplitElements.runButton.focus({ preventScroll: true })" in js
+    assert "function openDatasetEntryInDataIngestion" in js
     assert "appendActiveWorkspaceTrainingFiles" in js
     assert "activeDatasetSaladHeadName" in js
     assert "getDataIngestionNumber(dataIngestionElements.maxTrainImages, 0" in js
@@ -348,12 +365,28 @@ def test_data_ingestion_panel_contract():
     assert 'fetch(`${API_ROOT}/data_ingestion/reference_profiles/import`' in js
     assert 'accepted_export/preview`' in js
     assert 'accepted_export/download`' in js
+    assert 'fetch(`${API_ROOT}/data_ingestion/jobs/${encodeURIComponent(dataIngestionState.activeJobId)}/distribution`' in js
     assert "candidate_thumbnail" in router
+    assert "reference_thumbnail" in router
     assert "data-data-ingestion-item-id" in js
+    assert "data-data-ingestion-detail-toggle" in js
+    assert "Keep candidate" in js
+    assert "Discard candidate" in js
+    assert "Show all candidates" in js
     assert "data-data-ingestion-output-id" not in js
     assert "acceptedOutputFilterActive" not in js
+    assert "function formatDataIngestionCoverageRank" in js
+    assert "coverage rank" in js
+    assert "outside selected coverage set" in js
+    assert "raw reference distance" in js
+    assert "Selection uses farthest-first coverage rank" in js
     assert "reference novelty" in js
     assert "dataIngestionHoverPreview" in js
+    assert "existing reference data" in js
+    assert "Class Split Dataset Analysis is not required for this map" in js
+    assert "This does not require Class Split Dataset Analysis" in html
+    assert "dataIngestionDistributionStatus" in js
+    assert "width: min(400px, calc(100vw - 24px));" in css
     assert "Tile overlap creates near-duplicates" in js
     assert 'fetch(`${API_ROOT}/datasets`' in js
     assert "appendActiveWorkspaceReferenceFiles" in js
@@ -375,6 +408,8 @@ def test_data_ingestion_panel_contract():
     assert "No reference profiles built" in js
     assert "No local SALAD heads trained" not in js
     assert "No profiles for selected reference" in js
+    assert "Use for ingestion" in js
+    assert "action.datasets.card.use_for_ingestion" in js
     assert "Selected reference profile does not match the chosen reference dataset" in js
     assert "Open at least two images in Label Images before building a reference profile" in js
     assert "Reference profile build needs at least two usable images or frames." in js
@@ -392,6 +427,8 @@ def test_data_ingestion_panel_contract():
     assert '"/data_ingestion/reference_profiles/{profile_id}/export"' in router
     assert '"/data_ingestion/reference_profiles/import"' in router
     assert '"/data_ingestion/jobs/{job_id}/accepted_export/preview"' in router
+    assert '"/data_ingestion/jobs/{job_id}/distribution"' in router
+    assert '"/data_ingestion/jobs/{job_id}/reference_thumbnail/{point_id}"' in router
     assert '"/data_ingestion/jobs/{job_id}/accepted_export/{preview_id}/thumbnail/{output_id}"' in router
     assert '"/data_ingestion/jobs/{job_id}/accepted_export/download"' in router
     assert 'max_part_size=1024 * 1024 * 1024' in router
@@ -542,6 +579,7 @@ def test_class_split_explorer_panel_contract():
     assert 'Backbone<span class="help-icon"' in html
     assert "Full WALDO tests keep DINOv3 Precise as the stable default" in html
     assert "C-RADIOv4 improves NN purity only in a very slow opt-in audit path" in html
+    assert 'class="embedding-benchmark-note" open' not in html
     assert "its slowest recipe improved NN purity in full WALDO tests" in html
     assert "The first NN number is object-weighted; the second balances classes" in html
     assert "the visible C-RADIO preset starts from summary mode" in html
@@ -566,6 +604,13 @@ def test_class_split_explorer_panel_contract():
     assert 'id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel" open' in html
     assert 'id="classSplitWrongList"' in html
     assert 'id="classSplitInspector"' in html
+    assert '<option value="image_value">Image value</option>' in html
+    assert 'id="classSplitDatasetAnalysisPanel" class="class-split-panel class-split-dataset-analysis"' in html
+    assert 'id="classSplitDatasetAnalysisPanel" class="class-split-panel class-split-dataset-analysis" open' not in html
+    assert "Optional image-value review" in html
+    assert 'id="classSplitDatasetAnalysisRun"' in html
+    assert 'id="classSplitDatasetAnalysisGraph" class="class-split-dataset-graph"' in html
+    assert 'id="classSplitDatasetAnalysisList" class="class-split-dataset-list"' in html
     assert "Selected crop" in html
     assert "Likely wrong class" in html
 
@@ -583,11 +628,15 @@ def test_class_split_explorer_panel_contract():
     assert "transition: width 0.08s ease-out, height 0.08s ease-out;" in css
     assert ".embedding-recipe-note__text" in css
     assert ".class-split-review" in css
+    assert ".class-split-dataset-analysis" in css
+    assert ".class-split-dataset-hover-preview" in css
+    assert '"dataset dataset"' not in css
+    assert "html.theme-pipboy .class-split-dataset-analysis" in css
     assert "height: calc(100vh - 330px);" in css
     assert "html.theme-dark .class-split-panel" in css
     assert "html.theme-dark .class-split-workspace__header" in css
     assert "html.theme-pipboy .class-split-panel" in css
-    assert '"bulk"\n            "graph"' in css
+    assert '"bulk bulk"\n        "graph review"' in css
 
     assert 'const TAB_CLASS_SPLIT = "class-split";' in js
     assert "tabElements.classSplitButton = document.getElementById(\"tabClassSplitButton\")" in js
@@ -638,6 +687,12 @@ def test_class_split_explorer_panel_contract():
     assert "function buildClassSplitActiveWorkspaceForm" in js
     assert "function getClassSplitPointImageKey" in js
     assert "function renderClassSplitReport" in js
+    assert "function runClassSplitDatasetAnalysis" in js
+    assert "computeDatasetImageValueAnalysis(points)" in js
+    assert "function renderClassSplitDatasetAnalysisGraph" in js
+    assert "classSplitDatasetAnalysisHoverPreview" in js
+    assert "dataset_image_value_score" in js
+    assert "scheduleAnnotationDiversityMetricRefresh();" in js
     assert "Projection neighbors" in js
     assert "Size-axis check" in js
     assert "Crop cache" in js

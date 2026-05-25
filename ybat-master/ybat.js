@@ -2373,6 +2373,12 @@ const AUTOMATION_LOCKED_TABS = new Set([
         wrongPanel: null,
         wrongList: null,
         inspector: null,
+        datasetAnalysisPanel: null,
+        datasetAnalysisRun: null,
+        datasetAnalysisStatus: null,
+        datasetAnalysisReport: null,
+        datasetAnalysisGraph: null,
+        datasetAnalysisList: null,
         bulkPanel: null,
         bulkCount: null,
         bulkClass: null,
@@ -2410,6 +2416,12 @@ const AUTOMATION_LOCKED_TABS = new Set([
         report: null,
         listTitle: null,
         list: null,
+        distribution: null,
+        distributionButton: null,
+        openDatasetAnalysisButton: null,
+        distributionStatus: null,
+        distributionGraph: null,
+        distributionDetails: null,
         acceptance: null,
         outputMode: null,
         targetWidth: null,
@@ -2433,12 +2445,16 @@ const AUTOMATION_LOCKED_TABS = new Set([
         profileImportInFlight: false,
         acceptedPreviewInFlight: false,
         acceptedDownloadInFlight: false,
+        distributionInFlight: false,
         pollTimer: null,
         pollRequestId: 0,
         preferredSaladHeadId: "",
         currentResult: null,
         acceptedItemIds: new Set(),
         lastPreview: null,
+        distribution: null,
+        selectedDistributionItemId: "",
+        visibleItemLimit: 120,
     };
     const sam3RecipeElements = {
         fileInput: null,
@@ -2589,6 +2605,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         lassoPointIds: new Set(),
         dismissedWrongIds: new Set(),
         relabelInFlight: false,
+        datasetAnalysis: null,
         flashPointId: "",
         flashTimer: null,
         flashStartedAt: 0,
@@ -3746,6 +3763,43 @@ const sam3TrainState = {
             bits.push(`expires: ${expiryIso}`);
         }
         datasetManagerElements.pathSummary.textContent = bits.join(" • ");
+    }
+
+    async function openDatasetEntryInDataIngestion(entry) {
+        const datasetId = String(entry?.id || "").trim();
+        if (!datasetId) {
+            throw new Error("Dataset id is missing.");
+        }
+        setActiveTab(TAB_DATA_INGESTION);
+        initDataIngestionUi();
+        if (dataIngestionElements.referenceBackend) {
+            dataIngestionElements.referenceBackend.checked = true;
+        }
+        if (dataIngestionElements.referenceActive) {
+            dataIngestionElements.referenceActive.checked = false;
+        }
+        await refreshDataIngestionCapabilities();
+        const values = Array.from(dataIngestionElements.referenceDataset?.options || [])
+            .map((option) => option.value);
+        if (!values.includes(datasetId)) {
+            setDataIngestionStatus(
+                `Dataset ${entry.label || datasetId} is not available as a backend reference dataset. Refresh Dataset Management and try again.`,
+                "error",
+            );
+            return;
+        }
+        setSelectValueIfPresent(dataIngestionElements.referenceDataset, datasetId);
+        populateDataIngestionSaladHeads();
+        refreshDataIngestionControls();
+        const hasMatchingProfile = !!String(dataIngestionElements.saladHead?.value || "").trim();
+        const nextStep = hasMatchingProfile
+            ? "A matching reference profile is selected; choose candidate media and analyze."
+            : "Build or upload a matching reference profile, then choose candidate media and analyze.";
+        setDataIngestionStatus(`Selected ${entry.label || datasetId} as the backend reference. ${nextStep}`, hasMatchingProfile ? "success" : "warn");
+        const referencePanel = document.getElementById("dataIngestionReferenceTitle");
+        if (referencePanel) {
+            referencePanel.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
     }
 
     function updateDatasetPathButtons() {
@@ -5191,6 +5245,29 @@ const sam3TrainState = {
                         });
                     });
                     actions.appendChild(annotateBtn);
+                    const ingestionBtn = document.createElement("button");
+                    ingestionBtn.type = "button";
+                    ingestionBtn.className = "button button-outline";
+                    ingestionBtn.setAttribute("data-testid", "action.datasets.card.use_for_ingestion");
+                    ingestionBtn.textContent = "Use for ingestion";
+                    const linkedRootStatus = String(entry.linked_root_status || "").trim().toLowerCase();
+                    const linkedUnavailable = String(entry.storage_mode || "").toLowerCase() === "linked"
+                        && linkedRootStatus
+                        && linkedRootStatus !== "ok";
+                    ingestionBtn.disabled = linkedUnavailable;
+                    ingestionBtn.title = linkedUnavailable
+                        ? "Linked root is unavailable; fix or re-register the dataset before using it as an ingestion reference."
+                        : "Switch to Data Ingestion and select this dataset as the backend reference.";
+                    ingestionBtn.addEventListener("click", () => {
+                        openDatasetEntryInDataIngestion(entry).catch((error) => {
+                            console.error("Data Ingestion reference selection failed", error);
+                            setDatasetUploadMessage(
+                                `Failed to use for ingestion: ${error.message || error}`,
+                                "error"
+                            );
+                        });
+                    });
+                    actions.appendChild(ingestionBtn);
                     const downloadBtn = document.createElement("button");
 	                    downloadBtn.type = "button";
                     downloadBtn.className = "button button-outline";
@@ -36197,6 +36274,10 @@ async function cancelRfDetrTrainingJobRequest() {
         setButtonDisabled(dataIngestionElements.profileUploadButton, dataIngestionState.active || dataIngestionState.profileImportInFlight);
         setButtonDisabled(dataIngestionElements.previewAcceptedButton, dataIngestionState.active || !hasAcceptedResult || acceptedCount <= 0 || dataIngestionState.acceptedPreviewInFlight);
         setButtonDisabled(dataIngestionElements.downloadAcceptedButton, dataIngestionState.active || !hasAcceptedResult || acceptedCount <= 0 || dataIngestionState.acceptedDownloadInFlight);
+        setButtonDisabled(dataIngestionElements.distributionButton, dataIngestionState.active || !hasAcceptedResult || !dataIngestionState.activeJobId || dataIngestionState.distributionInFlight);
+        if (dataIngestionElements.distributionButton) {
+            dataIngestionElements.distributionButton.textContent = dataIngestionState.distributionInFlight ? "Loading map ..." : "Show distribution map";
+        }
         [
             dataIngestionElements.files,
             dataIngestionElements.referenceActive,
@@ -36345,6 +36426,11 @@ async function cancelRfDetrTrainingJobRequest() {
         try {
             dataIngestionState.active = true;
             dataIngestionState.activeJobId = "";
+            dataIngestionState.currentResult = null;
+            dataIngestionState.acceptedItemIds = new Set();
+            dataIngestionState.lastPreview = null;
+            dataIngestionState.visibleItemLimit = 120;
+            clearDataIngestionDistribution();
             setDataIngestionStatus("Packaging media ...");
             renderDataIngestionProgress({ progress: 0, message: "Packaging candidate media ..." });
             refreshDataIngestionControls();
@@ -36406,6 +36492,11 @@ async function cancelRfDetrTrainingJobRequest() {
         try {
             dataIngestionState.active = true;
             dataIngestionState.activeJobId = "";
+            dataIngestionState.currentResult = null;
+            dataIngestionState.acceptedItemIds = new Set();
+            dataIngestionState.lastPreview = null;
+            dataIngestionState.visibleItemLimit = 120;
+            clearDataIngestionDistribution();
             const packageMessage = referenceSource === "backend_dataset"
                 ? "Queueing backend dataset reference profile ..."
                 : "Packaging active Label Images dataset for reference profile ...";
@@ -36553,8 +36644,40 @@ async function cancelRfDetrTrainingJobRequest() {
         return `item_${String(Number.isFinite(idx) ? Math.max(0, Math.round(idx)) : 0).padStart(6, "0")}`;
     }
 
+    function getDataIngestionResultItems() {
+        return Array.isArray(dataIngestionState.currentResult?.items)
+            ? dataIngestionState.currentResult.items
+            : [];
+    }
+
     function selectedDataIngestionItemIds() {
         return Array.from(dataIngestionState.acceptedItemIds || []);
+    }
+
+    function setDataIngestionItemAccepted(itemId, accepted) {
+        const safeId = String(itemId || "").trim();
+        if (!safeId) return;
+        if (!(dataIngestionState.acceptedItemIds instanceof Set)) {
+            dataIngestionState.acceptedItemIds = new Set();
+        }
+        if (accepted) {
+            dataIngestionState.acceptedItemIds.add(safeId);
+        } else {
+            dataIngestionState.acceptedItemIds.delete(safeId);
+        }
+        dataIngestionState.lastPreview = null;
+        renderDataIngestionResult(dataIngestionState.currentResult, {
+            preserveSelection: true,
+            preserveDistribution: true,
+        });
+        renderDataIngestionTilePreview([]);
+        renderDataIngestionAcceptedSummary();
+        refreshDataIngestionControls();
+        if (dataIngestionState.distribution) {
+            const selectedPoint = getDataIngestionDistributionPointById(dataIngestionState.selectedDistributionItemId);
+            renderDataIngestionDistributionDetails(selectedPoint);
+            renderDataIngestionDistributionGraph();
+        }
     }
 
     function getDataIngestionAcceptedExportPayload({ offset = 0, limit = 80 } = {}) {
@@ -36653,14 +36776,389 @@ async function cancelRfDetrTrainingJobRequest() {
         if (preview) preview.hidden = true;
     }
 
+    function formatDataIngestionCoverageRank(item, selectedCount) {
+        const rankValue = Number(item.rank);
+        if (Number.isFinite(rankValue) && rankValue > 0) {
+            const suffix = selectedCount > 0 ? `/${selectedCount}` : "";
+            return `coverage rank ${Math.round(rankValue)}${suffix}`;
+        }
+        return "outside selected coverage set";
+    }
+
     function formatDataIngestionReferenceNovelty(item, totalItems) {
         const rawScore = item.reference_novelty_score ?? item.diversity_score ?? 0;
         const score = Number(rawScore) || 0;
         const percentileValue = Number(item.reference_novelty_percentile);
-        const percentile = Number.isFinite(percentileValue) ? `p${Math.round(percentileValue)}` : "";
+        const percentile = Number.isFinite(percentileValue) ? `reference novelty p${Math.round(percentileValue)}` : "";
         const rankValue = Number(item.reference_novelty_rank);
-        const rank = Number.isFinite(rankValue) && rankValue > 0 && totalItems > 0 ? `rank ${rankValue}/${totalItems}` : "";
-        return [`reference novelty ${score.toFixed(3)}`, percentile, rank].filter(Boolean).join(" • ");
+        const rank = Number.isFinite(rankValue) && rankValue > 0 && totalItems > 0 ? `novelty rank ${rankValue}/${totalItems}` : "";
+        return [percentile, rank, `raw reference distance ${score.toFixed(3)}`].filter(Boolean).join(" • ");
+    }
+
+    function setDataIngestionDistributionStatus(message, variant = "") {
+        if (!dataIngestionElements.distributionStatus) return;
+        dataIngestionElements.distributionStatus.textContent = message || "";
+        dataIngestionElements.distributionStatus.classList.remove("warn", "error", "success");
+        if (variant) {
+            dataIngestionElements.distributionStatus.classList.add(variant);
+        }
+    }
+
+    function formatDataIngestionDistributionError(errorMessage) {
+        const raw = String(errorMessage || "").trim();
+        if (!raw || raw === "Not Found") {
+            return "Map endpoint or job artifacts were not found. Restart the backend if it is still running old code, then rerun candidate analysis. Class Split Dataset Analysis is not required for this map.";
+        }
+        if (raw === "data_ingestion_embeddings_not_found") {
+            return "This job has no saved map embeddings. Rerun candidate analysis to regenerate distribution artifacts. Class Split Dataset Analysis is not required.";
+        }
+        if (raw === "data_ingestion_reference_thumbnail_not_found") {
+            return "Reference preview thumbnails are unavailable for this older job; rerun candidate analysis to regenerate them.";
+        }
+        return raw;
+    }
+
+    function openClassSplitDatasetAnalysisFromIngestion() {
+        setActiveTab(TAB_CLASS_SPLIT);
+        window.setTimeout(() => {
+            initClassSplitExplorer();
+            if (classSplitElements.scopeAll) {
+                classSplitElements.scopeAll.checked = true;
+            }
+            if (classSplitElements.scopeSelected) {
+                classSplitElements.scopeSelected.checked = false;
+            }
+            if (classSplitElements.recipePreset) {
+                classSplitElements.recipePreset.value = "precise";
+                applyEmbeddingRecipePresetToClassSplit("precise");
+            }
+            refreshClassSplitControls();
+            renderClassSplitDatasetAnalysis();
+            const panel = classSplitElements.datasetAnalysisPanel || document.getElementById("classSplitDatasetAnalysisPanel");
+            if (panel) {
+                panel.open = true;
+            }
+            const setupTarget = document.getElementById("classSplitTitle")?.closest(".class-split-panel") || classSplitElements.runButton || panel;
+            if (setupTarget) {
+                setupTarget.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+            if (classSplitElements.runButton) {
+                classSplitElements.runButton.focus({ preventScroll: true });
+            }
+            setClassSplitJobStatus("Dataset Analysis needs an all-class Class Split result. Scope has been set to All classes; run analysis, then click Run dataset analysis.", "warn");
+        }, 80);
+    }
+
+    function clearDataIngestionDistribution({ resetGraph = true } = {}) {
+        dataIngestionState.distribution = null;
+        dataIngestionState.selectedDistributionItemId = "";
+        setDataIngestionDistributionStatus("");
+        if (resetGraph && dataIngestionElements.distributionGraph) {
+            dataIngestionElements.distributionGraph.innerHTML = `<div class="training-help">Map not loaded.</div>`;
+        }
+        if (resetGraph && dataIngestionElements.distributionDetails) {
+            dataIngestionElements.distributionDetails.innerHTML = `<div class="training-help">Click a candidate point to inspect it.</div>`;
+        }
+    }
+
+    function getDataIngestionDistributionPoints(kind = "") {
+        const points = Array.isArray(dataIngestionState.distribution?.points) ? dataIngestionState.distribution.points : [];
+        if (!kind) {
+            return points;
+        }
+        return points.filter((point) => String(point?.kind || "") === kind);
+    }
+
+    function dataIngestionDistributionPointId(point) {
+        return String(point?.item_id || point?.point_id || "");
+    }
+
+    function getDataIngestionDistributionPointById(pointId) {
+        const target = String(pointId || "");
+        if (!target) {
+            return null;
+        }
+        return getDataIngestionDistributionPoints().find((point) => dataIngestionDistributionPointId(point) === target) || null;
+    }
+
+    function getDataIngestionDistributionPreviewUrl(point) {
+        const thumbPath = String(point?.thumbnail_url || "");
+        if (!thumbPath) {
+            return "";
+        }
+        if (/^https?:\/\//i.test(thumbPath)) {
+            return thumbPath;
+        }
+        return `${API_ROOT}${thumbPath}`;
+    }
+
+    function formatDataIngestionDistributionPointText(point, totalItems) {
+        if (!point) {
+            return "";
+        }
+        if (String(point.kind || "") === "reference") {
+            const dims = point.width || point.height ? `${point.width || ""}x${point.height || ""}` : "";
+            return [
+                `<b>${escapeHtml(point.filename || point.label || "Reference image")}</b>`,
+                "existing reference data",
+                dims ? escapeHtml(dims) : "",
+            ].filter(Boolean).join("<br>");
+        }
+        if (String(point.kind || "") !== "candidate") {
+            return escapeHtml(point.label || point.filename || "point");
+        }
+        const accepted = dataIngestionState.acceptedItemIds?.has(dataIngestionDistributionPointId(point));
+        const dims = point.width || point.height ? `${point.width || ""}x${point.height || ""}` : "";
+        return [
+            `<b>${escapeHtml(point.filename || "candidate")}</b>`,
+            accepted ? "selected to keep" : "not selected",
+            point.rank ? `coverage rank ${escapeHtml(point.rank)}` : "outside selected coverage set",
+            escapeHtml(formatDataIngestionReferenceNovelty(point, totalItems)),
+            dims ? escapeHtml(dims) : "",
+        ].filter(Boolean).join("<br>");
+    }
+
+    function renderDataIngestionDistributionDetails(point = null) {
+        const details = dataIngestionElements.distributionDetails;
+        if (!details) return;
+        if (!point) {
+            details.innerHTML = `<div class="training-help">Click a candidate point to inspect it.</div>`;
+            return;
+        }
+        if (String(point.kind || "") === "reference") {
+            const previewUrl = getDataIngestionDistributionPreviewUrl(point);
+            const meta = [
+                "existing reference data",
+                `${point.source_type || "image"}${point.width || point.height ? ` • ${point.width || ""}x${point.height || ""}` : ""}`,
+            ].filter(Boolean);
+            details.innerHTML = [
+                previewUrl ? `<img src="${escapeHtml(previewUrl)}" alt="Reference preview" loading="lazy">` : "",
+                `<div class="data-ingestion-distribution-details__meta">`,
+                `<strong>${escapeHtml(point.filename || point.label || "Reference image")}</strong>`,
+                meta.map((entry) => `<span>${escapeHtml(entry)}</span>`).join(""),
+                `</div>`,
+            ].join("");
+            return;
+        }
+        if (String(point.kind || "") !== "candidate") {
+            details.innerHTML = `<div class="training-help">Click a candidate point to inspect it.</div>`;
+            return;
+        }
+        const pointId = dataIngestionDistributionPointId(point);
+        const previewUrl = getDataIngestionDistributionPreviewUrl(point);
+        const accepted = dataIngestionState.acceptedItemIds?.has(pointId);
+        const totalItems = getDataIngestionDistributionPoints("candidate").length;
+        const meta = [
+            accepted ? "selected to keep" : "not selected",
+            point.rank ? `coverage rank ${point.rank}` : "outside selected coverage set",
+            formatDataIngestionReferenceNovelty(point, totalItems),
+            `${point.source_type || "image"}${point.width || point.height ? ` • ${point.width || ""}x${point.height || ""}` : ""}`,
+        ].filter(Boolean);
+        details.innerHTML = [
+            previewUrl ? `<img src="${escapeHtml(previewUrl)}" alt="Candidate preview" loading="lazy">` : "",
+            `<div class="data-ingestion-distribution-details__meta">`,
+            `<strong>${escapeHtml(point.filename || "candidate")}</strong>`,
+            meta.map((entry) => `<span>${escapeHtml(entry)}</span>`).join(""),
+            `</div>`,
+            `<div class="data-ingestion-distribution-details__actions">`,
+            `<button type="button" class="training-button secondary" data-data-ingestion-detail-toggle>${accepted ? "Discard candidate" : "Keep candidate"}</button>`,
+            `</div>`,
+        ].join("");
+        const toggleButton = details.querySelector("[data-data-ingestion-detail-toggle]");
+        if (toggleButton) {
+            toggleButton.addEventListener("click", () => {
+                setDataIngestionItemAccepted(pointId, !accepted);
+            });
+        }
+    }
+
+    function getDataIngestionDistributionRange(points, axisIndex) {
+        const values = points
+            .map((point) => Number(point?.projection?.[axisIndex]))
+            .filter((value) => Number.isFinite(value));
+        if (!values.length) {
+            return [-1, 1];
+        }
+        let min = Math.min(...values);
+        let max = Math.max(...values);
+        if (min === max) {
+            min -= 1;
+            max += 1;
+        }
+        const pad = Math.max((max - min) * 0.08, 1e-6);
+        return [min - pad, max + pad];
+    }
+
+    function buildDataIngestionDistributionTrace(points, name, marker) {
+        const candidates = getDataIngestionDistributionPoints("candidate");
+        return {
+            type: "scattergl",
+            mode: "markers",
+            name,
+            x: points.map((point) => Number(point?.projection?.[0]) || 0),
+            y: points.map((point) => Number(point?.projection?.[1]) || 0),
+            customdata: points.map((point) => dataIngestionDistributionPointId(point)),
+            text: points.map((point) => formatDataIngestionDistributionPointText(point, candidates.length)),
+            hovertemplate: "%{text}<extra></extra>",
+            marker,
+        };
+    }
+
+    function renderDataIngestionDistributionGraph() {
+        const graphEl = dataIngestionElements.distributionGraph;
+        if (!graphEl) {
+            return Promise.resolve(false);
+        }
+        const points = getDataIngestionDistributionPoints();
+        if (!points.length) {
+            graphEl.innerHTML = `<div class="training-help">No distribution points returned.</div>`;
+            return Promise.resolve(false);
+        }
+        if (!window.Plotly) {
+            graphEl.innerHTML = `<div class="training-help">Plotly did not load; cannot render the distribution map.</div>`;
+            return Promise.resolve(false);
+        }
+        const acceptedIds = dataIngestionState.acceptedItemIds instanceof Set ? dataIngestionState.acceptedItemIds : new Set();
+        const referencePoints = points.filter((point) => String(point?.kind || "") === "reference");
+        const candidatePoints = points.filter((point) => String(point?.kind || "") === "candidate");
+        const acceptedPoints = candidatePoints.filter((point) => acceptedIds.has(dataIngestionDistributionPointId(point)));
+        const skippedPoints = candidatePoints.filter((point) => !acceptedIds.has(dataIngestionDistributionPointId(point)));
+        const selectedPoint = getDataIngestionDistributionPointById(dataIngestionState.selectedDistributionItemId);
+        const traces = [];
+        if (referencePoints.length) {
+            traces.push(buildDataIngestionDistributionTrace(referencePoints, "Reference dataset", {
+                size: 5,
+                color: "rgba(148, 163, 184, 0.48)",
+                line: { color: "rgba(71, 85, 105, 0.3)", width: 0.4 },
+            }));
+        }
+        if (skippedPoints.length) {
+            traces.push(buildDataIngestionDistributionTrace(skippedPoints, "Not selected", {
+                size: 8,
+                color: "rgba(245, 158, 11, 0.72)",
+                line: { color: "rgba(146, 64, 14, 0.7)", width: 0.7 },
+            }));
+        }
+        if (acceptedPoints.length) {
+            traces.push(buildDataIngestionDistributionTrace(acceptedPoints, "Selected to keep", {
+                size: 10,
+                color: "rgba(37, 99, 235, 0.82)",
+                line: { color: "rgba(191, 219, 254, 0.95)", width: 1.2 },
+            }));
+        }
+        if (selectedPoint && String(selectedPoint.kind || "") === "candidate") {
+            traces.push({
+                type: "scatter",
+                mode: "markers",
+                name: "Current candidate",
+                x: [Number(selectedPoint.projection?.[0]) || 0],
+                y: [Number(selectedPoint.projection?.[1]) || 0],
+                customdata: [dataIngestionDistributionPointId(selectedPoint)],
+                text: [formatDataIngestionDistributionPointText(selectedPoint, candidatePoints.length)],
+                hovertemplate: "%{text}<extra></extra>",
+                marker: {
+                    size: 22,
+                    color: "rgba(250, 204, 21, 0.3)",
+                    line: { color: "#facc15", width: 3 },
+                    symbol: "circle-open",
+                },
+            });
+        }
+        const theme = getClassSplitPlotTheme();
+        const layout = {
+            paper_bgcolor: theme.paper,
+            plot_bgcolor: theme.plot,
+            font: { color: theme.text, family: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif" },
+            margin: { l: 42, r: 16, t: 20, b: 42 },
+            xaxis: {
+                title: "reference profile axis 1",
+                range: getDataIngestionDistributionRange(points, 0),
+                zeroline: false,
+                gridcolor: theme.grid,
+                linecolor: theme.grid,
+            },
+            yaxis: {
+                title: "reference profile axis 2",
+                range: getDataIngestionDistributionRange(points, 1),
+                zeroline: false,
+                gridcolor: theme.grid,
+                linecolor: theme.grid,
+            },
+            legend: {
+                orientation: "h",
+                y: 1.08,
+                x: 0,
+                bgcolor: "rgba(0,0,0,0)",
+            },
+            dragmode: "pan",
+            uirevision: [
+                "data-ingestion-distribution",
+                dataIngestionState.activeJobId || "live",
+                points.length,
+            ].join(":"),
+        };
+        return window.Plotly.react(graphEl, traces, layout, {
+            responsive: true,
+            displaylogo: false,
+            scrollZoom: true,
+            modeBarButtonsToRemove: ["toImage"],
+        }).then(() => {
+            if (typeof graphEl.removeAllListeners === "function") {
+                ["plotly_click", "plotly_hover", "plotly_unhover"].forEach((eventName) => graphEl.removeAllListeners(eventName));
+            }
+            graphEl.on("plotly_click", (event) => {
+                const pointId = String(event?.points?.[0]?.customdata || "");
+                const point = getDataIngestionDistributionPointById(pointId);
+                if (point) {
+                    dataIngestionState.selectedDistributionItemId = dataIngestionDistributionPointId(point);
+                    renderDataIngestionDistributionDetails(point);
+                    renderDataIngestionDistributionGraph();
+                }
+            });
+            graphEl.on("plotly_hover", (event) => {
+                const pointId = String(event?.points?.[0]?.customdata || "");
+                const point = getDataIngestionDistributionPointById(pointId);
+                const previewUrl = getDataIngestionDistributionPreviewUrl(point);
+                if (point && previewUrl && event?.event) {
+                    showDataIngestionHoverPreview(event.event, previewUrl, point.filename || "candidate");
+                }
+            });
+            graphEl.on("plotly_unhover", hideDataIngestionHoverPreview);
+            return true;
+        }).catch((error) => {
+            console.warn("Data Ingestion distribution graph render failed", error);
+            graphEl.innerHTML = `<div class="training-help error">Distribution map failed: ${escapeHtml(error.message || error)}</div>`;
+            return false;
+        });
+    }
+
+    async function loadDataIngestionDistribution() {
+        if (!dataIngestionState.currentResult || !dataIngestionState.activeJobId || dataIngestionState.distributionInFlight) {
+            return;
+        }
+        dataIngestionState.distributionInFlight = true;
+        setDataIngestionDistributionStatus("Loading map ...");
+        refreshDataIngestionControls();
+        try {
+            const resp = await fetch(`${API_ROOT}/data_ingestion/jobs/${encodeURIComponent(dataIngestionState.activeJobId)}/distribution`);
+            const detail = await resp.text();
+            if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            const payload = parseJsonObjectSafe(detail, {});
+            dataIngestionState.distribution = payload;
+            dataIngestionState.selectedDistributionItemId = "";
+            const summary = payload.summary || {};
+            const candidateCount = Number(summary.candidate_point_count || 0);
+            const referenceCount = Number(summary.reference_point_count || 0);
+            setDataIngestionDistributionStatus(`${candidateCount} candidates projected onto ${referenceCount} reference images.`, "success");
+            renderDataIngestionDistributionDetails();
+            await renderDataIngestionDistributionGraph();
+        } catch (error) {
+            console.error("Data Ingestion distribution load failed", error);
+            setDataIngestionDistributionStatus(`Map failed: ${formatDataIngestionDistributionError(error.message || error)}`, "error");
+        } finally {
+            dataIngestionState.distributionInFlight = false;
+            refreshDataIngestionControls();
+        }
     }
 
     async function downloadDataIngestionReferenceProfile() {
@@ -36798,16 +37296,34 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    function renderDataIngestionResult(result) {
+    function showAllDataIngestionCandidates() {
+        const items = getDataIngestionResultItems();
+        dataIngestionState.visibleItemLimit = Math.max(items.length, 120);
+        renderDataIngestionResult(dataIngestionState.currentResult, {
+            preserveSelection: true,
+            preserveDistribution: true,
+        });
+    }
+
+    function renderDataIngestionResult(result, { preserveSelection = false, preserveDistribution = false } = {}) {
         hideDataIngestionHoverPreview();
         const summary = result?.summary || {};
         const items = Array.isArray(result?.items) ? result.items : [];
         const isProfileBuild = !!String(summary.head_id || "").trim() && !items.length;
+        if (!preserveDistribution) {
+            clearDataIngestionDistribution();
+        }
         dataIngestionState.currentResult = isProfileBuild ? null : result;
-        dataIngestionState.acceptedItemIds = new Set(isProfileBuild ? [] : items.filter((item) => !!item.keep).map(dataIngestionResultItemId));
+        const previousAcceptedIds = dataIngestionState.acceptedItemIds instanceof Set
+            ? new Set(dataIngestionState.acceptedItemIds)
+            : new Set();
+        dataIngestionState.acceptedItemIds = preserveSelection && !isProfileBuild
+            ? previousAcceptedIds
+            : new Set(isProfileBuild ? [] : items.filter((item) => !!item.keep).map(dataIngestionResultItemId));
         dataIngestionState.lastPreview = null;
         if (dataIngestionElements.results) dataIngestionElements.results.hidden = false;
         if (dataIngestionElements.acceptance) dataIngestionElements.acceptance.hidden = isProfileBuild || !items.length;
+        if (dataIngestionElements.distribution) dataIngestionElements.distribution.hidden = isProfileBuild || !items.length;
         if (dataIngestionElements.reportTitle) {
             dataIngestionElements.reportTitle.textContent = isProfileBuild ? "Reference profile report" : "Ingestion report";
         }
@@ -36849,21 +37365,42 @@ async function cancelRfDetrTrainingJobRequest() {
             } else if (!items.length) {
                 dataIngestionElements.list.innerHTML = `<div class="training-help">No ranked candidates for this job.</div>`;
             } else {
-                dataIngestionElements.list.innerHTML = items.slice(0, 120).map((item) => {
-                    const keep = !!item.keep;
+                const selectedCount = Number(summary.selected_count ?? items.filter((entry) => !!entry.keep).length) || 0;
+                const scoreNote = [
+                    `<div class="training-help data-ingestion-score-note">`,
+                    `Selection uses farthest-first coverage rank. Reference novelty is a percentile/rank diagnostic, so raw distances can overlap between kept and skipped images.`,
+                    `</div>`,
+                ].join("");
+                const visibleLimit = Math.max(1, Number(dataIngestionState.visibleItemLimit) || 120);
+                const visibleItems = items.slice(0, visibleLimit);
+                const listControls = items.length > visibleItems.length
+                    ? [
+                        `<div class="data-ingestion-list-controls">`,
+                        `<span class="training-help">Showing ${visibleItems.length} of ${items.length} candidates.</span>`,
+                        `<button type="button" class="training-button secondary" data-data-ingestion-show-all>Show all candidates</button>`,
+                        `</div>`,
+                    ].join("")
+                    : "";
+                dataIngestionElements.list.innerHTML = scoreNote + listControls + visibleItems.map((item) => {
                     const itemId = dataIngestionResultItemId(item);
-                    const checked = dataIngestionState.acceptedItemIds.has(itemId) ? " checked" : "";
+                    const accepted = dataIngestionState.acceptedItemIds.has(itemId);
+                    const originalKeep = !!item.keep;
+                    const checked = accepted ? " checked" : "";
                     const previewUrl = item.thumbnail_url ? `${API_ROOT}${item.thumbnail_url}` : "";
                     const sourceType = escapeHtml(item.source_type || "image");
                     const dimensions = `${escapeHtml(item.width || "")}x${escapeHtml(item.height || "")}`;
+                    const coverage = formatDataIngestionCoverageRank(item, selectedCount);
                     const novelty = formatDataIngestionReferenceNovelty(item, items.length);
-                    const title = "Keep rank is the farthest-first coverage order. Reference novelty is nearest-reference cosine distance.";
+                    const title = "Keep rank is the farthest-first coverage order against the reference and already selected candidates. Reference novelty is nearest-reference cosine distance, not the selection threshold.";
+                    const stateLabel = accepted
+                        ? (originalKeep ? `Keep #${escapeHtml(item.rank || "")}` : "Keep manual")
+                        : (originalKeep ? `Discarded keep #${escapeHtml(item.rank || "")}` : "Skip");
                     return [
-                        `<div class="data-ingestion-list__item${keep ? " is-keep" : ""}" data-data-ingestion-preview-url="${escapeHtml(previewUrl)}" data-data-ingestion-preview-label="${escapeHtml(item.filename || item.saved_name || "candidate")}" title="${escapeHtml(title)}">`,
+                        `<div class="data-ingestion-list__item${accepted ? " is-keep" : ""}" data-data-ingestion-preview-url="${escapeHtml(previewUrl)}" data-data-ingestion-preview-label="${escapeHtml(item.filename || item.saved_name || "candidate")}" title="${escapeHtml(title)}">`,
                         `<label>`,
                         `<input type="checkbox" data-data-ingestion-item-id="${escapeHtml(itemId)}"${checked}>`,
-                        `<span><strong>${keep ? `Keep #${escapeHtml(item.rank || "")}` : "Skip"}</strong> ${escapeHtml(item.filename || item.saved_name || "candidate")}<br>`,
-                        `<span>${sourceType} • ${escapeHtml(novelty)} • ${dimensions}</span></span>`,
+                        `<span><strong>${stateLabel}</strong> ${escapeHtml(item.filename || item.saved_name || "candidate")}<br>`,
+                        `<span>${sourceType} • ${escapeHtml(coverage)} • ${escapeHtml(novelty)} • ${dimensions}</span></span>`,
                         `</label>`,
                         `</div>`,
                     ].join("");
@@ -36876,19 +37413,15 @@ async function cancelRfDetrTrainingJobRequest() {
                     card.addEventListener("mousemove", moveDataIngestionHoverPreview);
                     card.addEventListener("mouseleave", hideDataIngestionHoverPreview);
                 });
+                const showAllButton = dataIngestionElements.list.querySelector("[data-data-ingestion-show-all]");
+                if (showAllButton) {
+                    showAllButton.addEventListener("click", showAllDataIngestionCandidates);
+                }
                 dataIngestionElements.list.querySelectorAll("[data-data-ingestion-item-id]").forEach((checkbox) => {
                     checkbox.addEventListener("change", () => {
                         const itemId = String(checkbox.getAttribute("data-data-ingestion-item-id") || "");
                         if (!itemId) return;
-                        if (checkbox.checked) {
-                            dataIngestionState.acceptedItemIds.add(itemId);
-                        } else {
-                            dataIngestionState.acceptedItemIds.delete(itemId);
-                        }
-                        dataIngestionState.lastPreview = null;
-                        renderDataIngestionTilePreview([]);
-                        renderDataIngestionAcceptedSummary();
-                        refreshDataIngestionControls();
+                        setDataIngestionItemAccepted(itemId, checkbox.checked);
                     });
                 });
             }
@@ -36944,6 +37477,12 @@ async function cancelRfDetrTrainingJobRequest() {
         dataIngestionElements.downloadAcceptedButton = document.getElementById("dataIngestionDownloadAcceptedButton");
         dataIngestionElements.acceptedSummary = document.getElementById("dataIngestionAcceptedSummary");
         dataIngestionElements.tilePreview = document.getElementById("dataIngestionTilePreview");
+        dataIngestionElements.distribution = document.getElementById("dataIngestionDistribution");
+        dataIngestionElements.distributionButton = document.getElementById("dataIngestionDistributionButton");
+        dataIngestionElements.openDatasetAnalysisButton = document.getElementById("dataIngestionOpenDatasetAnalysisButton");
+        dataIngestionElements.distributionStatus = document.getElementById("dataIngestionDistributionStatus");
+        dataIngestionElements.distributionGraph = document.getElementById("dataIngestionDistributionGraph");
+        dataIngestionElements.distributionDetails = document.getElementById("dataIngestionDistributionDetails");
         [
             dataIngestionElements.referenceActive,
             dataIngestionElements.referenceBackend,
@@ -37007,6 +37546,12 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (dataIngestionElements.downloadAcceptedButton) {
             dataIngestionElements.downloadAcceptedButton.addEventListener("click", downloadDataIngestionAcceptedZip);
+        }
+        if (dataIngestionElements.distributionButton) {
+            dataIngestionElements.distributionButton.addEventListener("click", loadDataIngestionDistribution);
+        }
+        if (dataIngestionElements.openDatasetAnalysisButton) {
+            dataIngestionElements.openDatasetAnalysisButton.addEventListener("click", openClassSplitDatasetAnalysisFromIngestion);
         }
         refreshDataIngestionCapabilities();
         refreshDataIngestionControls();
@@ -37310,10 +37855,11 @@ async function cancelRfDetrTrainingJobRequest() {
         if (classSplitElements.cradioPooling) {
             classSplitElements.cradioPooling.disabled = !available || classSplitState.active || classSplitEncoderType !== "cradio";
         }
-        setButtonDisabled(classSplitElements.runButton, !canRun);
-        setButtonDisabled(classSplitElements.cancelButton, !classSplitState.active || !classSplitState.currentJobId);
-        setButtonDisabled(classSplitElements.rerunButton, classSplitState.active || !classSplitState.lastRequest);
-    }
+	        setButtonDisabled(classSplitElements.runButton, !canRun);
+	        setButtonDisabled(classSplitElements.cancelButton, !classSplitState.active || !classSplitState.currentJobId);
+	        setButtonDisabled(classSplitElements.rerunButton, classSplitState.active || !classSplitState.lastRequest);
+	        refreshClassSplitDatasetAnalysisControls();
+	    }
 
     function buildClassSplitRequest() {
         const stats = getClassSplitActiveWorkspaceStats();
@@ -37394,10 +37940,11 @@ async function cancelRfDetrTrainingJobRequest() {
             const request = reuseLast && classSplitState.lastRequest
                 ? { ...classSplitState.lastRequest }
                 : buildClassSplitRequest();
-            classSplitState.active = true;
-            classSplitState.currentJobId = "";
-            classSplitState.selectedPointId = "";
-            setClassSplitJobStatus("Packaging active workspace ...", "");
+	            classSplitState.active = true;
+	            classSplitState.currentJobId = "";
+	            classSplitState.selectedPointId = "";
+	            clearClassSplitDatasetAnalysis({ render: true });
+	            setClassSplitJobStatus("Packaging active workspace ...", "");
             renderClassSplitProgress({ progress: 0, message: "Packaging active labels and images ..." });
             refreshClassSplitControls();
             const workspace = await buildClassSplitActiveWorkspaceForm(request);
@@ -37522,12 +38069,13 @@ async function cancelRfDetrTrainingJobRequest() {
                 classSplitState.pointsById.set(String(point.point_id), point);
             }
         });
-        classSplitState.selectedPointId = "";
-        classSplitState.lassoPointIds = new Set();
-        classSplitState.dismissedWrongIds = new Set();
-        stopClassSplitPlotFlash();
-        renderClassSplitResult();
-    }
+	        classSplitState.selectedPointId = "";
+	        classSplitState.lassoPointIds = new Set();
+	        classSplitState.dismissedWrongIds = new Set();
+	        clearClassSplitDatasetAnalysis();
+	        stopClassSplitPlotFlash();
+	        renderClassSplitResult();
+	    }
 
     function getClassSplitFilteredPoints() {
         const result = classSplitState.result;
@@ -37564,13 +38112,17 @@ async function cancelRfDetrTrainingJobRequest() {
         if (mode === "outlier") {
             return classSplitScoreColor(point.outlier_score, "#dcfce7", "#f97316");
         }
-        if (mode === "area") {
-            const area = Math.max(0, (Number(point.width) || 0) * (Number(point.height) || 0));
-            const score = Math.min(1, Math.log10(area + 1) / 6);
-            return classSplitScoreColor(score, "#f1f5f9", "#7c3aed");
-        }
-        return getClassColorTokens(point.class_name || "").stroke || "#2563eb";
-    }
+	        if (mode === "area") {
+	            const area = Math.max(0, (Number(point.width) || 0) * (Number(point.height) || 0));
+	            const score = Math.min(1, Math.log10(area + 1) / 6);
+	            return classSplitScoreColor(score, "#f1f5f9", "#7c3aed");
+	        }
+	        if (mode === "image_value") {
+	            const score = Number(point.dataset_image_value_score);
+	            return Number.isFinite(score) ? classSplitScoreColor(score, "#dcfce7", "#be123c") : "#94a3b8";
+	        }
+	        return getClassColorTokens(point.class_name || "").stroke || "#2563eb";
+	    }
 
     function getClassSplitPlotTheme() {
         const mode = typeof getActiveThemeMode === "function" ? getActiveThemeMode() : THEME_LIGHT;
@@ -37825,15 +38377,301 @@ async function cancelRfDetrTrainingJobRequest() {
         updateClassSplitBulkClassOptions();
     }
 
-    function clearClassSplitBulkSelection({ render = false } = {}) {
-        classSplitState.lassoPointIds = new Set();
-        renderClassSplitBulkPanel();
-        if (render) {
-            renderClassSplitPlot();
-        }
-    }
+	    function clearClassSplitBulkSelection({ render = false } = {}) {
+	        classSplitState.lassoPointIds = new Set();
+	        renderClassSplitBulkPanel();
+	        if (render) {
+	            renderClassSplitPlot();
+	        }
+	    }
 
-    function rememberClassSplitSelectionFromPlot(event) {
+	    function classSplitHasAllClassResult() {
+	        const scope = String(classSplitState.result?.summary?.analysis_scope || classSplitState.lastRequest?.analysis_scope || "");
+	        return scope === "all_classes";
+	    }
+
+	    function clearClassSplitDatasetAnalysis({ render = false } = {}) {
+	        classSplitState.datasetAnalysis = null;
+	        (Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : []).forEach((point) => {
+	            delete point.dataset_image_value_score;
+	            delete point.dataset_image_value_rank;
+	        });
+	        if (render) {
+	            renderClassSplitDatasetAnalysis();
+	        }
+	    }
+
+	    function refreshClassSplitDatasetAnalysisControls() {
+	        const hasAllClassResult = classSplitHasAllClassResult();
+	        setButtonDisabled(classSplitElements.datasetAnalysisRun, classSplitState.active || !hasAllClassResult);
+	    }
+
+	    function applyClassSplitDatasetAnalysisToPoints(analysis) {
+	        (Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : []).forEach((point) => {
+	            delete point.dataset_image_value_score;
+	            delete point.dataset_image_value_rank;
+	        });
+	        (Array.isArray(analysis?.items) ? analysis.items : []).forEach((item, index) => {
+	            const score = Number(item.image_value_score);
+	            (Array.isArray(item.point_ids) ? item.point_ids : []).forEach((pointId) => {
+	                const point = getClassSplitPointById(pointId);
+	                if (!point) {
+	                    return;
+	                }
+	                point.dataset_image_value_score = Number.isFinite(score) ? score : 0;
+	                point.dataset_image_value_rank = index + 1;
+	            });
+	        });
+	    }
+
+	    function getClassSplitDatasetHoverPreview() {
+	        let preview = document.getElementById("classSplitDatasetAnalysisHoverPreview");
+	        if (!preview) {
+	            preview = document.createElement("div");
+	            preview.id = "classSplitDatasetAnalysisHoverPreview";
+	            preview.className = "class-split-dataset-hover-preview";
+	            preview.hidden = true;
+	            preview.innerHTML = `<img alt="Representative crop preview"><span></span>`;
+	            document.body.appendChild(preview);
+	        }
+	        return preview;
+	    }
+
+	    function moveClassSplitDatasetHoverPreview(event) {
+	        const preview = document.getElementById("classSplitDatasetAnalysisHoverPreview");
+	        if (!preview || preview.hidden) {
+	            return;
+	        }
+	        const gap = 18;
+	        const rect = preview.getBoundingClientRect();
+	        let left = event.clientX + gap;
+	        let top = event.clientY + gap;
+	        if (left + rect.width > window.innerWidth - gap) {
+	            left = Math.max(gap, event.clientX - rect.width - gap);
+	        }
+	        if (top + rect.height > window.innerHeight - gap) {
+	            top = Math.max(gap, window.innerHeight - rect.height - gap);
+	        }
+	        preview.style.left = `${Math.round(left)}px`;
+	        preview.style.top = `${Math.round(top)}px`;
+	    }
+
+	    function showClassSplitDatasetHoverPreview(event, previewUrl, label) {
+	        if (!previewUrl) {
+	            return;
+	        }
+	        const preview = getClassSplitDatasetHoverPreview();
+	        const img = preview.querySelector("img");
+	        const caption = preview.querySelector("span");
+	        if (img && img.getAttribute("src") !== previewUrl) {
+	            img.setAttribute("src", previewUrl);
+	        }
+	        if (caption) {
+	            caption.textContent = label || "";
+	        }
+	        preview.hidden = false;
+	        moveClassSplitDatasetHoverPreview(event);
+	    }
+
+	    function hideClassSplitDatasetHoverPreview() {
+	        const preview = document.getElementById("classSplitDatasetAnalysisHoverPreview");
+	        if (preview) {
+	            preview.hidden = true;
+	        }
+	    }
+
+	    function renderClassSplitDatasetAnalysisGraph(analysis) {
+	        const graphEl = classSplitElements.datasetAnalysisGraph;
+	        if (!graphEl) {
+	            return Promise.resolve(false);
+	        }
+	        const items = Array.isArray(analysis?.items) ? analysis.items : [];
+	        if (!items.length) {
+	            graphEl.innerHTML = `<div class="training-help">No image-value points yet.</div>`;
+	            return Promise.resolve(false);
+	        }
+	        if (!window.Plotly) {
+	            graphEl.innerHTML = `<div class="training-help">Plotly did not load; cannot render dataset value graph.</div>`;
+	            return Promise.resolve(false);
+	        }
+	        const theme = getClassSplitPlotTheme();
+	        const trace = {
+	            type: "scatter",
+	            mode: "markers",
+	            name: "Images",
+	            x: items.map((item) => Number(item.projection_rarity) || 0),
+	            y: items.map((item) => ((Number(item.bbox_rarity) || 0) + (Number(item.feature_rarity) || 0)) / 2),
+	            customdata: items.map((item) => String(item.preview_point_id || "")),
+	            text: items.map((item) => [
+	                item.image_relpath || item.image_name || "image",
+	                `value ${Number(item.image_value) || 0}/100`,
+	                `${Number(item.object_count) || 0} objects`,
+	            ].join("<br>")),
+	            hovertemplate: "%{text}<br>image edge %{x:.2f}<br>object rarity %{y:.2f}<extra></extra>",
+	            marker: {
+	                size: items.map((item) => Math.max(9, Math.min(28, 7 + Math.sqrt(Number(item.object_count) || 1) * 5))),
+	                color: items.map((item) => Number(item.image_value) || 0),
+	                cmin: 0,
+	                cmax: 100,
+	                colorscale: [
+	                    [0, "#22c55e"],
+	                    [0.55, "#f59e0b"],
+	                    [1, "#be123c"],
+	                ],
+	                colorbar: { title: "value" },
+	                opacity: 0.86,
+	                line: { color: "rgba(15, 23, 42, 0.38)", width: 0.75 },
+	            },
+	        };
+	        const layout = {
+	            paper_bgcolor: theme.paper,
+	            plot_bgcolor: theme.plot,
+	            font: { color: theme.text, family: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif" },
+	            margin: { l: 46, r: 28, t: 16, b: 48 },
+	            xaxis: {
+	                title: "image edge",
+	                range: [-0.04, 1.04],
+	                zeroline: false,
+	                gridcolor: theme.grid,
+	                linecolor: theme.grid,
+	            },
+	            yaxis: {
+	                title: "bbox / feature rarity",
+	                range: [-0.04, 1.04],
+	                zeroline: false,
+	                gridcolor: theme.grid,
+	                linecolor: theme.grid,
+	            },
+	            showlegend: false,
+	            uirevision: `class-split-dataset:${classSplitState.currentJobId || "live"}`,
+	        };
+	        return window.Plotly.react(graphEl, [trace], layout, {
+	            responsive: true,
+	            displaylogo: false,
+	            modeBarButtonsToRemove: ["toImage"],
+	        }).then(() => {
+	            if (typeof graphEl.removeAllListeners === "function") {
+	                graphEl.removeAllListeners("plotly_click");
+	            }
+	            graphEl.on("plotly_click", (event) => {
+	                const pointId = String(event?.points?.[0]?.customdata || "");
+	                if (pointId) {
+	                    selectClassSplitPoint(pointId, { jump: false, focusPlot: true, flash: true });
+	                }
+	            });
+	            return true;
+	        }).catch((error) => {
+	            console.warn("Class Split dataset graph render failed", error);
+	            graphEl.innerHTML = `<div class="training-help error">Dataset graph failed: ${escapeHtml(error.message || error)}</div>`;
+	            return false;
+	        });
+	    }
+
+	    function renderClassSplitDatasetAnalysisList(analysis) {
+	        const listEl = classSplitElements.datasetAnalysisList;
+	        if (!listEl) {
+	            return;
+	        }
+	        const items = Array.isArray(analysis?.items) ? analysis.items : [];
+	        if (!items.length) {
+	            listEl.innerHTML = `<div class="training-help">No image-value results yet.</div>`;
+	            return;
+	        }
+	        listEl.innerHTML = items.slice(0, 80).map((item, index) => {
+	            const point = getClassSplitPointById(item.preview_point_id);
+	            const previewUrl = point ? getClassSplitThumbnailUrl(point) : "";
+	            const classes = (Array.isArray(item.classes) ? item.classes : []).slice(0, 4).join(", ");
+	            const rarity = Math.round((((Number(item.bbox_rarity) || 0) + (Number(item.feature_rarity) || 0)) / 2) * 100);
+	            const edge = Math.round((Number(item.projection_rarity) || 0) * 100);
+	            return [
+	                `<div class="class-split-dataset-list__item" data-point-id="${escapeHtml(item.preview_point_id || "")}" data-preview-url="${escapeHtml(previewUrl)}" data-preview-label="${escapeHtml(item.image_relpath || item.image_name || "")}">`,
+	                `<strong>#${index + 1} • value ${escapeHtml(item.image_value ?? 0)}/100 • ${escapeHtml(item.image_name || "image")}</strong>`,
+	                `<span>${escapeHtml(item.object_count || 0)} objects • ${escapeHtml(item.class_count || 0)} classes${classes ? ` • ${escapeHtml(classes)}` : ""}</span><br>`,
+	                `<span>edge ${edge}% • bbox/feature rarity ${rarity}%</span>`,
+	                `</div>`,
+	            ].join("");
+	        }).join("");
+	        listEl.querySelectorAll(".class-split-dataset-list__item").forEach((node) => {
+	            const pointId = String(node.getAttribute("data-point-id") || "");
+	            const previewUrl = String(node.getAttribute("data-preview-url") || "");
+	            const previewLabel = String(node.getAttribute("data-preview-label") || "");
+	            node.addEventListener("click", () => {
+	                if (pointId) {
+	                    selectClassSplitPoint(pointId, { jump: false, focusPlot: true, flash: true });
+	                }
+	            });
+	            if (previewUrl) {
+	                node.addEventListener("mouseenter", (event) => showClassSplitDatasetHoverPreview(event, previewUrl, previewLabel));
+	                node.addEventListener("mousemove", moveClassSplitDatasetHoverPreview);
+	                node.addEventListener("mouseleave", hideClassSplitDatasetHoverPreview);
+	            }
+	        });
+	    }
+
+	    function renderClassSplitDatasetAnalysis() {
+	        refreshClassSplitDatasetAnalysisControls();
+	        const hasResult = !!classSplitState.result;
+	        const hasAllClassResult = classSplitHasAllClassResult();
+	        const points = Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : [];
+	        const analysis = classSplitState.datasetAnalysis;
+        const items = Array.isArray(analysis?.items) ? analysis.items : [];
+        if (classSplitElements.datasetAnalysisStatus) {
+            if (!hasResult) {
+                classSplitElements.datasetAnalysisStatus.textContent = "Run Class Split with Scope = All classes first.";
+            } else if (!hasAllClassResult) {
+                classSplitElements.datasetAnalysisStatus.textContent = "This result is selected-class only. Switch Scope to All classes and rerun Class Split.";
+            } else if (!items.length) {
+                classSplitElements.datasetAnalysisStatus.textContent = `Ready for ${points.length} objects.`;
+            } else {
+	                classSplitElements.datasetAnalysisStatus.textContent = `${items.length} images scored.`;
+	            }
+	        }
+        if (classSplitElements.datasetAnalysisReport) {
+            if (!items.length) {
+                classSplitElements.datasetAnalysisReport.innerHTML = `<div class="training-help">${
+                    hasAllClassResult
+                        ? "Run dataset analysis to score central versus edge images."
+                        : "Dataset Analysis is optional and separate from Data Ingestion. It needs an all-class Class Split result before it can score image value."
+                }</div>`;
+            } else {
+	                const summary = analysis.summary || {};
+	                const rows = [
+	                    ["Images", summary.image_count ?? items.length],
+	                    ["Objects", summary.object_count ?? points.length],
+	                    ["Mean value", `${summary.mean_image_value ?? 0}/100`],
+	                    ["Edge images", summary.high_value_count ?? 0],
+	                    ["Central images", summary.central_count ?? 0],
+	                ];
+	                classSplitElements.datasetAnalysisReport.innerHTML = `<div class="class-split-dataset-report__grid">${
+	                    rows.map(([label, value]) => `<div class="class-split-dataset-report__item"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`).join("")
+	                }</div>`;
+	            }
+	        }
+	        renderClassSplitDatasetAnalysisList(analysis);
+	        renderClassSplitDatasetAnalysisGraph(analysis);
+	    }
+
+	    function runClassSplitDatasetAnalysis() {
+	        const api = getAnnotationDiversityApi();
+	        const points = Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : [];
+	        if (!classSplitHasAllClassResult()) {
+	            setClassSplitJobStatus("Run Class Split with Scope = All classes before Dataset Analysis.", "warn");
+	            renderClassSplitDatasetAnalysis();
+	            return;
+	        }
+	        if (!api?.computeDatasetImageValueAnalysis) {
+	            setClassSplitJobStatus("Dataset analysis helper is unavailable.", "error");
+	            return;
+	        }
+	        const analysis = api.computeDatasetImageValueAnalysis(points);
+	        classSplitState.datasetAnalysis = analysis;
+	        applyClassSplitDatasetAnalysisToPoints(analysis);
+	        renderClassSplitDatasetAnalysis();
+	        renderClassSplitPlot();
+	        setClassSplitJobStatus(`Dataset analysis scored ${analysis.summary?.image_count || 0} images.`, "success");
+	    }
+
+	    function rememberClassSplitSelectionFromPlot(event) {
         const ids = new Set();
         (Array.isArray(event?.points) ? event.points : []).forEach((plotPoint) => {
             const pointId = String(plotPoint?.customdata || "");
@@ -38250,11 +39088,12 @@ async function cancelRfDetrTrainingJobRequest() {
         );
         renderClassSplitFilterOptions();
         renderClassSplitReport();
-        renderClassSplitWrongList();
-        renderClassSplitInspector();
-        renderClassSplitBulkPanel();
-        renderClassSplitPlot();
-    }
+	        renderClassSplitWrongList();
+	        renderClassSplitInspector();
+	        renderClassSplitBulkPanel();
+	        renderClassSplitDatasetAnalysis();
+	        renderClassSplitPlot();
+	    }
 
     function selectClassSplitPoint(pointId, { jump = false, focusPlot = false, flash = false } = {}) {
         const safeId = String(pointId || "");
@@ -38467,10 +39306,12 @@ async function cancelRfDetrTrainingJobRequest() {
             updateSam3ClassOptions({ preserveSelection: true });
             syncClassSplitCurrentClassSelection();
             markOnlyBboxRecord(match.bbox);
-        }
-        captureAnnotationDirtyStateForImage(imageKey);
-        return true;
-    }
+	        }
+	        captureAnnotationDirtyStateForImage(imageKey);
+	        scheduleAnnotationDiversityMetricRefresh();
+	        clearClassSplitDatasetAnalysis();
+	        return true;
+	    }
 
     async function changeClassSplitSelectedPointsClass(newClass) {
         const targetClass = String(newClass || "").trim();
@@ -38506,10 +39347,11 @@ async function cancelRfDetrTrainingJobRequest() {
             });
             clearClassSplitBulkSelection();
             renderClassSplitFilterOptions();
-            renderClassSplitWrongList();
-            renderClassSplitInspector();
-            renderClassSplitReport();
-            renderClassSplitPlot();
+	            renderClassSplitWrongList();
+	            renderClassSplitInspector();
+	            renderClassSplitReport();
+	            renderClassSplitDatasetAnalysis();
+	            renderClassSplitPlot();
             const suffix = failed.length ? ` ${failed.length} failed.` : " Save labels when ready.";
             const variant = failed.length && !changed ? "error" : failed.length ? "warn" : "success";
             setSamStatus(`Changed ${changed} selected object${changed === 1 ? "" : "s"} to ${targetClass}.${suffix}`, {
@@ -38649,9 +39491,11 @@ async function cancelRfDetrTrainingJobRequest() {
             syncQwenClassToCurrent();
             updateSam3ClassOptions({ preserveSelection: true });
             syncClassSplitCurrentClassSelection();
-            markOnlyBboxRecord(match.bbox);
-            captureAnnotationDirtyStateForImage(imageKey);
-            setSamStatus(`Changed class to ${targetClass}; rerunning analysis.`, { variant: "success", duration: 3500 });
+	            markOnlyBboxRecord(match.bbox);
+	            captureAnnotationDirtyStateForImage(imageKey);
+	            scheduleAnnotationDiversityMetricRefresh();
+	            clearClassSplitDatasetAnalysis({ render: true });
+	            setSamStatus(`Changed class to ${targetClass}; rerunning analysis.`, { variant: "success", duration: 3500 });
             await startClassSplitAnalysis({ reuseLast: true });
         } finally {
             classSplitState.relabelInFlight = false;
@@ -38694,11 +39538,17 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.colorMode = document.getElementById("classSplitColorMode");
         classSplitElements.filterClass = document.getElementById("classSplitFilterClass");
         classSplitElements.graph = document.getElementById("classSplitGraph");
-        classSplitElements.report = document.getElementById("classSplitReport");
-        classSplitElements.wrongPanel = document.getElementById("classSplitWrongPanel");
-        classSplitElements.wrongList = document.getElementById("classSplitWrongList");
-        classSplitElements.inspector = document.getElementById("classSplitInspector");
-        classSplitElements.bulkPanel = document.getElementById("classSplitBulkPanel");
+	        classSplitElements.report = document.getElementById("classSplitReport");
+	        classSplitElements.wrongPanel = document.getElementById("classSplitWrongPanel");
+	        classSplitElements.wrongList = document.getElementById("classSplitWrongList");
+	        classSplitElements.inspector = document.getElementById("classSplitInspector");
+	        classSplitElements.datasetAnalysisPanel = document.getElementById("classSplitDatasetAnalysisPanel");
+	        classSplitElements.datasetAnalysisRun = document.getElementById("classSplitDatasetAnalysisRun");
+	        classSplitElements.datasetAnalysisStatus = document.getElementById("classSplitDatasetAnalysisStatus");
+	        classSplitElements.datasetAnalysisReport = document.getElementById("classSplitDatasetAnalysisReport");
+	        classSplitElements.datasetAnalysisGraph = document.getElementById("classSplitDatasetAnalysisGraph");
+	        classSplitElements.datasetAnalysisList = document.getElementById("classSplitDatasetAnalysisList");
+	        classSplitElements.bulkPanel = document.getElementById("classSplitBulkPanel");
         classSplitElements.bulkCount = document.getElementById("classSplitBulkCount");
         classSplitElements.bulkClass = document.getElementById("classSplitBulkClass");
         classSplitElements.bulkApply = document.getElementById("classSplitBulkApply");
@@ -38775,10 +39625,13 @@ async function cancelRfDetrTrainingJobRequest() {
                 });
             });
         }
-        if (classSplitElements.bulkClear) {
-            classSplitElements.bulkClear.addEventListener("click", () => clearClassSplitBulkSelection({ render: true }));
-        }
-        applyEmbeddingRecipePresetToClassSplit(classSplitElements.recipePreset?.value || "precise");
+	        if (classSplitElements.bulkClear) {
+	            classSplitElements.bulkClear.addEventListener("click", () => clearClassSplitBulkSelection({ render: true }));
+	        }
+	        if (classSplitElements.datasetAnalysisRun) {
+	            classSplitElements.datasetAnalysisRun.addEventListener("click", runClassSplitDatasetAnalysis);
+	        }
+	        applyEmbeddingRecipePresetToClassSplit(classSplitElements.recipePreset?.value || "precise");
         populateClassSplitClasses({ preserveSelection: true });
         refreshClassSplitControls();
         loadClassSplitClipBackbones()

@@ -233,7 +233,35 @@ def test_reference_profile_import_rejects_duplicate_members(tmp_path, monkeypatc
     asyncio.run(response.background())
 
 
+def test_data_ingestion_job_serialization_hides_private_paths(tmp_path):
+    job = api.DataIngestionJob(
+        job_id="di_public_job",
+        kind="analysis",
+        status="completed",
+        request={
+            "candidate_uploads": [{"path": str(tmp_path / "candidate.jpg"), "filename": "candidate.jpg"}],
+            "reference_uploads": [{"image_path": str(tmp_path / "reference.jpg"), "filename": "reference.jpg"}],
+            "keep_fraction": 0.2,
+        },
+        result={"summary": {"path": str(tmp_path / "profile.pt"), "selected_count": 1}},
+    )
+
+    serialized = api._serialize_data_ingestion_job(job)
+
+    dumped = json.dumps(serialized)
+    assert str(tmp_path) not in dumped
+    assert serialized["request"]["candidate_uploads"][0] == {"filename": "candidate.jpg"}
+    assert serialized["request"]["reference_uploads"][0] == {"filename": "reference.jpg"}
+    assert serialized["summary"] == {"selected_count": 1}
+
+
 def _register_completed_ingestion_job(api_module, job_id: str, job_dir: Path, image_path: Path) -> None:
+    reference_thumb_path, _thumb_dir = api_module._data_ingestion_thumbnail_cache_path(
+        job_dir,
+        "reference_thumbnails",
+        "reference_000000",
+    )
+    Image.new("RGB", (20, 18), (180, 120, 20)).save(reference_thumb_path)
     result = {
         "summary": {"salad_head_id": "unit_profile", "selected_count": 1},
         "items": [
@@ -265,6 +293,18 @@ def _register_completed_ingestion_job(api_module, job_id: str, job_dir: Path, im
                 "height": 10,
                 "image_path": str(image_path),
             },
+        ],
+        "reference_items": [
+            {
+                "point_id": "reference_000000",
+                "index": 0,
+                "filename": "reference_a.jpg",
+                "source_type": "image",
+                "frame_index": 0,
+                "width": 20,
+                "height": 18,
+                "has_thumbnail": True,
+            }
         ],
     }
     result_path = job_dir / "result.json"
@@ -315,6 +355,76 @@ def test_data_ingestion_candidate_thumbnail_uses_internal_source_path(tmp_path, 
     assert thumb_path.exists()
     with Image.open(thumb_path) as img:
         assert max(img.size) == api.DATA_INGESTION_CANDIDATE_THUMB_SIZE
+
+
+def test_data_ingestion_reference_thumbnail_uses_cached_job_artifact(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_reference_thumb"
+    media_dir = job_dir / "media" / "candidates"
+    media_dir.mkdir(parents=True)
+    image_path = media_dir / "candidate_a.jpg"
+    Image.new("RGB", (24, 16), (20, 100, 180)).save(image_path)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_reference_thumb", job_dir, image_path)
+
+    response = api.get_data_ingestion_reference_thumbnail("di_reference_thumb", "reference_000000")
+
+    thumb_path = Path(response.path)
+    assert thumb_path.exists()
+    assert job_dir in thumb_path.parents
+    with Image.open(thumb_path) as img:
+        assert img.size == (20, 18)
+
+
+def test_data_ingestion_distribution_projects_candidates_without_paths(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_distribution"
+    media_dir = job_dir / "media" / "candidates"
+    media_dir.mkdir(parents=True)
+    image_path = media_dir / "candidate_a.jpg"
+    Image.new("RGB", (24, 16), (20, 100, 180)).save(image_path)
+    np.savez_compressed(
+        job_dir / "embeddings.npz",
+        candidate_embeddings=np.asarray(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            dtype=np.float32,
+        ),
+        reference_embeddings=np.asarray(
+            [
+                [1.0, 0.0, 0.0],
+                [0.8, 0.2, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_distribution", job_dir, image_path)
+
+    distribution = api.get_data_ingestion_distribution("di_distribution")
+
+    assert distribution["summary"]["projection"] == "pca"
+    assert distribution["summary"]["projection_fit_basis"] == "reference"
+    assert distribution["summary"]["candidate_count"] == 2
+    assert distribution["summary"]["reference_count"] == 3
+    assert distribution["summary"]["candidate_point_count"] == 2
+    assert distribution["summary"]["reference_point_count"] == 3
+    assert "image_path" not in json.dumps(distribution)
+    assert str(tmp_path) not in json.dumps(distribution)
+    reference_points = [point for point in distribution["points"] if point["kind"] == "reference"]
+    candidate_points = [point for point in distribution["points"] if point["kind"] == "candidate"]
+    assert len(reference_points) == 3
+    assert len(candidate_points) == 2
+    assert reference_points[0]["thumbnail_url"] == "/data_ingestion/jobs/di_distribution/reference_thumbnail/reference_000000"
+    assert reference_points[0]["filename"] == "reference_a.jpg"
+    assert candidate_points[0]["thumbnail_url"] == "/data_ingestion/jobs/di_distribution/candidate_thumbnail/item_keep"
+    assert all(len(point["projection"]) == 2 for point in distribution["points"])
+    assert all(np.isfinite(point["projection"]).all() for point in distribution["points"])
 
 
 def test_accepted_export_preview_and_download_tiles_kept_items(tmp_path, monkeypatch):
@@ -1943,6 +2053,29 @@ def test_list_local_salad_heads_rejects_symlinked_root(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "load_local_salad_head_file", fail_load)
 
     assert api._list_local_salad_heads() == []
+
+
+def test_list_local_salad_heads_omits_filesystem_paths(tmp_path, monkeypatch):
+    heads_root = tmp_path / "heads"
+    heads_root.mkdir()
+    (heads_root / "profile.pt").write_bytes(b"placeholder")
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+
+    def fake_load(_path, device_name="cpu"):
+        return None, {
+            "label": "Profile",
+            "encoder_type": "dinov3",
+            "train_image_count": 3,
+            "config": {"token_dim": 2, "num_clusters": 1, "cluster_dim": 4},
+        }
+
+    monkeypatch.setattr(api, "load_local_salad_head_file", fake_load)
+
+    heads = api._list_local_salad_heads()
+
+    assert len(heads) == 1
+    assert heads[0]["id"] == "profile"
+    assert "path" not in heads[0]
 
 
 def test_local_salad_head_ids_do_not_overwrite_existing_heads(tmp_path, monkeypatch):

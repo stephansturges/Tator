@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20260520a" rel="stylesheet">
+    <link href="ybat.css?v=20260525a" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
          before we call listenImageCrop().
@@ -12,8 +12,8 @@
     <script src="jszip.min.js?v=20260409a"></script>
     <script src="filesaver.min.js?v=20260409a"></script>
     <script src="plotly-2.35.2.min.js?v=20260520a"></script>
-    <script src="annotation_diversity.js?v=20260524a"></script>
-    <script src="ybat.js?v=20260524a"></script>
+    <script src="annotation_diversity.js?v=20260525a"></script>
+    <script src="ybat.js?v=20260525a"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -819,6 +819,27 @@
                             <strong id="dataIngestionListTitle">Top diverse candidates</strong>
                             <div id="dataIngestionList" class="data-ingestion-list"></div>
                         </div>
+                        <div class="data-ingestion-distribution" id="dataIngestionDistribution" hidden>
+                            <div class="data-ingestion-panel__header">
+                                <div>
+                                    <strong>Distribution map</strong>
+                                    <div class="training-help">Project candidates onto the selected reference dataset profile. This does not require Class Split Dataset Analysis; that is a separate image-value review workflow.</div>
+                                </div>
+                                <div class="data-ingestion-actions">
+                                    <button type="button" id="dataIngestionDistributionButton" class="training-button secondary">Show distribution map</button>
+                                    <button type="button" id="dataIngestionOpenDatasetAnalysisButton" class="training-button secondary">Open Class Split setup</button>
+                                    <span id="dataIngestionDistributionStatus" class="training-help"></span>
+                                </div>
+                            </div>
+                            <div class="data-ingestion-distribution__body">
+                                <div id="dataIngestionDistributionGraph" class="data-ingestion-distribution-graph">
+                                    <div class="training-help">Map not loaded.</div>
+                                </div>
+                                <div id="dataIngestionDistributionDetails" class="data-ingestion-distribution-details">
+                                    <div class="training-help">Click a candidate point to inspect it.</div>
+                                </div>
+                            </div>
+                        </div>
                         <div class="data-ingestion-acceptance" id="dataIngestionAcceptance" hidden>
                             <div class="data-ingestion-panel__header">
                                 <div>
@@ -880,7 +901,7 @@
                             <h2>Class Split Explorer</h2>
                             <div id="classSplitDatasetStatus" class="training-help">Open a dataset in Label Images to run analysis. Full WALDO tests keep DINOv3 Precise as the stable default; C-RADIOv4 improves NN purity only in a very slow opt-in audit path.</div>
                             <div class="training-help warn">C-RADIOv4 on Mac now uses the local MLX backend by default when <code>~/cradio_mlx</code> and its checkpoints are present; otherwise it falls back to Torch CUDA/MPS/CPU. The old WALDO C-RADIO timings were Torch/MPS-era numbers.</div>
-                            <details class="embedding-benchmark-note" open>
+                            <details class="embedding-benchmark-note">
                                 <summary>WALDO encoder benchmark comparison</summary>
                                 <div class="embedding-benchmark-note__intro">All-class object-crop audit, uncapped. NN purity means: for each embedded object crop, what fraction of its nearest neighbors have the same class. The first NN number is object-weighted; the second balances classes. This is a clustering score, not classifier accuracy. Lower size leakage and fewer wrong-class candidates are better. The C-RADIO card is the slow tight+context audit row; the visible C-RADIO preset starts from summary mode.</div>
                                 <div class="embedding-benchmark-note__grid">
@@ -1040,13 +1061,14 @@
                         <div class="class-split-results" id="classSplitResults" hidden>
                             <div class="class-split-toolbar">
                                 <label for="classSplitColorMode">Color</label>
-                                <select id="classSplitColorMode">
-                                    <option value="class">Class</option>
-                                    <option value="cluster">Cluster</option>
-                                    <option value="wrong">Wrong-class suspicion</option>
-                                    <option value="outlier">Outlier score</option>
-                                    <option value="area">Box area</option>
-                                </select>
+	                                <select id="classSplitColorMode">
+	                                    <option value="class">Class</option>
+	                                    <option value="cluster">Cluster</option>
+	                                    <option value="wrong">Wrong-class suspicion</option>
+	                                    <option value="outlier">Outlier score</option>
+	                                    <option value="area">Box area</option>
+	                                    <option value="image_value">Image value</option>
+	                                </select>
                                 <label for="classSplitFilterClass">Filter</label>
                                 <select id="classSplitFilterClass"></select>
                             </div>
@@ -1077,6 +1099,21 @@
                             </div>
                         </div>
                     </section>
+                    <details id="classSplitDatasetAnalysisPanel" class="class-split-panel class-split-dataset-analysis">
+                        <summary>Dataset analysis</summary>
+                        <div class="training-help">Optional image-value review. Run Class Split with Scope = All classes first, then score which source images sit near under-covered classes, rare object features, or graph edges.</div>
+                        <div class="class-split-dataset-analysis__actions">
+                            <button type="button" id="classSplitDatasetAnalysisRun" class="training-button secondary" disabled>Run dataset analysis</button>
+                            <span id="classSplitDatasetAnalysisStatus" class="training-help">Run Class Split with Scope = All classes first.</span>
+                        </div>
+                        <div id="classSplitDatasetAnalysisReport" class="class-split-dataset-report">
+                            <div class="training-help">Run all-class analysis to score image value.</div>
+                        </div>
+                        <div class="class-split-dataset-analysis__body">
+                            <div id="classSplitDatasetAnalysisGraph" class="class-split-dataset-graph"></div>
+                            <div id="classSplitDatasetAnalysisList" class="class-split-dataset-list"></div>
+                        </div>
+                    </details>
                 </div>
             </div>
             <div class="tab-panel" id="tabPrepassBuilder" data-tab-panel="prepass-builder">

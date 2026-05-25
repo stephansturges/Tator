@@ -299,6 +299,7 @@ from services.data_ingestion import (
     diversity_summary as _data_ingestion_diversity_summary,
     greedy_diverse_indices as _data_ingestion_greedy_indices,
     normalize_keep_fraction as _data_ingestion_keep_fraction,
+    normalize_rows as _data_ingestion_normalize_rows,
     safe_media_name as _data_ingestion_safe_media_name,
 )
 from services.detector_jobs import (
@@ -13883,6 +13884,7 @@ ACCEPTED_EXPORT_MAX_PREVIEW_OUTPUTS = 240
 ACCEPTED_EXPORT_MAX_DOWNLOAD_OUTPUTS = 20000
 ACCEPTED_EXPORT_THUMB_SIZE = 192
 DATA_INGESTION_CANDIDATE_THUMB_SIZE = 400
+DATA_INGESTION_REFERENCE_THUMB_SIZE = 400
 ACCEPTED_EXPORT_MAX_TARGET_EDGE = 8192
 ACCEPTED_EXPORT_MAX_TARGET_PIXELS = 67_108_864
 PROMPT_HELPER_JOB_ROOT = Path(
@@ -20007,6 +20009,22 @@ def _data_ingestion_update(
         job.updated_at = time.time()
 
 
+def _data_ingestion_public_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for key, item in value.items():
+            key_str = str(key)
+            if key_str.startswith("_") or key_str in {"path", "image_path", "source_path", "resolved_path"}:
+                continue
+            out[key_str] = _data_ingestion_public_payload(item)
+        return out
+    if isinstance(value, list):
+        return [_data_ingestion_public_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [_data_ingestion_public_payload(item) for item in value]
+    return json_sanitize(value)
+
+
 def _serialize_data_ingestion_job(job: DataIngestionJob) -> Dict[str, Any]:
     return {
         "job_id": job.job_id,
@@ -20014,9 +20032,9 @@ def _serialize_data_ingestion_job(job: DataIngestionJob) -> Dict[str, Any]:
         "status": job.status,
         "progress": json_sanitize(job.progress),
         "message": job.message,
-        "request": json_sanitize(job.request),
+        "request": _data_ingestion_public_payload(job.request),
         "logs": json_sanitize(job.logs),
-        "summary": json_sanitize(
+        "summary": _data_ingestion_public_payload(
             (job.result or {}).get("summary") if isinstance(job.result, dict) else None
         ),
         "error": json_sanitize(job.error),
@@ -20190,7 +20208,6 @@ def _list_local_salad_heads() -> List[Dict[str, Any]]:
         entry: Dict[str, Any] = {
             "id": path.stem,
             "filename": path.name,
-            "path": str(path),
             "updated_at": path.stat().st_mtime,
             "status": "available",
         }
@@ -20595,6 +20612,45 @@ def _data_ingestion_novelty_score_metadata(scores: Sequence[float]) -> List[Dict
         }
         for idx in range(total)
     ]
+
+
+def _data_ingestion_thumbnail_cache_path(job_dir: Path, cache_dir_name: str, key: str) -> Tuple[Path, Path]:
+    safe_key = hashlib.sha256(str(key or "").encode("utf-8")).hexdigest()[:24]
+    if not safe_key:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_thumbnail_key_invalid")
+    thumb_dir = job_dir / cache_dir_name
+    prepared_thumb_dir = _class_analysis_prepare_dir(thumb_dir, job_dir)
+    if prepared_thumb_dir is None:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_thumbnail_path_invalid")
+    return prepared_thumb_dir / f"{safe_key}.jpg", prepared_thumb_dir
+
+
+def _data_ingestion_write_reference_thumbnail(row: Dict[str, Any], job_dir: Path, point_id: str) -> bool:
+    try:
+        thumb_path, _thumb_dir = _data_ingestion_thumbnail_cache_path(job_dir, "reference_thumbnails", point_id)
+        source_path = Path(str(row.get("image_path") or ""))
+        if source_path.suffix.lower() not in DATA_INGESTION_IMAGE_EXTS:
+            return False
+        with _data_ingestion_open_image(source_path) as image:
+            image.thumbnail((DATA_INGESTION_REFERENCE_THUMB_SIZE, DATA_INGESTION_REFERENCE_THUMB_SIZE))
+            _class_analysis_write_jpeg(thumb_path, job_dir, image, quality=86)
+        return _safe_existing_regular_file_within_root_impl(thumb_path, job_dir) is not None
+    except Exception:
+        return False
+
+
+def _data_ingestion_public_reference_item(row: Dict[str, Any], idx: int, *, has_thumbnail: bool) -> Dict[str, Any]:
+    point_id = f"reference_{idx:06d}"
+    return {
+        "point_id": point_id,
+        "index": idx,
+        "filename": str(row.get("filename") or row.get("saved_name") or f"Reference {idx + 1}"),
+        "source_type": str(row.get("source_type") or "image"),
+        "frame_index": _coerce_int(row.get("frame_index"), 0, minimum=0),
+        "width": _coerce_int(row.get("width"), 0, minimum=0),
+        "height": _coerce_int(row.get("height"), 0, minimum=0),
+        "has_thumbnail": bool(has_thumbnail),
+    }
 
 
 async def _data_ingestion_save_uploads(files: Sequence[Any], target_dir: Path, field_name: str) -> List[Dict[str, Any]]:
@@ -21139,7 +21195,14 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
                     "selection_method": "farthest_first_coverage",
                 }
             )
+        reference_items: List[Dict[str, Any]] = []
+        for idx, row in enumerate(references):
+            point_id = f"reference_{idx:06d}"
+            has_thumbnail = _data_ingestion_write_reference_thumbnail(row, out_dir, point_id)
+            reference_items.append(_data_ingestion_public_reference_item(row, idx, has_thumbnail=has_thumbnail))
         result = {"summary": summary, "items": ranked_items}
+        if reference_items:
+            result["reference_items"] = reference_items
         result_path = out_dir / "result.json"
         if job.cancel_event.is_set():
             raise RuntimeError("cancelled")
@@ -21624,7 +21687,7 @@ def _load_data_ingestion_result(job_id: str) -> Dict[str, Any]:
 
 
 def _data_ingestion_public_result(job_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
-    public = dict(result or {})
+    public = _data_ingestion_public_payload(result or {})
     items: List[Dict[str, Any]] = []
     for item in result.get("items") or []:
         if not isinstance(item, dict):
@@ -21646,6 +21709,152 @@ def _data_ingestion_public_result(job_id: str, result: Dict[str, Any]) -> Dict[s
 
 def get_data_ingestion_result(job_id: str) -> Dict[str, Any]:
     return _data_ingestion_public_result(job_id, _load_data_ingestion_result(job_id))
+
+
+def _data_ingestion_load_embeddings(job_dir: Path) -> Tuple[np.ndarray, np.ndarray]:
+    embeddings_path = _safe_existing_regular_file_within_root_impl(job_dir / "embeddings.npz", job_dir)
+    if embeddings_path is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_embeddings_not_found")
+    try:
+        with np.load(str(embeddings_path), allow_pickle=False) as payload:
+            candidate_embeddings = np.asarray(payload["candidate_embeddings"], dtype=np.float32)
+            reference_embeddings = np.asarray(payload["reference_embeddings"], dtype=np.float32)
+    except KeyError as exc:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_embeddings_incomplete") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_embeddings_invalid") from exc
+    if candidate_embeddings.ndim != 2 or reference_embeddings.ndim != 2:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_embeddings_invalid")
+    if candidate_embeddings.size and reference_embeddings.size and candidate_embeddings.shape[1] != reference_embeddings.shape[1]:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_embedding_dim_mismatch")
+    return candidate_embeddings, reference_embeddings
+
+
+def _data_ingestion_fit_reference_projection(
+    candidate_embeddings: np.ndarray,
+    reference_embeddings: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    candidate_count = int(candidate_embeddings.shape[0])
+    reference_count = int(reference_embeddings.shape[0])
+    dim = int(candidate_embeddings.shape[1] if candidate_embeddings.ndim == 2 and candidate_embeddings.size else reference_embeddings.shape[1])
+    if candidate_count <= 0:
+        return np.empty((0, 2), dtype=np.float32), np.empty((reference_count, 2), dtype=np.float32), {
+            "projection": "empty",
+            "fit_basis": "none",
+            "explained_variance_ratio": [],
+        }
+    candidate_norm = _data_ingestion_normalize_rows(candidate_embeddings)
+    reference_norm = _data_ingestion_normalize_rows(reference_embeddings) if reference_count else np.empty((0, dim), dtype=np.float32)
+    if reference_count >= 2:
+        fit_rows = reference_norm
+        fit_basis = "reference"
+    else:
+        fit_rows = np.concatenate([reference_norm, candidate_norm], axis=0) if reference_count else candidate_norm
+        fit_basis = "reference_plus_candidates" if reference_count else "candidates"
+    sample_count = int(fit_rows.shape[0])
+    if sample_count <= 1:
+        candidate_coords = np.zeros((candidate_count, 2), dtype=np.float32)
+        reference_coords = np.zeros((reference_count, 2), dtype=np.float32)
+        return candidate_coords, reference_coords, {
+            "projection": "single",
+            "fit_basis": fit_basis,
+            "explained_variance_ratio": [],
+        }
+    n_components = 2 if min(fit_rows.shape) >= 2 else 1
+    reducer = PCA(n_components=n_components, random_state=42)
+    reducer.fit(fit_rows)
+    candidate_coords = reducer.transform(candidate_norm).astype(np.float32, copy=False)
+    reference_coords = reducer.transform(reference_norm).astype(np.float32, copy=False) if reference_count else np.empty((0, n_components), dtype=np.float32)
+    if n_components == 1:
+        candidate_coords = np.concatenate([candidate_coords, np.zeros((candidate_count, 1), dtype=np.float32)], axis=1)
+        reference_coords = np.concatenate([reference_coords, np.zeros((reference_count, 1), dtype=np.float32)], axis=1)
+    return candidate_coords.astype(np.float32, copy=False), reference_coords.astype(np.float32, copy=False), {
+        "projection": "pca",
+        "fit_basis": fit_basis,
+        "explained_variance_ratio": [float(value) for value in getattr(reducer, "explained_variance_ratio_", [])[:2]],
+    }
+
+
+def get_data_ingestion_distribution(job_id: str) -> Dict[str, Any]:
+    _job, result, items, job_dir = _data_ingestion_completed_analysis(job_id)
+    candidate_embeddings, reference_embeddings = _data_ingestion_load_embeddings(job_dir)
+    candidate_coords, reference_coords, projection_meta = _data_ingestion_fit_reference_projection(
+        candidate_embeddings,
+        reference_embeddings,
+    )
+    items_by_index: Dict[int, Dict[str, Any]] = {}
+    for item in items:
+        idx = _coerce_int(item.get("index"), -1)
+        if idx >= 0:
+            items_by_index[idx] = item
+    reference_items = [dict(item) for item in result.get("reference_items") or [] if isinstance(item, dict)]
+    reference_items_by_index: Dict[int, Dict[str, Any]] = {}
+    for item in reference_items:
+        idx = _coerce_int(item.get("index"), -1)
+        if idx >= 0:
+            reference_items_by_index[idx] = item
+    points: List[Dict[str, Any]] = []
+    for idx, coord in enumerate(reference_coords):
+        reference_item = reference_items_by_index.get(idx, {})
+        point_id = str(reference_item.get("point_id") or f"reference_{idx:06d}")
+        point = {
+            "kind": "reference",
+            "point_id": point_id,
+            "index": idx,
+            "projection": [float(coord[0]), float(coord[1])],
+            "label": str(reference_item.get("filename") or reference_item.get("label") or f"Reference {idx + 1}"),
+            "filename": str(reference_item.get("filename") or f"Reference {idx + 1}"),
+            "source_type": str(reference_item.get("source_type") or "image"),
+            "frame_index": reference_item.get("frame_index") or 0,
+            "width": reference_item.get("width") or 0,
+            "height": reference_item.get("height") or 0,
+        }
+        if reference_item.get("has_thumbnail"):
+            point["thumbnail_url"] = f"/data_ingestion/jobs/{job_id}/reference_thumbnail/{point_id}"
+        points.append(
+            point
+        )
+    for idx, coord in enumerate(candidate_coords):
+        item = items_by_index.get(idx)
+        if not item:
+            continue
+        item_id = _data_ingestion_result_item_id(item)
+        point = {
+            "kind": "candidate",
+            "point_id": item_id,
+            "item_id": item_id,
+            "index": idx,
+            "projection": [float(coord[0]), float(coord[1])],
+            "keep": bool(item.get("keep")),
+            "rank": item.get("rank"),
+            "filename": str(item.get("filename") or item.get("saved_name") or item_id),
+            "source_type": str(item.get("source_type") or "image"),
+            "frame_index": item.get("frame_index") or 0,
+            "width": item.get("width") or 0,
+            "height": item.get("height") or 0,
+            "diversity_score": float(item.get("diversity_score") or 0.0),
+            "reference_novelty_score": item.get("reference_novelty_score"),
+            "reference_novelty_percentile": item.get("reference_novelty_percentile"),
+            "reference_novelty_rank": item.get("reference_novelty_rank"),
+            "thumbnail_url": f"/data_ingestion/jobs/{job_id}/candidate_thumbnail/{item_id}",
+        }
+        points.append(point)
+    summary = dict(result.get("summary") or {})
+    return json_sanitize(
+        {
+            "summary": {
+                "candidate_count": int(candidate_embeddings.shape[0]),
+                "reference_count": int(reference_embeddings.shape[0]),
+                "candidate_point_count": int(len([point for point in points if point.get("kind") == "candidate"])),
+                "reference_point_count": int(reference_coords.shape[0]),
+                "projection": projection_meta.get("projection"),
+                "projection_fit_basis": projection_meta.get("fit_basis"),
+                "explained_variance_ratio": projection_meta.get("explained_variance_ratio") or [],
+                "selection_method": summary.get("selection_method") or "farthest_first_coverage",
+            },
+            "points": points,
+        }
+    )
 
 
 def _data_ingestion_result_item_id(item: Dict[str, Any]) -> str:
@@ -21705,6 +21914,20 @@ def get_data_ingestion_candidate_thumbnail(job_id: str, item_id: str):
         safe_thumb_path = _safe_existing_regular_file_within_root_impl(thumb_path, job_dir)
     if safe_thumb_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_candidate_thumbnail_not_found")
+    return FileResponse(str(safe_thumb_path), media_type="image/jpeg")
+
+
+def get_data_ingestion_reference_thumbnail(job_id: str, point_id: str):
+    _job, result, _items, job_dir = _data_ingestion_completed_analysis(job_id)
+    wanted = str(point_id or "").strip()
+    reference_items = [dict(item) for item in result.get("reference_items") or [] if isinstance(item, dict)]
+    item = next((entry for entry in reference_items if str(entry.get("point_id") or "") == wanted), None)
+    if item is None or not bool(item.get("has_thumbnail")):
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_reference_thumbnail_not_found")
+    thumb_path, _thumb_dir = _data_ingestion_thumbnail_cache_path(job_dir, "reference_thumbnails", wanted)
+    safe_thumb_path = _safe_existing_regular_file_within_root_impl(thumb_path, job_dir)
+    if safe_thumb_path is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="data_ingestion_reference_thumbnail_not_found")
     return FileResponse(str(safe_thumb_path), media_type="image/jpeg")
 
 
@@ -39417,6 +39640,8 @@ app.include_router(
         import_reference_profile_fn=import_data_ingestion_reference_profile,
         preview_accepted_export_fn=preview_data_ingestion_accepted_export,
         get_candidate_thumbnail_fn=get_data_ingestion_candidate_thumbnail,
+        get_reference_thumbnail_fn=get_data_ingestion_reference_thumbnail,
+        get_distribution_fn=get_data_ingestion_distribution,
         get_accepted_export_thumbnail_fn=get_data_ingestion_accepted_export_thumbnail,
         download_accepted_export_fn=download_data_ingestion_accepted_export,
         get_job_fn=get_data_ingestion_job,

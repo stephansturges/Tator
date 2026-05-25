@@ -17,6 +17,8 @@ def build_data_ingestion_router(
     import_reference_profile_fn: Callable[[UploadFile], Any],
     preview_accepted_export_fn: Callable[[str, dict], Any],
     get_candidate_thumbnail_fn: Callable[[str, str], Any],
+    get_reference_thumbnail_fn: Callable[[str, str], Any],
+    get_distribution_fn: Callable[[str], Any],
     get_accepted_export_thumbnail_fn: Callable[[str, str, str], Any],
     download_accepted_export_fn: Callable[[str, dict], Any],
     get_job_fn: Callable[[str], Any],
@@ -100,6 +102,14 @@ def build_data_ingestion_router(
     @router.get("/data_ingestion/jobs/{job_id}/candidate_thumbnail/{item_id}")
     def get_candidate_thumbnail(job_id: str, item_id: str):
         return get_candidate_thumbnail_fn(job_id, item_id)
+
+    @router.get("/data_ingestion/jobs/{job_id}/reference_thumbnail/{point_id}")
+    def get_reference_thumbnail(job_id: str, point_id: str):
+        return get_reference_thumbnail_fn(job_id, point_id)
+
+    @router.get("/data_ingestion/jobs/{job_id}/distribution")
+    def get_distribution(job_id: str):
+        return get_distribution_fn(job_id)
 
     @router.get("/data_ingestion/jobs/{job_id}/accepted_export/{preview_id}/thumbnail/{output_id}")
     def get_accepted_export_thumbnail(job_id: str, preview_id: str, output_id: str):

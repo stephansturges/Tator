@@ -85,3 +85,28 @@ def test_annotation_diversity_metric_counts_buckets_and_yolo_rows():
         """
     )
     _run_node(script)
+
+
+def test_dataset_image_value_analysis_prioritizes_rare_edge_images():
+    script = textwrap.dedent(
+        """
+        const assert = require("assert");
+        const api = require("./ybat-master/annotation_diversity.js");
+
+        const points = [
+            { point_id: "common_1", split: "train", image_relpath: "common.jpg", class_name: "car", cluster_id: 1, width: 20, height: 20, outlier_score: 0.05, projection: [0, 0] },
+            { point_id: "common_2", split: "train", image_relpath: "common.jpg", class_name: "car", cluster_id: 1, width: 21, height: 20, outlier_score: 0.08, projection: [0.02, 0.01] },
+            { point_id: "common_3", split: "train", image_relpath: "common_2.jpg", class_name: "car", cluster_id: 1, width: 22, height: 20, outlier_score: 0.04, projection: [-0.02, 0] },
+            { point_id: "edge_1", split: "train", image_relpath: "edge.jpg", class_name: "rare", cluster_id: 9, width: 90, height: 80, outlier_score: 0.95, projection: [3, 3] },
+        ];
+
+        const analysis = api.computeDatasetImageValueAnalysis(points);
+        assert.strictEqual(analysis.summary.image_count, 3);
+        assert.strictEqual(analysis.summary.object_count, 4);
+        assert.strictEqual(analysis.items[0].image_relpath, "edge.jpg");
+        assert(analysis.items[0].image_value > analysis.items[analysis.items.length - 1].image_value);
+        assert.strictEqual(analysis.items[0].preview_point_id, "edge_1");
+        assert(analysis.items[0].classes.includes("rare"));
+        """
+    )
+    _run_node(script)

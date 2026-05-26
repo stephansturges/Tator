@@ -5082,6 +5082,14 @@ const sam3TrainState = {
         }
     }
 
+    function formatBackendFetchError(error, fallbackMessage = "Backend request failed") {
+        const message = String(error?.message || error || "").trim();
+        if (message === "Failed to fetch" || /NetworkError/i.test(message)) {
+            return `Backend is not reachable at ${API_ROOT}. Start the backend and retry.`;
+        }
+        return message || fallbackMessage;
+    }
+
     function applyPlaywrightTestIds() {
         // Stable selectors for browser E2E tests. Keep this list additive so legacy ids remain untouched.
         const selectorMap = {
@@ -6470,25 +6478,29 @@ const sam3TrainState = {
     }
 
     async function uploadCurrentDatasetToCache(options = {}) {
-        if (datasetManagerState.uploading) {
-            setDatasetUploadMessage("Dataset upload already in progress. Please wait.", "info");
+        const failUpload = (message, variant = "warn") => {
+            const safeMessage = message || "Failed to upload current dataset";
+            setDatasetUploadMessage(safeMessage, variant);
+            if (options.throwOnError) {
+                throw new Error(safeMessage);
+            }
             return null;
+        };
+        if (datasetManagerState.uploading) {
+            return failUpload("Dataset upload already in progress. Please wait.", "info");
         }
         try {
             const validation = validateGeometryForSave();
             if (!validation.ok) {
-			            setDatasetUploadMessage(validation.message || "Dataset geometry invalid.", "warn");
-			            return null;
-			        }
+                return failUpload(validation.message || "Dataset geometry invalid.", "warn");
+            }
             const imageKeys = Object.keys(images || {});
             if (!imageKeys.length) {
-                setDatasetUploadMessage("Load images in the labeling tab first.", "warn");
-                return null;
+                return failUpload("Load images in the labeling tab first.", "warn");
             }
-			            const classNames = Object.keys(classes || {});
-			            if (!classNames.length) {
-			                setDatasetUploadMessage("Load a labelmap in the labeling tab first.", "warn");
-			                return null;
+            const classNames = Object.keys(classes || {});
+            if (!classNames.length) {
+                return failUpload("Load a labelmap in the labeling tab first.", "warn");
             }
             const statusPrefix = options.statusPrefix || "current dataset";
             const useChunkedUpload = options.transport === "chunked" || options.chunked === true;
@@ -6662,8 +6674,12 @@ const sam3TrainState = {
 		            await refreshDatasetList();
 		            return data;
 	        } catch (err) {
+	            const message = formatBackendFetchError(err, "Failed to upload current dataset");
 	            console.error("Upload current dataset failed", err);
-	            setDatasetUploadMessage(err.message || "Failed to upload current dataset", "error");
+	            setDatasetUploadMessage(message, "error");
+	            if (options.throwOnError) {
+	                throw new Error(message);
+	            }
 	            return null;
 	        } finally {
                 datasetManagerState.uploading = false;
@@ -36819,6 +36835,7 @@ async function cancelRfDetrTrainingJobRequest() {
             context: dataIngestionUploadedReferenceContext(referenceLabel),
             split: false,
             transport: "chunked",
+            throwOnError: true,
             statusPrefix: "active Label Images reference dataset",
             onSessionStart: ({ sessionId, abortController } = {}) => {
                 dataIngestionState.activeUploadSessionId = String(sessionId || "");

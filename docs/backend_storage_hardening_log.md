@@ -2040,3 +2040,22 @@ preserving the exact validation story for storage and artifact-write fixes.
   tests/test_labeling_panel_layout_contract.py` (`257 passed`), plus
   `python3 -m py_compile localinferenceapi.py api/data_ingestion.py`,
   `node --check ybat-master/ybat.js`, and `git diff --check`.
+
+## 2026-05-26: Data Ingestion Upload Error Reporting
+
+- Fixed the active Label Images reference upload path so Data Ingestion preserves
+  the real shared Dataset Management upload failure instead of replacing it with
+  the misleading "did not return a backend dataset" message.
+- Added backend-unreachable copy for browser fetch failures. If `localhost:8000`
+  is down, the Data Ingestion panel now tells the user to start the backend
+  instead of implying that a completed dataset upload returned malformed data.
+- Confirmed the current 9,526-image active-reference dataset was already
+  registered as
+  `data_ingestion_reference_current_label_images_dataset_9526`, no chunk upload
+  sessions were left behind, and the matching reference profile is visible when
+  the backend is running.
+- Validation: `node --check ybat-master/ybat.js`, `git diff --check`,
+  `tests/test_dataset_zip_upload_security.py`, focused Data Ingestion backend
+  reference tests (`19 passed`), and live `/datasets`,
+  `/datasets/upload_sessions`, and `/data_ingestion/capabilities` probes against
+  the restarted backend.

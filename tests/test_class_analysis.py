@@ -2546,7 +2546,12 @@ def test_set_active_model_accepts_multiview_dinov3_embedding_width(tmp_path, mon
     monkeypatch.setattr(api, "dinov3_model", None)
     monkeypatch.setattr(api, "dinov3_processor", None)
     monkeypatch.setattr(api, "dinov3_initialized", False)
-    monkeypatch.setattr(api, "_load_dinov3_backbone", lambda *args, **kwargs: (FakeDinoModel(), object()))
+    monkeypatch.setattr(
+        api,
+        "_data_ingestion_get_dinov3",
+        lambda model_name, device_name=None: (FakeDinoModel(), object(), model_name, device_name or "cpu"),
+    )
+    monkeypatch.setattr(api, "resolve_mlx_dinov3_backend", lambda *_args, **_kwargs: "torch")
 
     payload = api.set_active_model(
         api.ActiveModelRequest(

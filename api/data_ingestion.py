@@ -14,6 +14,7 @@ def build_data_ingestion_router(
     capabilities_fn: Callable[[], Any],
     create_analysis_job_fn: Callable[[str, list[Any], list[Any]], Any],
     create_salad_train_job_fn: Callable[[str, list[Any]], Any],
+    list_jobs_fn: Callable[[], Any],
     export_reference_profile_fn: Callable[[str], Any],
     import_reference_profile_fn: Callable[[UploadFile], Any],
     preview_accepted_export_fn: Callable[[str, dict], Any],
@@ -31,6 +32,10 @@ def build_data_ingestion_router(
     @router.get("/data_ingestion/capabilities")
     def data_ingestion_capabilities():
         return capabilities_fn()
+
+    @router.get("/data_ingestion/jobs")
+    def list_data_ingestion_jobs():
+        return list_jobs_fn()
 
     @router.post("/data_ingestion/jobs")
     async def create_data_ingestion_job(request: Request):

@@ -222,10 +222,13 @@ def test_data_ingestion_capabilities_expose_reference_profile_flow():
     assert "local_salad_heads" in caps
     assert caps["max_extracted_frames_per_video"] == api.DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO
     assert caps["media_prepare_workers"] >= 1
+    assert caps["media_prepare_workers_max"] >= caps["media_prepare_workers"]
     assert caps["image_load_workers"] >= 1
+    assert caps["image_load_workers_max"] >= caps["image_load_workers"]
+    assert caps["local_salad_train_view_max_side"] == api.LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE
     assert "data_ingestion_recipes" not in caps
     assert api._local_salad_training_stage(0.02) == "Preparing reference media"
-    assert api._local_salad_training_stage(0.20) == "Encoding reference views"
+    assert api._local_salad_training_stage(0.20) == "Training augmented reference views"
     assert api._local_salad_training_stage(0.50) == "Training reference profile"
     assert api._local_salad_training_stage(0.80) == "Optimizing reference profile"
     assert api._local_salad_training_stage(0.99) == "Finalizing reference profile"
@@ -2630,7 +2633,7 @@ def test_local_salad_training_job_uses_mlx_backend_and_saves_compatible_head(tmp
     monkeypatch.setattr(api, "_data_ingestion_prepare_media", lambda *args, **kwargs: list(prepared))
     monkeypatch.setattr(api, "_data_ingestion_get_dinov3", lambda model_name: (DummyDino(), object(), "unit-dino", "cpu"))
 
-    def fake_dinov3_tokens(model_obj, processor_obj, device_name, images):
+    def fake_dinov3_tokens(model_obj, processor_obj, device_name, images, **_kwargs):
         patches = []
         globals_ = []
         ramp = torch.arange(48, dtype=torch.float32).reshape(6, 8) / 100.0
@@ -2671,6 +2674,8 @@ def test_local_salad_training_job_uses_mlx_backend_and_saves_compatible_head(tmp
     assert summary["salad_backend"] == "mlx"
     assert summary["head_id"] == "MLX_Unit_Head"
     assert summary["augmentation_profile"] == api.LOCAL_SALAD_AUGMENTATION_PROFILE
+    assert summary["train_view_max_side"] == api.LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE
+    assert summary["training_signature"]["augmentation_profile"] == api.LOCAL_SALAD_AUGMENTATION_PROFILE
     assert Path(summary["path"]).exists()
 
     loaded, meta = api._load_local_salad_head(summary["head_id"], device_name="cpu", backend="torch")
@@ -2684,6 +2689,126 @@ def test_local_salad_training_job_uses_mlx_backend_and_saves_compatible_head(tmp
     desc = api._encode_local_salad_head_np(loaded, test_patches, test_global)
     assert desc.shape == (2, summary["descriptor_dim"])
     assert np.allclose(np.linalg.norm(desc, axis=1), np.ones(2), atol=1e-5)
+
+
+def test_local_salad_training_reuses_matching_reference_profile(tmp_path, monkeypatch):
+    jobs_root = tmp_path / "jobs"
+    heads_root = tmp_path / "heads"
+    jobs_root.mkdir()
+    heads_root.mkdir()
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", jobs_root)
+    monkeypatch.setattr(api, "LOCAL_SALAD_HEAD_ROOT", heads_root)
+
+    image_a = tmp_path / "a.jpg"
+    image_b = tmp_path / "b.jpg"
+    Image.new("RGB", (24, 24), (30, 80, 120)).save(image_a)
+    Image.new("RGB", (24, 24), (140, 70, 20)).save(image_b)
+    prepared = [
+        {"image_path": str(image_a), "filename": "a.jpg", "width": 24, "height": 24, "source_type": "image"},
+        {"image_path": str(image_b), "filename": "b.jpg", "width": 24, "height": 24, "source_type": "image"},
+    ]
+
+    class DummyDino:
+        class Config:
+            hidden_size = 8
+
+        config = Config()
+
+    request = {
+        "train_uploads": prepared,
+        "encoder_type": "dinov3",
+        "encoder_model": "unit-dino",
+        "head_name": "Reusable Head",
+        "local_salad_backend": "torch",
+        "epochs": 1,
+        "batch_size": 2,
+        "num_clusters": 4,
+        "cluster_dim": 8,
+        "token_dim": 8,
+        "hidden_dim": 64,
+        "dropout": 0.0,
+        "seed": 7,
+        "learning_rate": 1e-4,
+        "weight_decay": 1e-4,
+        "temperature": 0.07,
+        "reference_source": "active_label_images",
+        "reference_dataset_id": "unit_dataset",
+        "reference_label": "Unit Dataset",
+    }
+    config = LocalSALADConfig(
+        num_channels=8,
+        num_clusters=4,
+        cluster_dim=8,
+        token_dim=8,
+        hidden_dim=64,
+        dropout=0.0,
+    )
+    fingerprint = api._data_ingestion_reference_fingerprint(
+        prepared,
+        source="active_label_images",
+        dataset_id="unit_dataset",
+        label="Unit Dataset",
+    )
+    signature = api._local_salad_training_signature(
+        reference_fingerprint=fingerprint,
+        encoder_type="dinov3",
+        resolved_model="unit-dino",
+        cradio_pooling="summary",
+        config=config,
+        train_image_count=len(prepared),
+        epochs=1,
+        batch_size=2,
+        learning_rate=1e-4,
+        weight_decay=1e-4,
+        temperature=0.07,
+        seed=7,
+        salad_backend="torch",
+    )
+    head = LocalSALADHead(config)
+    torch.save(
+        {
+            "format": api.LOCAL_SALAD_CACHE_VERSION,
+            "config": config.to_dict(),
+            "state_dict": head.state_dict(),
+            "metadata": {
+                "id": "reusable_profile",
+                "label": "Reusable Profile",
+                "encoder_type": "dinov3",
+                "encoder_model": "unit-dino",
+                "train_image_count": len(prepared),
+                "reference_fingerprint": fingerprint,
+                "augmentation_profile": api.LOCAL_SALAD_AUGMENTATION_PROFILE,
+                "train_view_max_side": api.LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE,
+                "epochs": 1,
+                "batch_size": 2,
+                "learning_rate": 1e-4,
+                "weight_decay": 1e-4,
+                "temperature": 0.07,
+                "seed": 7,
+                "salad_backend": "torch",
+                "training_signature": signature,
+                "policy": api.LOCAL_SALAD_POLICY,
+                "trainer": api.LOCAL_SALAD_TRAINER,
+            },
+        },
+        heads_root / "reusable_profile.pt",
+    )
+
+    monkeypatch.setattr(api, "_data_ingestion_prepare_media", lambda *args, **kwargs: list(prepared))
+    monkeypatch.setattr(api, "_data_ingestion_get_dinov3", lambda model_name: (DummyDino(), object(), "unit-dino", "cpu"))
+    monkeypatch.setattr(
+        api,
+        "_data_ingestion_dinov3_tokens",
+        lambda *_args, **_kwargs: pytest.fail("reused profile should skip DINO encoding"),
+    )
+
+    job = api.DataIngestionJob(job_id="salad_reuse_unit", kind="local_salad_train", request=request)
+    api._run_local_salad_training_job(job)
+
+    assert job.status == "completed"
+    assert job.result["summary"]["head_id"] == "reusable_profile"
+    assert job.result["summary"]["reused_existing_profile"] is True
+    assert job.result["losses"] == []
 
 
 def test_local_salad_training_cancelled_before_head_write_leaves_no_head(tmp_path, monkeypatch):
@@ -2733,9 +2858,9 @@ def test_local_salad_training_cancelled_before_head_write_leaves_no_head(tmp_pat
     monkeypatch.setattr(api, "_data_ingestion_prepare_media", lambda *_args, **_kwargs: list(prepared))
     monkeypatch.setattr(api, "_data_ingestion_get_dinov3", lambda model_name: (DummyDino(), object(), "unit-dino", "cpu"))
 
-    def fake_dinov3_tokens(_model_obj, _processor_obj, _device_name, images):
+    def fake_dinov3_tokens(_model_obj, _processor_obj, _device_name, images, **_kwargs):
         token_calls["count"] += 1
-        if token_calls["count"] >= 2:
+        if token_calls["count"] >= 1:
             job.cancel_event.set()
         patches = []
         globals_ = []

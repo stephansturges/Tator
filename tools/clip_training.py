@@ -59,6 +59,18 @@ from utils.cradio_embedding import (
     normalize_cradio_pooling,
     resolve_cradio_torch_device,
 )
+try:
+    from services.mlx_dinov3 import (
+        MlxDinoV3Unavailable,
+        get_mlx_dinov3_worker,
+        is_mlx_dinov3_encoder,
+        resolve_mlx_dinov3_backend,
+    )
+except Exception:  # noqa: BLE001
+    MlxDinoV3Unavailable = RuntimeError  # type: ignore[assignment]
+    get_mlx_dinov3_worker = None  # type: ignore[assignment]
+    is_mlx_dinov3_encoder = None  # type: ignore[assignment]
+    resolve_mlx_dinov3_backend = None  # type: ignore[assignment]
 
 # The datasets we work with can include truncated images; be lenient when reading.
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -181,6 +193,7 @@ class TrainingArtifacts:
     embedding_view_mode: str
     embedding_adjustment: str
     dinov3_pooling: str
+    dinov3_backend: Optional[str]
     cradio_pooling: str
     embedding_aggregation: str
     embedding_salad_head_id: str
@@ -682,7 +695,25 @@ def _load_clip(arch: str, device: str) -> Tuple[torch.nn.Module, Callable[[Image
     return model, preprocess
 
 
-def _load_dinov3(model_name: str, device: str) -> Tuple[torch.nn.Module, Any]:
+def _requested_dinov3_backend() -> str:
+    return str(os.environ.get("DINOV3_BACKEND") or "auto").strip().lower() or "auto"
+
+
+def _load_dinov3(model_name: str, device: str) -> Tuple[Any, Any]:
+    backend_request = _requested_dinov3_backend()
+    if resolve_mlx_dinov3_backend is not None and get_mlx_dinov3_worker is not None:
+        try:
+            if resolve_mlx_dinov3_backend(model_name, requested=backend_request) == "mlx":
+                worker = get_mlx_dinov3_worker(model_name)
+                return worker, worker
+        except MlxDinoV3Unavailable as exc:
+            if backend_request == "mlx":
+                raise TrainingError(f"MLX-DINOv3 is unavailable: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            if backend_request == "mlx":
+                raise TrainingError(f"Failed to load MLX-DINOv3 backend: {exc}") from exc
+            logger.warning("MLX-DINOv3 auto backend failed for %s; falling back to Torch: %s", model_name, exc)
+
     try:
         from transformers import AutoImageProcessor, AutoModel
     except Exception as exc:  # noqa: BLE001
@@ -710,6 +741,56 @@ def _load_dinov3(model_name: str, device: str) -> Tuple[torch.nn.Module, Any]:
     model.eval()
     model.to(device)
     return model, processor
+
+
+def _dinov3_backend_name(model: Any) -> str:
+    if is_mlx_dinov3_encoder is not None:
+        try:
+            if is_mlx_dinov3_encoder(model):
+                return "mlx"
+        except Exception:
+            pass
+    return "torch"
+
+
+def _encode_batch_mlx_dinov3(
+    model: Any,
+    images: Sequence[Image.Image],
+    *,
+    normalize: bool = True,
+    pooling: str = "pooler",
+) -> np.ndarray:
+    pooling_norm = _embedding_normalize_dinov3_pooling(pooling)
+    hidden = int(getattr(model, "hidden_size", 0) or 0)
+    if not images:
+        width = hidden * 2 if pooling_norm == "cls_patch_concat" else hidden
+        return np.empty((0, width), dtype=np.float32)
+    include_patch_tokens = pooling_norm in {"patch_mean", "cls_patch_concat"}
+    with tempfile.TemporaryDirectory(prefix="mlx_dinov3_train_") as tmp_dir:
+        paths: List[str] = []
+        for idx, img in enumerate(images):
+            path = Path(tmp_dir) / f"{idx:05d}.png"
+            img.convert("RGB").save(path, format="PNG")
+            paths.append(str(path))
+        arrays = model.encode_image_paths(paths, include_patch_tokens=include_patch_tokens)
+    cls_np = np.asarray(arrays.get("cls_token"), dtype=np.float32)
+    patch_np = np.asarray(arrays.get("patch_tokens"), dtype=np.float32) if "patch_tokens" in arrays else None
+    if pooling_norm == "patch_mean":
+        if patch_np is None or patch_np.ndim != 3 or patch_np.shape[1] <= 0:
+            raise TrainingError("DINOv3 output missing patch tokens.")
+        feats = patch_np.mean(axis=1)
+    elif pooling_norm == "cls_patch_concat":
+        if patch_np is None or patch_np.ndim != 3 or patch_np.shape[1] <= 0:
+            raise TrainingError("DINOv3 output missing patch tokens.")
+        cls_feats = cls_np / np.maximum(np.linalg.norm(cls_np, axis=-1, keepdims=True), 1e-12)
+        patch_mean = patch_np.mean(axis=1)
+        patch_feats = patch_mean / np.maximum(np.linalg.norm(patch_mean, axis=-1, keepdims=True), 1e-12)
+        feats = np.concatenate([cls_feats, patch_feats], axis=-1)
+    else:
+        feats = cls_np
+    if normalize:
+        feats = feats / np.maximum(np.linalg.norm(feats, axis=-1, keepdims=True), 1e-12)
+    return np.asarray(feats, dtype=np.float32)
 
 
 def _clamp_bbox(x_min: float, y_min: float, x_max: float, y_max: float, w_img: int, h_img: int) -> Optional[Tuple[int, int, int, int]]:
@@ -821,7 +902,7 @@ def _encode_batch(
 
 
 def _encode_batch_dinov3(
-    model: torch.nn.Module,
+    model: Any,
     processor: Any,
     device: str,
     images: Sequence[Image.Image],
@@ -829,6 +910,13 @@ def _encode_batch_dinov3(
     normalize: bool = True,
     pooling: str = "pooler",
 ) -> np.ndarray:
+    if _dinov3_backend_name(model) == "mlx":
+        return _encode_batch_mlx_dinov3(
+            model,
+            images,
+            normalize=normalize,
+            pooling=pooling,
+        )
     if not images:
         hidden = int(getattr(getattr(model, "config", None), "hidden_size", 0) or 0)
         if hidden <= 0:
@@ -1393,6 +1481,7 @@ def train_clip_from_yolo(
         except Exception:
             labelmap_hash = None
     resolved_device = _resolve_device(device)
+    dinov3_backend: Optional[str] = None
     normalize_embeddings = True
     if classifier_type == "mlp":
         normalize_embeddings = bool(mlp_normalize_embeddings)
@@ -1409,6 +1498,7 @@ def train_clip_from_yolo(
             )
     elif encoder_type == "dinov3":
         dino_model, dino_processor = _load_dinov3(encoder_model_name, resolved_device)
+        dinov3_backend = _dinov3_backend_name(dino_model)
 
         def encode_images(images: Sequence[Image.Image]) -> np.ndarray:
             return _encode_batch_dinov3(
@@ -1468,6 +1558,7 @@ def train_clip_from_yolo(
         "embedding_view_mode": embedding_view_mode,
         "embedding_adjustment": embedding_adjustment,
         "dinov3_pooling": dinov3_pooling,
+        "dinov3_backend": dinov3_backend,
         "cradio_pooling": cradio_pooling,
         "embedding_aggregation": embedding_aggregation,
         "embedding_salad_head_id": embedding_salad_head_id,
@@ -1552,7 +1643,8 @@ def train_clip_from_yolo(
         should_cleanup_chunks = False
     else:
         _safe_progress(progress_cb, 0.05, f"Found {len(image_files)} candidate images.")
-        _safe_progress(progress_cb, 0.08, f"Encoding {encoder_type} embeddings on {resolved_device} (batch size={batch_size}) ...")
+        encode_device_label = dinov3_backend if encoder_type == "dinov3" and dinov3_backend else resolved_device
+        _safe_progress(progress_cb, 0.08, f"Encoding {encoder_type} embeddings on {encode_device_label} (batch size={batch_size}) ...")
 
         if reuse_embeddings and cache_signature:
             cache_dir = EMBED_CACHE_ROOT / cache_signature
@@ -2539,6 +2631,7 @@ def train_clip_from_yolo(
                 "embedding_adjustment": embedding_adjustment,
                 "embedding_adjustment_transform": embedding_adjustment_transform,
                 "dinov3_pooling": dinov3_pooling,
+                "dinov3_backend": dinov3_backend,
                 "cradio_pooling": cradio_pooling,
                 "embedding_aggregation": embedding_aggregation,
                 "embedding_salad_head_id": embedding_salad_head_id,
@@ -2991,6 +3084,7 @@ def train_clip_from_yolo(
             "embedding_adjustment": embedding_adjustment,
             "embedding_adjustment_transform": embedding_adjustment_transform,
             "dinov3_pooling": dinov3_pooling,
+            "dinov3_backend": dinov3_backend,
             "cradio_pooling": cradio_pooling,
             "embedding_aggregation": embedding_aggregation,
             "embedding_salad_head_id": embedding_salad_head_id,
@@ -3113,6 +3207,7 @@ def train_clip_from_yolo(
             embedding_view_mode=str(embedding_view_mode),
             embedding_adjustment=str(embedding_adjustment),
             dinov3_pooling=str(dinov3_pooling),
+            dinov3_backend=dinov3_backend,
             cradio_pooling=str(cradio_pooling),
             embedding_aggregation=str(embedding_aggregation),
             embedding_salad_head_id=str(embedding_salad_head_id),

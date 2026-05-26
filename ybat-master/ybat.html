@@ -770,6 +770,10 @@
                                 <label for="dataIngestionBatchSize">Batch size<span class="help-icon" title="Number of paired augmented reference images processed per profile optimization step. Larger batches improve contrastive signal but need more memory.">?</span></label>
                                 <input type="number" id="dataIngestionBatchSize" min="2" max="128" step="1" value="8" />
                             </div>
+                            <div class="data-ingestion-field">
+                                <label for="dataIngestionMediaWorkers">Media / view workers<span class="help-icon" title="Parallel CPU workers for video frame extraction, image preparation, and augmented reference-view generation. Higher values can help many videos or large reference sets, but too high can reduce responsiveness.">?</span></label>
+                                <input type="number" id="dataIngestionMediaWorkers" min="1" max="16" step="1" value="4" />
+                            </div>
                         </div>
                         <div class="data-ingestion-actions">
                             <button type="button" id="dataIngestionBuildProfileButton" class="training-button">Build reference profile</button>

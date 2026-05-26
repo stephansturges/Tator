@@ -218,6 +218,7 @@ crops/
 corrected_labels/
 uploads/
 calib_example/
+**/.build/
 training.txr
 *.zip
 *.tar

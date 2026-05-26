@@ -2400,6 +2400,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         localVendiWeight: null,
         frameInterval: null,
         maxFrames: null,
+        mediaWorkers: null,
         analyzeButton: null,
         buildProfileButton: null,
         cancelButton: null,
@@ -36221,7 +36222,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         dataIngestionElements.status.textContent = message || "";
-        dataIngestionElements.status.classList.remove("warn", "error", "success");
+        dataIngestionElements.status.classList.remove("warn", "error", "success", "info");
         if (variant) {
             dataIngestionElements.status.classList.add(variant);
         }
@@ -36548,6 +36549,7 @@ async function cancelRfDetrTrainingJobRequest() {
             dataIngestionElements.localVendiWeight,
             dataIngestionElements.frameInterval,
             dataIngestionElements.maxFrames,
+            dataIngestionElements.mediaWorkers,
             dataIngestionElements.headName,
             dataIngestionElements.trainEncoder,
             dataIngestionElements.trainCradioModel,
@@ -36626,6 +36628,12 @@ async function cancelRfDetrTrainingJobRequest() {
             if (dataIngestionElements.localVendiWeight && Number.isFinite(Number(localVendi.default_weight))) {
                 const weightDefault = Number(localVendi.default_weight);
                 dataIngestionElements.localVendiWeight.value = String(Math.max(0, Math.min(0.5, weightDefault)));
+            }
+            if (dataIngestionElements.mediaWorkers && Number.isFinite(Number(dataIngestionState.capabilities?.media_prepare_workers))) {
+                const workerDefault = Math.max(1, Math.round(Number(dataIngestionState.capabilities.media_prepare_workers)));
+                const workerMax = Math.max(workerDefault, Math.round(Number(dataIngestionState.capabilities?.media_prepare_workers_max || 16)));
+                dataIngestionElements.mediaWorkers.max = String(workerMax);
+                dataIngestionElements.mediaWorkers.value = String(Math.min(workerMax, workerDefault));
             }
             dataIngestionState.localVendiDefaultsApplied = true;
         }
@@ -36958,6 +36966,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 local_vendi_weight: getDataIngestionNumber(dataIngestionElements.localVendiWeight, 0.2, { min: 0, max: 1 }),
                 frame_interval: getDataIngestionNumber(dataIngestionElements.frameInterval, 1.0, { min: 0.1 }),
                 max_frames_per_video: Math.round(getDataIngestionNumber(dataIngestionElements.maxFrames, 200, { min: 0 })),
+                media_prepare_workers: Math.round(getDataIngestionNumber(dataIngestionElements.mediaWorkers, 4, { min: 1, max: 64 })),
                 reference_count: referenceCount,
             };
             formData.append("manifest", JSON.stringify(manifest));
@@ -37052,6 +37061,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 max_train_images: maxTrainImages,
                 frame_interval: getDataIngestionNumber(dataIngestionElements.frameInterval, 1.0, { min: 0.1 }),
                 max_frames_per_video: Math.round(getDataIngestionNumber(dataIngestionElements.maxFrames, 200, { min: 0 })),
+                media_prepare_workers: Math.round(getDataIngestionNumber(dataIngestionElements.mediaWorkers, 4, { min: 1, max: 64 })),
             };
             formData.append("manifest", JSON.stringify(manifest));
             const resp = await fetch(`${API_ROOT}/data_ingestion/salad_train_jobs`, { method: "POST", body: formData });
@@ -37134,6 +37144,34 @@ async function cancelRfDetrTrainingJobRequest() {
             }
         };
         run();
+    }
+
+    async function maybeResumeDataIngestionJob() {
+        if (dataIngestionState.active || dataIngestionState.activeJobId || dataIngestionState.activeUploadSessionId) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/data_ingestion/jobs`);
+            const detail = await resp.text();
+            if (!resp.ok) throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            const jobs = parseJsonObjectSafe(detail, []);
+            if (!Array.isArray(jobs)) return;
+            const activeJob = jobs.find((job) => {
+                const status = String(job?.status || "");
+                return job?.job_id && !["completed", "failed", "cancelled"].includes(status);
+            });
+            if (!activeJob) return;
+            const jobId = String(activeJob.job_id || "").trim();
+            if (!jobId) return;
+            dataIngestionState.active = true;
+            dataIngestionState.activeJobId = jobId;
+            renderDataIngestionProgress(activeJob);
+            setDataIngestionStatus(`Recovered active Data Ingestion job: ${jobId}.`, "info");
+            refreshDataIngestionControls();
+            pollDataIngestionJob(jobId);
+        } catch (error) {
+            console.warn("No resumable Data Ingestion job found", error);
+        }
     }
 
     async function cancelDataIngestionJob() {
@@ -38061,6 +38099,7 @@ async function cancelRfDetrTrainingJobRequest() {
         dataIngestionElements.localVendiWeight = document.getElementById("dataIngestionLocalVendiWeight");
         dataIngestionElements.frameInterval = document.getElementById("dataIngestionFrameInterval");
         dataIngestionElements.maxFrames = document.getElementById("dataIngestionMaxFrames");
+        dataIngestionElements.mediaWorkers = document.getElementById("dataIngestionMediaWorkers");
         dataIngestionElements.analyzeButton = document.getElementById("dataIngestionAnalyzeButton");
         dataIngestionElements.buildProfileButton = document.getElementById("dataIngestionBuildProfileButton");
         dataIngestionElements.cancelButton = document.getElementById("dataIngestionCancelButton");
@@ -38114,6 +38153,7 @@ async function cancelRfDetrTrainingJobRequest() {
             dataIngestionElements.localVendiWeight,
             dataIngestionElements.frameInterval,
             dataIngestionElements.maxFrames,
+            dataIngestionElements.mediaWorkers,
             dataIngestionElements.outputMode,
             dataIngestionElements.targetWidth,
             dataIngestionElements.targetHeight,
@@ -38169,7 +38209,9 @@ async function cancelRfDetrTrainingJobRequest() {
         if (dataIngestionElements.openDatasetAnalysisButton) {
             dataIngestionElements.openDatasetAnalysisButton.addEventListener("click", openClassSplitDatasetAnalysisFromIngestion);
         }
-        refreshDataIngestionCapabilities();
+        refreshDataIngestionCapabilities().then(() => maybeResumeDataIngestionJob()).catch((error) => {
+            console.warn("Failed to initialize Data Ingestion capabilities", error);
+        });
         refreshDataIngestionControls();
     }
 

@@ -428,6 +428,15 @@ from services.runtime_unload import (
 from services.dinov3_runtime import (
     _dinov3_resolve_device_impl as _dinov3_resolve_device_impl,
 )
+from services.mlx_dinov3 import (
+    MlxDinoV3Unavailable,
+    MlxDinoV3WorkerError,
+    get_mlx_dinov3_worker,
+    is_mlx_dinov3_encoder,
+    mlx_dinov3_status,
+    resolve_mlx_dinov3_backend,
+    stop_mlx_dinov3_workers,
+)
 from services.clip_runtime import (
     _suspend_clip_backbone_impl as _suspend_clip_backbone_impl,
     _resume_clip_backbone_impl as _resume_clip_backbone_impl,
@@ -1055,8 +1064,10 @@ DATA_INGESTION_UPLOAD_QUOTA_BYTES = _env_int(
 DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO = _env_int(
     "DATA_INGESTION_MAX_EXTRACTED_FRAMES_PER_VIDEO", 10000
 )
-DATA_INGESTION_MEDIA_PREPARE_WORKERS = _env_int("DATA_INGESTION_MEDIA_PREPARE_WORKERS", 4)
-DATA_INGESTION_IMAGE_LOAD_WORKERS = _env_int("DATA_INGESTION_IMAGE_LOAD_WORKERS", 4)
+DATA_INGESTION_DEFAULT_WORKERS = min(8, max(4, os.cpu_count() or 4))
+DATA_INGESTION_MEDIA_PREPARE_WORKERS = _env_int("DATA_INGESTION_MEDIA_PREPARE_WORKERS", DATA_INGESTION_DEFAULT_WORKERS)
+DATA_INGESTION_IMAGE_LOAD_WORKERS = _env_int("DATA_INGESTION_IMAGE_LOAD_WORKERS", DATA_INGESTION_DEFAULT_WORKERS)
+DATA_INGESTION_WORKER_MAX = max(1, _env_int("DATA_INGESTION_WORKER_MAX", min(16, max(4, os.cpu_count() or 4))))
 DATA_INGESTION_LOCAL_VENDI_DEFAULT_ENABLED = _env_bool("DATA_INGESTION_LOCAL_VENDI_DEFAULT_ENABLED", True)
 DATA_INGESTION_LOCAL_VENDI_DEFAULT_WEIGHT = max(
     0.0,
@@ -1372,6 +1383,10 @@ def _unload_dinov3_backbone() -> None:
     dinov3_model_name = state["dinov3_model_name"]
     dinov3_model_device = state["dinov3_model_device"]
     dinov3_initialized = state["dinov3_initialized"]
+    try:
+        stop_mlx_dinov3_workers()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Failed to stop MLX-DINOv3 workers during unload: %s", exc)
 
 
 def _unload_cradio_backbone() -> None:
@@ -1406,6 +1421,21 @@ def _load_dinov3_backbone(
             "Failed to load DINOv3 backbone '%s' on %s: %s", model_name, target_device, exc
         )
         return None, None
+
+
+def _resolve_dinov3_runtime_device(model_name: str, requested_device: Optional[str] = None) -> str:
+    resolved_model = str(model_name or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL).strip() or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL
+    try:
+        if resolve_mlx_dinov3_backend(resolved_model) == "mlx":
+            return "mlx"
+    except MlxDinoV3Unavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("MLX-DINOv3 backend check failed for %s: %s", resolved_model, exc)
+    return _dinov3_resolve_device_impl(
+        requested_device or device,
+        cuda_disabled=dinov3_cuda_disabled,
+    )
 
 
 def _load_cradio_backbone_cached(
@@ -3268,15 +3298,30 @@ def _resume_classifier_backbone() -> None:
         _resume_clip_backbone(state.get("clip_model_name"))
         state["_clip_reload_needed"] = _clip_reload_needed
 
+    def _resolve_resume_dinov3_device(requested_device: str) -> str:
+        return _resolve_dinov3_runtime_device(
+            str(state.get("active_encoder_model") or ""),
+            requested_device,
+        )
+
+    def _load_resume_dinov3(model_name: str, target_device: str) -> Tuple[Optional[Any], Optional[Any]]:
+        try:
+            model_obj, processor_obj, _resolved_model, _loaded_device = _data_ingestion_get_dinov3(
+                model_name,
+                target_device,
+            )
+            return model_obj, processor_obj
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to reload DINOv3 backbone %s after training: %s", model_name, exc)
+            return None, None
+
     _resume_classifier_backbone_impl(
         state=state,
         device=device,
         dinov3_lock=dinov3_lock,
         dinov3_cuda_disabled=dinov3_cuda_disabled,
-        dinov3_resolve_device_fn=lambda device: _dinov3_resolve_device_impl(
-            device, cuda_disabled=dinov3_cuda_disabled
-        ),
-        load_dinov3_fn=_load_dinov3_backbone,
+        dinov3_resolve_device_fn=_resolve_resume_dinov3_device,
+        load_dinov3_fn=_load_resume_dinov3,
         resume_clip_fn=_resume_clip_from_state,
     )
     dinov3_model = state["dinov3_model"]
@@ -8932,6 +8977,12 @@ def _encode_pil_batch_for_head(
         target_device = device_override or _dinov3_resolve_device_impl(
             device, cuda_disabled=dinov3_cuda_disabled
         )
+        if device_override is None:
+            try:
+                if resolve_mlx_dinov3_backend(model_name or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL) == "mlx":
+                    target_device = "mlx"
+            except MlxDinoV3Unavailable:
+                return None
         if (
             dinov3_model is None
             or dinov3_processor is None
@@ -8946,7 +8997,7 @@ def _encode_pil_batch_for_head(
                     or (dinov3_model_device and dinov3_model_device != target_device)
                 ):
                     load_name = model_name or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL
-                    model_obj, processor_obj = _load_dinov3_backbone(
+                    model_obj, processor_obj, _resolved_model, loaded_device = _data_ingestion_get_dinov3(
                         load_name,
                         target_device,
                     )
@@ -8954,18 +9005,37 @@ def _encode_pil_batch_for_head(
                         dinov3_model = model_obj
                         dinov3_processor = processor_obj
                         dinov3_model_name = load_name
-                        dinov3_model_device = target_device
+                        dinov3_model_device = loaded_device
                         dinov3_initialized = True
         if dinov3_model is None or dinov3_processor is None:
             return None
         device_name = device_override or dinov3_model_device or target_device or device
         for idx in range(0, len(images), batch_size):
             batch = images[idx : idx + batch_size]
+            pooling = _embedding_normalize_dinov3_pooling(head.get("dinov3_pooling"))
+            if is_mlx_dinov3_encoder(dinov3_model):
+                arrays = _encode_mlx_dinov3_pil_images(
+                    dinov3_model,
+                    batch,
+                    include_patch_tokens=pooling in {"patch_mean", "cls_patch_concat"},
+                )
+                cls_np = np.asarray(arrays.get("cls_token"), dtype=np.float32)
+                patch_np = np.asarray(arrays.get("patch_tokens"), dtype=np.float32) if "patch_tokens" in arrays else None
+                if pooling == "patch_mean" and patch_np is not None and patch_np.ndim == 3 and patch_np.shape[1] > 0:
+                    feats_np = patch_np.mean(axis=1)
+                elif pooling == "cls_patch_concat" and patch_np is not None and patch_np.ndim == 3 and patch_np.shape[1] > 0:
+                    cls_norm = cls_np / np.maximum(np.linalg.norm(cls_np, axis=-1, keepdims=True), 1e-12)
+                    patch_mean = patch_np.mean(axis=1)
+                    patch_norm = patch_mean / np.maximum(np.linalg.norm(patch_mean, axis=-1, keepdims=True), 1e-12)
+                    feats_np = np.concatenate([cls_norm, patch_norm], axis=-1)
+                else:
+                    feats_np = cls_np
+                features.append(np.asarray(feats_np, dtype=np.float32))
+                continue
             inputs = dinov3_processor(images=batch, return_tensors="pt")
             inputs = {k: v.to(device_name) for k, v in inputs.items()}
             with torch.no_grad():
                 outputs = dinov3_model(**inputs)
-            pooling = _embedding_normalize_dinov3_pooling(head.get("dinov3_pooling"))
             last_hidden = getattr(outputs, "last_hidden_state", None)
             if pooling == "pooler" and hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
                 feats = outputs.pooler_output
@@ -13920,12 +13990,13 @@ CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL = os.environ.get(
 )
 DATA_INGESTION_ROOT = Path(os.environ.get("DATA_INGESTION_ROOT", "./uploads/data_ingestion"))
 _init_storage_root(DATA_INGESTION_ROOT)
+DATA_INGESTION_MLX_DINOV3_TMP_ROOT = DATA_INGESTION_ROOT / "tmp" / "mlx_dinov3_batches"
 LOCAL_SALAD_HEAD_ROOT = Path(os.environ.get("LOCAL_SALAD_HEAD_ROOT", "./uploads/salad_heads"))
 _init_storage_root(LOCAL_SALAD_HEAD_ROOT)
 LOCAL_SALAD_HEAD_LOCK = threading.Lock()
 LOCAL_SALAD_AUGMENTATION_PROFILE = "strong_photometric_spatial_v2"
 LOCAL_SALAD_DEFAULT_EPOCHS = 8
-LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE = 768
+LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE = max(224, _env_int("LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE", 384))
 REFERENCE_PROFILE_BUNDLE_VERSION = "tator-reference-profile-v1"
 REFERENCE_PROFILE_BUNDLE_MAX_BYTES = 512 * 1024 * 1024
 REFERENCE_PROFILE_BUNDLE_MAX_UNCOMPRESSED_BYTES = 768 * 1024 * 1024
@@ -18624,6 +18695,7 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
         "cradio_pooling_modes": ["summary", "spatial_mean", "summary_spatial_concat"],
         "default_cradio_pooling": "summary",
         "cradio_backend": _public_cradio_backend_capabilities(),
+        "dinov3_backend": mlx_dinov3_status(CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL).to_dict(),
         "projection_methods": projection_methods,
         "default_projection": "pca",
         "preprocess_modes": ["canonical"],
@@ -20953,6 +21025,17 @@ def _list_local_salad_heads() -> List[Dict[str, Any]]:
                     "reference_dataset_label": metadata.get("reference_dataset_label") or "",
                     "reference_label": metadata.get("reference_label") or "",
                     "reference_fingerprint": metadata.get("reference_fingerprint") if isinstance(metadata.get("reference_fingerprint"), dict) else None,
+                    "augmentation_profile": metadata.get("augmentation_profile") or "",
+                    "train_view_max_side": metadata.get("train_view_max_side") or None,
+                    "epochs": metadata.get("epochs") or None,
+                    "batch_size": metadata.get("batch_size") or None,
+                    "learning_rate": metadata.get("learning_rate") or None,
+                    "weight_decay": metadata.get("weight_decay") or None,
+                    "temperature": metadata.get("temperature") or None,
+                    "seed": metadata.get("seed") or None,
+                    "training_signature": metadata.get("training_signature")
+                    if isinstance(metadata.get("training_signature"), dict)
+                    else None,
                     "descriptor_dim": int(config.get("token_dim") or 0)
                     + int(config.get("num_clusters") or 0) * int(config.get("cluster_dim") or 0),
                     "config": _data_ingestion_public_payload(config),
@@ -21296,7 +21379,82 @@ def _validate_local_salad_head_reference(head_id: str, request: Dict[str, Any]) 
     return dict(metadata)
 
 
+def _data_ingestion_canonical_json(value: Any) -> str:
+    return json.dumps(json_sanitize(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _local_salad_training_signature(
+    *,
+    reference_fingerprint: Mapping[str, Any],
+    encoder_type: str,
+    resolved_model: str,
+    cradio_pooling: str,
+    config: LocalSALADConfig,
+    train_image_count: int,
+    epochs: int,
+    batch_size: int,
+    learning_rate: float,
+    weight_decay: float,
+    temperature: float,
+    seed: int,
+    salad_backend: str,
+) -> Dict[str, Any]:
+    encoder_norm = str(encoder_type or "dinov3").strip().lower()
+    return {
+        "format": LOCAL_SALAD_CACHE_VERSION,
+        "policy": LOCAL_SALAD_POLICY,
+        "trainer": LOCAL_SALAD_TRAINER,
+        "augmentation_profile": LOCAL_SALAD_AUGMENTATION_PROFILE,
+        "train_view_max_side": int(LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE),
+        "encoder_type": encoder_norm,
+        "encoder_model": str(resolved_model or ""),
+        "cradio_pooling": normalize_cradio_pooling(cradio_pooling) if encoder_norm == "cradio" else None,
+        "reference_fingerprint": dict(reference_fingerprint or {}),
+        "train_image_count": int(train_image_count),
+        "config": config.to_dict(),
+        "epochs": int(epochs),
+        "batch_size": int(batch_size),
+        "learning_rate": float(learning_rate),
+        "weight_decay": float(weight_decay),
+        "temperature": float(temperature),
+        "seed": int(seed),
+        "salad_backend": str(salad_backend or ""),
+    }
+
+
+def _local_salad_training_signature_matches(metadata: Mapping[str, Any], signature: Mapping[str, Any]) -> bool:
+    stored_signature = metadata.get("training_signature")
+    if isinstance(stored_signature, Mapping):
+        return _data_ingestion_canonical_json(stored_signature) == _data_ingestion_canonical_json(signature)
+    return False
+
+
+def _find_reusable_local_salad_head(training_signature: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    try:
+        root = _local_salad_head_root(create=False)
+    except HTTPException:
+        return None
+    if not root.exists():
+        return None
+    paths = sorted(root.glob("*.pt"), key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+    for path in paths:
+        try:
+            if path.is_symlink() or not _path_is_within_root_impl(path.resolve(strict=True), root):
+                continue
+            _head, metadata = load_local_salad_head_file(path, device_name="cpu")
+            if _local_salad_training_signature_matches(metadata, training_signature):
+                return {
+                    "head_id": path.stem,
+                    "path": str(path),
+                    "metadata": dict(metadata),
+                }
+        except Exception:
+            continue
+    return None
+
+
 def _data_ingestion_capabilities() -> Dict[str, Any]:
+    worker_max = _data_ingestion_worker_max()
     return {
         "encoders": ["local_salad"],
         "default_encoder": "local_salad",
@@ -21309,6 +21467,7 @@ def _data_ingestion_capabilities() -> Dict[str, Any]:
         "cradio_pooling_modes": ["summary", "spatial_mean", "summary_spatial_concat"],
         "default_cradio_pooling": "summary",
         "cradio_backend": _public_cradio_backend_capabilities(),
+        "dinov3_backend": mlx_dinov3_status(CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL).to_dict(),
         "local_salad_heads": _list_local_salad_heads(),
         "ffmpeg_available": bool(shutil.which("ffmpeg")),
         "image_exts": sorted(DATA_INGESTION_IMAGE_EXTS),
@@ -21318,15 +21477,18 @@ def _data_ingestion_capabilities() -> Dict[str, Any]:
             DATA_INGESTION_MEDIA_PREPARE_WORKERS,
             max(1, DATA_INGESTION_MEDIA_PREPARE_WORKERS),
         ),
+        "media_prepare_workers_max": worker_max,
         "image_load_workers": _data_ingestion_worker_count(
             DATA_INGESTION_IMAGE_LOAD_WORKERS,
             max(1, DATA_INGESTION_IMAGE_LOAD_WORKERS),
         ),
+        "image_load_workers_max": worker_max,
         "salad_policy": "local_training_only",
         "local_salad_policy": LOCAL_SALAD_POLICY,
         "local_salad_trainer": LOCAL_SALAD_TRAINER,
         "local_salad_augmentation_profile": LOCAL_SALAD_AUGMENTATION_PROFILE,
         "local_salad_default_epochs": LOCAL_SALAD_DEFAULT_EPOCHS,
+        "local_salad_train_view_max_side": LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE,
         "local_vendi": {
             "enabled": True,
             "default_enabled": DATA_INGESTION_LOCAL_VENDI_DEFAULT_ENABLED,
@@ -21878,12 +22040,26 @@ def _data_ingestion_open_image(path: Path) -> Image.Image:
         return img.convert("RGB")
 
 
+def _data_ingestion_worker_max() -> int:
+    cpu_count = os.cpu_count() or 2
+    return max(1, min(int(DATA_INGESTION_WORKER_MAX or 1), max(1, cpu_count)))
+
+
 def _data_ingestion_worker_count(configured: int, item_count: int) -> int:
     if item_count <= 1:
         return 1
-    cpu_count = os.cpu_count() or 2
     requested = max(1, int(configured or 1))
-    return max(1, min(item_count, requested, max(1, cpu_count), 8))
+    return max(1, min(item_count, requested, _data_ingestion_worker_max()))
+
+
+def _data_ingestion_requested_worker_count(
+    request: Mapping[str, Any],
+    key: str,
+    default_workers: int,
+    item_count: int,
+) -> int:
+    requested = _coerce_int(request.get(key), default_workers, minimum=1)
+    return _data_ingestion_worker_count(requested, item_count)
 
 
 def _data_ingestion_open_images_for_batch(batch_rows: Sequence[Dict[str, Any]]) -> List[Image.Image]:
@@ -22005,11 +22181,15 @@ def _data_ingestion_prepare_media(
     max_frames_per_video: int,
     progress_start: float,
     progress_end: float,
+    worker_count: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     prepared: List[Dict[str, Any]] = []
     total = max(1, len(rows))
     ffmpeg_path = shutil.which("ffmpeg")
-    workers = _data_ingestion_worker_count(DATA_INGESTION_MEDIA_PREPARE_WORKERS, len(rows))
+    workers = _data_ingestion_worker_count(
+        worker_count if worker_count is not None else DATA_INGESTION_MEDIA_PREPARE_WORKERS,
+        len(rows),
+    )
     if workers <= 1:
         indexed_results: List[Tuple[int, List[Dict[str, Any]], List[str]]] = []
         for idx, row in enumerate(rows):
@@ -22069,11 +22249,85 @@ def _data_ingestion_encoder_label(encoder: str, base_encoder: str) -> str:
 
 def _data_ingestion_get_dinov3(model_name: str, device_name: Optional[str] = None) -> Tuple[Any, Any, str, str]:
     resolved_model = str(model_name or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL).strip() or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL
+    backend_request = os.environ.get("DINOV3_BACKEND") or "auto"
+    try:
+        if resolve_mlx_dinov3_backend(resolved_model, requested=backend_request) == "mlx":
+            worker = get_mlx_dinov3_worker(resolved_model)
+            return worker, worker, resolved_model, "mlx"
+    except MlxDinoV3Unavailable:
+        if str(backend_request).strip().lower() == "mlx":
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="mlx_dinov3_unavailable")
+    except Exception as exc:  # noqa: BLE001
+        if str(backend_request).strip().lower() == "mlx":
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"mlx_dinov3_load_failed:{exc}") from exc
     target_device = device_name or _dinov3_resolve_device_impl(device, cuda_disabled=dinov3_cuda_disabled)
     model_obj, processor_obj = _load_dinov3_backbone(resolved_model, target_device)
     if model_obj is None or processor_obj is None:
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dinov3_load_failed")
     return model_obj, processor_obj, resolved_model, target_device
+
+
+def _dinov3_aux_torch_device(device_name: str) -> str:
+    if str(device_name or "").strip().lower() == "mlx":
+        return _dinov3_resolve_device_impl(device, cuda_disabled=dinov3_cuda_disabled)
+    return str(device_name or device)
+
+
+def _data_ingestion_mlx_dinov3_tmp_root() -> Path:
+    root = DATA_INGESTION_MLX_DINOV3_TMP_ROOT
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _encode_mlx_dinov3_pil_images(
+    encoder_obj: Any,
+    images: Sequence[Image.Image],
+    *,
+    include_patch_tokens: bool = True,
+    image_format: str = "PNG",
+    jpeg_quality: int = 92,
+) -> Dict[str, np.ndarray]:
+    if not images:
+        return {}
+    tmp_root = _data_ingestion_mlx_dinov3_tmp_root()
+    batch_dir = Path(tempfile.mkdtemp(prefix="batch_", dir=str(tmp_root)))
+    image_paths: List[str] = []
+    fmt = str(image_format or "PNG").strip().upper()
+    if fmt not in {"PNG", "JPEG", "JPG"}:
+        fmt = "PNG"
+    suffix = ".jpg" if fmt in {"JPEG", "JPG"} else ".png"
+    save_format = "JPEG" if fmt in {"JPEG", "JPG"} else "PNG"
+    quality = max(1, min(100, int(jpeg_quality or 92)))
+
+    def _save(idx_img: Tuple[int, Image.Image]) -> str:
+        idx, img = idx_img
+        path = batch_dir / f"{idx:05d}{suffix}"
+        rgb = img.convert("RGB")
+        if save_format == "JPEG":
+            rgb.save(path, format=save_format, quality=quality, optimize=False)
+        else:
+            rgb.save(path, format=save_format)
+        return str(path)
+
+    try:
+        save_workers = _data_ingestion_worker_count(DATA_INGESTION_IMAGE_LOAD_WORKERS, len(images))
+        if save_workers > 1:
+            with ThreadPoolExecutor(max_workers=save_workers, thread_name_prefix="mlx-dinov3-save") as executor:
+                image_paths = list(executor.map(_save, enumerate(images)))
+        else:
+            image_paths = [_save(pair) for pair in enumerate(images)]
+        return encoder_obj.encode_image_paths(image_paths, include_patch_tokens=include_patch_tokens)
+    finally:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+
+
+def _encode_mlx_dinov3_image_paths(
+    encoder_obj: Any,
+    image_paths: Sequence[str],
+    *,
+    include_patch_tokens: bool = True,
+) -> Dict[str, np.ndarray]:
+    return encoder_obj.encode_image_paths([str(path) for path in image_paths], include_patch_tokens=include_patch_tokens)
 
 
 def _data_ingestion_encode_prepared_images(
@@ -22120,7 +22374,7 @@ def _data_ingestion_encode_prepared_images(
     else:
         model_obj, processor_obj, resolved_model, device_name = _data_ingestion_get_dinov3(model_name)
         if encoder_norm == "local_salad":
-            salad_head, salad_meta = _load_local_salad_head(salad_head_id, device_name=device_name)
+            salad_head, salad_meta = _load_local_salad_head(salad_head_id, device_name=_dinov3_aux_torch_device(device_name))
     resolved_batch = max(1, min(int(batch_size or 16), len(prepared)))
     features: List[np.ndarray] = []
     local_vendi_metrics: List[Dict[str, float]] = []
@@ -22132,74 +22386,105 @@ def _data_ingestion_encode_prepared_images(
         batch_rows = prepared[start : start + resolved_batch]
         images: List[Image.Image] = []
         try:
-            images = _data_ingestion_open_images_for_batch(batch_rows)
-            if base_encoder == "cradio":
-                pooling = normalize_cradio_pooling(
-                    salad_meta.get("cradio_pooling") if encoder_norm == "local_salad" else cradio_pooling
+            if base_encoder == "dinov3" and is_mlx_dinov3_encoder(model_obj):
+                arrays = _encode_mlx_dinov3_image_paths(
+                    model_obj,
+                    [str(row.get("image_path") or "") for row in batch_rows],
+                    include_patch_tokens=encoder_norm == "local_salad" or return_local_vendi,
                 )
+                cls_np = np.asarray(arrays.get("cls_token"), dtype=np.float32)
+                patch_np = np.asarray(arrays.get("patch_tokens"), dtype=np.float32) if "patch_tokens" in arrays else None
                 if encoder_norm == "local_salad":
-                    _base, spatial_tokens, summary_tokens = encode_cradio_images(
-                        model_obj,
-                        processor_obj,
-                        device_name,
-                        images,
-                        pooling=pooling,
-                        normalize=False,
-                        return_tokens=True,
-                    )
-                    if spatial_tokens.ndim != 3 or spatial_tokens.shape[1] <= 0:
-                        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="cradio_spatial_tokens_missing")
+                    if patch_np is None or patch_np.ndim != 3 or patch_np.shape[1] <= 0:
+                        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dinov3_patch_tokens_missing")
+                    if cls_np.ndim != 2:
+                        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dinov3_global_token_missing")
                     if return_local_vendi:
-                        local_vendi_metrics.extend(_data_ingestion_patch_token_local_vendi_metrics(spatial_tokens))
+                        local_vendi_metrics.extend(_data_ingestion_patch_token_local_vendi_metrics(patch_np))
                     assert salad_head is not None
                     if is_mlx_local_salad_head(salad_head):
-                        features.append(_encode_local_salad_head_np(salad_head, spatial_tokens, summary_tokens))
+                        features.append(_encode_local_salad_head_np(salad_head, patch_np, cls_np))
                     else:
                         with torch.no_grad():
                             salad_device = next(salad_head.parameters()).device
                             features.append(
                                 _encode_local_salad_head_np(
                                     salad_head,
-                                    torch.from_numpy(spatial_tokens).to(salad_device),
-                                    torch.from_numpy(summary_tokens).to(salad_device),
+                                    torch.from_numpy(patch_np).to(salad_device),
+                                    torch.from_numpy(cls_np).to(salad_device),
                                 )
                             )
                 else:
-                    features.append(
-                        encode_cradio_images(
+                    denom = np.linalg.norm(cls_np, axis=-1, keepdims=True)
+                    features.append((cls_np / np.maximum(denom, 1e-12)).astype(np.float32, copy=False))
+            else:
+                images = _data_ingestion_open_images_for_batch(batch_rows)
+                if base_encoder == "cradio":
+                    pooling = normalize_cradio_pooling(
+                        salad_meta.get("cradio_pooling") if encoder_norm == "local_salad" else cradio_pooling
+                    )
+                    if encoder_norm == "local_salad":
+                        _base, spatial_tokens, summary_tokens = encode_cradio_images(
                             model_obj,
                             processor_obj,
                             device_name,
                             images,
                             pooling=pooling,
-                            normalize=True,
+                            normalize=False,
+                            return_tokens=True,
                         )
-                    )
-            else:
-                inputs = processor_obj(images=images, return_tensors="pt")
-                inputs = {k: v.to(device_name) for k, v in inputs.items()}
-                with torch.no_grad():
-                    outputs = model_obj(**inputs)
-                    last_hidden = getattr(outputs, "last_hidden_state", None)
-                    if encoder_norm == "local_salad":
-                        if last_hidden is None or last_hidden.ndim != 3 or last_hidden.shape[1] <= 1:
-                            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dinov3_patch_tokens_missing")
-                        global_token = getattr(outputs, "pooler_output", None)
-                        if global_token is None:
-                            global_token = last_hidden[:, 0, :]
+                        if spatial_tokens.ndim != 3 or spatial_tokens.shape[1] <= 0:
+                            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="cradio_spatial_tokens_missing")
                         if return_local_vendi:
-                            local_vendi_metrics.extend(_data_ingestion_patch_token_local_vendi_metrics(last_hidden[:, 1:, :]))
+                            local_vendi_metrics.extend(_data_ingestion_patch_token_local_vendi_metrics(spatial_tokens))
                         assert salad_head is not None
-                        features.append(_encode_local_salad_head_np(salad_head, last_hidden[:, 1:, :], global_token))
-                        continue
+                        if is_mlx_local_salad_head(salad_head):
+                            features.append(_encode_local_salad_head_np(salad_head, spatial_tokens, summary_tokens))
+                        else:
+                            with torch.no_grad():
+                                salad_device = next(salad_head.parameters()).device
+                                features.append(
+                                    _encode_local_salad_head_np(
+                                        salad_head,
+                                        torch.from_numpy(spatial_tokens).to(salad_device),
+                                        torch.from_numpy(summary_tokens).to(salad_device),
+                                    )
+                                )
                     else:
-                        feats = getattr(outputs, "pooler_output", None)
-                        if feats is None and last_hidden is not None:
-                            feats = last_hidden[:, 0, :]
-                        if feats is None:
-                            feats = outputs[0]
-                    feats = torch.nn.functional.normalize(feats.float(), dim=-1)
-                features.append(feats.detach().cpu().numpy().astype(np.float32))
+                        features.append(
+                            encode_cradio_images(
+                                model_obj,
+                                processor_obj,
+                                device_name,
+                                images,
+                                pooling=pooling,
+                                normalize=True,
+                            )
+                        )
+                else:
+                    inputs = processor_obj(images=images, return_tensors="pt")
+                    inputs = {k: v.to(device_name) for k, v in inputs.items()}
+                    with torch.no_grad():
+                        outputs = model_obj(**inputs)
+                        last_hidden = getattr(outputs, "last_hidden_state", None)
+                        if encoder_norm == "local_salad":
+                            if last_hidden is None or last_hidden.ndim != 3 or last_hidden.shape[1] <= 1:
+                                raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dinov3_patch_tokens_missing")
+                            global_token = getattr(outputs, "pooler_output", None)
+                            if global_token is None:
+                                global_token = last_hidden[:, 0, :]
+                            if return_local_vendi:
+                                local_vendi_metrics.extend(_data_ingestion_patch_token_local_vendi_metrics(last_hidden[:, 1:, :]))
+                            assert salad_head is not None
+                            features.append(_encode_local_salad_head_np(salad_head, last_hidden[:, 1:, :], global_token))
+                        else:
+                            feats = getattr(outputs, "pooler_output", None)
+                            if feats is None and last_hidden is not None:
+                                feats = last_hidden[:, 0, :]
+                            if feats is None:
+                                feats = outputs[0]
+                            feats = torch.nn.functional.normalize(feats.float(), dim=-1)
+                            features.append(feats.detach().cpu().numpy().astype(np.float32))
         finally:
             for img in images:
                 try:
@@ -22259,6 +22544,12 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
         _data_ingestion_update(job, status="running", progress=0.02, message="Preparing candidate media ...")
         frame_interval = _coerce_float(request.get("frame_interval"), 1.0, minimum=0.1)
         max_frames = _coerce_int(request.get("max_frames_per_video"), 200, minimum=0)
+        media_workers = _data_ingestion_requested_worker_count(
+            request,
+            "media_prepare_workers",
+            DATA_INGESTION_MEDIA_PREPARE_WORKERS,
+            max(len(candidate_rows), len(reference_rows)),
+        )
         candidates = _data_ingestion_prepare_media(
             job,
             candidate_rows,
@@ -22267,6 +22558,7 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             max_frames_per_video=max_frames,
             progress_start=0.03,
             progress_end=0.18,
+            worker_count=media_workers,
         )
         if not candidates:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_candidate_images")
@@ -22279,6 +22571,7 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             max_frames_per_video=max_frames,
             progress_start=0.19,
             progress_end=0.28,
+            worker_count=media_workers,
         )
         if not references:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="data_ingestion_no_reference_images")
@@ -22424,6 +22717,11 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             "encoder_type": salad_base_encoder,
             "base_encoder": salad_base_encoder,
             "encoder_model": salad_encoder_model or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL,
+            "dinov3_backend": (
+                mlx_dinov3_status(salad_encoder_model or CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL).resolved
+                if salad_base_encoder == "dinov3"
+                else None
+            ),
             "cradio_pooling": salad_cradio_pooling,
             "salad_head_id": salad_head_id,
             "salad_head_backend": salad_head_meta.get("salad_backend") or salad_head_meta.get("backend") or "",
@@ -22436,6 +22734,7 @@ def _run_data_ingestion_analysis_job(job: DataIngestionJob) -> None:
             "reference_label": str(request.get("reference_label") or ""),
             "candidate_upload_count": len(candidate_rows),
             "candidate_image_count": len(candidates),
+            "media_prepare_workers": media_workers,
             "local_vendi_enabled": bool(local_vendi_enabled and len(local_vendi_metadata) == len(candidates)),
             "local_vendi_weight": local_vendi_weight,
             "local_vendi_max_patches": DATA_INGESTION_LOCAL_VENDI_MAX_PATCHES,
@@ -22681,12 +22980,23 @@ def _data_ingestion_train_view(img: Image.Image, rng: random.Random) -> Image.Im
     return work.convert("RGB")
 
 
+def _data_ingestion_load_augmented_pair(
+    row: Mapping[str, Any],
+    left_seed: int,
+    right_seed: int,
+) -> Tuple[Image.Image, Image.Image]:
+    with _data_ingestion_open_image(Path(str(row.get("image_path") or ""))) as original:
+        left = _data_ingestion_train_view(original, random.Random(int(left_seed)))
+        right = _data_ingestion_train_view(original, random.Random(int(right_seed)))
+    return left, right
+
+
 def _local_salad_training_stage(progress: float) -> str:
     pct = clamp_progress(progress, fallback=0.0) or 0.0
     if pct < 0.18:
         return "Preparing reference media"
     if pct < 0.35:
-        return "Encoding reference views"
+        return "Training augmented reference views"
     if pct < 0.70:
         return "Training reference profile"
     if pct < 0.94:
@@ -22699,7 +23009,29 @@ def _data_ingestion_dinov3_tokens(
     processor_obj: Any,
     device_name: str,
     images: Sequence[Image.Image],
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    *,
+    return_numpy: bool = False,
+    image_format: str = "PNG",
+) -> Tuple[Any, Any]:
+    if is_mlx_dinov3_encoder(model_obj):
+        try:
+            arrays = _encode_mlx_dinov3_pil_images(
+                model_obj,
+                images,
+                include_patch_tokens=True,
+                image_format=image_format,
+            )
+        except MlxDinoV3WorkerError as exc:
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=f"mlx_dinov3_worker_failed:{exc}") from exc
+        patch_np = np.asarray(arrays.get("patch_tokens"), dtype=np.float32)
+        cls_np = np.asarray(arrays.get("cls_token"), dtype=np.float32)
+        if patch_np.ndim != 3 or patch_np.shape[1] <= 0:
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dinov3_patch_tokens_missing")
+        if cls_np.ndim != 2:
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dinov3_global_token_missing")
+        if return_numpy:
+            return patch_np, cls_np
+        return torch.from_numpy(patch_np), torch.from_numpy(cls_np)
     inputs = processor_obj(images=list(images), return_tensors="pt")
     inputs = {k: v.to(device_name) for k, v in inputs.items()}
     with torch.no_grad():
@@ -22710,7 +23042,11 @@ def _data_ingestion_dinov3_tokens(
     global_token = getattr(outputs, "pooler_output", None)
     if global_token is None:
         global_token = last_hidden[:, 0, :]
-    return last_hidden[:, 1:, :].detach(), global_token.detach()
+    patches = last_hidden[:, 1:, :].detach()
+    global_token = global_token.detach()
+    if return_numpy:
+        return patches.float().cpu().numpy().astype(np.float32, copy=False), global_token.float().cpu().numpy().astype(np.float32, copy=False)
+    return patches, global_token
 
 
 def _run_local_salad_training_job(job: DataIngestionJob) -> None:
@@ -22724,6 +23060,12 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
         _data_ingestion_update(job, status="running", progress=0.02, message="Preparing reference media ...")
         frame_interval = _coerce_float(request.get("frame_interval"), 1.0, minimum=0.1)
         max_frames = _coerce_int(request.get("max_frames_per_video"), 200, minimum=0)
+        media_workers = _data_ingestion_requested_worker_count(
+            request,
+            "media_prepare_workers",
+            DATA_INGESTION_MEDIA_PREPARE_WORKERS,
+            len(upload_rows),
+        )
         prepared = _data_ingestion_prepare_media(
             job,
             upload_rows,
@@ -22732,6 +23074,7 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
             max_frames_per_video=max_frames,
             progress_start=0.03,
             progress_end=0.18,
+            worker_count=media_workers,
         )
         max_images = _coerce_int(request.get("max_train_images"), 0, minimum=0)
         if max_images > 0 and len(prepared) > max_images:
@@ -22779,7 +23122,13 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
         else:
             model_obj, processor_obj, resolved_model, device_name = _data_ingestion_get_dinov3(model_name)
             salad_device_name = device_name
-            hidden_size = int(getattr(getattr(model_obj, "config", None), "hidden_size", 0) or 0)
+            if is_mlx_dinov3_encoder(model_obj):
+                salad_device_name = _dinov3_aux_torch_device(device_name)
+            hidden_size = int(
+                getattr(model_obj, "hidden_size", 0)
+                or getattr(getattr(model_obj, "config", None), "hidden_size", 0)
+                or 0
+            )
             if hidden_size <= 0:
                 # Probe one image if the config does not expose hidden_size.
                 with _data_ingestion_open_image(Path(str(prepared[0].get("image_path")))) as probe_img:
@@ -22796,6 +23145,59 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
         salad_backend = resolve_local_salad_backend(request.get("local_salad_backend"))
         learning_rate = _coerce_float(request.get("learning_rate"), 1e-4, minimum=1e-7)
         weight_decay = _coerce_float(request.get("weight_decay"), 1e-4, minimum=0.0)
+        epochs = _coerce_int(request.get("epochs"), LOCAL_SALAD_DEFAULT_EPOCHS, minimum=1)
+        batch_size = max(2, _coerce_int(request.get("batch_size"), 8, minimum=2))
+        temperature = _coerce_float(request.get("temperature"), 0.07, minimum=0.001)
+        seed = _coerce_int(request.get("seed"), 42)
+        descriptor_dim = int(config.token_dim) + int(config.num_clusters) * int(config.cluster_dim)
+        training_signature = _local_salad_training_signature(
+            reference_fingerprint=reference_fingerprint,
+            encoder_type=encoder_type,
+            resolved_model=resolved_model,
+            cradio_pooling=cradio_pooling,
+            config=config,
+            train_image_count=len(prepared),
+            epochs=epochs,
+            batch_size=batch_size,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            temperature=temperature,
+            seed=seed,
+            salad_backend=salad_backend,
+        )
+        force_rebuild = _env_bool("DATA_INGESTION_FORCE_PROFILE_REBUILD", False)
+        raw_force_rebuild = request.get("force_rebuild_profile")
+        if isinstance(raw_force_rebuild, bool):
+            force_rebuild = force_rebuild or raw_force_rebuild
+        elif raw_force_rebuild is not None:
+            force_rebuild = force_rebuild or str(raw_force_rebuild).strip().lower() in {"1", "true", "yes", "on"}
+        if not force_rebuild:
+            reusable = _find_reusable_local_salad_head(training_signature)
+            if reusable:
+                reused_head_id = str(reusable.get("head_id") or "")
+                reused_metadata = dict(reusable.get("metadata") or {})
+                result = {
+                    "summary": {
+                        "head_id": reused_head_id,
+                        "path": str(reusable.get("path") or _local_salad_head_path(reused_head_id)),
+                        "descriptor_dim": descriptor_dim,
+                        **reused_metadata,
+                        "reused_existing_profile": True,
+                    },
+                    "losses": [],
+                }
+                result_path = out_dir / "result.json"
+                _class_analysis_write_json(result_path, out_dir, result)
+                with DATA_INGESTION_JOBS_LOCK:
+                    job.result_path = str(result_path)
+                    _data_ingestion_update(
+                        job,
+                        status="completed",
+                        progress=1.0,
+                        message=f"Reference profile reused: {reused_head_id}",
+                        result=result,
+                    )
+                return
         if salad_backend == "mlx":
             head: Any = MLXLocalSALADHead(config)
             optimizer = make_mlx_local_salad_optimizer(
@@ -22810,98 +23212,123 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                 lr=learning_rate,
                 weight_decay=weight_decay,
             )
-        epochs = _coerce_int(request.get("epochs"), LOCAL_SALAD_DEFAULT_EPOCHS, minimum=1)
-        batch_size = max(2, _coerce_int(request.get("batch_size"), 8, minimum=2))
-        temperature = _coerce_float(request.get("temperature"), 0.07, minimum=0.001)
-        seed = _coerce_int(request.get("seed"), 42)
         rng = random.Random(seed)
         losses: List[float] = []
         total_steps = max(1, epochs * math.ceil(len(prepared) / batch_size))
         step = 0
-        for epoch in range(epochs):
-            if job.cancel_event.is_set():
-                raise RuntimeError("cancelled")
-            order = list(range(len(prepared)))
-            rng.shuffle(order)
-            for start in range(0, len(order), batch_size):
-                batch_ids = order[start : start + batch_size]
-                if len(batch_ids) < 2:
-                    continue
-                images_left: List[Image.Image] = []
-                images_right: List[Image.Image] = []
-                originals: List[Image.Image] = []
-                try:
-                    for idx in batch_ids:
-                        original = _data_ingestion_open_image(Path(str(prepared[idx].get("image_path") or "")))
-                        originals.append(original)
-                        images_left.append(_data_ingestion_train_view(original, rng))
-                        images_right.append(_data_ingestion_train_view(original, rng))
-                    if encoder_type == "cradio":
-                        _feats_a, patches_a_np, global_a_np = encode_cradio_images(
-                            model_obj,
-                            processor_obj,
-                            device_name,
-                            images_left,
-                            pooling=cradio_pooling,
-                            normalize=False,
-                            return_tokens=True,
-                        )
-                        _feats_b, patches_b_np, global_b_np = encode_cradio_images(
-                            model_obj,
-                            processor_obj,
-                            device_name,
-                            images_right,
-                            pooling=cradio_pooling,
-                            normalize=False,
-                            return_tokens=True,
-                        )
-                        if salad_backend == "mlx":
-                            patches_a, global_a = patches_a_np, global_a_np
-                            patches_b, global_b = patches_b_np, global_b_np
+        view_workers = _data_ingestion_worker_count(media_workers, batch_size)
+        view_executor: Optional[ThreadPoolExecutor] = None
+        if view_workers > 1:
+            view_executor = ThreadPoolExecutor(max_workers=view_workers, thread_name_prefix="salad-train-view")
+        try:
+            for epoch in range(epochs):
+                if job.cancel_event.is_set():
+                    raise RuntimeError("cancelled")
+                order = list(range(len(prepared)))
+                rng.shuffle(order)
+                for start in range(0, len(order), batch_size):
+                    batch_ids = order[start : start + batch_size]
+                    if len(batch_ids) < 2:
+                        continue
+                    images_left: List[Image.Image] = []
+                    images_right: List[Image.Image] = []
+                    try:
+                        pair_specs = [
+                            (
+                                prepared[idx],
+                                rng.randrange(0, 2**32 - 1),
+                                rng.randrange(0, 2**32 - 1),
+                            )
+                            for idx in batch_ids
+                        ]
+                        if view_executor is not None:
+                            pairs = list(
+                                view_executor.map(
+                                    lambda spec: _data_ingestion_load_augmented_pair(*spec),
+                                    pair_specs,
+                                )
+                            )
                         else:
-                            patches_a = torch.from_numpy(patches_a_np).to(salad_device_name)
-                            patches_b = torch.from_numpy(patches_b_np).to(salad_device_name)
-                            global_a = torch.from_numpy(global_a_np).to(salad_device_name)
-                            global_b = torch.from_numpy(global_b_np).to(salad_device_name)
-                    else:
-                        patches_a, global_a = _data_ingestion_dinov3_tokens(model_obj, processor_obj, device_name, images_left)
-                        patches_b, global_b = _data_ingestion_dinov3_tokens(model_obj, processor_obj, device_name, images_right)
-                    if salad_backend == "mlx":
-                        loss_value = mlx_local_salad_train_step(
-                            head,
-                            optimizer,
-                            patches_a,
-                            global_a,
-                            patches_b,
-                            global_b,
-                            temperature=temperature,
-                            max_grad_norm=1.0,
-                        )
-                    else:
-                        optimizer.zero_grad(set_to_none=True)
-                        desc_a = head(patches_a, global_token=global_a)
-                        desc_b = head(patches_b, global_token=global_b)
-                        loss = symmetric_infonce_loss(desc_a, desc_b, temperature=temperature)
-                        loss.backward()
-                        torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
-                        optimizer.step()
-                        loss_value = float(loss.detach().cpu().item())
-                    losses.append(float(loss_value))
-                finally:
-                    for img in [*images_left, *images_right, *originals]:
-                        try:
-                            img.close()
-                        except Exception:
-                            pass
-                step += 1
-                progress = 0.18 + 0.72 * (step / total_steps)
-                recent = float(np.mean(losses[-10:])) if losses else 0.0
-                stage = _local_salad_training_stage(progress)
-                _data_ingestion_update(
-                    job,
-                    progress=progress,
-                    message=f"{stage} • epoch {epoch + 1}/{epochs}, step {step}/{total_steps}, loss {recent:.4f}",
-                )
+                            pairs = [_data_ingestion_load_augmented_pair(*spec) for spec in pair_specs]
+                        images_left = [left for left, _right in pairs]
+                        images_right = [right for _left, right in pairs]
+                        split_at = len(images_left)
+                        all_views = [*images_left, *images_right]
+                        if encoder_type == "cradio":
+                            _feats_all, patches_all_np, global_all_np = encode_cradio_images(
+                                model_obj,
+                                processor_obj,
+                                device_name,
+                                all_views,
+                                pooling=cradio_pooling,
+                                normalize=False,
+                                return_tokens=True,
+                            )
+                            patches_a_np, patches_b_np = patches_all_np[:split_at], patches_all_np[split_at:]
+                            global_a_np, global_b_np = global_all_np[:split_at], global_all_np[split_at:]
+                            if salad_backend == "mlx":
+                                patches_a, global_a = patches_a_np, global_a_np
+                                patches_b, global_b = patches_b_np, global_b_np
+                            else:
+                                patches_a = torch.from_numpy(patches_a_np).to(salad_device_name)
+                                patches_b = torch.from_numpy(patches_b_np).to(salad_device_name)
+                                global_a = torch.from_numpy(global_a_np).to(salad_device_name)
+                                global_b = torch.from_numpy(global_b_np).to(salad_device_name)
+                        else:
+                            patches_all, global_all = _data_ingestion_dinov3_tokens(
+                                model_obj,
+                                processor_obj,
+                                device_name,
+                                all_views,
+                                return_numpy=salad_backend == "mlx",
+                                image_format="JPEG" if is_mlx_dinov3_encoder(model_obj) else "PNG",
+                            )
+                            patches_a, patches_b = patches_all[:split_at], patches_all[split_at:]
+                            global_a, global_b = global_all[:split_at], global_all[split_at:]
+                            if salad_backend != "mlx":
+                                patches_a = patches_a.to(salad_device_name)
+                                patches_b = patches_b.to(salad_device_name)
+                                global_a = global_a.to(salad_device_name)
+                                global_b = global_b.to(salad_device_name)
+                        if salad_backend == "mlx":
+                            loss_value = mlx_local_salad_train_step(
+                                head,
+                                optimizer,
+                                patches_a,
+                                global_a,
+                                patches_b,
+                                global_b,
+                                temperature=temperature,
+                                max_grad_norm=1.0,
+                            )
+                        else:
+                            optimizer.zero_grad(set_to_none=True)
+                            desc_a = head(patches_a, global_token=global_a)
+                            desc_b = head(patches_b, global_token=global_b)
+                            loss = symmetric_infonce_loss(desc_a, desc_b, temperature=temperature)
+                            loss.backward()
+                            torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
+                            optimizer.step()
+                            loss_value = float(loss.detach().cpu().item())
+                        losses.append(float(loss_value))
+                    finally:
+                        for img in [*images_left, *images_right]:
+                            try:
+                                img.close()
+                            except Exception:
+                                pass
+                    step += 1
+                    progress = 0.18 + 0.72 * (step / total_steps)
+                    recent = float(np.mean(losses[-10:])) if losses else 0.0
+                    stage = _local_salad_training_stage(progress)
+                    _data_ingestion_update(
+                        job,
+                        progress=progress,
+                        message=f"{stage} • epoch {epoch + 1}/{epochs}, step {step}/{total_steps}, loss {recent:.4f}",
+                    )
+        finally:
+            if view_executor is not None:
+                view_executor.shutdown(wait=True, cancel_futures=True)
         if job.cancel_event.is_set():
             raise RuntimeError("cancelled")
         requested_name = str(request.get("head_name") or "").strip() or f"local_salad_{time.strftime('%Y%m%d_%H%M%S')}"
@@ -22922,6 +23349,7 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                 "label": requested_name,
                 "encoder_type": encoder_type,
                 "encoder_model": resolved_model,
+                "dinov3_backend": "mlx" if encoder_type == "dinov3" and is_mlx_dinov3_encoder(model_obj) else ("torch" if encoder_type == "dinov3" else None),
                 "cradio_pooling": cradio_pooling if encoder_type == "cradio" else None,
                 "train_image_count": len(prepared),
                 "source_mode": str(request.get("source_mode") or "uploaded_media"),
@@ -22935,9 +23363,15 @@ def _run_local_salad_training_job(job: DataIngestionJob) -> None:
                 "active_image_count": _coerce_int(request.get("active_image_count"), 0, minimum=0),
                 "epochs": epochs,
                 "augmentation_profile": LOCAL_SALAD_AUGMENTATION_PROFILE,
+                "train_view_max_side": LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE,
                 "batch_size": batch_size,
+                "media_prepare_workers": media_workers,
+                "train_view_workers": view_workers,
                 "learning_rate": learning_rate,
                 "weight_decay": weight_decay,
+                "temperature": temperature,
+                "seed": seed,
+                "training_signature": training_signature,
                 "salad_backend": salad_backend,
                 "loss_final": float(losses[-1]) if losses else None,
                 "loss_mean_last10": float(np.mean(losses[-10:])) if losses else None,
@@ -23111,6 +23545,13 @@ def _get_data_ingestion_job(job_id: str) -> DataIngestionJob:
 
 def get_data_ingestion_job(job_id: str) -> Dict[str, Any]:
     return _serialize_data_ingestion_job(_get_data_ingestion_job(job_id))
+
+
+def list_data_ingestion_jobs() -> List[Dict[str, Any]]:
+    with DATA_INGESTION_JOBS_LOCK:
+        jobs = list(DATA_INGESTION_JOBS.values())
+    jobs.sort(key=lambda item: float(getattr(item, "updated_at", 0.0) or 0.0), reverse=True)
+    return [_serialize_data_ingestion_job(job) for job in jobs]
 
 
 def _load_data_ingestion_result(job_id: str) -> Dict[str, Any]:
@@ -37942,22 +38383,33 @@ def set_active_model(payload: ActiveModelRequest):
         if not encoder_model_norm:
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="encoder_model_required")
         try:
-            target_device = _dinov3_resolve_device_impl(device, cuda_disabled=dinov3_cuda_disabled)
-            new_dinov3_model, new_dinov3_processor = _load_dinov3_backbone(
+            target_device = _resolve_dinov3_runtime_device(encoder_model_norm, device)
+            (
+                new_dinov3_model,
+                new_dinov3_processor,
+                _resolved_dinov3_model,
+                target_device,
+            ) = _data_ingestion_get_dinov3(
                 encoder_model_norm,
                 target_device,
-                raise_on_error=True,
             )
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=HTTP_400_BAD_REQUEST, detail=f"dinov3_load_failed:{exc.detail}"
+            ) from exc
         except RuntimeError as exc:
             raise HTTPException(
                 status_code=HTTP_400_BAD_REQUEST, detail=f"dinov3_load_failed:{exc}"
             ) from exc
         dino_dim = None
-        try:
-            cfg = getattr(new_dinov3_model, "config", None)
-            dino_dim = getattr(cfg, "hidden_size", None) or getattr(cfg, "embed_dim", None)
-        except Exception:
-            dino_dim = None
+        if is_mlx_dinov3_encoder(new_dinov3_model):
+            dino_dim = int(getattr(new_dinov3_model, "hidden_size", 0) or 0)
+        else:
+            try:
+                cfg = getattr(new_dinov3_model, "config", None)
+                dino_dim = getattr(cfg, "hidden_size", None) or getattr(cfg, "embed_dim", None)
+            except Exception:
+                dino_dim = None
         expected_dino_dim = _classifier_expected_head_dim(
             dino_dim,
             encoder_type=encoder_type_norm,
@@ -41129,6 +41581,7 @@ app.include_router(
         capabilities_fn=_data_ingestion_capabilities,
         create_analysis_job_fn=create_data_ingestion_analysis_job,
         create_salad_train_job_fn=create_local_salad_training_job,
+        list_jobs_fn=list_data_ingestion_jobs,
         export_reference_profile_fn=export_data_ingestion_reference_profile,
         import_reference_profile_fn=import_data_ingestion_reference_profile,
         preview_accepted_export_fn=preview_data_ingestion_accepted_export,

@@ -17,6 +17,9 @@ The backend is still a single FastAPI app exported by `app/__init__.py` and wire
 Runtime loading happens in these places:
 
 - CLIP: `localinferenceapi.py` loads `clip.load(...)` into the global classifier backbone.
+- DINOv3: `services/mlx_dinov3.py` can route ViT DINOv3 encoding through a
+  Swift/MLX worker when converted weights are present, otherwise Torch/MPS is
+  used.
 - SAM1 interactive prompts: `localinferenceapi.py` builds `SamPredictor` slots.
 - SAM3 text/visual prompts: `services/sam3_runtime.py` resolves the device and caches the text runtime.
 - YOLO: `services/detectors.py` calls `model.predict(...)`; `localinferenceapi.py` now supplies a resolved inference device.
@@ -28,6 +31,8 @@ Runtime loading happens in these places:
 The Mac backend uses two acceleration families:
 
 - PyTorch MPS for CLIP, SAM/SAM3, YOLO, and RF-DETR.
+- MLX-DINOv3 for DINOv3 ViT embedding jobs when the worker and converted model
+  cache are available.
 - MLX-VLM for Qwen3-VL inference on Apple Silicon, with Transformers/PyTorch as the fallback.
 
 Reason:
@@ -45,6 +50,7 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 # route unsupported MPS ops to CPU
 YOLO_INFER_DEVICE=auto        # optional per-runtime override
 RFDETR_INFER_DEVICE=auto      # optional per-runtime override
 SAM3_DEVICE=auto
+DINOV3_BACKEND=auto           # auto|torch|mlx
 QWEN_DEVICE=auto
 QWEN_INFERENCE_PLATFORM=auto # auto|mlx_vlm|transformers
 QWEN_MLX_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
@@ -108,6 +114,23 @@ curl http://127.0.0.1:8000/system/health_summary
 
 The GPU status payload now reports `mps.available`, `preferred_inference_device`, and `inference_backend`.
 
+MLX-DINOv3 worker smoke:
+
+```bash
+tools/build_mlx_dinov3_worker.sh
+tools/convert_mlx_dinov3_model.sh facebook/dinov3-vitb16-pretrain-lvd1689m
+source .venv-macos/bin/activate
+python - <<'PY'
+from services.mlx_dinov3 import mlx_dinov3_status
+print(mlx_dinov3_status("facebook/dinov3-vitb16-pretrain-lvd1689m").to_dict())
+PY
+```
+
+On this machine, `auto` resolves to MLX after those two commands because the
+worker exists and the converted model is cached under
+`uploads/model_cache/mlx_dinov3/`. If either asset is missing, `auto` falls back
+to Torch/MPS before a job starts.
+
 Qwen runtime smoke:
 
 ```bash
@@ -162,6 +185,66 @@ selections resolve to the matching full checkpoint before training and apply
 bitsandbytes QLoRA there. MLX entries train through MLX-VLM on Apple Silicon,
 including quantized checkpoints for QLoRA-style adapter training. FP8 requires
 compatible NVIDIA hardware.
+
+## MLX-DINOv3
+
+The optional DINOv3 worker is a SwiftPM package in
+`tools/mlx_dinov3_worker/`, pinned to `vincentamato/MLXDINOv3` commit
+`3122d7905cca21012b4c249e8ddad19ff78f54bc`. It supports ViT DINOv3 checkpoints;
+ConvNeXt-style DINOv3 models remain on Torch.
+
+Build and convert:
+
+```bash
+tools/build_mlx_dinov3_worker.sh
+tools/convert_mlx_dinov3_model.sh facebook/dinov3-vitb16-pretrain-lvd1689m
+```
+
+`swift build` can produce the binaries, but MLX also needs `mlx.metallib` next
+to them. The build script compiles the MLX generated Metal sources into that
+metallib. If the normal Xcode `metal` wrapper reports a missing Metal Toolchain,
+run `xcodebuild -downloadComponent MetalToolchain`; on some systems the
+downloaded cryptex must be mounted before the script can use
+`/Volumes/MetalToolchainCryptex/Metal.xctoolchain/usr/bin/metal`.
+
+Selection rules:
+
+- `DINOV3_BACKEND=auto` uses MLX only when the platform is Apple Silicon and
+  both the worker and converted model are present.
+- `DINOV3_BACKEND=torch` forces the existing Hugging Face/Torch path.
+- `DINOV3_BACKEND=mlx` requires MLX and fails clearly if the worker/model is
+  unavailable.
+- A job never silently switches between MLX and Torch after it starts.
+
+Runtime coverage:
+
+- Data Ingestion reference profile training, candidate scoring, pooled DINOv3,
+  local SALAD-over-DINOv3, and local Vendi patch scoring use the resolver.
+- Class Split Explorer and active DINOv3 classifier inference use the resolver.
+- Train Class Predictor uses the resolver for frozen DINOv3 feature extraction;
+  metadata records `dinov3_backend` for trained artifacts.
+
+Data Ingestion CPU-side controls:
+
+- `DATA_INGESTION_MEDIA_PREPARE_WORKERS` defaults to `8`; the Data Ingestion UI
+  can override it per job for video frame extraction, image preparation, and
+  reference-view augmentation.
+- `DATA_INGESTION_WORKER_MAX` caps the UI/env worker value, defaulting to `16`
+  or the local CPU count, whichever is lower.
+- `LOCAL_SALAD_TRAIN_VIEW_MAX_SIDE` defaults to `384`; profile-training views
+  are augmented at this bound before the DINOv3 worker resizes them to its
+  native `224` input.
+- Matching saved reference profiles are reused by training signature. Set
+  `DATA_INGESTION_FORCE_PROFILE_REBUILD=1` or send `force_rebuild_profile` in
+  the job manifest when a deliberate retrain is needed.
+
+Validation on the local ViT-B checkpoint:
+
+- Worker smoke returned CLS `[1, 768]` and patch tokens `[1, 196, 768]`.
+- Two-image parity against Torch/MPS showed CLS cosine minimum `0.999994` and
+  patch-token cosine minimum `0.999998`.
+- A 32-image synthetic throughput check measured MLX at about `342-361 imgs/s`
+  for batches 4-16 versus Torch/MPS at about `180-212 imgs/s`.
 
 ## SAM3 Notes
 

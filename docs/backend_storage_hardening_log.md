@@ -2002,3 +2002,41 @@ preserving the exact validation story for storage and artifact-write fixes.
   tests/test_labeling_panel_layout_contract.py tests/test_api_route_uniqueness.py`
   (`126 passed`), live upload-session start/batch/status/list/cancel smoke,
   `tools/check_ui_endpoints.py http://127.0.0.1:8000`, and `git diff --check`.
+
+## 2026-05-26: MLX-DINOv3 Mac Encoder Path
+
+- Added an optional Swift/MLX DINOv3 worker pinned to
+  `vincentamato/MLXDINOv3` commit
+  `3122d7905cca21012b4c249e8ddad19ff78f54bc`.
+- Added a backend resolver for `DINOV3_BACKEND=auto|torch|mlx`. Auto selects
+  MLX on Apple Silicon only when the worker and converted ViT checkpoint are
+  present; otherwise it falls back to Torch/MPS before a job starts.
+- Wired the resolver into Data Ingestion profile training, candidate/reference
+  scoring, DINOv3 class-analysis encoding, active DINOv3 classifier loading,
+  post-training DINOv3 classifier resume, and Train Class Predictor DINOv3
+  feature extraction without mixing MLX and Torch embeddings inside one job.
+- Added a per-job Data Ingestion media worker control, parallelized reference
+  view augmentation, merged left/right augmented encoder passes into a single
+  DINOv3/C-RADIO batch, and bounded local SALAD training views at `384px`
+  before the encoder's native resize to reduce avoidable CPU/image I/O.
+- Added training-signature reuse for reference profiles so repeated builds of
+  the same reference dataset/settings can return the existing profile instead
+  of launching another full augmented DINOv3/SALAD pass.
+- Added a list endpoint for in-memory Data Ingestion jobs to make active
+  profile/analysis jobs recoverable after a tab refresh.
+- Added build/convert scripts for the Swift worker and converted model cache.
+  The build script now creates the colocated `mlx.metallib` needed by SwiftPM
+  MLX binaries.
+- Validation: focused Python coverage for MLX-DINOv3 resolution and Data
+  Ingestion/classification/training routing, Swift worker build, ViT-B conversion, real
+  worker smoke (`cls_token [1,768]`, `patch_tokens [1,196,768]`), Torch parity
+  check (`CLS cosine min 0.999994`, patch cosine min `0.999998`), and a
+  synthetic 32-image throughput check showing MLX about `342-361 imgs/s` versus
+  Torch/MPS about `180-212 imgs/s`.
+- Final focused regression bundle:
+  `tests/test_mlx_dinov3_backend.py tests/test_data_ingestion.py
+  tests/test_class_analysis.py tests/test_macos_acceleration.py
+  tests/test_clip_training_artifact_publish.py
+  tests/test_labeling_panel_layout_contract.py` (`257 passed`), plus
+  `python3 -m py_compile localinferenceapi.py api/data_ingestion.py`,
+  `node --check ybat-master/ybat.js`, and `git diff --check`.

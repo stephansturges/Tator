@@ -546,6 +546,8 @@ def main() -> None:
     print(f"Crop pad / size     : {artifacts.embedding_crop_padding_ratio} / {artifacts.canonical_size}")
     print(f"Background / views  : {artifacts.background_mode} / {artifacts.embedding_view_mode}")
     print(f"DINOv3 pooling      : {artifacts.dinov3_pooling}")
+    if artifacts.dinov3_backend:
+        print(f"DINOv3 backend      : {artifacts.dinov3_backend}")
     print(f"Aggregation         : {artifacts.embedding_aggregation}")
     print(f"Accuracy            : {artifacts.accuracy:.4f}")
     if artifacts.classifier_type == "mlp":

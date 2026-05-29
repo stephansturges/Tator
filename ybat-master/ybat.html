@@ -1083,6 +1083,15 @@
 	                                </select>
                                 <label for="classSplitFilterClass">Filter</label>
                                 <select id="classSplitFilterClass"></select>
+                                <label for="classSplitDisplayMode">Display</label>
+                                <select id="classSplitDisplayMode" title="Limit which objects are drawn in the graph. This does not change the analysis result or right-side review panels.">
+                                    <option value="all">All graph objects</option>
+                                    <option value="wrong_only">Likely wrong class only</option>
+                                </select>
+                                <label class="class-split-toggle" title="Draw translucent outlines around embedding clusters. Cluster IDs come from the analysis result; the outlines are only a review aid.">
+                                    <input type="checkbox" id="classSplitClusterOverlay" checked />
+                                    Cluster hulls
+                                </label>
                             </div>
                             <div id="classSplitBulkPanel" class="class-split-bulk-panel" hidden>
                                 <strong id="classSplitBulkCount">0 selected</strong>
@@ -1098,6 +1107,12 @@
                                         <div class="training-help">Select a point to inspect its crop.</div>
                                     </div>
                                 </div>
+                                <details id="classSplitClusterPanel" class="class-split-review-section class-split-cluster-panel" open>
+                                    <summary>Cluster proposals</summary>
+                                    <div id="classSplitClusterList" class="class-split-cluster-list">
+                                        <div class="training-help">Run analysis to review cluster proposals.</div>
+                                    </div>
+                                </details>
                                 <details id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel" open>
                                     <summary>Likely wrong class</summary>
                                     <div id="classSplitWrongList" class="class-split-wrong-list"></div>

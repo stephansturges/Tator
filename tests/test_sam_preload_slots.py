@@ -91,3 +91,25 @@ def test_sam_preload_generation_supersession_remains_variant_wide():
         assert manager._is_superseded(old_generation_job) is True
     finally:
         manager.stop()
+
+
+def test_sam1_backend_can_select_mlx_adapter(monkeypatch):
+    class DummyPredictor:
+        def __init__(self):
+            self.image_shape = None
+
+        def set_image(self, np_img):
+            self.image_shape = np_img.shape
+
+        def predict(self, **kwargs):
+            return "masks", "scores", "logits"
+
+    monkeypatch.setattr(api, "SAM1_BACKEND_PREF", "mlx")
+    monkeypatch.setattr(api, "should_use_mlx_sam", lambda preference: True)
+    monkeypatch.setattr(api, "build_mlx_sam_predictor", DummyPredictor)
+
+    backend = api._Sam1Backend()
+
+    backend.set_image(api.np.zeros((4, 5, 3), dtype=api.np.uint8))
+    assert backend.backend == "mlx"
+    assert backend.predict() == ("masks", "scores", "logits")

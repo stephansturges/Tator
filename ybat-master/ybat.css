@@ -2153,6 +2153,13 @@ body.annotation-focus-mode .class-scroll-indicator {
     grid-area: toolbar;
 }
 
+.class-split-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+
 .class-split-bulk-panel {
     grid-area: bulk;
     display: flex;
@@ -2210,14 +2217,16 @@ body.annotation-focus-mode .class-scroll-indicator {
 }
 
 .class-split-review-section > strong,
-.class-split-wrong-panel > summary {
+.class-split-wrong-panel > summary,
+.class-split-cluster-panel > summary {
     display: block;
     margin-bottom: 5px;
     font-weight: 700;
     color: #0f172a;
 }
 
-.class-split-wrong-panel > summary {
+.class-split-wrong-panel > summary,
+.class-split-cluster-panel > summary {
     cursor: pointer;
 }
 
@@ -2231,6 +2240,7 @@ body.annotation-focus-mode .class-scroll-indicator {
 
 .class-split-report,
 .class-split-wrong-list,
+.class-split-cluster-list,
 .class-split-inspector {
     min-height: 150px;
     max-height: 320px;
@@ -2246,6 +2256,7 @@ body.annotation-focus-mode .class-scroll-indicator {
 }
 
 .class-split-panel--workspace .class-split-wrong-list,
+.class-split-panel--workspace .class-split-cluster-list,
 .class-split-panel--workspace .class-split-inspector {
     min-height: 250px;
     max-height: none;
@@ -2337,10 +2348,11 @@ body.annotation-focus-mode .class-scroll-indicator {
     border-color: rgba(14, 165, 233, 0.55);
 }
 
-.class-split-dataset-hover-preview {
+.class-split-dataset-hover-preview,
+.class-split-graph-hover-preview {
     position: fixed;
     z-index: 10000;
-    width: min(360px, calc(100vw - 24px));
+    width: min(400px, calc(100vw - 24px));
     box-sizing: border-box;
     pointer-events: none;
     border: 1px solid rgba(15, 23, 42, 0.18);
@@ -2350,20 +2362,24 @@ body.annotation-focus-mode .class-scroll-indicator {
     padding: 8px;
 }
 
-.class-split-dataset-hover-preview[hidden] {
+.class-split-dataset-hover-preview[hidden],
+.class-split-graph-hover-preview[hidden] {
     display: none;
 }
 
-.class-split-dataset-hover-preview img {
+.class-split-dataset-hover-preview img,
+.class-split-graph-hover-preview img {
     display: block;
     width: 100%;
+    min-height: 120px;
     max-height: 60vh;
     object-fit: contain;
     border-radius: 5px;
     background: rgba(15, 23, 42, 0.06);
 }
 
-.class-split-dataset-hover-preview span {
+.class-split-dataset-hover-preview span,
+.class-split-graph-hover-preview span {
     display: block;
     margin-top: 6px;
     font-size: 12px;
@@ -2414,6 +2430,66 @@ body.annotation-focus-mode .class-scroll-indicator {
 
 .class-split-wrong-item:hover {
     border-color: #fb923c;
+}
+
+.class-split-cluster-item {
+    display: grid;
+    grid-template-columns: 58px minmax(0, 1fr);
+    gap: 8px;
+    padding: 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #f8fafc;
+    cursor: pointer;
+}
+
+.class-split-cluster-item + .class-split-cluster-item {
+    margin-top: 8px;
+}
+
+.class-split-cluster-item:hover,
+.class-split-cluster-item--selected {
+    border-color: #38bdf8;
+    background: #eff6ff;
+}
+
+.class-split-cluster-item--selected {
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.14);
+}
+
+.class-split-cluster-item__thumb {
+    width: 58px;
+    height: 58px;
+    border-radius: 6px;
+    border: 1px solid #cbd5e1;
+    object-fit: contain;
+    background: #ffffff;
+}
+
+.class-split-cluster-item__body {
+    min-width: 0;
+}
+
+.class-split-cluster-item__body strong {
+    display: block;
+    color: #0f172a;
+    line-height: 1.2;
+}
+
+.class-split-cluster-item__body span {
+    color: #475569;
+    font-size: 0.85rem;
+}
+
+.class-split-cluster-item__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+.class-split-cluster-item__actions .training-button {
+    padding: 4px 8px;
 }
 
 .class-split-wrong-item__actions {
@@ -4709,6 +4785,7 @@ html.theme-dark .class-split-graph,
 html.theme-dark .class-split-review-section--inspector,
 html.theme-dark .class-split-report,
 html.theme-dark .class-split-wrong-list,
+html.theme-dark .class-split-cluster-list,
 html.theme-dark .class-split-inspector,
 html.theme-dark .class-split-dataset-analysis,
 html.theme-dark .class-split-dataset-graph,
@@ -4804,6 +4881,7 @@ html.theme-dark .class-split-advanced summary,
 html.theme-dark .class-split-dataset-analysis > summary,
 html.theme-dark .class-split-review-section > strong,
 html.theme-dark .class-split-wrong-panel > summary,
+html.theme-dark .class-split-cluster-panel > summary,
 html.theme-dark .class-split-report__note,
 html.theme-dark .class-split-bulk-panel strong,
 html.theme-dark .class-split-inspector__meta {
@@ -4812,9 +4890,24 @@ html.theme-dark .class-split-inspector__meta {
 
 html.theme-dark .class-split-report__item,
 html.theme-dark .class-split-dataset-report__item,
-html.theme-dark .class-split-dataset-list__item {
+html.theme-dark .class-split-dataset-list__item,
+html.theme-dark .class-split-cluster-item {
     background: rgba(15, 23, 42, 0.72);
     border-color: rgba(148, 163, 184, 0.28);
+}
+
+html.theme-dark .class-split-cluster-item:hover,
+html.theme-dark .class-split-cluster-item--selected {
+    background: rgba(30, 41, 59, 0.92);
+    border-color: rgba(56, 189, 248, 0.75);
+}
+
+html.theme-dark .class-split-cluster-item__body strong {
+    color: #e2e8f0;
+}
+
+html.theme-dark .class-split-cluster-item__body span {
+    color: #b9c5c0;
 }
 
 html.theme-dark .embedding-benchmark-note {
@@ -5462,6 +5555,7 @@ html.theme-pipboy .class-split-graph,
 html.theme-pipboy .class-split-review-section--inspector,
 html.theme-pipboy .class-split-report,
 html.theme-pipboy .class-split-wrong-list,
+html.theme-pipboy .class-split-cluster-list,
 html.theme-pipboy .class-split-inspector,
 html.theme-pipboy .class-split-dataset-analysis,
 html.theme-pipboy .class-split-dataset-graph,
@@ -5557,6 +5651,7 @@ html.theme-pipboy .class-split-advanced summary,
 html.theme-pipboy .class-split-dataset-analysis > summary,
 html.theme-pipboy .class-split-review-section > strong,
 html.theme-pipboy .class-split-wrong-panel > summary,
+html.theme-pipboy .class-split-cluster-panel > summary,
 html.theme-pipboy .class-split-report__note,
 html.theme-pipboy .class-split-bulk-panel strong,
 html.theme-pipboy .class-split-inspector__meta {
@@ -5565,9 +5660,21 @@ html.theme-pipboy .class-split-inspector__meta {
 
 html.theme-pipboy .class-split-report__item,
 html.theme-pipboy .class-split-dataset-report__item,
-html.theme-pipboy .class-split-dataset-list__item {
+html.theme-pipboy .class-split-dataset-list__item,
+html.theme-pipboy .class-split-cluster-item {
     background: color-mix(in srgb, var(--pip-panel) 80%, transparent);
     border-color: color-mix(in srgb, var(--pip-green) 35%, transparent);
+}
+
+html.theme-pipboy .class-split-cluster-item:hover,
+html.theme-pipboy .class-split-cluster-item--selected {
+    background: color-mix(in srgb, var(--pip-green) 16%, var(--pip-panel) 84%);
+    border-color: var(--pip-green-strong);
+}
+
+html.theme-pipboy .class-split-cluster-item__body strong,
+html.theme-pipboy .class-split-cluster-item__body span {
+    color: var(--pip-green-muted);
 }
 
 html.theme-pipboy .embedding-benchmark-note {

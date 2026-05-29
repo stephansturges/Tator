@@ -2059,3 +2059,29 @@ preserving the exact validation story for storage and artifact-write fixes.
   reference tests (`19 passed`), and live `/datasets`,
   `/datasets/upload_sessions`, and `/data_ingestion/capabilities` probes against
   the restarted backend.
+
+## 2026-05-29: Class Split Review And MLX SAM1 Runtime
+
+- Added an optional MLX SAM1 adapter for Apple Silicon annotation prompts.
+  `SAM1_BACKEND=auto` uses the existing Torch/MPS SAM path unless converted MLX
+  SAM weights and the `mlx-examples` Segment Anything package are configured;
+  `SAM1_BACKEND=mlx` fails closed when those assets are unavailable.
+- Exposed SAM1 backend preference, Torch device candidates, and MLX adapter
+  availability in `/system/health_summary`.
+- Hardened active Label Images Data Ingestion reference reuse so candidate
+  analysis can use a selected reference profile's stored backend dataset handle
+  after confirming the dataset still exists and the image count matches the open
+  workspace.
+- Added Class Split graph display filtering for likely wrong-class points,
+  floating graph crop previews, optional cluster hull overlays, and a Cluster
+  Proposals panel with representative crop, class mix, purity, mean outlier, and
+  select-cluster bulk review behavior.
+- Made cluster selection switch the graph back to all-object display before
+  selecting every cluster member, so bulk relabeling cannot silently act on
+  objects hidden by the wrong-only graph filter.
+- Updated macOS runtime docs, README update tracking, Class Split/Data Ingestion
+  flow docs, env examples, and UI contract tests for the new controls.
+- Validation: `node --check ybat-master/ybat.js`, `py_compile
+  localinferenceapi.py services/mlx_sam.py`, `git diff --check`, and focused
+  Data Ingestion, Class Analysis, macOS acceleration, MLX-DINOv3, MLX-SAM, SAM
+  preload, and UI contract coverage (`219 passed`, `8 warnings`).

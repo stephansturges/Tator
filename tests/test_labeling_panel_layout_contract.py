@@ -420,6 +420,10 @@ def test_data_ingestion_panel_contract():
     assert "activeCount > 500 && dataIngestionBackendDatasetExists(selectedDatasetId)" not in js
     assert "function dataIngestionHeadMatchesReference" in js
     assert "const activeHandle = getDataIngestionServerReferenceHandle(\"active_label_images\");" in js
+    assert "const selectedHeadReferenceHandle = dataIngestionHandleFromSelectedHead(selectedHead);" in js
+    assert "activeReferenceCount > 0 || !!selectedHeadReferenceHandle" in js
+    assert "if (!dataIngestionBackendDatasetExists(headDatasetId)) return null;" in js
+    assert "imageCount: activeCount || backendCount || headActiveCount || 0" in js
     assert "const headLabel = String(head.reference_label || head.reference_dataset_label || \"\").trim();" in js
     assert "const activeLabel = getDataIngestionReferenceLabel();" in js
     assert 'if (!headReferenceSource && !headDatasetId && !headSessionId) {\n            return false;' in js
@@ -622,10 +626,15 @@ def test_class_split_explorer_panel_contract():
     assert 'Scoring neighbors<span class="help-icon"' in html
     assert 'value="5000"' not in html
     assert 'id="classSplitGraph" class="class-split-graph"' in html
+    assert 'id="classSplitDisplayMode"' in html
+    assert '<option value="wrong_only">Likely wrong class only</option>' in html
+    assert 'id="classSplitClusterOverlay" checked' in html
     assert 'id="classSplitCradioPooling"' in html
     assert "benchmark carefully before promoting any C-RADIO pooling mode" in html
     assert 'id="classSplitReport" class="class-split-report"' in html
     assert 'id="classSplitBulkPanel" class="class-split-bulk-panel" hidden' in html
+    assert 'id="classSplitClusterPanel" class="class-split-review-section class-split-cluster-panel" open' in html
+    assert 'id="classSplitClusterList" class="class-split-cluster-list"' in html
     assert 'id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel" open' in html
     assert 'id="classSplitWrongList"' in html
     assert 'id="classSplitInspector"' in html
@@ -645,6 +654,9 @@ def test_class_split_explorer_panel_contract():
     assert ".class-split-bulk-panel" in css
     assert ".class-split-graph" in css
     assert ".class-split-report" in css
+    assert ".class-split-cluster-list" in css
+    assert ".class-split-cluster-item" in css
+    assert ".class-split-graph-hover-preview" in css
     assert ".class-split-graph.class-split-graph--pan" not in css
     assert ".class-split-review-section--inspector" in css
     assert ".class-split-hover-card" not in css
@@ -713,6 +725,15 @@ def test_class_split_explorer_panel_contract():
     assert "function getClassSplitPointImageKey" in js
     assert "function renderClassSplitReport" in js
     assert "function runClassSplitDatasetAnalysis" in js
+    assert "function getClassSplitGraphPoints" in js
+    assert 'displayMode === "wrong_only"' in js
+    assert "function showClassSplitGraphHoverPreview" in js
+    assert "function bindClassSplitGraphHoverPreviewMovement" in js
+    assert "classSplitGraphHoverPreview" in js
+    assert "function renderClassSplitClusterList" in js
+    assert "function selectClassSplitCluster" in js
+    assert 'classSplitElements.displayMode.value = "all";' in js
+    assert "function buildClassSplitClusterHullTraces" in js
     assert "computeDatasetImageValueAnalysis(points)" in js
     assert "function isClassSplitDatasetAnalysisPanelOpen" in js
     assert "function renderClassSplitDatasetAnalysisGraph" in js
@@ -720,6 +741,7 @@ def test_class_split_explorer_panel_contract():
     assert "renderClassSplitDatasetAnalysisGraph(classSplitState.datasetAnalysis, { force: true })" in js
     assert "classSplitDatasetAnalysisHoverPreview" in js
     assert 'graphEl.on("plotly_hover", (event) => {' in js
+    assert "showClassSplitGraphHoverPreview(event.event, previewUrl, point)" in js
     assert "showClassSplitDatasetHoverPreview(event.event, previewUrl" in js
     assert "dataset_image_value_score" in js
     assert "scheduleAnnotationDiversityMetricRefresh();" in js
@@ -751,6 +773,9 @@ def test_class_split_explorer_panel_contract():
     assert "clearClassSplitBulkSelection({ render: true });" in js
     assert 'classSplitElements.filterClass.addEventListener("change", () => {' in js
     assert "clearClassSplitBulkSelection();\n                renderClassSplitPlot();" in js
+    assert 'classSplitElements.displayMode.addEventListener("change", () => {' in js
+    assert "clearClassSplitBulkSelection({ render: true });" in js
+    assert "if (filterChanged) {\n            renderClassSplitBulkPanel();\n            renderClassSplitClusterList();" in js
     assert "function showClassSplitHoverCard" not in js
     assert "cropPreview.naturalWidth" in js
     assert "Math.min(shellWidth / naturalWidth, shellHeight / naturalHeight)" in js

@@ -21,6 +21,8 @@ Runtime loading happens in these places:
   Swift/MLX worker when converted weights are present, otherwise Torch/MPS is
   used.
 - SAM1 interactive prompts: `localinferenceapi.py` builds `SamPredictor` slots.
+  `SAM1_BACKEND=auto` can use the MLX SAM adapter on Apple Silicon when a
+  converted MLX SAM model and the `mlx-examples` SAM package are configured.
 - SAM3 text/visual prompts: `services/sam3_runtime.py` resolves the device and caches the text runtime.
 - YOLO: `services/detectors.py` calls `model.predict(...)`; `localinferenceapi.py` now supplies a resolved inference device.
 - RF-DETR: `services/detectors.py` constructs the RF-DETR model with a resolved device string.
@@ -30,14 +32,19 @@ Runtime loading happens in these places:
 
 The Mac backend uses two acceleration families:
 
-- PyTorch MPS for CLIP, SAM/SAM3, YOLO, and RF-DETR.
+- PyTorch MPS for CLIP, SAM3, YOLO, and RF-DETR.
+- Optional MLX SAM1 for interactive click/box annotation when converted SAM
+  weights are available locally.
 - MLX-DINOv3 for DINOv3 ViT embedding jobs when the worker and converted model
   cache are available.
 - MLX-VLM for Qwen3-VL inference on Apple Silicon, with Transformers/PyTorch as the fallback.
 
 Reason:
 
-- CLIP, SAM, YOLO, and RF-DETR are already loaded as PyTorch models in this codebase, so MPS is the shortest path for the existing annotation flow.
+- CLIP, SAM3, YOLO, and RF-DETR are already loaded as PyTorch models in this codebase, so MPS is the shortest path for those runtimes.
+- SAM1 can use MLX through the `mlx-examples` Segment Anything implementation;
+  the adapter falls back to the existing PyTorch SAM1 path unless `SAM1_BACKEND=mlx`
+  is explicitly requested.
 - Qwen3-VL has maintained quantized MLX community builds, so Apple Silicon VLM inference and Qwen adapter training can use native MLX without porting detector/SAM weights.
 - Adapter checkpoints preserve their runtime family: Transformers adapters load through PEFT, while MLX adapters load through MLX-VLM.
 
@@ -50,6 +57,9 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 # route unsupported MPS ops to CPU
 YOLO_INFER_DEVICE=auto        # optional per-runtime override
 RFDETR_INFER_DEVICE=auto      # optional per-runtime override
 SAM3_DEVICE=auto
+SAM1_BACKEND=auto             # auto|torch|mlx
+SAM_MLX_MODEL_PATH=           # converted MLX SAM model dir with config.json/model.safetensors
+SAM_MLX_ROOT=                 # mlx-examples/segment_anything checkout
 DINOV3_BACKEND=auto           # auto|torch|mlx
 QWEN_DEVICE=auto
 QWEN_INFERENCE_PLATFORM=auto # auto|mlx_vlm|transformers
@@ -130,6 +140,24 @@ On this machine, `auto` resolves to MLX after those two commands because the
 worker exists and the converted model is cached under
 `uploads/model_cache/mlx_dinov3/`. If either asset is missing, `auto` falls back
 to Torch/MPS before a job starts.
+
+MLX SAM1 annotation smoke, after cloning `mlx-examples` and converting a SAM
+checkpoint with its `segment_anything/convert.py` script:
+
+```bash
+source .venv-macos/bin/activate
+SAM1_BACKEND=mlx \
+SAM_MLX_MODEL_PATH=/path/to/sam-vit-base-mlx \
+SAM_MLX_ROOT=/path/to/mlx-examples/segment_anything \
+python - <<'PY'
+import localinferenceapi as api
+print(api._system_health_summary()["models"]["sam1"])
+PY
+```
+
+The backend only switches the annotation SAM1 slots to MLX after restart with
+those environment variables. `SAM1_BACKEND=auto` falls back to Torch/MPS when
+the MLX assets are absent.
 
 Qwen runtime smoke:
 
@@ -255,7 +283,8 @@ Upstream SAM3 currently imports a few CUDA/Triton helper modules even when the r
 ## Known Limits
 
 - YOLO is expected to work through Ultralytics `device=mps`.
-- CLIP and SAM1 use PyTorch MPS directly.
+- CLIP uses PyTorch MPS. SAM1 uses PyTorch MPS unless `SAM1_BACKEND` selects
+  the optional MLX adapter.
 - SAM3 visual prompts have been smoke-tested on MPS. Some internal ops still fall back to CPU; set `SAM3_DEVICE=cpu` when debugging SAM3-specific runtime issues.
 - RF-DETR receives `device=mps`, but package-level MPS coverage must be verified with real weights. If it fails on unsupported ops, set `RFDETR_INFER_DEVICE=cpu` while keeping YOLO/SAM/CLIP on MPS.
 - Qwen MLX-VLM does not stream tokens yet; streaming endpoints return the final generated text once the MLX call completes.

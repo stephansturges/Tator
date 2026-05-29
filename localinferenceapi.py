@@ -416,6 +416,12 @@ from services.sam3_runtime import (
     _build_backend_for_variant_impl as _build_backend_for_variant_impl,
     _ensure_sam3_text_runtime_impl as _ensure_sam3_text_runtime_impl,
 )
+from services.mlx_sam import (
+    MlxSamUnavailable,
+    build_mlx_sam_predictor,
+    mlx_sam_status,
+    should_use_mlx_sam,
+)
 from services.runtime_unload import (
     _unload_sam3_text_runtime_impl as _unload_sam3_text_runtime_impl,
     _unload_dinov3_backbone_impl as _unload_dinov3_backbone_impl,
@@ -3336,6 +3342,7 @@ def _resume_classifier_backbone() -> None:
 # 4) Load the SAM model (segment-anything) as normal:
 MODEL_TYPE = os.environ.get("SAM_MODEL_TYPE", "vit_h")
 CHECKPOINT_PATH = os.environ.get("SAM_CHECKPOINT_PATH", "./sam_vit_h_4b8939.pth")
+SAM1_BACKEND_PREF = os.environ.get("SAM1_BACKEND", os.environ.get("SAM_BACKEND", "auto")).strip().lower()
 
 
 def _resolve_hf_cached_model_file(repo_id: str, filename: str) -> Optional[str]:
@@ -3561,10 +3568,32 @@ def _resolve_sam1_devices() -> List[torch.device]:
 
 class _Sam1Backend:
     def __init__(self):
-        self.predictor = SamPredictor(sam_model_registry[MODEL_TYPE](checkpoint=CHECKPOINT_PATH))
+        self.backend = "torch"
+        self.device = None
+        try:
+            use_mlx = should_use_mlx_sam(SAM1_BACKEND_PREF)
+        except MlxSamUnavailable as exc:
+            raise RuntimeError(f"mlx_sam_unavailable:{exc}") from exc
+        if use_mlx:
+            try:
+                self.predictor = build_mlx_sam_predictor()
+                self.backend = "mlx"
+                return
+            except Exception as exc:  # noqa: BLE001
+                if SAM1_BACKEND_PREF == "mlx":
+                    raise RuntimeError(f"mlx_sam_load_failed:{exc}") from exc
+                logger.warning("Falling back to Torch SAM1 after MLX SAM load failed: %s", exc)
+        model = sam_model_registry[MODEL_TYPE](checkpoint=CHECKPOINT_PATH)
+        devices = _resolve_sam1_devices()
+        self.device = devices[0] if devices else torch.device("cpu")
+        try:
+            model = model.to(device=self.device)
+        except TypeError:
+            model = model.to(self.device)
+        self.predictor = SamPredictor(model)
 
     def set_image(self, np_img: np.ndarray) -> None:
-        self.predictor.set_image(np_img)
+        self.predictor.set_image(np.ascontiguousarray(np_img))
 
     def predict(self, **kwargs):
         return self.predictor.predict(**kwargs)
@@ -38842,6 +38871,15 @@ def _system_health_summary() -> Dict[str, Any]:
         summary["models"]["qwen"] = qwen_status()
     except Exception as exc:  # noqa: BLE001
         summary["errors"].append(f"qwen_status_failed:{exc}")
+        summary["ok"] = False
+    try:
+        summary["models"]["sam1"] = {
+            "backend_preference": SAM1_BACKEND_PREF,
+            "torch_devices": [str(device) for device in _resolve_sam1_devices()],
+            "mlx": mlx_sam_status(),
+        }
+    except Exception as exc:  # noqa: BLE001
+        summary["errors"].append(f"sam1_status_failed:{exc}")
         summary["ok"] = False
     try:
         summary["models"]["sam3_runs"] = len(

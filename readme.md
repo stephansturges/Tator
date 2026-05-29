@@ -222,8 +222,10 @@ The Label Images tab is the everyday workspace.
   active image.
 - Use Qwen captions as visual context while keeping final labels editable.
 - Use Class Split Explorer to embed one class or all classes in the current
-  annotation dataset, inspect cluster structure, and jump from suspicious
-  points back to the source bbox for correction.
+  annotation dataset, inspect cluster structure, filter the plot to likely
+  wrong-class objects, preview crops on hover, select proposed clusters for
+  bulk relabeling, and jump from suspicious points back to the source bbox for
+  correction.
 - After an all-class Class Split run, use Dataset Analysis to rank image-level
   value from class rarity, object-feature rarity, and embedding-map edge cases.
 - Export selected crops through the chunked crop ZIP endpoints.
@@ -569,6 +571,7 @@ The runner defaults to:
 TATOR_INFERENCE_DEVICE=auto
 TATOR_ALLOW_MPS=1
 PYTORCH_ENABLE_MPS_FALLBACK=1
+SAM1_BACKEND=auto
 SAM3_DEVICE=auto
 YOLO_INFER_DEVICE=auto
 RFDETR_INFER_DEVICE=auto
@@ -656,8 +659,9 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current verification: focused upload-session, Data Ingestion, route, and UI
-contract suites passed (`126 passed`). Full log:
+Current verification: focused Class Split, Data Ingestion, macOS acceleration,
+MLX-DINOv3, MLX-SAM, SAM preload, and UI contract suites passed (`219
+passed`). Full log:
 [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
 </details>

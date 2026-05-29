@@ -77,6 +77,11 @@ Flow checks:
 - Browser-only active workspaces become managed backend datasets through a
   sidecar-backed upload session before profile training; the profile job receives
   a dataset id, not thousands of multipart reference files.
+- If a selected reference profile already came from a backend-backed active
+  Label Images upload, candidate analysis reuses that stored dataset handle
+  after confirming the dataset still exists and its image count matches the open
+  workspace. This keeps reloads and profile reuse on the managed dataset path
+  instead of falling back to huge multipart reference uploads.
 - Profile exports include checksums and reference metadata.
 - Imported profiles are selected only when they match the selected reference.
 - Capabilities no longer expose local filesystem paths for profile files or
@@ -190,10 +195,21 @@ Flow checks:
 - Crop previews fit the available inspector and support scroll zoom.
 - Plot lasso supports bulk class reassignment.
 - Wrong-class candidates can be marked correct or relabeled.
+- The plot can be limited to likely wrong-class points without changing the
+  analysis result or right-side review panels.
+- Plot points show a floating crop preview on hover so a user can inspect an
+  object before selecting it.
+- Cluster proposals show representative crops, class mix, purity, and mean
+  outlier score. Selecting a cluster selects all visible points in that cluster,
+  zooms the plot to the hull, flashes the medoid, and enables the existing bulk
+  class-change controls.
 
 Fix from this pass:
 
 - The long benchmark explanation starts collapsed, reducing first-screen noise.
+- Cluster hulls are optional graph overlays. Cluster selection forces the graph
+  back to all-object display before creating the bulk selection, so a
+  wrong-only filter cannot hide objects that are about to be relabeled.
 
 ## Journey 7: Optional Class Split Dataset Analysis
 
@@ -231,18 +247,18 @@ Fix from this pass:
 - Accepted exports must be read-only with respect to submitted candidates.
 - Class Split relabeling must mark the corresponding annotation image dirty so
   the normal save path persists the change.
+- Class Split cluster-assisted bulk relabeling must never operate on hidden
+  filtered-out cluster members without making that display change visible first.
 
 ## Verification Scope
 
 Current focused verification for this review:
 
 ```bash
-NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m py_compile localinferenceapi.py services/data_ingestion.py
+NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m py_compile localinferenceapi.py services/mlx_sam.py
 node --check ybat-master/ybat.js
 git diff --check
-NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest tests/test_data_ingestion.py -q
-NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py tests/ui/e2e/test_dataset_ingestion_safety_flows.py -q
-curl -fsS http://127.0.0.1:8000/data_ingestion/capabilities
+NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest -q tests/test_data_ingestion.py tests/test_class_analysis.py tests/test_macos_acceleration.py tests/test_mlx_dinov3_backend.py tests/test_mlx_sam_backend.py tests/test_sam_preload_slots.py tests/test_labeling_panel_layout_contract.py
 ```
 
 Interactive browser smoke is still a separate manual/Playwright concern; the

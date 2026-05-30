@@ -676,8 +676,16 @@ def test_class_split_explorer_panel_contract():
     assert '"bulk bulk"\n        "graph review"' in css
 
     assert 'const TAB_CLASS_SPLIT = "class-split";' in js
+    assert "const TOP_TAB_KEYS = new Set([" in js
     assert "tabElements.classSplitButton = document.getElementById(\"tabClassSplitButton\")" in js
     assert "setActiveTab(TAB_CLASS_SPLIT)" in js
+    assert "function handleTopTabNavigationClick(event)" in js
+    assert 'event.target.closest(".tab-button[data-tab]")' in js
+    assert "document.addEventListener(\"click\", handleTopTabNavigationClick, true);" in js
+    assert "let tabNavigationInitialized = false;" in js
+    assert "if (tabNavigationInitialized) {\n            setActiveTab(activeTab);\n            return;\n        }\n        tabNavigationInitialized = true;" in js
+    assert "initializeAdaptiveTopTabs();\n        setupTabNavigation();\n        applyPlaywrightTestIds();" in js
+    assert "document.readyState !== \"complete\"" in js
     assert "const classSplitElements = {" in js
     assert "const classSplitState = {" in js
     assert "function initClassSplitExplorer" in js

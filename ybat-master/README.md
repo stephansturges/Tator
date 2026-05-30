@@ -41,6 +41,8 @@ The UI talks to the backend configured by `API_ROOT`, which defaults to
   after edits.
 - Bump the `ybat.js?v=...` cache key in `ybat.html` whenever frontend behavior
   changes.
+- Keep top-tab navigation on the early delegated click handler; individual
+  panel initialization must not be able to leave visible tabs inert.
 - Imported YOLO/VOC/COCO labels are stamped with UUID and creation metadata so
   SAM and auto-tweak responses can target the correct box.
 - Zip imports skip directory entries and keep importing remaining files if one

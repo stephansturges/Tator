@@ -664,6 +664,10 @@ MLX-DINOv3, MLX-SAM, SAM preload, and UI contract suites passed (`219
 passed`). Full log:
 [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
+2026-05-30 follow-up: top-tab navigation now binds through an early delegated
+handler and the browser cache key was bumped, so Data Ingestion and Class Split
+remain reachable even if later panel initialization is delayed.
+
 </details>
 
 ## Runtime Artifacts

@@ -808,6 +808,26 @@
     const TAB_QWEN = "qwen";
     const TAB_PREDICTORS = "predictors";
     const TAB_SETTINGS = "settings";
+    const TOP_TAB_KEYS = new Set([
+        TAB_LABELING,
+        TAB_DATA_INGESTION,
+        TAB_CLASS_SPLIT,
+        TAB_PREPASS_BUILDER,
+        TAB_TRAINING,
+        TAB_QWEN_TRAIN,
+        TAB_SAM3_TRAIN,
+        TAB_YOLO_TRAIN,
+        TAB_RFDETR_TRAIN,
+        TAB_AGENT_MINING,
+        TAB_PROMPT_HELPER,
+        TAB_DATASETS,
+        TAB_SAM3_PROMPT_MODELS,
+        TAB_DETECTORS,
+        TAB_ACTIVE,
+        TAB_QWEN,
+        TAB_PREDICTORS,
+        TAB_SETTINGS,
+    ]);
 
     function formatBytesLabel(bytes) {
         const mb = bytes / (1024 * 1024);
@@ -17659,7 +17679,8 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    function setupTabNavigation() {
+    let tabNavigationInitialized = false;
+    function bindTabNavigationElements() {
         tabElements.labelingButton = document.getElementById("tabLabelingButton");
         tabElements.dataIngestionButton = document.getElementById("tabDataIngestionButton");
         tabElements.classSplitButton = document.getElementById("tabClassSplitButton");
@@ -17696,6 +17717,35 @@ async function cancelRfDetrTrainingJobRequest() {
         tabElements.qwenPanel = document.getElementById("tabQwen");
         tabElements.predictorsPanel = document.getElementById("tabPredictors");
         tabElements.settingsPanel = document.getElementById("tabSettings");
+        return !!(tabElements.labelingButton && tabElements.labelingPanel);
+    }
+
+    function handleTopTabNavigationClick(event) {
+        const button = event.target && event.target.closest ? event.target.closest(".tab-button[data-tab]") : null;
+        if (!button || button.disabled) {
+            return;
+        }
+        const tabKey = button.getAttribute("data-tab") || "";
+        if (!TOP_TAB_KEYS.has(tabKey)) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        bindTabNavigationElements();
+        setActiveTab(tabKey);
+    }
+
+    document.addEventListener("click", handleTopTabNavigationClick, true);
+
+    function setupTabNavigation() {
+        if (!bindTabNavigationElements()) {
+            return;
+        }
+        if (tabNavigationInitialized) {
+            setActiveTab(activeTab);
+            return;
+        }
+        tabNavigationInitialized = true;
         if (tabElements.labelingButton) {
             tabElements.labelingButton.addEventListener("click", () => setActiveTab(TAB_LABELING));
         }
@@ -40759,6 +40809,7 @@ async function cancelRfDetrTrainingJobRequest() {
         initHelpTooltips();
         initializeThemeToggle();
         initializeAdaptiveTopTabs();
+        setupTabNavigation();
         applyPlaywrightTestIds();
         autoModeCheckbox = document.getElementById("autoMode");
         autoClassMarginEnabledCheckbox = document.getElementById("autoClassMarginEnabled");

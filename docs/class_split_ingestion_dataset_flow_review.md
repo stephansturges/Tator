@@ -61,8 +61,9 @@ Flow checks:
    current Label Images dataset or backend dataset.
 3. User builds a reference profile or uploads a profile bundle.
 4. If the current Label Images workspace is not already backend-backed with the
-   same registered image count, the UI first saves it through
-   `/datasets/upload_session/*` in bounded image batches.
+   same registered image count, the UI first saves it through the named
+   `Current upload dataset name` field and `/datasets/upload_session/*` in
+   bounded image batches.
 5. UI posts profile-build jobs to `/data_ingestion/salad_train_jobs` or imports
    a ZIP through `/data_ingestion/reference_profiles/import`.
 6. Backend reads the selected backend dataset, trains the local profile, records
@@ -77,6 +78,9 @@ Flow checks:
 - Browser-only active workspaces become managed backend datasets through a
   sidecar-backed upload session before profile training; the profile job receives
   a dataset id, not thousands of multipart reference files.
+- Active-reference upload reuse includes the requested dataset name, so changing
+  that name creates or resolves a different managed dataset instead of silently
+  reusing an old auto-named upload.
 - If a selected reference profile already came from a backend-backed active
   Label Images upload, candidate analysis reuses that stored dataset handle
   after confirming the dataset still exists and its image count matches the open
@@ -179,8 +183,13 @@ Flow checks:
 2. User opens Class Split Explorer.
 3. UI reports whether images, labelmap, and labeled objects are available.
 4. User chooses selected-class or all-class scope.
-5. UI packages the active workspace through
-   `/class_analysis/jobs/active_workspace`.
+5. If the current workspace is backend-linked or transient, UI submits a JSON
+   `/class_analysis/jobs` request that references that dataset/session directly.
+   If it is browser-only, UI first uploads it with the `Workspace upload name`
+   through `/datasets/upload_session/*`, then submits the resulting backend
+   dataset id to `/class_analysis/jobs`. The legacy one-shot
+   `/class_analysis/jobs/active_workspace` path remains a fallback only when
+   chunked upload is not possible.
 6. Backend embeds object crops, writes thumbnails, points, cluster summary, and
    wrong-class candidates.
 7. UI renders the graph, selected crop inspector, likely-wrong panel, report,
@@ -191,6 +200,10 @@ Flow checks:
 - Class Split runs against the current annotation workspace, not Data Ingestion
   candidate files.
 - Dirty annotation snapshots are flushed before running in dataset-backed mode.
+- Browser-only current workspaces use the same managed, cancellable chunked
+  upload path as Dataset Management, preserve raw YOLO label lines for images
+  that have not been hydrated in the browser, and register a named dataset that
+  can be inspected or deleted later.
 - Crop inspector stays at the top of the right stack.
 - Crop previews fit the available inspector and support scroll zoom.
 - Plot lasso supports bulk class reassignment.
@@ -210,6 +223,8 @@ Fix from this pass:
 - Cluster hulls are optional graph overlays. Cluster selection forces the graph
   back to all-object display before creating the bulk selection, so a
   wrong-only filter cannot hide objects that are about to be relabeled.
+- Class Split no longer tries to upload large all-class runs as one huge
+  multipart request when a chunked current-workspace upload is available.
 
 ## Journey 7: Optional Class Split Dataset Analysis
 

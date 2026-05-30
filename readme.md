@@ -151,7 +151,10 @@ workspaces use `/datasets/upload_session/*`: the browser streams image batches,
 the backend stages them under `uploads/yolo_dataset_upload_sessions`, and
 finalization atomically promotes the complete YOLO layout into
 `uploads/datasets`. Interrupted sessions have sidecar metadata, are listable,
-and can be cancelled without touching already registered datasets.
+and can be cancelled without touching already registered datasets. Panes that
+trigger current-workspace uploads expose a requested dataset name before upload,
+so temporary references can be identified and deleted later from Dataset
+Management.
 
 Dataset records also carry:
 
@@ -192,11 +195,13 @@ the ranked list or the distribution-map preview.
 
 If the selected reference is the current Label Images workspace and it is not
 already backed by a matching registered or transient backend dataset, Data
-Ingestion uses the same chunked dataset-upload session described above.
-Registered active references are reused only when their image count matches the
-open Label Images list. The reference profile job receives only the resulting
-backend dataset id, avoiding thousands of multipart reference-file fields and
-keeping the staged upload cancelable and inspectable.
+Ingestion uses the named chunked dataset-upload session described above. The
+`Current upload dataset name` field is the requested backend dataset id for that
+managed upload; the backend makes it unique if needed. Registered active
+references are reused only when their image count matches the open Label Images
+list and the requested upload name has not changed. The reference profile job
+receives only the resulting backend dataset id, avoiding thousands of multipart
+reference-file fields and keeping the staged upload cancelable and inspectable.
 
 On Apple Silicon, DINOv3 encoding can use the optional MLX-DINOv3 worker once
 its Swift worker and converted ViT checkpoint are built. `DINOV3_BACKEND=auto`
@@ -225,7 +230,9 @@ The Label Images tab is the everyday workspace.
   annotation dataset, inspect cluster structure, filter the plot to likely
   wrong-class objects, preview crops on hover, select proposed clusters for
   bulk relabeling, and jump from suspicious points back to the source bbox for
-  correction.
+  correction. Backend-backed workspaces are analyzed in place; browser-only
+  current workspaces first upload through a named chunked dataset session so the
+  temporary managed dataset is visible and removable in Dataset Management.
 - After an all-class Class Split run, use Dataset Analysis to rank image-level
   value from class rarity, object-feature rarity, and embedding-map edge cases.
 - Export selected crops through the chunked crop ZIP endpoints.
@@ -666,7 +673,9 @@ passed`). Full log:
 
 2026-05-30 follow-up: top-tab navigation now binds through an early delegated
 handler and the browser cache key was bumped, so Data Ingestion and Class Split
-remain reachable even if later panel initialization is delayed.
+remain reachable even if later panel initialization is delayed. Current
+workspace uploads from Data Ingestion and Class Split now use explicit dataset
+names and the shared chunked upload-session path.
 
 </details>
 

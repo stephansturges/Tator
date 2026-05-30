@@ -288,6 +288,9 @@ def test_data_ingestion_panel_contract():
     assert 'id="dataIngestionReferenceActive"' in html
     assert 'id="dataIngestionReferenceBackend"' in html
     assert 'id="dataIngestionReferenceDataset"' in html
+    assert 'id="dataIngestionActiveUploadName"' in html
+    assert "Current upload dataset name" in html
+    assert "delete it later from Dataset Management" in html
     assert 'id="dataIngestionBuildProfileButton"' in html
     assert 'id="dataIngestionProfileDownload"' in html
     assert 'id="dataIngestionProfileUpload"' in html
@@ -364,6 +367,9 @@ def test_data_ingestion_panel_contract():
     assert "const backendCount = getDataIngestionDatasetImageCount(headDatasetId);" in js
     assert "appendActiveWorkspaceTrainingFiles" in js
     assert "activeDatasetSaladHeadName" in js
+    assert "function getDataIngestionActiveReferenceUploadName" in js
+    assert "dataIngestionElements.activeUploadName" in js
+    assert 'const uploadCacheKey = `${signature}|name:${uploadName}`;' in js
     assert "getDataIngestionNumber(dataIngestionElements.maxTrainImages, 0" in js
     assert 'startLocalSaladTraining("active_dataset")' not in js
     assert "preferredSaladHeadId" in js
@@ -615,6 +621,8 @@ def test_class_split_explorer_panel_contract():
     assert 'id="classSplitDetails"' not in html
     assert 'id="classSplitScopeSelected"' in html
     assert 'id="classSplitScopeAll"' in html
+    assert 'id="classSplitUploadDatasetName"' in html
+    assert "Workspace upload name" in html
     assert 'id="classSplitEncoderType"' in html
     assert 'id="classSplitBackbone"' in html
     assert '<option value="precise" selected>Precise best</option>' in html
@@ -826,6 +834,19 @@ def test_class_split_explorer_panel_contract():
     assert "Correct class" in js
     assert "function drawClassSplitInstancePulse" in js
     assert "startClassSplitInstancePulse(match.bbox" in js
+    assert "function getClassSplitServerSourceHandle" in js
+    assert "function ensureClassSplitUploadedWorkspaceSourceHandle" in js
+    assert "classSplitElements.uploadDatasetName" in js
+    assert 'const uploadCacheKey = `${signature}|name:${uploadName}`;' in js
+    assert "CLASS_SPLIT_ACTIVE_WORKSPACE_UPLOADS_STORAGE_KEY" in js
+    assert "transport: \"chunked\"" in js
+    assert "labelLinesForImage: (imageKey) => getClassSplitActiveLabelLines(imageKey)" in js
+    assert "activeUploadSessionId" in js
+    assert 'fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(uploadSessionId)}/cancel`' in js
+    assert 'source_mode: sourceHandle.sourceMode' in js
+    assert "payload.dataset_id = sourceHandle.datasetId" in js
+    assert 'fetch(`${API_ROOT}/class_analysis/jobs`, {' in js
+    assert 'headers: { "Content-Type": "application/json" }' in js
     assert 'fetch(`${API_ROOT}/class_analysis/jobs/active_workspace`' in js
     assert "window.Plotly.react" in js
     assert "function jumpToClassSplitPoint" in js
@@ -835,6 +856,8 @@ def test_class_split_explorer_panel_contract():
     assert "captureAnnotationDirtyStateForImage(imageKey)" in js
     assert "async function ensureClassSplitSnapshotClean" in js
     assert "captureCurrentAnnotationDirtyState();" in js
+    assert 'await ensureClassSplitSnapshotClean("Class Split analysis")' in js
+    assert "Class Split analysis is running. The graph will appear when the backend finishes embedding and projection." in js
     assert "startClassSplitAnalysis({ reuseLast: true })" in js
     assert "initClassSplitExplorer();" in js
     assert "max_files=float(\"inf\")" in router

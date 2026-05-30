@@ -2118,3 +2118,28 @@ preserving the exact validation story for storage and artifact-write fixes.
   `tools/check_ui_endpoints.py http://127.0.0.1:8000`, browser top-tab
   navigation E2E against the restarted backend (`1 passed`), and
   `/system/health_summary` returned `ok: true`.
+
+## 2026-05-30: Named Active-Workspace Uploads For Ingestion And Class Split
+
+- Added explicit upload-name controls for active Label Images uploads launched
+  from Data Ingestion (`Current upload dataset name`) and Class Split Explorer
+  (`Workspace upload name`). These requested ids are handed to the backend
+  dataset registry, which still uniquifies them when needed, so temporary
+  current-workspace datasets can be identified and deleted later from Dataset
+  Management.
+- Wired Class Split browser-only active workspaces into the shared
+  `/datasets/upload_session/*` chunked upload path before analysis. Backend
+  linked/transient workspaces still submit direct `/class_analysis/jobs`
+  references; the old one-shot `/class_analysis/jobs/active_workspace`
+  multipart path remains only as a fallback when chunked upload cannot be used.
+- Preserved raw active-workspace YOLO label lines during Class Split-triggered
+  uploads, so all-class runs include labels for images that are listed in the
+  active dataset but have not been hydrated by the browser.
+- Made the Data Ingestion and Class Split active-workspace upload caches include
+  the requested dataset name. Changing the name now creates or resolves a
+  distinct managed dataset instead of silently reusing a previous auto-named
+  upload with matching images.
+- Validation: `node --check ybat-master/ybat.js`, `git diff --check`, focused
+  Data Ingestion/Class Split UI contract tests, chunked upload-session finalize
+  regression, and active-workspace class-analysis manifest regression (`4
+  passed`).

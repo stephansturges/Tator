@@ -2644,6 +2644,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         flashTimer: null,
         flashStartedAt: 0,
         cropResizeObserver: null,
+        activeUploadSessionId: "",
+        activeUploadAbortController: null,
+        activeWorkspaceDatasetUpload: null,
     };
     let qwenClassOverride = false;
     let qwenAdvancedVisible = false;
@@ -3712,6 +3715,7 @@ const sam3TrainState = {
     const ANNOTATION_EDITOR_STORAGE_KEY = "tator.annotationEditorId";
     const ANNOTATION_DIVERSITY_METRIC_STORAGE_KEY = "tator.annotationDiversityMetric.enabled";
     const DATA_INGESTION_ACTIVE_REFERENCE_UPLOADS_STORAGE_KEY = "tator.dataIngestion.activeReferenceUploads.v1";
+    const CLASS_SPLIT_ACTIVE_WORKSPACE_UPLOADS_STORAGE_KEY = "tator.classSplit.activeWorkspaceUploads.v1";
 
     const annotationSourceState = {
         mode: "none", // "none" | "linked" | "transient"
@@ -6821,7 +6825,18 @@ const sam3TrainState = {
                 }
                 const labelRel = labelNameParts.join(".");
                 const result = [];
-                const buckets = bboxes[imageKey] || {};
+                const providedLabelLines = typeof options.labelLinesForImage === "function"
+                    ? options.labelLinesForImage(imageKey, imageRecord)
+                    : null;
+                if (Array.isArray(providedLabelLines)) {
+                    providedLabelLines.forEach((line) => {
+                        const safeLine = String(line || "").trim();
+                        if (safeLine) {
+                            result.push(safeLine);
+                        }
+                    });
+                } else {
+                    const buckets = bboxes[imageKey] || {};
 		                for (const className of Object.keys(buckets)) {
 		                    const bucket = buckets[className] || [];
 		                    const classIdx = classes[className];
@@ -6850,6 +6865,7 @@ const sam3TrainState = {
 		                        }
 			                    });
 			                }
+                }
                 const labelText = result.join("\n");
                 if (root) {
                     root.file(`${splitName}/labels/${labelRel}`, labelText);
@@ -36856,6 +36872,9 @@ async function cancelRfDetrTrainingJobRequest() {
         if (dataIngestionElements.referenceDataset) {
             dataIngestionElements.referenceDataset.disabled = dataIngestionState.active || source !== "backend_dataset";
         }
+        if (dataIngestionElements.activeUploadName) {
+            dataIngestionElements.activeUploadName.disabled = dataIngestionState.active || source !== "active_label_images";
+        }
         if (dataIngestionElements.trainCradioModel) {
             dataIngestionElements.trainCradioModel.disabled = dataIngestionState.active || !trainingUsesCradio;
         }
@@ -36994,6 +37013,11 @@ async function cancelRfDetrTrainingJobRequest() {
         return `data_ingestion_reference_${stem}_${getClassSplitImageKeys().length || 0}`;
     }
 
+    function getDataIngestionActiveReferenceUploadName(label = "") {
+        const explicit = String(dataIngestionElements.activeUploadName?.value || "").trim();
+        return explicit || dataIngestionActiveReferenceUploadName(label);
+    }
+
     function dataIngestionUploadedReferenceContext(label = "") {
         const safeLabel = String(label || getDataIngestionReferenceLabel() || "active Label Images dataset").trim();
         return `Data Ingestion active reference: ${safeLabel}`;
@@ -37072,8 +37096,11 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const imageCount = activeKeys.length;
         const signature = dataIngestionActiveWorkspaceSignature(activeKeys);
+        const referenceLabel = getDataIngestionReferenceLabel();
+        const uploadName = getDataIngestionActiveReferenceUploadName(referenceLabel);
+        const uploadCacheKey = `${signature}|name:${uploadName}`;
         const cached = dataIngestionState.activeReferenceDatasetUpload;
-        if (cached?.signature === signature && cached?.datasetId && dataIngestionBackendDatasetExists(cached.datasetId)) {
+        if (cached?.signature === uploadCacheKey && cached?.datasetId && dataIngestionBackendDatasetExists(cached.datasetId)) {
             return {
                 kind: "backend_dataset",
                 datasetId: cached.datasetId,
@@ -37081,18 +37108,16 @@ async function cancelRfDetrTrainingJobRequest() {
                 id: cached.datasetId,
                 uploadedActiveReference: true,
                 imageCount,
-                signature,
+                signature: uploadCacheKey,
             };
         }
         await initDatasetManagerTab();
         await refreshDataIngestionDatasets();
-        const referenceLabel = getDataIngestionReferenceLabel();
-        const uploadName = dataIngestionActiveReferenceUploadName(referenceLabel);
-        const reusableEntry = getDataIngestionStoredActiveReferenceUpload(signature);
-        const reusableHandle = dataIngestionActiveReferenceHandleFromDataset(reusableEntry, signature);
+        const reusableEntry = getDataIngestionStoredActiveReferenceUpload(uploadCacheKey);
+        const reusableHandle = dataIngestionActiveReferenceHandleFromDataset(reusableEntry, uploadCacheKey);
         if (reusableHandle) {
             dataIngestionState.activeReferenceDatasetUpload = {
-                signature,
+                signature: uploadCacheKey,
                 datasetId: reusableHandle.datasetId,
                 imageCount,
             };
@@ -37132,16 +37157,16 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!result) {
             throw new Error("Active Label Images dataset upload did not return a backend dataset.");
         }
-        const handle = dataIngestionActiveReferenceHandleFromDataset(result, signature);
+        const handle = dataIngestionActiveReferenceHandleFromDataset(result, uploadCacheKey);
         if (!handle) {
             throw new Error("Active Label Images dataset upload returned no dataset id.");
         }
         dataIngestionState.activeReferenceDatasetUpload = {
-            signature,
+            signature: uploadCacheKey,
             datasetId: handle.datasetId,
             imageCount,
         };
-        setDataIngestionStoredActiveReferenceUpload(signature, handle.datasetId, imageCount);
+        setDataIngestionStoredActiveReferenceUpload(uploadCacheKey, handle.datasetId, imageCount);
         await refreshDataIngestionDatasets();
         return handle;
     }
@@ -38384,6 +38409,7 @@ async function cancelRfDetrTrainingJobRequest() {
         dataIngestionElements.referenceActive = document.getElementById("dataIngestionReferenceActive");
         dataIngestionElements.referenceBackend = document.getElementById("dataIngestionReferenceBackend");
         dataIngestionElements.referenceDataset = document.getElementById("dataIngestionReferenceDataset");
+        dataIngestionElements.activeUploadName = document.getElementById("dataIngestionActiveUploadName");
         dataIngestionElements.saladHead = document.getElementById("dataIngestionSaladHead");
         dataIngestionElements.profileDownloadButton = document.getElementById("dataIngestionProfileDownload");
         dataIngestionElements.profileUploadButton = document.getElementById("dataIngestionProfileUploadButton");
@@ -38434,12 +38460,14 @@ async function cancelRfDetrTrainingJobRequest() {
             dataIngestionElements.referenceActive,
             dataIngestionElements.referenceBackend,
             dataIngestionElements.referenceDataset,
+            dataIngestionElements.activeUploadName,
         ].forEach((control) => {
             if (control) control.addEventListener("change", handleDataIngestionReferenceChange);
         });
         [
             dataIngestionElements.files,
             dataIngestionElements.saladHead,
+            dataIngestionElements.activeUploadName,
             dataIngestionElements.trainEncoder,
             dataIngestionElements.trainCradioModel,
             dataIngestionElements.keepFraction,
@@ -38557,6 +38585,254 @@ async function cancelRfDetrTrainingJobRequest() {
         };
         formData.append("manifest", JSON.stringify(manifest));
         return { formData, imageCount: rows.length, objectCount };
+    }
+
+    function getClassSplitServerSourceHandle() {
+        const mode = String(annotationSourceState.mode || "").trim().toLowerCase();
+        const datasetId = String(annotationSourceState.datasetId || "").trim();
+        if (mode === "linked" && datasetId) {
+            const stats = getClassSplitActiveWorkspaceStats();
+            return {
+                sourceMode: "dataset",
+                datasetId,
+                sessionId: "",
+                imageCount: stats.imageCount,
+                objectCount: stats.objectCount,
+                label: annotationSourceState.datasetLabel || datasetId,
+            };
+        }
+        const sessionId = String(annotationSourceState.sessionId || "").trim();
+        if (mode === "transient" && sessionId) {
+            const stats = getClassSplitActiveWorkspaceStats();
+            return {
+                sourceMode: "transient",
+                datasetId: "",
+                sessionId,
+                imageCount: stats.imageCount,
+                objectCount: stats.objectCount,
+                label: annotationSourceState.datasetLabel || sessionId,
+            };
+        }
+        return null;
+    }
+
+    function classSplitHashValues(values = []) {
+        let hash = 2166136261;
+        const append = (value) => {
+            const text = String(value || "");
+            for (let i = 0; i < text.length; i += 1) {
+                hash ^= text.charCodeAt(i);
+                hash = Math.imul(hash, 16777619) >>> 0;
+            }
+            hash ^= 0xff;
+            hash = Math.imul(hash, 16777619) >>> 0;
+        };
+        values.forEach(append);
+        return hash >>> 0;
+    }
+
+    function classSplitActiveWorkspaceSignature(keys = getClassSplitImageKeys()) {
+        const values = [
+            annotationSourceState.mode,
+            annotationSourceState.datasetId,
+            annotationSourceState.sessionId,
+            annotationSourceState.datasetLabel,
+            datasetType,
+        ];
+        Object.keys(classes || {}).sort().forEach((className) => {
+            values.push(`${className}:${classes[className]}`);
+        });
+        keys.forEach((key) => {
+            values.push(`image:${key}`);
+            getClassSplitActiveLabelLines(key).forEach((line) => values.push(`label:${line}`));
+        });
+        return `${keys.length}:${classSplitHashValues(values)}`;
+    }
+
+    function getClassSplitStoredActiveWorkspaceUploads() {
+        try {
+            const parsed = JSON.parse(window.localStorage?.getItem(CLASS_SPLIT_ACTIVE_WORKSPACE_UPLOADS_STORAGE_KEY) || "{}");
+            return parsed && typeof parsed === "object" ? parsed : {};
+        } catch (error) {
+            return {};
+        }
+    }
+
+    function setClassSplitStoredActiveWorkspaceUpload(signature, datasetId, imageCount, objectCount) {
+        const safeSignature = String(signature || "").trim();
+        const safeDatasetId = String(datasetId || "").trim();
+        if (!safeSignature || !safeDatasetId) return;
+        try {
+            const uploads = getClassSplitStoredActiveWorkspaceUploads();
+            uploads[safeSignature] = {
+                datasetId: safeDatasetId,
+                imageCount: Number(imageCount) || 0,
+                objectCount: Number(objectCount) || 0,
+                storedAt: Date.now(),
+            };
+            window.localStorage?.setItem(
+                CLASS_SPLIT_ACTIVE_WORKSPACE_UPLOADS_STORAGE_KEY,
+                JSON.stringify(uploads),
+            );
+        } catch (error) {
+            console.warn("Failed to store Class Split active workspace upload cache", error);
+        }
+    }
+
+    function getClassSplitStoredActiveWorkspaceUpload(signature, stats) {
+        const safeSignature = String(signature || "").trim();
+        if (!safeSignature) return null;
+        const entry = getClassSplitStoredActiveWorkspaceUploads()[safeSignature];
+        const datasetId = String(entry?.datasetId || "").trim();
+        if (!datasetId || !dataIngestionBackendDatasetExists(datasetId)) return null;
+        const backendCount = getDataIngestionDatasetImageCount(datasetId);
+        const activeCount = Number(stats?.imageCount || 0) || getClassSplitImageKeys().length;
+        if (activeCount > 0 && backendCount !== null && backendCount !== activeCount) return null;
+        return {
+            sourceMode: "dataset",
+            datasetId,
+            sessionId: "",
+            imageCount: activeCount,
+            objectCount: Number(stats?.objectCount || entry?.objectCount || 0) || 0,
+            label: datasetId,
+            uploadedActiveWorkspace: true,
+            signature: safeSignature,
+        };
+    }
+
+    function classSplitActiveWorkspaceUploadName(label = "") {
+        const explicit = String(classSplitElements.uploadDatasetName?.value || "").trim();
+        if (explicit) {
+            return explicit;
+        }
+        const raw = String(
+            label ||
+            annotationSourceState.datasetLabel ||
+            annotationSourceState.datasetId ||
+            annotationSourceState.sessionId ||
+            "active_workspace"
+        );
+        const stem = raw
+            .toLowerCase()
+            .replace(/[^a-z0-9._-]+/g, "_")
+            .replace(/^[_ .-]+|[_ .-]+$/g, "")
+            .slice(0, 72) || "active_workspace";
+        return `class_split_active_${stem}_${getClassSplitImageKeys().length || 0}`;
+    }
+
+    function classSplitActiveWorkspaceUploadContext(label = "") {
+        const safeLabel = String(label || annotationSourceState.datasetLabel || "active Label Images workspace").trim();
+        return `Class Split active workspace upload: ${safeLabel}`;
+    }
+
+    function classSplitHasChunkUploadableFiles() {
+        const keys = getClassSplitImageKeys();
+        if (!keys.length) return false;
+        return keys.every((key) => {
+            const meta = images?.[key]?.meta;
+            return meta instanceof Blob || (
+                meta
+                && typeof meta.size === "number"
+                && typeof meta.slice === "function"
+            );
+        });
+    }
+
+    async function ensureClassSplitUploadedWorkspaceSourceHandle() {
+        const sourceHandle = getClassSplitServerSourceHandle();
+        if (sourceHandle) {
+            return sourceHandle;
+        }
+        if (!classSplitHasChunkUploadableFiles()) {
+            return null;
+        }
+        const stats = getClassSplitActiveWorkspaceStats();
+        const imageKeys = getClassSplitImageKeys();
+        const signature = classSplitActiveWorkspaceSignature(imageKeys);
+        const uploadName = classSplitActiveWorkspaceUploadName();
+        const uploadCacheKey = `${signature}|name:${uploadName}`;
+        await initDatasetManagerTab();
+        await refreshDataIngestionDatasets();
+        const cached = classSplitState.activeWorkspaceDatasetUpload;
+        if (
+            cached?.signature === uploadCacheKey
+            && cached?.datasetId
+            && dataIngestionBackendDatasetExists(cached.datasetId)
+        ) {
+            return {
+                sourceMode: "dataset",
+                datasetId: cached.datasetId,
+                sessionId: "",
+                imageCount: stats.imageCount,
+                objectCount: stats.objectCount,
+                label: cached.datasetId,
+                uploadedActiveWorkspace: true,
+                signature: uploadCacheKey,
+            };
+        }
+        const reusable = getClassSplitStoredActiveWorkspaceUpload(uploadCacheKey, stats);
+        if (reusable) {
+            classSplitState.activeWorkspaceDatasetUpload = {
+                signature: uploadCacheKey,
+                datasetId: reusable.datasetId,
+                imageCount: reusable.imageCount,
+                objectCount: reusable.objectCount,
+            };
+            return reusable;
+        }
+        const uploadMessage = `Uploading active Label Images workspace (${stats.imageCount} images, ${stats.objectCount} objects) for Class Split analysis ...`;
+        setClassSplitJobStatus("Uploading active workspace ...", "info");
+        renderClassSplitProgress({ progress: 0, message: uploadMessage });
+        const result = await uploadCurrentDatasetToCache({
+            runName: uploadName,
+            context: classSplitActiveWorkspaceUploadContext(),
+            split: false,
+            transport: "chunked",
+            throwOnError: true,
+            statusPrefix: "Class Split active workspace",
+            labelLinesForImage: (imageKey) => getClassSplitActiveLabelLines(imageKey),
+            onSessionStart: ({ sessionId, abortController } = {}) => {
+                classSplitState.activeUploadSessionId = String(sessionId || "");
+                classSplitState.activeUploadAbortController = abortController || null;
+                refreshClassSplitControls();
+            },
+            onSessionEnd: ({ sessionId } = {}) => {
+                if (!sessionId || classSplitState.activeUploadSessionId === sessionId) {
+                    classSplitState.activeUploadSessionId = "";
+                    classSplitState.activeUploadAbortController = null;
+                    refreshClassSplitControls();
+                }
+            },
+            onProgress: ({ progress = 0, message = "" } = {}) => {
+                const pct = Math.max(0, Math.min(0.2, (Number(progress) || 0) * 0.2));
+                renderClassSplitProgress({ progress: pct, message: message || uploadMessage });
+                if (message) {
+                    setClassSplitJobStatus(message, "");
+                }
+            },
+        });
+        const datasetId = String(result?.id || result?.dataset_id || "").trim();
+        if (!datasetId) {
+            throw new Error("Active workspace upload did not return a backend dataset.");
+        }
+        classSplitState.activeWorkspaceDatasetUpload = {
+            signature: uploadCacheKey,
+            datasetId,
+            imageCount: stats.imageCount,
+            objectCount: stats.objectCount,
+        };
+        setClassSplitStoredActiveWorkspaceUpload(uploadCacheKey, datasetId, stats.imageCount, stats.objectCount);
+        await refreshDataIngestionDatasets();
+        return {
+            sourceMode: "dataset",
+            datasetId,
+            sessionId: "",
+            imageCount: stats.imageCount,
+            objectCount: stats.objectCount,
+            label: result?.label || datasetId,
+            uploadedActiveWorkspace: true,
+            signature: uploadCacheKey,
+        };
     }
 
     function getClassSplitClassCounts() {
@@ -38726,7 +39002,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         classSplitElements.jobStatus.textContent = message || "";
-        classSplitElements.jobStatus.classList.remove("warn", "error", "success");
+        classSplitElements.jobStatus.classList.remove("warn", "error", "success", "info");
         if (variant) {
             classSplitElements.jobStatus.classList.add(variant);
         }
@@ -38778,6 +39054,7 @@ async function cancelRfDetrTrainingJobRequest() {
         [
             classSplitElements.scopeSelected,
             classSplitElements.scopeAll,
+            classSplitElements.uploadDatasetName,
             classSplitElements.recipePreset,
             classSplitElements.encoderType,
             classSplitElements.backbone,
@@ -38807,8 +39084,15 @@ async function cancelRfDetrTrainingJobRequest() {
         if (classSplitElements.cradioPooling) {
             classSplitElements.cradioPooling.disabled = !available || classSplitState.active || classSplitEncoderType !== "cradio";
         }
+        if (classSplitElements.uploadDatasetName) {
+            classSplitElements.uploadDatasetName.disabled = !available || classSplitState.active || !!getClassSplitServerSourceHandle();
+        }
 	        setButtonDisabled(classSplitElements.runButton, !canRun);
-	        setButtonDisabled(classSplitElements.cancelButton, !classSplitState.active || !classSplitState.currentJobId);
+	        setButtonDisabled(
+	            classSplitElements.cancelButton,
+	            !classSplitState.active
+	                || (!classSplitState.currentJobId && !classSplitState.activeUploadSessionId && !classSplitState.activeUploadAbortController)
+	        );
 	        setButtonDisabled(classSplitElements.rerunButton, classSplitState.active || !classSplitState.lastRequest);
 	        refreshClassSplitDatasetAnalysisControls();
 	    }
@@ -38892,24 +39176,57 @@ async function cancelRfDetrTrainingJobRequest() {
             const request = reuseLast && classSplitState.lastRequest
                 ? { ...classSplitState.lastRequest }
                 : buildClassSplitRequest();
-	            classSplitState.active = true;
-	            classSplitState.currentJobId = "";
-	            classSplitState.selectedPointId = "";
-	            classSplitState.selectedClusterId = "";
-	            clearClassSplitDatasetAnalysis({ render: true });
-	            setClassSplitJobStatus("Packaging active workspace ...", "");
-            renderClassSplitProgress({ progress: 0, message: "Packaging active labels and images ..." });
+            await ensureClassSplitSnapshotClean("Class Split analysis");
+            classSplitState.active = true;
+            classSplitState.currentJobId = "";
+            classSplitState.result = null;
+            classSplitState.pointsById = new Map();
+            classSplitState.selectedPointId = "";
+            classSplitState.selectedClusterId = "";
+            classSplitState.lassoPointIds = new Set();
+            classSplitState.selectionRevision += 1;
+            classSplitState.dismissedWrongIds = new Set();
+            clearClassSplitDatasetAnalysis({ render: true });
+            stopClassSplitPlotFlash();
+            renderClassSplitResult();
+            setClassSplitJobStatus("Starting analysis ...", "");
+            renderClassSplitProgress({ progress: 0, message: "Preparing Class Split analysis ..." });
             refreshClassSplitControls();
-            const workspace = await buildClassSplitActiveWorkspaceForm(request);
             classSplitState.lastRequest = { ...request };
-            renderClassSplitProgress({
-                progress: 0.01,
-                message: `Uploading ${workspace.objectCount} objects from ${workspace.imageCount} active images ...`,
-            });
-            const resp = await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace`, {
-                method: "POST",
-                body: workspace.formData,
-            });
+            const sourceHandle = await ensureClassSplitUploadedWorkspaceSourceHandle();
+            let resp;
+            if (sourceHandle) {
+                const payload = {
+                    ...request,
+                    source_mode: sourceHandle.sourceMode,
+                };
+                if (sourceHandle.datasetId) {
+                    payload.dataset_id = sourceHandle.datasetId;
+                }
+                if (sourceHandle.sessionId) {
+                    payload.session_id = sourceHandle.sessionId;
+                }
+                renderClassSplitProgress({
+                    progress: Math.max(0.01, sourceHandle.uploadedActiveWorkspace ? 0.2 : 0.01),
+                    message: `Starting backend ${sourceHandle.sourceMode} analysis for ${sourceHandle.objectCount} objects from ${sourceHandle.imageCount} images ...`,
+                });
+                resp = await fetch(`${API_ROOT}/class_analysis/jobs`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+            } else {
+                renderClassSplitProgress({ progress: 0, message: "Packaging active labels and images ..." });
+                const workspace = await buildClassSplitActiveWorkspaceForm(request);
+                renderClassSplitProgress({
+                    progress: 0.01,
+                    message: `Snapshot-uploading ${workspace.objectCount} objects from ${workspace.imageCount} active images ...`,
+                });
+                resp = await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace`, {
+                    method: "POST",
+                    body: workspace.formData,
+                });
+            }
             const detail = await resp.text();
             if (!resp.ok) {
                 throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
@@ -38920,7 +39237,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 throw new Error("Class analysis did not return a job id.");
             }
             classSplitState.currentJobId = jobId;
-            setClassSplitJobStatus("Queued active workspace", "");
+            setClassSplitJobStatus(sourceHandle ? "Queued backend dataset" : "Queued active workspace", "");
             pollClassSplitJob(jobId);
         } catch (error) {
             console.error("Class Split analysis failed to start", error);
@@ -38989,6 +39306,29 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     async function cancelClassSplitJob() {
+        const uploadSessionId = String(classSplitState.activeUploadSessionId || "").trim();
+        const uploadAbortController = classSplitState.activeUploadAbortController;
+        if (uploadAbortController || uploadSessionId) {
+            try {
+                if (uploadAbortController && typeof uploadAbortController.abort === "function") {
+                    uploadAbortController.abort();
+                }
+                if (uploadSessionId) {
+                    await fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(uploadSessionId)}/cancel`, {
+                        method: "POST",
+                    });
+                }
+                setClassSplitJobStatus("Cancelling active workspace upload ...", "warn");
+            } catch (error) {
+                console.error("Class Split upload cancel failed", error);
+                setClassSplitJobStatus(`Upload cancel failed: ${error.message || error}`, "error");
+            } finally {
+                classSplitState.activeUploadSessionId = "";
+                classSplitState.activeUploadAbortController = null;
+                refreshClassSplitControls();
+            }
+            return;
+        }
         const jobId = classSplitState.currentJobId;
         if (!jobId) {
             return;
@@ -40082,6 +40422,10 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const points = getClassSplitGraphPoints();
         if (!points.length) {
+            if (classSplitState.active && !classSplitState.result) {
+                graphEl.innerHTML = `<div class="training-help">Class Split analysis is running. The graph will appear when the backend finishes embedding and projection.</div>`;
+                return Promise.resolve(false);
+            }
             const wrongOnly = String(classSplitElements.displayMode?.value || "all") === "wrong_only";
             graphEl.innerHTML = `<div class="training-help">${wrongOnly ? "No likely wrong-class points match the current class filter." : "No points match the current filter."}</div>`;
             return Promise.resolve(false);
@@ -40912,6 +41256,7 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.jobStatus = document.getElementById("classSplitJobStatus");
         classSplitElements.scopeSelected = document.getElementById("classSplitScopeSelected");
         classSplitElements.scopeAll = document.getElementById("classSplitScopeAll");
+        classSplitElements.uploadDatasetName = document.getElementById("classSplitUploadDatasetName");
         classSplitElements.recipePreset = document.getElementById("classSplitRecipePreset");
         classSplitElements.classSelect = document.getElementById("classSplitClassSelect");
         classSplitElements.encoderType = document.getElementById("classSplitEncoderType");

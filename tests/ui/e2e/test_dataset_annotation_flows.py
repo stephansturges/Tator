@@ -153,6 +153,158 @@ def test_register_path_creates_linked_card_and_opens_annotation(playwright_page)
         delete_dataset_if_exists(linked_id)
 
 
+# CASE_ID: DATASET_TRANSIENT_SAVE_HANDOFF
+
+def test_transient_save_to_library_clears_temporary_manager_controls(playwright_page):
+    page, dataset_path = playwright_page
+    ensure_local_mode(page)
+    linked_id = f"pw_saved_{uuid.uuid4().hex[:8]}"
+    linked_label = f"Playwright Saved {linked_id}"
+    try:
+        open_datasets_tab(page)
+        page.fill("#datasetPathInput", dataset_path)
+        page.fill("#datasetPathId", linked_id)
+        page.fill("#datasetPathLabel", linked_label)
+        page.click("#datasetPathOpenBtn")
+        page.wait_for_selector("#datasetPathSaveBtn:not([disabled])", timeout=20000)
+        page.click("#datasetPathSaveBtn")
+        page.wait_for_function(
+            """
+() => {
+  const msg = (document.querySelector('#datasetPathMessage')?.textContent || '').toLowerCase();
+  return msg.includes('saved transient session') && msg.includes('reopen it from the dataset card');
+}
+""",
+            timeout=45000,
+        )
+        summary = page.text_content("#datasetPathSummary") or ""
+        assert "No transient server-path dataset is open" in summary
+        save_disabled = page.eval_on_selector("#datasetPathSaveBtn", "el => !!el.disabled")
+        annotate_disabled = page.eval_on_selector("#datasetPathAnnotateBtn", "el => !!el.disabled")
+        assert save_disabled is True
+        assert annotate_disabled is True
+        card = page.locator('[data-testid="card.datasets.entry"]').filter(has_text=linked_label)
+        card.first.wait_for(timeout=45000)
+    finally:
+        ensure_local_mode(page)
+        delete_dataset_if_exists(linked_id)
+
+
+# CASE_ID: DATASET_LINKED_UNAVAILABLE_ACTION_GATING
+
+def test_unavailable_linked_dataset_disables_source_dependent_card_actions(playwright_page):
+    page, _ = playwright_page
+    ensure_local_mode(page)
+    blocked_entry = {
+        "id": "pw_broken_link",
+        "label": "Playwright Broken Link",
+        "type": "bbox",
+        "source": "registry",
+        "storage_mode": "linked",
+        "linked_root": "/tmp/pw_missing_dataset",
+        "linked_root_status": "missing",
+        "format": "yolo",
+        "yolo_ready": True,
+        "coco_ready": False,
+        "qwen_ready": False,
+        "image_count": 2,
+        "annotation_status": "new",
+        "annotation_progress": {"percent_labeled": 0},
+    }
+
+    def _mock_datasets(route):
+        if route.request.method == "GET":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps([blocked_entry]),
+            )
+            return
+        route.continue_()
+
+    page.route("**/datasets", _mock_datasets)
+    try:
+        open_datasets_tab(page)
+        page.wait_for_selector("#datasetListRefreshTop:not([disabled])", timeout=15000)
+        page.click("#datasetListRefreshTop")
+        card = page.locator('[data-testid="card.datasets.entry"]').filter(has_text="Playwright Broken Link")
+        card.first.wait_for(timeout=15000)
+        gated_actions = [
+            "open_annotation",
+            "use_for_ingestion",
+            "download",
+            "convert",
+            "build_qwen",
+        ]
+        for action in gated_actions:
+            assert card.first.locator(f'[data-testid="action.datasets.card.{action}"]').is_disabled()
+        assert card.first.locator('[data-testid="action.datasets.card.delete"]').is_enabled()
+        title = card.first.locator('[data-testid="action.datasets.card.open_annotation"]').get_attribute("title") or ""
+        assert "Linked root is unavailable" in title
+    finally:
+        page.unroute("**/datasets", _mock_datasets)
+
+
+# CASE_ID: DATASET_UPLOAD_SESSION_VISIBILITY
+
+def test_dataset_manager_exposes_staged_upload_sessions_and_cancel(playwright_page):
+    page, _ = playwright_page
+    ensure_local_mode(page)
+    session_payload = {
+        "session_id": "pw_staged_session",
+        "run_name": "playwright_staged_upload",
+        "dataset_type": "bbox",
+        "image_count": 1,
+        "total_images": 3,
+        "bytes_written": 2048,
+        "source": "disk",
+        "status": "active",
+        "stale": True,
+        "root": "/tmp/playwright_staged_upload",
+    }
+    cancelled = {"done": False}
+
+    def _mock_sessions(route):
+        if route.request.method == "GET":
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps([] if cancelled["done"] else [session_payload]),
+            )
+            return
+        route.continue_()
+
+    def _mock_cancel(route):
+        cancelled["done"] = True
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"status": "cancelled", "session_id": session_payload["session_id"]}),
+        )
+
+    page.route("**/datasets/upload_sessions", _mock_sessions)
+    page.route("**/datasets/upload_session/**/cancel", _mock_cancel)
+    try:
+        open_datasets_tab(page)
+        page.wait_for_selector("#datasetUploadSessionsRefresh:not([disabled])", timeout=15000)
+        page.click("#datasetUploadSessionsRefresh")
+        card = page.locator('[data-testid="card.datasets.upload_session"]').filter(
+            has_text="playwright_staged_upload"
+        )
+        card.first.wait_for(timeout=15000)
+        assert "STALE" in (card.first.text_content() or "")
+        page.once("dialog", lambda dialog: dialog.accept())
+        card.first.locator('[data-testid="action.datasets.upload_session.cancel"]').click()
+        page.wait_for_function(
+            "document.querySelector('#datasetUploadSessionsList')?.textContent?.includes('No unfinished dataset uploads')",
+            timeout=15000,
+        )
+        assert cancelled["done"] is True
+    finally:
+        page.unroute("**/datasets/upload_sessions", _mock_sessions)
+        page.unroute("**/datasets/upload_session/**/cancel", _mock_cancel)
+
+
 # CASE_ID: DATASET_READONLY_TAKEOVER
 
 def test_readonly_takeover_flow_for_transient_session(playwright_page):

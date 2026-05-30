@@ -21,6 +21,7 @@ def test_all_tab_buttons_open_expected_panels(playwright_page):
         ("#tabAgentMiningButton", "#tabAgentMining", "#agentRunBtn"),
         ("#tabPromptHelperButton", "#tabPromptHelper", "#promptHelperGenerateBtn"),
         ("#tabDataIngestionButton", "#tabDataIngestion", "#dataIngestionBuildProfileButton"),
+        ("#tabClassSplitButton", "#tabClassSplit", "#classSplitRunButton"),
         ("#tabDatasetsButton", "#tabDatasets", "#datasetPathOpenBtn"),
         ("#tabSam3PromptModelsButton", "#tabSam3PromptModels", "#sam3PromptRefresh"),
         ("#tabDetectorsButton", "#tabDetectors", "#detectorDefaultSave"),

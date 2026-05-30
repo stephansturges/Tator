@@ -359,8 +359,9 @@ def test_data_ingestion_panel_contract():
     assert 'document.getElementById("classSplitTitle")?.closest(".class-split-panel")' in js
     assert "classSplitElements.runButton.focus({ preventScroll: true })" in js
     assert "function openDatasetEntryInDataIngestion" in js
-    assert 'activeCount > 0 && backendCount !== activeCount' in js
-    assert 'cachedCount > 0 && backendCount !== cachedCount' in js
+    assert js.count('activeCount > 0 && backendCount !== null && backendCount !== activeCount') >= 2
+    assert 'cachedCount > 0 && backendCount !== null && backendCount !== cachedCount' in js
+    assert "const backendCount = getDataIngestionDatasetImageCount(headDatasetId);" in js
     assert "appendActiveWorkspaceTrainingFiles" in js
     assert "activeDatasetSaladHeadName" in js
     assert "getDataIngestionNumber(dataIngestionElements.maxTrainImages, 0" in js
@@ -470,23 +471,41 @@ def test_dataset_manager_delete_trash_restore_contract():
 
     assert 'id="datasetTrashRefresh"' in html
     assert 'id="datasetTrashList"' in html
+    assert 'id="datasetUploadSessionsRefresh"' in html
+    assert 'id="datasetUploadSessionsList"' in html
     assert 'data-testid="list.datasets.trash"' in html
+    assert 'data-testid="list.datasets.upload_sessions"' in html
     assert "Deleted managed datasets" in html
     assert "Managed dataset deletes move here first" in html
+    assert "Staged upload sessions" in html
+    assert "Cancelling removes only temporary upload chunks" in html
 
     assert "trashRefresh: null" in js
     assert "trashList: null" in js
+    assert "uploadSessionsRefresh: null" in js
+    assert "uploadSessionsList: null" in js
     assert "trashRefreshInFlight: false" in js
+    assert "uploadSessionRefreshInFlight: false" in js
+    assert "function renderDatasetUploadSessions(list)" in js
+    assert "async function handleDatasetUploadSessionCancel(entry)" in js
+    assert "async function refreshDatasetUploadSessions()" in js
+    assert "fetch(`${API_ROOT}/datasets/upload_sessions`)" in js
+    assert "fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(sessionId)}/cancel`" in js
     assert "function renderDatasetTrashList(list)" in js
     assert "async function handleDatasetTrashRestore(entry)" in js
     assert "async function refreshDatasetTrashList()" in js
     assert "fetch(`${API_ROOT}/datasets/trash`)" in js
     assert "fetch(`${API_ROOT}/datasets/trash/${encodeURIComponent(entry.trash_id)}/restore`" in js
     assert 'Move managed dataset "${entry.label || entry.id}" to deleted datasets?' in js
+    assert "function isDatasetEntryLinkedUnavailable(entry)" in js
+    assert "Linked root is unavailable; fix or re-register the dataset path before using source-dependent actions." in js
+    assert "Reopen it from the dataset card for persistent edits." in js
     delete_start = js.index("async function handleDatasetDelete")
     delete_end = js.index("async function handleDatasetConvert")
     assert "This cannot be undone." not in js[delete_start:delete_end]
 
+    assert '@router.get("/datasets/upload_sessions")' in router
+    assert '@router.post("/datasets/upload_session/{session_id}/cancel")' in router
     assert '@router.get("/datasets/trash")' in router
     assert '@router.post("/datasets/trash/{trash_id}/restore")' in router
 
@@ -627,6 +646,8 @@ def test_class_split_explorer_panel_contract():
     assert 'value="5000"' not in html
     assert 'id="classSplitGraph" class="class-split-graph"' in html
     assert 'id="classSplitDisplayMode"' in html
+    assert 'id="classSplitDragMode"' in html
+    assert '<option value="pan">Pan</option>' in html
     assert '<option value="wrong_only">Likely wrong class only</option>' in html
     assert 'id="classSplitClusterOverlay" checked' in html
     assert 'id="classSplitCradioPooling"' in html
@@ -738,6 +759,9 @@ def test_class_split_explorer_panel_contract():
     assert "function showClassSplitGraphHoverPreview" in js
     assert "function bindClassSplitGraphHoverPreviewMovement" in js
     assert "classSplitGraphHoverPreview" in js
+    assert "selectedpoints" in js
+    assert "selectionrevision" in js
+    assert 'dragmode: String(classSplitElements.dragMode?.value || "lasso")' in js
     assert "function renderClassSplitClusterList" in js
     assert "function selectClassSplitCluster" in js
     assert 'classSplitElements.displayMode.value = "all";' in js
@@ -762,7 +786,7 @@ def test_class_split_explorer_panel_contract():
     assert "Hold Shift over this tab to switch the graph" not in js
     assert "function setClassSplitGraphPanMode" not in js
     assert "function panClassSplitPlotWithWheel" not in js
-    assert 'dragmode: "lasso"' in js
+    assert 'dragmode: String(classSplitElements.dragMode?.value || "lasso")' in js
     assert "scrollZoom: true" in js
     assert "__classSplitShiftWheelGuard" not in js
     assert "function suppressClassSplitShiftWheel" in js
@@ -777,6 +801,9 @@ def test_class_split_explorer_panel_contract():
     assert "const plotRender = renderClassSplitPlot();" in js
     assert "Promise.resolve(plotRender).then(() => {" in js
     assert "classSplitState.selectedPointId === safeId" in js
+    assert 'focusPlot\n            && classSplitElements.displayMode' in js
+    assert 'String(classSplitElements.displayMode.value || "all") === "wrong_only"' in js
+    assert "!point.is_wrong_class_candidate" in js
     assert "Suggested by neighbors: ${escapeHtml(point.suggested_neighbor_class)}" in js
     assert "clearClassSplitBulkSelection({ render: true });" in js
     assert 'classSplitElements.filterClass.addEventListener("change", () => {' in js

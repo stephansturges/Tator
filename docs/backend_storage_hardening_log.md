@@ -2085,3 +2085,36 @@ preserving the exact validation story for storage and artifact-write fixes.
   localinferenceapi.py services/mlx_sam.py`, `git diff --check`, and focused
   Data Ingestion, Class Analysis, macOS acceleration, MLX-DINOv3, MLX-SAM, SAM
   preload, and UI contract coverage (`219 passed`, `8 warnings`).
+
+## 2026-05-30: Dataset Upload Guardrails And Class Split Navigation
+
+- Added a Dataset Management "Staged upload sessions" panel backed by the
+  existing `/datasets/upload_sessions` and upload-session cancel endpoints, so
+  interrupted browser uploads are visible and cancellable without touching
+  registered datasets or source files.
+- Hardened transient server-path dataset saves. After a transient session is
+  saved into the library, the temporary path controls are cleared and the UI
+  tells the user to reopen the dataset card before continuing persistent edits.
+- Disabled source-dependent actions for unavailable linked datasets while
+  keeping delete available. This prevents annotation, ingestion, download,
+  conversion, or Qwen export actions from acting on missing source roots.
+- Tightened active Label Images reference reuse in Data Ingestion by allowing
+  unknown backend image counts but rejecting explicit mismatches, which avoids
+  stale count assumptions blocking valid active-workspace reference profiles.
+- Added a Class Split graph drag-mode selector (`lasso`, `box`, `pan`) and
+  moved graph selection state onto Plotly `selectedpoints` plus
+  `selectionrevision`, so lasso and cluster selections stay visually stable
+  across rerenders and both normal/wrong-class traces dim consistently.
+- Hardened Class Split jump-to-point behavior from wrong-only display: selecting
+  an object outside the current wrong-only filter now restores all-object
+  display before focusing/flashing the point.
+- Hardened Train Class Predictor's `Test Size = 0` flow so explicit zero
+  evaluation uses all samples for training instead of falling into sklearn split
+  errors. The UI help now states the group-split, stratified fallback, and
+  all-train behavior.
+- Validation: `node --check ybat-master/ybat.js`, `git diff --check`, focused
+  Class Split/auto-class tests (`3 passed`), broader class-analysis and
+  auto-class bundle (`143 passed`, `1 skipped`), live
+  `tools/check_ui_endpoints.py http://127.0.0.1:8000`, browser top-tab
+  navigation E2E against the restarted backend (`1 passed`), and
+  `/system/health_summary` returned `ok: true`.

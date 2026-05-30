@@ -168,6 +168,11 @@ def test_data_ingestion_requires_matching_backend_reference_profile(playwright_p
         )
 
     def fulfill_start_job(route):
+        # Tab initialization probes the same collection URL with GET to recover active jobs.
+        # Keep that separate from the POST body assertion below.
+        if route.request.method != "POST":
+            route.fulfill(status=200, content_type="application/json", body="[]")
+            return
         body = route.request.post_data_buffer or b""
         posted_payloads.append(body.decode("utf-8", errors="replace"))
         route.fulfill(

@@ -590,6 +590,12 @@ def _split_train_test_indices(
     all_indices = np.arange(labels.shape[0])
     all_classes = {str(name) for name in labels.tolist()}
     use_group_split = False
+    test_fraction = float(test_size or 0.0)
+    if test_fraction <= 0.0:
+        if len(all_classes) < 2:
+            raise TrainingError("Need at least two classes in the training split.")
+        return all_indices.astype(np.int64), np.asarray([], dtype=np.int64), use_group_split
+    test_fraction = min(test_fraction, 0.95)
 
     def train_covers_classes(train_idx: Sequence[int]) -> bool:
         train_classes = {str(labels[int(idx)]) for idx in train_idx}
@@ -598,7 +604,7 @@ def _split_train_test_indices(
     unique_groups = np.unique(group_arr)
     if len(unique_groups) >= 2:
         try:
-            splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_seed)
+            splitter = GroupShuffleSplit(n_splits=1, test_size=test_fraction, random_state=random_seed)
             train_idx, test_idx = next(splitter.split(all_indices, labels, groups=group_arr))
             if train_covers_classes(train_idx):
                 use_group_split = True
@@ -613,14 +619,14 @@ def _split_train_test_indices(
     try:
         train_idx, test_idx = train_test_split(
             all_indices,
-            test_size=test_size,
+            test_size=test_fraction,
             random_state=random_seed,
             stratify=stratify,
         )
     except Exception:
         train_idx, test_idx = train_test_split(
             all_indices,
-            test_size=test_size,
+            test_size=test_fraction,
             random_state=random_seed,
             stratify=None,
         )

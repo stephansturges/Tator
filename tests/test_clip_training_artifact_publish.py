@@ -251,6 +251,22 @@ def test_split_train_test_can_preserve_all_classes_with_empty_test_split():
     assert test_idx.tolist() == []
 
 
+def test_split_train_test_allows_explicit_zero_eval_fraction():
+    labels = np.asarray(["car", "car", "boat", "boat"], dtype=object)
+    groups = np.asarray(["a", "b", "c", "d"], dtype=object)
+
+    train_idx, test_idx, used_group_split = clip_training._split_train_test_indices(
+        labels,
+        groups,
+        test_size=0.0,
+        random_seed=0,
+    )
+
+    assert used_group_split is False
+    assert train_idx.tolist() == [0, 1, 2, 3]
+    assert test_idx.tolist() == []
+
+
 def test_require_two_training_classes_rejects_single_class():
     with pytest.raises(clip_training.TrainingError, match="at least two classes"):
         clip_training._require_two_training_classes(["car", "car"])

@@ -1073,20 +1073,26 @@
                         <div class="class-split-results" id="classSplitResults" hidden>
                             <div class="class-split-toolbar">
                                 <label for="classSplitColorMode">Color</label>
-	                                <select id="classSplitColorMode">
-	                                    <option value="class">Class</option>
-	                                    <option value="cluster">Cluster</option>
-	                                    <option value="wrong">Wrong-class suspicion</option>
-	                                    <option value="outlier">Outlier score</option>
-	                                    <option value="area">Box area</option>
-	                                    <option value="image_value">Image value</option>
-	                                </select>
+                                <select id="classSplitColorMode">
+                                    <option value="class">Class</option>
+                                    <option value="cluster">Cluster</option>
+                                    <option value="wrong">Wrong-class suspicion</option>
+                                    <option value="outlier">Outlier score</option>
+                                    <option value="area">Box area</option>
+                                    <option value="image_value">Image value</option>
+                                </select>
                                 <label for="classSplitFilterClass">Filter</label>
                                 <select id="classSplitFilterClass"></select>
                                 <label for="classSplitDisplayMode">Display</label>
                                 <select id="classSplitDisplayMode" title="Limit which objects are drawn in the graph. This does not change the analysis result or right-side review panels.">
                                     <option value="all">All graph objects</option>
                                     <option value="wrong_only">Likely wrong class only</option>
+                                </select>
+                                <label for="classSplitDragMode">Drag</label>
+                                <select id="classSplitDragMode" title="Choose how dragging behaves inside the graph. Use lasso or box to select objects for bulk class changes; switch to pan when navigating a zoomed graph.">
+                                    <option value="lasso" selected>Lasso select</option>
+                                    <option value="select">Box select</option>
+                                    <option value="pan">Pan</option>
                                 </select>
                                 <label class="class-split-toggle" title="Draw translucent outlines around embedding clusters. Cluster IDs come from the analysis result; the outlines are only a review aid.">
                                     <input type="checkbox" id="classSplitClusterOverlay" checked />
@@ -1761,7 +1767,7 @@
                             <div>
                                 <label for="trainTestSize">Test Size</label>
                                 <input type="number" id="trainTestSize" min="0" max="0.9" step="0.05" value="0.2" />
-                                <div class="training-help">Fraction of images reserved for evaluation.</div>
+                                <div class="training-help">Fraction reserved for evaluation. Training first tries a source-image group split, falls back to stratified object split when needed, and uses all samples when set to 0.</div>
                             </div>
                             <div>
                                 <label for="trainRandomSeed">Seed</label>
@@ -4015,6 +4021,14 @@
                                     <button type="button" data-testid="action.datasets.refresh_list_top" id="datasetListRefreshTop" class="training-button">Refresh list</button>
                                 </div>
                                 <div data-testid="list.datasets.entries" id="datasetList" class="training-history"></div>
+                                <div class="training-subsection">
+                                    <div class="training-subsection__title">Staged upload sessions</div>
+                                    <div class="training-help">Unfinished browser uploads live here until finalized or cancelled. Cancelling removes only temporary upload chunks, never registered datasets.</div>
+                                    <div class="training-actions">
+                                        <button type="button" data-testid="action.datasets.upload_sessions_refresh" id="datasetUploadSessionsRefresh" class="training-button training-button--ghost">Refresh staged uploads</button>
+                                    </div>
+                                    <div data-testid="list.datasets.upload_sessions" id="datasetUploadSessionsList" class="training-history"></div>
+                                </div>
                                 <div class="training-subsection">
                                     <div class="training-subsection__title">Deleted managed datasets</div>
                                     <div class="training-help">Managed dataset deletes move here first. Restore brings the dataset back into the library; linked dataset deletes still remove only the library record.</div>

@@ -2143,3 +2143,28 @@ preserving the exact validation story for storage and artifact-write fixes.
   Data Ingestion/Class Split UI contract tests, chunked upload-session finalize
   regression, and active-workspace class-analysis manifest regression (`4
   passed`).
+
+## 2026-06-02: Class Split Graph Projection And UI State Closeout
+
+- Added switchable Class Split graph projection modes: global PCA,
+  class-balanced PCA, between-class PCA, within-filter PCA, and UMAP when
+  available. Class-balanced PCA is the default all-class view; within-filter PCA
+  is guarded so all-class overlays require a class filter instead of drawing a
+  misleading global plot.
+- Moved large PCA coordinate arrays out of the public Class Split result JSON.
+  Completed jobs write `projection_coordinates.npz`, public results expose
+  `coordinates_available`, and the UI lazily fetches coordinates through
+  `/class_analysis/jobs/{job_id}/projection/{mode}`.
+- Hardened Class Split graph state: one Plotly trace per visible class for
+  class coloring, explicit graph status text, stale placeholder purging, render
+  tokens for async projection loads, and previous-result restoration when
+  upload or job start fails.
+- Tightened review interactions: confirming likely-wrong objects prunes hidden
+  wrong-only selections, cluster hulls enable only when visible subclass
+  clusters can actually draw a hull, malformed bbox matches no longer coerce to
+  zero, and legacy PCA results map to global PCA without breaking the graph.
+- Validation: `node --check ybat-master/ybat.js`,
+  `py_compile localinferenceapi.py api/class_analysis.py`, `git diff --check`,
+  focused class-analysis and layout tests, API route/UI endpoint contracts, and
+  live Playwright Class Split/navigation contracts against the local backend
+  (`99 passed`, `1 skipped` across the closeout commands).

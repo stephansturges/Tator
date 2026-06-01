@@ -183,16 +183,20 @@ Flow checks:
 2. User opens Class Split Explorer.
 3. UI reports whether images, labelmap, and labeled objects are available.
 4. User chooses selected-class or all-class scope.
-5. If the current workspace is backend-linked or transient, UI submits a JSON
+5. User chooses graph projection mode. The default is class-balanced PCA for
+   all-class readability; global PCA preserves the previous view;
+   between-class PCA spreads class centroids for label-overview work; and
+   within-filter PCA recomputes axes inside the selected class or class filter.
+6. If the current workspace is backend-linked or transient, UI submits a JSON
    `/class_analysis/jobs` request that references that dataset/session directly.
    If it is browser-only, UI first uploads it with the `Workspace upload name`
    through `/datasets/upload_session/*`, then submits the resulting backend
    dataset id to `/class_analysis/jobs`. The legacy one-shot
    `/class_analysis/jobs/active_workspace` path remains a fallback only when
    chunked upload is not possible.
-6. Backend embeds object crops, writes thumbnails, points, cluster summary, and
-   wrong-class candidates.
-7. UI renders the graph, selected crop inspector, likely-wrong panel, report,
+7. Backend embeds object crops, writes thumbnails, points, cluster summary,
+   wrong-class candidates, and compact projection metadata.
+8. UI renders the graph, selected crop inspector, likely-wrong panel, report,
    and bulk relabel controls.
 
 Flow checks:
@@ -207,6 +211,16 @@ Flow checks:
 - Crop inspector stays at the top of the right stack.
 - Crop previews fit the available inspector and support scroll zoom.
 - Plot lasso supports bulk class reassignment.
+- Plot class coloring renders one trace per visible class, so legend entries,
+  colors, selected points, and suspicious marker outlines stay stable after
+  clicks, filter changes, and tab switches.
+- Switchable PCA graph coordinates are persisted separately from the public
+  result payload. The public result advertises available coordinate modes; the
+  browser fetches large coordinate arrays from
+  `/class_analysis/jobs/{job_id}/projection/{mode}` only when needed.
+- Within-filter PCA requires a selected class or class filter. If the user
+  clears the filter in an all-class run, the graph explains why the mode cannot
+  overlay all classes instead of rendering an empty or misleading plot.
 - Wrong-class candidates can be marked correct or relabeled.
 - The plot can be limited to likely wrong-class points without changing the
   analysis result or right-side review panels.
@@ -243,6 +257,10 @@ Fix from this pass:
 - `See instance` resolves active-image aliases before jumping back to Label
   Images, covering backend-backed, transient, chunked-upload, and browser-only
   workspace names.
+- Class Split now snapshots the last completed graph before starting a new
+  analysis. If upload or job start fails, the previous graph, filters,
+  selection, and review panels are restored and the failure is reported without
+  replacing the graph with a stale empty placeholder.
 
 ## Journey 7: Optional Class Split Dataset Analysis
 

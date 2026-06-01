@@ -14013,6 +14013,15 @@ CLASS_ANALYSIS_CACHE_ROOT = Path(
 )
 _init_storage_root(CLASS_ANALYSIS_CACHE_ROOT)
 CLASS_ANALYSIS_CACHE_VERSION = "class-analysis-v2"
+CLASS_ANALYSIS_PCA_PROJECTION_MODES = [
+    "global_pca",
+    "class_balanced_pca",
+    "between_class_pca",
+    "within_filter_pca",
+]
+CLASS_ANALYSIS_DEFAULT_PCA_PROJECTION_MODE = "class_balanced_pca"
+CLASS_ANALYSIS_PCA_FIT_CAP_PER_CLASS = _env_int("CLASS_ANALYSIS_PCA_FIT_CAP_PER_CLASS", 4096)
+CLASS_ANALYSIS_PROJECTION_COORDS_FILENAME = "projection_coordinates.npz"
 CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL = os.environ.get(
     "CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL",
     "facebook/dinov3-vitb16-pretrain-lvd1689m",
@@ -18726,7 +18735,9 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
         "cradio_backend": _public_cradio_backend_capabilities(),
         "dinov3_backend": mlx_dinov3_status(CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL).to_dict(),
         "projection_methods": projection_methods,
+        "pca_projection_modes": list(CLASS_ANALYSIS_PCA_PROJECTION_MODES),
         "default_projection": "pca",
+        "default_pca_projection_mode": CLASS_ANALYSIS_DEFAULT_PCA_PROJECTION_MODE,
         "preprocess_modes": ["canonical"],
         "expert_preprocess_modes": ["native", "canonical"],
         "default_preprocess_mode": "canonical",
@@ -19238,6 +19249,36 @@ def _class_analysis_write_npz(path: Path, root: Path, **arrays: Any) -> Path:
     )
 
 
+def _class_analysis_extract_projection_coordinates(result: Dict[str, Any]) -> Dict[str, np.ndarray]:
+    projection_options = result.get("projection_options") if isinstance(result, dict) else None
+    coordinates = projection_options.get("coordinates") if isinstance(projection_options, dict) else None
+    if not isinstance(coordinates, dict):
+        return {}
+    extracted: Dict[str, np.ndarray] = {}
+    for mode in CLASS_ANALYSIS_PCA_PROJECTION_MODES:
+        if mode not in coordinates:
+            continue
+        arr = np.asarray(coordinates.get(mode), dtype=np.float32)
+        if arr.ndim == 2 and arr.shape[1] >= 2:
+            extracted[mode] = arr[:, :2].astype(np.float32, copy=False)
+    return extracted
+
+
+def _class_analysis_public_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    public = dict(result)
+    projection_options = dict(public.get("projection_options") or {})
+    coordinates = projection_options.pop("coordinates", None)
+    if isinstance(coordinates, dict):
+        projection_options.setdefault(
+            "coordinates_available",
+            [mode for mode in CLASS_ANALYSIS_PCA_PROJECTION_MODES if mode in coordinates],
+        )
+    public["projection_options"] = projection_options
+    return public
+
+
 def _class_analysis_write_jpeg(
     path: Path,
     root: Path,
@@ -19332,6 +19373,59 @@ def _class_analysis_normalize_preprocess_mode(value: Any) -> str:
 
 def _class_analysis_normalize_embedding_adjustment(value: Any) -> str:
     return _embedding_normalize_adjustment(value)
+
+
+def _class_analysis_normalize_pca_projection_mode(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "": CLASS_ANALYSIS_DEFAULT_PCA_PROJECTION_MODE,
+        "pca": "global_pca",
+        "global": "global_pca",
+        "global_pca": "global_pca",
+        "balanced": "class_balanced_pca",
+        "balanced_pca": "class_balanced_pca",
+        "class_balanced": "class_balanced_pca",
+        "class_balanced_pca": "class_balanced_pca",
+        "between": "between_class_pca",
+        "between_pca": "between_class_pca",
+        "between_class": "between_class_pca",
+        "between_class_pca": "between_class_pca",
+        "centroid": "between_class_pca",
+        "centroid_pca": "between_class_pca",
+        "within": "within_filter_pca",
+        "within_pca": "within_filter_pca",
+        "within_class": "within_filter_pca",
+        "within_class_pca": "within_filter_pca",
+        "within_filter": "within_filter_pca",
+        "within_filter_pca": "within_filter_pca",
+    }
+    return aliases.get(raw, CLASS_ANALYSIS_DEFAULT_PCA_PROJECTION_MODE)
+
+
+def _class_analysis_parse_projection_endpoint_mode(value: Any) -> Optional[str]:
+    raw = str(value or "").strip().lower().replace("-", "_")
+    aliases = {
+        "pca": "global_pca",
+        "global": "global_pca",
+        "global_pca": "global_pca",
+        "balanced": "class_balanced_pca",
+        "balanced_pca": "class_balanced_pca",
+        "class_balanced": "class_balanced_pca",
+        "class_balanced_pca": "class_balanced_pca",
+        "between": "between_class_pca",
+        "between_pca": "between_class_pca",
+        "between_class": "between_class_pca",
+        "between_class_pca": "between_class_pca",
+        "centroid": "between_class_pca",
+        "centroid_pca": "between_class_pca",
+        "within": "within_filter_pca",
+        "within_pca": "within_filter_pca",
+        "within_class": "within_filter_pca",
+        "within_class_pca": "within_filter_pca",
+        "within_filter": "within_filter_pca",
+        "within_filter_pca": "within_filter_pca",
+    }
+    return aliases.get(raw)
 
 
 def _class_analysis_preprocess_crop(
@@ -20102,6 +20196,147 @@ def _class_analysis_project_embeddings(
     return coords.astype(np.float32), "pca"
 
 
+def _class_analysis_fit_pca_projection(
+    transform_embeddings: np.ndarray,
+    *,
+    fit_embeddings: Optional[np.ndarray] = None,
+    seed: int,
+    warnings: Optional[List[str]] = None,
+    label: str = "PCA",
+) -> np.ndarray:
+    transform_arr = np.asarray(transform_embeddings, dtype=np.float32)
+    n_samples = int(transform_arr.shape[0]) if transform_arr.ndim == 2 else 0
+    if n_samples <= 1:
+        return np.zeros((n_samples, 2), dtype=np.float32)
+    fit_arr = transform_arr if fit_embeddings is None else np.asarray(fit_embeddings, dtype=np.float32)
+    if fit_arr.ndim != 2 or fit_arr.shape[0] <= 1 or fit_arr.shape[1] == 0:
+        if warnings is not None:
+            warnings.append(f"{label} unavailable; used zero projection.")
+        return np.zeros((n_samples, 2), dtype=np.float32)
+    try:
+        n_components = 2 if min(fit_arr.shape) >= 2 else 1
+        reducer = PCA(n_components=n_components, random_state=int(seed))
+        reducer.fit(fit_arr)
+        coords = reducer.transform(transform_arr)
+        if coords.shape[1] == 1:
+            coords = np.concatenate([coords, np.zeros((coords.shape[0], 1), dtype=coords.dtype)], axis=1)
+        return coords.astype(np.float32, copy=False)
+    except Exception as exc:
+        if warnings is not None:
+            warnings.append(f"{label} failed; used zero projection ({exc}).")
+        return np.zeros((n_samples, 2), dtype=np.float32)
+
+
+def _class_analysis_class_indices(records: Sequence[Dict[str, Any]]) -> Dict[str, List[int]]:
+    class_indices: Dict[str, List[int]] = defaultdict(list)
+    for idx, record in enumerate(records):
+        class_indices[str(record.get("class_name") or "")].append(int(idx))
+    return dict(class_indices)
+
+
+def _class_analysis_sample_indices(
+    idxs: Sequence[int],
+    *,
+    limit: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    arr = np.asarray(list(idxs), dtype=int)
+    if arr.size <= max(0, int(limit or 0)) or int(limit or 0) <= 0:
+        return arr
+    return np.sort(rng.choice(arr, size=int(limit), replace=False)).astype(int)
+
+
+def _class_analysis_balanced_pca_fit_indices(
+    class_indices: Dict[str, List[int]],
+    *,
+    seed: int,
+) -> np.ndarray:
+    populated = [idxs for idxs in class_indices.values() if idxs]
+    if len(populated) < 2:
+        return np.asarray([], dtype=int)
+    min_count = min(len(idxs) for idxs in populated)
+    target = max(1, min(min_count, max(1, int(CLASS_ANALYSIS_PCA_FIT_CAP_PER_CLASS))))
+    rng = np.random.default_rng(int(seed))
+    sampled: List[np.ndarray] = []
+    for idxs in populated:
+        sampled.append(_class_analysis_sample_indices(idxs, limit=target, rng=rng))
+    if not sampled:
+        return np.asarray([], dtype=int)
+    return np.sort(np.concatenate(sampled)).astype(int)
+
+
+def _class_analysis_build_pca_projection_coordinates(
+    records: Sequence[Dict[str, Any]],
+    embeddings: np.ndarray,
+    *,
+    seed: int,
+    warnings: List[str],
+) -> Dict[str, np.ndarray]:
+    embeddings = np.asarray(embeddings, dtype=np.float32)
+    n_samples = int(embeddings.shape[0]) if embeddings.ndim == 2 else 0
+    if n_samples <= 1:
+        empty = np.zeros((n_samples, 2), dtype=np.float32)
+        return {mode: empty.copy() for mode in CLASS_ANALYSIS_PCA_PROJECTION_MODES}
+
+    class_indices = _class_analysis_class_indices(records)
+    coords: Dict[str, np.ndarray] = {
+        "global_pca": _class_analysis_fit_pca_projection(
+            embeddings,
+            seed=seed,
+            warnings=warnings,
+            label="Global PCA",
+        )
+    }
+
+    balanced_indices = _class_analysis_balanced_pca_fit_indices(class_indices, seed=seed)
+    if balanced_indices.size >= 2:
+        coords["class_balanced_pca"] = _class_analysis_fit_pca_projection(
+            embeddings,
+            fit_embeddings=embeddings[balanced_indices],
+            seed=seed,
+            warnings=warnings,
+            label="Class-balanced PCA",
+        )
+    else:
+        coords["class_balanced_pca"] = coords["global_pca"].copy()
+
+    centroids: List[np.ndarray] = []
+    for idxs in class_indices.values():
+        if idxs:
+            centroids.append(embeddings[np.asarray(idxs, dtype=int)].mean(axis=0))
+    if len(centroids) >= 2:
+        coords["between_class_pca"] = _class_analysis_fit_pca_projection(
+            embeddings,
+            fit_embeddings=np.vstack(centroids).astype(np.float32, copy=False),
+            seed=seed,
+            warnings=warnings,
+            label="Between-class PCA",
+        )
+    else:
+        coords["between_class_pca"] = coords["global_pca"].copy()
+
+    within_coords = np.zeros((n_samples, 2), dtype=np.float32)
+    rng = np.random.default_rng(int(seed) + 17)
+    for class_name, idxs in class_indices.items():
+        idx_arr = np.asarray(idxs, dtype=int)
+        if idx_arr.size <= 1:
+            continue
+        fit_idx = _class_analysis_sample_indices(
+            idx_arr,
+            limit=max(1, int(CLASS_ANALYSIS_PCA_FIT_CAP_PER_CLASS)),
+            rng=rng,
+        )
+        within_coords[idx_arr] = _class_analysis_fit_pca_projection(
+            embeddings[idx_arr],
+            fit_embeddings=embeddings[fit_idx],
+            seed=seed,
+            warnings=warnings,
+            label=f"Within-filter PCA for {class_name or 'unlabeled'}",
+        )
+    coords["within_filter_pca"] = within_coords
+    return coords
+
+
 def _class_analysis_cluster_embeddings(
     embeddings: np.ndarray,
     *,
@@ -20165,19 +20400,41 @@ def _class_analysis_build_result(
     *,
     summary: Dict[str, Any],
     projection: str,
+    projection_mode: str = CLASS_ANALYSIS_DEFAULT_PCA_PROJECTION_MODE,
     projection_neighbor_k: int,
     neighbor_k: int,
     seed: int,
 ) -> Dict[str, Any]:
     warnings: List[str] = []
     n_samples = len(records)
-    coords, projection_used = _class_analysis_project_embeddings(
+    projection_norm = str(projection or "pca").strip().lower()
+    pca_projection_mode = _class_analysis_normalize_pca_projection_mode(projection_mode)
+    pca_projection_coordinates = _class_analysis_build_pca_projection_coordinates(
+        records,
         embeddings,
-        projection=projection,
-        projection_neighbor_k=projection_neighbor_k,
         seed=seed,
         warnings=warnings,
     )
+    if projection_norm == "umap":
+        coords, projection_used = _class_analysis_project_embeddings(
+            embeddings,
+            projection=projection_norm,
+            projection_neighbor_k=projection_neighbor_k,
+            seed=seed,
+            warnings=warnings,
+        )
+        if projection_used == "umap":
+            selected_projection_mode = "umap"
+        else:
+            selected_projection_mode = "global_pca"
+            coords = pca_projection_coordinates.get("global_pca", coords)
+    else:
+        coords = pca_projection_coordinates.get(pca_projection_mode)
+        if coords is None:
+            pca_projection_mode = CLASS_ANALYSIS_DEFAULT_PCA_PROJECTION_MODE
+            coords = pca_projection_coordinates[pca_projection_mode]
+        projection_used = "pca"
+        selected_projection_mode = pca_projection_mode
     diagnostics = _class_analysis_projection_diagnostics(records, coords)
     labels, cluster_summary = _class_analysis_cluster_embeddings(
         embeddings, seed=seed, max_k=8
@@ -20336,6 +20593,7 @@ def _class_analysis_build_result(
     summary = {
         **summary,
         "projection": projection_used,
+        "projection_mode": selected_projection_mode,
         "projection_neighbor_k": projection_neighbor_raw,
         "projection_neighbor_k_resolved": projection_neighbor_resolved,
         "neighbor_k": int(neighbor_k or 15),
@@ -20354,6 +20612,15 @@ def _class_analysis_build_result(
     return {
         "summary": summary,
         "points": points,
+        "projection_options": {
+            "selected": selected_projection_mode,
+            "available": list(CLASS_ANALYSIS_PCA_PROJECTION_MODES),
+            "coordinates": {
+                mode: pca_projection_coordinates[mode]
+                for mode in CLASS_ANALYSIS_PCA_PROJECTION_MODES
+                if mode in pca_projection_coordinates
+            },
+        },
         "clusters": cluster_summary,
         "class_clusters": class_cluster_summary,
         "diagnostics": diagnostics,
@@ -20452,10 +20719,19 @@ def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
                 "embedding_cache": cache_stats,
             },
             projection=str(job.request.get("projection") or "pca"),
+            projection_mode=str(job.request.get("projection_mode") or CLASS_ANALYSIS_DEFAULT_PCA_PROJECTION_MODE),
             projection_neighbor_k=_coerce_int(job.request.get("projection_neighbor_k"), 50, minimum=0),
             neighbor_k=_coerce_int(job.request.get("neighbor_k"), 15, minimum=1),
             seed=_coerce_int(job.request.get("seed"), 42),
         )
+        projection_coordinates = _class_analysis_extract_projection_coordinates(result)
+        if projection_coordinates:
+            _class_analysis_write_npz(
+                out_dir / CLASS_ANALYSIS_PROJECTION_COORDS_FILENAME,
+                out_dir,
+                **projection_coordinates,
+            )
+        result = _class_analysis_public_result(result)
         result_path = out_dir / "result.json"
         _class_analysis_write_json(result_path, out_dir, result)
         _class_analysis_write_json(out_dir / "config.json", out_dir, job.request)
@@ -20489,6 +20765,7 @@ def _normalize_class_analysis_request(payload: Dict[str, Any]) -> Dict[str, Any]
     request_payload.setdefault("encoder_type", "dinov3")
     request_payload.setdefault("encoder_model", CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL)
     request_payload.setdefault("projection", "pca")
+    request_payload.setdefault("projection_mode", CLASS_ANALYSIS_DEFAULT_PCA_PROJECTION_MODE)
     request_payload.setdefault("projection_neighbor_k", 50)
     request_payload.setdefault("crop_mode", "padded_square")
     request_payload.setdefault("padding_ratio", 0.08)
@@ -20515,6 +20792,15 @@ def _normalize_class_analysis_request(payload: Dict[str, Any]) -> Dict[str, Any]
             request_payload["encoder_model"] = CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL
     if request_payload["encoder_type"] == "cradio":
         request_payload["cradio_pooling"] = normalize_cradio_pooling(request_payload.get("cradio_pooling"))
+    projection_norm = str(request_payload.get("projection") or "pca").strip().lower()
+    projection_mode_norm = _class_analysis_normalize_pca_projection_mode(request_payload.get("projection_mode"))
+    if projection_norm in set(CLASS_ANALYSIS_PCA_PROJECTION_MODES):
+        projection_mode_norm = _class_analysis_normalize_pca_projection_mode(projection_norm)
+        projection_norm = "pca"
+    if projection_norm != "umap":
+        projection_norm = "pca"
+    request_payload["projection"] = projection_norm
+    request_payload["projection_mode"] = projection_mode_norm
     request_payload["embedding_aggregation"] = _embedding_normalize_aggregation(
         request_payload.get("embedding_aggregation")
     )
@@ -20732,13 +21018,109 @@ def _safe_job_result_json_path(raw_path: Optional[str], root: Path) -> Optional[
 def get_class_analysis_result(job_id: str) -> Dict[str, Any]:
     job = _get_class_analysis_job(job_id)
     if isinstance(job.result, dict):
-        return job.result
+        return _class_analysis_public_result(job.result)
     result_path = _safe_job_result_json_path(job.result_path, CLASS_ANALYSIS_ROOT)
     if result_path is not None:
-        return _load_json_metadata(result_path) or {}
+        return _class_analysis_public_result(_load_json_metadata(result_path) or {})
     if job.status in {"queued", "running", "cancelling"}:
         raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="job_not_finished")
     raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="result_not_found")
+
+
+def _class_analysis_projection_from_points(result: Dict[str, Any]) -> Optional[np.ndarray]:
+    points = result.get("points") if isinstance(result, dict) else None
+    if not isinstance(points, list):
+        return None
+    coords = []
+    for point in points:
+        pair = point.get("projection") if isinstance(point, dict) else None
+        if not isinstance(pair, list) or len(pair) < 2:
+            return None
+        try:
+            x = float(pair[0])
+            y = float(pair[1])
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(x) or not math.isfinite(y):
+            return None
+        coords.append((x, y))
+    return np.asarray(coords, dtype=np.float32)
+
+
+def _class_analysis_projection_response(mode: str, coords: np.ndarray) -> Dict[str, Any]:
+    arr = np.asarray(coords, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="projection_not_found")
+    return {
+        "mode": mode,
+        "coordinates": arr[:, :2].astype(np.float32, copy=False).tolist(),
+    }
+
+
+def _class_analysis_result_selected_projection_mode(result: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(result, dict):
+        return None
+    projection_options = result.get("projection_options") if isinstance(result.get("projection_options"), dict) else {}
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    explicit = projection_options.get("selected") or summary.get("projection_mode")
+    if explicit:
+        return _class_analysis_parse_projection_endpoint_mode(explicit)
+    if str(summary.get("projection") or "").strip().lower() == "pca":
+        return "global_pca"
+    points = result.get("points")
+    if isinstance(points, list) and any(
+        isinstance(point, dict)
+        and isinstance(point.get("projection"), list)
+        and len(point.get("projection") or []) >= 2
+        for point in points
+    ):
+        return "global_pca"
+    return None
+
+
+def get_class_analysis_projection(job_id: str, mode: str) -> Dict[str, Any]:
+    job = _get_class_analysis_job(job_id)
+    projection_mode = _class_analysis_parse_projection_endpoint_mode(mode)
+    if not projection_mode:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="projection_not_found")
+    job_dir = _class_analysis_job_dir(job.job_id, create=False)
+    coords_path = _safe_existing_regular_file_within_root_impl(
+        job_dir / CLASS_ANALYSIS_PROJECTION_COORDS_FILENAME,
+        job_dir,
+    )
+    if coords_path is not None:
+        try:
+            with np.load(coords_path, allow_pickle=False) as data:
+                if projection_mode in data.files:
+                    coords = np.asarray(data[projection_mode], dtype=np.float32)
+                    if coords.ndim == 2 and coords.shape[1] >= 2:
+                        return _class_analysis_projection_response(projection_mode, coords)
+        except Exception as exc:
+            logger.warning(
+                "Failed to read class analysis projection coordinates for %s/%s: %s",
+                job_id,
+                projection_mode,
+                exc,
+            )
+
+    result: Dict[str, Any] = {}
+    if isinstance(job.result, dict):
+        result = job.result
+    else:
+        result_path = _safe_job_result_json_path(job.result_path, CLASS_ANALYSIS_ROOT)
+        if result_path is not None:
+            result = _load_json_metadata(result_path) or {}
+    extracted = _class_analysis_extract_projection_coordinates(result)
+    if projection_mode in extracted:
+        return _class_analysis_projection_response(projection_mode, extracted[projection_mode])
+
+    selected_mode = _class_analysis_result_selected_projection_mode(result)
+    if projection_mode == selected_mode:
+        point_coords = _class_analysis_projection_from_points(result)
+        if point_coords is not None:
+            return _class_analysis_projection_response(projection_mode, point_coords)
+
+    raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="projection_not_found")
 
 
 def get_class_analysis_thumbnail(job_id: str, point_id: str):
@@ -41661,6 +42043,7 @@ app.include_router(
         create_active_workspace_job_fn=create_class_analysis_active_workspace_job,
         get_job_fn=get_class_analysis_job,
         get_result_fn=get_class_analysis_result,
+        get_projection_fn=get_class_analysis_projection,
         get_thumbnail_fn=get_class_analysis_thumbnail,
         cancel_job_fn=cancel_class_analysis_job,
     )

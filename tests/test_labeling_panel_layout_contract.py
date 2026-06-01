@@ -628,7 +628,14 @@ def test_class_split_explorer_panel_contract():
     assert '<option value="precise" selected>Precise best</option>' in html
     assert '<option value="cradio">C-RADIOv4 summary</option>' in html
     assert '<option value="local_salad">Local SALAD separation</option>' not in html
-    assert 'Projection<span class="help-icon"' in html
+    assert 'Graph projection<span class="help-icon"' in html
+    assert 'class="class-split-field class-split-field--projection"' in html
+    assert html.index('id="classSplitProjection"') < html.index('id="classSplitRecipePreset"')
+    assert html.index('id="classSplitProjection"') < html.index('id="classSplitUploadDatasetName"')
+    assert '<option value="class_balanced_pca" selected>Class-balanced PCA</option>' in html
+    assert '<option value="global_pca">Global PCA</option>' in html
+    assert '<option value="between_class_pca">Between-class PCA</option>' in html
+    assert '<option value="within_filter_pca">Within-filter PCA</option>' in html
     assert 'Scope<span class="help-icon"' in html
     assert 'Class<span class="help-icon"' in html
     assert 'Encoder<span class="help-icon"' in html
@@ -654,6 +661,7 @@ def test_class_split_explorer_panel_contract():
     assert 'value="5000"' not in html
     assert 'id="classSplitGraph" class="class-split-graph"' in html
     assert 'id="classSplitDisplayMode"' in html
+    assert 'id="classSplitGraphProjection"' in html
     assert 'id="classSplitDragMode"' in html
     assert '<option value="pan">Pan</option>' in html
     assert '<option value="wrong_only">Likely wrong class only</option>' in html
@@ -662,6 +670,7 @@ def test_class_split_explorer_panel_contract():
     assert "benchmark carefully before promoting any C-RADIO pooling mode" in html
     assert 'id="classSplitReport" class="class-split-report"' in html
     assert 'id="classSplitBulkPanel" class="class-split-bulk-panel" hidden' in html
+    assert 'id="classSplitGraphStatus" class="class-split-graph-status" aria-live="polite"' in html
     assert 'id="classSplitClusterPanel" class="class-split-review-section class-split-cluster-panel" open' in html
     assert 'id="classSplitClusterList" class="class-split-cluster-list"' in html
     assert 'id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel class-split-wrong-panel--wide" open' in html
@@ -679,8 +688,11 @@ def test_class_split_explorer_panel_contract():
 
     assert '.tab-panel[data-tab-panel="class-split"]' in css
     assert ".class-split-workspace" in css
+    assert "grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));" in css
+    assert ".class-split-field--projection" in css
     assert ".class-split-panel--workspace .class-split-results" in css
     assert ".class-split-bulk-panel" in css
+    assert ".class-split-graph-status" in css
     assert ".class-split-graph" in css
     assert ".class-split-report" in css
     assert ".class-split-cluster-list" in css
@@ -725,6 +737,28 @@ def test_class_split_explorer_panel_contract():
     assert "function startClassSplitAnalysis" in js
     assert "function getClassSplitSampleCap" in js
     assert "request.sample_cap = sampleCap" in js
+    assert "function getClassSplitProjectionRequestParts" in js
+    assert "function inferClassSplitResultSelectedProjection" in js
+    assert "function getClassSplitPointProjection" in js
+    assert "function ensureClassSplitProjectionCoordinates" in js
+    assert "function getClassSplitGraphViewModel" in js
+    assert "function getClassSplitVisibleClassNames" in js
+    assert "function buildClassSplitClassTraces" in js
+    assert 'const pointTraces = colorMode === "class"' in js
+    assert "getClassSplitClassColorTokens(className, points).stroke" in js
+    assert "getClassSplitPointMarkerLine(point, { suspiciousTrace }).width" in js
+    assert "function updateClassSplitGraphStatus" in js
+    assert "function hideClassSplitResultUiUntilReady" in js
+    assert "function syncClassSplitSetupControlsFromResult" in js
+    assert "function applyClassSplitResultPayload" in js
+    assert "function installTatorTestHooks" in js
+    assert "classSplitApplyResult" in js
+    assert "classSplitEmitPointClick" in js
+    assert "classSplitEnterRunningState" in js
+    assert "classSplitElements.graphProjection" in js
+    assert "classSplitElements.graphStatus" in js
+    assert "plotRenderToken" in js
+    assert "projection_mode: projectionParts.projectionMode" in js
     assert "projection_neighbor_k: projectionNeighborK" in js
     assert "cradio_pooling:" in js
     assert "classSplitElements.cradioPooling" in js
@@ -799,6 +833,8 @@ def test_class_split_explorer_panel_contract():
     assert "dataset_image_value_score" in js
     assert "scheduleAnnotationDiversityMetricRefresh();" in js
     assert "Projection neighbors" in js
+    assert "Graph projection" in js
+    assert "Within-filter PCA" in js
     assert "Size-axis check" in js
     assert "Crop cache" in js
     assert "Embedding cache" in js
@@ -826,7 +862,8 @@ def test_class_split_explorer_panel_contract():
     assert 'String(classSplitElements.displayMode.value || "all") === "wrong_only"' in js
     assert "!point.is_wrong_class_candidate" in js
     assert "Suggested by neighbors: ${escapeHtml(point.suggested_neighbor_class)}" in js
-    assert 'classSplitElements.filterClass.addEventListener("change", () => {' in js
+    assert 'classSplitElements.filterClass.addEventListener("input", handleFilterClassChange);' in js
+    assert 'classSplitElements.filterClass.addEventListener("change", handleFilterClassChange);' in js
     assert "classSplitState.selectedClusterId = \"\";\n                refreshClassSplitFilteredReviewUi();" in js
     assert 'classSplitElements.displayMode.addEventListener("change", () => {' in js
     assert "refreshClassSplitFilteredReviewUi();" in js

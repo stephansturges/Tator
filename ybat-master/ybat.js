@@ -2387,11 +2387,13 @@ const AUTOMATION_LOCKED_TABS = new Set([
         progressText: null,
         results: null,
         colorMode: null,
+        graphProjection: null,
         filterClass: null,
         displayMode: null,
         dragMode: null,
         clusterOverlay: null,
         graph: null,
+        graphStatus: null,
         report: null,
         clusterPanel: null,
         clusterList: null,
@@ -2633,6 +2635,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         lastRequest: null,
         result: null,
         pointsById: new Map(),
+        projectionCoordinates: {},
+        projectionCoordinateLoads: new Map(),
         selectedPointId: "",
         selectedClusterId: "",
         lassoPointIds: new Set(),
@@ -2649,6 +2653,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         activeWorkspaceDatasetUpload: null,
         pointImageLookup: null,
         pointImageLookupSignature: "",
+        plotRenderToken: 0,
+        lastPlotViewKey: "",
     };
     let qwenClassOverride = false;
     let qwenAdvancedVisible = false;
@@ -38971,17 +38977,234 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function updateClassSplitProjectionOptions() {
-        if (!classSplitElements.projection) {
+        const selects = [classSplitElements.projection, classSplitElements.graphProjection].filter(Boolean);
+        if (!selects.length) {
             return;
         }
-        const available = Array.isArray(classSplitState.capabilities?.projection_methods)
+        const pcaModes = Array.isArray(classSplitState.capabilities?.pca_projection_modes)
+            ? classSplitState.capabilities.pca_projection_modes
+            : ["global_pca", "class_balanced_pca", "between_class_pca", "within_filter_pca"];
+        const availableProjectionMethods = Array.isArray(classSplitState.capabilities?.projection_methods)
             ? classSplitState.capabilities.projection_methods
             : ["pca"];
         const options = [
-            { value: "pca", label: "PCA" },
-            { value: "umap", label: available.includes("umap") ? "UMAP" : "UMAP if available" },
-        ];
-        fillSelectOptions(classSplitElements.projection, options, classSplitElements.projection.value || "pca");
+            { value: "class_balanced_pca", label: "Class-balanced PCA" },
+            { value: "global_pca", label: "Global PCA" },
+            { value: "between_class_pca", label: "Between-class PCA" },
+            { value: "within_filter_pca", label: "Within-filter PCA" },
+            { value: "umap", label: availableProjectionMethods.includes("umap") ? "UMAP" : "UMAP if available" },
+        ].filter((option) => option.value === "umap" || pcaModes.includes(option.value));
+        const desired = normalizeClassSplitProjectionChoice(
+            classSplitElements.graphProjection?.value
+            || classSplitElements.projection?.value
+            || classSplitState.capabilities?.default_pca_projection_mode
+            || "class_balanced_pca"
+        );
+        selects.forEach((select) => fillSelectOptions(select, options, desired));
+        refreshClassSplitProjectionHint();
+    }
+
+    function normalizeClassSplitProjectionChoice(value) {
+        const raw = String(value || "").trim().toLowerCase().replace(/-/g, "_");
+        const aliases = {
+            pca: "global_pca",
+            global: "global_pca",
+            global_pca: "global_pca",
+            balanced: "class_balanced_pca",
+            balanced_pca: "class_balanced_pca",
+            class_balanced: "class_balanced_pca",
+            class_balanced_pca: "class_balanced_pca",
+            between: "between_class_pca",
+            between_pca: "between_class_pca",
+            between_class: "between_class_pca",
+            between_class_pca: "between_class_pca",
+            within: "within_filter_pca",
+            within_pca: "within_filter_pca",
+            within_class: "within_filter_pca",
+            within_class_pca: "within_filter_pca",
+            within_filter: "within_filter_pca",
+            within_filter_pca: "within_filter_pca",
+            umap: "umap",
+        };
+        return aliases[raw] || "class_balanced_pca";
+    }
+
+    function classSplitProjectionChoiceLabel(choice) {
+        const labels = {
+            global_pca: "Global PCA",
+            class_balanced_pca: "Class-balanced PCA",
+            between_class_pca: "Between-class PCA",
+            within_filter_pca: "Within-filter PCA",
+            umap: "UMAP",
+        };
+        return labels[normalizeClassSplitProjectionChoice(choice)] || labels.class_balanced_pca;
+    }
+
+    function getClassSplitProjectionChoice() {
+        return normalizeClassSplitProjectionChoice(
+            classSplitElements.graphProjection?.value
+            || classSplitElements.projection?.value
+            || inferClassSplitResultSelectedProjection(classSplitState.result)
+            || "class_balanced_pca"
+        );
+    }
+
+    function inferClassSplitResultSelectedProjection(result) {
+        if (!result || typeof result !== "object") {
+            return "";
+        }
+        const projectionOptions = result.projection_options || {};
+        const summary = result.summary || {};
+        const explicit = projectionOptions.selected || summary.projection_mode;
+        if (explicit) {
+            return normalizeClassSplitProjectionChoice(explicit);
+        }
+        const projection = String(summary.projection || "").trim().toLowerCase();
+        if (projection === "pca") {
+            return "global_pca";
+        }
+        if (projection === "umap") {
+            return "umap";
+        }
+        if (
+            Array.isArray(result.points)
+            && result.points.some((point) => Array.isArray(point?.projection) && point.projection.length >= 2)
+        ) {
+            return "global_pca";
+        }
+        return "";
+    }
+
+    function setClassSplitProjectionChoice(choice, source = null) {
+        const normalized = normalizeClassSplitProjectionChoice(choice);
+        [classSplitElements.projection, classSplitElements.graphProjection].forEach((select) => {
+            if (select && select !== source) {
+                select.value = normalized;
+            }
+        });
+        return normalized;
+    }
+
+    function getClassSplitProjectionRequestParts() {
+        const choice = getClassSplitProjectionChoice();
+        if (choice === "umap") {
+            return { projection: "umap", projectionMode: "global_pca" };
+        }
+        return { projection: "pca", projectionMode: choice };
+    }
+
+    function classSplitProjectionNeedsClassFilter(choice = getClassSplitProjectionChoice()) {
+        return normalizeClassSplitProjectionChoice(choice) === "within_filter_pca"
+            && getClassSplitResultScope() === "all_classes"
+            && !String(classSplitElements.filterClass?.value || "").trim();
+    }
+
+    function getClassSplitPointProjection(point, axisIndex) {
+        if (!point) {
+            return 0;
+        }
+        const choice = getClassSplitProjectionChoice();
+        if (classSplitProjectionNeedsClassFilter(choice)) {
+            return 0;
+        }
+        const pointIndex = Number(point._projectionIndex);
+        const loadedCoordinates = classSplitState.projectionCoordinates || {};
+        const inlineCoordinates = classSplitState.result?.projection_options?.coordinates || {};
+        const coordinates = loadedCoordinates[choice] || inlineCoordinates[choice];
+        if (choice !== "umap" && Number.isInteger(pointIndex) && Array.isArray(coordinates)) {
+            const pair = coordinates[pointIndex];
+            const value = Number(Array.isArray(pair) ? pair[axisIndex] : NaN);
+            if (Number.isFinite(value)) {
+                return value;
+            }
+        }
+        const fallback = Number(point.projection?.[axisIndex]);
+        return Number.isFinite(fallback) ? fallback : 0;
+    }
+
+    function getClassSplitProjectionUnavailableMessage() {
+        const choice = getClassSplitProjectionChoice();
+        if (classSplitProjectionNeedsClassFilter(choice)) {
+            return "Choose a class filter to use Within-filter PCA. Each class has its own local PCA axes, so all classes cannot be overlaid in that mode.";
+        }
+        if (choice === "umap" && String(classSplitState.result?.summary?.projection || "") !== "umap") {
+            return "UMAP coordinates are only available after rerunning Class Split with UMAP selected.";
+        }
+        if (classSplitState.result && choice !== "umap") {
+            const inlineCoordinates = classSplitState.result?.projection_options?.coordinates || {};
+            const hasStoredCoordinates = Array.isArray(inlineCoordinates?.[choice])
+                || Array.isArray(classSplitState.projectionCoordinates?.[choice]);
+            const available = classSplitState.result?.projection_options?.coordinates_available;
+            const canFetchCoordinates = Array.isArray(available) && available.includes(choice);
+            const legacyGlobalPca = choice === "global_pca"
+                && String(classSplitState.result?.summary?.projection || "").toLowerCase() === "pca";
+            const selectedMode = inferClassSplitResultSelectedProjection(classSplitState.result);
+            const selectedHasPointProjection = !!selectedMode && choice === selectedMode;
+            if (!hasStoredCoordinates && !canFetchCoordinates && !legacyGlobalPca && !selectedHasPointProjection) {
+                return `${classSplitProjectionChoiceLabel(choice)} coordinates are only available after rerunning Class Split.`;
+            }
+        }
+        return "";
+    }
+
+    function refreshClassSplitProjectionHint() {
+        const title = getClassSplitProjectionUnavailableMessage()
+            || "Switches the graph coordinates only. Full-space nearest-neighbor scoring is unchanged.";
+        [classSplitElements.projection, classSplitElements.graphProjection].forEach((select) => {
+            if (select) {
+                select.title = title;
+            }
+        });
+    }
+
+    function classSplitProjectionCoordinatesLoaded(choice = getClassSplitProjectionChoice()) {
+        const normalized = normalizeClassSplitProjectionChoice(choice);
+        if (normalized === "umap") {
+            return true;
+        }
+        if (Array.isArray(classSplitState.projectionCoordinates?.[normalized])) {
+            return true;
+        }
+        if (Array.isArray(classSplitState.result?.projection_options?.coordinates?.[normalized])) {
+            return true;
+        }
+        const selectedMode = inferClassSplitResultSelectedProjection(classSplitState.result);
+        return !!selectedMode && normalized === selectedMode && Array.isArray(classSplitState.result?.points);
+    }
+
+    async function ensureClassSplitProjectionCoordinates(choice = getClassSplitProjectionChoice()) {
+        const normalized = normalizeClassSplitProjectionChoice(choice);
+        if (classSplitProjectionCoordinatesLoaded(normalized)) {
+            return true;
+        }
+        const available = classSplitState.result?.projection_options?.coordinates_available;
+        if (!Array.isArray(available) || !available.includes(normalized) || !classSplitState.currentJobId) {
+            return false;
+        }
+        if (!classSplitState.projectionCoordinateLoads) {
+            classSplitState.projectionCoordinateLoads = new Map();
+        }
+        if (!classSplitState.projectionCoordinateLoads.has(normalized)) {
+            const loadPromise = fetch(`${API_ROOT}/class_analysis/jobs/${encodeURIComponent(classSplitState.currentJobId)}/projection/${encodeURIComponent(normalized)}`)
+                .then(async (resp) => {
+                    const detail = await resp.text();
+                    if (!resp.ok) {
+                        throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+                    }
+                    const payload = parseJsonObjectSafe(detail, {});
+                    const coords = Array.isArray(payload.coordinates) ? payload.coordinates : [];
+                    classSplitState.projectionCoordinates = {
+                        ...(classSplitState.projectionCoordinates || {}),
+                        [normalized]: coords,
+                    };
+                    return true;
+                })
+                .finally(() => {
+                    classSplitState.projectionCoordinateLoads?.delete(normalized);
+                });
+            classSplitState.projectionCoordinateLoads.set(normalized, loadPromise);
+        }
+        return classSplitState.projectionCoordinateLoads.get(normalized);
     }
 
     function updateClassSplitBackboneOptions() {
@@ -39143,12 +39366,14 @@ async function cancelRfDetrTrainingJobRequest() {
             ? Math.max(0, Math.min(5000, projectionNeighborRaw))
             : 50;
         const neighborK = Math.max(3, Math.min(100, parseInt(classSplitElements.neighborK?.value || "15", 10) || 15));
+        const projectionParts = getClassSplitProjectionRequestParts();
         const request = {
             analysis_scope: scope,
             class_name: scope === "selected_class" ? className : "",
             encoder_type: encoderType,
             encoder_model: String(classSplitElements.backbone?.value || "").trim(),
-            projection: String(classSplitElements.projection?.value || "pca").trim().toLowerCase() || "pca",
+            projection: projectionParts.projection,
+            projection_mode: projectionParts.projectionMode,
             projection_neighbor_k: projectionNeighborK,
             crop_mode: "padded_square",
             padding_ratio: padding,
@@ -39183,15 +39408,56 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+    function snapshotClassSplitReviewState() {
+        if (!classSplitState.result) {
+            return null;
+        }
+        return {
+            currentJobId: classSplitState.currentJobId,
+            result: classSplitState.result,
+            pointsById: new Map(classSplitState.pointsById || []),
+            projectionCoordinates: { ...(classSplitState.projectionCoordinates || {}) },
+            selectedPointId: classSplitState.selectedPointId,
+            selectedClusterId: classSplitState.selectedClusterId,
+            lassoPointIds: new Set(classSplitState.lassoPointIds || []),
+            dismissedWrongIds: new Set(classSplitState.dismissedWrongIds || []),
+            lastRequest: classSplitState.lastRequest ? { ...classSplitState.lastRequest } : null,
+            datasetAnalysis: classSplitState.datasetAnalysis,
+        };
+    }
+
+    function restoreClassSplitReviewState(snapshot) {
+        if (!snapshot || !snapshot.result) {
+            return false;
+        }
+        classSplitState.active = false;
+        classSplitState.currentJobId = snapshot.currentJobId;
+        classSplitState.result = snapshot.result;
+        classSplitState.pointsById = new Map(snapshot.pointsById || []);
+        classSplitState.projectionCoordinates = { ...(snapshot.projectionCoordinates || {}) };
+        classSplitState.projectionCoordinateLoads = new Map();
+        classSplitState.selectedPointId = snapshot.selectedPointId || "";
+        classSplitState.selectedClusterId = snapshot.selectedClusterId || "";
+        classSplitState.lassoPointIds = new Set(snapshot.lassoPointIds || []);
+        classSplitState.dismissedWrongIds = new Set(snapshot.dismissedWrongIds || []);
+        classSplitState.lastRequest = snapshot.lastRequest ? { ...snapshot.lastRequest } : null;
+        classSplitState.datasetAnalysis = snapshot.datasetAnalysis || null;
+        invalidateClassSplitPointImageLookup();
+        renderClassSplitResult();
+        return true;
+    }
+
     async function startClassSplitAnalysis({ reuseLast = false } = {}) {
         if (classSplitState.active) {
             return;
         }
+        let previousReviewState = null;
         try {
             const request = reuseLast && classSplitState.lastRequest
                 ? { ...classSplitState.lastRequest }
                 : buildClassSplitRequest();
             await ensureClassSplitSnapshotClean("Class Split analysis");
+            previousReviewState = snapshotClassSplitReviewState();
             classSplitState.active = true;
             classSplitState.currentJobId = "";
             classSplitState.result = null;
@@ -39257,9 +39523,13 @@ async function cancelRfDetrTrainingJobRequest() {
             pollClassSplitJob(jobId);
         } catch (error) {
             console.error("Class Split analysis failed to start", error);
+            const restoredPreviousResult = restoreClassSplitReviewState(previousReviewState);
             classSplitState.active = false;
             setClassSplitJobStatus(`Failed: ${error.message || error}`, "error");
             renderClassSplitProgress({ progress: 1, message: `Failed: ${error.message || error}` });
+            if (restoredPreviousResult) {
+                renderClassSplitPlot();
+            }
             refreshClassSplitControls();
         }
     }
@@ -39364,17 +39634,78 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    async function loadClassSplitResult(jobId) {
-        const resp = await fetch(`${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/result`);
-        const detail = await resp.text();
-        if (!resp.ok) {
-            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+    function syncClassSplitSetupControlsFromResult(result) {
+        const summary = result?.summary || {};
+        const scope = String(summary.analysis_scope || "").trim();
+        if (scope === "all_classes") {
+            if (classSplitElements.scopeAll) {
+                classSplitElements.scopeAll.checked = true;
+            }
+            if (classSplitElements.scopeSelected) {
+                classSplitElements.scopeSelected.checked = false;
+            }
+            return;
         }
-        const result = parseJsonObjectSafe(detail, {});
+        if (scope === "selected_class") {
+            if (classSplitElements.scopeSelected) {
+                classSplitElements.scopeSelected.checked = true;
+            }
+            if (classSplitElements.scopeAll) {
+                classSplitElements.scopeAll.checked = false;
+            }
+            const className = String(
+                summary.class_name
+                || summary.selected_class
+                || classSplitState.lastRequest?.class_name
+                || ""
+            ).trim();
+            if (
+                className
+                && classSplitElements.classSelect
+                && Array.from(classSplitElements.classSelect.options || []).some((option) => option.value === className)
+            ) {
+                classSplitElements.classSelect.value = className;
+            }
+        }
+    }
+
+    function applyClassSplitResultPayload(resultPayload, jobId = "") {
+        const result = resultPayload && typeof resultPayload === "object" ? resultPayload : {};
+        if (jobId) {
+            classSplitState.currentJobId = String(jobId || "").trim();
+        }
+        classSplitState.active = false;
         classSplitState.result = result;
+        syncClassSplitSetupControlsFromResult(result);
         classSplitState.pointsById = new Map();
+        classSplitState.projectionCoordinates = {};
+        classSplitState.projectionCoordinateLoads = new Map();
+        const inlineCoordinates = result?.projection_options?.coordinates;
+        if (inlineCoordinates && typeof inlineCoordinates === "object") {
+            classSplitState.projectionCoordinates = { ...inlineCoordinates };
+            delete result.projection_options.coordinates;
+            result.projection_options.coordinates_available = Object.keys(classSplitState.projectionCoordinates);
+        }
+        setClassSplitProjectionChoice(
+            inferClassSplitResultSelectedProjection(result)
+            || classSplitState.lastRequest?.projection_mode
+            || classSplitState.capabilities?.default_pca_projection_mode
+            || "class_balanced_pca"
+        );
+        if (classSplitElements.colorMode) {
+            classSplitElements.colorMode.value = "class";
+        }
+        if (classSplitElements.displayMode) {
+            classSplitElements.displayMode.value = "all";
+        }
+        if (classSplitElements.filterClass) {
+            classSplitElements.filterClass.value = "";
+        }
         invalidateClassSplitPointImageLookup();
-        (Array.isArray(result.points) ? result.points : []).forEach((point) => {
+        (Array.isArray(result.points) ? result.points : []).forEach((point, index) => {
+            if (point) {
+                point._projectionIndex = index;
+            }
             if (point?.point_id) {
                 classSplitState.pointsById.set(String(point.point_id), point);
             }
@@ -39387,6 +39718,15 @@ async function cancelRfDetrTrainingJobRequest() {
         clearClassSplitDatasetAnalysis();
         stopClassSplitPlotFlash();
         renderClassSplitResult();
+    }
+
+    async function loadClassSplitResult(jobId) {
+        const resp = await fetch(`${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/result`);
+        const detail = await resp.text();
+        if (!resp.ok) {
+            throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+        }
+        applyClassSplitResultPayload(parseJsonObjectSafe(detail, {}), jobId);
     }
 
     function getClassSplitFilteredPoints() {
@@ -39445,6 +39785,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function refreshClassSplitFilteredReviewUi({ renderPlot = true } = {}) {
         pruneClassSplitSelectionsForActiveGraphView();
+        refreshClassSplitProjectionHint();
         refreshClassSplitClusterOverlayControl();
         renderClassSplitClusterList();
         renderClassSplitWrongList();
@@ -39473,7 +39814,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const mode = String(classSplitElements.colorMode?.value || "class");
         if (mode === "cluster") {
             const clusterKey = classSplitPointClusterKey(point);
-            return clusterKey ? classSplitClusterColor(clusterKey) : (getClassColorTokens(point.class_name || "").stroke || "#2563eb");
+            return clusterKey ? classSplitClusterColor(clusterKey) : (getClassSplitClassColorTokens(point.class_name || "").stroke || "#2563eb");
         }
         if (mode === "wrong") {
             return classSplitScoreColor(point.wrong_class_suspicion, "#e0f2fe", "#ef4444");
@@ -39490,7 +39831,7 @@ async function cancelRfDetrTrainingJobRequest() {
             const score = Number(point.dataset_image_value_score);
             return Number.isFinite(score) ? classSplitScoreColor(score, "#dcfce7", "#be123c") : "#94a3b8";
         }
-        return getClassColorTokens(point.class_name || "").stroke || "#2563eb";
+        return getClassSplitClassColorTokens(point.class_name || "").stroke || "#2563eb";
     }
 
     function getClassSplitPlotTheme() {
@@ -39517,6 +39858,72 @@ async function cancelRfDetrTrainingJobRequest() {
             grid: "rgba(148, 163, 184, 0.35)",
             text: "#0f172a",
         };
+    }
+
+    function getClassSplitResultClassNames(points = null) {
+        const ordered = [];
+        const seen = new Set();
+        const add = (value) => {
+            const className = String(value || "").trim();
+            if (!className || seen.has(className)) {
+                return;
+            }
+            seen.add(className);
+            ordered.push(className);
+        };
+        (Array.isArray(loadedClassList) ? loadedClassList : []).forEach(add);
+        const counts = classSplitState.result?.summary?.class_counts || {};
+        Object.keys(counts).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).forEach(add);
+        (Array.isArray(points) ? points : (Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : []))
+            .forEach((point) => add(point?.class_name));
+        return ordered;
+    }
+
+    function getClassSplitVisibleClassNames(points) {
+        const ordered = [];
+        const seen = new Set();
+        (Array.isArray(points) ? points : []).forEach((point) => {
+            const className = String(point?.class_name || "").trim();
+            if (!className || seen.has(className)) {
+                return;
+            }
+            seen.add(className);
+            ordered.push(className);
+        });
+        return ordered;
+    }
+
+    function getClassSplitClassColorTokens(className, points = null) {
+        const label = String(className || "").trim() || "unknown";
+        const mapped = classes && Object.prototype.hasOwnProperty.call(classes, label)
+            ? Number(classes[label])
+            : NaN;
+        const order = getClassSplitResultClassNames(points);
+        const orderIndex = order.indexOf(label);
+        const index = Number.isFinite(mapped) && mapped >= 0
+            ? Math.floor(mapped)
+            : (orderIndex >= 0 ? orderIndex : hashStringForColor(label) % 4096);
+        const cacheKey = `class-split:${label}::${index}`;
+        const cached = classColorCache.get(cacheKey);
+        if (cached) {
+            return cached;
+        }
+        const stroke = index < curatedClassColors.length
+            ? (normalizeHexColor(curatedClassColors[index]) || generatedClassColor(index))
+            : generatedClassColor(index);
+        const strokeLuminance = relativeLuminance(stroke);
+        const strongBg = strokeLuminance > 0.42
+            ? mixHexColors(stroke, "#0f172a", 0.34)
+            : mixHexColors(stroke, "#ffffff", 0.1);
+        const tokens = {
+            stroke,
+            fill: colorWithAlpha(stroke, 0.2),
+            handleFill: colorWithAlpha(stroke, 0.35),
+            strongBg: colorWithAlpha(strongBg, 0.96),
+            textOnStrongBg: getTextColorForClassToastBackground(strongBg),
+        };
+        classColorCache.set(cacheKey, tokens);
+        return tokens;
     }
 
     function getClassSplitThumbnailUrl(point) {
@@ -39807,7 +40214,11 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function classSplitClusterHullsAllowed() {
-        return classSplitClusterProposalsAllowed();
+        if (!classSplitClusterProposalsAllowed()) {
+            return false;
+        }
+        return getClassSplitVisibleClusterSummaries(getClassSplitGraphPoints())
+            .some((summary) => classSplitConvexHull(summary.points).length >= 2);
     }
 
     function refreshClassSplitClusterOverlayControl() {
@@ -39816,13 +40227,25 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const allowed = classSplitClusterHullsAllowed();
+        if (!allowed) {
+            if (control.dataset.disabledPreviousChecked === undefined) {
+                control.dataset.disabledPreviousChecked = control.checked ? "1" : "0";
+            }
+            control.checked = false;
+        } else if (control.dataset.disabledPreviousChecked !== undefined) {
+            control.checked = control.dataset.disabledPreviousChecked === "1";
+            delete control.dataset.disabledPreviousChecked;
+        }
         control.disabled = classSplitState.active || !allowed;
         const label = control.closest(".class-split-toggle");
         if (label) {
+            const disabledReason = classSplitClusterProposalsAllowed()
+                ? "Cluster hulls need at least two visible clustered points. Switch Display back to all graph objects or choose another class filter."
+                : "Choose a class filter first. Cluster hulls are only drawn for within-class subclass review.";
             label.classList.toggle("class-split-toggle--disabled", !allowed);
             label.title = allowed
                 ? "Draw translucent outlines around subclass clusters inside the selected class."
-                : "Choose a class filter first. Cluster hulls are only drawn for within-class subclass review.";
+                : disabledReason;
         }
     }
 
@@ -39904,8 +40327,8 @@ async function cancelRfDetrTrainingJobRequest() {
         const coords = [];
         const seen = new Set();
         points.forEach((point) => {
-            const x = Number(point.projection?.[0]);
-            const y = Number(point.projection?.[1]);
+            const x = getClassSplitPointProjection(point, 0);
+            const y = getClassSplitPointProjection(point, 1);
             if (!Number.isFinite(x) || !Number.isFinite(y)) {
                 return;
             }
@@ -39987,8 +40410,8 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!summary || !summary.points.length) {
             return;
         }
-        const xs = summary.points.map((point) => Number(point.projection?.[0])).filter(Number.isFinite);
-        const ys = summary.points.map((point) => Number(point.projection?.[1])).filter(Number.isFinite);
+        const xs = summary.points.map((point) => getClassSplitPointProjection(point, 0)).filter(Number.isFinite);
+        const ys = summary.points.map((point) => getClassSplitPointProjection(point, 1)).filter(Number.isFinite);
         if (!xs.length || !ys.length) {
             return;
         }
@@ -40164,8 +40587,8 @@ async function cancelRfDetrTrainingJobRequest() {
             type: "scatter",
             mode: "markers",
             name: "Selected point",
-            x: [Number(point.projection?.[0]) || 0],
-            y: [Number(point.projection?.[1]) || 0],
+            x: [getClassSplitPointProjection(point, 0)],
+            y: [getClassSplitPointProjection(point, 1)],
             hoverinfo: "skip",
             showlegend: false,
             marker: {
@@ -40179,7 +40602,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function getClassSplitPointRange(points, axisIndex) {
         const values = points
-            .map((point) => Number(point.projection?.[axisIndex]))
+            .map((point) => getClassSplitPointProjection(point, axisIndex))
             .filter((value) => Number.isFinite(value));
         if (!values.length) {
             return [-1, 1];
@@ -40220,8 +40643,8 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!graphEl || !window.Plotly || !point) {
             return;
         }
-        const pointX = Number(point.projection?.[0]) || 0;
-        const pointY = Number(point.projection?.[1]) || 0;
+        const pointX = getClassSplitPointProjection(point, 0);
+        const pointY = getClassSplitPointProjection(point, 1);
         const xRange = getClassSplitAxisRange(graphEl, "xaxis", 0);
         const yRange = getClassSplitAxisRange(graphEl, "yaxis", 1);
         const fullXRange = getClassSplitPointRange(getClassSplitFilteredPoints(), 0);
@@ -40246,8 +40669,54 @@ async function cancelRfDetrTrainingJobRequest() {
             });
     }
 
-    function buildClassSplitTrace(points, name, suspiciousOnly = false) {
-        const filtered = points.filter((point) => !!point.is_wrong_class_candidate === suspiciousOnly);
+    function formatClassSplitPointHoverText(point) {
+        const neighbor = point.suggested_neighbor_class
+            ? `Suggested by neighbors: ${escapeHtml(point.suggested_neighbor_class)}<br>`
+            : "";
+        const imageName = classSplitShortHoverText(point.image_relpath || "");
+        const clusterLabel = formatClassSplitPointClusterLabel(point);
+        return [
+            `<b>${escapeHtml(point.class_name || "")}</b>`,
+            `${escapeHtml(imageName)}`,
+            clusterLabel ? escapeHtml(clusterLabel) : "",
+            `${neighbor}Suspicion ${(Number(point.wrong_class_suspicion) || 0).toFixed(2)}`,
+        ].filter(Boolean).join("<br>");
+    }
+
+    function getClassSplitPointMarkerSize(point, { suspiciousTrace = false } = {}) {
+        const pointId = String(point?.point_id || "");
+        if (pointId === classSplitState.selectedPointId) {
+            return suspiciousTrace ? 17 : 15;
+        }
+        if (classSplitState.selectedClusterId && classSplitPointClusterKey(point) === classSplitState.selectedClusterId) {
+            return suspiciousTrace ? 16 : 13;
+        }
+        if (classSplitState.lassoPointIds?.has(pointId)) {
+            return suspiciousTrace ? 15 : 12;
+        }
+        return point?.is_wrong_class_candidate ? 10 : 8;
+    }
+
+    function getClassSplitPointMarkerLine(point, { suspiciousTrace = false } = {}) {
+        const pointId = String(point?.point_id || "");
+        if (pointId === classSplitState.selectedPointId) {
+            return { color: "#facc15", width: 2.6 };
+        }
+        if (classSplitState.selectedClusterId && classSplitPointClusterKey(point) === classSplitState.selectedClusterId) {
+            return { color: "#f59e0b", width: 2.1 };
+        }
+        if (classSplitState.lassoPointIds?.has(pointId)) {
+            return { color: "#facc15", width: 1.8 };
+        }
+        if (point?.is_wrong_class_candidate || suspiciousTrace) {
+            return { color: "#ef4444", width: 1.8 };
+        }
+        return { color: "rgba(15, 23, 42, 0.35)", width: 0.45 };
+    }
+
+    function buildClassSplitPointTrace(points, name, options = {}) {
+        const filtered = Array.isArray(points) ? points : [];
+        const suspiciousTrace = !!options.suspiciousTrace;
         const selectedPointIds = classSplitState.lassoPointIds || new Set();
         const hasAnySelection = selectedPointIds.size > 0;
         const selectedIndices = [];
@@ -40262,43 +40731,21 @@ async function cancelRfDetrTrainingJobRequest() {
             type: "scattergl",
             mode: "markers",
             name,
-            x: filtered.map((point) => Number(point.projection?.[0]) || 0),
-            y: filtered.map((point) => Number(point.projection?.[1]) || 0),
+            legendgroup: options.legendgroup || name,
+            showlegend: options.showlegend !== false,
+            x: filtered.map((point) => getClassSplitPointProjection(point, 0)),
+            y: filtered.map((point) => getClassSplitPointProjection(point, 1)),
             customdata: pointIds,
             selectedpoints: hasAnySelection ? selectedIndices : null,
-            text: filtered.map((point) => {
-                const neighbor = point.suggested_neighbor_class
-                    ? `Suggested by neighbors: ${escapeHtml(point.suggested_neighbor_class)}<br>`
-                    : "";
-                const imageName = classSplitShortHoverText(point.image_relpath || "");
-                const clusterLabel = formatClassSplitPointClusterLabel(point);
-                return [
-                    `<b>${escapeHtml(point.class_name || "")}</b>`,
-                    `${escapeHtml(imageName)}`,
-                    clusterLabel ? escapeHtml(clusterLabel) : "",
-                    `${neighbor}Suspicion ${(Number(point.wrong_class_suspicion) || 0).toFixed(2)}`,
-                ].filter(Boolean).join("<br>");
-            }),
+            text: filtered.map((point) => formatClassSplitPointHoverText(point)),
             hovertemplate: "%{text}<extra></extra>",
             marker: {
-                size: filtered.map((point) => {
-                    const pointId = String(point.point_id || "");
-                    if (pointId === classSplitState.selectedPointId) {
-                        return suspiciousOnly ? 17 : 15;
-                    }
-                    if (classSplitState.selectedClusterId && classSplitPointClusterKey(point) === classSplitState.selectedClusterId) {
-                        return suspiciousOnly ? 16 : 13;
-                    }
-                    if (classSplitState.lassoPointIds?.has(pointId)) {
-                        return suspiciousOnly ? 15 : 12;
-                    }
-                    return suspiciousOnly ? 12 : 8;
-                }),
-                color: filtered.map((point) => getClassSplitPointColor(point)),
-                opacity: suspiciousOnly ? 0.95 : 0.78,
+                size: filtered.map((point) => getClassSplitPointMarkerSize(point, { suspiciousTrace })),
+                color: filtered.map((point) => options.color || getClassSplitPointColor(point)),
+                opacity: options.opacity ?? (suspiciousTrace ? 0.95 : 0.78),
                 line: {
-                    color: suspiciousOnly ? "#ef4444" : "rgba(15, 23, 42, 0.35)",
-                    width: suspiciousOnly ? 2 : 0.5,
+                    color: filtered.map((point) => getClassSplitPointMarkerLine(point, { suspiciousTrace }).color),
+                    width: filtered.map((point) => getClassSplitPointMarkerLine(point, { suspiciousTrace }).width),
                 },
             },
             selected: {
@@ -40308,10 +40755,49 @@ async function cancelRfDetrTrainingJobRequest() {
             },
             unselected: {
                 marker: {
-                    opacity: hasAnySelection ? 0.22 : (suspiciousOnly ? 0.95 : 0.78),
+                    opacity: hasAnySelection ? 0.22 : (options.opacity ?? (suspiciousTrace ? 0.95 : 0.78)),
                 },
             },
         };
+    }
+
+    function buildClassSplitTrace(points, name, suspiciousOnly = false) {
+        const filtered = points.filter((point) => !!point.is_wrong_class_candidate === suspiciousOnly);
+        return buildClassSplitPointTrace(filtered, name, { suspiciousTrace: suspiciousOnly });
+    }
+
+    function buildClassSplitClassTraces(points) {
+        const order = getClassSplitResultClassNames(points);
+        const groups = new Map();
+        order.forEach((className) => groups.set(className, []));
+        points.forEach((point) => {
+            const className = String(point?.class_name || "").trim() || "unknown";
+            if (!groups.has(className)) {
+                groups.set(className, []);
+            }
+            groups.get(className).push(point);
+        });
+        return Array.from(groups.entries())
+            .filter(([, classPoints]) => classPoints.length > 0)
+            .map(([className, classPoints]) => buildClassSplitPointTrace(classPoints, className, {
+                legendgroup: `class:${className}`,
+                color: getClassSplitClassColorTokens(className, points).stroke,
+                opacity: 0.82,
+            }));
+    }
+
+    function buildClassSplitGraphTraces(points) {
+        const colorMode = String(classSplitElements.colorMode?.value || "class");
+        const pointTraces = colorMode === "class"
+            ? buildClassSplitClassTraces(points)
+            : [
+                buildClassSplitTrace(points, "Objects", false),
+                buildClassSplitTrace(points, "Likely wrong class", true),
+            ];
+        return [
+            ...buildClassSplitClusterHullTraces(points),
+            ...pointTraces,
+        ].filter((trace) => trace && trace.x && trace.x.length > 0);
     }
 
     function updateClassSplitBulkClassOptions() {
@@ -40712,6 +41198,100 @@ async function cancelRfDetrTrainingJobRequest() {
         graphEl.addEventListener("mouseleave", hideClassSplitGraphHoverPreview);
     }
 
+    function classSplitGraphHasLivePlot(graphEl = classSplitElements.graph) {
+        return !!(graphEl && Array.isArray(graphEl.data) && graphEl.data.length > 0);
+    }
+
+    function clearClassSplitGraphPlaceholderText(graphEl) {
+        if (!graphEl) {
+            return;
+        }
+        Array.from(graphEl.children || []).forEach((child) => {
+            if (child instanceof HTMLElement && child.classList.contains("training-help")) {
+                child.remove();
+            }
+        });
+    }
+
+    function setClassSplitGraphPlaceholder(html, { purge = true } = {}) {
+        const graphEl = classSplitElements.graph;
+        if (!graphEl) {
+            return;
+        }
+        if (purge) {
+            try {
+                if (window.Plotly && typeof window.Plotly.purge === "function" && Array.isArray(graphEl.data)) {
+                    window.Plotly.purge(graphEl);
+                }
+            } catch (error) {
+                console.warn("Class Split placeholder purge failed", error);
+            }
+            graphEl.data = [];
+            graphEl.layout = null;
+        }
+        graphEl.innerHTML = html;
+    }
+
+    function getClassSplitGraphViewModel() {
+        const allPoints = Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : [];
+        const filteredPoints = getClassSplitFilteredPoints();
+        const points = getClassSplitGraphPoints();
+        const classNames = getClassSplitVisibleClassNames(points);
+        const projectionChoice = getClassSplitProjectionChoice();
+        const displayMode = String(classSplitElements.displayMode?.value || "all");
+        const filterClass = String(classSplitElements.filterClass?.value || "").trim();
+        const colorMode = String(classSplitElements.colorMode?.value || "class");
+        return {
+            allPoints,
+            filteredPoints,
+            points,
+            classNames,
+            projectionChoice,
+            displayMode,
+            filterClass,
+            colorMode,
+            projectionUnavailable: getClassSplitProjectionUnavailableMessage(),
+        };
+    }
+
+    function classSplitColorModeLabel(value) {
+        const labels = {
+            class: "class",
+            cluster: "cluster",
+            wrong: "wrong-class suspicion",
+            outlier: "outlier score",
+            area: "box area",
+            image_value: "image value",
+        };
+        return labels[String(value || "class")] || "class";
+    }
+
+    function updateClassSplitGraphStatus(view, message = "") {
+        const statusEl = classSplitElements.graphStatus;
+        if (!statusEl) {
+            return;
+        }
+        if (!classSplitState.result) {
+            statusEl.textContent = "";
+            return;
+        }
+        const parts = [];
+        parts.push(`${view.points.length}/${view.allPoints.length} objects shown`);
+        parts.push(`${view.classNames.length} class${view.classNames.length === 1 ? "" : "es"}`);
+        parts.push(classSplitProjectionChoiceLabel(view.projectionChoice));
+        parts.push(`colored by ${classSplitColorModeLabel(view.colorMode)}`);
+        if (view.filterClass) {
+            parts.push(`filter: ${view.filterClass}`);
+        }
+        if (view.displayMode === "wrong_only") {
+            parts.push("likely wrong only");
+        }
+        if (message) {
+            parts.push(message);
+        }
+        statusEl.textContent = parts.join(" • ");
+    }
+
     function renderClassSplitPlot() {
         const graphEl = classSplitElements.graph;
         hideClassSplitGraphHoverPreview();
@@ -40719,25 +41299,60 @@ async function cancelRfDetrTrainingJobRequest() {
             return Promise.resolve(false);
         }
         if (!window.Plotly) {
-            graphEl.innerHTML = `<div class="training-help">Plotly did not load; cannot render the cluster graph.</div>`;
+            setClassSplitGraphPlaceholder(`<div class="training-help">Plotly did not load; cannot render the cluster graph.</div>`);
             return Promise.resolve(false);
         }
-        const points = getClassSplitGraphPoints();
+        const renderToken = ++classSplitState.plotRenderToken;
+        const view = getClassSplitGraphViewModel();
+        const points = view.points;
+        refreshClassSplitProjectionHint();
+        updateClassSplitGraphStatus(view);
         if (!points.length) {
             if (classSplitState.active && !classSplitState.result) {
-                graphEl.innerHTML = `<div class="training-help">Class Split analysis is running. The graph will appear when the backend finishes embedding and projection.</div>`;
+                setClassSplitGraphPlaceholder(`<div class="training-help">Class Split analysis is running. The graph will appear when the backend finishes embedding and projection.</div>`);
                 return Promise.resolve(false);
             }
             const wrongOnly = String(classSplitElements.displayMode?.value || "all") === "wrong_only";
-            graphEl.innerHTML = `<div class="training-help">${wrongOnly ? "No likely wrong-class points match the current class filter." : "No points match the current filter."}</div>`;
+            setClassSplitGraphPlaceholder(`<div class="training-help">${wrongOnly ? "No likely wrong-class points match the current class filter." : "No points match the current filter."}</div>`);
             return Promise.resolve(false);
         }
+        const projectionUnavailable = view.projectionUnavailable;
+        if (projectionUnavailable) {
+            setClassSplitGraphPlaceholder(`<div class="training-help">${escapeHtml(projectionUnavailable)}</div>`);
+            return Promise.resolve(false);
+        }
+        const projectionChoice = view.projectionChoice;
+        if (!classSplitProjectionCoordinatesLoaded(projectionChoice)) {
+            updateClassSplitGraphStatus(view, "loading coordinates");
+            if (!classSplitGraphHasLivePlot(graphEl)) {
+                setClassSplitGraphPlaceholder(
+                    `<div class="training-help">Loading ${escapeHtml(classSplitProjectionChoiceLabel(projectionChoice))} coordinates ...</div>`,
+                    { purge: false },
+                );
+            }
+            return ensureClassSplitProjectionCoordinates(projectionChoice)
+                .then((loaded) => {
+                    if (renderToken !== classSplitState.plotRenderToken) {
+                        return false;
+                    }
+                    if (!loaded) {
+                        setClassSplitGraphPlaceholder(`<div class="training-help">${escapeHtml(classSplitProjectionChoiceLabel(projectionChoice))} coordinates are not available for this result. Rerun Class Split to use that projection.</div>`);
+                        return false;
+                    }
+                    return renderClassSplitPlot();
+                })
+                .catch((error) => {
+                    if (renderToken !== classSplitState.plotRenderToken) {
+                        return false;
+                    }
+                    console.warn("Class Split projection coordinate load failed", error);
+                    setClassSplitGraphPlaceholder(`<div class="training-help error">Projection load failed: ${escapeHtml(error.message || error)}</div>`);
+                    return false;
+                });
+        }
         const theme = getClassSplitPlotTheme();
-        const traces = [
-            ...buildClassSplitClusterHullTraces(points),
-            buildClassSplitTrace(points, "Objects", false),
-            buildClassSplitTrace(points, "Likely wrong class", true),
-        ].filter((trace) => trace.x.length > 0);
+        const traces = buildClassSplitGraphTraces(points)
+            .filter((trace) => trace.x.length > 0);
         const flashTrace = buildClassSplitFlashTrace();
         if (flashTrace) {
             traces.push(flashTrace);
@@ -40773,6 +41388,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 classSplitState.currentJobId || "live",
                 classSplitElements.filterClass?.value || "all",
                 classSplitElements.displayMode?.value || "all",
+                getClassSplitProjectionChoice(),
                 points.length,
             ].join(":"),
             selectionrevision: classSplitState.selectionRevision,
@@ -40783,9 +41399,15 @@ async function cancelRfDetrTrainingJobRequest() {
             scrollZoom: true,
             modeBarButtonsToRemove: ["toImage"],
         };
+        clearClassSplitGraphPlaceholderText(graphEl);
         suppressClassSplitShiftWheel(graphEl);
         bindClassSplitGraphHoverPreviewMovement(graphEl);
         return window.Plotly.react(graphEl, traces, layout, config).then(() => {
+            if (renderToken !== classSplitState.plotRenderToken) {
+                return false;
+            }
+            classSplitState.lastPlotViewKey = layout.uirevision;
+            updateClassSplitGraphStatus(view);
             if (typeof graphEl.removeAllListeners === "function") {
                 [
                     "plotly_click",
@@ -40819,8 +41441,11 @@ async function cancelRfDetrTrainingJobRequest() {
             });
             return true;
         }).catch((error) => {
+            if (renderToken !== classSplitState.plotRenderToken) {
+                return false;
+            }
             console.warn("Class Split plot render failed", error);
-            graphEl.innerHTML = `<div class="training-help error">Graph render failed: ${escapeHtml(error.message || error)}</div>`;
+            setClassSplitGraphPlaceholder(`<div class="training-help error">Graph render failed: ${escapeHtml(error.message || error)}</div>`);
             return false;
         });
     }
@@ -40911,6 +41536,11 @@ async function cancelRfDetrTrainingJobRequest() {
         const projectionNeighbors = String(summary.projection || request.projection || "pca") === "umap"
             ? (summary.projection_neighbor_k_resolved || summary.projection_neighbor_k || request.projection_neighbor_k || 50)
             : "n/a for PCA";
+        const projectionChoice = getClassSplitProjectionChoice();
+        const projectionUnavailable = getClassSplitProjectionUnavailableMessage();
+        const projectionLabel = projectionUnavailable
+            ? `${classSplitProjectionChoiceLabel(projectionChoice)} (unavailable until filter/rerun)`
+            : classSplitProjectionChoiceLabel(projectionChoice);
         const sizeCorr = strongest.metric
             ? `${strongest.axis || "axis"} vs ${strongest.metric}: ${Math.abs(Number(strongest.correlation) || 0).toFixed(2)}`
             : "n/a";
@@ -40918,7 +41548,7 @@ async function cancelRfDetrTrainingJobRequest() {
             ["Objects", `${summary.object_count || 0}${summary.sampled ? ` sampled from ${summary.raw_object_count || 0}` : ""}`],
             ["Classes", `${classCount}`],
             ["Encoder", `${summary.encoder_type || request.encoder_type || "encoder"}`],
-            ["Projection", `${summary.projection || request.projection || "pca"}`],
+            ["Graph projection", projectionLabel],
             ["Projection neighbors", `${projectionNeighbors}`],
             ["Clusters", formatClassSplitClusterReport(result, summary)],
             ["Scoring neighbors", `${summary.neighbor_k || request.neighbor_k || 15}`],
@@ -41183,7 +41813,39 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+    function hideClassSplitResultUiUntilReady() {
+        classSplitState.plotRenderToken += 1;
+        hideClassSplitGraphHoverPreview();
+        if (classSplitElements.results) {
+            classSplitElements.results.hidden = true;
+        }
+        if (classSplitElements.graphStatus) {
+            classSplitElements.graphStatus.textContent = "";
+        }
+        if (classSplitElements.bulkPanel) {
+            classSplitElements.bulkPanel.hidden = true;
+        }
+        const graphEl = classSplitElements.graph;
+        if (!graphEl) {
+            return;
+        }
+        try {
+            if (window.Plotly && typeof window.Plotly.purge === "function" && Array.isArray(graphEl.data)) {
+                window.Plotly.purge(graphEl);
+            }
+        } catch (error) {
+            console.warn("Class Split plot purge failed", error);
+        }
+        graphEl.data = [];
+        graphEl.layout = null;
+        graphEl.innerHTML = "";
+    }
+
     function renderClassSplitResult() {
+        if (!classSplitState.result) {
+            hideClassSplitResultUiUntilReady();
+            return;
+        }
         if (classSplitElements.results) {
             classSplitElements.results.hidden = false;
         }
@@ -41295,10 +41957,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         clearClassSplitWrongCandidate(safeId);
-        if (classSplitState.selectedPointId === safeId) {
-            renderClassSplitInspector();
-        }
-        renderClassSplitWrongList();
+        refreshClassSplitFilteredReviewUi({ renderPlot: false });
         renderClassSplitReport();
         renderClassSplitPlot();
         setClassSplitJobStatus("Marked object as correct for this review session.", "success");
@@ -41507,8 +42166,8 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!buckets) {
             return null;
         }
-        const target = Array.isArray(point.bbox_xyxy) ? point.bbox_xyxy.map((value) => Number(value) || 0) : null;
-        if (!target || target.length < 4) {
+        const target = Array.isArray(point.bbox_xyxy) ? point.bbox_xyxy.slice(0, 4).map((value) => Number(value)) : null;
+        if (!target || target.length < 4 || !target.every(Number.isFinite) || target[2] <= target[0] || target[3] <= target[1]) {
             return null;
         }
         const targetClass = String(point.class_name || "");
@@ -41803,6 +42462,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function initClassSplitExplorer() {
         if (classSplitState.initialized) {
+            installTatorTestHooks();
             return;
         }
         classSplitState.initialized = true;
@@ -41836,11 +42496,13 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.progressText = document.getElementById("classSplitProgressText");
         classSplitElements.results = document.getElementById("classSplitResults");
         classSplitElements.colorMode = document.getElementById("classSplitColorMode");
+        classSplitElements.graphProjection = document.getElementById("classSplitGraphProjection");
         classSplitElements.filterClass = document.getElementById("classSplitFilterClass");
         classSplitElements.displayMode = document.getElementById("classSplitDisplayMode");
         classSplitElements.dragMode = document.getElementById("classSplitDragMode");
         classSplitElements.clusterOverlay = document.getElementById("classSplitClusterOverlay");
         classSplitElements.graph = document.getElementById("classSplitGraph");
+        classSplitElements.graphStatus = document.getElementById("classSplitGraphStatus");
         classSplitElements.report = document.getElementById("classSplitReport");
         classSplitElements.clusterPanel = document.getElementById("classSplitClusterPanel");
         classSplitElements.clusterList = document.getElementById("classSplitClusterList");
@@ -41916,11 +42578,24 @@ async function cancelRfDetrTrainingJobRequest() {
         if (classSplitElements.colorMode) {
             classSplitElements.colorMode.addEventListener("change", renderClassSplitPlot);
         }
+        [classSplitElements.projection, classSplitElements.graphProjection].forEach((select) => {
+            if (!select) {
+                return;
+            }
+            select.addEventListener("change", () => {
+                setClassSplitProjectionChoice(select.value, select);
+                refreshClassSplitProjectionHint();
+                renderClassSplitReport();
+                renderClassSplitPlot();
+            });
+        });
         if (classSplitElements.filterClass) {
-            classSplitElements.filterClass.addEventListener("change", () => {
+            const handleFilterClassChange = () => {
                 classSplitState.selectedClusterId = "";
                 refreshClassSplitFilteredReviewUi();
-            });
+            };
+            classSplitElements.filterClass.addEventListener("input", handleFilterClassChange);
+            classSplitElements.filterClass.addEventListener("change", handleFilterClassChange);
         }
         if (classSplitElements.displayMode) {
             classSplitElements.displayMode.addEventListener("change", () => {
@@ -41962,6 +42637,100 @@ async function cancelRfDetrTrainingJobRequest() {
         loadClassSplitClipBackbones()
             .then(() => loadClassSplitCapabilities())
             .catch((error) => console.warn("Class Split init refresh failed", error));
+        installTatorTestHooks();
+    }
+
+    function getClassSplitPlotTestSnapshot() {
+        const graphEl = classSplitElements.graph;
+        const traces = Array.isArray(graphEl?.data) ? graphEl.data : [];
+        return {
+            selectedPointId: classSplitState.selectedPointId,
+            jobStatus: classSplitElements.jobStatus?.textContent || "",
+            progressText: classSplitElements.progressText?.textContent || "",
+            resultsHidden: !!classSplitElements.results?.hidden,
+            statusText: classSplitElements.graphStatus?.textContent || "",
+            graphText: graphEl?.textContent || "",
+            traceCount: traces.length,
+            traceNames: traces.map((trace) => String(trace?.name || "")),
+            tracePointCounts: traces.map((trace) => Array.isArray(trace?.x) ? trace.x.length : 0),
+            traceColors: traces.map((trace) => {
+                const color = trace?.marker?.color;
+                return Array.isArray(color) ? color.slice(0, 4) : color;
+            }),
+        };
+    }
+
+    function installTatorTestHooks() {
+        if (typeof window === "undefined") {
+            return;
+        }
+        const existing = window.__TATOR_TEST_HOOKS__ || {};
+        window.__TATOR_TEST_HOOKS__ = {
+            ...existing,
+            classSplitApplyResult(result, jobId = "class_split_test_job") {
+                applyClassSplitResultPayload(result, jobId);
+                return Promise.resolve(renderClassSplitPlot()).then(getClassSplitPlotTestSnapshot);
+            },
+            classSplitEmitPointClick(pointId) {
+                const graphEl = classSplitElements.graph;
+                if (graphEl && typeof graphEl.emit === "function") {
+                    graphEl.emit("plotly_click", { points: [{ customdata: String(pointId || "") }] });
+                } else {
+                    selectClassSplitPoint(pointId, { jump: false });
+                }
+                return Promise.resolve(renderClassSplitPlot()).then(getClassSplitPlotTestSnapshot);
+            },
+            classSplitSimulateFailedStartAfterClear(message = "Synthetic start failure") {
+                const snapshot = snapshotClassSplitReviewState();
+                classSplitState.active = true;
+                classSplitState.currentJobId = "";
+                classSplitState.result = null;
+                classSplitState.pointsById = new Map();
+                classSplitState.projectionCoordinates = {};
+                classSplitState.projectionCoordinateLoads = new Map();
+                classSplitState.selectedPointId = "";
+                classSplitState.selectedClusterId = "";
+                classSplitState.lassoPointIds = new Set();
+                classSplitState.selectionRevision += 1;
+                renderClassSplitResult();
+                restoreClassSplitReviewState(snapshot);
+                setClassSplitJobStatus(`Failed: ${message}`, "error");
+                renderClassSplitProgress({ progress: 1, message: `Failed: ${message}` });
+                refreshClassSplitControls();
+                return Promise.resolve(renderClassSplitPlot()).then(getClassSplitPlotTestSnapshot);
+            },
+            classSplitPlotSnapshot: getClassSplitPlotTestSnapshot,
+            classSplitClusterDebugState() {
+                const summaries = getClassSplitVisibleClusterSummaries();
+                return {
+                    scope: getClassSplitResultScope(),
+                    filterClass: String(classSplitElements.filterClass?.value || ""),
+                    filteredCount: getClassSplitFilteredPoints().length,
+                    proposalsAllowed: classSplitClusterProposalsAllowed(),
+                    hullsAllowed: classSplitClusterHullsAllowed(),
+                    overlayDisabled: !!classSplitElements.clusterOverlay?.disabled,
+                    overlayChecked: !!classSplitElements.clusterOverlay?.checked,
+                    clusterKeys: summaries.map((summary) => String(summary.clusterKey || "")),
+                };
+            },
+            classSplitEnterRunningState() {
+                classSplitState.active = true;
+                classSplitState.currentJobId = "";
+                classSplitState.result = null;
+                classSplitState.pointsById = new Map();
+                classSplitState.projectionCoordinates = {};
+                classSplitState.projectionCoordinateLoads = new Map();
+                classSplitState.selectedPointId = "";
+                classSplitState.lassoPointIds = new Set();
+                renderClassSplitResult();
+                renderClassSplitProgress({ progress: 0.1, message: "Test running state" });
+                return {
+                    resultsHidden: !!classSplitElements.results?.hidden,
+                    progressHidden: !!classSplitElements.progress?.hidden,
+                    ...getClassSplitPlotTestSnapshot(),
+                };
+            },
+        };
     }
 
     document.addEventListener("DOMContentLoaded", () => {

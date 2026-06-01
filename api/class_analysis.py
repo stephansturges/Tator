@@ -16,6 +16,7 @@ def build_class_analysis_router(
     create_active_workspace_job_fn: Callable[[str, list[UploadFile]], Any],
     get_job_fn: Callable[[str], Any],
     get_result_fn: Callable[[str], Any],
+    get_projection_fn: Callable[[str, str], Any],
     get_thumbnail_fn: Callable[[str, str], FileResponse],
     cancel_job_fn: Callable[[str], Any],
 ) -> APIRouter:
@@ -56,6 +57,10 @@ def build_class_analysis_router(
     @router.get("/class_analysis/jobs/{job_id}/result")
     def get_class_analysis_result(job_id: str):
         return get_result_fn(job_id)
+
+    @router.get("/class_analysis/jobs/{job_id}/projection/{mode}")
+    def get_class_analysis_projection(job_id: str, mode: str):
+        return get_projection_fn(job_id, mode)
 
     @router.get("/class_analysis/jobs/{job_id}/thumbnail/{point_id}")
     def get_class_analysis_thumbnail(job_id: str, point_id: str):

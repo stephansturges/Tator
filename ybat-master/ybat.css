@@ -2045,7 +2045,7 @@ body.annotation-focus-mode .class-scroll-indicator {
 }
 
 .class-split-panel--workspace .class-split-grid {
-    grid-template-columns: repeat(4, minmax(160px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
     align-items: end;
 }
 
@@ -2058,6 +2058,10 @@ body.annotation-focus-mode .class-scroll-indicator {
 
 .class-split-field--wide {
     grid-column: 1 / -1;
+}
+
+.class-split-field--projection {
+    min-width: 0;
 }
 
 .class-split-field label,
@@ -2112,6 +2116,14 @@ body.annotation-focus-mode .class-scroll-indicator {
     gap: 8px;
 }
 
+.class-split-toolbar select {
+    max-width: min(100%, 260px);
+}
+
+.class-split-toolbar__projection {
+    min-width: 210px;
+}
+
 .class-split-progress {
     display: flex;
     flex-direction: column;
@@ -2142,7 +2154,7 @@ body.annotation-focus-mode .class-scroll-indicator {
 .class-split-progress[hidden],
 .data-ingestion-results[hidden],
 .data-ingestion-progress[hidden] {
-    display: none;
+    display: none !important;
 }
 
 .class-split-panel--workspace .class-split-results {
@@ -2150,6 +2162,7 @@ body.annotation-focus-mode .class-scroll-indicator {
     grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.75fr);
     grid-template-areas:
         "toolbar toolbar"
+        "status status"
         "bulk bulk"
         "graph review"
         "wrong wrong";
@@ -2159,6 +2172,17 @@ body.annotation-focus-mode .class-scroll-indicator {
 
 .class-split-panel--workspace .class-split-toolbar {
     grid-area: toolbar;
+}
+
+.class-split-panel--workspace .class-split-graph-status {
+    grid-area: status;
+}
+
+.class-split-graph-status {
+    min-height: 1.2em;
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 600;
 }
 
 .class-split-toggle {
@@ -2985,6 +3009,7 @@ body.annotation-focus-mode .class-scroll-indicator {
         grid-template-columns: 1fr;
         grid-template-areas:
             "toolbar"
+            "status"
             "bulk"
             "graph"
             "review"
@@ -4938,6 +4963,7 @@ html.theme-dark .qwen-caption-progress__detail {
 html.theme-dark .class-split-field label,
 html.theme-dark .data-ingestion-field label,
 html.theme-dark .class-split-toolbar label,
+html.theme-dark .class-split-graph-status,
 html.theme-dark .class-split-advanced summary,
 html.theme-dark .class-split-dataset-analysis > summary,
 html.theme-dark .class-split-review-section > strong,
@@ -5716,6 +5742,7 @@ html.theme-pipboy .qwen-caption-progress__detail {
 html.theme-pipboy .class-split-field label,
 html.theme-pipboy .data-ingestion-field label,
 html.theme-pipboy .class-split-toolbar label,
+html.theme-pipboy .class-split-graph-status,
 html.theme-pipboy .class-split-advanced summary,
 html.theme-pipboy .class-split-dataset-analysis > summary,
 html.theme-pipboy .class-split-review-section > strong,

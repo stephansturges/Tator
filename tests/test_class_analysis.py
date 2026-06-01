@@ -279,6 +279,109 @@ def test_class_analysis_sample_cap_defaults_to_unlimited():
     assert api._class_analysis_stratified_indices(records, cap=0, seed=7) == list(range(12))
 
 
+def test_class_analysis_normalizes_pca_projection_modes():
+    request = api._normalize_class_analysis_request({"projection": "between_class_pca"})
+    assert request["projection"] == "pca"
+    assert request["projection_mode"] == "between_class_pca"
+
+    fallback = api._normalize_class_analysis_request({"projection_mode": "unknown"})
+    assert fallback["projection"] == "pca"
+    assert fallback["projection_mode"] == api.CLASS_ANALYSIS_DEFAULT_PCA_PROJECTION_MODE
+
+
+def test_class_analysis_result_carries_switchable_pca_coordinates():
+    records = [
+        _record("a0", "alpha"),
+        _record("a1", "alpha"),
+        _record("a2", "alpha"),
+        _record("b0", "beta"),
+        _record("b1", "beta"),
+        _record("b2", "beta"),
+    ]
+    embeddings = np.asarray(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.98, 0.02, 0.0, 0.0],
+            [0.99, -0.02, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.02, 0.98, 0.0, 0.0],
+            [-0.02, 0.99, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+    result = api._class_analysis_build_result(
+        records,
+        embeddings,
+        summary={"analysis_scope": "all_classes"},
+        projection="pca",
+        projection_mode="between_class_pca",
+        projection_neighbor_k=15,
+        neighbor_k=3,
+        seed=13,
+    )
+
+    options = result["projection_options"]
+    assert options["selected"] == "between_class_pca"
+    assert options["available"] == api.CLASS_ANALYSIS_PCA_PROJECTION_MODES
+    assert set(options["coordinates"]) == set(api.CLASS_ANALYSIS_PCA_PROJECTION_MODES)
+    for coords in options["coordinates"].values():
+        assert coords.shape == (len(records), 2)
+        assert np.isfinite(coords).all()
+    first_point = result["points"][0]
+    assert first_point["projection"] == pytest.approx(options["coordinates"]["between_class_pca"][0].tolist())
+    assert result["summary"]["projection"] == "pca"
+    assert result["summary"]["projection_mode"] == "between_class_pca"
+
+    public = api._class_analysis_public_result(result)
+    assert "coordinates" not in public["projection_options"]
+    assert public["projection_options"]["coordinates_available"] == api.CLASS_ANALYSIS_PCA_PROJECTION_MODES
+    assert public["points"][0]["projection"] == pytest.approx(first_point["projection"])
+
+
+def test_class_analysis_umap_fallback_is_labeled_as_global_pca(monkeypatch):
+    monkeypatch.setitem(__import__("sys").modules, "umap", None)
+    records = [
+        _record("a0", "alpha"),
+        _record("a1", "alpha"),
+        _record("a2", "alpha"),
+        _record("b0", "beta"),
+        _record("b1", "beta"),
+        _record("b2", "beta"),
+    ]
+    embeddings = np.asarray(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.98, 0.02, 0.0, 0.0],
+            [0.99, -0.02, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.02, 0.98, 0.0, 0.0],
+            [-0.02, 0.99, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+    result = api._class_analysis_build_result(
+        records,
+        embeddings,
+        summary={"analysis_scope": "all_classes"},
+        projection="umap",
+        projection_mode="class_balanced_pca",
+        projection_neighbor_k=15,
+        neighbor_k=3,
+        seed=13,
+    )
+
+    options = result["projection_options"]
+    assert result["summary"]["projection"] == "pca"
+    assert result["summary"]["projection_mode"] == "global_pca"
+    assert options["selected"] == "global_pca"
+    assert result["points"][0]["projection"] == pytest.approx(options["coordinates"]["global_pca"][0].tolist())
+    assert any("UMAP unavailable" in warning for warning in result["summary"]["warnings"])
+
+
 def test_class_analysis_direct_job_rejects_missing_source():
     with pytest.raises(api.HTTPException) as exc_info:
         api.create_class_analysis_job({})
@@ -557,6 +660,8 @@ def test_class_analysis_capabilities_expose_only_normal_recipe_controls():
     assert caps["default_preprocess_mode"] == "canonical"
     assert caps["default_embedding_adjustment"] == "remove_size_bias"
     assert caps["default_projection_neighbor_k"] == 50
+    assert caps["default_pca_projection_mode"] == "class_balanced_pca"
+    assert caps["pca_projection_modes"] == api.CLASS_ANALYSIS_PCA_PROJECTION_MODES
     assert caps["embedding_aggregation_modes"] == ["pooled"]
     assert "local_salad_heads" not in caps
     assert "local_salad_policy" not in caps
@@ -1038,6 +1143,166 @@ def test_class_analysis_npz_write_is_atomic_over_symlink_leaves(
     with np.load(target) as loaded:
         assert np.allclose(loaded["embeddings"], [[1.0, 2.0]])
     assert not tmp_leaf.exists()
+
+
+def test_class_analysis_projection_endpoint_returns_json_lists(tmp_path, monkeypatch):
+    class_root = tmp_path / "class_analysis"
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    job_dir = api._class_analysis_job_dir("job_projection", create=True)
+    result_path = job_dir / "result.json"
+    api._class_analysis_write_json(
+        result_path,
+        class_root,
+        {
+            "summary": {"projection": "pca", "projection_mode": "global_pca"},
+            "points": [
+                {"point_id": "a", "projection": [1.0, 2.0]},
+                {"point_id": "b", "projection": [3.0, 4.0]},
+            ],
+            "projection_options": {"selected": "global_pca", "coordinates_available": ["global_pca"]},
+        },
+    )
+    api._class_analysis_write_npz(
+        job_dir / api.CLASS_ANALYSIS_PROJECTION_COORDS_FILENAME,
+        class_root,
+        global_pca=np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+    )
+    job = api.ClassAnalysisJob(
+        job_id="job_projection",
+        status="completed",
+        result_path=str(result_path),
+    )
+    with api.CLASS_ANALYSIS_JOBS_LOCK:
+        api.CLASS_ANALYSIS_JOBS.clear()
+        api.CLASS_ANALYSIS_JOBS[job.job_id] = job
+
+    try:
+        payload = api.get_class_analysis_projection(job.job_id, "global_pca")
+        assert payload["mode"] == "global_pca"
+        assert payload["coordinates"] == [[1.0, 2.0], [3.0, 4.0]]
+        assert isinstance(payload["coordinates"], list)
+        assert isinstance(payload["coordinates"][0], list)
+        for bad_mode in ("not_a_projection", "umap"):
+            with pytest.raises(api.HTTPException) as exc_info:
+                api.get_class_analysis_projection(job.job_id, bad_mode)
+            assert exc_info.value.status_code == api.HTTP_404_NOT_FOUND
+            assert exc_info.value.detail == "projection_not_found"
+    finally:
+        with api.CLASS_ANALYSIS_JOBS_LOCK:
+            api.CLASS_ANALYSIS_JOBS.clear()
+
+
+def test_class_analysis_projection_endpoint_maps_legacy_pca_points_to_global(tmp_path, monkeypatch):
+    class_root = tmp_path / "class_analysis"
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    job_dir = api._class_analysis_job_dir("job_legacy_projection", create=True)
+    result_path = job_dir / "result.json"
+    api._class_analysis_write_json(
+        result_path,
+        class_root,
+        {
+            "summary": {"projection": "pca"},
+            "points": [
+                {"point_id": "a", "projection": [1.0, 2.0]},
+                {"point_id": "b", "projection": [3.0, 4.0]},
+            ],
+            "projection_options": {},
+        },
+    )
+    job = api.ClassAnalysisJob(
+        job_id="job_legacy_projection",
+        status="completed",
+        result_path=str(result_path),
+    )
+    with api.CLASS_ANALYSIS_JOBS_LOCK:
+        api.CLASS_ANALYSIS_JOBS.clear()
+        api.CLASS_ANALYSIS_JOBS[job.job_id] = job
+
+    try:
+        payload = api.get_class_analysis_projection(job.job_id, "global_pca")
+        assert payload["mode"] == "global_pca"
+        assert payload["coordinates"] == [[1.0, 2.0], [3.0, 4.0]]
+        with pytest.raises(api.HTTPException) as exc_info:
+            api.get_class_analysis_projection(job.job_id, "class_balanced_pca")
+        assert exc_info.value.status_code == api.HTTP_404_NOT_FOUND
+        assert exc_info.value.detail == "projection_not_found"
+    finally:
+        with api.CLASS_ANALYSIS_JOBS_LOCK:
+            api.CLASS_ANALYSIS_JOBS.clear()
+
+
+def test_class_analysis_projection_endpoint_rejects_corrupt_legacy_points(tmp_path, monkeypatch):
+    class_root = tmp_path / "class_analysis"
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    job_dir = api._class_analysis_job_dir("job_corrupt_projection", create=True)
+    result_path = job_dir / "result.json"
+    api._class_analysis_write_json(
+        result_path,
+        class_root,
+        {
+            "summary": {"projection": "pca"},
+            "points": [
+                {"point_id": "a", "projection": [1.0, 2.0]},
+                {"point_id": "b", "projection": ["not-a-number", 4.0]},
+            ],
+            "projection_options": {},
+        },
+    )
+    job = api.ClassAnalysisJob(
+        job_id="job_corrupt_projection",
+        status="completed",
+        result_path=str(result_path),
+    )
+    with api.CLASS_ANALYSIS_JOBS_LOCK:
+        api.CLASS_ANALYSIS_JOBS.clear()
+        api.CLASS_ANALYSIS_JOBS[job.job_id] = job
+
+    try:
+        with pytest.raises(api.HTTPException) as exc_info:
+            api.get_class_analysis_projection(job.job_id, "global_pca")
+        assert exc_info.value.status_code == api.HTTP_404_NOT_FOUND
+        assert exc_info.value.detail == "projection_not_found"
+    finally:
+        with api.CLASS_ANALYSIS_JOBS_LOCK:
+            api.CLASS_ANALYSIS_JOBS.clear()
+
+
+def test_class_analysis_projection_endpoint_maps_unannotated_legacy_points_to_global(tmp_path, monkeypatch):
+    class_root = tmp_path / "class_analysis"
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    job_dir = api._class_analysis_job_dir("job_legacy_projection_no_summary", create=True)
+    result_path = job_dir / "result.json"
+    api._class_analysis_write_json(
+        result_path,
+        class_root,
+        {
+            "summary": {},
+            "points": [
+                {"point_id": "a", "projection": [5.0, 6.0]},
+                {"point_id": "b", "projection": [7.0, 8.0]},
+            ],
+        },
+    )
+    job = api.ClassAnalysisJob(
+        job_id="job_legacy_projection_no_summary",
+        status="completed",
+        result_path=str(result_path),
+    )
+    with api.CLASS_ANALYSIS_JOBS_LOCK:
+        api.CLASS_ANALYSIS_JOBS.clear()
+        api.CLASS_ANALYSIS_JOBS[job.job_id] = job
+
+    try:
+        payload = api.get_class_analysis_projection(job.job_id, "global_pca")
+        assert payload["mode"] == "global_pca"
+        assert payload["coordinates"] == [[5.0, 6.0], [7.0, 8.0]]
+        with pytest.raises(api.HTTPException) as exc_info:
+            api.get_class_analysis_projection(job.job_id, "class_balanced_pca")
+        assert exc_info.value.status_code == api.HTTP_404_NOT_FOUND
+        assert exc_info.value.detail == "projection_not_found"
+    finally:
+        with api.CLASS_ANALYSIS_JOBS_LOCK:
+            api.CLASS_ANALYSIS_JOBS.clear()
 
 
 def test_class_analysis_result_rejects_symlinked_result_escape(tmp_path, monkeypatch):

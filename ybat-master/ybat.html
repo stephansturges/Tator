@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20260601a" rel="stylesheet">
+    <link href="ybat.css?v=20260601n" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
          before we call listenImageCrop().
@@ -13,7 +13,7 @@
     <script src="filesaver.min.js?v=20260409a"></script>
     <script src="plotly-2.35.2.min.js?v=20260520a"></script>
     <script src="annotation_diversity.js?v=20260530a"></script>
-    <script src="ybat.js?v=20260601a"></script>
+    <script src="ybat.js?v=20260601n"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -953,6 +953,16 @@
                                     <label><input type="radio" name="classSplitScope" id="classSplitScopeAll" value="all_classes" /> All classes</label>
                                 </div>
                             </div>
+                            <div class="class-split-field class-split-field--projection">
+                                <label for="classSplitProjection">Graph projection<span class="help-icon" title="Controls only the 2D graph layout, not full-space nearest-neighbor scoring. Class-balanced PCA is the safer all-class view; between-class PCA spreads labels apart; within-filter PCA recomputes axes inside the selected class or class filter.">?</span></label>
+                                <select id="classSplitProjection">
+                                    <option value="class_balanced_pca" selected>Class-balanced PCA</option>
+                                    <option value="global_pca">Global PCA</option>
+                                    <option value="between_class_pca">Between-class PCA</option>
+                                    <option value="within_filter_pca">Within-filter PCA</option>
+                                    <option value="umap">UMAP if available</option>
+                                </select>
+                            </div>
                             <div class="class-split-field">
                                 <label for="classSplitRecipePreset">Quality preset<span class="help-icon" title="Fast is a quick coarse audit. Balanced is the faster single-view DINOv3 baseline. Precise is the measured WALDO default for all-class wrong-label discovery. C-RADIOv4 is opt-in: its slowest recipe improved NN purity in full WALDO tests but leaked more size signal and produced more wrong-class candidates than DINOv3 Precise. On Mac it now uses local MLX when available.">?</span></label>
                                 <select id="classSplitRecipePreset">
@@ -987,19 +997,12 @@
                                 <label for="classSplitBackbone">Backbone<span class="help-icon" title="Specific model checkpoint for the selected encoder. Larger backbones may improve separation but can be slower or exceed local memory. C-RADIOv4 SO400M is the practical candidate; H is larger.">?</span></label>
                                 <select id="classSplitBackbone"></select>
                             </div>
-                            <div class="class-split-field">
-                                <label for="classSplitProjection">Projection<span class="help-icon" title="Controls only the 2D graph layout, not the embeddings or crop analysis. PCA is deterministic, fast, and good for a first audit. UMAP can show curved or separated neighborhoods more clearly when installed, but is slower and may move points between runs.">?</span></label>
-                                <select id="classSplitProjection">
-                                    <option value="pca" selected>PCA</option>
-                                    <option value="umap">UMAP if available</option>
-                                </select>
-                            </div>
                         </div>
                         <details class="class-split-advanced">
                             <summary>Advanced embedding controls</summary>
                             <div class="class-split-grid">
                             <div class="class-split-field">
-                                <label for="classSplitProjectionNeighborK">Projection neighbors<span class="help-icon" title="UMAP-only layout setting. Higher values make UMAP preserve broader/global structure; lower values emphasize tight local islands. PCA does not use neighbors, so this is reported as not applicable for PCA runs. Use 0 for all available neighbors.">?</span></label>
+                                <label for="classSplitProjectionNeighborK">Projection neighbors<span class="help-icon" title="UMAP-only layout setting. Higher values make UMAP preserve broader/global structure; lower values emphasize tight local islands. PCA modes do not use neighbors, so this is reported as not applicable for PCA runs. Use 0 for all available neighbors.">?</span></label>
                                 <input type="number" id="classSplitProjectionNeighborK" min="0" max="5000" value="50" />
                             </div>
                             <div class="class-split-field">
@@ -1080,6 +1083,14 @@
                         </div>
                         <div class="class-split-results" id="classSplitResults" hidden>
                             <div class="class-split-toolbar">
+                                <label for="classSplitGraphProjection">Graph projection</label>
+                                <select id="classSplitGraphProjection" class="class-split-toolbar__projection" title="Switches only the 2D graph coordinates. Full-space nearest-neighbor scoring is unchanged.">
+                                    <option value="class_balanced_pca" selected>Class-balanced PCA</option>
+                                    <option value="global_pca">Global PCA</option>
+                                    <option value="between_class_pca">Between-class PCA</option>
+                                    <option value="within_filter_pca">Within-filter PCA</option>
+                                    <option value="umap">UMAP if available</option>
+                                </select>
                                 <label for="classSplitColorMode">Color</label>
                                 <select id="classSplitColorMode">
                                     <option value="class">Class</option>
@@ -1107,6 +1118,7 @@
                                     Cluster hulls
                                 </label>
                             </div>
+                            <div id="classSplitGraphStatus" class="class-split-graph-status" aria-live="polite"></div>
                             <div id="classSplitBulkPanel" class="class-split-bulk-panel" hidden>
                                 <strong id="classSplitBulkCount">0 selected</strong>
                                 <select id="classSplitBulkClass"></select>

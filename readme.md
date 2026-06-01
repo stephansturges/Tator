@@ -232,7 +232,9 @@ The Label Images tab is the everyday workspace.
   bulk relabeling, and jump from suspicious points back to the source bbox for
   correction. Backend-backed workspaces are analyzed in place; browser-only
   current workspaces first upload through a named chunked dataset session so the
-  temporary managed dataset is visible and removable in Dataset Management.
+  temporary managed dataset is visible and removable in Dataset Management. The
+  graph can switch between global, class-balanced, between-class, and
+  within-filter PCA views without changing the full-space audit scores.
 - After an all-class Class Split run, use Dataset Analysis to rank image-level
   value from class rarity, object-feature rarity, and embedding-map edge cases.
 - Export selected crops through the chunked crop ZIP endpoints.
@@ -667,9 +669,13 @@ the backend are available.
 <summary>Update Tracking</summary>
 
 Current verification: focused Class Split, Data Ingestion, macOS acceleration,
-MLX-DINOv3, MLX-SAM, SAM preload, and UI contract suites passed (`219
-passed`). Full log:
+MLX-DINOv3, MLX-SAM, SAM preload, and UI contract suites passed. Full log:
 [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+
+2026-06-02 follow-up: Class Split now has switchable graph projection modes,
+class-color rendering is one trace per class, result graphs survive click,
+filter, tab-return, and failed-start paths, and projection coordinates are served
+through a dedicated job endpoint instead of bloating result JSON.
 
 2026-05-30 follow-up: top-tab navigation now binds through an early delegated
 handler and the browser cache key was bumped, so Data Ingestion and Class Split

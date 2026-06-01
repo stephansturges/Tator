@@ -2138,13 +2138,21 @@ body.annotation-focus-mode .class-scroll-indicator {
     gap: 10px;
 }
 
+.class-split-results[hidden],
+.class-split-progress[hidden],
+.data-ingestion-results[hidden],
+.data-ingestion-progress[hidden] {
+    display: none;
+}
+
 .class-split-panel--workspace .class-split-results {
     display: grid;
     grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.75fr);
     grid-template-areas:
         "toolbar toolbar"
         "bulk bulk"
-        "graph review";
+        "graph review"
+        "wrong wrong";
     gap: 12px;
     align-items: stretch;
 }
@@ -2158,6 +2166,10 @@ body.annotation-focus-mode .class-scroll-indicator {
     align-items: center;
     gap: 5px;
     white-space: nowrap;
+}
+
+.class-split-toggle--disabled {
+    opacity: 0.58;
 }
 
 .class-split-bulk-panel {
@@ -2238,6 +2250,10 @@ body.annotation-focus-mode .class-scroll-indicator {
     padding-bottom: 2px;
 }
 
+.class-split-wrong-panel--wide {
+    grid-area: wrong;
+}
+
 .class-split-report,
 .class-split-wrong-list,
 .class-split-cluster-list,
@@ -2260,6 +2276,13 @@ body.annotation-focus-mode .class-scroll-indicator {
 .class-split-panel--workspace .class-split-inspector {
     min-height: 250px;
     max-height: none;
+}
+
+.class-split-panel--workspace .class-split-wrong-list {
+    min-height: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 10px;
 }
 
 .class-split-panel--workspace .class-split-report {
@@ -2420,16 +2443,43 @@ body.annotation-focus-mode .class-scroll-indicator {
 }
 
 .class-split-wrong-item {
+    display: grid;
+    grid-template-columns: 116px minmax(0, 1fr);
+    gap: 9px;
     border: 1px solid #fee2e2;
     border-radius: 7px;
     background: #fff7ed;
-    padding: 7px;
-    margin-bottom: 6px;
+    padding: 8px;
     cursor: pointer;
 }
 
 .class-split-wrong-item:hover {
     border-color: #fb923c;
+}
+
+.class-split-wrong-item__preview {
+    width: 116px;
+    height: 96px;
+    border-radius: 6px;
+    border: 1px solid rgba(251, 146, 60, 0.45);
+    background: #000;
+    object-fit: contain;
+}
+
+.class-split-wrong-item__body {
+    min-width: 0;
+}
+
+.class-split-wrong-item__body strong,
+.class-split-wrong-item__body span {
+    display: block;
+    overflow-wrap: anywhere;
+}
+
+.class-split-wrong-item__body span {
+    color: #7c2d12;
+    font-size: 12px;
+    line-height: 1.3;
 }
 
 .class-split-cluster-item {
@@ -2494,13 +2544,21 @@ body.annotation-focus-mode .class-scroll-indicator {
 
 .class-split-wrong-item__actions {
     display: flex;
-    justify-content: flex-end;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    align-items: center;
+    gap: 6px;
     margin-top: 6px;
 }
 
 .class-split-wrong-item__actions .training-button {
     padding: 4px 7px;
     font-size: 11px;
+}
+
+.class-split-wrong-item__actions select {
+    flex: 1 1 130px;
+    min-width: 0;
 }
 
 .class-split-inspector__crop-shell {
@@ -2929,7 +2987,8 @@ body.annotation-focus-mode .class-scroll-indicator {
             "toolbar"
             "bulk"
             "graph"
-            "review";
+            "review"
+            "wrong";
     }
 
     .class-split-panel--workspace .class-split-graph {
@@ -2962,6 +3021,8 @@ body.annotation-focus-mode .class-scroll-indicator {
 
     .class-split-panel--workspace .class-split-results {
         display: flex;
+        flex-direction: column;
+        align-items: stretch;
     }
 
     .class-split-panel--workspace .class-split-graph {
@@ -4992,6 +5053,14 @@ html.theme-dark .class-split-wrong-item {
     border-color: rgba(248, 113, 113, 0.45);
 }
 
+html.theme-dark .class-split-wrong-item__body strong {
+    color: #fee2e2;
+}
+
+html.theme-dark .class-split-wrong-item__body span {
+    color: #fed7aa;
+}
+
 html.theme-dark .qwen-caption-workflow__title,
 html.theme-dark .qwen-caption-workflow__path-item strong,
 html.theme-dark .qwen-caption-workflow__setting strong {
@@ -5757,6 +5826,11 @@ html.theme-pipboy .class-split-dataset-list__item span {
 html.theme-pipboy .class-split-wrong-item {
     background: color-mix(in srgb, var(--pip-red) 12%, var(--pip-panel));
     border-color: color-mix(in srgb, var(--pip-red) 55%, var(--pip-border));
+}
+
+html.theme-pipboy .class-split-wrong-item__body strong,
+html.theme-pipboy .class-split-wrong-item__body span {
+    color: var(--pip-green);
 }
 
 html.theme-pipboy .qwen-caption-workflow__title,

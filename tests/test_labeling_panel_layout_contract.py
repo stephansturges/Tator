@@ -664,7 +664,7 @@ def test_class_split_explorer_panel_contract():
     assert 'id="classSplitBulkPanel" class="class-split-bulk-panel" hidden' in html
     assert 'id="classSplitClusterPanel" class="class-split-review-section class-split-cluster-panel" open' in html
     assert 'id="classSplitClusterList" class="class-split-cluster-list"' in html
-    assert 'id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel" open' in html
+    assert 'id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel class-split-wrong-panel--wide" open' in html
     assert 'id="classSplitWrongList"' in html
     assert 'id="classSplitInspector"' in html
     assert '<option value="image_value">Image value</option>' in html
@@ -685,6 +685,10 @@ def test_class_split_explorer_panel_contract():
     assert ".class-split-report" in css
     assert ".class-split-cluster-list" in css
     assert ".class-split-cluster-item" in css
+    assert ".class-split-wrong-panel--wide" in css
+    assert ".class-split-wrong-item__preview" in css
+    assert ".class-split-results[hidden]" in css
+    assert ".data-ingestion-results[hidden]" in css
     assert ".class-split-graph-hover-preview" in css
     assert ".class-split-graph.class-split-graph--pan" not in css
     assert ".class-split-review-section--inspector" in css
@@ -702,7 +706,7 @@ def test_class_split_explorer_panel_contract():
     assert "html.theme-dark .class-split-panel" in css
     assert "html.theme-dark .class-split-workspace__header" in css
     assert "html.theme-pipboy .class-split-panel" in css
-    assert '"bulk bulk"\n        "graph review"' in css
+    assert '"bulk bulk"\n        "graph review"\n        "wrong wrong"' in css
 
     assert 'const TAB_CLASS_SPLIT = "class-split";' in js
     assert "const TOP_TAB_KEYS = new Set([" in js
@@ -763,6 +767,8 @@ def test_class_split_explorer_panel_contract():
     assert "function renderClassSplitReport" in js
     assert "function runClassSplitDatasetAnalysis" in js
     assert "function getClassSplitGraphPoints" in js
+    assert "function classSplitPointMatchesActiveGraphView" in js
+    assert "function refreshClassSplitFilteredReviewUi" in js
     assert 'displayMode === "wrong_only"' in js
     assert "function showClassSplitGraphHoverPreview" in js
     assert "function bindClassSplitGraphHoverPreviewMovement" in js
@@ -772,6 +778,13 @@ def test_class_split_explorer_panel_contract():
     assert 'dragmode: String(classSplitElements.dragMode?.value || "lasso")' in js
     assert "function renderClassSplitClusterList" in js
     assert "function selectClassSplitCluster" in js
+    assert "function classSplitClusterProposalsAllowed" in js
+    assert "function classSplitAllClassResultNeedsPerClassClusterRerun" in js
+    assert "function formatClassSplitClusterReport" in js
+    assert "point.class_cluster_id" in js
+    assert "Number(point?.class_cluster_size) > 0" in js
+    assert "Choose a class filter to inspect subclass clusters" in js
+    assert "Rerun Class Split to review subclass cluster proposals" in js
     assert 'classSplitElements.displayMode.value = "all";' in js
     assert "function buildClassSplitClusterHullTraces" in js
     assert "computeDatasetImageValueAnalysis(points)" in js
@@ -813,11 +826,10 @@ def test_class_split_explorer_panel_contract():
     assert 'String(classSplitElements.displayMode.value || "all") === "wrong_only"' in js
     assert "!point.is_wrong_class_candidate" in js
     assert "Suggested by neighbors: ${escapeHtml(point.suggested_neighbor_class)}" in js
-    assert "clearClassSplitBulkSelection({ render: true });" in js
     assert 'classSplitElements.filterClass.addEventListener("change", () => {' in js
-    assert "clearClassSplitBulkSelection();\n                renderClassSplitPlot();" in js
+    assert "classSplitState.selectedClusterId = \"\";\n                refreshClassSplitFilteredReviewUi();" in js
     assert 'classSplitElements.displayMode.addEventListener("change", () => {' in js
-    assert "clearClassSplitBulkSelection({ render: true });" in js
+    assert "refreshClassSplitFilteredReviewUi();" in js
     assert "if (filterChanged) {\n            renderClassSplitBulkPanel();\n            renderClassSplitClusterList();" in js
     assert "function showClassSplitHoverCard" not in js
     assert "cropPreview.naturalWidth" in js
@@ -831,7 +843,17 @@ def test_class_split_explorer_panel_contract():
     assert "function focusClassSplitPlotOnPoint" in js
     assert "classSplitElements.bulkPanel" in js
     assert "panClassSplitPlotWithWheel" not in js
-    assert "Correct class" in js
+    assert "Confirm current class" in js
+    assert "Reassign" in js
+    assert ">Choose class</option>" in js
+    assert "function getClassSplitContextCropUrl" in js
+    assert "const maxPreviewDim = 1400;" in js
+    assert 'alt="Object context crop"' in js
+    assert "point.cluster_id = null;" in js
+    assert "imageKeys: activeKeys" in js
+    assert "imageKeys," in js
+    assert "Changed class to ${targetClass}. Save labels when ready." in js
+    assert "Changed class to ${targetClass}; rerunning analysis." not in js
     assert "function drawClassSplitInstancePulse" in js
     assert "startClassSplitInstancePulse(match.bbox" in js
     assert "function getClassSplitServerSourceHandle" in js

@@ -200,6 +200,13 @@ def test_class_analysis_flags_neighbor_disagreement_only_in_all_classes():
     p0 = next(point for point in all_classes["points"] if point["point_id"] == "p0")
     assert p0["suggested_neighbor_class"] == "boat"
     assert p0["is_wrong_class_candidate"] is True
+    assert "class_cluster_id" in p0
+    assert "class_cluster_key" in p0
+    assert p0["class_cluster_size"] == 0
+    assert all_classes["class_clusters"]["car"]["clusters"] == []
+    assert all_classes["class_clusters"]["boat"]["clusters"] == []
+    assert all_classes["summary"]["class_cluster_count"] == 0
+    assert all_classes["summary"]["class_cluster_class_count"] == 0
 
     selected_class = api._class_analysis_build_result(
         records,
@@ -212,6 +219,41 @@ def test_class_analysis_flags_neighbor_disagreement_only_in_all_classes():
     )
     assert selected_class["wrong_class_candidates"] == []
     assert all(point["is_wrong_class_candidate"] is False for point in selected_class["points"])
+    assert all("class_cluster_id" in point for point in selected_class["points"])
+
+
+def test_class_analysis_per_class_clusters_require_real_subclusters():
+    records = [_record(f"p{i}", "vehicle") for i in range(8)]
+    embeddings = np.asarray(
+        [
+            [1.0, 0.0, 0.0],
+            [0.99, 0.01, 0.0],
+            [0.98, -0.01, 0.0],
+            [1.0, 0.02, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.01, 0.99, 0.0],
+            [-0.01, 0.98, 0.0],
+            [0.02, 1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+    result = api._class_analysis_build_result(
+        records,
+        embeddings,
+        summary={"analysis_scope": "all_classes"},
+        projection="pca",
+        projection_neighbor_k=15,
+        neighbor_k=3,
+        seed=13,
+    )
+
+    clusters = result["class_clusters"]["vehicle"]["clusters"]
+    assert len(clusters) == 2
+    assert result["summary"]["class_cluster_count"] == 2
+    assert result["summary"]["class_cluster_class_count"] == 1
+    assert all(point["class_cluster_size"] > 0 for point in result["points"])
 
 
 def test_class_analysis_stratified_sampling_keeps_classes_represented():

@@ -8,6 +8,7 @@ def _force_apple_mlx(monkeypatch):
     monkeypatch.setattr(mlx_sam.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(mlx_sam.platform, "machine", lambda: "arm64")
     monkeypatch.setattr(mlx_sam.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(mlx_sam, "_mlx_runtime_error", lambda: None)
 
 
 def test_resolve_mlx_sam_config_accepts_converted_model_and_examples_root(tmp_path, monkeypatch):
@@ -39,6 +40,23 @@ def test_explicit_mlx_sam_reports_missing_assets(monkeypatch):
 
     with pytest.raises(mlx_sam.MlxSamUnavailable, match="mlx_sam_model_path_missing"):
         mlx_sam.should_use_mlx_sam("mlx")
+
+
+def test_resolve_mlx_sam_config_rejects_unusable_mlx_runtime(tmp_path, monkeypatch):
+    monkeypatch.setattr(mlx_sam.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(mlx_sam.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(mlx_sam.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(mlx_sam, "_mlx_runtime_error", lambda: "No Metal device available")
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text("{}", encoding="utf-8")
+    (model_dir / "model.safetensors").write_bytes(b"test")
+    monkeypatch.setenv("SAM_MLX_MODEL_PATH", str(model_dir))
+
+    config = mlx_sam.resolve_mlx_sam_config()
+
+    assert config.available is False
+    assert config.reason.startswith("mlx_runtime_unavailable")
 
 
 def test_mlx_sam_outputs_match_segment_anything_numpy_shapes():

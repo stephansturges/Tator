@@ -21,7 +21,7 @@ from typing import (
     Set,
     Iterator,
 )
-from collections import Counter, deque
+from collections import Counter, defaultdict, deque
 import torch, clip, joblib
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 from fastapi import FastAPI, UploadFile, File, Form, Query, Body, HTTPException, Request
@@ -20182,6 +20182,42 @@ def _class_analysis_build_result(
     labels, cluster_summary = _class_analysis_cluster_embeddings(
         embeddings, seed=seed, max_k=8
     )
+    class_indices: Dict[str, List[int]] = defaultdict(list)
+    for idx, record in enumerate(records):
+        class_indices[str(record.get("class_name") or "")].append(idx)
+    class_cluster_labels = np.zeros(n_samples, dtype=int)
+    class_cluster_summary: Dict[str, Any] = {}
+    class_cluster_sizes: Dict[Tuple[str, int], int] = {}
+    for class_name, idx_list in sorted(class_indices.items()):
+        idxs = np.asarray(idx_list, dtype=int)
+        if idxs.size == 0:
+            continue
+        subset_labels, subset_summary = _class_analysis_cluster_embeddings(
+            embeddings[idxs],
+            seed=seed,
+            max_k=8,
+        )
+        for local_idx, global_idx in enumerate(idxs.tolist()):
+            class_cluster_labels[int(global_idx)] = int(subset_labels[local_idx])
+        best_k = int(subset_summary.get("best_k") or 0)
+        has_subclusters = best_k > 1 and len(set(subset_labels.tolist())) > 1
+        counts = (
+            Counter(int(label) for label in subset_labels.tolist())
+            if has_subclusters
+            else Counter()
+        )
+        if has_subclusters:
+            for cluster_id, size in counts.items():
+                class_cluster_sizes[(class_name, int(cluster_id))] = int(size)
+        class_cluster_summary[class_name] = {
+            "method": subset_summary.get("method"),
+            "best_k": best_k,
+            "candidates": subset_summary.get("candidates") or [],
+            "clusters": [
+                {"cluster_id": int(cluster_id), "size": int(size)}
+                for cluster_id, size in sorted(counts.items())
+            ],
+        }
     neighbor_count = min(max(1, int(neighbor_k or 15)) + 1, max(1, n_samples))
     neighbor_ids_by_idx: List[List[int]] = [[] for _ in records]
     neighbor_dist_by_idx: List[List[float]] = [[] for _ in records]
@@ -20241,6 +20277,15 @@ def _class_analysis_build_result(
             **record,
             "projection": [float(coords[idx, 0]), float(coords[idx, 1])],
             "cluster_id": int(labels[idx]) if n_samples else 0,
+            "class_cluster_id": int(class_cluster_labels[idx]) if n_samples else 0,
+            "class_cluster_key": (
+                f"{current_class}:{int(class_cluster_labels[idx]) if n_samples else 0}"
+            ),
+            "class_cluster_size": (
+                int(class_cluster_sizes.get((current_class, int(class_cluster_labels[idx])), 0))
+                if n_samples
+                else 0
+            ),
             "outlier_score": float(outlier_scores[idx]),
             "neighbor_ids": [records[n]["point_id"] for n in neighbor_indices],
             "neighbor_distances": neighbor_dist_by_idx[idx],
@@ -20296,6 +20341,12 @@ def _class_analysis_build_result(
         "neighbor_k": int(neighbor_k or 15),
         "class_counts": dict(class_counts),
         "cluster_count": len(clusters),
+        "class_cluster_count": sum(
+            len(entry.get("clusters") or []) for entry in class_cluster_summary.values()
+        ),
+        "class_cluster_class_count": sum(
+            1 for entry in class_cluster_summary.values() if entry.get("clusters")
+        ),
         "wrong_class_candidate_count": len(wrong_class_candidates),
         "warnings": warnings,
     }
@@ -20304,6 +20355,7 @@ def _class_analysis_build_result(
         "summary": summary,
         "points": points,
         "clusters": cluster_summary,
+        "class_clusters": class_cluster_summary,
         "diagnostics": diagnostics,
         "wrong_class_candidates": sorted(
             wrong_class_candidates,

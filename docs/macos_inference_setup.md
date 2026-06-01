@@ -157,7 +157,11 @@ PY
 
 The backend only switches the annotation SAM1 slots to MLX after restart with
 those environment variables. `SAM1_BACKEND=auto` falls back to Torch/MPS when
-the MLX assets are absent.
+the MLX assets are absent. It also probes the MLX runtime before advertising the
+adapter as available. In headless, sandboxed, or otherwise non-Metal sessions,
+installed `mlx` packages can still raise `No Metal device available`; those
+sessions now report `mlx_runtime_unavailable` and remain on the Torch SAM1 path
+instead of selecting an unusable MLX predictor.
 
 Qwen runtime smoke:
 

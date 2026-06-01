@@ -94,6 +94,16 @@ def resolve_mlx_sam_config() -> MlxSamConfig:
         return MlxSamConfig(False, "not_apple_silicon", None, None, apple_silicon, mlx_installed)
     if not mlx_installed:
         return MlxSamConfig(False, "mlx_not_installed", None, None, apple_silicon, mlx_installed)
+    runtime_error = _mlx_runtime_error()
+    if runtime_error:
+        return MlxSamConfig(
+            False,
+            f"mlx_runtime_unavailable: {runtime_error}",
+            None,
+            None,
+            apple_silicon,
+            mlx_installed,
+        )
 
     model_path = _resolve_mlx_sam_model_path()
     if model_path is None:
@@ -194,22 +204,52 @@ def _normalize_predict_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
 def _to_mlx_array(value: Any) -> Any:
     if value is None:
         return None
+    if _is_mlx_array(value):
+        return value
     import mlx.core as mx
 
-    return value if value.__class__.__module__.startswith("mlx.") else mx.array(value)
+    try:
+        return mx.array(value)
+    except RuntimeError as exc:
+        if _is_mlx_device_unavailable_error(exc):
+            return np.asarray(value)
+        raise
 
 
 def _normalize_mask_input(mask_input: Any) -> Any:
-    import mlx.core as mx
-
     if len(mask_input.shape) == 2:
         return mask_input[None, :, :, None]
     if len(mask_input.shape) == 3:
         # Meta SAM logits are CxHxW; MLX SAM expects BxHxWxC.
         if mask_input.shape[0] in {1, 3} and mask_input.shape[-1] not in {1, 3}:
-            return mx.moveaxis(mask_input, 0, -1)[None, :, :, :]
+            if _is_mlx_array(mask_input):
+                import mlx.core as mx
+
+                return mx.moveaxis(mask_input, 0, -1)[None, :, :, :]
+            return np.moveaxis(mask_input, 0, -1)[None, :, :, :]
         return mask_input[None, :, :, :]
     return mask_input
+
+
+def _is_mlx_array(value: Any) -> bool:
+    return value.__class__.__module__.startswith("mlx.")
+
+
+def _is_mlx_device_unavailable_error(exc: BaseException) -> bool:
+    text = str(exc)
+    return "No Metal device" in text or "metal::load_device" in text
+
+
+def _mlx_runtime_error() -> Optional[str]:
+    try:
+        import mlx.core as mx
+
+        probe = mx.array([0.0])
+        if hasattr(mx, "eval"):
+            mx.eval(probe)
+        return None
+    except Exception as exc:  # pragma: no cover - depends on local Metal availability.
+        return str(exc) or exc.__class__.__name__
 
 
 def _to_segment_anything_outputs(masks: Any, scores: Any, logits: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:

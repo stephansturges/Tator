@@ -225,6 +225,24 @@ Fix from this pass:
   wrong-only filter cannot hide objects that are about to be relabeled.
 - Class Split no longer tries to upload large all-class runs as one huge
   multipart request when a chunked current-workspace upload is available.
+- Class Split result panels and Data Ingestion result panels now have explicit
+  component-level `[hidden]` CSS rules. This guards against display rules on the
+  same component accidentally making hidden results visible during tab switches
+  or job startup.
+- All-class Class Split results compute subclass clusters per class, but the UI
+  hides cluster proposals and hulls until a class filter is chosen. This keeps
+  global class-separation clusters out of the subclass review workflow.
+- The selected-crop inspector and likely-wrong review vignettes now render
+  source-image context crops with the object box drawn over the crop. The crop
+  uses up to 50 px of added context per side for large objects and black padding
+  at source-image edges.
+- Confirming a likely-wrong item or relabeling it from a vignette removes it
+  from the review list without automatically rerunning the expensive Class Split
+  job. The local annotation state is marked dirty so the normal save path
+  persists the correction.
+- `See instance` resolves active-image aliases before jumping back to Label
+  Images, covering backend-backed, transient, chunked-upload, and browser-only
+  workspace names.
 
 ## Journey 7: Optional Class Split Dataset Analysis
 
@@ -274,6 +292,7 @@ NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m py_compile localinferenceap
 node --check ybat-master/ybat.js
 git diff --check
 NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest -q tests/test_data_ingestion.py tests/test_class_analysis.py tests/test_macos_acceleration.py tests/test_mlx_dinov3_backend.py tests/test_mlx_sam_backend.py tests/test_sam_preload_slots.py tests/test_labeling_panel_layout_contract.py
+.venv-macos/bin/python -m pytest -q
 ```
 
 Interactive browser smoke is still a separate manual/Playwright concern; the

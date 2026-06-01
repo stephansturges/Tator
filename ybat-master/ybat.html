@@ -1102,7 +1102,7 @@
                                     <option value="select">Box select</option>
                                     <option value="pan">Pan</option>
                                 </select>
-                                <label class="class-split-toggle" title="Draw translucent outlines around embedding clusters. Cluster IDs come from the analysis result; the outlines are only a review aid.">
+                                <label class="class-split-toggle" title="Draw translucent outlines around subclass clusters inside the selected class.">
                                     <input type="checkbox" id="classSplitClusterOverlay" checked />
                                     Cluster hulls
                                 </label>
@@ -1127,10 +1127,6 @@
                                         <div class="training-help">Run analysis to review cluster proposals.</div>
                                     </div>
                                 </details>
-                                <details id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel" open>
-                                    <summary>Likely wrong class</summary>
-                                    <div id="classSplitWrongList" class="class-split-wrong-list"></div>
-                                </details>
                                 <div class="class-split-review-section">
                                     <strong>Graph report</strong>
                                     <div id="classSplitReport" class="class-split-report">
@@ -1138,6 +1134,10 @@
                                     </div>
                                 </div>
                             </div>
+                            <details id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel class-split-wrong-panel--wide" open>
+                                <summary>Likely wrong class</summary>
+                                <div id="classSplitWrongList" class="class-split-wrong-list"></div>
+                            </details>
                         </div>
                     </section>
                     <details id="classSplitDatasetAnalysisPanel" class="class-split-panel class-split-dataset-analysis">

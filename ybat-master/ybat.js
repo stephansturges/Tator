@@ -755,6 +755,8 @@
     let imageListSelectionLock = 0;
     let imageLoadInProgress = false;
     let imageLoadPromise = null;
+    let imageDimensionScanToken = 0;
+    let imageDimensionScanPromise = null;
     let imageCropInProgress = false;
     let imageSelectionRequestToken = 0;
     // Guards against duplicate input/crop handlers if init is triggered more than once.
@@ -1327,8 +1329,11 @@
         ingestProgressState.element.classList.add("visible");
     }
 
-    function incrementIngestProgress(delta = 1) {
+    function incrementIngestProgress(delta = 1, expectedPhase = null) {
         if (!ingestProgressState.visible) {
+            return;
+        }
+        if (expectedPhase && ingestProgressState.phase !== expectedPhase) {
             return;
         }
         ingestProgressState.completed = Math.max(0, ingestProgressState.completed + delta);
@@ -1351,9 +1356,12 @@
         renderIngestProgress();
     }
 
-    function stopIngestProgress() {
+    function stopIngestProgress(expectedPhase = null) {
         ensureIngestElements();
         if (!ingestProgressState.element) {
+            return;
+        }
+        if (expectedPhase && ingestProgressState.phase !== expectedPhase) {
             return;
         }
         ingestProgressState.visible = false;
@@ -47026,8 +47034,8 @@ async function cancelRfDetrTrainingJobRequest() {
 
     /******************************************************
      * listenImageLoad
-     * We still do one pass for each file to get .width, .height
-     * But do NOT store big .object for each file (to save memory).
+     * Stage the selected file list first, then scan dimensions in the
+     * background so the first image can appear immediately.
      ******************************************************/
     const readImageDimensions = async (file) => {
         if (window.createImageBitmap) {
@@ -47059,6 +47067,26 @@ async function cancelRfDetrTrainingJobRequest() {
             tempImg.src = url;
         });
     };
+
+    function decodeImageFromBlob(blob) {
+        return new Promise((resolve, reject) => {
+            if (!(blob instanceof Blob)) {
+                reject(new Error("Image file blob is missing."));
+                return;
+            }
+            const objectUrl = URL.createObjectURL(blob);
+            const imageObject = new Image();
+            imageObject.onload = () => {
+                URL.revokeObjectURL(objectUrl);
+                resolve(imageObject);
+            };
+            imageObject.onerror = (error) => {
+                URL.revokeObjectURL(objectUrl);
+                reject(error || new Error("Failed to decode image."));
+            };
+            imageObject.src = objectUrl;
+        });
+    }
 
     const listenImageLoad = () => {
         if (imageLoadListenerBound) {
@@ -47123,16 +47151,14 @@ async function cancelRfDetrTrainingJobRequest() {
             return extensions.indexOf(ext) !== -1;
         });
         const total = selectedFiles.length;
+        const scanToken = ++imageDimensionScanToken;
         setGlobalCursor("wait");
-        const loadingLabel = `Loading ${total} image${total === 1 ? "" : "s"}… please wait`;
+        const loadingLabel = `Staging ${total} image${total === 1 ? "" : "s"} ...`;
         setSamStatus(loadingLabel, { variant: "info", duration: 0 });
         let fileCount = 0;
-        const YIELD_EVERY = 75;
-
-        if (supportedFiles.length > 0) {
-            startIngestProgress({ phase: "images", total: supportedFiles.length });
-            showBackgroundLoadModal("Images are still loading in the background. You can continue once the counter finishes.");
-        }
+        const stagedFiles = [];
+        const fragment = document.createDocumentFragment();
+        const YIELD_EVERY = 250;
 
         try {
             for (let i = 0; i < supportedFiles.length; i++) {
@@ -47151,28 +47177,16 @@ async function cancelRfDetrTrainingJobRequest() {
                 if (fileCount === 1) {
                     option.selected = true;
                 }
-                imageList.appendChild(option);
-
-                try {
-                    const dim = await readImageDimensions(file);
-                    images[file.name].width = dim.width;
-                    images[file.name].height = dim.height;
-                } catch (error) {
-                    console.debug("Failed to read image dimensions", file.name, error);
-                }
-
-                incrementIngestProgress();
+                fragment.appendChild(option);
+                stagedFiles.push({ name: file.name, file });
 
                 if (fileCount % YIELD_EVERY === 0) {
                     await yieldToDom(0);
                 }
             }
+            imageList.appendChild(fragment);
         } finally {
             setGlobalCursor("default");
-            if (supportedFiles.length > 0) {
-                stopIngestProgress();
-                hideBackgroundLoadModal();
-            }
         }
 
         if (fileCount === 0) {
@@ -47190,12 +47204,73 @@ async function cancelRfDetrTrainingJobRequest() {
         setCurrentImage(images[firstName]);
 
         syncLabelingSourceControls();
-
-        setSamStatus(`Loaded ${fileCount} image${fileCount === 1 ? "" : "s"}.`, { variant: "success", duration: 3000 });
+        startImageDimensionScan(stagedFiles, scanToken);
+        setSamStatus(`Loaded first image from ${fileCount} selected image${fileCount === 1 ? "" : "s"}. Indexing dimensions in the background.`, { variant: "success", duration: 3000 });
         imagesInput.value = "";
     }
 
+    function startImageDimensionScan(stagedFiles, scanToken) {
+        const records = Array.isArray(stagedFiles) ? stagedFiles : [];
+        if (!records.length || scanToken !== imageDimensionScanToken) {
+            return;
+        }
+        startIngestProgress({ phase: "images", total: records.length });
+        if (records.length > 1) {
+            showBackgroundLoadModal("Image dimensions are indexing in the background. The first image is ready for labeling.");
+        }
+        const scanPromise = runImageDimensionScan(records, scanToken);
+        imageDimensionScanPromise = scanPromise;
+        scanPromise.catch((error) => {
+            console.warn("Image dimension indexing failed", error);
+        });
+    }
+
+    async function runImageDimensionScan(stagedFiles, scanToken) {
+        let completed = 0;
+        const YIELD_EVERY = 50;
+        try {
+            for (const item of stagedFiles) {
+                if (scanToken !== imageDimensionScanToken) {
+                    return;
+                }
+                const imageRecord = images[item.name];
+                if (imageRecord && (!imageRecord.width || !imageRecord.height)) {
+                    try {
+                        const dim = await readImageDimensions(item.file);
+                        if (scanToken !== imageDimensionScanToken) {
+                            return;
+                        }
+                        imageRecord.width = dim.width;
+                        imageRecord.height = dim.height;
+                    } catch (error) {
+                        console.debug("Failed to read image dimensions", item.name, error);
+                    }
+                }
+                completed += 1;
+                incrementIngestProgress(1, "images");
+                if (completed % YIELD_EVERY === 0) {
+                    await yieldToDom(0);
+                }
+            }
+            if (scanToken === imageDimensionScanToken) {
+                setSamStatus(`Indexed ${completed} image${completed === 1 ? "" : "s"}.`, { variant: "success", duration: 2500 });
+            }
+        } finally {
+            if (scanToken === imageDimensionScanToken) {
+                stopIngestProgress("images");
+                hideBackgroundLoadModal();
+                if (imageDimensionScanPromise) {
+                    imageDimensionScanPromise = null;
+                }
+            }
+        }
+    }
+
     const resetImageList = () => {
+        imageDimensionScanToken += 1;
+        imageDimensionScanPromise = null;
+        stopIngestProgress("images");
+        hideBackgroundLoadModal();
         const imageList = document.getElementById("imageList");
         if (imageList) {
             imageList.innerHTML = "";
@@ -47412,17 +47487,22 @@ async function cancelRfDetrTrainingJobRequest() {
                         });
                     });
             } else {
-                const reader = new FileReader();
-                reader.onload = () => {
-                    if (isSelectionStale() || image._loadVersion !== loadVersion) {
-                        return;
-                    }
-                    const dataUrl = typeof reader.result === "string" ? reader.result : "";
-                    const imageObject = new Image();
-                    imageObject.onload = () => {
-                        finalizeLoadedImage(imageObject, dataUrl);
-                    };
-                    imageObject.onerror = () => {
+                if (!image.meta || !(image.meta instanceof Blob)) {
+                    setGlobalCursor("default");
+                    setSamStatus(`Failed to read image ${image.meta?.name || "(unknown)"}.`, {
+                        variant: "error",
+                        duration: 5000,
+                    });
+                    return;
+                }
+                decodeImageFromBlob(image.meta)
+                    .then((imageObject) => {
+                        if (isSelectionStale() || image._loadVersion !== loadVersion) {
+                            return;
+                        }
+                        finalizeLoadedImage(imageObject, null);
+                    })
+                    .catch(() => {
                         if (isSelectionStale() || image._loadVersion !== loadVersion) {
                             return;
                         }
@@ -47431,20 +47511,7 @@ async function cancelRfDetrTrainingJobRequest() {
                             `Failed to decode image ${image.meta?.name || "(unknown)"}.`,
                             { variant: "error", duration: 5000 }
                         );
-                    };
-                    imageObject.src = dataUrl;
-                };
-                reader.onerror = () => {
-                    if (isSelectionStale() || image._loadVersion !== loadVersion) {
-                        return;
-                    }
-                    setGlobalCursor("default");
-                    setSamStatus(`Failed to read image ${image.meta?.name || "(unknown)"}.`, {
-                        variant: "error",
-                        duration: 5000,
                     });
-                };
-                reader.readAsDataURL(image.meta);
             }
         }
         else {
@@ -49098,19 +49165,13 @@ async function cancelRfDetrTrainingJobRequest() {
                 reject(new Error("Image file blob is missing."));
                 return;
             }
-            const reader = new FileReader();
-            reader.onload = () => {
-                const im = new Image();
-                im.onload = () => {
+            decodeImageFromBlob(imgData.meta)
+                .then((im) => {
                     imgData.object = im;
-                    imgData.dataUrl = typeof reader.result === "string" ? reader.result : null;
+                    imgData.dataUrl = null;
                     resolve();
-                };
-                im.onerror = reject;
-                im.src = reader.result;
-            };
-            reader.onerror = reject;
-            reader.readAsDataURL(imgData.meta);
+                })
+                .catch(reject);
         });
     }
 

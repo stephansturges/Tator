@@ -64,6 +64,32 @@ def test_yolo_import_and_export_controls_live_in_annotation_source_panel():
     assert source_start < html.index('id="saveBboxes"') < html.index('id="qwenDetectionDetails"')
 
 
+def test_local_image_selection_shows_first_image_before_dimension_scan():
+    js = _js()
+    ingest_start = js.index("async function ingestImageFiles")
+    ingest_end = js.index("function startImageDimensionScan", ingest_start)
+    ingest_body = js[ingest_start:ingest_end]
+
+    assert "document.createDocumentFragment()" in ingest_body
+    assert "await readImageDimensions(file)" not in ingest_body
+    assert "setCurrentImage(images[firstName]);" in ingest_body
+    assert "startImageDimensionScan(stagedFiles, scanToken);" in ingest_body
+    assert ingest_body.index("setCurrentImage(images[firstName]);") < ingest_body.index(
+        "startImageDimensionScan(stagedFiles, scanToken);"
+    )
+
+    set_current_start = js.index("function setCurrentImage")
+    set_current_end = js.index("const fitZoom", set_current_start)
+    set_current_body = js[set_current_start:set_current_end]
+    assert "decodeImageFromBlob(image.meta)" in set_current_body
+    assert "reader.readAsDataURL(image.meta)" not in set_current_body
+
+    load_object_start = js.index("function loadImageObject")
+    load_object_end = js.index("function showProgressModal", load_object_start)
+    load_object_body = js[load_object_start:load_object_end]
+    assert "decodeImageFromBlob(imgData.meta)" in load_object_body
+
+
 def test_annotation_diversity_metric_control_contract():
     html = _html()
     css = _css()

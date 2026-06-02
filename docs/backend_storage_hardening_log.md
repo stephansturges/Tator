@@ -2187,3 +2187,25 @@ preserving the exact validation story for storage and artifact-write fixes.
   backend/UI (`14 passed`), `tools/check_ui_endpoints.py
   http://127.0.0.1:8000` reported no missing paths or method mismatches, local
   `/system/health_summary` returned `ok: true`, and `git diff --check` passed.
+
+## 2026-06-02: Label Image Selection Load Hardening
+
+- Re-reviewed the current Class Split projection/frontend and backend result
+  paths, then hardened the Label Images local file-selection flow found during
+  the pass.
+- Local image selection now stages the file list and displays the first image
+  before the slower dimension scan runs. Dimension indexing continues in the
+  background with stale-scan cancellation and phase-aware progress updates, so
+  bbox imports/crop jobs are not blocked by image metadata indexing.
+- Local image decode now uses object URLs instead of `FileReader.readAsDataURL`
+  for normal display and helper loading. The original `File` blob remains on
+  each image record for Class Split uploads, crop export, and downstream
+  packaging, while base64 remains available only when a later tool explicitly
+  asks for it.
+- Validation: `git diff --check`, `node --check ybat-master/ybat.js`,
+  `py_compile localinferenceapi.py api/class_analysis.py`, and
+  combined pytest coverage for `tests/test_labeling_panel_layout_contract.py`,
+  `tests/test_data_ingestion.py`, and `tests/test_class_analysis.py`
+  (`190 passed`, `2 skipped`; sandbox emitted a Metal-device warning at
+  interpreter shutdown). Playwright Class Split contracts were skipped under
+  the current non-UI test configuration.

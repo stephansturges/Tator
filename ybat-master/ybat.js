@@ -41657,6 +41657,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 `<strong>${escapeHtml(item.class_name || "")} → ${escapeHtml(suggestedClass || "neighbor class")}</strong>`,
                 `<span>${Math.round(score * 100)}% suspicion • ${escapeHtml(item.image_relpath || "")}</span>`,
                 `<div class="class-split-wrong-item__actions">`,
+                `<button type="button" class="training-button secondary" data-action="jump-instance" data-point-id="${escapeHtml(pointId)}">See instance</button>`,
                 `<button type="button" class="training-button secondary" data-action="correct-class" data-point-id="${escapeHtml(pointId)}">Confirm current class</button>`,
                 `<select data-action="target-class" data-point-id="${escapeHtml(pointId)}">${options}</select>`,
                 `<button type="button" class="training-button" data-action="reassign-class" data-point-id="${escapeHtml(pointId)}">Reassign</button>`,
@@ -41675,6 +41676,26 @@ async function cancelRfDetrTrainingJobRequest() {
                     jump: false,
                     focusPlot: true,
                     flash: true,
+                });
+            });
+        });
+        listEl.querySelectorAll('[data-action="jump-instance"]').forEach((button) => {
+            button.addEventListener("click", (event) => {
+                event.stopPropagation();
+                const pointId = button.getAttribute("data-point-id") || "";
+                const point = getClassSplitPointById(pointId);
+                if (!point) {
+                    setSamStatus("Could not find the selected Class Split point.", { variant: "error", duration: 5000 });
+                    return;
+                }
+                selectClassSplitPoint(pointId, {
+                    jump: false,
+                    focusPlot: true,
+                    flash: true,
+                });
+                jumpToClassSplitPoint(point).catch((error) => {
+                    console.error("Class Split vignette jump failed", error);
+                    setSamStatus(`Jump failed: ${error.message || error}`, { variant: "error", duration: 5000 });
                 });
             });
         });

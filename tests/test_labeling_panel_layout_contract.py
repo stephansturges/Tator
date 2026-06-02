@@ -937,6 +937,9 @@ def test_class_split_explorer_panel_contract():
     assert "function jumpToClassSplitPoint" in js
     assert "setActiveTab(TAB_LABELING)" in js
     assert "See instance" in js
+    assert 'data-action="jump-instance"' in js
+    assert 'listEl.querySelectorAll(\'[data-action="jump-instance"]\')' in js
+    assert "Class Split vignette jump failed" in js
     assert "function changeClassSplitPointClass" in js
     assert "captureAnnotationDirtyStateForImage(imageKey)" in js
     assert "async function ensureClassSplitSnapshotClean" in js

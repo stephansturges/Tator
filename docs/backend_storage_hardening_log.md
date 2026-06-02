@@ -2168,3 +2168,22 @@ preserving the exact validation story for storage and artifact-write fixes.
   focused class-analysis and layout tests, API route/UI endpoint contracts, and
   live Playwright Class Split/navigation contracts against the local backend
   (`99 passed`, `1 skipped` across the closeout commands).
+
+## 2026-06-02: Class Split Projection Re-Audit
+
+- Re-reviewed the committed Class Split graph/projection path after the
+  post-analysis blank-plot concern: setup and toolbar projection controls,
+  result projection inference, lazy coordinate loading, filter/display pruning,
+  placeholder purging, cluster-hull gating, likely-wrong vignettes, inspector
+  context crops, and jump-to-source matching.
+- Confirmed normal backend results still keep `points` in public
+  `/class_analysis/jobs/{job_id}/result` payloads while storing only the extra
+  switchable PCA coordinate matrices in `projection_coordinates.npz` for lazy
+  fetch through the projection endpoint.
+- Validation: `node --check ybat-master/ybat.js`, macOS venv
+  `py_compile` for `localinferenceapi.py` and `api/class_analysis.py`,
+  `tests/test_class_analysis.py -q` (`81 passed`, `1 skipped`), live
+  `RUN_UI_E2E=1` Playwright Class Split contract against the existing local
+  backend/UI (`14 passed`), `tools/check_ui_endpoints.py
+  http://127.0.0.1:8000` reported no missing paths or method mismatches, local
+  `/system/health_summary` returned `ok: true`, and `git diff --check` passed.

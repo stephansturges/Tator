@@ -200,11 +200,8 @@ def test_class_analysis_flags_neighbor_disagreement_only_in_all_classes():
     p0 = next(point for point in all_classes["points"] if point["point_id"] == "p0")
     assert p0["suggested_neighbor_class"] == "boat"
     assert p0["is_wrong_class_candidate"] is True
-    assert "class_cluster_id" in p0
-    assert "class_cluster_key" in p0
-    assert p0["class_cluster_size"] == 0
-    assert all_classes["class_clusters"]["car"]["clusters"] == []
-    assert all_classes["class_clusters"]["boat"]["clusters"] == []
+    assert "class_cluster_id" not in p0
+    assert all_classes["class_clusters"] == {}
     assert all_classes["summary"]["class_cluster_count"] == 0
     assert all_classes["summary"]["class_cluster_class_count"] == 0
 
@@ -219,10 +216,10 @@ def test_class_analysis_flags_neighbor_disagreement_only_in_all_classes():
     )
     assert selected_class["wrong_class_candidates"] == []
     assert all(point["is_wrong_class_candidate"] is False for point in selected_class["points"])
-    assert all("class_cluster_id" in point for point in selected_class["points"])
+    assert all("class_cluster_id" not in point for point in selected_class["points"])
 
 
-def test_class_analysis_per_class_clusters_require_real_subclusters():
+def test_class_analysis_cluster_search_reuses_selected_class_embeddings():
     records = [_record(f"p{i}", "vehicle") for i in range(8)]
     embeddings = np.asarray(
         [
@@ -239,21 +236,20 @@ def test_class_analysis_per_class_clusters_require_real_subclusters():
     )
     embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
 
-    result = api._class_analysis_build_result(
-        records,
-        embeddings,
-        summary={"analysis_scope": "all_classes"},
-        projection="pca",
-        projection_neighbor_k=15,
-        neighbor_k=3,
-        seed=13,
+    cluster_job = api.ClassAnalysisClusterJob(job_id="cac_unit", parent_job_id="ca_unit")
+    result = api._class_analysis_cluster_search_result(
+        job=cluster_job,
+        points=records,
+        embeddings=embeddings,
+        payload={"sensitivity": "sensitive", "max_clusters": 4, "min_cluster_size": 2, "seed": 13},
     )
 
-    clusters = result["class_clusters"]["vehicle"]["clusters"]
+    clusters = result["clusters"]
     assert len(clusters) == 2
-    assert result["summary"]["class_cluster_count"] == 2
-    assert result["summary"]["class_cluster_class_count"] == 1
-    assert all(point["class_cluster_size"] > 0 for point in result["points"])
+    assert result["summary"]["cluster_count"] == 2
+    assert result["summary"]["best_k"] == 2
+    assert set(result["labels_by_point_id"]) == {record["point_id"] for record in records}
+    assert sorted(cluster["size"] for cluster in clusters) == [4, 4]
 
 
 def test_class_analysis_stratified_sampling_keeps_classes_represented():

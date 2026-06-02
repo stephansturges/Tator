@@ -2209,3 +2209,29 @@ preserving the exact validation story for storage and artifact-write fixes.
   (`190 passed`, `2 skipped`; sandbox emitted a Metal-device warning at
   interpreter shutdown). Playwright Class Split contracts were skipped under
   the current non-UI test configuration.
+
+## 2026-06-02: Class Split Subclass Search Closeout
+
+- Removed browser-heavy cluster coloring and hull overlays from all-class Class
+  Split graphs. All-class mode now stays focused on class overview,
+  likely-wrong review, and dataset analysis.
+- Added explicit selected-class subclass search with sensitivity, max-cluster,
+  and min-size controls. The backend exposes separate cluster-search jobs that
+  reuse the parent analysis embeddings and report progress through
+  `/class_analysis/jobs/{job_id}/cluster_search`.
+- Moved cluster proposals and graph report beneath the plot, kept selected crop
+  preview at the top of the right stack, and changed likely-wrong review into a
+  full-width 12-vignette queue with shuffle, skip, confirm, source jump, and
+  explicit suggested-class relabel actions.
+- Hardened frontend state so stale subclass-search polling cannot mutate a
+  newer Class Split result. Class cycling in Label Images now keeps the `E/R`
+  carousel light by rendering a bounded class window, syncing Qwen/SAM3 target
+  selects without rebuilding full option lists, and debouncing Class Split
+  control refreshes.
+- Updated README, the Class Split/Data Ingestion flow review, shortcut
+  explainer text, and frontend cache keys.
+- Validation: `node --check ybat-master/ybat.js`,
+  `py_compile api/class_analysis.py localinferenceapi.py`, `git diff --check`,
+  focused class-analysis backend tests, and focused labeling-panel layout
+  contract tests. The Playwright Class Split contract remains fixture-skipped
+  unless run with the UI E2E environment enabled.

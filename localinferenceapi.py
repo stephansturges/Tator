@@ -14285,6 +14285,23 @@ class ClassAnalysisJob:
 
 
 @dataclass
+class ClassAnalysisClusterJob:
+    job_id: str
+    parent_job_id: str
+    status: str = "queued"
+    progress: float = 0.0
+    message: str = "Queued"
+    request: Dict[str, Any] = field(default_factory=dict)
+    logs: List[Dict[str, Any]] = field(default_factory=list)
+    result: Optional[Dict[str, Any]] = None
+    result_path: Optional[str] = None
+    error: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
+@dataclass
 class DataIngestionJob:
     job_id: str
     kind: str = "analysis"
@@ -14321,6 +14338,8 @@ AUTO_LABEL_JOBS: Dict[str, AutoLabelJob] = {}
 AUTO_LABEL_JOBS_LOCK = threading.Lock()
 CLASS_ANALYSIS_JOBS: Dict[str, ClassAnalysisJob] = {}
 CLASS_ANALYSIS_JOBS_LOCK = threading.Lock()
+CLASS_ANALYSIS_CLUSTER_JOBS: Dict[str, ClassAnalysisClusterJob] = {}
+CLASS_ANALYSIS_CLUSTER_JOBS_LOCK = threading.Lock()
 DATA_INGESTION_JOBS: Dict[str, DataIngestionJob] = {}
 DATA_INGESTION_JOBS_LOCK = threading.Lock()
 CALIBRATION_JOBS: Dict[str, CalibrationJob] = {}
@@ -14746,6 +14765,7 @@ def _active_job_registry_referencing_path_root(path_root: Path) -> Optional[str]
         ("agent_mining", AGENT_MINING_JOBS, AGENT_MINING_JOBS_LOCK),
         ("auto_label", AUTO_LABEL_JOBS, AUTO_LABEL_JOBS_LOCK),
         ("class_analysis", CLASS_ANALYSIS_JOBS, CLASS_ANALYSIS_JOBS_LOCK),
+        ("class_analysis_cluster", CLASS_ANALYSIS_CLUSTER_JOBS, CLASS_ANALYSIS_CLUSTER_JOBS_LOCK),
         ("data_ingestion", DATA_INGESTION_JOBS, DATA_INGESTION_JOBS_LOCK),
         ("calibration", CALIBRATION_JOBS, CALIBRATION_JOBS_LOCK),
     ]
@@ -14768,6 +14788,7 @@ def _active_job_registry_referencing_dataset_id(dataset_id: str) -> Optional[str
         ("agent_mining", AGENT_MINING_JOBS, AGENT_MINING_JOBS_LOCK),
         ("auto_label", AUTO_LABEL_JOBS, AUTO_LABEL_JOBS_LOCK),
         ("class_analysis", CLASS_ANALYSIS_JOBS, CLASS_ANALYSIS_JOBS_LOCK),
+        ("class_analysis_cluster", CLASS_ANALYSIS_CLUSTER_JOBS, CLASS_ANALYSIS_CLUSTER_JOBS_LOCK),
         ("data_ingestion", DATA_INGESTION_JOBS, DATA_INGESTION_JOBS_LOCK),
         ("calibration", CALIBRATION_JOBS, CALIBRATION_JOBS_LOCK),
     ]
@@ -18851,6 +18872,26 @@ def _serialize_class_analysis_job(job: ClassAnalysisJob) -> Dict[str, Any]:
     }
 
 
+def _serialize_class_analysis_cluster_job(job: ClassAnalysisClusterJob) -> Dict[str, Any]:
+    return {
+        "cluster_job_id": job.job_id,
+        "job_id": job.job_id,
+        "parent_job_id": job.parent_job_id,
+        "status": job.status,
+        "progress": json_sanitize(job.progress),
+        "message": job.message,
+        "request": json_sanitize(job.request),
+        "logs": json_sanitize(job.logs),
+        "summary": json_sanitize(
+            (job.result or {}).get("summary") if isinstance(job.result, dict) else None
+        ),
+        "result": json_sanitize(job.result),
+        "error": json_sanitize(job.error),
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+
+
 def _class_analysis_json_safe(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         return [_class_analysis_json_safe(v) for v in value.tolist()]
@@ -20439,42 +20480,6 @@ def _class_analysis_build_result(
     labels, cluster_summary = _class_analysis_cluster_embeddings(
         embeddings, seed=seed, max_k=8
     )
-    class_indices: Dict[str, List[int]] = defaultdict(list)
-    for idx, record in enumerate(records):
-        class_indices[str(record.get("class_name") or "")].append(idx)
-    class_cluster_labels = np.zeros(n_samples, dtype=int)
-    class_cluster_summary: Dict[str, Any] = {}
-    class_cluster_sizes: Dict[Tuple[str, int], int] = {}
-    for class_name, idx_list in sorted(class_indices.items()):
-        idxs = np.asarray(idx_list, dtype=int)
-        if idxs.size == 0:
-            continue
-        subset_labels, subset_summary = _class_analysis_cluster_embeddings(
-            embeddings[idxs],
-            seed=seed,
-            max_k=8,
-        )
-        for local_idx, global_idx in enumerate(idxs.tolist()):
-            class_cluster_labels[int(global_idx)] = int(subset_labels[local_idx])
-        best_k = int(subset_summary.get("best_k") or 0)
-        has_subclusters = best_k > 1 and len(set(subset_labels.tolist())) > 1
-        counts = (
-            Counter(int(label) for label in subset_labels.tolist())
-            if has_subclusters
-            else Counter()
-        )
-        if has_subclusters:
-            for cluster_id, size in counts.items():
-                class_cluster_sizes[(class_name, int(cluster_id))] = int(size)
-        class_cluster_summary[class_name] = {
-            "method": subset_summary.get("method"),
-            "best_k": best_k,
-            "candidates": subset_summary.get("candidates") or [],
-            "clusters": [
-                {"cluster_id": int(cluster_id), "size": int(size)}
-                for cluster_id, size in sorted(counts.items())
-            ],
-        }
     neighbor_count = min(max(1, int(neighbor_k or 15)) + 1, max(1, n_samples))
     neighbor_ids_by_idx: List[List[int]] = [[] for _ in records]
     neighbor_dist_by_idx: List[List[float]] = [[] for _ in records]
@@ -20534,15 +20539,6 @@ def _class_analysis_build_result(
             **record,
             "projection": [float(coords[idx, 0]), float(coords[idx, 1])],
             "cluster_id": int(labels[idx]) if n_samples else 0,
-            "class_cluster_id": int(class_cluster_labels[idx]) if n_samples else 0,
-            "class_cluster_key": (
-                f"{current_class}:{int(class_cluster_labels[idx]) if n_samples else 0}"
-            ),
-            "class_cluster_size": (
-                int(class_cluster_sizes.get((current_class, int(class_cluster_labels[idx])), 0))
-                if n_samples
-                else 0
-            ),
             "outlier_score": float(outlier_scores[idx]),
             "neighbor_ids": [records[n]["point_id"] for n in neighbor_indices],
             "neighbor_distances": neighbor_dist_by_idx[idx],
@@ -20599,12 +20595,8 @@ def _class_analysis_build_result(
         "neighbor_k": int(neighbor_k or 15),
         "class_counts": dict(class_counts),
         "cluster_count": len(clusters),
-        "class_cluster_count": sum(
-            len(entry.get("clusters") or []) for entry in class_cluster_summary.values()
-        ),
-        "class_cluster_class_count": sum(
-            1 for entry in class_cluster_summary.values() if entry.get("clusters")
-        ),
+        "class_cluster_count": 0,
+        "class_cluster_class_count": 0,
         "wrong_class_candidate_count": len(wrong_class_candidates),
         "warnings": warnings,
     }
@@ -20622,7 +20614,7 @@ def _class_analysis_build_result(
             },
         },
         "clusters": cluster_summary,
-        "class_clusters": class_cluster_summary,
+        "class_clusters": {},
         "diagnostics": diagnostics,
         "wrong_class_candidates": sorted(
             wrong_class_candidates,
@@ -21121,6 +21113,300 @@ def get_class_analysis_projection(job_id: str, mode: str) -> Dict[str, Any]:
             return _class_analysis_projection_response(projection_mode, point_coords)
 
     raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="projection_not_found")
+
+
+def _class_analysis_cluster_sensitivity_settings(value: Any, n_samples: int) -> Dict[str, Any]:
+    sensitivity = str(value or "balanced").strip().lower()
+    if sensitivity not in {"conservative", "balanced", "sensitive"}:
+        sensitivity = "balanced"
+    if sensitivity == "conservative":
+        return {
+            "sensitivity": sensitivity,
+            "min_silhouette": 0.16,
+            "min_cluster_size": max(8, int(math.ceil(max(1, n_samples) * 0.02))),
+            "max_clusters": 6,
+        }
+    if sensitivity == "sensitive":
+        return {
+            "sensitivity": sensitivity,
+            "min_silhouette": 0.06,
+            "min_cluster_size": max(3, int(math.ceil(max(1, n_samples) * 0.005))),
+            "max_clusters": 12,
+        }
+    return {
+        "sensitivity": sensitivity,
+        "min_silhouette": 0.10,
+        "min_cluster_size": max(5, int(math.ceil(max(1, n_samples) * 0.01))),
+        "max_clusters": 8,
+    }
+
+
+def _class_analysis_cluster_search_result(
+    *,
+    job: ClassAnalysisClusterJob,
+    points: List[Dict[str, Any]],
+    embeddings: np.ndarray,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    embeddings = np.asarray(embeddings, dtype=np.float32)
+    n_samples = int(embeddings.shape[0]) if embeddings.ndim == 2 else 0
+    settings = _class_analysis_cluster_sensitivity_settings(payload.get("sensitivity"), n_samples)
+    requested_max_clusters = _coerce_int(
+        payload.get("max_clusters"),
+        int(settings["max_clusters"]),
+        minimum=2,
+    )
+    requested_max_clusters = min(16, requested_max_clusters)
+    max_clusters = min(int(requested_max_clusters), int(settings["max_clusters"]) if settings["sensitivity"] != "balanced" else requested_max_clusters)
+    min_cluster_size = _coerce_int(
+        payload.get("min_cluster_size"),
+        0,
+        minimum=0,
+    ) or int(settings["min_cluster_size"])
+    min_silhouette = float(settings["min_silhouette"])
+    summary: Dict[str, Any] = {
+        "parent_job_id": job.parent_job_id,
+        "object_count": n_samples,
+        "sensitivity": settings["sensitivity"],
+        "min_silhouette": min_silhouette,
+        "min_cluster_size": int(min_cluster_size),
+        "max_clusters": int(max_clusters),
+    }
+    if n_samples < max(4, int(min_cluster_size) * 2):
+        return {
+            "summary": {**summary, "cluster_count": 0},
+            "clusters": [],
+            "labels_by_point_id": {},
+            "candidates": [],
+            "reason": "Not enough selected-class objects for the requested cluster sensitivity.",
+        }
+    upper_k = max(2, min(int(max_clusters), n_samples - 1))
+    candidates: List[Dict[str, Any]] = []
+    best_labels: Optional[np.ndarray] = None
+    best_score = -999.0
+    best_k = 0
+    for k in range(2, upper_k + 1):
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+            _class_analysis_update(
+                job,
+                progress=0.12 + 0.70 * ((k - 2) / max(1, upper_k - 1)),
+                message=f"Testing {k} subclass clusters ...",
+            )
+        try:
+            model = MiniBatchKMeans(
+                n_clusters=k,
+                random_state=_coerce_int(payload.get("seed"), 42),
+                batch_size=max(256, k * 64),
+                n_init=5,
+            )
+            labels = model.fit_predict(embeddings)
+            counts = Counter(int(label) for label in labels.tolist())
+            smallest = min(counts.values()) if counts else 0
+            if len(counts) < 2:
+                candidates.append({"k": k, "rejected": "single_cluster"})
+                continue
+            if smallest < min_cluster_size:
+                candidates.append(
+                    {
+                        "k": k,
+                        "rejected": "cluster_too_small",
+                        "smallest_cluster": int(smallest),
+                    }
+                )
+                continue
+            sample_size = min(4000, n_samples) if n_samples > 4000 else None
+            score = float(
+                silhouette_score(
+                    embeddings,
+                    labels,
+                    metric="cosine",
+                    sample_size=sample_size,
+                    random_state=_coerce_int(payload.get("seed"), 42) if sample_size else None,
+                )
+            )
+            candidates.append({"k": k, "silhouette": score, "smallest_cluster": int(smallest)})
+            if score > best_score:
+                best_score = score
+                best_labels = np.asarray(labels, dtype=int)
+                best_k = k
+        except Exception as exc:
+            candidates.append({"k": k, "error": str(exc)})
+    if best_labels is None:
+        return {
+            "summary": {**summary, "cluster_count": 0, "best_silhouette": None},
+            "clusters": [],
+            "labels_by_point_id": {},
+            "candidates": candidates,
+            "reason": "No candidate split produced stable clusters above the minimum size.",
+        }
+    if best_score < min_silhouette:
+        return {
+            "summary": {
+                **summary,
+                "cluster_count": 0,
+                "best_k": int(best_k),
+                "best_silhouette": float(best_score),
+            },
+            "clusters": [],
+            "labels_by_point_id": {},
+            "candidates": candidates,
+            "reason": f"Best split silhouette {best_score:.2f} is below the {min_silhouette:.2f} threshold.",
+        }
+    clusters: List[Dict[str, Any]] = []
+    labels_by_point_id: Dict[str, int] = {}
+    for idx, point in enumerate(points):
+        point_id = str(point.get("point_id") or "")
+        if point_id:
+            labels_by_point_id[point_id] = int(best_labels[idx])
+    for cluster_id in sorted(set(best_labels.tolist())):
+        idxs = np.flatnonzero(best_labels == int(cluster_id))
+        if idxs.size == 0:
+            continue
+        centroid = embeddings[idxs].mean(axis=0)
+        distances = np.linalg.norm(embeddings[idxs] - centroid, axis=1)
+        medoid_idx = int(idxs[int(np.argmin(distances))])
+        cohesion = float(distances.mean()) if distances.size else 0.0
+        clusters.append(
+            {
+                "cluster_id": int(cluster_id),
+                "size": int(idxs.size),
+                "class_counts": dict(Counter(str(points[i].get("class_name") or "") for i in idxs.tolist())),
+                "medoid_point_id": str(points[medoid_idx].get("point_id") or ""),
+                "mean_embedding_distance": cohesion,
+                "silhouette": float(best_score),
+            }
+        )
+    clusters.sort(key=lambda item: (-(int(item.get("size") or 0)), int(item.get("cluster_id") or 0)))
+    return {
+        "summary": {
+            **summary,
+            "cluster_count": len(clusters),
+            "best_k": int(best_k),
+            "best_silhouette": float(best_score),
+        },
+        "clusters": clusters,
+        "labels_by_point_id": labels_by_point_id,
+        "candidates": candidates,
+        "reason": "",
+    }
+
+
+def _run_class_analysis_cluster_search_job(job: ClassAnalysisClusterJob) -> None:
+    try:
+        with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+            _class_analysis_update(job, status="running", progress=0.03, message="Loading saved embeddings ...")
+        parent_job = _get_class_analysis_job(job.parent_job_id)
+        result = get_class_analysis_result(parent_job.job_id)
+        summary = result.get("summary") if isinstance(result, dict) else {}
+        if str((summary or {}).get("analysis_scope") or "") != "selected_class":
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="cluster_search_requires_selected_class")
+        points = result.get("points") if isinstance(result, dict) else None
+        if not isinstance(points, list) or len(points) < 2:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="cluster_search_not_enough_points")
+        job_dir = _class_analysis_job_dir(parent_job.job_id, create=False)
+        embeddings_path = _safe_existing_regular_file_within_root_impl(job_dir / "embeddings.npz", job_dir)
+        if embeddings_path is None:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="embeddings_not_found")
+        with np.load(embeddings_path, allow_pickle=False) as data:
+            if "embeddings" not in data.files:
+                raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="embeddings_not_found")
+            embeddings = np.asarray(data["embeddings"], dtype=np.float32)
+        if embeddings.ndim != 2 or embeddings.shape[0] != len(points):
+            raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="embedding_point_count_mismatch")
+        with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+            _class_analysis_update(
+                job,
+                progress=0.08,
+                message=f"Searching {len(points)} selected-class embeddings ...",
+            )
+        result_payload = _class_analysis_cluster_search_result(
+            job=job,
+            points=points,
+            embeddings=embeddings,
+            payload=job.request,
+        )
+        with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+            _class_analysis_update(job, progress=0.92, message="Saving subclass cluster result ...")
+        out_dir = _class_analysis_job_dir(parent_job.job_id, create=False) / "cluster_search"
+        if _class_analysis_prepare_dir(out_dir, job_dir) is None:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="cluster_search_path_invalid")
+        result_payload["cluster_job_id"] = job.job_id
+        result_path = out_dir / f"{job.job_id}.json"
+        _class_analysis_write_json(result_path, out_dir, result_payload)
+        with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+            job.result_path = str(result_path)
+            _class_analysis_update(
+                job,
+                status="completed",
+                progress=1.0,
+                message="Subclass cluster search completed.",
+                result=result_payload,
+            )
+    except RuntimeError as exc:
+        with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+            if str(exc) == "cancelled":
+                _class_analysis_update(job, status="cancelled", progress=job.progress, message="Subclass cluster search cancelled.")
+            else:
+                _class_analysis_update(job, status="failed", message=str(exc), error=str(exc))
+    except HTTPException as exc:
+        with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+            _class_analysis_update(job, status="failed", message=str(exc.detail), error=str(exc.detail))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[class-analysis-cluster %s] job crashed", job.job_id[:8])
+        with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+            _class_analysis_update(job, status="failed", message="Subclass cluster search crashed.", error=str(exc))
+
+
+def create_class_analysis_cluster_search(parent_job_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    parent_job = _get_class_analysis_job(parent_job_id)
+    if parent_job.status != "completed":
+        raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="parent_job_not_completed")
+    result = get_class_analysis_result(parent_job.job_id)
+    summary = result.get("summary") if isinstance(result, dict) else {}
+    if str((summary or {}).get("analysis_scope") or "") != "selected_class":
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="cluster_search_requires_selected_class")
+    _prune_job_registry(CLASS_ANALYSIS_CLUSTER_JOBS, CLASS_ANALYSIS_CLUSTER_JOBS_LOCK)
+    cluster_job_id = f"cac_{uuid.uuid4().hex[:10]}"
+    request_payload = dict(payload or {})
+    request_payload["parent_job_id"] = parent_job.job_id
+    job = ClassAnalysisClusterJob(
+        job_id=cluster_job_id,
+        parent_job_id=parent_job.job_id,
+        request=request_payload,
+    )
+    with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+        _class_analysis_log(job, "Subclass cluster search queued.")
+    _register_job_and_start_thread(
+        job=job,
+        registry=CLASS_ANALYSIS_CLUSTER_JOBS,
+        lock=CLASS_ANALYSIS_CLUSTER_JOBS_LOCK,
+        target=_run_class_analysis_cluster_search_job,
+        args=(job,),
+        name=f"class-analysis-cluster-{cluster_job_id[:8]}",
+    )
+    return {"cluster_job_id": cluster_job_id, "job_id": cluster_job_id}
+
+
+def get_class_analysis_cluster_search(cluster_job_id: str) -> Dict[str, Any]:
+    with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+        job = CLASS_ANALYSIS_CLUSTER_JOBS.get(str(cluster_job_id or ""))
+    if not job:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="cluster_job_not_found")
+    return _serialize_class_analysis_cluster_job(job)
+
+
+def cancel_class_analysis_cluster_search(cluster_job_id: str) -> Dict[str, Any]:
+    with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+        job = CLASS_ANALYSIS_CLUSTER_JOBS.get(str(cluster_job_id or ""))
+        if not job:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="cluster_job_not_found")
+        if job.status in {"completed", "failed", "cancelled"}:
+            raise HTTPException(status_code=HTTP_428_PRECONDITION_REQUIRED, detail="cluster_job_not_cancellable")
+        job.cancel_event.set()
+        _class_analysis_update(job, status="cancelling", message="Cancellation requested ...")
+    return {"status": job.status}
 
 
 def get_class_analysis_thumbnail(job_id: str, point_id: str):
@@ -42045,6 +42331,9 @@ app.include_router(
         get_result_fn=get_class_analysis_result,
         get_projection_fn=get_class_analysis_projection,
         get_thumbnail_fn=get_class_analysis_thumbnail,
+        create_cluster_search_fn=create_class_analysis_cluster_search,
+        get_cluster_search_fn=get_class_analysis_cluster_search,
+        cancel_cluster_search_fn=cancel_class_analysis_cluster_search,
         cancel_job_fn=cancel_class_analysis_job,
     )
 )

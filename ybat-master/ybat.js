@@ -764,6 +764,7 @@
     let imageSelectListenerBound = false;
     let classLoadListenerBound = false;
     let classSelectListenerBound = false;
+    let classSplitControlsRefreshTimer = null;
     let bboxLoadListenersBound = false;
     let bboxSaveListenerBound = false;
     let keyboardListenersBound = false;
@@ -1562,8 +1563,11 @@
         if (!currentName) {
             return;
         }
-        const aboveCount = Math.floor((total - 1) / 2);
-        const belowCount = total - 1 - aboveCount;
+        const requestedMaxItems = Number.isFinite(options.maxVisibleItems) ? Math.floor(options.maxVisibleItems) : 7;
+        const maxVisibleItems = Math.max(3, Math.min(9, requestedMaxItems));
+        const visibleCount = Math.min(total, maxVisibleItems);
+        const aboveCount = Math.floor((visibleCount - 1) / 2);
+        const belowCount = visibleCount - 1 - aboveCount;
         const maxDistance = Math.max(1, aboveCount, belowCount);
         const items = [];
         for (let offset = -aboveCount; offset <= belowCount; offset++) {
@@ -2400,12 +2404,21 @@ const AUTOMATION_LOCKED_TABS = new Set([
         displayMode: null,
         dragMode: null,
         clusterOverlay: null,
+        clusterSensitivity: null,
+        clusterMaxClusters: null,
+        clusterMinSize: null,
+        clusterRun: null,
+        clusterProgress: null,
+        clusterProgressFill: null,
+        clusterStatus: null,
         graph: null,
         graphStatus: null,
         report: null,
         clusterPanel: null,
         clusterList: null,
         wrongPanel: null,
+        wrongQueueStatus: null,
+        wrongShuffle: null,
         wrongList: null,
         inspector: null,
         datasetAnalysisPanel: null,
@@ -2647,9 +2660,16 @@ const AUTOMATION_LOCKED_TABS = new Set([
         projectionCoordinateLoads: new Map(),
         selectedPointId: "",
         selectedClusterId: "",
+        clusterSearchActive: false,
+        clusterSearchJobId: "",
+        clusterSearchPollTimer: null,
+        clusterSearchRequestId: 0,
+        clusterSearchResult: null,
         lassoPointIds: new Set(),
         selectionRevision: 0,
         dismissedWrongIds: new Set(),
+        wrongQueueIds: [],
+        wrongQueueSignature: "",
         relabelInFlight: false,
         datasetAnalysis: null,
         flashPointId: "",
@@ -2664,6 +2684,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         plotRenderToken: 0,
         lastPlotViewKey: "",
     };
+    const CLASS_SPLIT_MAX_PLOT_POINTS = 50000;
     let qwenClassOverride = false;
     let qwenAdvancedVisible = false;
     let qwenStatusRefreshRequestId = 0;
@@ -23877,8 +23898,14 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         if (currentClass && qwenElements.classSelect.value !== currentClass) {
-            const options = Array.from(qwenElements.classSelect.options).map((opt) => opt.value);
-            if (options.includes(currentClass)) {
+            let hasClass = false;
+            for (const option of qwenElements.classSelect.options || []) {
+                if (option.value === currentClass) {
+                    hasClass = true;
+                    break;
+                }
+            }
+            if (hasClass) {
                 qwenElements.classSelect.value = currentClass;
             }
         }
@@ -23927,6 +23954,24 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         refreshSam3TextCascadeClassOptions({ preserveSelection });
         renderSam3CascadeSteps();
+        updateSam3TextWorkflow();
+    }
+
+    function syncSam3ClassToCurrent() {
+        if (!sam3TextElements.classSelect || !currentClass || sam3TextElements.classSelect.value === currentClass) {
+            return;
+        }
+        let hasClass = false;
+        for (const option of sam3TextElements.classSelect.options || []) {
+            if (option.value === currentClass) {
+                hasClass = true;
+                break;
+            }
+        }
+        if (!hasClass) {
+            return;
+        }
+        sam3TextElements.classSelect.value = currentClass;
         updateSam3TextWorkflow();
     }
 
@@ -38947,6 +38992,19 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+    function scheduleClassSplitControlsRefresh({ delay = 140 } = {}) {
+        if (!classSplitState.initialized) {
+            return;
+        }
+        if (classSplitControlsRefreshTimer) {
+            window.clearTimeout(classSplitControlsRefreshTimer);
+        }
+        classSplitControlsRefreshTimer = window.setTimeout(() => {
+            classSplitControlsRefreshTimer = null;
+            refreshClassSplitControls();
+        }, Math.max(0, Number(delay) || 0));
+    }
+
     async function loadClassSplitClipBackbones() {
         try {
             const resp = await fetch(`${API_ROOT}/clip/backbones`);
@@ -39339,7 +39397,7 @@ async function cancelRfDetrTrainingJobRequest() {
 	                || (!classSplitState.currentJobId && !classSplitState.activeUploadSessionId && !classSplitState.activeUploadAbortController)
 	        );
 	        setButtonDisabled(classSplitElements.rerunButton, classSplitState.active || !classSplitState.lastRequest);
-	        refreshClassSplitClusterOverlayControl();
+	        refreshClassSplitClusterControls();
 	        refreshClassSplitDatasetAnalysisControls();
 	    }
 
@@ -39427,8 +39485,12 @@ async function cancelRfDetrTrainingJobRequest() {
             projectionCoordinates: { ...(classSplitState.projectionCoordinates || {}) },
             selectedPointId: classSplitState.selectedPointId,
             selectedClusterId: classSplitState.selectedClusterId,
+            clusterSearchResult: classSplitState.clusterSearchResult,
+            clusterSearchJobId: classSplitState.clusterSearchJobId,
             lassoPointIds: new Set(classSplitState.lassoPointIds || []),
             dismissedWrongIds: new Set(classSplitState.dismissedWrongIds || []),
+            wrongQueueIds: Array.from(classSplitState.wrongQueueIds || []),
+            wrongQueueSignature: classSplitState.wrongQueueSignature || "",
             lastRequest: classSplitState.lastRequest ? { ...classSplitState.lastRequest } : null,
             datasetAnalysis: classSplitState.datasetAnalysis,
         };
@@ -39446,8 +39508,13 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitState.projectionCoordinateLoads = new Map();
         classSplitState.selectedPointId = snapshot.selectedPointId || "";
         classSplitState.selectedClusterId = snapshot.selectedClusterId || "";
+        classSplitState.clusterSearchActive = false;
+        classSplitState.clusterSearchResult = snapshot.clusterSearchResult || null;
+        classSplitState.clusterSearchJobId = snapshot.clusterSearchJobId || "";
         classSplitState.lassoPointIds = new Set(snapshot.lassoPointIds || []);
         classSplitState.dismissedWrongIds = new Set(snapshot.dismissedWrongIds || []);
+        classSplitState.wrongQueueIds = Array.isArray(snapshot.wrongQueueIds) ? [...snapshot.wrongQueueIds] : [];
+        classSplitState.wrongQueueSignature = snapshot.wrongQueueSignature || "";
         classSplitState.lastRequest = snapshot.lastRequest ? { ...snapshot.lastRequest } : null;
         classSplitState.datasetAnalysis = snapshot.datasetAnalysis || null;
         invalidateClassSplitPointImageLookup();
@@ -39466,15 +39533,22 @@ async function cancelRfDetrTrainingJobRequest() {
                 : buildClassSplitRequest();
             await ensureClassSplitSnapshotClean("Class Split analysis");
             previousReviewState = snapshotClassSplitReviewState();
+            stopClassSplitClusterPoll();
+            classSplitState.clusterSearchRequestId += 1;
             classSplitState.active = true;
             classSplitState.currentJobId = "";
             classSplitState.result = null;
             classSplitState.pointsById = new Map();
             classSplitState.selectedPointId = "";
             classSplitState.selectedClusterId = "";
+            classSplitState.clusterSearchActive = false;
+            classSplitState.clusterSearchJobId = "";
+            classSplitState.clusterSearchResult = null;
             classSplitState.lassoPointIds = new Set();
             classSplitState.selectionRevision += 1;
             classSplitState.dismissedWrongIds = new Set();
+            classSplitState.wrongQueueIds = [];
+            classSplitState.wrongQueueSignature = "";
             invalidateClassSplitPointImageLookup();
             clearClassSplitDatasetAnalysis({ render: true });
             stopClassSplitPlotFlash();
@@ -39679,6 +39753,8 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function applyClassSplitResultPayload(resultPayload, jobId = "") {
         const result = resultPayload && typeof resultPayload === "object" ? resultPayload : {};
+        stopClassSplitClusterPoll();
+        classSplitState.clusterSearchRequestId += 1;
         if (jobId) {
             classSplitState.currentJobId = String(jobId || "").trim();
         }
@@ -39720,9 +39796,14 @@ async function cancelRfDetrTrainingJobRequest() {
         });
         classSplitState.selectedPointId = "";
         classSplitState.selectedClusterId = "";
+        classSplitState.clusterSearchActive = false;
+        classSplitState.clusterSearchJobId = "";
+        classSplitState.clusterSearchResult = null;
         classSplitState.lassoPointIds = new Set();
         classSplitState.selectionRevision += 1;
         classSplitState.dismissedWrongIds = new Set();
+        classSplitState.wrongQueueIds = [];
+        classSplitState.wrongQueueSignature = "";
         clearClassSplitDatasetAnalysis();
         stopClassSplitPlotFlash();
         renderClassSplitResult();
@@ -39754,6 +39835,122 @@ async function cancelRfDetrTrainingJobRequest() {
             return points.filter((point) => !!point.is_wrong_class_candidate);
         }
         return points;
+    }
+
+    function classSplitPointMustStayPlotted(point) {
+        const pointId = String(point?.point_id || "");
+        if (!pointId) {
+            return false;
+        }
+        if (
+            pointId === classSplitState.selectedPointId
+            || pointId === classSplitState.flashPointId
+            || classSplitState.lassoPointIds?.has(pointId)
+        ) {
+            return true;
+        }
+        return !!point?.is_wrong_class_candidate;
+    }
+
+    function sampleClassSplitGraphPoints(points) {
+        const source = Array.isArray(points) ? points : [];
+        const cap = CLASS_SPLIT_MAX_PLOT_POINTS;
+        if (source.length <= cap) {
+            return { points: source, capped: false, requestedCount: source.length, cap };
+        }
+        const forcedIds = new Set();
+        const forcedObjects = new Set();
+        const groups = new Map();
+        source.forEach((point) => {
+            const pointId = String(point?.point_id || "");
+            if (classSplitPointMustStayPlotted(point)) {
+                if (pointId) {
+                    forcedIds.add(pointId);
+                } else {
+                    forcedObjects.add(point);
+                }
+                return;
+            }
+            const className = String(point?.class_name || "").trim() || "unknown";
+            if (!groups.has(className)) {
+                groups.set(className, []);
+            }
+            groups.get(className).push(point);
+        });
+        const remainingSlots = Math.max(0, cap - forcedIds.size - forcedObjects.size);
+        const keepIds = new Set(forcedIds);
+        const keepObjects = new Set(forcedObjects);
+        const groupEntries = Array.from(groups.entries()).filter(([, group]) => group.length > 0);
+        const nonForcedCount = groupEntries.reduce((sum, [, group]) => sum + group.length, 0);
+        if (remainingSlots > 0 && nonForcedCount > 0 && groupEntries.length > 0) {
+            const quotas = groupEntries.map(([className, group]) => {
+                const ideal = (group.length / nonForcedCount) * remainingSlots;
+                const minimumQuota = remainingSlots >= groupEntries.length ? 1 : 0;
+                return {
+                    className,
+                    group,
+                    quota: Math.min(group.length, Math.max(minimumQuota, Math.floor(ideal))),
+                    remainder: ideal - Math.floor(ideal),
+                };
+            });
+            let quotaTotal = quotas.reduce((sum, entry) => sum + entry.quota, 0);
+            quotas
+                .slice()
+                .sort((a, b) => b.remainder - a.remainder || b.group.length - a.group.length)
+                .forEach((entry) => {
+                    if (quotaTotal >= remainingSlots || entry.quota >= entry.group.length) {
+                        return;
+                    }
+                    entry.quota += 1;
+                    quotaTotal += 1;
+                });
+            quotas
+                .slice()
+                .sort((a, b) => b.quota - a.quota || a.group.length - b.group.length)
+                .forEach((entry) => {
+                    while (quotaTotal > remainingSlots && entry.quota > 0) {
+                        entry.quota -= 1;
+                        quotaTotal -= 1;
+                    }
+                });
+            quotas.forEach((entry) => {
+                const group = entry.group;
+                const quota = Math.min(group.length, Math.max(0, entry.quota));
+                if (quota <= 0) {
+                    return;
+                }
+                if (quota >= group.length) {
+                    group.forEach((point) => {
+                        const pointId = String(point?.point_id || "");
+                        if (pointId) {
+                            keepIds.add(pointId);
+                        } else {
+                            keepObjects.add(point);
+                        }
+                    });
+                    return;
+                }
+                const stride = group.length / quota;
+                for (let index = 0; index < quota; index += 1) {
+                    const sampled = group[Math.min(group.length - 1, Math.floor((index + 0.5) * stride))];
+                    const pointId = String(sampled?.point_id || "");
+                    if (pointId) {
+                        keepIds.add(pointId);
+                    } else {
+                        keepObjects.add(sampled);
+                    }
+                }
+            });
+        }
+        return {
+            points: source.filter((point) => {
+                const pointId = String(point?.point_id || "");
+                return (pointId && keepIds.has(pointId)) || keepObjects.has(point);
+            }),
+            capped: true,
+            requestedCount: source.length,
+            cap,
+        };
     }
 
     function classSplitPointMatchesActiveGraphView(point) {
@@ -39794,7 +39991,7 @@ async function cancelRfDetrTrainingJobRequest() {
     function refreshClassSplitFilteredReviewUi({ renderPlot = true } = {}) {
         pruneClassSplitSelectionsForActiveGraphView();
         refreshClassSplitProjectionHint();
-        refreshClassSplitClusterOverlayControl();
+        refreshClassSplitClusterControls();
         renderClassSplitClusterList();
         renderClassSplitWrongList();
         renderClassSplitInspector();
@@ -40163,23 +40360,15 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function classSplitPointClusterKey(point) {
-        if (!classSplitClusterProposalsAllowed()) {
+        if (!point || getClassSplitResultScope() !== "selected_class") {
             return "";
         }
-        if (getClassSplitResultScope() === "all_classes") {
-            const contextClass = classSplitClusterContextClass();
-            if (!contextClass || String(point?.class_name || "") !== contextClass) {
-                return "";
-            }
-            if (point?.class_cluster_id === null || point?.class_cluster_id === undefined || point?.class_cluster_id === "") {
-                return "";
-            }
-            if (!(Number(point?.class_cluster_size) > 0)) {
-                return "";
-            }
-            return classSplitClusterKey(point.class_cluster_id);
+        const labels = classSplitState.clusterSearchResult?.labels_by_point_id || {};
+        const pointId = String(point.point_id || "");
+        if (!pointId || !Object.prototype.hasOwnProperty.call(labels, pointId)) {
+            return "";
         }
-        const clusterKey = classSplitClusterKey(point?.cluster_id);
+        const clusterKey = classSplitClusterKey(labels[pointId]);
         return clusterKey && getClassSplitBackendClusterById(clusterKey) ? clusterKey : "";
     }
 
@@ -40188,9 +40377,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!clusterKey) {
             return "";
         }
-        return getClassSplitResultScope() === "all_classes"
-            ? `Subclass cluster ${clusterKey}`
-            : `Cluster ${clusterKey}`;
+        return `Subclass cluster ${clusterKey}`;
     }
 
     function getClassSplitResultScope() {
@@ -40216,53 +40403,84 @@ async function cancelRfDetrTrainingJobRequest() {
         return String(classSplitElements.filterClass?.value || "").trim();
     }
 
+    function classSplitHasSelectedClassResult() {
+        return !!classSplitState.result && getClassSplitResultScope() === "selected_class";
+    }
+
+    function classSplitClusterSearchReady() {
+        return classSplitHasSelectedClassResult()
+            && !!classSplitState.clusterSearchResult
+            && Array.isArray(classSplitState.clusterSearchResult.clusters);
+    }
+
     function classSplitClusterProposalsAllowed() {
-        const scope = getClassSplitResultScope();
-        return scope === "selected_class" || !!classSplitClusterContextClass();
+        return classSplitClusterSearchReady()
+            && (classSplitState.clusterSearchResult.clusters || []).length > 0;
     }
 
     function classSplitClusterHullsAllowed() {
-        if (!classSplitClusterProposalsAllowed()) {
-            return false;
-        }
-        return getClassSplitVisibleClusterSummaries(getClassSplitGraphPoints())
-            .some((summary) => classSplitConvexHull(summary.points).length >= 2);
+        return false;
     }
 
-    function refreshClassSplitClusterOverlayControl() {
+    function setClassSplitClusterStatus(message, variant = "") {
+        if (classSplitElements.clusterStatus) {
+            classSplitElements.clusterStatus.textContent = message || "";
+            classSplitElements.clusterStatus.classList.remove("warn", "error", "success", "info");
+            if (variant) {
+                classSplitElements.clusterStatus.classList.add(variant);
+            }
+        }
+    }
+
+    function renderClassSplitClusterProgress(job = null) {
+        const active = !!classSplitState.clusterSearchActive
+            || (job && !["completed", "failed", "cancelled"].includes(String(job.status || "")));
+        if (classSplitElements.clusterProgress) {
+            classSplitElements.clusterProgress.hidden = !active && !job;
+        }
+        const progress = Math.max(0, Math.min(1, Number(job?.progress) || 0));
+        if (classSplitElements.clusterProgressFill) {
+            classSplitElements.clusterProgressFill.style.width = `${Math.round(progress * 100)}%`;
+        }
+        if (classSplitElements.clusterStatus) {
+            const pct = job ? `${Math.round(progress * 100)}%` : "";
+            const message = String(job?.message || "").trim();
+            const text = [pct, message].filter(Boolean).join(" • ");
+            if (text) {
+                setClassSplitClusterStatus(text);
+            }
+        }
+    }
+
+    function refreshClassSplitClusterControls() {
+        const isSelectedClassResult = classSplitHasSelectedClassResult();
+        const disabled = classSplitState.active || classSplitState.clusterSearchActive || !isSelectedClassResult || !classSplitState.currentJobId;
+        [
+            classSplitElements.clusterSensitivity,
+            classSplitElements.clusterMaxClusters,
+            classSplitElements.clusterMinSize,
+        ].forEach((control) => {
+            if (control) {
+                control.disabled = disabled;
+            }
+        });
+        setButtonDisabled(classSplitElements.clusterRun, disabled);
         const control = classSplitElements.clusterOverlay;
         if (!control) {
             return;
         }
-        const allowed = classSplitClusterHullsAllowed();
-        if (!allowed) {
-            if (control.dataset.disabledPreviousChecked === undefined) {
-                control.dataset.disabledPreviousChecked = control.checked ? "1" : "0";
-            }
-            control.checked = false;
-        } else if (control.dataset.disabledPreviousChecked !== undefined) {
-            control.checked = control.dataset.disabledPreviousChecked === "1";
-            delete control.dataset.disabledPreviousChecked;
-        }
-        control.disabled = classSplitState.active || !allowed;
+        control.checked = false;
+        control.disabled = true;
         const label = control.closest(".class-split-toggle");
         if (label) {
-            const disabledReason = classSplitClusterProposalsAllowed()
-                ? "Cluster hulls need at least two visible clustered points. Switch Display back to all graph objects or choose another class filter."
-                : "Choose a class filter first. Cluster hulls are only drawn for within-class subclass review.";
-            label.classList.toggle("class-split-toggle--disabled", !allowed);
-            label.title = allowed
-                ? "Draw translucent outlines around subclass clusters inside the selected class."
-                : disabledReason;
+            label.classList.add("class-split-toggle--disabled");
+            label.title = "Cluster hulls are disabled. Use selected-class subclass cluster search below the plot.";
         }
     }
 
     function getClassSplitBackendClusterById(clusterKey) {
-        if (getClassSplitResultScope() === "all_classes") {
-            return null;
-        }
-        const clusters = Array.isArray(classSplitState.result?.clusters?.clusters)
-            ? classSplitState.result.clusters.clusters
+        const clusters = Array.isArray(classSplitState.clusterSearchResult?.clusters)
+            ? classSplitState.clusterSearchResult.clusters
             : [];
         return clusters.find((cluster) => classSplitClusterKey(cluster?.cluster_id) === clusterKey) || null;
     }
@@ -40278,7 +40496,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 const backendCluster = getClassSplitBackendClusterById(clusterKey);
                 groups.set(clusterKey, {
                     clusterKey,
-                    clusterId: getClassSplitResultScope() === "all_classes" ? point.class_cluster_id : point.cluster_id,
+                    clusterId: clusterKey,
                     backendCluster,
                     points: [],
                     classCounts: new Map(),
@@ -40370,42 +40588,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function buildClassSplitClusterHullTraces(points) {
-        if (!classSplitClusterHullsAllowed()) {
-            return [];
-        }
-        const selectedKey = String(classSplitState.selectedClusterId || "");
-        const showAll = !!classSplitElements.clusterOverlay?.checked;
-        if (!showAll && !selectedKey) {
-            return [];
-        }
-        return getClassSplitVisibleClusterSummaries(points)
-            .filter((summary) => showAll || summary.clusterKey === selectedKey)
-            .map((summary) => {
-                const hull = classSplitConvexHull(summary.points);
-                if (hull.length < 2) {
-                    return null;
-                }
-                const selected = summary.clusterKey === selectedKey;
-                const color = classSplitClusterColor(summary.clusterId);
-                const closedHull = hull.length >= 3 ? hull.concat([hull[0]]) : hull;
-                return {
-                    type: "scatter",
-                    mode: "lines",
-                    name: `Cluster ${summary.clusterKey}`,
-                    x: closedHull.map((point) => point.x),
-                    y: closedHull.map((point) => point.y),
-                    hoverinfo: "skip",
-                    showlegend: false,
-                    fill: hull.length >= 3 ? "toself" : "none",
-                    fillcolor: withAlpha(color, selected ? 0.18 : 0.08),
-                    line: {
-                        color: withAlpha(color, selected ? 0.95 : 0.42),
-                        width: selected ? 3 : 1.4,
-                        dash: selected ? "solid" : "dot",
-                    },
-                };
-            })
-            .filter(Boolean);
+        return [];
     }
 
     function focusClassSplitPlotOnCluster(clusterKey, { flash = true } = {}) {
@@ -40471,39 +40654,54 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    function classSplitAllClassResultNeedsPerClassClusterRerun(points = getClassSplitFilteredPoints()) {
-        if (getClassSplitResultScope() !== "all_classes" || !classSplitClusterContextClass()) {
-            return false;
-        }
-        return points.some((point) => point && !Object.prototype.hasOwnProperty.call(point, "class_cluster_id"));
-    }
-
     function renderClassSplitClusterList() {
         const listEl = classSplitElements.clusterList;
         if (!listEl) {
             return;
         }
         if (!classSplitState.result) {
-            listEl.innerHTML = `<div class="training-help">Run analysis to review cluster proposals.</div>`;
+            listEl.innerHTML = `<div class="training-help">Run selected-class analysis before searching for subclass clusters.</div>`;
+            renderClassSplitClusterProgress();
+            refreshClassSplitClusterControls();
             return;
         }
-        if (!classSplitClusterProposalsAllowed()) {
-            listEl.innerHTML = `<div class="training-help">Choose a class filter to inspect subclass clusters. Global all-class clusters are hidden because they mix labels and are not useful for subclass review.</div>`;
+        if (getClassSplitResultScope() !== "selected_class") {
+            listEl.innerHTML = `<div class="training-help">Subclass clustering is disabled for all-class graphs. Rerun with Scope = Selected class to search for subclasses within one class.</div>`;
+            setClassSplitClusterStatus("All-class cluster search disabled.", "warn");
+            renderClassSplitClusterProgress();
+            refreshClassSplitClusterControls();
+            return;
+        }
+        if (classSplitState.clusterSearchActive) {
+            listEl.innerHTML = `<div class="training-help">Searching ${escapeHtml(classSplitClusterContextClass() || "selected class")} embeddings for subclass islands ...</div>`;
+            refreshClassSplitClusterControls();
+            return;
+        }
+        if (!classSplitState.clusterSearchResult) {
+            listEl.innerHTML = `<div class="training-help">Click Find subclass clusters to search the selected class without rerunning embeddings.</div>`;
+            setClassSplitClusterStatus("Ready for selected-class cluster search.", "info");
+            renderClassSplitClusterProgress();
+            refreshClassSplitClusterControls();
             return;
         }
         const visiblePoints = getClassSplitFilteredPoints();
-        if (classSplitAllClassResultNeedsPerClassClusterRerun(visiblePoints)) {
-            listEl.innerHTML = `<div class="training-help">This all-class result was computed before per-class subclass clusters were saved. Rerun Class Split to review subclass cluster proposals for ${escapeHtml(classSplitClusterContextClass())}.</div>`;
-            return;
-        }
         const summaries = getClassSplitVisibleClusterSummaries(visiblePoints);
         if (!summaries.length) {
             const contextClass = classSplitClusterContextClass();
-            listEl.innerHTML = `<div class="training-help">${escapeHtml(contextClass ? `No subclass clusters were found for ${contextClass}.` : "No cluster proposals for the current filter.")}</div>`;
+            const reason = String(classSplitState.clusterSearchResult.reason || "No clean subclass clusters were found.").trim();
+            listEl.innerHTML = `<div class="training-help">${escapeHtml(contextClass ? `${reason} (${contextClass})` : reason)}</div>`;
+            refreshClassSplitClusterControls();
             return;
         }
+        const classNames = (Array.isArray(loadedClassList) ? loadedClassList : [])
+            .map((className) => String(className || "").trim())
+            .filter(Boolean);
+        const selectOptions = [
+            `<option value="">Choose target class</option>`,
+            ...classNames.map((className) => `<option value="${escapeHtml(className)}">${escapeHtml(className)}</option>`),
+        ].join("");
         listEl.innerHTML = [
-            `<div class="training-help">Subclass clusters for ${escapeHtml(classSplitClusterContextClass() || "selected class")}. Select one to bulk-review its points.</div>`,
+            `<div class="training-help">Subclass clusters for ${escapeHtml(classSplitClusterContextClass() || "selected class")}. Select a cluster to highlight it in the plot, then reassign if it is a real subclass.</div>`,
             summaries.map((summary) => {
                 const medoid = summary.medoidPoint;
                 const thumbUrl = medoid ? getClassSplitThumbnailUrl(medoid) : "";
@@ -40511,6 +40709,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 const mix = formatClassSplitClusterMix(summary);
                 const purityPct = Math.round(summary.purity * 100);
                 const totalSuffix = summary.totalSize !== summary.size ? ` / ${summary.totalSize} total` : "";
+                const silhouette = Number(summary.backendCluster?.silhouette);
+                const silhouetteText = Number.isFinite(silhouette) ? ` • silhouette ${silhouette.toFixed(2)}` : "";
                 return [
                     `<div class="class-split-cluster-item${selectedClass}" data-cluster-id="${escapeHtml(summary.clusterKey)}">`,
                     thumbUrl
@@ -40518,9 +40718,11 @@ async function cancelRfDetrTrainingJobRequest() {
                         : `<div class="class-split-cluster-item__thumb" aria-hidden="true"></div>`,
                     `<div class="class-split-cluster-item__body">`,
                     `<strong>Cluster ${escapeHtml(summary.clusterKey)} • ${escapeHtml(summary.size)} object${summary.size === 1 ? "" : "s"}${escapeHtml(totalSuffix)}</strong>`,
-                    `<span>${escapeHtml(mix)} • purity ${purityPct}% • mean outlier ${summary.meanOutlierScore.toFixed(2)}</span>`,
+                    `<span>${escapeHtml(mix)} • purity ${purityPct}% • mean outlier ${summary.meanOutlierScore.toFixed(2)}${escapeHtml(silhouetteText)}</span>`,
                     `<div class="class-split-cluster-item__actions">`,
                     `<button type="button" class="training-button secondary" data-action="select-cluster" data-cluster-id="${escapeHtml(summary.clusterKey)}">Select cluster</button>`,
+                    `<select data-action="target-cluster-class" data-cluster-id="${escapeHtml(summary.clusterKey)}">${selectOptions}</select>`,
+                    `<button type="button" class="training-button" data-action="reassign-cluster" data-cluster-id="${escapeHtml(summary.clusterKey)}">Change cluster class</button>`,
                     `</div>`,
                     `</div>`,
                     `</div>`,
@@ -40541,6 +40743,173 @@ async function cancelRfDetrTrainingJobRequest() {
                 selectClassSplitCluster(button.getAttribute("data-cluster-id") || "");
             });
         });
+        listEl.querySelectorAll('[data-action="reassign-cluster"]').forEach((button) => {
+            button.addEventListener("click", (event) => {
+                event.stopPropagation();
+                const clusterKey = button.getAttribute("data-cluster-id") || "";
+                selectClassSplitCluster(clusterKey, { focusPlot: true });
+                const row = button.closest(".class-split-cluster-item");
+                const select = row?.querySelector('[data-action="target-cluster-class"]');
+                const targetClass = select instanceof HTMLSelectElement ? select.value : "";
+                changeClassSplitSelectedPointsClass(targetClass).catch((error) => {
+                    console.error("Class Split cluster relabel failed", error);
+                    setSamStatus(`Cluster class change failed: ${error.message || error}`, { variant: "error", duration: 5000 });
+                });
+            });
+        });
+        refreshClassSplitClusterControls();
+    }
+
+    function stopClassSplitClusterPoll() {
+        if (classSplitState.clusterSearchPollTimer) {
+            window.clearTimeout(classSplitState.clusterSearchPollTimer);
+            classSplitState.clusterSearchPollTimer = null;
+        }
+    }
+
+    function buildClassSplitClusterSearchRequest() {
+        const sensitivity = String(classSplitElements.clusterSensitivity?.value || "balanced").trim().toLowerCase();
+        const maxClustersRaw = parseInt(classSplitElements.clusterMaxClusters?.value || "8", 10);
+        const minSizeRaw = parseInt(classSplitElements.clusterMinSize?.value || "0", 10);
+        return {
+            sensitivity: ["conservative", "balanced", "sensitive"].includes(sensitivity) ? sensitivity : "balanced",
+            max_clusters: Number.isFinite(maxClustersRaw) ? Math.max(2, Math.min(16, maxClustersRaw)) : 8,
+            min_cluster_size: Number.isFinite(minSizeRaw) ? Math.max(0, Math.min(1000000, minSizeRaw)) : 0,
+        };
+    }
+
+    function applyClassSplitClusterSearchResult(resultPayload, clusterJobId = "") {
+        const result = resultPayload && typeof resultPayload === "object" ? resultPayload : {};
+        const labels = result.labels_by_point_id && typeof result.labels_by_point_id === "object"
+            ? result.labels_by_point_id
+            : {};
+        (Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : []).forEach((point) => {
+            const pointId = String(point?.point_id || "");
+            const clusterKey = pointId && Object.prototype.hasOwnProperty.call(labels, pointId)
+                ? classSplitClusterKey(labels[pointId])
+                : "";
+            point._subclass_cluster_id = clusterKey;
+        });
+        classSplitState.clusterSearchResult = result;
+        classSplitState.clusterSearchJobId = String(clusterJobId || result.cluster_job_id || "");
+        classSplitState.selectedClusterId = "";
+        if (classSplitState.lassoPointIds?.size) {
+            classSplitState.selectionRevision += 1;
+        }
+        classSplitState.lassoPointIds = new Set();
+        renderClassSplitClusterList();
+        renderClassSplitReport();
+        renderClassSplitBulkPanel();
+        renderClassSplitPlot();
+        const count = Array.isArray(result.clusters) ? result.clusters.length : 0;
+        setClassSplitClusterStatus(
+            count ? `Found ${count} subclass cluster${count === 1 ? "" : "s"}.` : (result.reason || "No clean subclass clusters were found."),
+            count ? "success" : "warn",
+        );
+    }
+
+    async function startClassSplitClusterSearch() {
+        if (classSplitState.clusterSearchActive) {
+            return;
+        }
+        if (!classSplitHasSelectedClassResult()) {
+            setClassSplitClusterStatus("Run selected-class analysis before searching for subclass clusters.", "warn");
+            return;
+        }
+        const parentJobId = String(classSplitState.currentJobId || "").trim();
+        if (!parentJobId) {
+            setClassSplitClusterStatus("Cluster search needs a completed backend analysis job.", "warn");
+            return;
+        }
+        try {
+            stopClassSplitClusterPoll();
+            classSplitState.clusterSearchActive = true;
+            classSplitState.clusterSearchJobId = "";
+            classSplitState.clusterSearchResult = null;
+            classSplitState.selectedClusterId = "";
+            if (classSplitState.lassoPointIds?.size) {
+                classSplitState.selectionRevision += 1;
+            }
+            classSplitState.lassoPointIds = new Set();
+            renderClassSplitClusterProgress({ progress: 0, message: "Queueing subclass cluster search ..." });
+            setClassSplitClusterStatus("Queueing subclass cluster search ...", "info");
+            renderClassSplitClusterList();
+            refreshClassSplitControls();
+            const resp = await fetch(`${API_ROOT}/class_analysis/jobs/${encodeURIComponent(parentJobId)}/cluster_search`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(buildClassSplitClusterSearchRequest()),
+            });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            const payload = parseJsonObjectSafe(detail, {});
+            const clusterJobId = String(payload.cluster_job_id || payload.job_id || "").trim();
+            if (!clusterJobId) {
+                throw new Error("Cluster search did not return a job id.");
+            }
+            classSplitState.clusterSearchJobId = clusterJobId;
+            pollClassSplitClusterSearch(clusterJobId);
+        } catch (error) {
+            console.error("Class Split subclass cluster search failed to start", error);
+            classSplitState.clusterSearchActive = false;
+            renderClassSplitClusterProgress({ progress: 1, message: `Failed: ${error.message || error}` });
+            setClassSplitClusterStatus(`Failed: ${error.message || error}`, "error");
+            renderClassSplitClusterList();
+            refreshClassSplitControls();
+        }
+    }
+
+    function pollClassSplitClusterSearch(clusterJobId) {
+        stopClassSplitClusterPoll();
+        const requestId = ++classSplitState.clusterSearchRequestId;
+        const run = async () => {
+            try {
+                const resp = await fetch(`${API_ROOT}/class_analysis/cluster_search/${encodeURIComponent(clusterJobId)}`);
+                const detail = await resp.text();
+                if (!resp.ok) {
+                    throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+                }
+                if (requestId !== classSplitState.clusterSearchRequestId) {
+                    return;
+                }
+                const job = parseJsonObjectSafe(detail, {});
+                renderClassSplitClusterProgress(job);
+                const status = String(job.status || "").toLowerCase();
+                if (status === "completed") {
+                    classSplitState.clusterSearchActive = false;
+                    applyClassSplitClusterSearchResult(job.result || {}, clusterJobId);
+                    refreshClassSplitControls();
+                    return;
+                }
+                if (status === "failed") {
+                    classSplitState.clusterSearchActive = false;
+                    setClassSplitClusterStatus(`Failed: ${job.error || job.message || "unknown error"}`, "error");
+                    renderClassSplitClusterList();
+                    refreshClassSplitControls();
+                    return;
+                }
+                if (status === "cancelled") {
+                    classSplitState.clusterSearchActive = false;
+                    setClassSplitClusterStatus("Cluster search cancelled.", "warn");
+                    renderClassSplitClusterList();
+                    refreshClassSplitControls();
+                    return;
+                }
+                classSplitState.clusterSearchPollTimer = window.setTimeout(run, 900);
+            } catch (error) {
+                console.error("Class Split subclass cluster poll failed", error);
+                if (requestId !== classSplitState.clusterSearchRequestId) {
+                    return;
+                }
+                classSplitState.clusterSearchActive = false;
+                setClassSplitClusterStatus(`Poll failed: ${error.message || error}`, "error");
+                renderClassSplitClusterList();
+                refreshClassSplitControls();
+            }
+        };
+        run();
     }
 
     function classSplitShortHoverText(value, maxLength = 52) {
@@ -40728,12 +41097,28 @@ async function cancelRfDetrTrainingJobRequest() {
         const selectedPointIds = classSplitState.lassoPointIds || new Set();
         const hasAnySelection = selectedPointIds.size > 0;
         const selectedIndices = [];
-        const pointIds = filtered.map((point, index) => {
+        const pointIds = [];
+        const xs = [];
+        const ys = [];
+        const hoverText = [];
+        const markerSizes = [];
+        const markerColors = [];
+        const markerLineColors = [];
+        const markerLineWidths = [];
+        filtered.forEach((point, index) => {
             const pointId = String(point.point_id || "");
             if (selectedPointIds.has(pointId)) {
                 selectedIndices.push(index);
             }
-            return pointId;
+            const markerLine = getClassSplitPointMarkerLine(point, { suspiciousTrace });
+            pointIds.push(pointId);
+            xs.push(getClassSplitPointProjection(point, 0));
+            ys.push(getClassSplitPointProjection(point, 1));
+            hoverText.push(formatClassSplitPointHoverText(point));
+            markerSizes.push(getClassSplitPointMarkerSize(point, { suspiciousTrace }));
+            markerColors.push(options.color || getClassSplitPointColor(point));
+            markerLineColors.push(markerLine.color);
+            markerLineWidths.push(markerLine.width);
         });
         return {
             type: "scattergl",
@@ -40741,19 +41126,19 @@ async function cancelRfDetrTrainingJobRequest() {
             name,
             legendgroup: options.legendgroup || name,
             showlegend: options.showlegend !== false,
-            x: filtered.map((point) => getClassSplitPointProjection(point, 0)),
-            y: filtered.map((point) => getClassSplitPointProjection(point, 1)),
+            x: xs,
+            y: ys,
             customdata: pointIds,
             selectedpoints: hasAnySelection ? selectedIndices : null,
-            text: filtered.map((point) => formatClassSplitPointHoverText(point)),
+            text: hoverText,
             hovertemplate: "%{text}<extra></extra>",
             marker: {
-                size: filtered.map((point) => getClassSplitPointMarkerSize(point, { suspiciousTrace })),
-                color: filtered.map((point) => options.color || getClassSplitPointColor(point)),
+                size: markerSizes,
+                color: markerColors,
                 opacity: options.opacity ?? (suspiciousTrace ? 0.95 : 0.78),
                 line: {
-                    color: filtered.map((point) => getClassSplitPointMarkerLine(point, { suspiciousTrace }).color),
-                    width: filtered.map((point) => getClassSplitPointMarkerLine(point, { suspiciousTrace }).width),
+                    color: markerLineColors,
+                    width: markerLineWidths,
                 },
             },
             selected: {
@@ -40852,7 +41237,7 @@ async function cancelRfDetrTrainingJobRequest() {
         renderClassSplitBulkPanel();
         renderClassSplitClusterList();
         renderClassSplitWrongList();
-        refreshClassSplitClusterOverlayControl();
+        refreshClassSplitClusterControls();
         if (render) {
             renderClassSplitPlot();
         }
@@ -41243,7 +41628,9 @@ async function cancelRfDetrTrainingJobRequest() {
     function getClassSplitGraphViewModel() {
         const allPoints = Array.isArray(classSplitState.result?.points) ? classSplitState.result.points : [];
         const filteredPoints = getClassSplitFilteredPoints();
-        const points = getClassSplitGraphPoints();
+        const requestedPoints = getClassSplitGraphPoints();
+        const plotSample = sampleClassSplitGraphPoints(requestedPoints);
+        const points = plotSample.points;
         const classNames = getClassSplitVisibleClassNames(points);
         const projectionChoice = getClassSplitProjectionChoice();
         const displayMode = String(classSplitElements.displayMode?.value || "all");
@@ -41252,7 +41639,10 @@ async function cancelRfDetrTrainingJobRequest() {
         return {
             allPoints,
             filteredPoints,
+            requestedPoints,
             points,
+            plotCapped: plotSample.capped,
+            plotCap: plotSample.cap,
             classNames,
             projectionChoice,
             displayMode,
@@ -41284,7 +41674,12 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const parts = [];
-        parts.push(`${view.points.length}/${view.allPoints.length} objects shown`);
+        if (view.plotCapped) {
+            parts.push(`${view.points.length}/${view.requestedPoints.length} objects plotted`);
+            parts.push(`plot thinned at ${view.plotCap} to keep the browser responsive`);
+        } else {
+            parts.push(`${view.points.length}/${view.allPoints.length} objects shown`);
+        }
         parts.push(`${view.classNames.length} class${view.classNames.length === 1 ? "" : "es"}`);
         parts.push(classSplitProjectionChoiceLabel(view.projectionChoice));
         parts.push(`colored by ${classSplitColorModeLabel(view.colorMode)}`);
@@ -41482,39 +41877,19 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function getClassSplitPerClassClusterStats(result = classSplitState.result) {
-        const classClusters = result?.class_clusters && typeof result.class_clusters === "object"
-            ? result.class_clusters
-            : {};
-        const classEntries = Object.entries(classClusters)
-            .filter(([, value]) => Array.isArray(value?.clusters));
-        const clusterCount = classEntries.reduce((sum, [, value]) => sum + value.clusters.length, 0);
-        const classCount = classEntries.filter(([, value]) => value.clusters.length > 0).length;
-        const topClasses = classEntries
-            .map(([className, value]) => ({
-                className,
-                count: Array.isArray(value?.clusters) ? value.clusters.length : 0,
-            }))
-            .filter((item) => item.count > 0)
-            .sort((a, b) => b.count - a.count || a.className.localeCompare(b.className))
-            .slice(0, 3);
-        return { clusterCount, classCount, topClasses };
+        return { clusterCount: 0, classCount: 0, topClasses: [] };
     }
 
     function formatClassSplitClusterReport(result = classSplitState.result, summary = result?.summary || {}) {
         const scope = String(summary.analysis_scope || classSplitState.lastRequest?.analysis_scope || getClassSplitResultScope());
         if (scope === "all_classes") {
-            const stats = getClassSplitPerClassClusterStats(result);
-            if (!stats.clusterCount) {
-                return "No per-class subclass clusters";
-            }
-            const examples = stats.topClasses.length
-                ? ` (${stats.topClasses.map((item) => `${item.className}: ${item.count}`).join(", ")})`
-                : "";
-            return `${stats.clusterCount} subclass groups across ${stats.classCount} classes${examples}`;
+            return "Subclass clustering disabled in all-class view";
         }
-        const clusters = Array.isArray(result?.clusters?.clusters) ? result.clusters.clusters : [];
+        const clusters = Array.isArray(classSplitState.clusterSearchResult?.clusters)
+            ? classSplitState.clusterSearchResult.clusters
+            : [];
         if (!clusters.length) {
-            return "No clusters";
+            return classSplitState.clusterSearchResult ? "No subclass clusters" : "Cluster search not run";
         }
         const clusterShape = clusters
             .slice()
@@ -41522,7 +41897,7 @@ async function cancelRfDetrTrainingJobRequest() {
             .slice(0, 3)
             .map((cluster) => `#${cluster.cluster_id}: ${cluster.size}`)
             .join(", ");
-        return `${summary.cluster_count || clusters.length} (${clusterShape})`;
+        return `${clusters.length} subclass cluster${clusters.length === 1 ? "" : "s"} (${clusterShape})`;
     }
 
     function renderClassSplitReport() {
@@ -41609,16 +41984,12 @@ async function cancelRfDetrTrainingJobRequest() {
         updateClassSplitBulkClassOptions();
     }
 
-    function renderClassSplitWrongList() {
-        const listEl = classSplitElements.wrongList;
-        if (!listEl) {
-            return;
-        }
+    function getClassSplitVisibleWrongCandidates() {
         const candidates = Array.isArray(classSplitState.result?.wrong_class_candidates)
             ? classSplitState.result.wrong_class_candidates
             : [];
         const activeFilter = String(classSplitElements.filterClass?.value || "").trim();
-        const visibleCandidates = candidates.filter((item) => {
+        return candidates.filter((item) => {
             const pointId = String(item?.point_id || "");
             const point = getClassSplitPointById(pointId);
             if (activeFilter && String(point?.class_name || item?.class_name || "") !== activeFilter) {
@@ -41626,6 +41997,71 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             return pointId && !classSplitState.dismissedWrongIds.has(pointId) && (!point || !!point.is_wrong_class_candidate);
         });
+    }
+
+    function getClassSplitWrongQueueSignature(candidates) {
+        const activeFilter = String(classSplitElements.filterClass?.value || "").trim();
+        return [
+            classSplitState.currentJobId || "live",
+            activeFilter || "all",
+            candidates.length,
+            candidates.map((item) => String(item?.point_id || "")).join("|"),
+        ].join("::");
+    }
+
+    function reconcileClassSplitWrongQueue(candidates, { shuffle = false } = {}) {
+        const cap = 12;
+        const ids = candidates.map((item) => String(item?.point_id || "")).filter(Boolean);
+        const idSet = new Set(ids);
+        const signature = getClassSplitWrongQueueSignature(candidates);
+        const previousQueue = classSplitState.wrongQueueSignature === signature
+            ? Array.from(classSplitState.wrongQueueIds || []).filter((id) => idSet.has(id))
+            : [];
+        let nextIds = [];
+        if (shuffle) {
+            const shuffled = [...ids];
+            for (let index = shuffled.length - 1; index > 0; index -= 1) {
+                const swapIndex = Math.floor(Math.random() * (index + 1));
+                [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+            }
+            nextIds = shuffled.slice(0, cap);
+        } else {
+            nextIds = previousQueue.slice(0, cap);
+            for (const id of ids) {
+                if (nextIds.length >= cap) {
+                    break;
+                }
+                if (!nextIds.includes(id)) {
+                    nextIds.push(id);
+                }
+            }
+        }
+        classSplitState.wrongQueueIds = nextIds;
+        classSplitState.wrongQueueSignature = signature;
+        return nextIds;
+    }
+
+    function shuffleClassSplitWrongQueue() {
+        const candidates = getClassSplitVisibleWrongCandidates();
+        reconcileClassSplitWrongQueue(candidates, { shuffle: true });
+        renderClassSplitWrongList();
+    }
+
+    function renderClassSplitWrongList() {
+        const listEl = classSplitElements.wrongList;
+        if (!listEl) {
+            return;
+        }
+        const visibleCandidates = getClassSplitVisibleWrongCandidates();
+        const queuedIds = reconcileClassSplitWrongQueue(visibleCandidates);
+        const queuedIdSet = new Set(queuedIds);
+        const queuedCandidates = visibleCandidates.filter((item) => queuedIdSet.has(String(item?.point_id || "")));
+        if (classSplitElements.wrongQueueStatus) {
+            classSplitElements.wrongQueueStatus.textContent = visibleCandidates.length
+                ? `Showing ${queuedCandidates.length} of ${visibleCandidates.length} flagged objects.`
+                : "No queued likely-wrong objects.";
+        }
+        setButtonDisabled(classSplitElements.wrongShuffle, visibleCandidates.length <= queuedCandidates.length);
         if (!visibleCandidates.length) {
             const suspicion = getClassSplitSuspicionStatus();
             listEl.innerHTML = `<div class="training-help">${escapeHtml(suspicion.enabled ? "No likely wrong-class objects were flagged." : suspicion.text)}</div>`;
@@ -41634,10 +42070,11 @@ async function cancelRfDetrTrainingJobRequest() {
         const classNames = (Array.isArray(loadedClassList) ? loadedClassList : [])
             .map((className) => String(className || "").trim())
             .filter(Boolean);
-        listEl.innerHTML = visibleCandidates.slice(0, 80).map((item) => {
+        listEl.innerHTML = queuedCandidates.map((item) => {
             const score = Number(item.wrong_class_suspicion) || 0;
             const point = getClassSplitPointById(item.point_id);
             const pointId = String(item.point_id || "");
+            const currentClass = String(point?.class_name || item.class_name || "").trim();
             const suggestedClass = String(item.suggested_neighbor_class || "").trim();
             const suggestedClassAvailable = suggestedClass && classNames.includes(suggestedClass);
             const options = [
@@ -41654,13 +42091,15 @@ async function cancelRfDetrTrainingJobRequest() {
                     ? `<img class="class-split-wrong-item__preview" src="${escapeHtml(thumbUrl)}" alt="Object context crop" loading="lazy" data-context-point-id="${escapeHtml(pointId)}">`
                     : `<div class="class-split-wrong-item__preview" aria-hidden="true"></div>`,
                 `<div class="class-split-wrong-item__body">`,
-                `<strong>${escapeHtml(item.class_name || "")} → ${escapeHtml(suggestedClass || "neighbor class")}</strong>`,
+                `<strong>${escapeHtml(currentClass || "current class")} → ${escapeHtml(suggestedClass || "neighbor class")}</strong>`,
+                suggestedClass ? `<span>Suggested target: ${escapeHtml(suggestedClass)}</span>` : "",
                 `<span>${Math.round(score * 100)}% suspicion • ${escapeHtml(item.image_relpath || "")}</span>`,
                 `<div class="class-split-wrong-item__actions">`,
                 `<button type="button" class="training-button secondary" data-action="jump-instance" data-point-id="${escapeHtml(pointId)}">See instance</button>`,
                 `<button type="button" class="training-button secondary" data-action="correct-class" data-point-id="${escapeHtml(pointId)}">Confirm current class</button>`,
+                `<button type="button" class="training-button secondary" data-action="skip-wrong" data-point-id="${escapeHtml(pointId)}">Skip</button>`,
                 `<select data-action="target-class" data-point-id="${escapeHtml(pointId)}">${options}</select>`,
-                `<button type="button" class="training-button" data-action="reassign-class" data-point-id="${escapeHtml(pointId)}">Reassign</button>`,
+                `<button type="button" class="training-button" data-action="reassign-class" data-point-id="${escapeHtml(pointId)}">${escapeHtml(suggestedClass ? `Switch class to ${suggestedClass}` : "Reassign")}</button>`,
                 `</div>`,
                 `</div>`,
                 `</div>`,
@@ -41705,6 +42144,12 @@ async function cancelRfDetrTrainingJobRequest() {
                 markClassSplitWrongCandidateCorrect(button.getAttribute("data-point-id") || "");
             });
         });
+        listEl.querySelectorAll('[data-action="skip-wrong"]').forEach((button) => {
+            button.addEventListener("click", (event) => {
+                event.stopPropagation();
+                skipClassSplitWrongCandidate(button.getAttribute("data-point-id") || "");
+            });
+        });
         listEl.querySelectorAll('[data-action="reassign-class"]').forEach((button) => {
             button.addEventListener("click", (event) => {
                 event.stopPropagation();
@@ -41717,6 +42162,15 @@ async function cancelRfDetrTrainingJobRequest() {
                     console.error("Class Split vignette relabel failed", error);
                     setSamStatus(`Class change failed: ${error.message || error}`, { variant: "error", duration: 5000 });
                 });
+            });
+        });
+        listEl.querySelectorAll('[data-action="target-class"]').forEach((select) => {
+            select.addEventListener("change", () => {
+                const row = select.closest(".class-split-wrong-item");
+                const button = row?.querySelector('[data-action="reassign-class"]');
+                if (button) {
+                    button.textContent = select.value ? `Switch class to ${select.value}` : "Reassign";
+                }
             });
         });
     }
@@ -41736,10 +42190,15 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const thumbUrl = getClassSplitThumbnailUrl(point);
+        const currentClass = String(point.class_name || "").trim();
+        const suggestedClass = String(point.suggested_neighbor_class || "").trim();
         const classOptions = (Array.isArray(loadedClassList) ? loadedClassList : [])
             .map((className) => String(className || "").trim())
             .filter(Boolean)
-            .map((className) => `<option value="${escapeHtml(className)}"${className === point.class_name ? " selected" : ""}>${escapeHtml(className)}</option>`)
+            .map((className) => {
+                const selected = suggestedClass ? className === suggestedClass : className === currentClass;
+                return `<option value="${escapeHtml(className)}"${selected ? " selected" : ""}>${escapeHtml(className)}</option>`;
+            })
             .join("");
         inspector.innerHTML = [
             `<div class="class-split-inspector__crop-shell">`,
@@ -41747,18 +42206,19 @@ async function cancelRfDetrTrainingJobRequest() {
             `<div class="class-split-inspector__crop-status" data-crop-status hidden>Crop preview unavailable.</div>`,
             `</div>`,
             `<div class="class-split-inspector__meta">`,
-            `<strong>${escapeHtml(point.class_name || "")}</strong><br>`,
+            `<strong>${escapeHtml(currentClass || "")}</strong><br>`,
             `${escapeHtml(point.split || "train")}/${escapeHtml(point.image_relpath || "")}<br>`,
             `Cluster ${escapeHtml(point.cluster_id ?? "")} • outlier ${(Number(point.outlier_score) || 0).toFixed(2)}<br>`,
             `Neighbor mix: same ${Math.round((Number(point.same_class_neighbor_ratio) || 0) * 100)}%`,
             point.suggested_neighbor_class
                 ? ` • top other ${escapeHtml(point.suggested_neighbor_class)} ${Math.round((Number(point.top_other_neighbor_ratio) || 0) * 100)}%`
                 : "",
+            suggestedClass ? `<br>Suggested target: ${escapeHtml(suggestedClass)}` : "",
             `</div>`,
             `<div class="class-split-inspector__actions">`,
             `<button type="button" class="training-button secondary" data-action="jump">See instance</button>`,
             `<select data-action="class">${classOptions}</select>`,
-            `<button type="button" class="training-button" data-action="change">Change class</button>`,
+            `<button type="button" class="training-button" data-action="change">${escapeHtml(suggestedClass ? `Switch class to ${suggestedClass}` : "Change class")}</button>`,
             `</div>`,
         ].join("");
         const jumpButton = inspector.querySelector('[data-action="jump"]');
@@ -41833,6 +42293,9 @@ async function cancelRfDetrTrainingJobRequest() {
             });
         }
         if (changeButton && classSelect) {
+            classSelect.addEventListener("change", () => {
+                changeButton.textContent = classSelect.value ? `Switch class to ${classSelect.value}` : "Change class";
+            });
             changeButton.addEventListener("click", () => {
                 changeClassSplitPointClass(point, classSelect.value).catch((error) => {
                     console.error("Class Split relabel failed", error);
@@ -41893,7 +42356,7 @@ async function cancelRfDetrTrainingJobRequest() {
         renderClassSplitInspector();
         renderClassSplitBulkPanel();
         renderClassSplitDatasetAnalysis();
-        refreshClassSplitClusterOverlayControl();
+        refreshClassSplitClusterControls();
         renderClassSplitPlot();
     }
 
@@ -41929,7 +42392,7 @@ async function cancelRfDetrTrainingJobRequest() {
             renderClassSplitBulkPanel();
             renderClassSplitClusterList();
             renderClassSplitWrongList();
-            refreshClassSplitClusterOverlayControl();
+            refreshClassSplitClusterControls();
         }
         if (focusPlot) {
             Promise.resolve(plotRender).then(() => {
@@ -41960,6 +42423,18 @@ async function cancelRfDetrTrainingJobRequest() {
             const point = getClassSplitPointById(pointId);
             return pointId && !classSplitState.dismissedWrongIds.has(pointId) && (!point || !!point.is_wrong_class_candidate);
         }).length;
+    }
+
+    function skipClassSplitWrongCandidate(pointId) {
+        const safeId = String(pointId || "");
+        if (!safeId) {
+            return;
+        }
+        classSplitState.dismissedWrongIds.add(safeId);
+        syncClassSplitWrongCandidateSummaryCount();
+        renderClassSplitWrongList();
+        renderClassSplitReport();
+        setClassSplitJobStatus("Skipped object for this review session.", "success");
     }
 
     function clearClassSplitWrongCandidate(pointId) {
@@ -42290,9 +42765,7 @@ async function cancelRfDetrTrainingJobRequest() {
         buckets[nextClass].push(match.bbox);
         point.class_name = nextClass;
         point.cluster_id = null;
-        point.class_cluster_id = null;
-        point.class_cluster_key = "";
-        point.class_cluster_size = 0;
+        point._subclass_cluster_id = "";
         classSplitState.selectedClusterId = "";
         clearClassSplitWrongCandidate(point.point_id);
         updateClassSplitSummaryClassCounts(previousClass, nextClass);
@@ -42530,12 +43003,21 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.displayMode = document.getElementById("classSplitDisplayMode");
         classSplitElements.dragMode = document.getElementById("classSplitDragMode");
         classSplitElements.clusterOverlay = document.getElementById("classSplitClusterOverlay");
+        classSplitElements.clusterSensitivity = document.getElementById("classSplitClusterSensitivity");
+        classSplitElements.clusterMaxClusters = document.getElementById("classSplitClusterMaxClusters");
+        classSplitElements.clusterMinSize = document.getElementById("classSplitClusterMinSize");
+        classSplitElements.clusterRun = document.getElementById("classSplitClusterRun");
+        classSplitElements.clusterProgress = document.getElementById("classSplitClusterProgress");
+        classSplitElements.clusterProgressFill = document.getElementById("classSplitClusterProgressFill");
+        classSplitElements.clusterStatus = document.getElementById("classSplitClusterStatus");
         classSplitElements.graph = document.getElementById("classSplitGraph");
         classSplitElements.graphStatus = document.getElementById("classSplitGraphStatus");
         classSplitElements.report = document.getElementById("classSplitReport");
         classSplitElements.clusterPanel = document.getElementById("classSplitClusterPanel");
         classSplitElements.clusterList = document.getElementById("classSplitClusterList");
         classSplitElements.wrongPanel = document.getElementById("classSplitWrongPanel");
+        classSplitElements.wrongQueueStatus = document.getElementById("classSplitWrongQueueStatus");
+        classSplitElements.wrongShuffle = document.getElementById("classSplitWrongShuffle");
         classSplitElements.wrongList = document.getElementById("classSplitWrongList");
         classSplitElements.inspector = document.getElementById("classSplitInspector");
         classSplitElements.datasetAnalysisPanel = document.getElementById("classSplitDatasetAnalysisPanel");
@@ -42621,6 +43103,8 @@ async function cancelRfDetrTrainingJobRequest() {
         if (classSplitElements.filterClass) {
             const handleFilterClassChange = () => {
                 classSplitState.selectedClusterId = "";
+                classSplitState.wrongQueueIds = [];
+                classSplitState.wrongQueueSignature = "";
                 refreshClassSplitFilteredReviewUi();
             };
             classSplitElements.filterClass.addEventListener("input", handleFilterClassChange);
@@ -42628,6 +43112,8 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (classSplitElements.displayMode) {
             classSplitElements.displayMode.addEventListener("change", () => {
+                classSplitState.wrongQueueIds = [];
+                classSplitState.wrongQueueSignature = "";
                 refreshClassSplitFilteredReviewUi();
             });
         }
@@ -42636,6 +43122,17 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (classSplitElements.clusterOverlay) {
             classSplitElements.clusterOverlay.addEventListener("change", renderClassSplitPlot);
+        }
+        if (classSplitElements.clusterRun) {
+            classSplitElements.clusterRun.addEventListener("click", () => {
+                startClassSplitClusterSearch().catch((error) => {
+                    console.error("Class Split cluster search failed", error);
+                    setClassSplitClusterStatus(`Failed: ${error.message || error}`, "error");
+                });
+            });
+        }
+        if (classSplitElements.wrongShuffle) {
+            classSplitElements.wrongShuffle.addEventListener("click", () => shuffleClassSplitWrongQueue());
         }
         if (classSplitElements.bulkApply) {
             classSplitElements.bulkApply.addEventListener("click", () => {
@@ -42700,6 +43197,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 applyClassSplitResultPayload(result, jobId);
                 return Promise.resolve(renderClassSplitPlot()).then(getClassSplitPlotTestSnapshot);
             },
+            classSplitApplyClusterResult(result, clusterJobId = "class_split_cluster_test_job") {
+                applyClassSplitClusterSearchResult(result, clusterJobId);
+                return Promise.resolve(renderClassSplitPlot()).then(getClassSplitPlotTestSnapshot);
+            },
             classSplitEmitPointClick(pointId) {
                 const graphEl = classSplitElements.graph;
                 if (graphEl && typeof graphEl.emit === "function") {
@@ -42731,14 +43232,16 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitPlotSnapshot: getClassSplitPlotTestSnapshot,
             classSplitClusterDebugState() {
                 const summaries = getClassSplitVisibleClusterSummaries();
+                const scope = getClassSplitResultScope();
                 return {
-                    scope: getClassSplitResultScope(),
+                    scope,
+                    analysisScope: scope,
                     filterClass: String(classSplitElements.filterClass?.value || ""),
                     filteredCount: getClassSplitFilteredPoints().length,
                     proposalsAllowed: classSplitClusterProposalsAllowed(),
                     hullsAllowed: classSplitClusterHullsAllowed(),
-                    overlayDisabled: !!classSplitElements.clusterOverlay?.disabled,
-                    overlayChecked: !!classSplitElements.clusterOverlay?.checked,
+                    overlayDisabled: classSplitElements.clusterOverlay ? !!classSplitElements.clusterOverlay.disabled : true,
+                    overlayChecked: classSplitElements.clusterOverlay ? !!classSplitElements.clusterOverlay.checked : false,
                     clusterKeys: summaries.map((summary) => String(summary.clusterKey || "")),
                 };
             },
@@ -47880,9 +48383,9 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         clearMultiPointAnnotations();
         syncQwenClassToCurrent();
-        updateSam3ClassOptions({ preserveSelection: true });
+        syncSam3ClassToCurrent();
         syncClassSplitCurrentClassSelection();
-        refreshClassSplitControls();
+        scheduleClassSplitControlsRefresh();
         showAnnotationFocusHud();
     };
 
@@ -48496,9 +48999,13 @@ async function cancelRfDetrTrainingJobRequest() {
                 ? classList.selectedIndex
                 : Math.min(Math.max(0, classListIndex || 0), total - 1);
             const nextIndex = (currentIndex + delta + total) % total;
-            Array.from(classList.options).forEach((option) => {
-                option.selected = false;
-            });
+            if (classList.selectedOptions && classList.selectedOptions.length > 1) {
+                Array.from(classList.selectedOptions).forEach((option) => {
+                    option.selected = false;
+                });
+            } else if (currentIndex >= 0 && currentIndex < total) {
+                classList.options[currentIndex].selected = false;
+            }
             classListIndex = nextIndex;
             classList.options[classListIndex].selected = true;
             classList.selectedIndex = classListIndex;

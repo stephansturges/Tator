@@ -226,34 +226,44 @@ Flow checks:
   analysis result or right-side review panels.
 - Plot points show a floating crop preview on hover so a user can inspect an
   object before selecting it.
-- Cluster proposals show representative crops, class mix, purity, and mean
-  outlier score. Selecting a cluster selects all visible points in that cluster,
-  zooms the plot to the hull, flashes the medoid, and enables the existing bulk
-  class-change controls.
+- Subclass cluster search is an explicit selected-class workflow, not an
+  always-on graph overlay. The user runs it after selected-class analysis; the
+  backend reuses saved embeddings, tests candidate cluster counts, and reports
+  progress through `/class_analysis/jobs/{job_id}/cluster_search`.
+- Cluster proposals show representative crops, class mix, purity, silhouette,
+  and mean outlier score. Selecting a cluster selects all visible points in that
+  cluster, zooms the plot to the island, flashes the medoid, and enables the
+  existing bulk class-change controls.
 
 Fix from this pass:
 
 - The long benchmark explanation starts collapsed, reducing first-screen noise.
-- Cluster hulls are optional graph overlays. Cluster selection forces the graph
-  back to all-object display before creating the bulk selection, so a
-  wrong-only filter cannot hide objects that are about to be relabeled.
+- All-class views do not render subclass hulls or cluster proposals. This keeps
+  browser-heavy clustering out of global class-overview mode and avoids
+  presenting cross-class islands as within-class subclasses.
+- Selected-class subclass search has its own sensitivity, max-cluster, and
+  min-size controls plus progress feedback. Search jobs are tracked separately
+  from the parent analysis and are cancelled/ignored safely if a newer analysis
+  result replaces the graph.
 - Class Split no longer tries to upload large all-class runs as one huge
   multipart request when a chunked current-workspace upload is available.
 - Class Split result panels and Data Ingestion result panels now have explicit
   component-level `[hidden]` CSS rules. This guards against display rules on the
   same component accidentally making hidden results visible during tab switches
   or job startup.
-- All-class Class Split results compute subclass clusters per class, but the UI
-  hides cluster proposals and hulls until a class filter is chosen. This keeps
-  global class-separation clusters out of the subclass review workflow.
+- The backend no longer computes per-class subclass clusters as part of every
+  all-class analysis. Explicit cluster search is selected-class only, so large
+  all-class plots do not trigger expensive or browser-crashing cluster overlays.
 - The selected-crop inspector and likely-wrong review vignettes now render
   source-image context crops with the object box drawn over the crop. The crop
   uses up to 50 px of added context per side for large objects and black padding
   at source-image edges.
-- Confirming a likely-wrong item or relabeling it from a vignette removes it
-  from the review list without automatically rerunning the expensive Class Split
-  job. The local annotation state is marked dirty so the normal save path
-  persists the correction.
+- The likely-wrong review is a full-width queue of 12 vignettes at a time.
+  Users can shuffle, skip, confirm current class, jump to the source image, or
+  switch to the suggested class. Confirmed, relabeled, and skipped rows drop
+  from the visible queue without automatically rerunning the expensive Class
+  Split job. The local annotation state is marked dirty so the normal save path
+  persists corrections.
 - `See instance` resolves active-image aliases before jumping back to Label
   Images, covering backend-backed, transient, chunked-upload, and browser-only
   workspace names.
@@ -261,6 +271,10 @@ Fix from this pass:
   analysis. If upload or job start fails, the previous graph, filters,
   selection, and review panels are restored and the failure is reported without
   replacing the graph with a stale empty placeholder.
+- The Label Images shortcut explainer now lists `D` as SAM point mode
+  explicitly. The class carousel used by `E/R` is lighter: it renders a bounded
+  nearby class window, updates Qwen/SAM3 target selects without rebuilding full
+  option lists, and debounces Class Split control refreshes.
 
 ## Journey 7: Optional Class Split Dataset Analysis
 
@@ -300,17 +314,18 @@ Fix from this pass:
   the normal save path persists the change.
 - Class Split cluster-assisted bulk relabeling must never operate on hidden
   filtered-out cluster members without making that display change visible first.
+- Class Split cluster-search jobs must reuse parent selected-class embeddings
+  and must not mutate or replace a newer graph after analysis state changes.
 
 ## Verification Scope
 
 Current focused verification for this review:
 
 ```bash
-NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m py_compile localinferenceapi.py services/mlx_sam.py
+NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m py_compile api/class_analysis.py localinferenceapi.py
 node --check ybat-master/ybat.js
 git diff --check
-NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest -q tests/test_data_ingestion.py tests/test_class_analysis.py tests/test_macos_acceleration.py tests/test_mlx_dinov3_backend.py tests/test_mlx_sam_backend.py tests/test_sam_preload_slots.py tests/test_labeling_panel_layout_contract.py
-.venv-macos/bin/python -m pytest -q
+NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest -q tests/test_class_analysis.py tests/test_labeling_panel_layout_contract.py
 ```
 
 Interactive browser smoke is still a separate manual/Playwright concern; the

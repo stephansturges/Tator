@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20260601n" rel="stylesheet">
+    <link href="ybat.css?v=20260602a" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
          before we call listenImageCrop().
@@ -13,7 +13,7 @@
     <script src="filesaver.min.js?v=20260409a"></script>
     <script src="plotly-2.35.2.min.js?v=20260520a"></script>
     <script src="annotation_diversity.js?v=20260530a"></script>
-    <script src="ybat.js?v=20260601n"></script>
+    <script src="ybat.js?v=20260602a"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -689,7 +689,8 @@
                                     <li><strong>Classes:</strong> ↓ / R = next class; ↑ / E = previous class.</li>
                                     <li><strong>Selection:</strong> Shift + click adds/removes positive selections; Shift + drag draws a positive selection box; Shift + Alt + click/drag marks SAM3 similarity negatives.</li>
                                     <li><strong>Box edits:</strong> Delete / Backspace / X removes selected or current bboxes; Q deletes the latest bbox.</li>
-                                    <li><strong>SAM:</strong> W runs magic tweak; double W tweaks selected boxes first, otherwise the carousel class; S toggles SAM; D toggles point mode; M toggles multi-point; F/G add positive/negative points; Enter submits multi-point masks.</li>
+                                    <li><strong>SAM:</strong> S toggles SAM; W runs magic tweak; double W tweaks selected boxes first, otherwise the carousel class.</li>
+                                    <li><strong>Point prompts:</strong> D toggles SAM point mode; M toggles multi-point; F/G add positive/negative points; Enter submits multi-point masks.</li>
                                     <li><strong>Detection/export:</strong> Shift + R + drag runs YOLO/RF-DETR region detect; 1 runs SAM3 similarity; Shift + Y requests Save YOLO + captions.</li>
                                     <li><strong>Canvas:</strong> Mouse wheel zooms; Shift + wheel pans; right-click drag pans.</li>
                                     <li><strong>Modes:</strong> A toggles auto-class; P switches to seg mode or toggles polygon drawing; hold Z temporarily pauses Auto Class and SAM modes for selection/deletion.</li>
@@ -1094,7 +1095,6 @@
                                 <label for="classSplitColorMode">Color</label>
                                 <select id="classSplitColorMode">
                                     <option value="class">Class</option>
-                                    <option value="cluster">Cluster</option>
                                     <option value="wrong">Wrong-class suspicion</option>
                                     <option value="outlier">Outlier score</option>
                                     <option value="area">Box area</option>
@@ -1113,10 +1113,6 @@
                                     <option value="select">Box select</option>
                                     <option value="pan">Pan</option>
                                 </select>
-                                <label class="class-split-toggle" title="Draw translucent outlines around subclass clusters inside the selected class.">
-                                    <input type="checkbox" id="classSplitClusterOverlay" checked />
-                                    Cluster hulls
-                                </label>
                             </div>
                             <div id="classSplitGraphStatus" class="class-split-graph-status" aria-live="polite"></div>
                             <div id="classSplitBulkPanel" class="class-split-bulk-panel" hidden>
@@ -1133,10 +1129,35 @@
                                         <div class="training-help">Select a point to inspect its crop.</div>
                                     </div>
                                 </div>
+                            </div>
+                            <div class="class-split-graph-footer">
                                 <details id="classSplitClusterPanel" class="class-split-review-section class-split-cluster-panel" open>
-                                    <summary>Cluster proposals</summary>
+                                    <summary>Subclass cluster search</summary>
+                                    <div class="class-split-cluster-controls">
+                                        <div class="class-split-cluster-controls__field">
+                                            <label for="classSplitClusterSensitivity">Sensitivity</label>
+                                            <select id="classSplitClusterSensitivity" title="Conservative needs cleaner separation; Sensitive proposes smaller or weaker clusters.">
+                                                <option value="balanced" selected>Balanced</option>
+                                                <option value="conservative">Conservative</option>
+                                                <option value="sensitive">Sensitive</option>
+                                            </select>
+                                        </div>
+                                        <div class="class-split-cluster-controls__field">
+                                            <label for="classSplitClusterMaxClusters">Max clusters</label>
+                                            <input type="number" id="classSplitClusterMaxClusters" min="2" max="16" value="8" />
+                                        </div>
+                                        <div class="class-split-cluster-controls__field">
+                                            <label for="classSplitClusterMinSize">Min size</label>
+                                            <input type="number" id="classSplitClusterMinSize" min="0" value="0" title="0 lets the backend choose based on sensitivity and class size." />
+                                        </div>
+                                        <button type="button" id="classSplitClusterRun" class="training-button secondary">Find subclass clusters</button>
+                                    </div>
+                                    <div class="class-split-cluster-progress" id="classSplitClusterProgress" hidden>
+                                        <div class="class-split-progress__bar"><div id="classSplitClusterProgressFill"></div></div>
+                                        <div id="classSplitClusterStatus" class="training-help">Ready.</div>
+                                    </div>
                                     <div id="classSplitClusterList" class="class-split-cluster-list">
-                                        <div class="training-help">Run analysis to review cluster proposals.</div>
+                                        <div class="training-help">Run a selected-class analysis, then find subclass clusters.</div>
                                     </div>
                                 </details>
                                 <div class="class-split-review-section">
@@ -1148,6 +1169,10 @@
                             </div>
                             <details id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel class-split-wrong-panel--wide" open>
                                 <summary>Likely wrong class</summary>
+                                <div class="class-split-wrong-toolbar">
+                                    <span id="classSplitWrongQueueStatus" class="training-help">Run all-class analysis to review likely wrong objects.</span>
+                                    <button type="button" id="classSplitWrongShuffle" class="training-button secondary">Shuffle vignettes</button>
+                                </div>
                                 <div id="classSplitWrongList" class="class-split-wrong-list"></div>
                             </details>
                         </div>

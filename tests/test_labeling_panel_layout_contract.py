@@ -186,7 +186,8 @@ def test_keyboard_image_navigation_shortcuts_are_documented_and_guarded():
     assert "<strong>Focus:</strong> V toggles image-only focus mode" in html
     assert "<strong>Classes:</strong> ↓ / R = next class; ↑ / E = previous class" in html
     assert "Delete / Backspace / X removes selected or current bboxes" in html
-    assert "W runs magic tweak; double W tweaks selected boxes first, otherwise the carousel class" in html
+    assert "S toggles SAM; W runs magic tweak; double W tweaks selected boxes first, otherwise the carousel class" in html
+    assert "<strong>Point prompts:</strong> D toggles SAM point mode; M toggles multi-point" in html
     assert "Shift + R + drag runs YOLO/RF-DETR region detect" in html
     assert "Shift + Y requests Save YOLO + captions" in html
     assert "const imageNavigationKey = (event) =>" in js
@@ -201,6 +202,11 @@ def test_keyboard_image_navigation_shortcuts_are_documented_and_guarded():
     assert "annotationWorkspaceHotkeysActive" in js
     assert "__tatorImageNavigationHandled" in js
     assert "canvas.element.focus({ preventScroll: true })" in js
+    assert "const requestedMaxItems = Number.isFinite(options.maxVisibleItems)" in js
+    assert "function scheduleClassSplitControlsRefresh" in js
+    assert "syncSam3ClassToCurrent();" in js
+    assert "scheduleClassSplitControlsRefresh();" in js
+    assert "const nextIndex = (currentIndex + delta + total) % total;\n            Array.from(classList.options).forEach" not in js
 
 
 def test_local_salad_is_data_ingestion_only_in_ui():
@@ -691,7 +697,12 @@ def test_class_split_explorer_panel_contract():
     assert 'id="classSplitDragMode"' in html
     assert '<option value="pan">Pan</option>' in html
     assert '<option value="wrong_only">Likely wrong class only</option>' in html
-    assert 'id="classSplitClusterOverlay" checked' in html
+    assert '<option value="cluster">Cluster</option>' not in html
+    assert 'id="classSplitClusterOverlay"' not in html
+    assert 'id="classSplitClusterSensitivity"' in html
+    assert 'id="classSplitClusterMaxClusters"' in html
+    assert 'id="classSplitClusterMinSize"' in html
+    assert 'id="classSplitClusterRun"' in html
     assert 'id="classSplitCradioPooling"' in html
     assert "benchmark carefully before promoting any C-RADIO pooling mode" in html
     assert 'id="classSplitReport" class="class-split-report"' in html
@@ -700,6 +711,8 @@ def test_class_split_explorer_panel_contract():
     assert 'id="classSplitClusterPanel" class="class-split-review-section class-split-cluster-panel" open' in html
     assert 'id="classSplitClusterList" class="class-split-cluster-list"' in html
     assert 'id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel class-split-wrong-panel--wide" open' in html
+    assert 'id="classSplitWrongQueueStatus"' in html
+    assert 'id="classSplitWrongShuffle"' in html
     assert 'id="classSplitWrongList"' in html
     assert 'id="classSplitInspector"' in html
     assert '<option value="image_value">Image value</option>' in html
@@ -717,6 +730,7 @@ def test_class_split_explorer_panel_contract():
     assert "grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));" in css
     assert ".class-split-field--projection" in css
     assert ".class-split-panel--workspace .class-split-results" in css
+    assert ".class-split-graph-footer" in css
     assert ".class-split-bulk-panel" in css
     assert ".class-split-graph-status" in css
     assert ".class-split-graph" in css
@@ -725,6 +739,9 @@ def test_class_split_explorer_panel_contract():
     assert ".class-split-cluster-item" in css
     assert ".class-split-wrong-panel--wide" in css
     assert ".class-split-wrong-item__preview" in css
+    assert "grid-template-columns: 232px minmax(0, 1fr);" in css
+    assert "width: 232px;" in css
+    assert "height: 192px;" in css
     assert ".class-split-results[hidden]" in css
     assert ".data-ingestion-results[hidden]" in css
     assert ".class-split-graph-hover-preview" in css
@@ -744,7 +761,7 @@ def test_class_split_explorer_panel_contract():
     assert "html.theme-dark .class-split-panel" in css
     assert "html.theme-dark .class-split-workspace__header" in css
     assert "html.theme-pipboy .class-split-panel" in css
-    assert '"bulk bulk"\n        "graph review"\n        "wrong wrong"' in css
+    assert '"bulk bulk"\n        "graph review"\n        "footer footer"\n        "wrong wrong"' in css
 
     assert 'const TAB_CLASS_SPLIT = "class-split";' in js
     assert "const TOP_TAB_KEYS = new Set([" in js
@@ -772,7 +789,11 @@ def test_class_split_explorer_panel_contract():
     assert "function buildClassSplitClassTraces" in js
     assert 'const pointTraces = colorMode === "class"' in js
     assert "getClassSplitClassColorTokens(className, points).stroke" in js
-    assert "getClassSplitPointMarkerLine(point, { suspiciousTrace }).width" in js
+    assert "const CLASS_SPLIT_MAX_PLOT_POINTS = 50000;" in js
+    assert "function sampleClassSplitGraphPoints" in js
+    assert "plot thinned at ${view.plotCap} to keep the browser responsive" in js
+    assert "const markerLine = getClassSplitPointMarkerLine(point, { suspiciousTrace });" in js
+    assert "markerLineWidths.push(markerLine.width)" in js
     assert "function updateClassSplitGraphStatus" in js
     assert "function hideClassSplitResultUiUntilReady" in js
     assert "function syncClassSplitSetupControlsFromResult" in js
@@ -837,14 +858,15 @@ def test_class_split_explorer_panel_contract():
     assert "selectionrevision" in js
     assert 'dragmode: String(classSplitElements.dragMode?.value || "lasso")' in js
     assert "function renderClassSplitClusterList" in js
+    assert "function startClassSplitClusterSearch" in js
+    assert "function pollClassSplitClusterSearch" in js
     assert "function selectClassSplitCluster" in js
     assert "function classSplitClusterProposalsAllowed" in js
-    assert "function classSplitAllClassResultNeedsPerClassClusterRerun" in js
     assert "function formatClassSplitClusterReport" in js
-    assert "point.class_cluster_id" in js
-    assert "Number(point?.class_cluster_size) > 0" in js
-    assert "Choose a class filter to inspect subclass clusters" in js
-    assert "Rerun Class Split to review subclass cluster proposals" in js
+    assert "point.class_cluster_id" not in js
+    assert "classSplitState.clusterSearchResult" in js
+    assert "Subclass clustering is disabled for all-class graphs" in js
+    assert "Click Find subclass clusters" in js
     assert 'classSplitElements.displayMode.value = "all";' in js
     assert "function buildClassSplitClusterHullTraces" in js
     assert "computeDatasetImageValueAnalysis(points)" in js
@@ -890,7 +912,7 @@ def test_class_split_explorer_panel_contract():
     assert "Suggested by neighbors: ${escapeHtml(point.suggested_neighbor_class)}" in js
     assert 'classSplitElements.filterClass.addEventListener("input", handleFilterClassChange);' in js
     assert 'classSplitElements.filterClass.addEventListener("change", handleFilterClassChange);' in js
-    assert "classSplitState.selectedClusterId = \"\";\n                refreshClassSplitFilteredReviewUi();" in js
+    assert "classSplitState.selectedClusterId = \"\";\n                classSplitState.wrongQueueIds = [];" in js
     assert 'classSplitElements.displayMode.addEventListener("change", () => {' in js
     assert "refreshClassSplitFilteredReviewUi();" in js
     assert "if (filterChanged) {\n            renderClassSplitBulkPanel();\n            renderClassSplitClusterList();" in js
@@ -907,7 +929,14 @@ def test_class_split_explorer_panel_contract():
     assert "classSplitElements.bulkPanel" in js
     assert "panClassSplitPlotWithWheel" not in js
     assert "Confirm current class" in js
+    assert "Skip" in js
+    assert 'data-action="skip-wrong"' in js
+    assert "function skipClassSplitWrongCandidate" in js
+    assert "function reconcileClassSplitWrongQueue" in js
+    assert "function shuffleClassSplitWrongQueue" in js
+    assert "const cap = 12;" in js
     assert "Reassign" in js
+    assert "Switch class to ${suggestedClass}" in js
     assert ">Choose class</option>" in js
     assert "function getClassSplitContextCropUrl" in js
     assert "const maxPreviewDim = 1400;" in js

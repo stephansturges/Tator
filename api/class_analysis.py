@@ -18,6 +18,9 @@ def build_class_analysis_router(
     get_result_fn: Callable[[str], Any],
     get_projection_fn: Callable[[str, str], Any],
     get_thumbnail_fn: Callable[[str, str], FileResponse],
+    create_cluster_search_fn: Callable[[str, dict], Any],
+    get_cluster_search_fn: Callable[[str], Any],
+    cancel_cluster_search_fn: Callable[[str], Any],
     cancel_job_fn: Callable[[str], Any],
 ) -> APIRouter:
     router = APIRouter()
@@ -65,6 +68,18 @@ def build_class_analysis_router(
     @router.get("/class_analysis/jobs/{job_id}/thumbnail/{point_id}")
     def get_class_analysis_thumbnail(job_id: str, point_id: str):
         return get_thumbnail_fn(job_id, point_id)
+
+    @router.post("/class_analysis/jobs/{job_id}/cluster_search")
+    def create_class_analysis_cluster_search(job_id: str, payload: dict = Body(default_factory=dict)):  # noqa: B008
+        return create_cluster_search_fn(job_id, payload or {})
+
+    @router.get("/class_analysis/cluster_search/{cluster_job_id}")
+    def get_class_analysis_cluster_search(cluster_job_id: str):
+        return get_cluster_search_fn(cluster_job_id)
+
+    @router.post("/class_analysis/cluster_search/{cluster_job_id}/cancel")
+    def cancel_class_analysis_cluster_search(cluster_job_id: str):
+        return cancel_cluster_search_fn(cluster_job_id)
 
     @router.post("/class_analysis/jobs/{job_id}/cancel")
     def cancel_class_analysis_job(job_id: str):

@@ -227,14 +227,15 @@ The Label Images tab is the everyday workspace.
   active image.
 - Use Qwen captions as visual context while keeping final labels editable.
 - Use Class Split Explorer to embed one class or all classes in the current
-  annotation dataset, inspect cluster structure, filter the plot to likely
-  wrong-class objects, preview crops on hover, select proposed clusters for
-  bulk relabeling, and jump from suspicious points back to the source bbox for
-  correction. Backend-backed workspaces are analyzed in place; browser-only
-  current workspaces first upload through a named chunked dataset session so the
-  temporary managed dataset is visible and removable in Dataset Management. The
-  graph can switch between global, class-balanced, between-class, and
-  within-filter PCA views without changing the full-space audit scores.
+  annotation dataset, filter the plot to likely wrong-class objects, preview
+  crops on hover, and jump suspicious points back to the source bbox for
+  correction. Selected-class runs can launch an explicit subclass cluster search
+  for bulk relabeling. Backend-backed workspaces are analyzed in place;
+  browser-only current workspaces first upload through a named chunked dataset
+  session so temporary managed datasets are visible and removable in Dataset
+  Management. The graph can switch between global, class-balanced,
+  between-class, and within-filter PCA views without changing full-space audit
+  scores.
 - After an all-class Class Split run, use Dataset Analysis to rank image-level
   value from class rarity, object-feature rarity, and embedding-map edge cases.
 - Export selected crops through the chunked crop ZIP endpoints.
@@ -668,14 +669,12 @@ the backend are available.
 <details>
 <summary>Update Tracking</summary>
 
-Current verification: focused Class Split, Data Ingestion, macOS acceleration,
-MLX-DINOv3, MLX-SAM, SAM preload, and UI contract suites passed. Full log:
-[docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+Current verification: focused Class Split backend and UI contract suites passed.
+Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
-2026-06-02 follow-up: Class Split now has switchable graph projection modes,
-class-color rendering is one trace per class, result graphs survive click,
-filter, tab-return, and failed-start paths, and projection coordinates are served
-through a dedicated job endpoint instead of bloating result JSON.
+2026-06-02 follow-up: Class Split has switchable PCA graph projections, stable
+per-class traces, selected-class subclass search, a 12-item likely-wrong review
+queue, source-context crop previews, and named active-workspace uploads.
 
 2026-05-30 follow-up: top-tab navigation now binds through an early delegated
 handler and the browser cache key was bumped, so Data Ingestion and Class Split

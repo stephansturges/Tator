@@ -2165,6 +2165,7 @@ body.annotation-focus-mode .class-scroll-indicator {
         "status status"
         "bulk bulk"
         "graph review"
+        "footer footer"
         "wrong wrong";
     gap: 12px;
     align-items: stretch;
@@ -2248,6 +2249,14 @@ body.annotation-focus-mode .class-scroll-indicator {
     align-content: start;
 }
 
+.class-split-graph-footer {
+    grid-area: footer;
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+    gap: 12px;
+    align-items: start;
+}
+
 .class-split-review-section {
     min-width: 0;
 }
@@ -2305,13 +2314,53 @@ body.annotation-focus-mode .class-scroll-indicator {
 .class-split-panel--workspace .class-split-wrong-list {
     min-height: 0;
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(520px, 1fr));
     gap: 10px;
 }
 
 .class-split-panel--workspace .class-split-report {
     min-height: 210px;
     max-height: none;
+}
+
+.class-split-cluster-controls,
+.class-split-wrong-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.class-split-cluster-controls__field {
+    display: flex;
+    flex: 1 1 150px;
+    min-width: 130px;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.class-split-cluster-controls__field label {
+    color: #475569;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.class-split-cluster-progress {
+    margin-bottom: 8px;
+}
+
+.class-split-cluster-progress[hidden] {
+    display: none;
+}
+
+.class-split-wrong-toolbar {
+    align-items: center;
+    justify-content: space-between;
+}
+
+.class-split-wrong-toolbar .training-help {
+    margin: 0;
 }
 
 .class-split-dataset-analysis {
@@ -2468,8 +2517,8 @@ body.annotation-focus-mode .class-scroll-indicator {
 
 .class-split-wrong-item {
     display: grid;
-    grid-template-columns: 116px minmax(0, 1fr);
-    gap: 9px;
+    grid-template-columns: 232px minmax(0, 1fr);
+    gap: 12px;
     border: 1px solid #fee2e2;
     border-radius: 7px;
     background: #fff7ed;
@@ -2482,8 +2531,8 @@ body.annotation-focus-mode .class-scroll-indicator {
 }
 
 .class-split-wrong-item__preview {
-    width: 116px;
-    height: 96px;
+    width: 232px;
+    height: 192px;
     border-radius: 6px;
     border: 1px solid rgba(251, 146, 60, 0.45);
     background: #000;
@@ -3013,7 +3062,12 @@ body.annotation-focus-mode .class-scroll-indicator {
             "bulk"
             "graph"
             "review"
+            "footer"
             "wrong";
+    }
+
+    .class-split-graph-footer {
+        grid-template-columns: 1fr;
     }
 
     .class-split-panel--workspace .class-split-graph {

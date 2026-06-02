@@ -76,42 +76,34 @@ def _mock_class_split_result():
 
 def _mock_class_split_result_with_subclusters():
     result = _mock_class_split_result()
-    result["summary"]["object_count"] = 6
-    result["summary"]["class_counts"] = {"Truck": 4, "Person": 2}
-    result["summary"]["class_cluster_count"] = 2
-    result["summary"]["class_cluster_class_count"] = 1
+    result["summary"]["analysis_scope"] = "selected_class"
+    result["summary"]["class_name"] = "Truck"
+    result["summary"]["object_count"] = 4
+    result["summary"]["class_counts"] = {"Truck": 4}
     result["projection_options"]["coordinates"] = {
         "class_balanced_pca": [
             [-1.0, -0.8],
             [-0.9, -0.7],
             [-0.15, 0.85],
             [-0.05, 0.92],
-            [0.9, 0.8],
-            [1.0, 0.9],
         ],
         "global_pca": [
             [-0.5, -0.3],
             [-0.45, -0.25],
             [-0.15, 0.35],
             [-0.1, 0.4],
-            [0.4, 0.2],
-            [0.5, 0.3],
         ],
         "between_class_pca": [
             [-1.5, 0.0],
             [-1.4, 0.05],
             [-1.2, 0.18],
             [-1.1, 0.25],
-            [1.3, -0.1],
-            [1.5, 0.0],
         ],
         "within_filter_pca": [
             [-0.8, -0.7],
             [-0.7, -0.8],
             [0.75, 0.7],
             [0.85, 0.8],
-            [-0.2, 0.1],
-            [0.2, -0.1],
         ],
     }
     result["points"] = [
@@ -120,8 +112,6 @@ def _mock_class_split_result_with_subclusters():
             "class_name": "Truck",
             "image_relpath": "img_0.png",
             "projection": [-1.0, -0.8],
-            "class_cluster_id": 0,
-            "class_cluster_size": 2,
             "wrong_class_suspicion": 0.0,
             "is_wrong_class_candidate": False,
         },
@@ -130,10 +120,8 @@ def _mock_class_split_result_with_subclusters():
             "class_name": "Truck",
             "image_relpath": "img_1.png",
             "projection": [-0.9, -0.7],
-            "class_cluster_id": 0,
-            "class_cluster_size": 2,
             "wrong_class_suspicion": 0.72,
-            "is_wrong_class_candidate": True,
+            "is_wrong_class_candidate": False,
             "suggested_neighbor_class": "Person",
         },
         {
@@ -141,8 +129,6 @@ def _mock_class_split_result_with_subclusters():
             "class_name": "Truck",
             "image_relpath": "img_2.png",
             "projection": [-0.15, 0.85],
-            "class_cluster_id": 1,
-            "class_cluster_size": 2,
             "wrong_class_suspicion": 0.0,
             "is_wrong_class_candidate": False,
         },
@@ -151,51 +137,89 @@ def _mock_class_split_result_with_subclusters():
             "class_name": "Truck",
             "image_relpath": "img_3.png",
             "projection": [-0.05, 0.92],
-            "class_cluster_id": 1,
-            "class_cluster_size": 2,
-            "wrong_class_suspicion": 0.0,
-            "is_wrong_class_candidate": False,
-        },
-        {
-            "point_id": "person-1",
-            "class_name": "Person",
-            "image_relpath": "img_2.png",
-            "projection": [0.9, 0.8],
-            "class_cluster_id": 0,
-            "class_cluster_size": 0,
-            "wrong_class_suspicion": 0.0,
-            "is_wrong_class_candidate": False,
-        },
-        {
-            "point_id": "person-2",
-            "class_name": "Person",
-            "image_relpath": "img_3.png",
-            "projection": [1.0, 0.9],
-            "class_cluster_id": 0,
-            "class_cluster_size": 0,
             "wrong_class_suspicion": 0.0,
             "is_wrong_class_candidate": False,
         },
     ]
-    result["wrong_class_candidates"] = [
-        {
-            "point_id": "truck-2",
-            "class_name": "Truck",
-            "suggested_neighbor_class": "Person",
-            "wrong_class_suspicion": 0.72,
-            "image_relpath": "img_1.png",
-        }
-    ]
-    result["class_clusters"] = {
-        "Truck": {
-            "method": "kmeans",
-            "best_k": 2,
-            "candidates": [{"k": 2, "silhouette": 0.8}],
-            "clusters": [{"cluster_id": 0, "size": 2}, {"cluster_id": 1, "size": 2}],
-        },
-        "Person": {"method": "kmeans", "best_k": 1, "candidates": [], "clusters": []},
-    }
+    result["wrong_class_candidates"] = []
+    result["class_clusters"] = {}
     return result
+
+
+def _mock_class_split_cluster_search_result():
+    return {
+        "summary": {
+            "cluster_count": 2,
+            "best_k": 2,
+            "best_silhouette": 0.82,
+            "sensitivity": "balanced",
+        },
+        "clusters": [
+            {"cluster_id": 0, "size": 2, "medoid_point_id": "truck-1", "silhouette": 0.82},
+            {"cluster_id": 1, "size": 2, "medoid_point_id": "truck-3", "silhouette": 0.82},
+        ],
+        "labels_by_point_id": {
+            "truck-1": 0,
+            "truck-2": 0,
+            "truck-3": 1,
+            "truck-4": 1,
+        },
+        "reason": "",
+    }
+
+
+def _mock_class_split_many_wrong_result(count=15):
+    points = []
+    candidates = []
+    coords = []
+    for idx in range(count):
+        point_id = f"truck-wrong-{idx}"
+        x = -1.0 + idx * 0.05
+        y = -0.8 + idx * 0.03
+        coords.append([x, y])
+        points.append(
+            {
+                "point_id": point_id,
+                "class_name": "Truck",
+                "image_relpath": f"img_{idx}.png",
+                "projection": [x, y],
+                "wrong_class_suspicion": 0.9 - idx * 0.01,
+                "is_wrong_class_candidate": True,
+                "suggested_neighbor_class": "Person",
+            }
+        )
+        candidates.append(
+            {
+                "point_id": point_id,
+                "class_name": "Truck",
+                "suggested_neighbor_class": "Person",
+                "wrong_class_suspicion": 0.9 - idx * 0.01,
+                "image_relpath": f"img_{idx}.png",
+            }
+        )
+    return {
+        "summary": {
+            "analysis_scope": "all_classes",
+            "object_count": count,
+            "class_counts": {"Truck": count},
+            "projection_mode": "class_balanced_pca",
+            "projection_method": "pca",
+            "wrong_class_candidate_count": count,
+        },
+        "projection_options": {
+            "selected": "class_balanced_pca",
+            "available": ["global_pca", "class_balanced_pca", "between_class_pca", "within_filter_pca"],
+            "coordinates": {
+                "class_balanced_pca": coords,
+                "global_pca": coords,
+                "between_class_pca": coords,
+                "within_filter_pca": coords,
+            },
+        },
+        "points": points,
+        "wrong_class_candidates": candidates,
+        "clusters": {"clusters": []},
+    }
 
 
 def test_class_split_initial_view_hides_result_toolbar_until_result(playwright_page):
@@ -233,7 +257,9 @@ def test_class_split_graph_controls_are_visible_and_coherent(playwright_page):
     assert page.eval_on_selector("#classSplitScopeAll", "el => el.checked") is True
     assert page.eval_on_selector("#classSplitScopeSelected", "el => el.checked") is False
     assert page.eval_on_selector("#classSplitGraphStatus", "el => getComputedStyle(el).display !== 'none'") is True
-    assert page.eval_on_selector("#classSplitClusterOverlay", "el => el.disabled && !el.checked") is True
+    assert page.locator("#classSplitColorMode option[value='cluster']").count() == 0
+    assert page.locator("#classSplitClusterOverlay").count() == 0
+    assert page.eval_on_selector("#classSplitClusterRun", "el => el.disabled") is True
 
 
 def test_class_split_running_state_hides_previous_graph_until_result(playwright_page):
@@ -410,6 +436,33 @@ def test_class_split_wrong_candidate_confirm_removes_vignette_without_breaking_p
     assert "No likely wrong-class objects were flagged." in (page.text_content("#classSplitWrongList") or "")
 
 
+def test_class_split_wrong_candidate_skip_removes_vignette_without_clearing_flag(playwright_page):
+    page, _ = playwright_page
+    go_to_tab(page, "#tabClassSplitButton", "#tabClassSplit")
+    page.wait_for_function("!!window.__TATOR_TEST_HOOKS__?.classSplitApplyResult", timeout=15000)
+
+    page.evaluate(
+        """async (result) => window.__TATOR_TEST_HOOKS__.classSplitApplyResult(result, 'pw_class_split_skip_wrong_job')""",
+        _mock_class_split_result(),
+    )
+    page.wait_for_selector('.class-split-wrong-item[data-point-id="truck-2"]', timeout=15000)
+    page.click('.class-split-wrong-item[data-point-id="truck-2"] [data-action="skip-wrong"]')
+    page.wait_for_function(
+        "() => !document.querySelector('.class-split-wrong-item[data-point-id=\"truck-2\"]')",
+        timeout=15000,
+    )
+
+    page.select_option("#classSplitDisplayMode", "wrong_only")
+    page.wait_for_function(
+        "() => window.__TATOR_TEST_HOOKS__.classSplitPlotSnapshot().tracePointCounts.some((count) => count === 1)",
+        timeout=15000,
+    )
+    snapshot = page.evaluate("() => window.__TATOR_TEST_HOOKS__.classSplitPlotSnapshot()")
+    assert snapshot["traceCount"] >= 1
+    assert sum(snapshot["tracePointCounts"]) == 1
+    assert "No likely wrong-class objects were flagged." in (page.text_content("#classSplitWrongList") or "")
+
+
 def test_class_split_confirm_wrong_candidate_prunes_hidden_wrong_only_selection(playwright_page):
     page, _ = playwright_page
     go_to_tab(page, "#tabClassSplitButton", "#tabClassSplit")
@@ -446,35 +499,50 @@ def test_class_split_all_class_subclusters_require_class_filter(playwright_page)
     page.wait_for_function("!!window.__TATOR_TEST_HOOKS__?.classSplitApplyResult", timeout=15000)
 
     page.evaluate(
+        """async (result) => window.__TATOR_TEST_HOOKS__.classSplitApplyResult(result, 'pw_class_split_all_class_cluster_disabled_job')""",
+        _mock_class_split_result(),
+    )
+    assert page.locator("#classSplitClusterOverlay").count() == 0
+    assert page.locator("#classSplitColorMode option[value='cluster']").count() == 0
+    assert page.eval_on_selector("#classSplitClusterRun", "el => el.disabled") is True
+    assert "disabled in all-class graphs" in (page.text_content("#classSplitClusterList") or "")
+
+    page.evaluate(
         """async (result) => window.__TATOR_TEST_HOOKS__.classSplitApplyResult(result, 'pw_class_split_subcluster_job')""",
         _mock_class_split_result_with_subclusters(),
     )
-    assert page.eval_on_selector("#classSplitClusterOverlay", "el => el.disabled && !el.checked") is True
-    assert "Choose a class filter to inspect subclass clusters" in (page.text_content("#classSplitClusterList") or "")
-
-    page.select_option("#classSplitFilterClass", "Truck")
     page.wait_for_function(
         """() => {
             const state = window.__TATOR_TEST_HOOKS__?.classSplitClusterDebugState?.();
-            return state && state.filterClass === 'Truck';
+            return state && state.analysisScope === 'selected_class';
         }""",
         timeout=15000,
     )
-    cluster_state = page.evaluate("() => window.__TATOR_TEST_HOOKS__.classSplitClusterDebugState()")
-    assert cluster_state["hullsAllowed"] is True, cluster_state
-    assert cluster_state["overlayDisabled"] is False, cluster_state
+    assert page.eval_on_selector("#classSplitClusterRun", "el => !el.disabled") is True
+    assert "Find subclass clusters" in (page.text_content("#classSplitClusterList") or "")
+
+    page.evaluate(
+        """async (result) => window.__TATOR_TEST_HOOKS__.classSplitApplyClusterResult(result, 'pw_cluster_search_job')""",
+        _mock_class_split_cluster_search_result(),
+    )
     page.wait_for_function(
-        "() => window.__TATOR_TEST_HOOKS__.classSplitPlotSnapshot().statusText.includes('filter: Truck')",
+        "() => (document.querySelector('#classSplitClusterList')?.textContent || '').includes('Subclass clusters')",
+        timeout=15000,
+    )
+    cluster_state = page.evaluate("() => window.__TATOR_TEST_HOOKS__.classSplitClusterDebugState()")
+    assert cluster_state["hullsAllowed"] is False, cluster_state
+    assert cluster_state["overlayDisabled"] is True, cluster_state
+    assert cluster_state["proposalsAllowed"] is True, cluster_state
+    assert cluster_state["clusterKeys"] == ["0", "1"], cluster_state
+    page.wait_for_function(
+        "() => window.__TATOR_TEST_HOOKS__.classSplitPlotSnapshot().statusText.includes('4/4 objects shown')",
         timeout=15000,
     )
 
     snapshot = page.evaluate("() => window.__TATOR_TEST_HOOKS__.classSplitPlotSnapshot()")
-    assert page.eval_on_selector("#classSplitClusterOverlay", "el => !el.disabled && el.checked") is True
-    assert "Subclass clusters for Truck" in (page.text_content("#classSplitClusterList") or "")
-    assert "Cluster 0" in snapshot["traceNames"]
-    assert "Cluster 1" in snapshot["traceNames"]
-    assert "Truck" in snapshot["traceNames"]
-    assert "4/6 objects shown" in snapshot["statusText"]
+    assert snapshot["traceNames"] == ["Truck"]
+    assert "Subclass cluster 0" in (page.text_content("#classSplitClusterList") or "")
+    assert "Subclass cluster 1" in (page.text_content("#classSplitClusterList") or "")
     assert "No points match" not in snapshot["graphText"]
 
     page.select_option("#classSplitDisplayMode", "wrong_only")
@@ -483,13 +551,38 @@ def test_class_split_all_class_subclusters_require_class_filter(playwright_page)
         timeout=15000,
     )
     wrong_only_cluster_state = page.evaluate("() => window.__TATOR_TEST_HOOKS__.classSplitClusterDebugState()")
-    assert wrong_only_cluster_state["filteredCount"] == 4, wrong_only_cluster_state
+    assert wrong_only_cluster_state["filteredCount"] == 0, wrong_only_cluster_state
     assert wrong_only_cluster_state["hullsAllowed"] is False, wrong_only_cluster_state
     assert wrong_only_cluster_state["overlayDisabled"] is True, wrong_only_cluster_state
-    assert "at least two visible clustered points" in page.eval_on_selector(
-        "#classSplitClusterOverlay",
-        "el => el.closest('.class-split-toggle')?.title || ''",
+    assert "No points match" in page.evaluate("() => window.__TATOR_TEST_HOOKS__.classSplitPlotSnapshot().graphText")
+
+
+def test_class_split_wrong_candidate_queue_shows_twelve_and_refills(playwright_page):
+    page, _ = playwright_page
+    go_to_tab(page, "#tabClassSplitButton", "#tabClassSplit")
+    page.wait_for_function("!!window.__TATOR_TEST_HOOKS__?.classSplitApplyResult", timeout=15000)
+
+    page.evaluate(
+        """async (result) => window.__TATOR_TEST_HOOKS__.classSplitApplyResult(result, 'pw_class_split_many_wrong_job')""",
+        _mock_class_split_many_wrong_result(15),
     )
+    page.wait_for_selector(".class-split-wrong-item", timeout=15000)
+    assert page.locator(".class-split-wrong-item").count() == 12
+    assert "Showing 12 of 15" in (page.text_content("#classSplitWrongQueueStatus") or "")
+
+    first_id = page.eval_on_selector(".class-split-wrong-item", "el => el.getAttribute('data-point-id')")
+    page.click(f'.class-split-wrong-item[data-point-id="{first_id}"] [data-action="skip-wrong"]')
+    page.wait_for_function(
+        """(pointId) => !document.querySelector(`.class-split-wrong-item[data-point-id="${pointId}"]`)""",
+        first_id,
+        timeout=15000,
+    )
+    assert page.locator(".class-split-wrong-item").count() == 12
+    assert "Showing 12 of 14" in (page.text_content("#classSplitWrongQueueStatus") or "")
+
+    page.click("#classSplitWrongShuffle")
+    page.wait_for_selector(".class-split-wrong-item", timeout=15000)
+    assert page.locator(".class-split-wrong-item").count() == 12
 
 
 def test_class_split_graph_survives_leaving_and_returning_to_tab(playwright_page):

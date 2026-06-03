@@ -85,6 +85,18 @@ cp .env.macos.example .env.macos
 tools/run_macos_backend.sh
 ```
 
+After setup, the daily backend start command is:
+
+```bash
+tools/run_macos_backend.sh
+```
+
+From another directory, `cd` to your clone first:
+
+```bash
+cd /path/to/Tator && tools/run_macos_backend.sh
+```
+
 Equivalent direct wrapper, for machines without Poetry:
 
 ```bash
@@ -96,10 +108,26 @@ tools/run_macos_backend.sh
 Then open:
 
 ```text
-ybat-master/ybat.html
+http://127.0.0.1:8000/
 ```
 
-The UI defaults to `http://localhost:8000`.
+The backend listens on `http://127.0.0.1:8000` and serves the browser UI at `/`
+and `/tator.html`. The old `/ybat.html` URL redirects to `/tator.html`.
+
+For frontend development, you can run a separate static UI server from the repo
+root:
+
+```bash
+python3 -m http.server 8080 -d ybat-master
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8080/tator.html
+```
+
+The UI still talks to the backend at `http://localhost:8000` by default.
 
 ## Verification
 

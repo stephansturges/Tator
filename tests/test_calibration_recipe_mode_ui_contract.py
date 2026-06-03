@@ -3,7 +3,7 @@ from pathlib import Path
 
 def test_calibration_recipe_mode_ui_controls_exist() -> None:
     repo_root = Path(__file__).resolve().parents[1]
-    html_text = (repo_root / "ybat-master" / "ybat.html").read_text(encoding="utf-8")
+    html_text = (repo_root / "ybat-master" / "tator.html").read_text(encoding="utf-8")
     js_text = (repo_root / "ybat-master" / "ybat.js").read_text(encoding="utf-8")
 
     for control_id in (

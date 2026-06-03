@@ -2064,6 +2064,60 @@ body.annotation-focus-mode .class-scroll-indicator {
     min-width: 0;
 }
 
+.class-split-projection-hint {
+    margin-top: 4px;
+    font-size: 12px;
+    line-height: 1.35;
+    color: #64748b;
+}
+
+.class-split-projection-hint.is-recommended {
+    color: #047857;
+}
+
+.class-split-projection-hint.is-warning {
+    color: #b45309;
+}
+
+.class-split-projection-guide {
+    grid-column: 1 / -1;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: rgba(241, 245, 249, 0.68);
+}
+
+.class-split-projection-guide summary {
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+    color: #334155;
+}
+
+.class-split-projection-guide__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.class-split-projection-guide__grid > div {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+
+.class-split-projection-guide__grid strong {
+    color: #0f172a;
+}
+
+.class-split-projection-guide__grid span {
+    color: #475569;
+    font-size: 12px;
+    line-height: 1.35;
+}
+
 .class-split-field label,
 .class-split-toolbar label {
     font-size: 12px;

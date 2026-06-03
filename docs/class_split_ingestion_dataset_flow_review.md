@@ -185,8 +185,10 @@ Flow checks:
 4. User chooses selected-class or all-class scope.
 5. User chooses graph projection mode. The default is class-balanced PCA for
    all-class readability; global PCA preserves the previous view;
-   between-class PCA spreads class centroids for label-overview work; and
-   within-filter PCA recomputes axes inside the selected class or class filter.
+   between-class PCA spreads class centroids for label-overview work;
+   within-filter PCA recomputes axes inside the selected class or class filter;
+   and UMAP is available for selected-class subclass-island searches when the
+   dependency is installed.
 6. If the current workspace is backend-linked or transient, UI submits a JSON
    `/class_analysis/jobs` request that references that dataset/session directly.
    If it is browser-only, UI first uploads it with the `Workspace upload name`
@@ -228,8 +230,9 @@ Flow checks:
   object before selecting it.
 - Subclass cluster search is an explicit selected-class workflow, not an
   always-on graph overlay. The user runs it after selected-class analysis; the
-  backend reuses saved embeddings, tests candidate cluster counts, and reports
-  progress through `/class_analysis/jobs/{job_id}/cluster_search`.
+  backend reuses saved embeddings, supports UMAP-island proposals or stricter
+  embedding KMeans proposals, and reports progress through
+  `/class_analysis/jobs/{job_id}/cluster_search`.
 - Cluster proposals show representative crops, class mix, purity, silhouette,
   and mean outlier score. Selecting a cluster selects all visible points in that
   cluster, zooms the plot to the island, flashes the medoid, and enables the
@@ -271,6 +274,10 @@ Fix from this pass:
   analysis. If upload or job start fails, the previous graph, filters,
   selection, and review panels are restored and the failure is reported without
   replacing the graph with a stale empty placeholder.
+- The projection UI now explains when to use global PCA, class-balanced PCA,
+  between-class PCA, within-filter PCA, and UMAP. UMAP exposes neighbor and
+  minimum-distance controls for subclass-island work, while explicit subclass
+  search exposes its own UMAP island or strict embedding proposal settings.
 - The Label Images shortcut explainer now lists `D` as SAM point mode
   explicitly. The class carousel used by `E/R` is lighter: it renders a bounded
   nearby class window, updates Qwen/SAM3 target selects without rebuilding full
@@ -322,10 +329,10 @@ Fix from this pass:
 Current focused verification for this review:
 
 ```bash
-NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m py_compile api/class_analysis.py localinferenceapi.py
+NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m py_compile localinferenceapi.py
 node --check ybat-master/ybat.js
 git diff --check
-NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest -q tests/test_class_analysis.py tests/test_labeling_panel_layout_contract.py
+NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest -q tests/test_class_analysis.py tests/test_labeling_panel_layout_contract.py tests/test_tator_ui_routes.py
 ```
 
 Interactive browser smoke is still a separate manual/Playwright concern; the

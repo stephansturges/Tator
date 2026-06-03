@@ -2235,3 +2235,25 @@ preserving the exact validation story for storage and artifact-write fixes.
   focused class-analysis backend tests, and focused labeling-panel layout
   contract tests. The Playwright Class Split contract remains fixture-skipped
   unless run with the UI E2E environment enabled.
+
+## 2026-06-03: Backend-Served UI And UMAP Subclass Controls
+
+- Renamed the browser entrypoint from `ybat.html` to `tator.html`. The backend
+  now serves the UI at `/` and `/tator.html`, serves the whitelisted static UI
+  assets from `ybat-master/`, and redirects legacy `/ybat.html` requests to
+  `/tator.html`.
+- Updated the startup documentation so the daily command remains
+  `tools/run_macos_backend.sh`, with the normal browser target now on the same
+  backend port instead of a separate static server. Static serving on port 8080
+  remains documented only as an optional frontend-development path.
+- Added backend route-contract coverage for the served UI, asset whitelist, and
+  legacy redirect, and moved frontend file-contract tests to read
+  `ybat-master/tator.html`.
+- Extended Class Split projection guidance and controls: UMAP is explained as
+  the selected-class subclass-island view, UMAP neighbor/min-distance levers are
+  exposed, and explicit subclass search can use UMAP-island proposals or strict
+  embedding KMeans proposals.
+- Validation: `py_compile localinferenceapi.py`, `node --check
+  ybat-master/ybat.js`, `git diff --check`, focused route/layout/calibration UI
+  contracts, focused class-analysis coverage, live backend checks for `/`,
+  `/tator.html`, `/ybat.html`, `/ybat.js`, and `/system/health_summary`.

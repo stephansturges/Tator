@@ -241,15 +241,81 @@ def test_class_analysis_cluster_search_reuses_selected_class_embeddings():
         job=cluster_job,
         points=records,
         embeddings=embeddings,
-        payload={"sensitivity": "sensitive", "max_clusters": 4, "min_cluster_size": 2, "seed": 13},
+        payload={
+            "proposal_source": "embedding_kmeans",
+            "sensitivity": "sensitive",
+            "max_clusters": 4,
+            "min_cluster_size": 2,
+            "seed": 13,
+        },
     )
 
     clusters = result["clusters"]
     assert len(clusters) == 2
     assert result["summary"]["cluster_count"] == 2
+    assert result["summary"]["proposal_source"] == "embedding_kmeans"
     assert result["summary"]["best_k"] == 2
     assert set(result["labels_by_point_id"]) == {record["point_id"] for record in records}
     assert sorted(cluster["size"] for cluster in clusters) == [4, 4]
+
+
+def test_class_analysis_cluster_search_umap_islands_can_propose_visual_tail(monkeypatch):
+    records = [_record(f"p{i}", "vehicle") for i in range(8)]
+    embeddings = np.asarray(
+        [
+            [1.0, 0.0, 0.0],
+            [0.99, 0.01, 0.0],
+            [0.98, -0.01, 0.0],
+            [1.0, 0.02, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.01, 0.99, 0.0],
+            [-0.01, 0.98, 0.0],
+            [0.02, 1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+    def fake_project(embeddings_arg, *, projection, projection_neighbor_k, projection_min_dist, seed, warnings):
+        assert projection == "umap"
+        assert projection_neighbor_k == 4
+        assert projection_min_dist == 0.02
+        return np.asarray(
+            [
+                [0.00, 0.00],
+                [0.02, 0.00],
+                [0.00, 0.02],
+                [0.02, 0.02],
+                [4.00, 0.00],
+                [4.02, 0.00],
+                [4.00, 0.02],
+                [4.02, 0.02],
+            ],
+            dtype=np.float32,
+        ), "umap"
+
+    monkeypatch.setattr(api, "_class_analysis_project_embeddings", fake_project)
+    cluster_job = api.ClassAnalysisClusterJob(job_id="cac_unit_umap", parent_job_id="ca_unit")
+    result = api._class_analysis_cluster_search_result(
+        job=cluster_job,
+        points=records,
+        embeddings=embeddings,
+        payload={
+            "proposal_source": "umap_islands",
+            "sensitivity": "sensitive",
+            "max_clusters": 4,
+            "min_cluster_size": 2,
+            "umap_neighbors": 4,
+            "umap_min_dist": 0.02,
+            "seed": 13,
+        },
+    )
+
+    assert result["summary"]["proposal_source"] == "umap_islands"
+    assert result["summary"]["method"] == "umap_dbscan"
+    assert result["summary"]["cluster_count"] == 2
+    assert sorted(cluster["size"] for cluster in result["clusters"]) == [4, 4]
+    assert set(result["labels_by_point_id"]) == {record["point_id"] for record in records}
 
 
 def test_class_analysis_stratified_sampling_keeps_classes_represented():
@@ -656,6 +722,11 @@ def test_class_analysis_capabilities_expose_only_normal_recipe_controls():
     assert caps["default_preprocess_mode"] == "canonical"
     assert caps["default_embedding_adjustment"] == "remove_size_bias"
     assert caps["default_projection_neighbor_k"] == 50
+    assert caps["default_projection_min_dist"] == 0.08
+    assert caps["subclass_cluster_sources"] == ["umap_islands", "embedding_kmeans"]
+    assert caps["default_subclass_cluster_source"] == "umap_islands"
+    assert caps["default_subclass_umap_neighbors"] == 15
+    assert caps["default_subclass_umap_min_dist"] == 0.02
     assert caps["default_pca_projection_mode"] == "class_balanced_pca"
     assert caps["pca_projection_modes"] == api.CLASS_ANALYSIS_PCA_PROJECTION_MODES
     assert caps["embedding_aggregation_modes"] == ["pooled"]

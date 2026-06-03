@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-HTML_PATH = REPO_ROOT / "ybat-master" / "ybat.html"
+HTML_PATH = REPO_ROOT / "ybat-master" / "tator.html"
 CSS_PATH = REPO_ROOT / "ybat-master" / "ybat.css"
 JS_PATH = REPO_ROOT / "ybat-master" / "ybat.js"
 
@@ -204,8 +204,11 @@ def test_keyboard_image_navigation_shortcuts_are_documented_and_guarded():
     assert "canvas.element.focus({ preventScroll: true })" in js
     assert "const requestedMaxItems = Number.isFinite(options.maxVisibleItems)" in js
     assert "function scheduleClassSplitControlsRefresh" in js
+    assert "function scheduleSam3TextWorkflowRefresh" in js
     assert "syncSam3ClassToCurrent();" in js
-    assert "scheduleClassSplitControlsRefresh();" in js
+    assert "scheduleClassSplitControlsRefresh();" not in js
+    assert "if (!isClassSplitTabActive()) {\n            return;\n        }" in js
+    assert "scheduleClassSplitControlsRefresh({ delay: 0, preferCurrentClass: true });" in js
     assert "const nextIndex = (currentIndex + delta + total) % total;\n            Array.from(classList.options).forEach" not in js
 
 
@@ -668,6 +671,11 @@ def test_class_split_explorer_panel_contract():
     assert '<option value="global_pca">Global PCA</option>' in html
     assert '<option value="between_class_pca">Between-class PCA</option>' in html
     assert '<option value="within_filter_pca">Within-filter PCA</option>' in html
+    assert '<option value="umap">UMAP if available</option>' in html
+    assert 'id="classSplitProjectionHint"' in html
+    assert "Projection guide" in html
+    assert "UMAP</strong><span>Best for selected-class subclass islands" in html
+    assert "Class-balanced PCA</strong><span>Best all-class default" in html
     assert 'Scope<span class="help-icon"' in html
     assert 'Class<span class="help-icon"' in html
     assert 'Encoder<span class="help-icon"' in html
@@ -679,6 +687,9 @@ def test_class_split_explorer_panel_contract():
     assert "The first NN number is object-weighted; the second balances classes" in html
     assert "the visible C-RADIO preset starts from summary mode" in html
     assert "On Mac it now uses local MLX when available" in html
+    assert 'UMAP neighbors<span class="help-icon"' in html
+    assert 'UMAP min distance<span class="help-icon"' in html
+    assert 'id="classSplitProjectionMinDist" min="0" max="0.99" step="0.01" value="0.08"' in html
     assert 'id="classSplitProjectionNeighborK" min="0" max="5000" value="50"' in html
     assert 'id="classSplitSampleCap" min="0" max="50000" placeholder="All objects"' in html
     assert 'Crop padding<span class="help-icon"' in html
@@ -699,10 +710,16 @@ def test_class_split_explorer_panel_contract():
     assert '<option value="wrong_only">Likely wrong class only</option>' in html
     assert '<option value="cluster">Cluster</option>' not in html
     assert 'id="classSplitClusterOverlay"' not in html
+    assert 'id="classSplitClusterSource"' in html
+    assert '<option value="umap_islands" selected>UMAP island proposals</option>' in html
+    assert '<option value="embedding_kmeans">Strict embedding clusters</option>' in html
     assert 'id="classSplitClusterSensitivity"' in html
     assert 'id="classSplitClusterMaxClusters"' in html
     assert 'id="classSplitClusterMinSize"' in html
+    assert 'id="classSplitClusterUmapNeighbors" min="0" max="5000" value="15"' in html
+    assert 'id="classSplitClusterUmapMinDist" min="0" max="0.99" step="0.01" value="0.02"' in html
     assert 'id="classSplitClusterRun"' in html
+    assert "UMAP island proposals search the selected class in a local UMAP map" in html
     assert 'id="classSplitCradioPooling"' in html
     assert "benchmark carefully before promoting any C-RADIO pooling mode" in html
     assert 'id="classSplitReport" class="class-split-report"' in html
@@ -807,6 +824,10 @@ def test_class_split_explorer_panel_contract():
     assert "plotRenderToken" in js
     assert "projection_mode: projectionParts.projectionMode" in js
     assert "projection_neighbor_k: projectionNeighborK" in js
+    assert "projection_min_dist: projectionMinDist" in js
+    assert "proposal_source:" in js
+    assert "umap_neighbors:" in js
+    assert "umap_min_dist:" in js
     assert "cradio_pooling:" in js
     assert "classSplitElements.cradioPooling" in js
     assert "function updateClassSplitEmbeddingRecipeExplanation" in js
@@ -867,6 +888,11 @@ def test_class_split_explorer_panel_contract():
     assert "classSplitState.clusterSearchResult" in js
     assert "Subclass clustering is disabled for all-class graphs" in js
     assert "Click Find subclass clusters" in js
+    assert "UMAP island mode follows local visual density" in js
+    assert "Strict embedding KMeans proposals" in js
+    assert "defaultClassSplitProjectionForScope" in js
+    assert 'classSplitUmapAvailable() ? "umap" : "within_filter_pca"' in js
+    assert "projectionNeighborK.disabled = !available || classSplitState.active || projectionChoice !== \"umap\"" in js
     assert 'classSplitElements.displayMode.value = "all";' in js
     assert "function buildClassSplitClusterHullTraces" in js
     assert "computeDatasetImageValueAnalysis(points)" in js

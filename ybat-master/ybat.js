@@ -765,6 +765,7 @@
     let classLoadListenerBound = false;
     let classSelectListenerBound = false;
     let classSplitControlsRefreshTimer = null;
+    let sam3TextWorkflowRefreshTimer = null;
     let bboxLoadListenersBound = false;
     let bboxSaveListenerBound = false;
     let keyboardListenersBound = false;
@@ -2332,6 +2333,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         prepassTraceList: null,
     };
     const sam3TextElements = {
+        panel: null,
         promptInput: null,
         thresholdInput: null,
         maskThresholdInput: null,
@@ -2379,7 +2381,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         encoderType: null,
         backbone: null,
         projection: null,
+        projectionHint: null,
         projectionNeighborK: null,
+        projectionMinDist: null,
         sampleCap: null,
         recipeExplanation: null,
         padding: null,
@@ -2404,9 +2408,12 @@ const AUTOMATION_LOCKED_TABS = new Set([
         displayMode: null,
         dragMode: null,
         clusterOverlay: null,
+        clusterSource: null,
         clusterSensitivity: null,
         clusterMaxClusters: null,
         clusterMinSize: null,
+        clusterUmapNeighbors: null,
+        clusterUmapMinDist: null,
         clusterRun: null,
         clusterProgress: null,
         clusterProgressFill: null,
@@ -4145,7 +4152,7 @@ const sam3TrainState = {
         }
         syncQwenCaptionDatasetControls();
         updateAnnotationSourceUi();
-        if (classSplitState.initialized) {
+        if (classSplitState.initialized && activeTab === TAB_CLASS_SPLIT) {
             refreshClassSplitControls();
         }
         scheduleAnnotationDiversityMetricRefresh();
@@ -18207,7 +18214,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (tabName === TAB_CLASS_SPLIT) {
             initClassSplitExplorer();
-            refreshClassSplitControls();
+            refreshClassSplitControls({ preferCurrentClass: true });
             window.setTimeout(() => renderClassSplitPlot(), 80);
         }
         if (tabName === TAB_DATA_INGESTION) {
@@ -22086,6 +22093,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         sam3TextUiInitialized = true;
+        sam3TextElements.panel = document.getElementById("sam3TextPanel");
         sam3TextElements.promptInput = document.getElementById("sam3TextPrompt");
         sam3TextElements.thresholdInput = document.getElementById("sam3Threshold");
         sam3TextElements.maskThresholdInput = document.getElementById("sam3MaskThreshold");
@@ -22197,6 +22205,14 @@ async function cancelRfDetrTrainingJobRequest() {
                 handleSam3SimilarityPrompt().catch((error) => {
                     console.error("SAM3 similarity prompt failed", error);
                 });
+            });
+        }
+        if (sam3TextElements.panel) {
+            sam3TextElements.panel.addEventListener("toggle", () => {
+                if (isSam3TextPanelOpen()) {
+                    syncSam3ClassToCurrent({ refreshWorkflow: true });
+                    updateSam3TextWorkflow();
+                }
             });
         }
         const workflowInputs = [
@@ -23957,7 +23973,24 @@ async function cancelRfDetrTrainingJobRequest() {
         updateSam3TextWorkflow();
     }
 
-    function syncSam3ClassToCurrent() {
+    function isSam3TextPanelOpen() {
+        return !!sam3TextElements.panel?.open;
+    }
+
+    function scheduleSam3TextWorkflowRefresh({ delay = 180 } = {}) {
+        if (!isSam3TextPanelOpen() || !sam3TextElements.workflow) {
+            return;
+        }
+        if (sam3TextWorkflowRefreshTimer) {
+            window.clearTimeout(sam3TextWorkflowRefreshTimer);
+        }
+        sam3TextWorkflowRefreshTimer = window.setTimeout(() => {
+            sam3TextWorkflowRefreshTimer = null;
+            updateSam3TextWorkflow();
+        }, Math.max(0, Number(delay) || 0));
+    }
+
+    function syncSam3ClassToCurrent({ refreshWorkflow = false } = {}) {
         if (!sam3TextElements.classSelect || !currentClass || sam3TextElements.classSelect.value === currentClass) {
             return;
         }
@@ -23972,7 +24005,11 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         sam3TextElements.classSelect.value = currentClass;
-        updateSam3TextWorkflow();
+        if (refreshWorkflow) {
+            updateSam3TextWorkflow();
+        } else {
+            scheduleSam3TextWorkflowRefresh();
+        }
     }
 
     function setSam3LabelmapStatus(message, variant = "info") {
@@ -38992,8 +39029,15 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    function scheduleClassSplitControlsRefresh({ delay = 140 } = {}) {
+    function isClassSplitTabActive() {
+        return activeTab === TAB_CLASS_SPLIT;
+    }
+
+    function scheduleClassSplitControlsRefresh({ delay = 140, preferCurrentClass = false } = {}) {
         if (!classSplitState.initialized) {
+            return;
+        }
+        if (!isClassSplitTabActive()) {
             return;
         }
         if (classSplitControlsRefreshTimer) {
@@ -39001,7 +39045,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         classSplitControlsRefreshTimer = window.setTimeout(() => {
             classSplitControlsRefreshTimer = null;
-            refreshClassSplitControls();
+            refreshClassSplitControls({ preferCurrentClass });
         }, Math.max(0, Number(delay) || 0));
     }
 
@@ -39039,6 +39083,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         updateClassSplitBackboneOptions();
         updateClassSplitProjectionOptions();
+        applyClassSplitProjectionDefaultForScope();
         refreshClassSplitControls();
     }
 
@@ -39063,8 +39108,7 @@ async function cancelRfDetrTrainingJobRequest() {
         const desired = normalizeClassSplitProjectionChoice(
             classSplitElements.graphProjection?.value
             || classSplitElements.projection?.value
-            || classSplitState.capabilities?.default_pca_projection_mode
-            || "class_balanced_pca"
+            || defaultClassSplitProjectionForScope()
         );
         selects.forEach((select) => fillSelectOptions(select, options, desired));
         refreshClassSplitProjectionHint();
@@ -39104,6 +39148,33 @@ async function cancelRfDetrTrainingJobRequest() {
             umap: "UMAP",
         };
         return labels[normalizeClassSplitProjectionChoice(choice)] || labels.class_balanced_pca;
+    }
+
+    function classSplitUmapAvailable() {
+        return Array.isArray(classSplitState.capabilities?.projection_methods)
+            && classSplitState.capabilities.projection_methods.includes("umap");
+    }
+
+    function defaultClassSplitProjectionForScope(scope = getClassSplitScope()) {
+        return String(scope || "") === "selected_class"
+            ? (classSplitUmapAvailable() ? "umap" : "within_filter_pca")
+            : "class_balanced_pca";
+    }
+
+    function classSplitProjectionIsAutoDefault(choice) {
+        return ["class_balanced_pca", "within_filter_pca", "umap"].includes(normalizeClassSplitProjectionChoice(choice));
+    }
+
+    function applyClassSplitProjectionDefaultForScope({ force = false } = {}) {
+        if (classSplitState.result && !force) {
+            return;
+        }
+        const desired = defaultClassSplitProjectionForScope();
+        const current = getClassSplitProjectionChoice();
+        if (force || classSplitProjectionIsAutoDefault(current)) {
+            setClassSplitProjectionChoice(desired);
+        }
+        refreshClassSplitProjectionHint();
     }
 
     function getClassSplitProjectionChoice() {
@@ -39214,13 +39285,32 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function refreshClassSplitProjectionHint() {
-        const title = getClassSplitProjectionUnavailableMessage()
-            || "Switches the graph coordinates only. Full-space nearest-neighbor scoring is unchanged.";
+        const choice = getClassSplitProjectionChoice();
+        const scope = getClassSplitScope();
+        const unavailable = getClassSplitProjectionUnavailableMessage();
+        const guidance = {
+            umap: classSplitUmapAvailable()
+                ? "UMAP preserves local neighborhoods and is the recommended selected-class view for spotting subclass islands. Axes and far-apart island distances are visual layout only."
+                : "UMAP is not installed in this backend; rerunning with UMAP will fall back to Global PCA. Install umap-learn to enable neighborhood maps.",
+            within_filter_pca: "Within-filter PCA is the conservative PCA fallback for one class or class filter. It recomputes linear axes inside that subset, but can still hide curved local islands.",
+            class_balanced_pca: "Class-balanced PCA is the safest all-class overview. It reduces domination by huge classes, but it is not the best tool for finding subclasses inside one class.",
+            between_class_pca: "Between-class PCA intentionally spreads labels apart for class overview. Use it to inspect class separation, not to prove subclass islands.",
+            global_pca: "Global PCA is the most conservative linear overview. If a split is clear here it is strong, but smaller semantic islands are often compressed.",
+        }[choice] || "Projection changes only the visible graph coordinates; wrong-class scoring stays in original embeddings.";
+        const suffix = scope === "selected_class"
+            ? " For subclass work: run Selected class + UMAP, then verify islands by crop previews before relabeling."
+            : " For likely-wrong-class review: use All classes + Class-balanced PCA, then filter likely wrong objects.";
+        const title = unavailable || `${guidance}${suffix}`;
         [classSplitElements.projection, classSplitElements.graphProjection].forEach((select) => {
             if (select) {
                 select.title = title;
             }
         });
+        if (classSplitElements.projectionHint) {
+            classSplitElements.projectionHint.textContent = title;
+            classSplitElements.projectionHint.classList.toggle("is-warning", !!unavailable || (choice === "umap" && !classSplitUmapAvailable()));
+            classSplitElements.projectionHint.classList.toggle("is-recommended", !unavailable && scope === "selected_class" && choice === "umap");
+        }
     }
 
     function classSplitProjectionCoordinatesLoaded(choice = getClassSplitProjectionChoice()) {
@@ -39331,14 +39421,18 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    function refreshClassSplitControls() {
+    function refreshClassSplitControls({ preferCurrentClass = false } = {}) {
         const stats = getClassSplitActiveWorkspaceStats();
         const available = stats.imageCount > 0 && stats.classCount > 0 && stats.objectCount > 0;
-        populateClassSplitClasses({ preserveSelection: true });
+        populateClassSplitClasses({ preserveSelection: !preferCurrentClass });
+        if (preferCurrentClass) {
+            syncClassSplitCurrentClassSelection();
+        }
         const scope = getClassSplitScope();
         const classSelected = !!String(classSplitElements.classSelect?.value || "").trim();
         const selectedClassCount = stats.counts.get(String(classSplitElements.classSelect?.value || "").trim()) || 0;
         const classSplitEncoderType = String(classSplitElements.encoderType?.value || "dinov3").trim().toLowerCase();
+        const projectionChoice = getClassSplitProjectionChoice();
         if (classSplitElements.datasetStatus) {
             if (!stats.imageCount) {
                 classSplitElements.datasetStatus.textContent = "Open images in Label Images to run analysis.";
@@ -39363,6 +39457,7 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitElements.backbone,
             classSplitElements.projection,
             classSplitElements.projectionNeighborK,
+            classSplitElements.projectionMinDist,
             classSplitElements.sampleCap,
             classSplitElements.padding,
             classSplitElements.canonicalSize,
@@ -39387,9 +39482,16 @@ async function cancelRfDetrTrainingJobRequest() {
         if (classSplitElements.cradioPooling) {
             classSplitElements.cradioPooling.disabled = !available || classSplitState.active || classSplitEncoderType !== "cradio";
         }
+        if (classSplitElements.projectionNeighborK) {
+            classSplitElements.projectionNeighborK.disabled = !available || classSplitState.active || projectionChoice !== "umap";
+        }
+        if (classSplitElements.projectionMinDist) {
+            classSplitElements.projectionMinDist.disabled = !available || classSplitState.active || projectionChoice !== "umap";
+        }
         if (classSplitElements.uploadDatasetName) {
             classSplitElements.uploadDatasetName.disabled = !available || classSplitState.active || !!getClassSplitServerSourceHandle();
         }
+        refreshClassSplitProjectionHint();
 	        setButtonDisabled(classSplitElements.runButton, !canRun);
 	        setButtonDisabled(
 	            classSplitElements.cancelButton,
@@ -39431,6 +39533,10 @@ async function cancelRfDetrTrainingJobRequest() {
         const projectionNeighborK = Number.isFinite(projectionNeighborRaw)
             ? Math.max(0, Math.min(5000, projectionNeighborRaw))
             : 50;
+        const projectionMinDistRaw = parseFloat(classSplitElements.projectionMinDist?.value || "0.08");
+        const projectionMinDist = Number.isFinite(projectionMinDistRaw)
+            ? Math.max(0, Math.min(0.99, projectionMinDistRaw))
+            : 0.08;
         const neighborK = Math.max(3, Math.min(100, parseInt(classSplitElements.neighborK?.value || "15", 10) || 15));
         const projectionParts = getClassSplitProjectionRequestParts();
         const request = {
@@ -39441,6 +39547,7 @@ async function cancelRfDetrTrainingJobRequest() {
             projection: projectionParts.projection,
             projection_mode: projectionParts.projectionMode,
             projection_neighbor_k: projectionNeighborK,
+            projection_min_dist: projectionMinDist,
             crop_mode: "padded_square",
             padding_ratio: padding,
             preprocess_mode: String(classSplitElements.preprocessMode?.value || "canonical").trim().toLowerCase() || "canonical",
@@ -40456,12 +40563,20 @@ async function cancelRfDetrTrainingJobRequest() {
         const isSelectedClassResult = classSplitHasSelectedClassResult();
         const disabled = classSplitState.active || classSplitState.clusterSearchActive || !isSelectedClassResult || !classSplitState.currentJobId;
         [
+            classSplitElements.clusterSource,
             classSplitElements.clusterSensitivity,
             classSplitElements.clusterMaxClusters,
             classSplitElements.clusterMinSize,
         ].forEach((control) => {
             if (control) {
                 control.disabled = disabled;
+            }
+        });
+        const source = String(classSplitElements.clusterSource?.value || "umap_islands").trim().toLowerCase();
+        const umapIslandDisabled = disabled || source !== "umap_islands";
+        [classSplitElements.clusterUmapNeighbors, classSplitElements.clusterUmapMinDist].forEach((control) => {
+            if (control) {
+                control.disabled = umapIslandDisabled;
             }
         });
         setButtonDisabled(classSplitElements.clusterRun, disabled);
@@ -40673,12 +40788,12 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         if (classSplitState.clusterSearchActive) {
-            listEl.innerHTML = `<div class="training-help">Searching ${escapeHtml(classSplitClusterContextClass() || "selected class")} embeddings for subclass islands ...</div>`;
+            listEl.innerHTML = `<div class="training-help">Searching ${escapeHtml(classSplitClusterContextClass() || "selected class")} for subclass candidates ...</div>`;
             refreshClassSplitClusterControls();
             return;
         }
         if (!classSplitState.clusterSearchResult) {
-            listEl.innerHTML = `<div class="training-help">Click Find subclass clusters to search the selected class without rerunning embeddings.</div>`;
+            listEl.innerHTML = `<div class="training-help">Click Find subclass clusters to propose review islands inside the selected class. UMAP island mode follows local visual density in a subclass-tuned UMAP map; strict embedding mode uses high-dimensional KMeans.</div>`;
             setClassSplitClusterStatus("Ready for selected-class cluster search.", "info");
             renderClassSplitClusterProgress();
             refreshClassSplitClusterControls();
@@ -40700,8 +40815,12 @@ async function cancelRfDetrTrainingJobRequest() {
             `<option value="">Choose target class</option>`,
             ...classNames.map((className) => `<option value="${escapeHtml(className)}">${escapeHtml(className)}</option>`),
         ].join("");
+        const source = String(classSplitState.clusterSearchResult?.summary?.proposal_source || "").trim();
+        const sourceText = source === "embedding_kmeans"
+            ? "Strict embedding KMeans proposals"
+            : "UMAP island proposals";
         listEl.innerHTML = [
-            `<div class="training-help">Subclass clusters for ${escapeHtml(classSplitClusterContextClass() || "selected class")}. Select a cluster to highlight it in the plot, then reassign if it is a real subclass.</div>`,
+            `<div class="training-help">${escapeHtml(sourceText)} for ${escapeHtml(classSplitClusterContextClass() || "selected class")}. Review crop context and graph position before relabeling; proposals are not ground truth.</div>`,
             summaries.map((summary) => {
                 const medoid = summary.medoidPoint;
                 const thumbUrl = medoid ? getClassSplitThumbnailUrl(medoid) : "";
@@ -40709,8 +40828,10 @@ async function cancelRfDetrTrainingJobRequest() {
                 const mix = formatClassSplitClusterMix(summary);
                 const purityPct = Math.round(summary.purity * 100);
                 const totalSuffix = summary.totalSize !== summary.size ? ` / ${summary.totalSize} total` : "";
-                const silhouette = Number(summary.backendCluster?.silhouette);
-                const silhouetteText = Number.isFinite(silhouette) ? ` • silhouette ${silhouette.toFixed(2)}` : "";
+                const clusterSource = String(summary.backendCluster?.proposal_source || source || "").trim();
+                const score = Number(summary.backendCluster?.score ?? summary.backendCluster?.silhouette);
+                const scoreLabel = clusterSource === "embedding_kmeans" ? "silhouette" : "island score";
+                const scoreText = Number.isFinite(score) ? ` • ${scoreLabel} ${score.toFixed(2)}` : "";
                 return [
                     `<div class="class-split-cluster-item${selectedClass}" data-cluster-id="${escapeHtml(summary.clusterKey)}">`,
                     thumbUrl
@@ -40718,7 +40839,7 @@ async function cancelRfDetrTrainingJobRequest() {
                         : `<div class="class-split-cluster-item__thumb" aria-hidden="true"></div>`,
                     `<div class="class-split-cluster-item__body">`,
                     `<strong>Cluster ${escapeHtml(summary.clusterKey)} • ${escapeHtml(summary.size)} object${summary.size === 1 ? "" : "s"}${escapeHtml(totalSuffix)}</strong>`,
-                    `<span>${escapeHtml(mix)} • purity ${purityPct}% • mean outlier ${summary.meanOutlierScore.toFixed(2)}${escapeHtml(silhouetteText)}</span>`,
+                    `<span>${escapeHtml(mix)} • purity ${purityPct}% • mean outlier ${summary.meanOutlierScore.toFixed(2)}${escapeHtml(scoreText)}</span>`,
                     `<div class="class-split-cluster-item__actions">`,
                     `<button type="button" class="training-button secondary" data-action="select-cluster" data-cluster-id="${escapeHtml(summary.clusterKey)}">Select cluster</button>`,
                     `<select data-action="target-cluster-class" data-cluster-id="${escapeHtml(summary.clusterKey)}">${selectOptions}</select>`,
@@ -40768,13 +40889,19 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function buildClassSplitClusterSearchRequest() {
+        const source = String(classSplitElements.clusterSource?.value || "umap_islands").trim().toLowerCase();
         const sensitivity = String(classSplitElements.clusterSensitivity?.value || "balanced").trim().toLowerCase();
         const maxClustersRaw = parseInt(classSplitElements.clusterMaxClusters?.value || "8", 10);
         const minSizeRaw = parseInt(classSplitElements.clusterMinSize?.value || "0", 10);
+        const umapNeighborsRaw = parseInt(classSplitElements.clusterUmapNeighbors?.value || "15", 10);
+        const umapMinDistRaw = parseFloat(classSplitElements.clusterUmapMinDist?.value || "0.02");
         return {
+            proposal_source: ["umap_islands", "embedding_kmeans"].includes(source) ? source : "umap_islands",
             sensitivity: ["conservative", "balanced", "sensitive"].includes(sensitivity) ? sensitivity : "balanced",
             max_clusters: Number.isFinite(maxClustersRaw) ? Math.max(2, Math.min(16, maxClustersRaw)) : 8,
             min_cluster_size: Number.isFinite(minSizeRaw) ? Math.max(0, Math.min(1000000, minSizeRaw)) : 0,
+            umap_neighbors: Number.isFinite(umapNeighborsRaw) ? Math.max(0, Math.min(5000, umapNeighborsRaw)) : 15,
+            umap_min_dist: Number.isFinite(umapMinDistRaw) ? Math.max(0, Math.min(0.99, umapMinDistRaw)) : 0.02,
         };
     }
 
@@ -40831,14 +40958,18 @@ async function cancelRfDetrTrainingJobRequest() {
                 classSplitState.selectionRevision += 1;
             }
             classSplitState.lassoPointIds = new Set();
-            renderClassSplitClusterProgress({ progress: 0, message: "Queueing subclass cluster search ..." });
-            setClassSplitClusterStatus("Queueing subclass cluster search ...", "info");
+            const requestPayload = buildClassSplitClusterSearchRequest();
+            const sourceLabel = requestPayload.proposal_source === "embedding_kmeans"
+                ? "strict embedding cluster search"
+                : "UMAP island search";
+            renderClassSplitClusterProgress({ progress: 0, message: `Queueing ${sourceLabel} ...` });
+            setClassSplitClusterStatus(`Queueing ${sourceLabel} ...`, "info");
             renderClassSplitClusterList();
             refreshClassSplitControls();
             const resp = await fetch(`${API_ROOT}/class_analysis/jobs/${encodeURIComponent(parentJobId)}/cluster_search`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(buildClassSplitClusterSearchRequest()),
+                body: JSON.stringify(requestPayload),
             });
             const detail = await resp.text();
             if (!resp.ok) {
@@ -41919,6 +42050,9 @@ async function cancelRfDetrTrainingJobRequest() {
         const projectionNeighbors = String(summary.projection || request.projection || "pca") === "umap"
             ? (summary.projection_neighbor_k_resolved || summary.projection_neighbor_k || request.projection_neighbor_k || 50)
             : "n/a for PCA";
+        const projectionMinDist = String(summary.projection || request.projection || "pca") === "umap"
+            ? (summary.projection_min_dist ?? request.projection_min_dist ?? 0.08)
+            : "n/a for PCA";
         const projectionChoice = getClassSplitProjectionChoice();
         const projectionUnavailable = getClassSplitProjectionUnavailableMessage();
         const projectionLabel = projectionUnavailable
@@ -41933,6 +42067,7 @@ async function cancelRfDetrTrainingJobRequest() {
             ["Encoder", `${summary.encoder_type || request.encoder_type || "encoder"}`],
             ["Graph projection", projectionLabel],
             ["Projection neighbors", `${projectionNeighbors}`],
+            ["Projection min distance", `${projectionMinDist}`],
             ["Clusters", formatClassSplitClusterReport(result, summary)],
             ["Scoring neighbors", `${summary.neighbor_k || request.neighbor_k || 15}`],
             ["Crop padding", `${summary.padding_ratio ?? request.padding_ratio ?? 0.08}`],
@@ -42978,7 +43113,9 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.encoderType = document.getElementById("classSplitEncoderType");
         classSplitElements.backbone = document.getElementById("classSplitBackbone");
         classSplitElements.projection = document.getElementById("classSplitProjection");
+        classSplitElements.projectionHint = document.getElementById("classSplitProjectionHint");
         classSplitElements.projectionNeighborK = document.getElementById("classSplitProjectionNeighborK");
+        classSplitElements.projectionMinDist = document.getElementById("classSplitProjectionMinDist");
         classSplitElements.sampleCap = document.getElementById("classSplitSampleCap");
         classSplitElements.recipeExplanation = document.getElementById("classSplitRecipeExplanation");
         classSplitElements.padding = document.getElementById("classSplitPadding");
@@ -43003,9 +43140,12 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.displayMode = document.getElementById("classSplitDisplayMode");
         classSplitElements.dragMode = document.getElementById("classSplitDragMode");
         classSplitElements.clusterOverlay = document.getElementById("classSplitClusterOverlay");
+        classSplitElements.clusterSource = document.getElementById("classSplitClusterSource");
         classSplitElements.clusterSensitivity = document.getElementById("classSplitClusterSensitivity");
         classSplitElements.clusterMaxClusters = document.getElementById("classSplitClusterMaxClusters");
         classSplitElements.clusterMinSize = document.getElementById("classSplitClusterMinSize");
+        classSplitElements.clusterUmapNeighbors = document.getElementById("classSplitClusterUmapNeighbors");
+        classSplitElements.clusterUmapMinDist = document.getElementById("classSplitClusterUmapMinDist");
         classSplitElements.clusterRun = document.getElementById("classSplitClusterRun");
         classSplitElements.clusterProgress = document.getElementById("classSplitClusterProgress");
         classSplitElements.clusterProgressFill = document.getElementById("classSplitClusterProgressFill");
@@ -43031,11 +43171,15 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.bulkClass = document.getElementById("classSplitBulkClass");
         classSplitElements.bulkApply = document.getElementById("classSplitBulkApply");
         classSplitElements.bulkClear = document.getElementById("classSplitBulkClear");
+        const handleClassSplitScopeChange = () => {
+            applyClassSplitProjectionDefaultForScope({ force: true });
+            refreshClassSplitControls();
+        };
         if (classSplitElements.scopeSelected) {
-            classSplitElements.scopeSelected.addEventListener("change", refreshClassSplitControls);
+            classSplitElements.scopeSelected.addEventListener("change", handleClassSplitScopeChange);
         }
         if (classSplitElements.scopeAll) {
-            classSplitElements.scopeAll.addEventListener("change", refreshClassSplitControls);
+            classSplitElements.scopeAll.addEventListener("change", handleClassSplitScopeChange);
         }
         if (classSplitElements.recipePreset) {
             classSplitElements.recipePreset.addEventListener("change", () => {
@@ -43122,6 +43266,9 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (classSplitElements.clusterOverlay) {
             classSplitElements.clusterOverlay.addEventListener("change", renderClassSplitPlot);
+        }
+        if (classSplitElements.clusterSource) {
+            classSplitElements.clusterSource.addEventListener("change", refreshClassSplitClusterControls);
         }
         if (classSplitElements.clusterRun) {
             classSplitElements.clusterRun.addEventListener("click", () => {
@@ -48384,8 +48531,10 @@ async function cancelRfDetrTrainingJobRequest() {
         clearMultiPointAnnotations();
         syncQwenClassToCurrent();
         syncSam3ClassToCurrent();
-        syncClassSplitCurrentClassSelection();
-        scheduleClassSplitControlsRefresh();
+        if (isClassSplitTabActive()) {
+            syncClassSplitCurrentClassSelection();
+            scheduleClassSplitControlsRefresh({ delay: 0, preferCurrentClass: true });
+        }
         showAnnotationFocusHud();
     };
 

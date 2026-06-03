@@ -20,6 +20,7 @@ from typing import (
     Callable,
     Set,
     Iterator,
+    Iterable,
 )
 from collections import Counter, defaultdict, deque
 import torch, clip, joblib
@@ -89,7 +90,7 @@ from api.yolo_training import build_yolo_training_router
 from api.rfdetr_training import build_rfdetr_training_router
 from api.rfdetr import build_rfdetr_router
 from api.yolo import build_yolo_router
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.background import BackgroundTask
 from models.schemas import (
@@ -812,7 +813,7 @@ import itertools
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
-from sklearn.cluster import MiniBatchKMeans
+from sklearn.cluster import DBSCAN, MiniBatchKMeans
 from sklearn.decomposition import PCA
 from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.metrics import silhouette_score
@@ -4090,6 +4091,19 @@ job_store: Dict[str, List["CropImage"]] = {}
 
 app = FastAPI(title="Local Inference API (Multi-Predictor)")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+TATOR_UI_DIR = Path(__file__).resolve().parent / "ybat-master"
+TATOR_UI_INDEX = TATOR_UI_DIR / "tator.html"
+TATOR_UI_ASSETS = {
+    "annotation_diversity.js",
+    "canvas.min.js",
+    "cute.png",
+    "filesaver.min.js",
+    "jszip.min.js",
+    "plotly-2.35.2.min.js",
+    "ybat.css",
+    "ybat.js",
+}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("localinferenceapi")
@@ -14022,6 +14036,11 @@ CLASS_ANALYSIS_PCA_PROJECTION_MODES = [
 CLASS_ANALYSIS_DEFAULT_PCA_PROJECTION_MODE = "class_balanced_pca"
 CLASS_ANALYSIS_PCA_FIT_CAP_PER_CLASS = _env_int("CLASS_ANALYSIS_PCA_FIT_CAP_PER_CLASS", 4096)
 CLASS_ANALYSIS_PROJECTION_COORDS_FILENAME = "projection_coordinates.npz"
+CLASS_ANALYSIS_DEFAULT_UMAP_NEIGHBORS = 50
+CLASS_ANALYSIS_DEFAULT_UMAP_MIN_DIST = 0.08
+CLASS_ANALYSIS_SUBCLASS_UMAP_NEIGHBORS = 15
+CLASS_ANALYSIS_SUBCLASS_UMAP_MIN_DIST = 0.02
+CLASS_ANALYSIS_CLUSTER_SOURCES = ["umap_islands", "embedding_kmeans"]
 CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL = os.environ.get(
     "CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL",
     "facebook/dinov3-vitb16-pretrain-lvd1689m",
@@ -18759,6 +18778,12 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
         "pca_projection_modes": list(CLASS_ANALYSIS_PCA_PROJECTION_MODES),
         "default_projection": "pca",
         "default_pca_projection_mode": CLASS_ANALYSIS_DEFAULT_PCA_PROJECTION_MODE,
+        "default_projection_neighbor_k": CLASS_ANALYSIS_DEFAULT_UMAP_NEIGHBORS,
+        "default_projection_min_dist": CLASS_ANALYSIS_DEFAULT_UMAP_MIN_DIST,
+        "subclass_cluster_sources": list(CLASS_ANALYSIS_CLUSTER_SOURCES),
+        "default_subclass_cluster_source": "umap_islands",
+        "default_subclass_umap_neighbors": CLASS_ANALYSIS_SUBCLASS_UMAP_NEIGHBORS,
+        "default_subclass_umap_min_dist": CLASS_ANALYSIS_SUBCLASS_UMAP_MIN_DIST,
         "preprocess_modes": ["canonical"],
         "expert_preprocess_modes": ["native", "canonical"],
         "default_preprocess_mode": "canonical",
@@ -18807,7 +18832,6 @@ def _class_analysis_capabilities() -> Dict[str, Any]:
         "embedding_adjustments": ["remove_size_bias"],
         "expert_embedding_adjustments": ["none", "remove_size_bias"],
         "default_embedding_adjustment": "remove_size_bias",
-        "default_projection_neighbor_k": 50,
         "wrong_class": {
             "neighbor_k": 15,
             "top_other_threshold": 0.65,
@@ -20205,6 +20229,7 @@ def _class_analysis_project_embeddings(
     *,
     projection: str,
     projection_neighbor_k: int,
+    projection_min_dist: float = CLASS_ANALYSIS_DEFAULT_UMAP_MIN_DIST,
     seed: int,
     warnings: List[str],
 ) -> Tuple[np.ndarray, str]:
@@ -20219,11 +20244,17 @@ def _class_analysis_project_embeddings(
             if resolved_neighbors <= 0:
                 resolved_neighbors = n_samples - 1
             resolved_neighbors = max(2, min(resolved_neighbors, n_samples - 1))
+            resolved_min_dist = _coerce_float(
+                projection_min_dist,
+                CLASS_ANALYSIS_DEFAULT_UMAP_MIN_DIST,
+                minimum=0.0,
+                maximum=0.99,
+            )
 
             reducer = umap.UMAP(
                 n_components=2,
                 n_neighbors=resolved_neighbors,
-                min_dist=0.08,
+                min_dist=resolved_min_dist,
                 metric="cosine",
                 random_state=int(seed),
             )
@@ -20445,6 +20476,7 @@ def _class_analysis_build_result(
     projection_neighbor_k: int,
     neighbor_k: int,
     seed: int,
+    projection_min_dist: float = CLASS_ANALYSIS_DEFAULT_UMAP_MIN_DIST,
 ) -> Dict[str, Any]:
     warnings: List[str] = []
     n_samples = len(records)
@@ -20461,6 +20493,7 @@ def _class_analysis_build_result(
             embeddings,
             projection=projection_norm,
             projection_neighbor_k=projection_neighbor_k,
+            projection_min_dist=projection_min_dist,
             seed=seed,
             warnings=warnings,
         )
@@ -20581,6 +20614,12 @@ def _class_analysis_build_result(
         )
     class_counts = Counter(str(point.get("class_name") or "") for point in points)
     projection_neighbor_raw = int(projection_neighbor_k if projection_neighbor_k is not None else 50)
+    projection_min_dist_value = _coerce_float(
+        projection_min_dist,
+        CLASS_ANALYSIS_DEFAULT_UMAP_MIN_DIST,
+        minimum=0.0,
+        maximum=0.99,
+    )
     if projection_used == "umap":
         projection_neighbor_resolved = n_samples - 1 if projection_neighbor_raw <= 0 else projection_neighbor_raw
         projection_neighbor_resolved = max(2, min(projection_neighbor_resolved, max(1, n_samples - 1)))
@@ -20592,6 +20631,7 @@ def _class_analysis_build_result(
         "projection_mode": selected_projection_mode,
         "projection_neighbor_k": projection_neighbor_raw,
         "projection_neighbor_k_resolved": projection_neighbor_resolved,
+        "projection_min_dist": float(projection_min_dist_value) if projection_used == "umap" else None,
         "neighbor_k": int(neighbor_k or 15),
         "class_counts": dict(class_counts),
         "cluster_count": len(clusters),
@@ -20712,7 +20752,13 @@ def _run_class_analysis_job(job: ClassAnalysisJob) -> None:
             },
             projection=str(job.request.get("projection") or "pca"),
             projection_mode=str(job.request.get("projection_mode") or CLASS_ANALYSIS_DEFAULT_PCA_PROJECTION_MODE),
-            projection_neighbor_k=_coerce_int(job.request.get("projection_neighbor_k"), 50, minimum=0),
+            projection_neighbor_k=_coerce_int(job.request.get("projection_neighbor_k"), CLASS_ANALYSIS_DEFAULT_UMAP_NEIGHBORS, minimum=0),
+            projection_min_dist=_coerce_float(
+                job.request.get("projection_min_dist"),
+                CLASS_ANALYSIS_DEFAULT_UMAP_MIN_DIST,
+                minimum=0.0,
+                maximum=0.99,
+            ),
             neighbor_k=_coerce_int(job.request.get("neighbor_k"), 15, minimum=1),
             seed=_coerce_int(job.request.get("seed"), 42),
         )
@@ -20758,7 +20804,8 @@ def _normalize_class_analysis_request(payload: Dict[str, Any]) -> Dict[str, Any]
     request_payload.setdefault("encoder_model", CLASS_ANALYSIS_DEFAULT_DINOV3_MODEL)
     request_payload.setdefault("projection", "pca")
     request_payload.setdefault("projection_mode", CLASS_ANALYSIS_DEFAULT_PCA_PROJECTION_MODE)
-    request_payload.setdefault("projection_neighbor_k", 50)
+    request_payload.setdefault("projection_neighbor_k", CLASS_ANALYSIS_DEFAULT_UMAP_NEIGHBORS)
+    request_payload.setdefault("projection_min_dist", CLASS_ANALYSIS_DEFAULT_UMAP_MIN_DIST)
     request_payload.setdefault("crop_mode", "padded_square")
     request_payload.setdefault("padding_ratio", 0.08)
     request_payload.setdefault("preprocess_mode", "canonical")
@@ -20793,6 +20840,12 @@ def _normalize_class_analysis_request(payload: Dict[str, Any]) -> Dict[str, Any]
         projection_norm = "pca"
     request_payload["projection"] = projection_norm
     request_payload["projection_mode"] = projection_mode_norm
+    request_payload["projection_min_dist"] = _coerce_float(
+        request_payload.get("projection_min_dist"),
+        CLASS_ANALYSIS_DEFAULT_UMAP_MIN_DIST,
+        minimum=0.0,
+        maximum=0.99,
+    )
     request_payload["embedding_aggregation"] = _embedding_normalize_aggregation(
         request_payload.get("embedding_aggregation")
     )
@@ -21136,9 +21189,460 @@ def _class_analysis_cluster_sensitivity_settings(value: Any, n_samples: int) -> 
     return {
         "sensitivity": sensitivity,
         "min_silhouette": 0.10,
+        "min_umap_score": 0.02,
         "min_cluster_size": max(5, int(math.ceil(max(1, n_samples) * 0.01))),
         "max_clusters": 8,
     }
+
+
+def _class_analysis_cluster_source(value: Any) -> str:
+    source = str(value or "").strip().lower().replace("-", "_")
+    if source in set(CLASS_ANALYSIS_CLUSTER_SOURCES):
+        return source
+    return "umap_islands"
+
+
+def _class_analysis_cluster_min_umap_score(settings: Dict[str, Any]) -> float:
+    sensitivity = str(settings.get("sensitivity") or "balanced").strip().lower()
+    if sensitivity == "conservative":
+        return 0.08
+    if sensitivity == "sensitive":
+        return -0.02
+    return float(settings.get("min_umap_score", 0.02))
+
+
+def _class_analysis_standardize_projection(coords: np.ndarray) -> np.ndarray:
+    arr = np.asarray(coords, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        return np.zeros((int(arr.shape[0]) if arr.ndim else 0, 2), dtype=np.float32)
+    arr = arr[:, :2]
+    center = np.nanmedian(arr, axis=0)
+    scale = np.nanstd(arr, axis=0)
+    scale = np.where(np.isfinite(scale) & (scale > 1e-6), scale, 1.0)
+    scaled = (arr - center) / scale
+    return np.nan_to_num(scaled, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+
+def _class_analysis_safe_silhouette(
+    values: np.ndarray,
+    labels: np.ndarray,
+    *,
+    metric: str,
+    seed: int,
+    sample_cap: int,
+) -> Optional[float]:
+    arr = np.asarray(values, dtype=np.float32)
+    lab = np.asarray(labels, dtype=int)
+    if arr.ndim != 2 or lab.ndim != 1 or arr.shape[0] != lab.shape[0] or arr.shape[0] < 3:
+        return None
+    unique = set(int(label) for label in lab.tolist())
+    if len(unique) < 2 or len(unique) >= arr.shape[0]:
+        return None
+    try:
+        sample_size = min(int(sample_cap), arr.shape[0]) if arr.shape[0] > int(sample_cap) else None
+        return float(
+            silhouette_score(
+                arr,
+                lab,
+                metric=metric,
+                sample_size=sample_size,
+                random_state=int(seed) if sample_size else None,
+            )
+        )
+    except Exception:
+        return None
+
+
+def _class_analysis_remap_cluster_labels(labels: np.ndarray, valid_cluster_ids: Iterable[int]) -> np.ndarray:
+    valid = sorted(int(label) for label in valid_cluster_ids if int(label) >= 0)
+    remap = {label: idx for idx, label in enumerate(valid)}
+    output = np.full(np.asarray(labels).shape[0], -1, dtype=int)
+    for old_label, new_label in remap.items():
+        output[np.asarray(labels, dtype=int) == int(old_label)] = int(new_label)
+    return output
+
+
+def _class_analysis_cluster_search_payload_from_labels(
+    *,
+    points: List[Dict[str, Any]],
+    embeddings: np.ndarray,
+    labels: np.ndarray,
+    summary: Dict[str, Any],
+    candidates: List[Dict[str, Any]],
+    source: str,
+    method: str,
+    best_score: Optional[float],
+    best_k: int,
+    reason: str = "",
+) -> Dict[str, Any]:
+    label_arr = np.asarray(labels, dtype=int)
+    clusters: List[Dict[str, Any]] = []
+    labels_by_point_id: Dict[str, int] = {}
+    for idx, point in enumerate(points):
+        point_id = str(point.get("point_id") or "")
+        label = int(label_arr[idx]) if idx < label_arr.shape[0] else -1
+        if point_id and label >= 0:
+            labels_by_point_id[point_id] = label
+    for cluster_id in sorted(label for label in set(label_arr.tolist()) if int(label) >= 0):
+        idxs = np.flatnonzero(label_arr == int(cluster_id))
+        if idxs.size == 0:
+            continue
+        centroid = embeddings[idxs].mean(axis=0)
+        distances = np.linalg.norm(embeddings[idxs] - centroid, axis=1)
+        medoid_idx = int(idxs[int(np.argmin(distances))])
+        cohesion = float(distances.mean()) if distances.size else 0.0
+        cluster_record = {
+            "cluster_id": int(cluster_id),
+            "size": int(idxs.size),
+            "class_counts": dict(Counter(str(points[i].get("class_name") or "") for i in idxs.tolist())),
+            "medoid_point_id": str(points[medoid_idx].get("point_id") or ""),
+            "mean_embedding_distance": cohesion,
+            "score": float(best_score) if best_score is not None else None,
+            "proposal_source": source,
+        }
+        if best_score is not None:
+            if source == "embedding_kmeans":
+                cluster_record["silhouette"] = float(best_score)
+            else:
+                cluster_record["island_score"] = float(best_score)
+        clusters.append(cluster_record)
+    clusters.sort(key=lambda item: (-(int(item.get("size") or 0)), int(item.get("cluster_id") or 0)))
+    result_summary = {
+        **summary,
+        "cluster_count": len(clusters),
+        "best_k": int(best_k),
+        "method": method,
+        "proposal_source": source,
+    }
+    if best_score is not None:
+        result_summary["best_score"] = float(best_score)
+        if source == "embedding_kmeans":
+            result_summary["best_silhouette"] = float(best_score)
+        else:
+            result_summary["best_island_score"] = float(best_score)
+    return {
+        "summary": result_summary,
+        "clusters": clusters,
+        "labels_by_point_id": labels_by_point_id,
+        "candidates": candidates,
+        "reason": reason,
+    }
+
+
+def _class_analysis_cluster_search_embedding_kmeans(
+    *,
+    job: ClassAnalysisClusterJob,
+    points: List[Dict[str, Any]],
+    embeddings: np.ndarray,
+    payload: Dict[str, Any],
+    summary: Dict[str, Any],
+    min_cluster_size: int,
+    min_silhouette: float,
+    max_clusters: int,
+    seed: int,
+) -> Dict[str, Any]:
+    n_samples = int(embeddings.shape[0])
+    upper_k = max(2, min(int(max_clusters), n_samples - 1))
+    candidates: List[Dict[str, Any]] = []
+    best_labels: Optional[np.ndarray] = None
+    best_score = -999.0
+    best_k = 0
+    for k in range(2, upper_k + 1):
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+            _class_analysis_update(
+                job,
+                progress=0.12 + 0.70 * ((k - 2) / max(1, upper_k - 1)),
+                message=f"Testing {k} embedding clusters ...",
+            )
+        try:
+            model = MiniBatchKMeans(
+                n_clusters=k,
+                random_state=int(seed),
+                batch_size=max(256, k * 64),
+                n_init=5,
+            )
+            labels = model.fit_predict(embeddings)
+            counts = Counter(int(label) for label in labels.tolist())
+            smallest = min(counts.values()) if counts else 0
+            if len(counts) < 2:
+                candidates.append({"k": k, "rejected": "single_cluster"})
+                continue
+            if smallest < min_cluster_size:
+                candidates.append(
+                    {
+                        "k": k,
+                        "rejected": "cluster_too_small",
+                        "smallest_cluster": int(smallest),
+                    }
+                )
+                continue
+            score = _class_analysis_safe_silhouette(
+                embeddings,
+                np.asarray(labels, dtype=int),
+                metric="cosine",
+                seed=seed,
+                sample_cap=4000,
+            )
+            if score is None:
+                candidates.append({"k": k, "rejected": "silhouette_unavailable", "smallest_cluster": int(smallest)})
+                continue
+            candidates.append({"k": k, "silhouette": score, "smallest_cluster": int(smallest)})
+            if score > best_score:
+                best_score = score
+                best_labels = np.asarray(labels, dtype=int)
+                best_k = k
+        except Exception as exc:
+            candidates.append({"k": k, "error": str(exc)})
+    if best_labels is None:
+        return {
+            "summary": {**summary, "cluster_count": 0, "best_silhouette": None, "method": "kmeans", "proposal_source": "embedding_kmeans"},
+            "clusters": [],
+            "labels_by_point_id": {},
+            "candidates": candidates,
+            "reason": "No candidate split produced stable embedding clusters above the minimum size.",
+        }
+    if best_score < min_silhouette:
+        return {
+            "summary": {
+                **summary,
+                "cluster_count": 0,
+                "best_k": int(best_k),
+                "best_silhouette": float(best_score),
+                "best_score": float(best_score),
+                "method": "kmeans",
+                "proposal_source": "embedding_kmeans",
+            },
+            "clusters": [],
+            "labels_by_point_id": {},
+            "candidates": candidates,
+            "reason": f"Best embedding split silhouette {best_score:.2f} is below the {min_silhouette:.2f} threshold.",
+        }
+    return _class_analysis_cluster_search_payload_from_labels(
+        points=points,
+        embeddings=embeddings,
+        labels=best_labels,
+        summary=summary,
+        candidates=candidates,
+        source="embedding_kmeans",
+        method="kmeans",
+        best_score=best_score,
+        best_k=best_k,
+    )
+
+
+def _class_analysis_cluster_search_umap_islands(
+    *,
+    job: ClassAnalysisClusterJob,
+    points: List[Dict[str, Any]],
+    embeddings: np.ndarray,
+    payload: Dict[str, Any],
+    summary: Dict[str, Any],
+    min_cluster_size: int,
+    max_clusters: int,
+    min_score: float,
+    seed: int,
+) -> Dict[str, Any]:
+    n_samples = int(embeddings.shape[0])
+    warnings: List[str] = []
+    umap_neighbors = _coerce_int(
+        payload.get("umap_neighbors", payload.get("projection_neighbor_k")),
+        CLASS_ANALYSIS_SUBCLASS_UMAP_NEIGHBORS,
+        minimum=0,
+    )
+    umap_neighbors = max(2, min(umap_neighbors or n_samples - 1, max(1, n_samples - 1)))
+    umap_min_dist = _coerce_float(
+        payload.get("umap_min_dist", payload.get("projection_min_dist")),
+        CLASS_ANALYSIS_SUBCLASS_UMAP_MIN_DIST,
+        minimum=0.0,
+        maximum=0.99,
+    )
+    with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+        _class_analysis_update(
+            job,
+            progress=0.12,
+            message=f"Building subclass UMAP ({umap_neighbors} neighbors, min_dist {umap_min_dist:.2f}) ...",
+        )
+    coords, projection_used = _class_analysis_project_embeddings(
+        embeddings,
+        projection="umap",
+        projection_neighbor_k=umap_neighbors,
+        projection_min_dist=umap_min_dist,
+        seed=seed,
+        warnings=warnings,
+    )
+    umap_summary = {
+        **summary,
+        "method": "umap_dbscan",
+        "proposal_source": "umap_islands",
+        "umap_neighbors": int(umap_neighbors),
+        "umap_min_dist": float(umap_min_dist),
+        "warnings": warnings,
+    }
+    if projection_used != "umap":
+        return {
+            "summary": {**umap_summary, "cluster_count": 0, "best_score": None},
+            "clusters": [],
+            "labels_by_point_id": {},
+            "candidates": [{"rejected": "umap_unavailable", "warnings": warnings}],
+            "reason": "UMAP island search is unavailable in this backend; use the strict embedding cluster source instead.",
+        }
+    scaled = _class_analysis_standardize_projection(coords)
+    default_min_samples = max(3, min(12, int(math.ceil(max(1, min_cluster_size) / 2))))
+    min_samples = _coerce_int(payload.get("dbscan_min_samples"), default_min_samples, minimum=2)
+    min_samples = max(2, min(int(min_samples), max(2, n_samples - 1)))
+    with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+        _class_analysis_update(job, progress=0.28, message="Estimating UMAP island density ...")
+    try:
+        neighbor_count = max(2, min(min_samples, n_samples - 1))
+        distances, _ = NearestNeighbors(n_neighbors=neighbor_count, metric="euclidean").fit(scaled).kneighbors(scaled)
+        k_distances = np.asarray(distances[:, -1], dtype=np.float32)
+    except Exception as exc:
+        return {
+            "summary": {**umap_summary, "cluster_count": 0, "best_score": None},
+            "clusters": [],
+            "labels_by_point_id": {},
+            "candidates": [{"rejected": "density_estimate_failed", "error": str(exc)}],
+            "reason": "UMAP island density estimation failed.",
+        }
+    sensitivity = str(summary.get("sensitivity") or "balanced").strip().lower()
+    quantiles = {
+        "conservative": [0.70, 0.78, 0.86, 0.94],
+        "sensitive": [0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95],
+    }.get(sensitivity, [0.50, 0.60, 0.70, 0.80, 0.90])
+    candidates: List[Dict[str, Any]] = []
+    best_labels: Optional[np.ndarray] = None
+    best_score: Optional[float] = None
+    best_k = 0
+    eps_values = sorted(
+        {
+            float(np.quantile(k_distances, q))
+            for q in quantiles
+            if np.isfinite(np.quantile(k_distances, q))
+        }
+    )
+    for idx, eps in enumerate(eps_values):
+        if job.cancel_event.is_set():
+            raise RuntimeError("cancelled")
+        with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
+            _class_analysis_update(
+                job,
+                progress=0.32 + 0.58 * (idx / max(1, len(eps_values))),
+                message=f"Testing UMAP island density {idx + 1}/{len(eps_values)} ...",
+            )
+        if eps <= 1e-6:
+            candidates.append({"eps": float(eps), "rejected": "eps_too_small"})
+            continue
+        try:
+            raw_labels = DBSCAN(eps=float(eps), min_samples=int(min_samples), metric="euclidean").fit_predict(scaled)
+            counts = Counter(int(label) for label in raw_labels.tolist())
+            valid_cluster_ids = [label for label, count in counts.items() if label >= 0 and count >= int(min_cluster_size)]
+            ignored_small = {
+                int(label): int(count)
+                for label, count in counts.items()
+                if label >= 0 and count < int(min_cluster_size)
+            }
+            if not valid_cluster_ids:
+                candidates.append(
+                    {
+                        "eps": float(eps),
+                        "rejected": "no_island_above_min_size",
+                        "noise_count": int(counts.get(-1, 0)),
+                        "small_clusters": ignored_small,
+                    }
+                )
+                continue
+            if len(valid_cluster_ids) > int(max_clusters):
+                candidates.append(
+                    {
+                        "eps": float(eps),
+                        "rejected": "too_many_islands",
+                        "cluster_count": int(len(valid_cluster_ids)),
+                        "max_clusters": int(max_clusters),
+                    }
+                )
+                continue
+            labels = _class_analysis_remap_cluster_labels(raw_labels, valid_cluster_ids)
+            noise_count = int(np.count_nonzero(labels < 0))
+            if len(valid_cluster_ids) == 1 and noise_count == 0:
+                candidates.append({"eps": float(eps), "rejected": "single_cluster"})
+                continue
+            umap_silhouette = _class_analysis_safe_silhouette(
+                scaled,
+                labels,
+                metric="euclidean",
+                seed=seed,
+                sample_cap=4000,
+            )
+            embedding_silhouette = _class_analysis_safe_silhouette(
+                embeddings,
+                labels,
+                metric="cosine",
+                seed=seed,
+                sample_cap=4000,
+            )
+            if umap_silhouette is None and embedding_silhouette is None:
+                candidates.append({"eps": float(eps), "rejected": "silhouette_unavailable"})
+                continue
+            score = float(0.75 * (umap_silhouette or 0.0) + 0.25 * (embedding_silhouette or 0.0))
+            valid_sizes = [
+                int(np.count_nonzero(labels == int(cluster_id)))
+                for cluster_id in sorted(set(labels.tolist()))
+                if int(cluster_id) >= 0
+            ]
+            candidates.append(
+                {
+                    "eps": float(eps),
+                    "score": score,
+                    "umap_silhouette": umap_silhouette,
+                    "embedding_silhouette": embedding_silhouette,
+                    "cluster_count": int(len(valid_sizes)),
+                    "noise_count": noise_count,
+                    "cluster_sizes": valid_sizes,
+                    "min_samples": int(min_samples),
+                }
+            )
+            if best_score is None or score > best_score:
+                best_score = score
+                best_labels = labels
+                best_k = int(len(valid_sizes))
+        except Exception as exc:
+            candidates.append({"eps": float(eps), "error": str(exc)})
+    if best_labels is None:
+        return {
+            "summary": {**umap_summary, "cluster_count": 0, "best_score": None, "min_score": float(min_score)},
+            "clusters": [],
+            "labels_by_point_id": {},
+            "candidates": candidates,
+            "reason": "No UMAP density island survived the minimum size and stability checks.",
+        }
+    if best_score is not None and best_score < min_score:
+        return {
+            "summary": {
+                **umap_summary,
+                "cluster_count": 0,
+                "best_k": int(best_k),
+                "best_score": float(best_score),
+                "best_island_score": float(best_score),
+                "min_score": float(min_score),
+            },
+            "clusters": [],
+            "labels_by_point_id": {},
+            "candidates": candidates,
+            "reason": f"Best UMAP island score {best_score:.2f} is below the {min_score:.2f} threshold.",
+        }
+    return _class_analysis_cluster_search_payload_from_labels(
+        points=points,
+        embeddings=embeddings,
+        labels=best_labels,
+        summary={**umap_summary, "min_score": float(min_score), "min_samples": int(min_samples)},
+        candidates=candidates,
+        source="umap_islands",
+        method="umap_dbscan",
+        best_score=best_score,
+        best_k=best_k,
+    )
 
 
 def _class_analysis_cluster_search_result(
@@ -21151,6 +21655,8 @@ def _class_analysis_cluster_search_result(
     embeddings = np.asarray(embeddings, dtype=np.float32)
     n_samples = int(embeddings.shape[0]) if embeddings.ndim == 2 else 0
     settings = _class_analysis_cluster_sensitivity_settings(payload.get("sensitivity"), n_samples)
+    source = _class_analysis_cluster_source(payload.get("proposal_source") or payload.get("source"))
+    seed = _coerce_int(payload.get("seed"), 42)
     requested_max_clusters = _coerce_int(
         payload.get("max_clusters"),
         int(settings["max_clusters"]),
@@ -21171,6 +21677,7 @@ def _class_analysis_cluster_search_result(
         "min_silhouette": min_silhouette,
         "min_cluster_size": int(min_cluster_size),
         "max_clusters": int(max_clusters),
+        "proposal_source": source,
     }
     if n_samples < max(4, int(min_cluster_size) * 2):
         return {
@@ -21180,117 +21687,29 @@ def _class_analysis_cluster_search_result(
             "candidates": [],
             "reason": "Not enough selected-class objects for the requested cluster sensitivity.",
         }
-    upper_k = max(2, min(int(max_clusters), n_samples - 1))
-    candidates: List[Dict[str, Any]] = []
-    best_labels: Optional[np.ndarray] = None
-    best_score = -999.0
-    best_k = 0
-    for k in range(2, upper_k + 1):
-        if job.cancel_event.is_set():
-            raise RuntimeError("cancelled")
-        with CLASS_ANALYSIS_CLUSTER_JOBS_LOCK:
-            _class_analysis_update(
-                job,
-                progress=0.12 + 0.70 * ((k - 2) / max(1, upper_k - 1)),
-                message=f"Testing {k} subclass clusters ...",
-            )
-        try:
-            model = MiniBatchKMeans(
-                n_clusters=k,
-                random_state=_coerce_int(payload.get("seed"), 42),
-                batch_size=max(256, k * 64),
-                n_init=5,
-            )
-            labels = model.fit_predict(embeddings)
-            counts = Counter(int(label) for label in labels.tolist())
-            smallest = min(counts.values()) if counts else 0
-            if len(counts) < 2:
-                candidates.append({"k": k, "rejected": "single_cluster"})
-                continue
-            if smallest < min_cluster_size:
-                candidates.append(
-                    {
-                        "k": k,
-                        "rejected": "cluster_too_small",
-                        "smallest_cluster": int(smallest),
-                    }
-                )
-                continue
-            sample_size = min(4000, n_samples) if n_samples > 4000 else None
-            score = float(
-                silhouette_score(
-                    embeddings,
-                    labels,
-                    metric="cosine",
-                    sample_size=sample_size,
-                    random_state=_coerce_int(payload.get("seed"), 42) if sample_size else None,
-                )
-            )
-            candidates.append({"k": k, "silhouette": score, "smallest_cluster": int(smallest)})
-            if score > best_score:
-                best_score = score
-                best_labels = np.asarray(labels, dtype=int)
-                best_k = k
-        except Exception as exc:
-            candidates.append({"k": k, "error": str(exc)})
-    if best_labels is None:
-        return {
-            "summary": {**summary, "cluster_count": 0, "best_silhouette": None},
-            "clusters": [],
-            "labels_by_point_id": {},
-            "candidates": candidates,
-            "reason": "No candidate split produced stable clusters above the minimum size.",
-        }
-    if best_score < min_silhouette:
-        return {
-            "summary": {
-                **summary,
-                "cluster_count": 0,
-                "best_k": int(best_k),
-                "best_silhouette": float(best_score),
-            },
-            "clusters": [],
-            "labels_by_point_id": {},
-            "candidates": candidates,
-            "reason": f"Best split silhouette {best_score:.2f} is below the {min_silhouette:.2f} threshold.",
-        }
-    clusters: List[Dict[str, Any]] = []
-    labels_by_point_id: Dict[str, int] = {}
-    for idx, point in enumerate(points):
-        point_id = str(point.get("point_id") or "")
-        if point_id:
-            labels_by_point_id[point_id] = int(best_labels[idx])
-    for cluster_id in sorted(set(best_labels.tolist())):
-        idxs = np.flatnonzero(best_labels == int(cluster_id))
-        if idxs.size == 0:
-            continue
-        centroid = embeddings[idxs].mean(axis=0)
-        distances = np.linalg.norm(embeddings[idxs] - centroid, axis=1)
-        medoid_idx = int(idxs[int(np.argmin(distances))])
-        cohesion = float(distances.mean()) if distances.size else 0.0
-        clusters.append(
-            {
-                "cluster_id": int(cluster_id),
-                "size": int(idxs.size),
-                "class_counts": dict(Counter(str(points[i].get("class_name") or "") for i in idxs.tolist())),
-                "medoid_point_id": str(points[medoid_idx].get("point_id") or ""),
-                "mean_embedding_distance": cohesion,
-                "silhouette": float(best_score),
-            }
+    if source == "embedding_kmeans":
+        return _class_analysis_cluster_search_embedding_kmeans(
+            job=job,
+            points=points,
+            embeddings=embeddings,
+            payload=payload,
+            summary=summary,
+            min_cluster_size=int(min_cluster_size),
+            min_silhouette=min_silhouette,
+            max_clusters=int(max_clusters),
+            seed=seed,
         )
-    clusters.sort(key=lambda item: (-(int(item.get("size") or 0)), int(item.get("cluster_id") or 0)))
-    return {
-        "summary": {
-            **summary,
-            "cluster_count": len(clusters),
-            "best_k": int(best_k),
-            "best_silhouette": float(best_score),
-        },
-        "clusters": clusters,
-        "labels_by_point_id": labels_by_point_id,
-        "candidates": candidates,
-        "reason": "",
-    }
+    return _class_analysis_cluster_search_umap_islands(
+        job=job,
+        points=points,
+        embeddings=embeddings,
+        payload=payload,
+        summary=summary,
+        min_cluster_size=int(min_cluster_size),
+        max_clusters=int(max_clusters),
+        min_score=_class_analysis_cluster_min_umap_score(settings),
+        seed=seed,
+    )
 
 
 def _run_class_analysis_cluster_search_job(job: ClassAnalysisClusterJob) -> None:
@@ -43080,6 +43499,42 @@ app.include_router(
         request_cls=CropZipRequest,
     )
 )
+
+
+def _serve_tator_ui() -> FileResponse:
+    if not TATOR_UI_INDEX.exists() or not TATOR_UI_INDEX.is_file():
+        raise HTTPException(status_code=404, detail="tator_ui_not_found")
+    return FileResponse(str(TATOR_UI_INDEX), media_type="text/html")
+
+
+@app.head("/", include_in_schema=False)
+@app.get("/", include_in_schema=False)
+def serve_tator_root() -> FileResponse:
+    return _serve_tator_ui()
+
+
+@app.head("/tator.html", include_in_schema=False)
+@app.get("/tator.html", include_in_schema=False)
+def serve_tator_html() -> FileResponse:
+    return _serve_tator_ui()
+
+
+@app.head("/ybat.html", include_in_schema=False)
+@app.get("/ybat.html", include_in_schema=False)
+def serve_legacy_ybat_html() -> RedirectResponse:
+    return RedirectResponse(url="/tator.html", status_code=307)
+
+
+@app.head("/{asset_name}", include_in_schema=False)
+@app.get("/{asset_name}", include_in_schema=False)
+def serve_tator_ui_asset(asset_name: str) -> FileResponse:
+    safe_name = Path(str(asset_name or "")).name
+    if safe_name != asset_name or safe_name not in TATOR_UI_ASSETS:
+        raise HTTPException(status_code=404, detail="ui_asset_not_found")
+    asset_path = TATOR_UI_DIR / safe_name
+    if not asset_path.exists() or not asset_path.is_file():
+        raise HTTPException(status_code=404, detail="ui_asset_not_found")
+    return FileResponse(str(asset_path))
 
 
 if os.environ.get("COORD_ROUNDTRIP_TEST") == "1":

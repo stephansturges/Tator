@@ -5,8 +5,24 @@ Ybat, but this copy is now the Tator labeling interface: dataset-aware
 annotation, assisted class prediction, SAM/SAM3 tools, Qwen captioning, detector
 prepasses, EDR application, and export controls all live here.
 
-Open `ybat.html` from a browser, or serve the directory with a small static
-server during development:
+Start the backend from the repo root:
+
+```bash
+tools/run_macos_backend.sh
+```
+
+Then open the UI served by the backend:
+
+```text
+http://127.0.0.1:8000/
+http://127.0.0.1:8000/tator.html
+```
+
+The UI talks to the backend configured by `API_ROOT`, which defaults to
+`http://localhost:8000`. The old `/ybat.html` URL redirects to `/tator.html`.
+
+For frontend development, you can also serve the directory with a small static
+server:
 
 ```bash
 python3 -m http.server 8080 -d ybat-master
@@ -15,11 +31,11 @@ python3 -m http.server 8080 -d ybat-master
 Then open:
 
 ```text
-http://127.0.0.1:8080/ybat.html
+http://127.0.0.1:8080/tator.html
 ```
 
-The UI talks to the backend configured by `API_ROOT`, which defaults to
-`http://localhost:8000`.
+From another directory, `cd` to your clone first before running backend or
+static-server commands.
 
 ## Main Areas
 
@@ -39,7 +55,7 @@ The UI talks to the backend configured by `API_ROOT`, which defaults to
 - `ybat.js` is intentionally plain browser JavaScript. Keep additions local to
   the existing helper/state pattern and run `node --check ybat-master/ybat.js`
   after edits.
-- Bump the `ybat.js?v=...` cache key in `ybat.html` whenever frontend behavior
+- Bump the `ybat.js?v=...` cache key in `tator.html` whenever frontend behavior
   changes.
 - Keep top-tab navigation on the early delegated click handler; individual
   panel initialization must not be able to leave visible tabs inert.

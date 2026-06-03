@@ -13,15 +13,42 @@ correction work instead of first-draft annotation.
 
 ## Quick Start
 
+First-time macOS setup:
+
 ```bash
 poetry install --only-root
 poetry run tator-setup macos   # or: poetry run tator-setup linux
 cp .env.macos.example .env.macos
+```
+
+Daily macOS backend start, from the repo root:
+
+```bash
 tools/run_macos_backend.sh
 ```
 
-Open `ybat-master/ybat.html` in a browser. The UI defaults to
-`http://localhost:8000`.
+From another directory, `cd` to your clone first:
+
+```bash
+cd /path/to/Tator && tools/run_macos_backend.sh
+```
+
+The backend listens on `http://127.0.0.1:8000` and serves the browser UI by
+default. Open either:
+
+```text
+http://127.0.0.1:8000/
+http://127.0.0.1:8000/tator.html
+```
+
+The old `/ybat.html` URL redirects to `/tator.html`. For a separate static UI
+server during frontend development:
+
+```bash
+python3 -m http.server 8080 -d ybat-master
+```
+
+Then open `http://127.0.0.1:8080/tator.html`.
 
 <details>
 <summary>Workflow demos</summary>
@@ -503,7 +530,7 @@ cp .env.example .env
 python -m uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
-Open `ybat-master/ybat.html` in a browser. The UI defaults to
+Open `http://127.0.0.1:8000/` in a browser. The UI defaults to
 `http://localhost:8000`.
 
 ### Linux Model Assets
@@ -570,6 +597,33 @@ poetry run tator-setup macos
 cp .env.macos.example .env.macos
 tools/run_macos_backend.sh
 ```
+
+After setup, the normal daily backend command is just:
+
+```bash
+tools/run_macos_backend.sh
+```
+
+From another directory, `cd` to your clone first:
+
+```bash
+cd /path/to/Tator && tools/run_macos_backend.sh
+```
+
+The backend serves the API and UI on `http://127.0.0.1:8000`. Open either:
+
+```text
+http://127.0.0.1:8000/
+http://127.0.0.1:8000/tator.html
+```
+
+For frontend development, you can still run a separate static UI server:
+
+```bash
+python3 -m http.server 8080 -d ybat-master
+```
+
+Then browse to `http://127.0.0.1:8080/tator.html`.
 
 The macOS venv installs CLIP, SAM1, SAM3, YOLO, RF-DETR, Qwen Transformers,
 MLX, MLX-VLM, and the local MPS compatibility path. The setup script installs
@@ -671,6 +725,10 @@ the backend are available.
 
 Current verification: focused Class Split backend and UI contract suites passed.
 Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
+
+2026-06-03 follow-up: the backend now serves the browser UI at `/` and
+`/tator.html`, legacy `/ybat.html` redirects, Class Split explains PCA/UMAP
+projection modes, and selected-class subclass search has UMAP-island controls.
 
 2026-06-02 follow-up: Class Split has switchable PCA graph projections, stable
 per-class traces, selected-class subclass search, a 12-item likely-wrong review

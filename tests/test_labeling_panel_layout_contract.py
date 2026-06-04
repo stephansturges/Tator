@@ -6,6 +6,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 HTML_PATH = REPO_ROOT / "ybat-master" / "tator.html"
 CSS_PATH = REPO_ROOT / "ybat-master" / "ybat.css"
 JS_PATH = REPO_ROOT / "ybat-master" / "ybat.js"
+MOBILE_REVIEW_PATH = REPO_ROOT / "ybat-master" / "mobile_review.html"
 
 
 def _html() -> str:
@@ -22,6 +23,10 @@ def _js() -> str:
 
 def _read(rel_path: str) -> str:
     return (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+
+
+def _mobile_review_html() -> str:
+    return MOBILE_REVIEW_PATH.read_text(encoding="utf-8")
 
 
 def _details_opening_tag(html: str, element_id: str) -> str:
@@ -62,6 +67,27 @@ def test_yolo_import_and_export_controls_live_in_annotation_source_panel():
 
     assert source_start < html.index('id="bboxes"') < html.index('id="qwenDetectionDetails"')
     assert source_start < html.index('id="saveBboxes"') < html.index('id="qwenDetectionDetails"')
+
+
+def test_mobile_review_page_contract():
+    html = _mobile_review_html()
+
+    assert "<title>Tator Mobile Review</title>" in html
+    assert 'id="sessionInput"' in html
+    assert 'placeholder="Review session id"' in html
+    assert 'id="preview" alt="Object context crop"' in html
+    assert 'id="confirmButton" class="primary">Confirm current class</button>' in html
+    assert 'id="skipButton" class="secondary">Skip</button>' in html
+    assert 'id="targetClass"' in html
+    assert 'id="changeButton" class="warn">Change class</button>' in html
+    assert 'id="skipCount" type="number" min="1" max="1000" step="1" value="20"' in html
+    assert 'id="skipNextButton" class="secondary">Skip next</button>' in html
+    assert "/class_analysis/mobile_review/${encodeURIComponent(sessionId)}" in html
+    assert 'action: "confirm"' in html
+    assert 'action: "skip"' in html
+    assert 'action: "change_class"' in html
+    assert 'action: "skip_next"' in html
+    assert "Change class to ${els.targetClass.value}" in html
 
 
 def test_local_image_selection_shows_first_image_before_dimension_scan():
@@ -656,8 +682,6 @@ def test_class_split_explorer_panel_contract():
     assert 'id="classSplitDetails"' not in html
     assert 'id="classSplitScopeSelected"' in html
     assert 'id="classSplitScopeAll"' in html
-    assert 'id="classSplitUploadDatasetName"' in html
-    assert "Workspace upload name" in html
     assert 'id="classSplitEncoderType"' in html
     assert 'id="classSplitBackbone"' in html
     assert '<option value="precise" selected>Precise best</option>' in html
@@ -666,7 +690,6 @@ def test_class_split_explorer_panel_contract():
     assert 'Graph projection<span class="help-icon"' in html
     assert 'class="class-split-field class-split-field--projection"' in html
     assert html.index('id="classSplitProjection"') < html.index('id="classSplitRecipePreset"')
-    assert html.index('id="classSplitProjection"') < html.index('id="classSplitUploadDatasetName"')
     assert '<option value="class_balanced_pca" selected>Class-balanced PCA</option>' in html
     assert '<option value="global_pca">Global PCA</option>' in html
     assert '<option value="between_class_pca">Between-class PCA</option>' in html
@@ -729,6 +752,8 @@ def test_class_split_explorer_panel_contract():
     assert 'id="classSplitClusterList" class="class-split-cluster-list"' in html
     assert 'id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel class-split-wrong-panel--wide" open' in html
     assert 'id="classSplitWrongQueueStatus"' in html
+    assert 'id="classSplitWrongDiscardCount" min="1" max="1000" step="1" value="20"' in html
+    assert 'id="classSplitWrongDiscardFirst"' in html
     assert 'id="classSplitWrongShuffle"' in html
     assert 'id="classSplitWrongList"' in html
     assert 'id="classSplitInspector"' in html
@@ -755,6 +780,7 @@ def test_class_split_explorer_panel_contract():
     assert ".class-split-cluster-list" in css
     assert ".class-split-cluster-item" in css
     assert ".class-split-wrong-panel--wide" in css
+    assert ".class-split-wrong-toolbar__discard" in css
     assert ".class-split-wrong-item__preview" in css
     assert "grid-template-columns: 232px minmax(0, 1fr);" in css
     assert "width: 232px;" in css
@@ -958,6 +984,36 @@ def test_class_split_explorer_panel_contract():
     assert "Skip" in js
     assert 'data-action="skip-wrong"' in js
     assert "function skipClassSplitWrongCandidate" in js
+    assert "function discardFirstClassSplitWrongCandidates" in js
+    assert "function getClassSplitWrongReviewOrder" in js
+    assert "function getClassSplitWrongDiscardCount" in js
+    assert "Discarded ${discardedIds.length} likely-wrong vignette" in js
+    assert "function pushClassSplitReviewToMobile" in js
+    assert "function syncClassSplitMobileReviewEdits" in js
+    assert "annotation_session_id: annotationSourceState.lockSessionId" in js
+    push_start = js.index("async function pushClassSplitReviewToMobile")
+    push_end = js.index("async function syncClassSplitMobileReviewEdits", push_start)
+    push_body = js[push_start:push_end]
+    assert "target_mode:" not in push_body
+    assert '["linked", "transient", "active_workspace"].includes(sourceMode)' in push_body
+    assert "Backend-backed edits save directly." not in js
+    assert "saves to the backend dataset directly" not in js
+    assert "classSplitState.mobileReviewTargetMode" in js
+    assert "classSplitElements.mobileSync.addEventListener" in js
+    assert "Sync mobile edits when you return." in js
+    assert "applyClassSplitPointClassLocally(point, targetClass)" in js
+    assert "action.action_id" in js
+    assert "mobile_review" in js
+    assert "classSplitMobilePush" in html
+    assert "classSplitMobileSync" in html
+    assert "Push to mobile" in html
+    assert "Sync mobile edits" in html
+    assert "mobile_review.html" in router or "mobile_review.html" in _read("localinferenceapi.py")
+    assert "Close overlaps only" in html
+    assert "classSplitOverlapPairMode" in html
+    assert "is_close_overlap_candidate" in js
+    assert "classSplitPointMatchesOverlapPairFilter" in js
+    assert "close_overlap_candidates" in _read("localinferenceapi.py")
     assert "function reconcileClassSplitWrongQueue" in js
     assert "function shuffleClassSplitWrongQueue" in js
     assert "const cap = 12;" in js
@@ -970,17 +1026,19 @@ def test_class_split_explorer_panel_contract():
     assert "point.cluster_id = null;" in js
     assert "imageKeys: activeKeys" in js
     assert "imageKeys," in js
-    assert "Changed class to ${targetClass}. Save labels when ready." in js
+    assert "Changed class to ${targetClass}. ${saveStatus}" in js
+    assert "Save pending; use Save labels if it does not clear." in js
     assert "Changed class to ${targetClass}; rerunning analysis." not in js
     assert "function drawClassSplitInstancePulse" in js
     assert "startClassSplitInstancePulse(match.bbox" in js
     assert "function getClassSplitServerSourceHandle" in js
-    assert "function ensureClassSplitUploadedWorkspaceSourceHandle" in js
-    assert "classSplitElements.uploadDatasetName" in js
-    assert 'const uploadCacheKey = `${signature}|name:${uploadName}`;' in js
-    assert "CLASS_SPLIT_ACTIVE_WORKSPACE_UPLOADS_STORAGE_KEY" in js
-    assert "transport: \"chunked\"" in js
-    assert "labelLinesForImage: (imageKey) => getClassSplitActiveLabelLines(imageKey)" in js
+    assert "function getClassSplitServerAnalysisSourceHandle" in js
+    assert "classSplitElements.uploadDatasetName" not in js
+    assert "CLASS_SPLIT_ACTIVE_WORKSPACE_UPLOADS_STORAGE_KEY" not in js
+    assert "Active workspace upload did not return a backend dataset." not in js
+    assert 'return getClassSplitServerSourceHandle();' in js
+    assert "const uploadAbortController = new AbortController();" in js
+    assert "signal: uploadAbortController.signal" in js
     assert "activeUploadSessionId" in js
     assert 'fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(uploadSessionId)}/cancel`' in js
     assert 'source_mode: sourceHandle.sourceMode' in js
@@ -996,6 +1054,7 @@ def test_class_split_explorer_panel_contract():
     assert 'listEl.querySelectorAll(\'[data-action="jump-instance"]\')' in js
     assert "Class Split vignette jump failed" in js
     assert "function changeClassSplitPointClass" in js
+    assert "const previousClass = String(match.className || graphClass).trim();" in js
     assert "captureAnnotationDirtyStateForImage(imageKey)" in js
     assert "async function ensureClassSplitSnapshotClean" in js
     assert "captureCurrentAnnotationDirtyState();" in js

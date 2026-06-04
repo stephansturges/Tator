@@ -189,13 +189,12 @@ Flow checks:
    within-filter PCA recomputes axes inside the selected class or class filter;
    and UMAP is available for selected-class subclass-island searches when the
    dependency is installed.
-6. If the current workspace is backend-linked or transient, UI submits a JSON
-   `/class_analysis/jobs` request that references that dataset/session directly.
-   If it is browser-only, UI first uploads it with the `Workspace upload name`
-   through `/datasets/upload_session/*`, then submits the resulting backend
-   dataset id to `/class_analysis/jobs`. The legacy one-shot
-   `/class_analysis/jobs/active_workspace` path remains a fallback only when
-   chunked upload is not possible.
+6. If the current workspace is backend-linked or a transient server-path
+   dataset, UI submits a JSON `/class_analysis/jobs` request that references
+   that dataset/session directly. If it is browser-only, UI packages the current
+   images and raw label lines into a transient Class Split job workspace through
+   `/class_analysis/jobs/active_workspace`. That workspace exists only under the
+   Class Split job directory and is not registered in Dataset Management.
 7. Backend embeds object crops, writes thumbnails, points, cluster summary,
    wrong-class candidates, and compact projection metadata.
 8. UI renders the graph, selected crop inspector, likely-wrong panel, report,
@@ -206,10 +205,13 @@ Flow checks:
 - Class Split runs against the current annotation workspace, not Data Ingestion
   candidate files.
 - Dirty annotation snapshots are flushed before running in dataset-backed mode.
-- Browser-only current workspaces use the same managed, cancellable chunked
-  upload path as Dataset Management, preserve raw YOLO label lines for images
-  that have not been hydrated in the browser, and register a named dataset that
-  can be inspected or deleted later.
+- Browser-only current workspaces are transient analysis inputs. They preserve
+  raw YOLO label lines for images that have not been hydrated in the browser,
+  but they do not become managed datasets and do not appear in Dataset
+  Management.
+- The active-workspace upload has its own browser `AbortController`, so the
+  Class Split Cancel button remains useful while the browser is still posting
+  the transient multipart snapshot and before a backend job id exists.
 - Crop inspector stays at the top of the right stack.
 - Crop previews fit the available inspector and support scroll zoom.
 - Plot lasso supports bulk class reassignment.
@@ -223,7 +225,8 @@ Flow checks:
 - Within-filter PCA requires a selected class or class filter. If the user
   clears the filter in an all-class run, the graph explains why the mode cannot
   overlay all classes instead of rendering an empty or misleading plot.
-- Wrong-class candidates can be marked correct or relabeled.
+- Wrong-class candidates can be marked correct, skipped, discarded in batches,
+  shuffled, opened in Label Images, or relabeled.
 - The plot can be limited to likely wrong-class points without changing the
   analysis result or right-side review panels.
 - Plot points show a floating crop preview on hover so a user can inspect an
@@ -237,6 +240,16 @@ Flow checks:
   and mean outlier score. Selecting a cluster selects all visible points in that
   cluster, zooms the plot to the island, flashes the medoid, and enables the
   existing bulk class-change controls.
+- Likely-wrong review can be pushed to `/mobile_review.html?session=...` for a
+  phone-sized one-by-one queue. Mobile review is a live relay for the current
+  desktop Class Split result. It can read context crops from backend-linked,
+  transient, or active-workspace Class Split sources, but class changes,
+  confirmations, and skips are recorded as session actions and must be synced
+  back into the currently open Label Images workspace from the desktop UI.
+- Mobile review never writes directly to a backend dataset snapshot. This keeps
+  mobile edits consistent with manual `See instance` fixes in Label Images:
+  both paths converge through the same open annotation state and normal save
+  path.
 
 Fix from this pass:
 
@@ -248,8 +261,27 @@ Fix from this pass:
   min-size controls plus progress feedback. Search jobs are tracked separately
   from the parent analysis and are cancelled/ignored safely if a newer analysis
   result replaces the graph.
-- Class Split no longer tries to upload large all-class runs as one huge
-  multipart request when a chunked current-workspace upload is available.
+- Class Split no longer creates or reuses temporary backend datasets for its
+  own browser-only active-workspace analysis. The `Workspace upload name` field,
+  local storage cache, and backend-dataset reuse branch were removed from Class
+  Split. Data Ingestion still uses named managed uploads for reference profiles,
+  because those profiles are intentionally reusable across sessions.
+- Mobile review now accepts `active_workspace` Class Split jobs for preview and
+  context-crop reads. This fixes the mismatch where an all-class graph created
+  from the currently open browser workspace could not be pushed to mobile even
+  though it represented exactly the live dataset the user wanted to review.
+- Mobile review session state is bounded in memory by TTL and session count, but
+  action logs are not truncated inside an active session. This avoids silently
+  dropping unsynced mobile edits while still pruning abandoned sessions.
+- Mobile action log entries now include stable `action_id` and monotonic
+  `sequence` values. Desktop sync deduplicates by `action_id`, then applies
+  `change_class`, `confirm`, `skip`, and `skip_next` actions into the open
+  Label Images workspace.
+- Class-change application now trusts the matched open bbox class, not the
+  stale graph point class. If a user already fixed an object manually before
+  syncing mobile actions, duplicate mobile changes clear the review flag without
+  moving the bbox again, decrementing the wrong class count, or marking the
+  image dirty unnecessarily.
 - Class Split result panels and Data Ingestion result panels now have explicit
   component-level `[hidden]` CSS rules. This guards against display rules on the
   same component accidentally making hidden results visible during tab switches
@@ -329,12 +361,15 @@ Fix from this pass:
 Current focused verification for this review:
 
 ```bash
-NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m py_compile localinferenceapi.py
 node --check ybat-master/ybat.js
+python3 -m py_compile localinferenceapi.py api/class_analysis.py
 git diff --check
-NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python -m pytest -q tests/test_class_analysis.py tests/test_labeling_panel_layout_contract.py tests/test_tator_ui_routes.py
+.venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py -q
+.venv-macos/bin/python -m pytest tests/test_class_analysis.py -q
 ```
 
-Interactive browser smoke is still a separate manual/Playwright concern; the
-flow contract above is enforced through code contracts and targeted backend
-tests.
+Final focused results for the Class Split/mobile review changes:
+`tests/test_labeling_panel_layout_contract.py` passed 22 tests, and
+`tests/test_class_analysis.py` passed 89 tests. Interactive browser smoke is
+still a separate manual/Playwright concern; during this pass the backend was not
+serving on `127.0.0.1:8080`, and the in-app Browser surface was unavailable.

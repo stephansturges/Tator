@@ -2144,6 +2144,31 @@ preserving the exact validation story for storage and artifact-write fixes.
   regression, and active-workspace class-analysis manifest regression (`4
   passed`).
 
+## 2026-06-04: Class Split Active Workspace Reverted To Transient Job State
+
+- Removed the Class Split `Workspace upload name` control and the local-storage
+  reuse cache for Class Split active-workspace uploads. Data Ingestion still
+  uses named managed uploads because reference profiles are reusable artifacts;
+  Class Split is a live audit of the currently open annotation workspace.
+- Browser-only Class Split analysis now uses
+  `/class_analysis/jobs/active_workspace` as a transient job-local workspace.
+  The uploaded images and label lines live under the Class Split job directory
+  and are not registered in Dataset Management.
+- Class Split mobile review is desktop-workspace only. Mobile actions are
+  appended to the live mobile-review session and later synced into the open
+  Label Images workspace; they never write directly to a backend dataset
+  snapshot.
+- Mobile review can still read context crops from backend-linked, transient, or
+  active-workspace Class Split sources. Active-workspace reads are restricted to
+  the parent Class Split job directory and its manifest.
+- Added stable mobile `action_id`/`sequence` values, session pruning, and an
+  active-workspace mobile context regression. Also hardened desktop sync so
+  class changes use the matched open bbox class rather than a stale graph class.
+- Validation: `node --check ybat-master/ybat.js`, `python3 -m py_compile
+  localinferenceapi.py api/class_analysis.py`, `git diff --check`,
+  `tests/test_labeling_panel_layout_contract.py` (`22 passed`), and
+  `tests/test_class_analysis.py` (`89 passed`).
+
 ## 2026-06-02: Class Split Graph Projection And UI State Closeout
 
 - Added switchable Class Split graph projection modes: global PCA,

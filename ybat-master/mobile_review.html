@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tator Mobile Review</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #071307; color: #b6ff9a; }
+    body { margin: 0; background: #071307; }
+    main { max-width: 760px; margin: 0 auto; padding: 14px; }
+    h1 { margin: 0 0 4px; font-size: 24px; }
+    .muted { color: #72b85c; font-size: 14px; }
+    .panel { border: 1px solid #2e7d24; border-radius: 8px; background: rgba(12, 39, 13, 0.86); padding: 12px; margin: 12px 0; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    input, select, button { min-height: 42px; border-radius: 7px; border: 1px solid #54a83d; background: #061607; color: #b6ff9a; font-size: 16px; padding: 7px 10px; }
+    input, select { flex: 1 1 180px; min-width: 0; }
+    button { font-weight: 700; cursor: pointer; }
+    button.primary { background: #184a16; }
+    button.secondary { background: #1d3237; border-color: #6a8c91; color: #f3fff0; }
+    button.warn { background: #4f2511; border-color: #f97316; color: #fff0df; }
+    button:disabled { opacity: 0.48; cursor: not-allowed; }
+    img { display: block; width: 100%; max-height: 62vh; object-fit: contain; background: #000; border-radius: 8px; border: 1px solid #2e7d24; }
+    .label { font-size: 20px; font-weight: 800; margin: 10px 0 4px; }
+    .meta { font-size: 14px; color: #9ee982; overflow-wrap: anywhere; }
+    .status { min-height: 22px; color: #9ee982; }
+    .error { color: #ff8c64; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Mobile review</h1>
+    <div id="status" class="status muted">Loading...</div>
+    <section id="connectPanel" class="panel" hidden>
+      <div class="row">
+        <input id="sessionInput" placeholder="Review session id">
+        <button id="loadButton" class="primary">Load</button>
+      </div>
+    </section>
+    <section id="reviewPanel" class="panel" hidden>
+      <img id="preview" alt="Object context crop">
+      <div id="label" class="label"></div>
+      <div id="meta" class="meta"></div>
+      <div class="row" style="margin-top: 12px;">
+        <button id="confirmButton" class="primary">Confirm current class</button>
+        <button id="skipButton" class="secondary">Skip</button>
+      </div>
+      <div class="row" style="margin-top: 8px;">
+        <select id="targetClass"></select>
+        <button id="changeButton" class="warn">Change class</button>
+      </div>
+      <div class="row" style="margin-top: 8px;">
+        <input id="skipCount" type="number" min="1" max="1000" step="1" value="20" aria-label="Skip count">
+        <button id="skipNextButton" class="secondary">Skip next</button>
+      </div>
+    </section>
+  </main>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    let sessionId = params.get("session") || "";
+    let current = null;
+    const els = {
+      status: document.getElementById("status"),
+      connectPanel: document.getElementById("connectPanel"),
+      sessionInput: document.getElementById("sessionInput"),
+      loadButton: document.getElementById("loadButton"),
+      reviewPanel: document.getElementById("reviewPanel"),
+      preview: document.getElementById("preview"),
+      label: document.getElementById("label"),
+      meta: document.getElementById("meta"),
+      targetClass: document.getElementById("targetClass"),
+      confirmButton: document.getElementById("confirmButton"),
+      skipButton: document.getElementById("skipButton"),
+      changeButton: document.getElementById("changeButton"),
+      skipCount: document.getElementById("skipCount"),
+      skipNextButton: document.getElementById("skipNextButton"),
+    };
+    function setStatus(text, error = false) {
+      els.status.textContent = text || "";
+      els.status.classList.toggle("error", !!error);
+    }
+    async function fetchJson(url, options = {}) {
+      const resp = await fetch(url, options);
+      const text = await resp.text();
+      if (!resp.ok) {
+        let message = text || `HTTP ${resp.status}`;
+        try {
+          const parsed = JSON.parse(text);
+          message = parsed.detail || message;
+        } catch (_) {}
+        throw new Error(message);
+      }
+      return text ? JSON.parse(text) : {};
+    }
+    function absoluteUrl(path) {
+      return new URL(path, window.location.origin).toString();
+    }
+    function render(data) {
+      const counts = data.counts || {};
+      current = data.current || null;
+      els.connectPanel.hidden = !!sessionId;
+      els.reviewPanel.hidden = !current;
+      setStatus(`${data.label || "Review"} - ${counts.remaining || 0} remaining, ${counts.changed || 0} changed, ${counts.confirmed || 0} confirmed, ${counts.skipped || 0} skipped${data.warning ? ` - ${data.warning}` : ""}`, !!data.warning);
+      els.targetClass.innerHTML = "";
+      (data.classes || []).forEach((className) => {
+        const option = document.createElement("option");
+        option.value = className;
+        option.textContent = className;
+        if (className === current?.suggested_neighbor_class) option.selected = true;
+        els.targetClass.appendChild(option);
+      });
+      if (!current) {
+        els.preview.removeAttribute("src");
+        els.label.textContent = "No queued items.";
+        els.meta.textContent = "";
+        return;
+      }
+      els.preview.src = absoluteUrl(current.context_url);
+      const suggestion = current.suggested_neighbor_class || "choose target";
+      els.label.textContent = `${current.class_name || "class"} -> ${suggestion}`;
+      const suspicion = Number(current.wrong_class_suspicion || 0);
+      els.meta.textContent = `${Math.round(suspicion * 100)}% suspicion - ${current.split || "train"}/${current.image_relpath || ""}`;
+      els.changeButton.textContent = els.targetClass.value ? `Change class to ${els.targetClass.value}` : "Change class";
+    }
+    async function load() {
+      if (!sessionId) {
+        els.connectPanel.hidden = false;
+        els.reviewPanel.hidden = true;
+        setStatus("Paste a review session id or open the mobile link from desktop.");
+        return;
+      }
+      setStatus("Loading session...");
+      render(await fetchJson(`/class_analysis/mobile_review/${encodeURIComponent(sessionId)}`));
+    }
+    async function action(payload) {
+      if (!sessionId) return;
+      [els.confirmButton, els.skipButton, els.changeButton, els.skipNextButton].forEach((button) => { button.disabled = true; });
+      try {
+        render(await fetchJson(`/class_analysis/mobile_review/${encodeURIComponent(sessionId)}/action`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }));
+      } catch (error) {
+        setStatus(`Failed: ${error.message || error}`, true);
+      } finally {
+        [els.confirmButton, els.skipButton, els.changeButton, els.skipNextButton].forEach((button) => { button.disabled = false; });
+      }
+    }
+    els.loadButton.addEventListener("click", () => {
+      sessionId = els.sessionInput.value.trim();
+      if (sessionId) history.replaceState(null, "", `?session=${encodeURIComponent(sessionId)}`);
+      load();
+    });
+    els.confirmButton.addEventListener("click", () => action({ action: "confirm", point_id: current?.point_id || "" }));
+    els.skipButton.addEventListener("click", () => action({ action: "skip", point_id: current?.point_id || "" }));
+    els.changeButton.addEventListener("click", () => action({ action: "change_class", point_id: current?.point_id || "", target_class: els.targetClass.value || "" }));
+    els.skipNextButton.addEventListener("click", () => action({ action: "skip_next", count: Number.parseInt(els.skipCount.value || "20", 10) || 20 }));
+    els.targetClass.addEventListener("change", () => {
+      els.changeButton.textContent = els.targetClass.value ? `Change class to ${els.targetClass.value}` : "Change class";
+    });
+    els.sessionInput.value = sessionId;
+    load().catch((error) => setStatus(`Failed: ${error.message || error}`, true));
+  </script>
+</body>
+</html>

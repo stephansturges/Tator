@@ -2406,6 +2406,9 @@ const AUTOMATION_LOCKED_TABS = new Set([
         graphProjection: null,
         filterClass: null,
         displayMode: null,
+        overlapPairMode: null,
+        overlapClassA: null,
+        overlapClassB: null,
         dragMode: null,
         clusterOverlay: null,
         clusterSource: null,
@@ -2425,7 +2428,12 @@ const AUTOMATION_LOCKED_TABS = new Set([
         clusterList: null,
         wrongPanel: null,
         wrongQueueStatus: null,
+        wrongDiscardCount: null,
+        wrongDiscardFirst: null,
         wrongShuffle: null,
+        mobilePush: null,
+        mobileSync: null,
+        mobileStatus: null,
         wrongList: null,
         inspector: null,
         datasetAnalysisPanel: null,
@@ -2677,6 +2685,10 @@ const AUTOMATION_LOCKED_TABS = new Set([
         dismissedWrongIds: new Set(),
         wrongQueueIds: [],
         wrongQueueSignature: "",
+        currentSourceHandle: null,
+        mobileReviewSessionId: "",
+        mobileReviewTargetMode: "",
+        mobileReviewSyncedActions: new Set(),
         relabelInFlight: false,
         datasetAnalysis: null,
         flashPointId: "",
@@ -2685,7 +2697,6 @@ const AUTOMATION_LOCKED_TABS = new Set([
         cropResizeObserver: null,
         activeUploadSessionId: "",
         activeUploadAbortController: null,
-        activeWorkspaceDatasetUpload: null,
         pointImageLookup: null,
         pointImageLookupSignature: "",
         plotRenderToken: 0,
@@ -3759,7 +3770,6 @@ const sam3TrainState = {
     const ANNOTATION_EDITOR_STORAGE_KEY = "tator.annotationEditorId";
     const ANNOTATION_DIVERSITY_METRIC_STORAGE_KEY = "tator.annotationDiversityMetric.enabled";
     const DATA_INGESTION_ACTIVE_REFERENCE_UPLOADS_STORAGE_KEY = "tator.dataIngestion.activeReferenceUploads.v1";
-    const CLASS_SPLIT_ACTIVE_WORKSPACE_UPLOADS_STORAGE_KEY = "tator.classSplit.activeWorkspaceUploads.v1";
 
     const annotationSourceState = {
         mode: "none", // "none" | "linked" | "transient"
@@ -38735,214 +38745,13 @@ async function cancelRfDetrTrainingJobRequest() {
         return hash >>> 0;
     }
 
-    function classSplitActiveWorkspaceSignature(keys = getClassSplitImageKeys()) {
-        const values = [
-            annotationSourceState.mode,
-            annotationSourceState.datasetId,
-            annotationSourceState.sessionId,
-            annotationSourceState.datasetLabel,
-            datasetType,
-        ];
-        Object.keys(classes || {}).sort().forEach((className) => {
-            values.push(`${className}:${classes[className]}`);
-        });
-        keys.forEach((key) => {
-            values.push(`image:${key}`);
-            getClassSplitActiveLabelLines(key).forEach((line) => values.push(`label:${line}`));
-        });
-        return `${keys.length}:${classSplitHashValues(values)}`;
-    }
-
     function invalidateClassSplitPointImageLookup() {
         classSplitState.pointImageLookup = null;
         classSplitState.pointImageLookupSignature = "";
     }
 
-    function getClassSplitStoredActiveWorkspaceUploads() {
-        try {
-            const parsed = JSON.parse(window.localStorage?.getItem(CLASS_SPLIT_ACTIVE_WORKSPACE_UPLOADS_STORAGE_KEY) || "{}");
-            return parsed && typeof parsed === "object" ? parsed : {};
-        } catch (error) {
-            return {};
-        }
-    }
-
-    function setClassSplitStoredActiveWorkspaceUpload(signature, datasetId, imageCount, objectCount) {
-        const safeSignature = String(signature || "").trim();
-        const safeDatasetId = String(datasetId || "").trim();
-        if (!safeSignature || !safeDatasetId) return;
-        try {
-            const uploads = getClassSplitStoredActiveWorkspaceUploads();
-            uploads[safeSignature] = {
-                datasetId: safeDatasetId,
-                imageCount: Number(imageCount) || 0,
-                objectCount: Number(objectCount) || 0,
-                storedAt: Date.now(),
-            };
-            window.localStorage?.setItem(
-                CLASS_SPLIT_ACTIVE_WORKSPACE_UPLOADS_STORAGE_KEY,
-                JSON.stringify(uploads),
-            );
-        } catch (error) {
-            console.warn("Failed to store Class Split active workspace upload cache", error);
-        }
-    }
-
-    function getClassSplitStoredActiveWorkspaceUpload(signature, stats) {
-        const safeSignature = String(signature || "").trim();
-        if (!safeSignature) return null;
-        const entry = getClassSplitStoredActiveWorkspaceUploads()[safeSignature];
-        const datasetId = String(entry?.datasetId || "").trim();
-        if (!datasetId || !dataIngestionBackendDatasetExists(datasetId)) return null;
-        const backendCount = getDataIngestionDatasetImageCount(datasetId);
-        const activeCount = Number(stats?.imageCount || 0) || getClassSplitImageKeys().length;
-        if (activeCount > 0 && backendCount !== null && backendCount !== activeCount) return null;
-        return {
-            sourceMode: "dataset",
-            datasetId,
-            sessionId: "",
-            imageCount: activeCount,
-            objectCount: Number(stats?.objectCount || entry?.objectCount || 0) || 0,
-            label: datasetId,
-            uploadedActiveWorkspace: true,
-            signature: safeSignature,
-        };
-    }
-
-    function classSplitActiveWorkspaceUploadName(label = "") {
-        const explicit = String(classSplitElements.uploadDatasetName?.value || "").trim();
-        if (explicit) {
-            return explicit;
-        }
-        const raw = String(
-            label ||
-            annotationSourceState.datasetLabel ||
-            annotationSourceState.datasetId ||
-            annotationSourceState.sessionId ||
-            "active_workspace"
-        );
-        const stem = raw
-            .toLowerCase()
-            .replace(/[^a-z0-9._-]+/g, "_")
-            .replace(/^[_ .-]+|[_ .-]+$/g, "")
-            .slice(0, 72) || "active_workspace";
-        return `class_split_active_${stem}_${getClassSplitImageKeys().length || 0}`;
-    }
-
-    function classSplitActiveWorkspaceUploadContext(label = "") {
-        const safeLabel = String(label || annotationSourceState.datasetLabel || "active Label Images workspace").trim();
-        return `Class Split active workspace upload: ${safeLabel}`;
-    }
-
-    function classSplitHasChunkUploadableFiles() {
-        const keys = getClassSplitImageKeys();
-        if (!keys.length) return false;
-        return keys.every((key) => {
-            const meta = images?.[key]?.meta;
-            return meta instanceof Blob || (
-                meta
-                && typeof meta.size === "number"
-                && typeof meta.slice === "function"
-            );
-        });
-    }
-
-    async function ensureClassSplitUploadedWorkspaceSourceHandle() {
-        const sourceHandle = getClassSplitServerSourceHandle();
-        if (sourceHandle) {
-            return sourceHandle;
-        }
-        if (!classSplitHasChunkUploadableFiles()) {
-            return null;
-        }
-        const stats = getClassSplitActiveWorkspaceStats();
-        const imageKeys = getClassSplitImageKeys();
-        const signature = classSplitActiveWorkspaceSignature(imageKeys);
-        const uploadName = classSplitActiveWorkspaceUploadName();
-        const uploadCacheKey = `${signature}|name:${uploadName}`;
-        await initDatasetManagerTab();
-        await refreshDataIngestionDatasets();
-        const cached = classSplitState.activeWorkspaceDatasetUpload;
-        if (
-            cached?.signature === uploadCacheKey
-            && cached?.datasetId
-            && dataIngestionBackendDatasetExists(cached.datasetId)
-        ) {
-            return {
-                sourceMode: "dataset",
-                datasetId: cached.datasetId,
-                sessionId: "",
-                imageCount: stats.imageCount,
-                objectCount: stats.objectCount,
-                label: cached.datasetId,
-                uploadedActiveWorkspace: true,
-                signature: uploadCacheKey,
-            };
-        }
-        const reusable = getClassSplitStoredActiveWorkspaceUpload(uploadCacheKey, stats);
-        if (reusable) {
-            classSplitState.activeWorkspaceDatasetUpload = {
-                signature: uploadCacheKey,
-                datasetId: reusable.datasetId,
-                imageCount: reusable.imageCount,
-                objectCount: reusable.objectCount,
-            };
-            return reusable;
-        }
-        const uploadMessage = `Uploading active Label Images workspace (${stats.imageCount} images, ${stats.objectCount} objects) for Class Split analysis ...`;
-        setClassSplitJobStatus("Uploading active workspace ...", "info");
-        renderClassSplitProgress({ progress: 0, message: uploadMessage });
-        const result = await uploadCurrentDatasetToCache({
-            runName: uploadName,
-            context: classSplitActiveWorkspaceUploadContext(),
-            split: false,
-            transport: "chunked",
-            throwOnError: true,
-            imageKeys,
-            statusPrefix: "Class Split active workspace",
-            labelLinesForImage: (imageKey) => getClassSplitActiveLabelLines(imageKey),
-            onSessionStart: ({ sessionId, abortController } = {}) => {
-                classSplitState.activeUploadSessionId = String(sessionId || "");
-                classSplitState.activeUploadAbortController = abortController || null;
-                refreshClassSplitControls();
-            },
-            onSessionEnd: ({ sessionId } = {}) => {
-                if (!sessionId || classSplitState.activeUploadSessionId === sessionId) {
-                    classSplitState.activeUploadSessionId = "";
-                    classSplitState.activeUploadAbortController = null;
-                    refreshClassSplitControls();
-                }
-            },
-            onProgress: ({ progress = 0, message = "" } = {}) => {
-                const pct = Math.max(0, Math.min(0.2, (Number(progress) || 0) * 0.2));
-                renderClassSplitProgress({ progress: pct, message: message || uploadMessage });
-                if (message) {
-                    setClassSplitJobStatus(message, "");
-                }
-            },
-        });
-        const datasetId = String(result?.id || result?.dataset_id || "").trim();
-        if (!datasetId) {
-            throw new Error("Active workspace upload did not return a backend dataset.");
-        }
-        classSplitState.activeWorkspaceDatasetUpload = {
-            signature: uploadCacheKey,
-            datasetId,
-            imageCount: stats.imageCount,
-            objectCount: stats.objectCount,
-        };
-        setClassSplitStoredActiveWorkspaceUpload(uploadCacheKey, datasetId, stats.imageCount, stats.objectCount);
-        await refreshDataIngestionDatasets();
-        return {
-            sourceMode: "dataset",
-            datasetId,
-            sessionId: "",
-            imageCount: stats.imageCount,
-            objectCount: stats.objectCount,
-            label: result?.label || datasetId,
-            uploadedActiveWorkspace: true,
-            signature: uploadCacheKey,
-        };
+    async function getClassSplitServerAnalysisSourceHandle() {
+        return getClassSplitServerSourceHandle();
     }
 
     function getClassSplitClassCounts() {
@@ -39451,7 +39260,6 @@ async function cancelRfDetrTrainingJobRequest() {
         [
             classSplitElements.scopeSelected,
             classSplitElements.scopeAll,
-            classSplitElements.uploadDatasetName,
             classSplitElements.recipePreset,
             classSplitElements.encoderType,
             classSplitElements.backbone,
@@ -39488,9 +39296,6 @@ async function cancelRfDetrTrainingJobRequest() {
         if (classSplitElements.projectionMinDist) {
             classSplitElements.projectionMinDist.disabled = !available || classSplitState.active || projectionChoice !== "umap";
         }
-        if (classSplitElements.uploadDatasetName) {
-            classSplitElements.uploadDatasetName.disabled = !available || classSplitState.active || !!getClassSplitServerSourceHandle();
-        }
         refreshClassSplitProjectionHint();
 	        setButtonDisabled(classSplitElements.runButton, !canRun);
 	        setButtonDisabled(
@@ -39499,6 +39304,14 @@ async function cancelRfDetrTrainingJobRequest() {
 	                || (!classSplitState.currentJobId && !classSplitState.activeUploadSessionId && !classSplitState.activeUploadAbortController)
 	        );
 	        setButtonDisabled(classSplitElements.rerunButton, classSplitState.active || !classSplitState.lastRequest);
+            setButtonDisabled(classSplitElements.mobilePush, classSplitState.active || !classSplitState.result);
+            setButtonDisabled(
+                classSplitElements.mobileSync,
+                classSplitState.active
+                    || !classSplitState.result
+                    || !classSplitState.mobileReviewSessionId
+                    || classSplitState.mobileReviewTargetMode !== "desktop_workspace"
+            );
 	        refreshClassSplitClusterControls();
 	        refreshClassSplitDatasetAnalysisControls();
 	    }
@@ -39598,6 +39411,10 @@ async function cancelRfDetrTrainingJobRequest() {
             dismissedWrongIds: new Set(classSplitState.dismissedWrongIds || []),
             wrongQueueIds: Array.from(classSplitState.wrongQueueIds || []),
             wrongQueueSignature: classSplitState.wrongQueueSignature || "",
+            currentSourceHandle: classSplitState.currentSourceHandle ? { ...classSplitState.currentSourceHandle } : null,
+            mobileReviewSessionId: classSplitState.mobileReviewSessionId || "",
+            mobileReviewTargetMode: classSplitState.mobileReviewTargetMode || "",
+            mobileReviewSyncedActions: new Set(classSplitState.mobileReviewSyncedActions || []),
             lastRequest: classSplitState.lastRequest ? { ...classSplitState.lastRequest } : null,
             datasetAnalysis: classSplitState.datasetAnalysis,
         };
@@ -39622,6 +39439,10 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitState.dismissedWrongIds = new Set(snapshot.dismissedWrongIds || []);
         classSplitState.wrongQueueIds = Array.isArray(snapshot.wrongQueueIds) ? [...snapshot.wrongQueueIds] : [];
         classSplitState.wrongQueueSignature = snapshot.wrongQueueSignature || "";
+        classSplitState.currentSourceHandle = snapshot.currentSourceHandle ? { ...snapshot.currentSourceHandle } : null;
+        classSplitState.mobileReviewSessionId = snapshot.mobileReviewSessionId || "";
+        classSplitState.mobileReviewTargetMode = snapshot.mobileReviewTargetMode || "";
+        classSplitState.mobileReviewSyncedActions = new Set(snapshot.mobileReviewSyncedActions || []);
         classSplitState.lastRequest = snapshot.lastRequest ? { ...snapshot.lastRequest } : null;
         classSplitState.datasetAnalysis = snapshot.datasetAnalysis || null;
         invalidateClassSplitPointImageLookup();
@@ -39656,6 +39477,10 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitState.dismissedWrongIds = new Set();
             classSplitState.wrongQueueIds = [];
             classSplitState.wrongQueueSignature = "";
+            classSplitState.currentSourceHandle = null;
+            classSplitState.mobileReviewSessionId = "";
+            classSplitState.mobileReviewTargetMode = "";
+            classSplitState.mobileReviewSyncedActions = new Set();
             invalidateClassSplitPointImageLookup();
             clearClassSplitDatasetAnalysis({ render: true });
             stopClassSplitPlotFlash();
@@ -39664,7 +39489,8 @@ async function cancelRfDetrTrainingJobRequest() {
             renderClassSplitProgress({ progress: 0, message: "Preparing Class Split analysis ..." });
             refreshClassSplitControls();
             classSplitState.lastRequest = { ...request };
-            const sourceHandle = await ensureClassSplitUploadedWorkspaceSourceHandle();
+            const sourceHandle = await getClassSplitServerAnalysisSourceHandle();
+            classSplitState.currentSourceHandle = sourceHandle ? { ...sourceHandle } : null;
             let resp;
             if (sourceHandle) {
                 const payload = {
@@ -39693,10 +39519,21 @@ async function cancelRfDetrTrainingJobRequest() {
                     progress: 0.01,
                     message: `Snapshot-uploading ${workspace.objectCount} objects from ${workspace.imageCount} active images ...`,
                 });
-                resp = await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace`, {
-                    method: "POST",
-                    body: workspace.formData,
-                });
+                const uploadAbortController = new AbortController();
+                classSplitState.activeUploadAbortController = uploadAbortController;
+                refreshClassSplitControls();
+                try {
+                    resp = await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace`, {
+                        method: "POST",
+                        body: workspace.formData,
+                        signal: uploadAbortController.signal,
+                    });
+                } finally {
+                    if (classSplitState.activeUploadAbortController === uploadAbortController) {
+                        classSplitState.activeUploadAbortController = null;
+                        refreshClassSplitControls();
+                    }
+                }
             }
             const detail = await resp.text();
             if (!resp.ok) {
@@ -39941,6 +39778,12 @@ async function cancelRfDetrTrainingJobRequest() {
         if (displayMode === "wrong_only") {
             return points.filter((point) => !!point.is_wrong_class_candidate);
         }
+        if (displayMode === "overlap_only") {
+            return points.filter((point) => !!point.is_close_overlap_candidate && classSplitPointMatchesOverlapPairFilter(point));
+        }
+        if (displayMode === "review_only") {
+            return points.filter((point) => Array.isArray(point.review_signals) && point.review_signals.length && classSplitPointMatchesOverlapPairFilter(point));
+        }
         return points;
     }
 
@@ -40068,8 +39911,15 @@ async function cancelRfDetrTrainingJobRequest() {
         if (filter && String(point.class_name || "") !== filter) {
             return false;
         }
-        if (String(classSplitElements.displayMode?.value || "all") === "wrong_only" && !point.is_wrong_class_candidate) {
-            return false;
+        const displayMode = String(classSplitElements.displayMode?.value || "all");
+        if (displayMode === "wrong_only") {
+            return !!point.is_wrong_class_candidate;
+        }
+        if (displayMode === "overlap_only") {
+            return !!point.is_close_overlap_candidate && classSplitPointMatchesOverlapPairFilter(point);
+        }
+        if (displayMode === "review_only") {
+            return Array.isArray(point.review_signals) && point.review_signals.length && classSplitPointMatchesOverlapPairFilter(point);
         }
         return true;
     }
@@ -40098,6 +39948,7 @@ async function cancelRfDetrTrainingJobRequest() {
     function refreshClassSplitFilteredReviewUi({ renderPlot = true } = {}) {
         pruneClassSplitSelectionsForActiveGraphView();
         refreshClassSplitProjectionHint();
+        refreshClassSplitOverlapControls();
         refreshClassSplitClusterControls();
         renderClassSplitClusterList();
         renderClassSplitWrongList();
@@ -42082,6 +41933,7 @@ async function cancelRfDetrTrainingJobRequest() {
             ["Embedding cache", `${cache.hits || 0} hits / ${cache.misses || 0} misses`],
             ["Size-axis check", sizeCorr],
             ["Sample cap", sampleCap > 0 ? `${sampleCap}` : "All objects"],
+            ["Close overlaps", `${summary.close_overlap_pair_count || 0} pairs / ${summary.close_overlap_candidate_count || 0} objects`],
         ];
         reportEl.innerHTML = [
             `<div class="class-split-report__grid">`,
@@ -42117,6 +41969,63 @@ async function cancelRfDetrTrainingJobRequest() {
             filterEl.value = previous;
         }
         updateClassSplitBulkClassOptions();
+        renderClassSplitOverlapPairOptions();
+        refreshClassSplitOverlapControls();
+    }
+
+    function renderClassSplitOverlapPairOptions() {
+        const selects = [classSplitElements.overlapClassA, classSplitElements.overlapClassB].filter(Boolean);
+        if (!selects.length) {
+            return;
+        }
+        const classNames = getClassSplitResultClassNames();
+        selects.forEach((selectEl) => {
+            const previous = selectEl.value;
+            selectEl.innerHTML = "";
+            const anyOption = document.createElement("option");
+            anyOption.value = "";
+            anyOption.textContent = "Any class";
+            selectEl.appendChild(anyOption);
+            classNames.forEach((className) => {
+                const option = document.createElement("option");
+                option.value = className;
+                option.textContent = className;
+                selectEl.appendChild(option);
+            });
+            const values = Array.from(selectEl.options).map((option) => option.value);
+            if (values.includes(previous)) {
+                selectEl.value = previous;
+            }
+        });
+    }
+
+    function refreshClassSplitOverlapControls() {
+        const displayMode = String(classSplitElements.displayMode?.value || "all");
+        const overlapModeActive = displayMode === "overlap_only" || displayMode === "review_only";
+        [classSplitElements.overlapPairMode, classSplitElements.overlapClassA, classSplitElements.overlapClassB].forEach((control) => {
+            if (control) {
+                control.disabled = !classSplitState.result || !overlapModeActive;
+            }
+        });
+    }
+
+    function classSplitPointMatchesOverlapPairFilter(point) {
+        const mode = String(classSplitElements.overlapPairMode?.value || "any");
+        if (mode === "any") {
+            return true;
+        }
+        const classA = String(classSplitElements.overlapClassA?.value || "").trim();
+        const classB = String(classSplitElements.overlapClassB?.value || "").trim();
+        if (!classA || !classB) {
+            return true;
+        }
+        const currentClass = String(point?.class_name || "").trim();
+        const matches = Array.isArray(point?.close_overlap_matches) ? point.close_overlap_matches : [];
+        const hasPair = matches.some((match) => {
+            const otherClass = String(match?.class_name || "").trim();
+            return (currentClass === classA && otherClass === classB) || (currentClass === classB && otherClass === classA);
+        });
+        return mode === "include" ? hasPair : !hasPair;
     }
 
     function getClassSplitVisibleWrongCandidates() {
@@ -42182,6 +42091,257 @@ async function cancelRfDetrTrainingJobRequest() {
         renderClassSplitWrongList();
     }
 
+    function getClassSplitWrongReviewOrder(candidates) {
+        const candidateById = new Map();
+        (Array.isArray(candidates) ? candidates : []).forEach((item) => {
+            const pointId = String(item?.point_id || "");
+            if (pointId) {
+                candidateById.set(pointId, item);
+            }
+        });
+        const ordered = [];
+        const seen = new Set();
+        const queuedIds = Array.isArray(classSplitState.wrongQueueIds)
+            ? classSplitState.wrongQueueIds
+            : [];
+        queuedIds.forEach((pointId) => {
+            const safeId = String(pointId || "");
+            if (safeId && candidateById.has(safeId) && !seen.has(safeId)) {
+                seen.add(safeId);
+                ordered.push(candidateById.get(safeId));
+            }
+        });
+        (Array.isArray(candidates) ? candidates : []).forEach((item) => {
+            const pointId = String(item?.point_id || "");
+            if (pointId && !seen.has(pointId)) {
+                seen.add(pointId);
+                ordered.push(item);
+            }
+        });
+        return ordered;
+    }
+
+    function getClassSplitWrongDiscardCount() {
+        const rawValue = classSplitElements.wrongDiscardCount?.value;
+        const parsed = Number.parseInt(String(rawValue || ""), 10);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+            return 20;
+        }
+        return Math.max(1, Math.min(1000, parsed));
+    }
+
+    function discardFirstClassSplitWrongCandidates() {
+        const visibleCandidates = getClassSplitVisibleWrongCandidates();
+        const queuedIds = reconcileClassSplitWrongQueue(visibleCandidates);
+        if (!visibleCandidates.length || !queuedIds.length) {
+            return;
+        }
+        const count = getClassSplitWrongDiscardCount();
+        const reviewOrder = getClassSplitWrongReviewOrder(visibleCandidates);
+        const discardedIds = reviewOrder
+            .slice(0, count)
+            .map((item) => String(item?.point_id || ""))
+            .filter(Boolean);
+        if (!discardedIds.length) {
+            return;
+        }
+        discardedIds.forEach((pointId) => classSplitState.dismissedWrongIds.add(pointId));
+        classSplitState.wrongQueueIds = [];
+        classSplitState.wrongQueueSignature = "";
+        syncClassSplitWrongCandidateSummaryCount();
+        renderClassSplitWrongList();
+        renderClassSplitReport();
+        setClassSplitJobStatus(
+            `Discarded ${discardedIds.length} likely-wrong vignette${discardedIds.length === 1 ? "" : "s"} for this review session.`,
+            "success"
+        );
+    }
+
+    function setClassSplitMobileStatus(html, variant = "") {
+        const el = classSplitElements.mobileStatus;
+        if (!el) {
+            return;
+        }
+        el.classList.remove("warn", "error", "success", "info");
+        if (variant) {
+            el.classList.add(variant);
+        }
+        el.innerHTML = html || "";
+    }
+
+    async function pushClassSplitReviewToMobile() {
+        const jobId = String(classSplitState.currentJobId || "").trim();
+        const result = classSplitState.result || {};
+        const summary = result.summary || {};
+        if (!jobId || !result.points) {
+            setClassSplitMobileStatus("Run Class Split first.", "warn");
+            return;
+        }
+        const sourceMode = String(summary.source_mode || "").trim().toLowerCase();
+        if (!["linked", "transient", "active_workspace"].includes(sourceMode)) {
+            setClassSplitMobileStatus("Mobile review needs a live Class Split session from the currently open dataset. Rerun analysis from Label Images.", "warn");
+            return;
+        }
+        const visibleCandidates = getClassSplitVisibleWrongCandidates();
+        if (!visibleCandidates.length) {
+            setClassSplitMobileStatus("No likely-wrong vignettes are queued.", "warn");
+            return;
+        }
+        try {
+            setButtonDisabled(classSplitElements.mobilePush, true);
+            setClassSplitMobileStatus("Pushing mobile review session ...", "info");
+            if (isAnnotationDatasetModeActive() && !isAnnotationMutationBlocked()) {
+                captureCurrentAnnotationDirtyState();
+                if (annotationSourceState.dirtyRecordsByKey.size) {
+                    const saved = await flushAnnotationSnapshot({ manual: false });
+                    if (!saved) {
+                        throw new Error("Pending annotation edits could not be saved before mobile review.");
+                    }
+                }
+            }
+            const resp = await fetch(`${API_ROOT}/class_analysis/jobs/${encodeURIComponent(jobId)}/mobile_review`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    label: `${summary.dataset_label || "Class Split"} likely-wrong review`,
+                    annotation_session_id: annotationSourceState.lockSessionId || "",
+                    dismissed_point_ids: Array.from(classSplitState.dismissedWrongIds || []),
+                }),
+            });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            const payload = parseJsonObjectSafe(detail, {});
+            const mobilePath = String(payload.mobile_url || "").trim();
+            const sessionId = String(payload.session_id || "").trim();
+            classSplitState.mobileReviewSessionId = sessionId;
+            classSplitState.mobileReviewTargetMode = "desktop_workspace";
+            classSplitState.mobileReviewSyncedActions = new Set();
+            const url = mobilePath ? new URL(mobilePath, API_ROOT).toString() : "";
+            const link = url
+                ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">Open mobile review</a>`
+                : "";
+            setClassSplitMobileStatus(
+                [link, sessionId ? `session ${escapeHtml(sessionId)}` : "", "Sync mobile edits when you return."].filter(Boolean).join(" • "),
+                payload.warning ? "warn" : "success"
+            );
+            refreshClassSplitControls();
+        } catch (error) {
+            console.error("Class Split mobile review push failed", error);
+            setClassSplitMobileStatus(`Mobile push failed: ${escapeHtml(error.message || error)}`, "error");
+        } finally {
+            setButtonDisabled(classSplitElements.mobilePush, false);
+        }
+    }
+
+    async function syncClassSplitMobileReviewEdits() {
+        const sessionId = String(classSplitState.mobileReviewSessionId || "").trim();
+        if (!sessionId) {
+            setClassSplitMobileStatus("No mobile review session is linked to this graph.", "warn");
+            return;
+        }
+        if (classSplitState.mobileReviewTargetMode && classSplitState.mobileReviewTargetMode !== "desktop_workspace") {
+            setClassSplitMobileStatus("This mobile review session is from an older backend-save flow. Push a new mobile review session from the current graph.", "warn");
+            return;
+        }
+        if (classSplitState.relabelInFlight) {
+            return;
+        }
+        classSplitState.relabelInFlight = true;
+        setButtonDisabled(classSplitElements.mobileSync, true);
+        try {
+            const resp = await fetch(`${API_ROOT}/class_analysis/mobile_review/${encodeURIComponent(sessionId)}`);
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            const payload = parseJsonObjectSafe(detail, {});
+            const actions = Array.isArray(payload.action_log) ? payload.action_log : [];
+            let changed = 0;
+            let confirmed = 0;
+            let skipped = 0;
+            let failed = 0;
+            for (let index = 0; index < actions.length; index += 1) {
+                const action = actions[index] || {};
+                const actionKey = String(action.action_id || "").trim()
+                    || `${action.timestamp || ""}:${action.name || ""}:${action.point_id || ""}:${action.target_class || ""}`;
+                if (classSplitState.mobileReviewSyncedActions.has(actionKey)) {
+                    continue;
+                }
+                const name = String(action.name || "").trim();
+                const status = String(action.status || "").trim();
+                try {
+                    if (name === "change_class" && status === "changed") {
+                        const pointId = String(action.point_id || "").trim();
+                        const targetClass = String(action.target_class || "").trim();
+                        const point = getClassSplitPointById(pointId);
+                        if (!point || !targetClass) {
+                            failed += 1;
+                        } else if (applyClassSplitPointClassLocally(point, targetClass)) {
+                            changed += 1;
+                        }
+                    } else if (name === "confirm" && status === "confirmed") {
+                        const pointId = String(action.point_id || "").trim();
+                        if (pointId) {
+                            clearClassSplitWrongCandidate(pointId);
+                            confirmed += 1;
+                        }
+                    } else if (name === "skip" && status === "skipped") {
+                        const pointId = String(action.point_id || "").trim();
+                        if (pointId) {
+                            classSplitState.dismissedWrongIds.add(pointId);
+                            skipped += 1;
+                        }
+                    } else if (name === "skip_next" && status === "skipped") {
+                        (Array.isArray(action.point_ids) ? action.point_ids : []).forEach((pointId) => {
+                            const safeId = String(pointId || "").trim();
+                            if (safeId) {
+                                classSplitState.dismissedWrongIds.add(safeId);
+                                skipped += 1;
+                            }
+                        });
+                    }
+                    classSplitState.mobileReviewSyncedActions.add(actionKey);
+                } catch (error) {
+                    failed += 1;
+                    console.warn("Class Split mobile action sync failed", action, error);
+                }
+            }
+            syncClassSplitWrongCandidateSummaryCount();
+            renderClassSplitFilterOptions();
+            refreshClassSplitFilteredReviewUi({ renderPlot: false });
+            renderClassSplitReport();
+            renderClassSplitDatasetAnalysis();
+            renderClassSplitPlot();
+            let saveText = "";
+            if (isAnnotationDatasetModeActive() && !isAnnotationMutationBlocked() && annotationSourceState.dirtyRecordsByKey.size) {
+                const saved = await flushAnnotationSnapshot({ manual: false });
+                saveText = saved && !annotationSourceState.dirtyRecordsByKey.size
+                    ? " Saved."
+                    : " Save pending.";
+            } else if (!isAnnotationDatasetModeActive() && changed > 0) {
+                saveText = " Export/save the open labels when ready.";
+            }
+            const parts = [
+                changed ? `${changed} class change${changed === 1 ? "" : "s"}` : "",
+                confirmed ? `${confirmed} confirmation${confirmed === 1 ? "" : "s"}` : "",
+                skipped ? `${skipped} skip${skipped === 1 ? "" : "s"}` : "",
+                failed ? `${failed} failed` : "",
+            ].filter(Boolean);
+            setClassSplitMobileStatus(
+                parts.length ? `Synced mobile review: ${parts.join(", ")}.${saveText}` : "No new mobile edits to sync.",
+                failed ? "warn" : "success"
+            );
+        } catch (error) {
+            console.error("Class Split mobile sync failed", error);
+            setClassSplitMobileStatus(`Mobile sync failed: ${escapeHtml(error.message || error)}`, "error");
+        } finally {
+            classSplitState.relabelInFlight = false;
+            refreshClassSplitControls();
+        }
+    }
+
     function renderClassSplitWrongList() {
         const listEl = classSplitElements.wrongList;
         if (!listEl) {
@@ -42197,6 +42357,12 @@ async function cancelRfDetrTrainingJobRequest() {
                 : "No queued likely-wrong objects.";
         }
         setButtonDisabled(classSplitElements.wrongShuffle, visibleCandidates.length <= queuedCandidates.length);
+        setButtonDisabled(classSplitElements.wrongDiscardFirst, !queuedCandidates.length);
+        setButtonDisabled(classSplitElements.mobilePush, !visibleCandidates.length || !classSplitState.currentJobId);
+        setButtonDisabled(
+            classSplitElements.mobileSync,
+            !classSplitState.mobileReviewSessionId || classSplitState.mobileReviewTargetMode !== "desktop_workspace"
+        );
         if (!visibleCandidates.length) {
             const suspicion = getClassSplitSuspicionStatus();
             listEl.innerHTML = `<div class="training-help">${escapeHtml(suspicion.enabled ? "No likely wrong-class objects were flagged." : suspicion.text)}</div>`;
@@ -42875,10 +43041,10 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!nextClass) {
             throw new Error("Choose a target class.");
         }
-        const previousClass = String(point?.class_name || "").trim();
-        if (!point || !previousClass || nextClass === previousClass) {
-            return false;
+        if (!point) {
+            throw new Error("No point selected.");
         }
+        const graphClass = String(point.class_name || "").trim();
         const knownClasses = Array.isArray(loadedClassList)
             ? loadedClassList.map((className) => String(className || "").trim()).filter(Boolean)
             : [];
@@ -42886,9 +43052,20 @@ async function cancelRfDetrTrainingJobRequest() {
             throw new Error(`Unknown class: ${nextClass}`);
         }
         const { imageKey, match } = ensureClassSplitPointBboxMatch(point);
+        const previousClass = String(match.className || graphClass).trim();
+        if (!previousClass) {
+            throw new Error("Could not determine the current bbox class.");
+        }
+        if (nextClass === previousClass) {
+            point.class_name = nextClass;
+            point.cluster_id = null;
+            point._subclass_cluster_id = "";
+            clearClassSplitWrongCandidate(point.point_id);
+            return false;
+        }
         const buckets = bboxes[imageKey] || {};
         bboxes[imageKey] = buckets;
-        const sourceBucket = Array.isArray(buckets[match.className]) ? buckets[match.className] : [];
+        const sourceBucket = Array.isArray(buckets[previousClass]) ? buckets[previousClass] : [];
         const sourceIndex = sourceBucket.indexOf(match.bbox);
         if (sourceIndex !== -1) {
             sourceBucket.splice(sourceIndex, 1);
@@ -43085,12 +43262,21 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             const changed = applyClassSplitPointClassLocally(point, targetClass);
             if (changed) {
+                let saveStatus = "Save labels when ready.";
+                if (isAnnotationDatasetModeActive() && !isAnnotationMutationBlocked() && annotationSourceState.dirtyRecordsByKey.size) {
+                    const saved = await flushAnnotationSnapshot({ manual: false });
+                    if (saved && !annotationSourceState.dirtyRecordsByKey.size) {
+                        saveStatus = "Saved.";
+                    } else if (annotationSourceState.dirtyRecordsByKey.size) {
+                        saveStatus = "Save pending; use Save labels if it does not clear.";
+                    }
+                }
                 renderClassSplitFilterOptions();
                 refreshClassSplitFilteredReviewUi({ renderPlot: false });
                 renderClassSplitReport();
                 renderClassSplitDatasetAnalysis();
                 renderClassSplitPlot();
-                setSamStatus(`Changed class to ${targetClass}. Save labels when ready.`, { variant: "success", duration: 3500 });
+                setSamStatus(`Changed class to ${targetClass}. ${saveStatus}`, { variant: "success", duration: 3500 });
             }
         } finally {
             classSplitState.relabelInFlight = false;
@@ -43107,7 +43293,6 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.jobStatus = document.getElementById("classSplitJobStatus");
         classSplitElements.scopeSelected = document.getElementById("classSplitScopeSelected");
         classSplitElements.scopeAll = document.getElementById("classSplitScopeAll");
-        classSplitElements.uploadDatasetName = document.getElementById("classSplitUploadDatasetName");
         classSplitElements.recipePreset = document.getElementById("classSplitRecipePreset");
         classSplitElements.classSelect = document.getElementById("classSplitClassSelect");
         classSplitElements.encoderType = document.getElementById("classSplitEncoderType");
@@ -43138,6 +43323,9 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.graphProjection = document.getElementById("classSplitGraphProjection");
         classSplitElements.filterClass = document.getElementById("classSplitFilterClass");
         classSplitElements.displayMode = document.getElementById("classSplitDisplayMode");
+        classSplitElements.overlapPairMode = document.getElementById("classSplitOverlapPairMode");
+        classSplitElements.overlapClassA = document.getElementById("classSplitOverlapClassA");
+        classSplitElements.overlapClassB = document.getElementById("classSplitOverlapClassB");
         classSplitElements.dragMode = document.getElementById("classSplitDragMode");
         classSplitElements.clusterOverlay = document.getElementById("classSplitClusterOverlay");
         classSplitElements.clusterSource = document.getElementById("classSplitClusterSource");
@@ -43157,7 +43345,12 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.clusterList = document.getElementById("classSplitClusterList");
         classSplitElements.wrongPanel = document.getElementById("classSplitWrongPanel");
         classSplitElements.wrongQueueStatus = document.getElementById("classSplitWrongQueueStatus");
+        classSplitElements.wrongDiscardCount = document.getElementById("classSplitWrongDiscardCount");
+        classSplitElements.wrongDiscardFirst = document.getElementById("classSplitWrongDiscardFirst");
         classSplitElements.wrongShuffle = document.getElementById("classSplitWrongShuffle");
+        classSplitElements.mobilePush = document.getElementById("classSplitMobilePush");
+        classSplitElements.mobileSync = document.getElementById("classSplitMobileSync");
+        classSplitElements.mobileStatus = document.getElementById("classSplitMobileStatus");
         classSplitElements.wrongList = document.getElementById("classSplitWrongList");
         classSplitElements.inspector = document.getElementById("classSplitInspector");
         classSplitElements.datasetAnalysisPanel = document.getElementById("classSplitDatasetAnalysisPanel");
@@ -43258,9 +43451,22 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitElements.displayMode.addEventListener("change", () => {
                 classSplitState.wrongQueueIds = [];
                 classSplitState.wrongQueueSignature = "";
+                refreshClassSplitOverlapControls();
                 refreshClassSplitFilteredReviewUi();
             });
         }
+        [
+            classSplitElements.overlapPairMode,
+            classSplitElements.overlapClassA,
+            classSplitElements.overlapClassB,
+        ].forEach((control) => {
+            if (!control) {
+                return;
+            }
+            control.addEventListener("change", () => {
+                refreshClassSplitFilteredReviewUi();
+            });
+        });
         if (classSplitElements.dragMode) {
             classSplitElements.dragMode.addEventListener("change", renderClassSplitPlot);
         }
@@ -43280,6 +43486,25 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (classSplitElements.wrongShuffle) {
             classSplitElements.wrongShuffle.addEventListener("click", () => shuffleClassSplitWrongQueue());
+        }
+        if (classSplitElements.wrongDiscardFirst) {
+            classSplitElements.wrongDiscardFirst.addEventListener("click", () => discardFirstClassSplitWrongCandidates());
+        }
+        if (classSplitElements.mobilePush) {
+            classSplitElements.mobilePush.addEventListener("click", () => {
+                pushClassSplitReviewToMobile().catch((error) => {
+                    console.error("Class Split mobile push failed", error);
+                    setClassSplitMobileStatus(`Mobile push failed: ${escapeHtml(error.message || error)}`, "error");
+                });
+            });
+        }
+        if (classSplitElements.mobileSync) {
+            classSplitElements.mobileSync.addEventListener("click", () => {
+                syncClassSplitMobileReviewEdits().catch((error) => {
+                    console.error("Class Split mobile sync failed", error);
+                    setClassSplitMobileStatus(`Mobile sync failed: ${escapeHtml(error.message || error)}`, "error");
+                });
+            });
         }
         if (classSplitElements.bulkApply) {
             classSplitElements.bulkApply.addEventListener("click", () => {

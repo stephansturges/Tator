@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20260603b" rel="stylesheet">
+    <link href="ybat.css?v=20260603d" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
          before we call listenImageCrop().
@@ -13,7 +13,7 @@
     <script src="filesaver.min.js?v=20260409a"></script>
     <script src="plotly-2.35.2.min.js?v=20260520a"></script>
     <script src="annotation_diversity.js?v=20260530a"></script>
-    <script src="ybat.js?v=20260603b"></script>
+    <script src="ybat.js?v=20260603d"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -975,10 +975,6 @@
                                     <option value="custom">Custom advanced</option>
                                 </select>
                             </div>
-                            <div class="class-split-field">
-                                <label for="classSplitUploadDatasetName">Workspace upload name<span class="help-icon" title="Used only when the current Label Images workspace must be uploaded before analysis. The backend registers this dataset name, makes it unique if needed, and it can be deleted later from Dataset Management. Backend-linked datasets are analyzed in place.">?</span></label>
-                                <input type="text" id="classSplitUploadDatasetName" placeholder="class_split_review_project_date" />
-                            </div>
                             <details class="class-split-field class-split-field--wide embedding-recipe-note" open>
                                 <summary>Analysis crop preprocessing<span class="help-icon" title="Shows the actual crop and embedding normalization recipe used before Class Split graph projection and wrong-class scoring.">?</span></summary>
                                 <div id="classSplitRecipeExplanation" class="embedding-recipe-note__text"></div>
@@ -1120,7 +1116,17 @@
                                 <select id="classSplitDisplayMode" title="Limit which objects are drawn in the graph. This does not change the analysis result or right-side review panels.">
                                     <option value="all">All graph objects</option>
                                     <option value="wrong_only">Likely wrong class only</option>
+                                    <option value="overlap_only">Close overlaps only</option>
+                                    <option value="review_only">Any review signal</option>
                                 </select>
+                                <label for="classSplitOverlapPairMode">Overlap pair</label>
+                                <select id="classSplitOverlapPairMode" title="Optional close-overlap filter. Use Exclude pair to hide one near-duplicate class combination.">
+                                    <option value="any">Any pair</option>
+                                    <option value="include">Only pair</option>
+                                    <option value="exclude">Exclude pair</option>
+                                </select>
+                                <select id="classSplitOverlapClassA" title="First class for close-overlap pair filtering."></select>
+                                <select id="classSplitOverlapClassB" title="Second class for close-overlap pair filtering."></select>
                                 <label for="classSplitDragMode">Drag</label>
                                 <select id="classSplitDragMode" title="Choose how dragging behaves inside the graph. Use lasso or box to select objects for bulk class changes; switch to pan when navigating a zoomed graph.">
                                     <option value="lasso" selected>Lasso select</option>
@@ -1200,7 +1206,15 @@
                                 <summary>Likely wrong class</summary>
                                 <div class="class-split-wrong-toolbar">
                                     <span id="classSplitWrongQueueStatus" class="training-help">Run all-class analysis to review likely wrong objects.</span>
+                                    <div class="class-split-wrong-toolbar__discard">
+                                        <label for="classSplitWrongDiscardCount">Discard first</label>
+                                        <input type="number" id="classSplitWrongDiscardCount" min="1" max="1000" step="1" value="20" />
+                                        <button type="button" id="classSplitWrongDiscardFirst" class="training-button secondary">Discard</button>
+                                    </div>
                                     <button type="button" id="classSplitWrongShuffle" class="training-button secondary">Shuffle vignettes</button>
+                                    <button type="button" id="classSplitMobilePush" class="training-button secondary">Push to mobile</button>
+                                    <button type="button" id="classSplitMobileSync" class="training-button secondary" disabled>Sync mobile edits</button>
+                                    <span id="classSplitMobileStatus" class="training-help"></span>
                                 </div>
                                 <div id="classSplitWrongList" class="class-split-wrong-list"></div>
                             </details>

@@ -257,12 +257,11 @@ The Label Images tab is the everyday workspace.
   annotation dataset, filter the plot to likely wrong-class objects, preview
   crops on hover, and jump suspicious points back to the source bbox for
   correction. Selected-class runs can launch an explicit subclass cluster search
-  for bulk relabeling. Backend-backed workspaces are analyzed in place;
-  browser-only current workspaces first upload through a named chunked dataset
-  session so temporary managed datasets are visible and removable in Dataset
-  Management. The graph can switch between global, class-balanced,
-  between-class, and within-filter PCA views without changing full-space audit
-  scores.
+  for bulk relabeling. Backend-linked and transient server-path workspaces are
+  analyzed by reference; browser-only workspaces are uploaded only into a
+  transient Class Split job workspace, not registered as backend datasets. The
+  graph can switch between global, class-balanced, between-class, and
+  within-filter PCA views without changing full-space audit scores.
 - After an all-class Class Split run, use Dataset Analysis to rank image-level
   value from class rarity, object-feature rarity, and embedding-map edge cases.
 - Export selected crops through the chunked crop ZIP endpoints.
@@ -726,13 +725,20 @@ the backend are available.
 Current verification: focused Class Split backend and UI contract suites passed.
 Full log: [docs/backend_storage_hardening_log.md](docs/backend_storage_hardening_log.md).
 
+2026-06-04 follow-up: Class Split mobile review is desktop-workspace only.
+Mobile actions are queued against the live Class Split session and sync back
+into the currently open Label Images workspace; they do not write directly to a
+backend dataset snapshot. Browser-only Class Split runs use the transient
+`/class_analysis/jobs/active_workspace` path, and the old Class Split
+workspace-upload-name/cache UI was removed.
+
 2026-06-03 follow-up: the backend now serves the browser UI at `/` and
 `/tator.html`, legacy `/ybat.html` redirects, Class Split explains PCA/UMAP
 projection modes, and selected-class subclass search has UMAP-island controls.
 
 2026-06-02 follow-up: Class Split has switchable PCA graph projections, stable
 per-class traces, selected-class subclass search, a 12-item likely-wrong review
-queue, source-context crop previews, and named active-workspace uploads.
+queue, and source-context crop previews.
 
 2026-05-30 follow-up: top-tab navigation now binds through an early delegated
 handler and the browser cache key was bumped, so Data Ingestion and Class Split

@@ -22,6 +22,10 @@ def build_class_analysis_router(
     get_cluster_search_fn: Callable[[str], Any],
     cancel_cluster_search_fn: Callable[[str], Any],
     cancel_job_fn: Callable[[str], Any],
+    create_mobile_review_fn: Callable[[str, dict], Any],
+    get_mobile_review_fn: Callable[[str], Any],
+    mobile_review_action_fn: Callable[[str, dict], Any],
+    get_mobile_review_context_fn: Callable[[str, str], FileResponse],
 ) -> APIRouter:
     router = APIRouter()
 
@@ -84,5 +88,21 @@ def build_class_analysis_router(
     @router.post("/class_analysis/jobs/{job_id}/cancel")
     def cancel_class_analysis_job(job_id: str):
         return cancel_job_fn(job_id)
+
+    @router.post("/class_analysis/jobs/{job_id}/mobile_review")
+    def create_class_analysis_mobile_review(job_id: str, payload: dict = Body(default_factory=dict)):  # noqa: B008
+        return create_mobile_review_fn(job_id, payload or {})
+
+    @router.get("/class_analysis/mobile_review/{session_id}")
+    def get_class_analysis_mobile_review(session_id: str):
+        return get_mobile_review_fn(session_id)
+
+    @router.post("/class_analysis/mobile_review/{session_id}/action")
+    def apply_class_analysis_mobile_review_action(session_id: str, payload: dict = Body(default_factory=dict)):  # noqa: B008
+        return mobile_review_action_fn(session_id, payload or {})
+
+    @router.get("/class_analysis/mobile_review/{session_id}/context/{point_id}")
+    def get_class_analysis_mobile_review_context(session_id: str, point_id: str):
+        return get_mobile_review_context_fn(session_id, point_id)
 
     return router

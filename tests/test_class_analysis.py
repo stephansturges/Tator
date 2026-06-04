@@ -219,6 +219,333 @@ def test_class_analysis_flags_neighbor_disagreement_only_in_all_classes():
     assert all("class_cluster_id" not in point for point in selected_class["points"])
 
 
+def test_class_analysis_flags_very_close_overlap_candidates():
+    records = [
+        {
+            **_record("p0", "boat"),
+            "image_relpath": "shared.jpg",
+            "bbox_xyxy": [10, 10, 50, 50],
+        },
+        {
+            **_record("p1", "building"),
+            "image_relpath": "shared.jpg",
+            "bbox_xyxy": [10.5, 10.5, 49.5, 49.5],
+        },
+        {
+            **_record("p2", "tree"),
+            "image_relpath": "shared.jpg",
+            "bbox_xyxy": [80, 80, 120, 120],
+        },
+        {
+            **_record("p3", "tree"),
+            "image_relpath": "other.jpg",
+            "bbox_xyxy": [10, 10, 50, 50],
+        },
+    ]
+    embeddings = np.eye(4, dtype=np.float32)
+
+    result = api._class_analysis_build_result(
+        records,
+        embeddings,
+        summary={"analysis_scope": "all_classes"},
+        projection="pca",
+        projection_neighbor_k=15,
+        neighbor_k=3,
+        seed=13,
+    )
+
+    assert result["summary"]["close_overlap_pair_count"] == 1
+    assert result["summary"]["close_overlap_candidate_count"] == 2
+    overlap_ids = {
+        point["point_id"]
+        for point in result["points"]
+        if point.get("is_close_overlap_candidate")
+    }
+    assert overlap_ids == {"p0", "p1"}
+    assert result["close_overlap_candidates"][0]["class_name"] == "boat"
+    assert result["close_overlap_candidates"][0]["other_class_name"] == "building"
+    p0 = next(point for point in result["points"] if point["point_id"] == "p0")
+    assert "close_overlap" in p0["review_signals"]
+
+
+def test_class_analysis_mobile_review_queue_and_actions(monkeypatch):
+    api.CLASS_ANALYSIS_JOBS.clear()
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.clear()
+
+    monkeypatch.setattr(
+        api,
+        "_class_analysis_mobile_touch_lock",
+        lambda session, required=False: {"status": "ok", "lock": {"session_id": session.annotation_session_id}},
+    )
+    points = [
+        {
+            **_record("p0", "building"),
+            "is_wrong_class_candidate": True,
+            "suggested_neighbor_class": "boat",
+            "wrong_class_suspicion": 0.8,
+        },
+        {
+            **_record("p1", "tree"),
+            "is_wrong_class_candidate": True,
+            "suggested_neighbor_class": "boat",
+            "wrong_class_suspicion": 0.7,
+        },
+    ]
+    api.CLASS_ANALYSIS_JOBS["ca_mobile"] = api.ClassAnalysisJob(
+        job_id="ca_mobile",
+        status="completed",
+        result={
+            "summary": {
+                "source_mode": "linked",
+                "source_id": "dataset_a",
+                "dataset_label": "Dataset A",
+                "labelmap": ["building", "boat", "tree"],
+            },
+            "points": points,
+            "wrong_class_candidates": [
+                {"point_id": "p0"},
+                {"point_id": "p1"},
+            ],
+        },
+    )
+
+    created = api.create_class_analysis_mobile_review(
+        "ca_mobile",
+        {"annotation_session_id": "desktop-lock", "dismissed_point_ids": []},
+    )
+    session_id = created["session_id"]
+    assert created["target_mode"] == "desktop_workspace"
+    assert created["current"]["point_id"] == "p0"
+    assert created["counts"]["remaining"] == 2
+    assert created["mobile_url"] == f"/mobile_review.html?session={session_id}"
+
+    skipped = api.class_analysis_mobile_review_action(session_id, {"action": "skip_next", "count": 1})
+    assert skipped["counts"]["skipped"] == 1
+    assert skipped["current"]["point_id"] == "p1"
+    assert skipped["action"]["point_ids"] == ["p0"]
+    assert skipped["action_log"][-1]["action_id"] == f"{session_id}:1"
+    assert skipped["action_log"][-1]["sequence"] == 1
+    assert skipped["action_log"][-1]["point_ids"] == ["p0"]
+
+    changed = api.class_analysis_mobile_review_action(
+        session_id,
+        {"action": "change_class", "point_id": "p1", "target_class": "boat"},
+    )
+    assert changed["counts"]["changed"] == 1
+    assert changed["counts"]["remaining"] == 0
+    assert changed["action_log"][-1]["action_id"] == f"{session_id}:2"
+    assert changed["action_log"][-1]["sequence"] == 2
+    assert changed["action_log"][-1]["target_class"] == "boat"
+    assert points[1]["class_name"] == "boat"
+    assert points[1]["is_wrong_class_candidate"] is False
+    api.CLASS_ANALYSIS_JOBS.clear()
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.clear()
+
+
+def test_class_analysis_mobile_review_forces_desktop_workspace_without_backend_write(monkeypatch):
+    api.CLASS_ANALYSIS_JOBS.clear()
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.clear()
+
+    monkeypatch.setattr(
+        api,
+        "save_dataset_annotation_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("mobile review must not write backend snapshots")),
+    )
+    point = {
+        **_record("p0", "building"),
+        "is_wrong_class_candidate": True,
+        "suggested_neighbor_class": "boat",
+        "review_signals": ["wrong_class"],
+        "wrong_class_suspicion": 0.8,
+    }
+    api.CLASS_ANALYSIS_JOBS["ca_mobile_desktop"] = api.ClassAnalysisJob(
+        job_id="ca_mobile_desktop",
+        status="completed",
+        result={
+            "summary": {
+                "source_mode": "linked",
+                "source_id": "uploaded_active_workspace",
+                "dataset_label": "Uploaded active workspace",
+                "labelmap": ["building", "boat"],
+            },
+            "points": [point],
+            "wrong_class_candidates": [{"point_id": "p0"}],
+        },
+    )
+
+    created = api.create_class_analysis_mobile_review(
+        "ca_mobile_desktop",
+        {"target_mode": "backend", "annotation_session_id": "desktop-lock"},
+    )
+    assert created["target_mode"] == "desktop_workspace"
+    assert created["lock"] == {}
+
+    changed = api.class_analysis_mobile_review_action(
+        created["session_id"],
+        {"action": "change_class", "point_id": "p0", "target_class": "boat"},
+    )
+
+    assert changed["target_mode"] == "desktop_workspace"
+    assert changed["counts"]["changed"] == 1
+    assert changed["counts"]["remaining"] == 0
+    assert changed["action_log"][-1]["name"] == "change_class"
+    assert changed["action_log"][-1]["action_id"] == f"{created['session_id']}:1"
+    assert changed["action_log"][-1]["sequence"] == 1
+    assert changed["action_log"][-1]["status"] == "changed"
+    assert changed["action_log"][-1]["point_id"] == "p0"
+    assert changed["action_log"][-1]["target_class"] == "boat"
+    assert changed["action_log"][-1]["timestamp"] > 0
+    assert point["class_name"] == "boat"
+    assert point["is_wrong_class_candidate"] is False
+    assert point["review_signals"] == []
+    api.CLASS_ANALYSIS_JOBS.clear()
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.clear()
+
+
+def test_class_analysis_mobile_review_accepts_active_workspace_context(tmp_path, monkeypatch):
+    api.CLASS_ANALYSIS_JOBS.clear()
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.clear()
+    class_root = tmp_path / "class_analysis"
+    workspace = class_root / "ca_active_mobile" / "active_workspace"
+    images_dir = workspace / "images"
+    images_dir.mkdir(parents=True)
+    Image.new("RGB", (80, 60), (40, 80, 120)).save(images_dir / "frame.jpg")
+    (workspace / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_label": "Live desktop workspace",
+                "labelmap": ["building", "boat"],
+                "yolo_layout": "flat",
+                "images": [
+                    {
+                        "split": "train",
+                        "image_relpath": "frame.jpg",
+                        "label_lines": ["0 0.5 0.5 0.5 0.5"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    point = {
+        **_record("p0", "building"),
+        "image_relpath": "frame.jpg",
+        "bbox_xyxy": [20, 15, 60, 45],
+        "is_wrong_class_candidate": True,
+        "suggested_neighbor_class": "boat",
+    }
+    api.CLASS_ANALYSIS_JOBS["ca_active_mobile"] = api.ClassAnalysisJob(
+        job_id="ca_active_mobile",
+        status="completed",
+        result={
+            "summary": {
+                "source_mode": "active_workspace",
+                "source_id": "ca_active_mobile",
+                "dataset_label": "Live desktop workspace",
+                "labelmap": ["building", "boat"],
+            },
+            "points": [point],
+            "wrong_class_candidates": [{"point_id": "p0"}],
+        },
+    )
+
+    created = api.create_class_analysis_mobile_review("ca_active_mobile", {})
+    assert created["source_mode"] == "active_workspace"
+    assert created["target_mode"] == "desktop_workspace"
+    context = api.get_class_analysis_mobile_review_context(created["session_id"], "p0")
+    assert context.media_type == "image/jpeg"
+    assert context.body
+    changed = api.class_analysis_mobile_review_action(
+        created["session_id"],
+        {"action": "change_class", "point_id": "p0", "target_class": "boat"},
+    )
+    assert changed["target_mode"] == "desktop_workspace"
+    assert changed["counts"]["changed"] == 1
+    api.CLASS_ANALYSIS_JOBS.clear()
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.clear()
+
+
+def test_class_analysis_mobile_review_prunes_stale_and_excess_sessions(monkeypatch):
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.clear()
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_MOBILE_REVIEW_TTL_SECONDS", 100)
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_MOBILE_REVIEW_MAX_SESSIONS", 2)
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS["old"] = api.ClassAnalysisMobileReviewSession(
+        session_id="old",
+        job_id="job",
+        source_mode="linked",
+        source_id="dataset",
+        updated_at=50.0,
+    )
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS["keep_a"] = api.ClassAnalysisMobileReviewSession(
+        session_id="keep_a",
+        job_id="job",
+        source_mode="linked",
+        source_id="dataset",
+        updated_at=950.0,
+    )
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS["keep_b"] = api.ClassAnalysisMobileReviewSession(
+        session_id="keep_b",
+        job_id="job",
+        source_mode="linked",
+        source_id="dataset",
+        updated_at=970.0,
+    )
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS["keep_c"] = api.ClassAnalysisMobileReviewSession(
+        session_id="keep_c",
+        job_id="job",
+        source_mode="linked",
+        source_id="dataset",
+        updated_at=990.0,
+    )
+
+    api._prune_class_analysis_mobile_review_sessions(now=1000.0)
+
+    assert set(api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS) == {"keep_b", "keep_c"}
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.clear()
+
+
+def test_class_analysis_mobile_review_excludes_overlap_only_candidates(monkeypatch):
+    api.CLASS_ANALYSIS_JOBS.clear()
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.clear()
+    monkeypatch.setattr(
+        api,
+        "_class_analysis_mobile_touch_lock",
+        lambda session, required=False: {"status": "ok", "lock": {"session_id": session.annotation_session_id}},
+    )
+    api.CLASS_ANALYSIS_JOBS["ca_overlap_only"] = api.ClassAnalysisJob(
+        job_id="ca_overlap_only",
+        status="completed",
+        result={
+            "summary": {
+                "source_mode": "linked",
+                "source_id": "dataset_a",
+                "dataset_label": "Dataset A",
+                "labelmap": ["building", "boat"],
+            },
+            "points": [
+                {
+                    **_record("p0", "building"),
+                    "is_wrong_class_candidate": False,
+                    "is_close_overlap_candidate": True,
+                    "review_signals": ["close_overlap"],
+                    "close_overlap_matches": [{"point_id": "p1", "class_name": "boat"}],
+                }
+            ],
+            "wrong_class_candidates": [],
+            "close_overlap_candidates": [{"point_id": "p0", "other_point_id": "p1"}],
+        },
+    )
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.create_class_analysis_mobile_review("ca_overlap_only", {})
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "mobile_review_no_candidates"
+    api.CLASS_ANALYSIS_JOBS.clear()
+    api.CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.clear()
+
+
 def test_class_analysis_cluster_search_reuses_selected_class_embeddings():
     records = [_record(f"p{i}", "vehicle") for i in range(8)]
     embeddings = np.asarray(

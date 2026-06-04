@@ -90,7 +90,7 @@ from api.yolo_training import build_yolo_training_router
 from api.rfdetr_training import build_rfdetr_training_router
 from api.rfdetr import build_rfdetr_router
 from api.yolo import build_yolo_router
-from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
+from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.background import BackgroundTask
 from models.schemas import (
@@ -4100,6 +4100,7 @@ TATOR_UI_ASSETS = {
     "cute.png",
     "filesaver.min.js",
     "jszip.min.js",
+    "mobile_review.html",
     "plotly-2.35.2.min.js",
     "ybat.css",
     "ybat.js",
@@ -14321,6 +14322,26 @@ class ClassAnalysisClusterJob:
 
 
 @dataclass
+class ClassAnalysisMobileReviewSession:
+    session_id: str
+    job_id: str
+    source_mode: str
+    source_id: str
+    target_mode: str = "desktop_workspace"
+    label: str = ""
+    annotation_session_id: str = ""
+    order: List[str] = field(default_factory=list)
+    dismissed_ids: Set[str] = field(default_factory=set)
+    processed_ids: Set[str] = field(default_factory=set)
+    confirmed_ids: Set[str] = field(default_factory=set)
+    changed_ids: Set[str] = field(default_factory=set)
+    action_log: List[Dict[str, Any]] = field(default_factory=list)
+    action_sequence: int = 0
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+
+@dataclass
 class DataIngestionJob:
     job_id: str
     kind: str = "analysis"
@@ -14359,6 +14380,16 @@ CLASS_ANALYSIS_JOBS: Dict[str, ClassAnalysisJob] = {}
 CLASS_ANALYSIS_JOBS_LOCK = threading.Lock()
 CLASS_ANALYSIS_CLUSTER_JOBS: Dict[str, ClassAnalysisClusterJob] = {}
 CLASS_ANALYSIS_CLUSTER_JOBS_LOCK = threading.Lock()
+CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS: Dict[str, ClassAnalysisMobileReviewSession] = {}
+CLASS_ANALYSIS_MOBILE_REVIEW_LOCK = threading.Lock()
+CLASS_ANALYSIS_MOBILE_REVIEW_TTL_SECONDS = max(
+    60,
+    _env_int("CLASS_ANALYSIS_MOBILE_REVIEW_TTL_SECONDS", 12 * 3600),
+)
+CLASS_ANALYSIS_MOBILE_REVIEW_MAX_SESSIONS = max(
+    1,
+    _env_int("CLASS_ANALYSIS_MOBILE_REVIEW_MAX_SESSIONS", 64),
+)
 DATA_INGESTION_JOBS: Dict[str, DataIngestionJob] = {}
 DATA_INGESTION_JOBS_LOCK = threading.Lock()
 CALIBRATION_JOBS: Dict[str, CalibrationJob] = {}
@@ -20466,6 +20497,123 @@ def _class_analysis_cluster_embeddings(
     }
 
 
+def _class_analysis_bbox_iou(a: Sequence[float], b: Sequence[float]) -> float:
+    try:
+        ax1, ay1, ax2, ay2 = [float(v) for v in list(a)[:4]]
+        bx1, by1, bx2, by2 = [float(v) for v in list(b)[:4]]
+    except Exception:
+        return 0.0
+    if ax2 <= ax1 or ay2 <= ay1 or bx2 <= bx1 or by2 <= by1:
+        return 0.0
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(0.0, (bx2 - bx1) * (by2 - by1))
+    union = area_a + area_b - inter
+    return float(inter / union) if union > 0 else 0.0
+
+
+def _class_analysis_bbox_corner_similarity(a: Sequence[float], b: Sequence[float]) -> float:
+    try:
+        ax1, ay1, ax2, ay2 = [float(v) for v in list(a)[:4]]
+        bx1, by1, bx2, by2 = [float(v) for v in list(b)[:4]]
+    except Exception:
+        return 0.0
+    aw = max(1.0, ax2 - ax1)
+    ah = max(1.0, ay2 - ay1)
+    bw = max(1.0, bx2 - bx1)
+    bh = max(1.0, by2 - by1)
+    scale = max(1.0, (aw + ah + bw + bh) / 2.0)
+    mean_corner_delta = (
+        abs(ax1 - bx1)
+        + abs(ay1 - by1)
+        + abs(ax2 - bx2)
+        + abs(ay2 - by2)
+    ) / 4.0
+    return float(max(0.0, min(1.0, 1.0 - (mean_corner_delta / scale))))
+
+
+def _class_analysis_close_overlap_candidates(
+    records: Sequence[Dict[str, Any]],
+    *,
+    iou_threshold: float = 0.9,
+    corner_threshold: float = 0.9,
+) -> Tuple[Dict[str, List[Dict[str, Any]]], List[Dict[str, Any]]]:
+    by_image: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        by_image[
+            (
+                _annotation_normalise_split(record.get("split")),
+                str(record.get("image_relpath") or ""),
+            )
+        ].append(record)
+    matches_by_point: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    candidates_by_pair: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for rows in by_image.values():
+        if len(rows) < 2:
+            continue
+        for left_pos in range(len(rows) - 1):
+            left = rows[left_pos]
+            left_id = str(left.get("point_id") or "")
+            if not left_id:
+                continue
+            for right_pos in range(left_pos + 1, len(rows)):
+                right = rows[right_pos]
+                right_id = str(right.get("point_id") or "")
+                if not right_id:
+                    continue
+                iou = _class_analysis_bbox_iou(left.get("bbox_xyxy") or [], right.get("bbox_xyxy") or [])
+                corner_similarity = _class_analysis_bbox_corner_similarity(
+                    left.get("bbox_xyxy") or [],
+                    right.get("bbox_xyxy") or [],
+                )
+                if iou < iou_threshold or corner_similarity < corner_threshold:
+                    continue
+                left_class = str(left.get("class_name") or "")
+                right_class = str(right.get("class_name") or "")
+                pair_key = tuple(sorted((left_id, right_id)))
+                candidates_by_pair[pair_key] = {
+                    "point_id": left_id,
+                    "other_point_id": right_id,
+                    "class_name": left_class,
+                    "other_class_name": right_class,
+                    "image_relpath": left.get("image_relpath") or "",
+                    "split": left.get("split") or "train",
+                    "iou": float(iou),
+                    "corner_similarity": float(corner_similarity),
+                    "score": float(min(iou, corner_similarity)),
+                }
+                matches_by_point[left_id].append(
+                    {
+                        "point_id": right_id,
+                        "class_name": right_class,
+                        "iou": float(iou),
+                        "corner_similarity": float(corner_similarity),
+                    }
+                )
+                matches_by_point[right_id].append(
+                    {
+                        "point_id": left_id,
+                        "class_name": left_class,
+                        "iou": float(iou),
+                        "corner_similarity": float(corner_similarity),
+                    }
+                )
+    return (
+        {point_id: matches for point_id, matches in matches_by_point.items()},
+        sorted(
+            candidates_by_pair.values(),
+            key=lambda item: (float(item.get("score") or 0.0), float(item.get("iou") or 0.0)),
+            reverse=True,
+        ),
+    )
+
+
 def _class_analysis_build_result(
     records: List[Dict[str, Any]],
     embeddings: np.ndarray,
@@ -20551,6 +20699,7 @@ def _class_analysis_build_result(
     scope = str(summary.get("analysis_scope") or "")
     points: List[Dict[str, Any]] = []
     wrong_class_candidates: List[Dict[str, Any]] = []
+    close_overlap_matches_by_point, close_overlap_candidates = _class_analysis_close_overlap_candidates(records)
     for idx, record in enumerate(records):
         neighbor_indices = neighbor_ids_by_idx[idx]
         neighbor_classes = [str(records[n].get("class_name") or "") for n in neighbor_indices]
@@ -20568,6 +20717,13 @@ def _class_analysis_build_result(
         is_suspicious = bool(
             scope == "all_classes" and top_other_ratio >= 0.65 and same_ratio <= 0.35
         )
+        point_id = str(record.get("point_id") or "")
+        close_overlap_matches = close_overlap_matches_by_point.get(point_id, [])
+        review_signals = []
+        if is_suspicious:
+            review_signals.append("wrong_class")
+        if close_overlap_matches:
+            review_signals.append("close_overlap")
         point = {
             **record,
             "projection": [float(coords[idx, 0]), float(coords[idx, 1])],
@@ -20581,6 +20737,9 @@ def _class_analysis_build_result(
             "suggested_neighbor_class": suggested_class,
             "wrong_class_suspicion": suspicion_score,
             "is_wrong_class_candidate": is_suspicious,
+            "is_close_overlap_candidate": bool(close_overlap_matches),
+            "close_overlap_matches": close_overlap_matches,
+            "review_signals": review_signals,
         }
         points.append(point)
         if is_suspicious:
@@ -20638,6 +20797,8 @@ def _class_analysis_build_result(
         "class_cluster_count": 0,
         "class_cluster_class_count": 0,
         "wrong_class_candidate_count": len(wrong_class_candidates),
+        "close_overlap_candidate_count": len(close_overlap_matches_by_point),
+        "close_overlap_pair_count": len(close_overlap_candidates),
         "warnings": warnings,
     }
     cluster_summary["clusters"] = clusters
@@ -20661,6 +20822,7 @@ def _class_analysis_build_result(
             key=lambda item: float(item.get("wrong_class_suspicion") or 0.0),
             reverse=True,
         ),
+        "close_overlap_candidates": close_overlap_candidates,
     }
 
 
@@ -21849,6 +22011,381 @@ def get_class_analysis_thumbnail(job_id: str, point_id: str):
     if thumb_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="thumbnail_not_found")
     return FileResponse(str(thumb_path), media_type="image/jpeg")
+
+
+def _prune_class_analysis_mobile_review_sessions(now: Optional[float] = None) -> None:
+    cutoff = float(now if now is not None else time.time()) - float(CLASS_ANALYSIS_MOBILE_REVIEW_TTL_SECONDS)
+    with CLASS_ANALYSIS_MOBILE_REVIEW_LOCK:
+        for session_id, session in list(CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.items()):
+            try:
+                if float(session.updated_at or session.created_at or 0.0) < cutoff:
+                    CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.pop(session_id, None)
+            except Exception:
+                CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.pop(session_id, None)
+        excess = len(CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS) - int(CLASS_ANALYSIS_MOBILE_REVIEW_MAX_SESSIONS)
+        if excess > 0:
+            oldest = sorted(
+                CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.items(),
+                key=lambda item: float(item[1].updated_at or item[1].created_at or 0.0),
+            )
+            for session_id, _session in oldest[:excess]:
+                CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.pop(session_id, None)
+
+
+def _get_class_analysis_mobile_review_session(session_id: str) -> ClassAnalysisMobileReviewSession:
+    _prune_class_analysis_mobile_review_sessions()
+    safe_id = _class_analysis_safe_slug(session_id, "")
+    if not safe_id:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="mobile_review_not_found")
+    with CLASS_ANALYSIS_MOBILE_REVIEW_LOCK:
+        session = CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS.get(safe_id)
+    if not session:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="mobile_review_not_found")
+    return session
+
+
+def _class_analysis_mobile_review_result(session: ClassAnalysisMobileReviewSession) -> Dict[str, Any]:
+    return get_class_analysis_result(session.job_id)
+
+
+def _class_analysis_mobile_points_by_id(result: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    points = result.get("points") if isinstance(result, dict) else []
+    return {
+        str(point.get("point_id")): point
+        for point in points
+        if isinstance(point, dict) and str(point.get("point_id") or "").strip()
+    }
+
+
+def _class_analysis_mobile_reviewable_ids(
+    session: ClassAnalysisMobileReviewSession,
+    result: Dict[str, Any],
+) -> List[str]:
+    points_by_id = _class_analysis_mobile_points_by_id(result)
+    ids: List[str] = []
+    for point_id in session.order:
+        safe_id = str(point_id or "")
+        if not safe_id or safe_id in session.dismissed_ids or safe_id in session.processed_ids:
+            continue
+        point = points_by_id.get(safe_id)
+        if point is None:
+            continue
+        if point.get("is_wrong_class_candidate") is False:
+            continue
+        ids.append(safe_id)
+    return ids
+
+
+def _class_analysis_mobile_current_point(
+    session: ClassAnalysisMobileReviewSession,
+    result: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    ids = _class_analysis_mobile_reviewable_ids(session, result)
+    if not ids:
+        return None
+    return _class_analysis_mobile_points_by_id(result).get(ids[0])
+
+
+def _class_analysis_mobile_item_payload(
+    session: ClassAnalysisMobileReviewSession,
+    result: Dict[str, Any],
+    point: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if not point:
+        return None
+    point_id = str(point.get("point_id") or "")
+    return {
+        "point_id": point_id,
+        "class_name": point.get("class_name") or "",
+        "suggested_neighbor_class": point.get("suggested_neighbor_class") or "",
+        "wrong_class_suspicion": json_sanitize(point.get("wrong_class_suspicion") or 0.0),
+        "same_class_neighbor_ratio": json_sanitize(point.get("same_class_neighbor_ratio") or 0.0),
+        "top_other_neighbor_ratio": json_sanitize(point.get("top_other_neighbor_ratio") or 0.0),
+        "image_relpath": point.get("image_relpath") or "",
+        "split": point.get("split") or "train",
+        "bbox_xyxy": json_sanitize(point.get("bbox_xyxy") or []),
+        "thumbnail_url": f"/class_analysis/jobs/{session.job_id}/thumbnail/{point_id}",
+        "context_url": f"/class_analysis/mobile_review/{session.session_id}/context/{point_id}",
+    }
+
+
+def _class_analysis_mobile_touch_lock(
+    session: ClassAnalysisMobileReviewSession,
+    *,
+    required: bool = False,
+) -> Dict[str, Any]:
+    return {"status": "ok", "lock": {}, "target_mode": "desktop_workspace"}
+
+
+def _serialize_class_analysis_mobile_review_session(
+    session: ClassAnalysisMobileReviewSession,
+    *,
+    action_status: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    result = _class_analysis_mobile_review_result(session)
+    reviewable_ids = _class_analysis_mobile_reviewable_ids(session, result)
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    candidates = result.get("wrong_class_candidates") if isinstance(result.get("wrong_class_candidates"), list) else []
+    lock_status = _class_analysis_mobile_touch_lock(session, required=False)
+    payload = {
+        "session_id": session.session_id,
+        "job_id": session.job_id,
+        "source_mode": session.source_mode,
+        "source_id": session.source_id,
+        "target_mode": "desktop_workspace",
+        "label": session.label or summary.get("dataset_label") or session.source_id,
+        "annotation_session_id": session.annotation_session_id,
+        "mobile_url": f"/mobile_review.html?session={session.session_id}",
+        "action_log": list(session.action_log),
+        "classes": list(summary.get("labelmap") or []),
+        "counts": {
+            "total": len(candidates),
+            "remaining": len(reviewable_ids),
+            "processed": len(session.processed_ids),
+            "confirmed": len(session.confirmed_ids),
+            "changed": len(session.changed_ids),
+            "skipped": len(session.dismissed_ids),
+        },
+        "current": _class_analysis_mobile_item_payload(
+            session,
+            result,
+            _class_analysis_mobile_current_point(session, result),
+        ),
+        "lock": lock_status.get("lock") or {},
+        "warning": lock_status.get("warning") or "",
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+    }
+    if action_status:
+        payload["action"] = action_status
+    return json_sanitize(payload)
+
+
+def create_class_analysis_mobile_review(job_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    _prune_class_analysis_mobile_review_sessions()
+    result = get_class_analysis_result(job_id)
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    source_mode = str(summary.get("source_mode") or "").strip().lower()
+    source_id = str(summary.get("source_id") or "").strip()
+    if source_mode not in {"linked", "transient", "active_workspace"} or not source_id:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="mobile_review_dataset_required")
+    candidates = result.get("wrong_class_candidates") if isinstance(result.get("wrong_class_candidates"), list) else []
+    order = [
+        str(item.get("point_id") or "").strip()
+        for item in candidates
+        if isinstance(item, dict) and str(item.get("point_id") or "").strip()
+    ]
+    if not order:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="mobile_review_no_candidates")
+    session_id = f"cmr_{uuid.uuid4().hex[:12]}"
+    annotation_session_id = str(payload.get("annotation_session_id") or "").strip() or f"mobile_{session_id}"
+    dismissed_ids = {
+        str(point_id or "").strip()
+        for point_id in (payload.get("dismissed_point_ids") or [])
+        if str(point_id or "").strip()
+    }
+    session = ClassAnalysisMobileReviewSession(
+        session_id=session_id,
+        job_id=str(job_id or ""),
+        source_mode=source_mode,
+        source_id=source_id,
+        target_mode="desktop_workspace",
+        label=str(payload.get("label") or summary.get("dataset_label") or source_id),
+        annotation_session_id=annotation_session_id,
+        order=order,
+        dismissed_ids=dismissed_ids,
+    )
+    _class_analysis_mobile_touch_lock(session, required=False)
+    with CLASS_ANALYSIS_MOBILE_REVIEW_LOCK:
+        CLASS_ANALYSIS_MOBILE_REVIEW_SESSIONS[session_id] = session
+    return _serialize_class_analysis_mobile_review_session(session)
+
+
+def get_class_analysis_mobile_review(session_id: str) -> Dict[str, Any]:
+    session = _get_class_analysis_mobile_review_session(session_id)
+    with CLASS_ANALYSIS_MOBILE_REVIEW_LOCK:
+        session.updated_at = time.time()
+    return _serialize_class_analysis_mobile_review_session(session)
+
+
+def _class_analysis_mobile_source_entry(
+    session: ClassAnalysisMobileReviewSession,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Path, str]:
+    if session.source_mode == "linked":
+        entry = _resolve_dataset_entry(session.source_id)
+        return entry, None, _dataset_effective_root_from_entry(entry), str(entry.get("yolo_layout") or "flat")
+    if session.source_mode == "transient":
+        transient = _resolve_transient_session(session.source_id)
+        return None, transient, _validate_linked_dataset_path(str(transient.get("dataset_root") or "")), str(transient.get("yolo_layout") or "flat")
+    if session.source_mode == "active_workspace":
+        workspace_dir = _class_analysis_job_dir(
+            session.job_id,
+            create=False,
+            detail="mobile_review_dataset_required",
+        ) / "active_workspace"
+        manifest_path = workspace_dir / "manifest.json"
+        workspace_dir, manifest_path = _class_analysis_active_workspace_paths(
+            str(workspace_dir),
+            str(manifest_path),
+        )
+        manifest = _load_json_metadata(manifest_path) if manifest_path is not None else {}
+        return None, manifest if isinstance(manifest, dict) else {}, workspace_dir, str((manifest or {}).get("yolo_layout") or "flat")
+    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="mobile_review_dataset_required")
+
+
+def _class_analysis_mobile_point_image_path(
+    session: ClassAnalysisMobileReviewSession,
+    point: Dict[str, Any],
+) -> Path:
+    _entry, _transient, dataset_root, yolo_layout = _class_analysis_mobile_source_entry(session)
+    split = _annotation_normalise_split(point.get("split"))
+    rel = _annotation_normalise_image_relpath(point.get("image_relpath"))
+    return _resolve_annotation_image_path(dataset_root, yolo_layout, split, rel)
+
+
+def _class_analysis_mobile_apply_class_change_to_review_state(
+    result: Dict[str, Any],
+    point: Dict[str, Any],
+    target_class: str,
+) -> None:
+    target = str(target_class or "").strip()
+    if not target:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="target_class_required")
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    labelmap = [str(name or "").strip() for name in (summary.get("labelmap") or [])]
+    if target not in labelmap:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="target_class_unknown")
+    point["class_name"] = target
+    point["is_wrong_class_candidate"] = False
+    point["review_signals"] = [
+        signal for signal in (point.get("review_signals") or []) if signal != "wrong_class"
+    ]
+
+
+def _class_analysis_mobile_record_action(
+    session: ClassAnalysisMobileReviewSession,
+    action_status: Dict[str, Any],
+) -> None:
+    with CLASS_ANALYSIS_MOBILE_REVIEW_LOCK:
+        session.updated_at = time.time()
+        session.action_sequence += 1
+        session.action_log.append(
+            {
+                "action_id": f"{session.session_id}:{session.action_sequence}",
+                "sequence": session.action_sequence,
+                "timestamp": session.updated_at,
+                **action_status,
+            }
+        )
+
+
+def class_analysis_mobile_review_action(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    session = _get_class_analysis_mobile_review_session(session_id)
+    result = _class_analysis_mobile_review_result(session)
+    points_by_id = _class_analysis_mobile_points_by_id(result)
+    action = str(payload.get("action") or "").strip().lower()
+    point_id = str(payload.get("point_id") or "").strip()
+    current = _class_analysis_mobile_current_point(session, result)
+    if not point_id and current:
+        point_id = str(current.get("point_id") or "")
+    action_status: Dict[str, Any] = {"name": action}
+    if action == "skip_next":
+        with CLASS_ANALYSIS_MOBILE_REVIEW_LOCK:
+            count = max(1, min(1000, _coerce_int(payload.get("count"), 20)))
+            skipped = _class_analysis_mobile_reviewable_ids(session, result)[:count]
+            for skip_id in skipped:
+                session.dismissed_ids.add(skip_id)
+        action_status.update({"status": "skipped", "count": len(skipped), "point_ids": skipped})
+    elif action == "skip":
+        if not point_id:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="point_id_required")
+        with CLASS_ANALYSIS_MOBILE_REVIEW_LOCK:
+            session.dismissed_ids.add(point_id)
+        action_status.update({"status": "skipped", "point_id": point_id})
+    elif action == "confirm":
+        if not point_id:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="point_id_required")
+        with CLASS_ANALYSIS_MOBILE_REVIEW_LOCK:
+            session.processed_ids.add(point_id)
+            session.confirmed_ids.add(point_id)
+            point = points_by_id.get(point_id)
+            if point is not None:
+                point["is_wrong_class_candidate"] = False
+                point["review_signals"] = [
+                    signal for signal in (point.get("review_signals") or []) if signal != "wrong_class"
+                ]
+        action_status.update({"status": "confirmed", "point_id": point_id})
+    elif action == "change_class":
+        if not point_id:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="point_id_required")
+        point = points_by_id.get(point_id)
+        if point is None:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="point_not_found")
+        target_class = str(payload.get("target_class") or "").strip()
+        _class_analysis_mobile_apply_class_change_to_review_state(result, point, target_class)
+        with CLASS_ANALYSIS_MOBILE_REVIEW_LOCK:
+            session.processed_ids.add(point_id)
+            session.changed_ids.add(point_id)
+        action_status.update({"status": "changed", "point_id": point_id, "target_class": target_class})
+    else:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="mobile_review_action_invalid")
+    _class_analysis_mobile_record_action(session, action_status)
+    return _serialize_class_analysis_mobile_review_session(session, action_status=action_status)
+
+
+def get_class_analysis_mobile_review_context(session_id: str, point_id: str):
+    session = _get_class_analysis_mobile_review_session(session_id)
+    result = _class_analysis_mobile_review_result(session)
+    point = _class_analysis_mobile_points_by_id(result).get(str(point_id or ""))
+    if point is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="point_not_found")
+    bbox = [float(v) for v in (point.get("bbox_xyxy") or [])[:4]]
+    if len(bbox) < 4:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="context_crop_not_found")
+    image_path = _class_analysis_mobile_point_image_path(session, point)
+    with Image.open(image_path) as loaded:
+        image = loaded.convert("RGB")
+    try:
+        image_width, image_height = image.size
+        box_left, box_top, box_right, box_bottom = bbox
+        box_width = max(1.0, box_right - box_left)
+        box_height = max(1.0, box_bottom - box_top)
+        pad_x = min(box_width * 0.5, 50.0)
+        pad_y = min(box_height * 0.5, 50.0)
+        crop_left = box_left - pad_x
+        crop_top = box_top - pad_y
+        crop_width = max(1, int(round(box_width + pad_x * 2.0)))
+        crop_height = max(1, int(round(box_height + pad_y * 2.0)))
+        output = Image.new("RGB", (crop_width, crop_height), (0, 0, 0))
+        src_left = max(0, int(math.floor(crop_left)))
+        src_top = max(0, int(math.floor(crop_top)))
+        src_right = min(image_width, int(math.ceil(crop_left + crop_width)))
+        src_bottom = min(image_height, int(math.ceil(crop_top + crop_height)))
+        if src_right > src_left and src_bottom > src_top:
+            paste_x = int(round(src_left - crop_left))
+            paste_y = int(round(src_top - crop_top))
+            output.paste(image.crop((src_left, src_top, src_right, src_bottom)), (paste_x, paste_y))
+        draw = ImageDraw.Draw(output)
+        line_width = max(2, min(8, int(round(min(crop_width, crop_height) * 0.018))))
+        draw.rectangle(
+            [
+                int(round(pad_x)),
+                int(round(pad_y)),
+                int(round(pad_x + box_width)),
+                int(round(pad_y + box_height)),
+            ],
+            outline=(249, 115, 22),
+            width=line_width,
+        )
+        output.thumbnail((900, 900))
+        buffer = io.BytesIO()
+        output.save(buffer, format="JPEG", quality=90)
+        return Response(content=buffer.getvalue(), media_type="image/jpeg")
+    finally:
+        try:
+            image.close()
+        except Exception:
+            pass
 
 
 def cancel_class_analysis_job(job_id: str) -> Dict[str, Any]:
@@ -42754,6 +43291,10 @@ app.include_router(
         get_cluster_search_fn=get_class_analysis_cluster_search,
         cancel_cluster_search_fn=cancel_class_analysis_cluster_search,
         cancel_job_fn=cancel_class_analysis_job,
+        create_mobile_review_fn=create_class_analysis_mobile_review,
+        get_mobile_review_fn=get_class_analysis_mobile_review,
+        mobile_review_action_fn=class_analysis_mobile_review_action,
+        get_mobile_review_context_fn=get_class_analysis_mobile_review_context,
     )
 )
 

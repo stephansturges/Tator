@@ -2434,6 +2434,14 @@ const AUTOMATION_LOCKED_TABS = new Set([
         mobilePush: null,
         mobileSync: null,
         mobileStatus: null,
+        qwenReviewModel: null,
+        qwenReviewRefresh: null,
+        qwenReviewStatus: null,
+        qwenReviewGlossary: null,
+        qwenReviewGuidance: null,
+        qwenReviewGlossaryReset: null,
+        qwenReviewGlossarySave: null,
+        qwenReviewContextStatus: null,
         wrongList: null,
         inspector: null,
         datasetAnalysisPanel: null,
@@ -2689,6 +2697,15 @@ const AUTOMATION_LOCKED_TABS = new Set([
         mobileReviewSessionId: "",
         mobileReviewTargetMode: "",
         mobileReviewSyncedActions: new Set(),
+        qwenReviewJobs: new Map(),
+        qwenReviewPollTimers: new Map(),
+        qwenReviewModels: [],
+        qwenReviewActiveModelId: "",
+        qwenReviewModelRefreshInFlight: false,
+        qwenReviewGlossaryLoadInFlight: false,
+        qwenReviewGlossarySaveInFlight: false,
+        qwenReviewGlossaryLoadedFor: "",
+        qwenReviewGlossaryDirty: false,
         relabelInFlight: false,
         datasetAnalysis: null,
         flashPointId: "",
@@ -2773,20 +2790,6 @@ const AUTOMATION_LOCKED_TABS = new Set([
         annotationSessionId: "",
     };
     const calibrationProgressCallbacks = new Set();
-    const DEFAULT_CAPTION_GLOSSARY_TERMS = {
-        bike: ["bike", "motorbike", "scooter", "motorcycle"],
-        boat: ["boat", "canoe", "kayak", "surfboard", "ship"],
-        building: ["building", "house", "store", "office building", "residential building", "warehouse"],
-        bus: ["bus", "coach"],
-        container: ["container", "shipping container", "truck container"],
-        digger: ["digger", "excavator", "tractor", "backhoe", "construction vehicle", "bulldozer"],
-        gastank: ["storage tank", "fuel tank", "water tank", "industrial tank", "gas tank", "silo"],
-        lightvehicle: ["small vehicle", "car", "van", "pickup truck", "personal pickup truck", "tuk-tuk", "SUV", "jeep"],
-        person: ["person", "human", "pedestrian", "individual", "cyclist", "passenger"],
-        solarpanels: ["solar panel", "solar array", "photovoltaic panel"],
-        truck: ["truck", "lorry", "commercial vehicle", "semi truck", "heavy-duty vehicle"],
-        utilitypole: ["utility pole", "power pole", "streetlight", "mast", "transmission tower", "antenna"],
-    };
     const CAPTION_PRESETS = [
         { id: "detailed", label: "Detailed scene caption", text: "Write a detailed caption describing the scene, setting, visible objects, spatial relationships, and notable details." },
         { id: "concise", label: "Concise scene caption", text: "Write a short caption (1-2 sentences) describing the scene and main objects." },
@@ -11314,14 +11317,14 @@ function getSelectedQwenTrainMode() {
 }
 
 const QWEN_VRAM_ESTIMATE_GB = {
-    official_lora: { "2B": 12.0, "4B": 20.0, "8B": 96.0, "32B": 192.0, "30B": 180.0, "235B": 800.0 },
-    trl_qlora: { "2B": 8.0, "4B": 10.0, "8B": 16.0, "32B": 48.0, "30B": 64.0, "235B": 260.0 },
+    official_lora: { "2B": 12.0, "4B": 20.0, "8B": 96.0, "32B": 192.0, "35B": 192.0, "30B": 180.0, "235B": 800.0 },
+    trl_qlora: { "2B": 8.0, "4B": 10.0, "8B": 16.0, "32B": 48.0, "35B": 56.0, "30B": 64.0, "235B": 260.0 },
 };
 const QWEN_VRAM_THINKING_SCALE = 1.08;
 const QWEN_VRAM_PIXEL_BASE = 451584;
 const QWEN_VRAM_PIXEL_SCALE_MIN = 0.6;
 const QWEN_VRAM_PIXEL_SCALE_MAX = 1.6;
-const QWEN_MLX_MEMORY_ESTIMATE_GB = { "2B": 5.5, "4B": 8.0, "8B": 14.0, "30B": 42.0, "32B": 46.0, "235B": 180.0 };
+const QWEN_MLX_MEMORY_ESTIMATE_GB = { "2B": 5.5, "4B": 8.0, "8B": 14.0, "30B": 42.0, "32B": 46.0, "35B": 32.0, "235B": 180.0 };
 function qwenTrainingFallback(id, label, metadata = {}) {
     return {
         id,
@@ -11394,7 +11397,7 @@ const QWEN_TRAINING_MODEL_FALLBACKS = [
 ];
 
 function inferQwenModelSize(modelId) {
-    const sizes = ["235B", "30B", "32B", "8B", "4B", "2B"];
+    const sizes = ["235B", "35B", "30B", "32B", "8B", "4B", "2B"];
     for (const size of sizes) {
         if (modelId.includes(size)) return size;
     }
@@ -11679,7 +11682,7 @@ function updateQwenPlatformControlState() {
     if (qwenTrainElements.accumulateInput) {
         qwenTrainElements.accumulateInput.disabled = isMlx;
         qwenTrainElements.accumulateInput.title = isMlx
-            ? "MLX-VLM 0.3.9 does not expose gradient accumulation through this backend path."
+            ? "MLX-VLM training does not expose gradient accumulation through this backend path."
             : "";
     }
     if (qwenTrainElements.loraTargetsInput) {
@@ -22633,12 +22636,12 @@ async function cancelRfDetrTrainingJobRequest() {
 		            const groupLabel = document.createElement("label");
 		            groupLabel.textContent = "Dedupe group";
 		            groupLabel.title =
-		                "Used for cross-class de-dupe: overlapping detections in the same group can suppress each other (e.g. car/truck/bus = vehicles).";
+		                "Used for cross-class de-dupe: overlapping detections in the same group can suppress each other when classes share a semantic family.";
 		            const groupInput = document.createElement("input");
 		            groupInput.type = "text";
-		            groupInput.placeholder = "e.g. vehicles";
+		            groupInput.placeholder = "e.g. semantic_family";
 		            groupInput.title =
-		                "Optional. Only affects cross-class de-dupe. Use different groups to prevent suppressing valid overlaps (e.g. person vs bike).";
+		                "Optional. Only affects cross-class de-dupe. Use different groups to prevent suppressing valid overlaps between unrelated classes.";
 		            groupInput.value = step.dedupe_group || "";
 		            groupInput.addEventListener("input", () => {
 		                step.dedupe_group = groupInput.value;
@@ -26234,7 +26237,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.imageTypeInput.placeholder = context || "Describe the image";
         }
         if (qwenElements.itemsInput && !qwenElements.itemsInput.value) {
-            qwenElements.itemsInput.placeholder = classes.length ? classes.join(", ") : "car, bus, kiosk";
+            qwenElements.itemsInput.placeholder = classes.length ? classes.join(", ") : "class_a, class_b";
         }
     }
 
@@ -26694,10 +26697,6 @@ async function cancelRfDetrTrainingJobRequest() {
         return resp.json();
     }
 
-    function captionGlossaryLabelKey(label) {
-        return String(label || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
-    }
-
     function naturalizeCaptionGlossaryLabel(label) {
         return String(label || "")
             .trim()
@@ -26744,9 +26743,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 return;
             }
             const natural = naturalizeCaptionGlossaryLabel(label);
-            const known = DEFAULT_CAPTION_GLOSSARY_TERMS[captionGlossaryLabelKey(label)];
-            const terms = known && known.length ? known.slice() : [natural || label];
-            mapping[label] = dedupeCaptionGlossaryTerms(terms);
+            mapping[label] = dedupeCaptionGlossaryTerms([natural || label]);
         });
         return Object.keys(mapping).length ? JSON.stringify(mapping, null, 2) : "";
     }
@@ -27368,7 +27365,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!isCustom) {
             qwenElements.agentGlossary.placeholder = "Glossary preview";
         } else {
-            qwenElements.agentGlossary.placeholder = "Paste JSON: {\"light_vehicle\": [\"car\", \"sedan\"], ... }";
+            qwenElements.agentGlossary.placeholder = "Paste JSON: {\"class_name\": [\"broad visual term\", \"synonym\"], ... }";
         }
         loadQwenAgentGlossary().catch((error) => {
             console.debug("Failed to load agent glossary", error);
@@ -39296,8 +39293,26 @@ async function cancelRfDetrTrainingJobRequest() {
         if (classSplitElements.projectionMinDist) {
             classSplitElements.projectionMinDist.disabled = !available || classSplitState.active || projectionChoice !== "umap";
         }
-        refreshClassSplitProjectionHint();
-	        setButtonDisabled(classSplitElements.runButton, !canRun);
+	        refreshClassSplitProjectionHint();
+            setButtonDisabled(classSplitElements.qwenReviewGlossaryReset, classSplitState.qwenReviewGlossaryLoadInFlight);
+            setButtonDisabled(
+                classSplitElements.qwenReviewGlossarySave,
+                classSplitState.qwenReviewGlossarySaveInFlight || !getClassSplitQwenReviewDatasetId()
+            );
+            if (classSplitElements.qwenReviewGlossary && !classSplitState.qwenReviewGlossaryDirty) {
+                const reviewContextKey = getClassSplitQwenReviewDatasetId()
+                    || `workspace:${classSplitHashValues(loadedClassList || [])}`;
+                if (
+                    reviewContextKey
+                    && classSplitState.qwenReviewGlossaryLoadedFor !== reviewContextKey
+                    && !classSplitState.qwenReviewGlossaryLoadInFlight
+                ) {
+                    loadClassSplitQwenReviewGlossary().catch((error) => {
+                        console.warn("Class Split review glossary refresh failed", error);
+                    });
+                }
+            }
+		        setButtonDisabled(classSplitElements.runButton, !canRun);
 	        setButtonDisabled(
 	            classSplitElements.cancelButton,
 	            !classSplitState.active
@@ -42169,6 +42184,118 @@ async function cancelRfDetrTrainingJobRequest() {
         el.innerHTML = html || "";
     }
 
+    function setClassSplitQwenReviewContextStatus(message, variant = "") {
+        const el = classSplitElements.qwenReviewContextStatus;
+        if (!el) {
+            return;
+        }
+        el.textContent = message || "";
+        el.classList.toggle("warn", variant === "warn");
+        el.classList.toggle("error", variant === "error");
+        el.classList.toggle("success", variant === "success");
+        el.classList.toggle("info", variant === "info");
+    }
+
+    function getClassSplitQwenReviewDatasetId() {
+        return annotationSourceState.mode === "linked"
+            ? String(annotationSourceState.datasetId || "").trim()
+            : "";
+    }
+
+    function buildClassSplitDefaultGlossaryText() {
+        const classNames = (Array.isArray(loadedClassList) ? loadedClassList : [])
+            .map((className) => String(className || "").trim())
+            .filter(Boolean);
+        return classNames.map((className) => `${className}: ${className}`).join("\n");
+    }
+
+    async function loadClassSplitQwenReviewGlossary({ force = false } = {}) {
+        const textarea = classSplitElements.qwenReviewGlossary;
+        if (!textarea) {
+            return;
+        }
+        const datasetId = getClassSplitQwenReviewDatasetId();
+        const contextKey = datasetId || `workspace:${classSplitHashValues(loadedClassList || [])}`;
+        if (!force && classSplitState.qwenReviewGlossaryDirty) {
+            setClassSplitQwenReviewContextStatus("Review glossary has local edits.", "info");
+            return;
+        }
+        if (!force && classSplitState.qwenReviewGlossaryLoadedFor === contextKey && textarea.value.trim()) {
+            return;
+        }
+        if (classSplitState.qwenReviewGlossaryLoadInFlight) {
+            return;
+        }
+        classSplitState.qwenReviewGlossaryLoadInFlight = true;
+        setButtonDisabled(classSplitElements.qwenReviewGlossaryReset, true);
+        setButtonDisabled(classSplitElements.qwenReviewGlossarySave, true);
+        try {
+            if (datasetId) {
+                const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/glossary`);
+                const detail = await resp.text();
+                if (!resp.ok) {
+                    throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+                }
+                const data = parseJsonObjectSafe(detail, {});
+                textarea.value = String(data.glossary || data.default_glossary || "").trim();
+                classSplitState.qwenReviewGlossaryLoadedFor = contextKey;
+                classSplitState.qwenReviewGlossaryDirty = false;
+                setClassSplitQwenReviewContextStatus("Loaded dataset review glossary.", "success");
+            } else {
+                textarea.value = buildClassSplitDefaultGlossaryText();
+                classSplitState.qwenReviewGlossaryLoadedFor = contextKey;
+                classSplitState.qwenReviewGlossaryDirty = false;
+                setClassSplitQwenReviewContextStatus("Using class-list review glossary for this session.", "info");
+            }
+        } catch (error) {
+            console.error("Class Split Qwen glossary load failed", error);
+            if (force || !textarea.value.trim()) {
+                textarea.value = buildClassSplitDefaultGlossaryText();
+                classSplitState.qwenReviewGlossaryLoadedFor = contextKey;
+                classSplitState.qwenReviewGlossaryDirty = false;
+            }
+            setClassSplitQwenReviewContextStatus(`Glossary load failed: ${error.message || error}`, "error");
+        } finally {
+            classSplitState.qwenReviewGlossaryLoadInFlight = false;
+            setButtonDisabled(classSplitElements.qwenReviewGlossaryReset, false);
+            setButtonDisabled(classSplitElements.qwenReviewGlossarySave, !getClassSplitQwenReviewDatasetId());
+        }
+    }
+
+    async function saveClassSplitQwenReviewGlossary() {
+        const datasetId = getClassSplitQwenReviewDatasetId();
+        const textarea = classSplitElements.qwenReviewGlossary;
+        if (!datasetId || !textarea) {
+            setClassSplitQwenReviewContextStatus("Open a linked backend dataset to save the glossary.", "warn");
+            return;
+        }
+        if (classSplitState.qwenReviewGlossarySaveInFlight) {
+            return;
+        }
+        classSplitState.qwenReviewGlossarySaveInFlight = true;
+        setButtonDisabled(classSplitElements.qwenReviewGlossarySave, true);
+        try {
+            const resp = await fetch(`${API_ROOT}/datasets/${encodeURIComponent(datasetId)}/glossary`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ glossary: textarea.value || "" }),
+            });
+            const detail = await resp.text();
+            if (!resp.ok) {
+                throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
+            }
+            classSplitState.qwenReviewGlossaryDirty = false;
+            classSplitState.qwenReviewGlossaryLoadedFor = datasetId;
+            setClassSplitQwenReviewContextStatus("Saved review glossary to dataset.", "success");
+        } catch (error) {
+            console.error("Class Split Qwen glossary save failed", error);
+            setClassSplitQwenReviewContextStatus(`Glossary save failed: ${error.message || error}`, "error");
+        } finally {
+            classSplitState.qwenReviewGlossarySaveInFlight = false;
+            setButtonDisabled(classSplitElements.qwenReviewGlossarySave, !getClassSplitQwenReviewDatasetId());
+        }
+    }
+
     async function pushClassSplitReviewToMobile() {
         const jobId = String(classSplitState.currentJobId || "").trim();
         const result = classSplitState.result || {};
@@ -42342,6 +42469,298 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
+    function setClassSplitQwenReviewStatus(message, variant = "") {
+        if (!classSplitElements.qwenReviewStatus) {
+            return;
+        }
+        classSplitElements.qwenReviewStatus.textContent = message || "";
+        classSplitElements.qwenReviewStatus.classList.toggle("warn", variant === "warn");
+        classSplitElements.qwenReviewStatus.classList.toggle("error", variant === "error");
+        classSplitElements.qwenReviewStatus.classList.toggle("success", variant === "success");
+    }
+
+    function renderClassSplitQwenReviewModelOptions() {
+        const select = classSplitElements.qwenReviewModel;
+        if (!select) {
+            return;
+        }
+        const selected = select.value || classSplitState.qwenReviewActiveModelId || "";
+        const models = Array.isArray(classSplitState.qwenReviewModels) ? classSplitState.qwenReviewModels : [];
+        const options = [
+            `<option value="">Active model${classSplitState.qwenReviewActiveModelId ? ` (${escapeHtml(classSplitState.qwenReviewActiveModelId)})` : ""}</option>`,
+            ...models.map((entry) => {
+                const id = String(entry?.id || "").trim();
+                if (!id) {
+                    return "";
+                }
+                const metadata = entry?.metadata || {};
+                if (metadata.inference_supported === false || metadata.vision_inference_supported === false) {
+                    return "";
+                }
+                const label = String(metadata.display_name || metadata.label || metadata.name || entry.label || entry.name || id);
+                const activeSuffix = id === classSplitState.qwenReviewActiveModelId ? " (active)" : "";
+                return `<option value="${escapeHtml(id)}"${id === selected ? " selected" : ""}>${escapeHtml(label + activeSuffix)}</option>`;
+            }).filter(Boolean),
+        ].join("");
+        select.innerHTML = options;
+        if (selected && models.some((entry) => String(entry?.id || "") === selected)) {
+            select.value = selected;
+        }
+    }
+
+    async function refreshClassSplitQwenReviewModels() {
+        if (classSplitState.qwenReviewModelRefreshInFlight) {
+            return;
+        }
+        classSplitState.qwenReviewModelRefreshInFlight = true;
+        setButtonDisabled(classSplitElements.qwenReviewRefresh, true);
+        setClassSplitQwenReviewStatus("Loading Qwen models ...", "info");
+        try {
+            const resp = await fetch(`${API_ROOT}/qwen/models`);
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(text || `HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            classSplitState.qwenReviewModels = Array.isArray(data.models) ? data.models : [];
+            classSplitState.qwenReviewActiveModelId = String(data.active || "");
+            renderClassSplitQwenReviewModelOptions();
+            setClassSplitQwenReviewStatus("Qwen reviewer models loaded.", "success");
+        } catch (error) {
+            console.error("Failed to load Class Split Qwen reviewer models", error);
+            setClassSplitQwenReviewStatus(`Qwen models failed: ${error.message || error}`, "error");
+        } finally {
+            classSplitState.qwenReviewModelRefreshInFlight = false;
+            setButtonDisabled(classSplitElements.qwenReviewRefresh, false);
+        }
+    }
+
+    function clearClassSplitQwenReviewPolls({ clearJobs = false } = {}) {
+        classSplitState.qwenReviewPollTimers.forEach((timer) => clearTimeout(timer));
+        classSplitState.qwenReviewPollTimers.clear();
+        if (clearJobs) {
+            classSplitState.qwenReviewJobs.clear();
+        }
+    }
+
+    function getClassSplitQwenReviewForPoint(pointId) {
+        return classSplitState.qwenReviewJobs.get(String(pointId || "")) || null;
+    }
+
+    function isClassSplitQwenReviewActive(review) {
+        return ["queued", "running", "cancelling"].includes(String(review?.status || "").toLowerCase());
+    }
+
+    function updateClassSplitQwenReviewJob(review) {
+        const pointId = String(review?.point_id || "").trim();
+        if (!pointId) {
+            return;
+        }
+        classSplitState.qwenReviewJobs.set(pointId, review);
+    }
+
+    function scheduleClassSplitQwenReviewPoll(pointId, reviewId) {
+        const safePointId = String(pointId || "").trim();
+        const safeReviewId = String(reviewId || "").trim();
+        if (!safePointId || !safeReviewId) {
+            return;
+        }
+        const existing = classSplitState.qwenReviewPollTimers.get(safePointId);
+        if (existing) {
+            clearTimeout(existing);
+        }
+        const timer = setTimeout(async () => {
+            classSplitState.qwenReviewPollTimers.delete(safePointId);
+            try {
+                const resp = await fetch(`${API_ROOT}/class_analysis/qwen_review/${encodeURIComponent(safeReviewId)}`);
+                if (!resp.ok) {
+                    const text = await resp.text();
+                    throw new Error(text || `HTTP ${resp.status}`);
+                }
+                const review = await resp.json();
+                updateClassSplitQwenReviewJob(review);
+                renderClassSplitWrongList();
+                if (isClassSplitQwenReviewActive(review)) {
+                    scheduleClassSplitQwenReviewPoll(safePointId, safeReviewId);
+                }
+            } catch (error) {
+                console.error("Class Split Qwen review poll failed", error);
+                const review = getClassSplitQwenReviewForPoint(safePointId) || { point_id: safePointId };
+                updateClassSplitQwenReviewJob({
+                    ...review,
+                    status: "failed",
+                    message: `Poll failed: ${error.message || error}`,
+                    error: String(error.message || error),
+                });
+                renderClassSplitWrongList();
+            }
+        }, 1400);
+        classSplitState.qwenReviewPollTimers.set(safePointId, timer);
+    }
+
+    async function startClassSplitQwenReview(pointId) {
+        const safePointId = String(pointId || "").trim();
+        if (!safePointId || !classSplitState.currentJobId) {
+            setSamStatus("Run Class Split analysis before starting Qwen review.", { variant: "warn", duration: 5000 });
+            return;
+        }
+        const existing = getClassSplitQwenReviewForPoint(safePointId);
+        if (isClassSplitQwenReviewActive(existing)) {
+            return;
+        }
+        updateClassSplitQwenReviewJob({
+            point_id: safePointId,
+            status: "queued",
+            progress: 0,
+            message: "Starting Qwen review ...",
+            evidence: [],
+            result: null,
+        });
+        renderClassSplitWrongList();
+        try {
+            const modelId = String(classSplitElements.qwenReviewModel?.value || "").trim();
+            const labelmapGlossary = String(classSplitElements.qwenReviewGlossary?.value || "").trim();
+            const reviewGuidance = String(classSplitElements.qwenReviewGuidance?.value || "").trim();
+            const resp = await fetch(`${API_ROOT}/class_analysis/jobs/${encodeURIComponent(classSplitState.currentJobId)}/points/${encodeURIComponent(safePointId)}/qwen_review`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    model_id: modelId || null,
+                    max_turns: 10,
+                    labelmap_glossary: labelmapGlossary || null,
+                    review_guidance: reviewGuidance || null,
+                    enable_class_concept_briefs: true,
+                }),
+            });
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(text || `HTTP ${resp.status}`);
+            }
+            const review = await resp.json();
+            updateClassSplitQwenReviewJob(review);
+            renderClassSplitWrongList();
+            if (isClassSplitQwenReviewActive(review)) {
+                scheduleClassSplitQwenReviewPoll(safePointId, review.review_id || review.job_id);
+            }
+        } catch (error) {
+            console.error("Class Split Qwen review failed to start", error);
+            updateClassSplitQwenReviewJob({
+                point_id: safePointId,
+                status: "failed",
+                progress: 1,
+                message: `Qwen review failed: ${error.message || error}`,
+                evidence: [],
+                result: null,
+                error: String(error.message || error),
+            });
+            renderClassSplitWrongList();
+        }
+    }
+
+    async function cancelClassSplitQwenReview(pointId) {
+        const safePointId = String(pointId || "").trim();
+        const review = getClassSplitQwenReviewForPoint(safePointId);
+        const reviewId = String(review?.review_id || review?.job_id || "").trim();
+        if (!reviewId) {
+            return;
+        }
+        try {
+            const resp = await fetch(`${API_ROOT}/class_analysis/qwen_review/${encodeURIComponent(reviewId)}/cancel`, { method: "POST" });
+            if (!resp.ok) {
+                const text = await resp.text();
+                throw new Error(text || `HTTP ${resp.status}`);
+            }
+            const updated = await resp.json();
+            updateClassSplitQwenReviewJob(updated);
+            renderClassSplitWrongList();
+        } catch (error) {
+            console.error("Class Split Qwen review cancel failed", error);
+            setSamStatus(`Qwen review cancel failed: ${error.message || error}`, { variant: "error", duration: 5000 });
+        }
+    }
+
+    function formatClassSplitQwenDecision(result) {
+        const decision = String(result?.decision || "").trim();
+        const targetClass = String(result?.target_class || "").trim();
+        if (decision === "confirm_current") {
+            return "Confirm current class";
+        }
+        if (decision === "accept_suggested" || decision === "change_to_other") {
+            return targetClass ? `Switch class to ${targetClass}` : "Switch class";
+        }
+        if (decision === "skip_uncertain") {
+            return "Skip / human review";
+        }
+        return "Waiting for decision";
+    }
+
+    function renderClassSplitQwenReviewBlock(pointId) {
+        const review = getClassSplitQwenReviewForPoint(pointId);
+        if (!review) {
+            return "";
+        }
+        const status = String(review.status || "queued").toLowerCase();
+        const progress = Math.max(0, Math.min(1, Number(review.progress) || 0));
+        const result = review.result || null;
+        const evidence = Array.isArray(review.evidence) ? review.evidence : [];
+        const resultEvidenceIds = new Set((Array.isArray(result?.evidence_ids) ? result.evidence_ids : []).map((id) => String(id || "")));
+        const visibleEvidence = evidence.filter((item) => {
+            const id = String(item?.evidence_id || "");
+            return !resultEvidenceIds.size || resultEvidenceIds.has(id);
+        }).slice(-6);
+        const guarded = result && typeof result.guarded_recommendation === "object"
+            ? result.guarded_recommendation
+            : null;
+        const guardedReasons = Array.isArray(guarded?.guardrail_reasons)
+            ? guarded.guardrail_reasons.map((item) => String(item || "").trim()).filter(Boolean)
+            : [];
+        const guardedTarget = String(guarded?.target_class || "").trim();
+        const guardedDecision = String(guarded?.decision || "").trim();
+        const guardedLabel = guardedDecision === "confirm_current"
+            ? "confirm current class"
+            : guardedTarget
+                ? `switch class to ${guardedTarget}`
+                : "class change";
+        const guardedHtml = guarded?.blocked
+            ? [
+                `<div class="class-split-qwen-review__guarded">`,
+                `<strong>Guarded suggestion: ${escapeHtml(guardedLabel)}</strong>`,
+                `<span>Blocked by backend guardrails${guardedReasons.length ? `: ${escapeHtml(guardedReasons[0])}` : "."}</span>`,
+                guarded.rationale_short ? `<p>${escapeHtml(guarded.rationale_short)}</p>` : "",
+                `</div>`,
+            ].join("")
+            : "";
+        const evidenceHtml = visibleEvidence.length
+            ? `<div class="class-split-qwen-review__evidence">${visibleEvidence.map((item) => {
+                const url = String(item?.artifact_url || "");
+                return url
+                    ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener"><img src="${escapeHtml(url)}" alt="${escapeHtml(item?.title || "Qwen evidence")}" loading="lazy"></a>`
+                    : "";
+            }).join("")}</div>`
+            : "";
+        const resultHtml = result
+            ? [
+                `<strong>${escapeHtml(formatClassSplitQwenDecision(result))}</strong>`,
+                `<span>confidence ${Math.round((Number(result.confidence) || 0) * 100)}% • ${escapeHtml(result.reviewed_by_model || "")}</span>`,
+                `<span>overlap ${escapeHtml(result.overlap_assessment || "n/a")} • anchors current ${escapeHtml(result.anchor_evidence_current || "n/a")} / suggested ${escapeHtml(result.anchor_evidence_suggested || "n/a")}</span>`,
+                result.rationale_short ? `<p>${escapeHtml(result.rationale_short)}</p>` : "",
+                result.counter_evidence ? `<p><em>Counter-evidence:</em> ${escapeHtml(result.counter_evidence)}</p>` : "",
+                guardedHtml,
+            ].join("")
+            : `<span>${escapeHtml(review.message || status)}</span>`;
+        const cancelHtml = isClassSplitQwenReviewActive(review)
+            ? `<button type="button" class="training-button secondary" data-action="qwen-cancel" data-point-id="${escapeHtml(pointId)}">Cancel Qwen</button>`
+            : "";
+        return [
+            `<div class="class-split-qwen-review class-split-qwen-review--${escapeHtml(status)}">`,
+            `<div class="class-split-qwen-review__bar"><span style="width:${Math.round(progress * 100)}%"></span></div>`,
+            `<div class="class-split-qwen-review__body">${resultHtml}</div>`,
+            evidenceHtml,
+            cancelHtml ? `<div class="class-split-qwen-review__actions">${cancelHtml}</div>` : "",
+            `</div>`,
+        ].join("");
+    }
+
     function renderClassSplitWrongList() {
         const listEl = classSplitElements.wrongList;
         if (!listEl) {
@@ -42378,6 +42797,8 @@ async function cancelRfDetrTrainingJobRequest() {
             const currentClass = String(point?.class_name || item.class_name || "").trim();
             const suggestedClass = String(item.suggested_neighbor_class || "").trim();
             const suggestedClassAvailable = suggestedClass && classNames.includes(suggestedClass);
+            const qwenReview = getClassSplitQwenReviewForPoint(pointId);
+            const qwenBusy = isClassSplitQwenReviewActive(qwenReview);
             const options = [
                 `<option value=""${suggestedClassAvailable ? "" : " selected"}>Choose class</option>`,
                 ...classNames.map((className) => {
@@ -42399,9 +42820,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 `<button type="button" class="training-button secondary" data-action="jump-instance" data-point-id="${escapeHtml(pointId)}">See instance</button>`,
                 `<button type="button" class="training-button secondary" data-action="correct-class" data-point-id="${escapeHtml(pointId)}">Confirm current class</button>`,
                 `<button type="button" class="training-button secondary" data-action="skip-wrong" data-point-id="${escapeHtml(pointId)}">Skip</button>`,
+                `<button type="button" class="training-button secondary" data-action="qwen-review" data-point-id="${escapeHtml(pointId)}"${qwenBusy ? " disabled" : ""}>${qwenBusy ? "Qwen reviewing ..." : "Review with Qwen"}</button>`,
                 `<select data-action="target-class" data-point-id="${escapeHtml(pointId)}">${options}</select>`,
                 `<button type="button" class="training-button" data-action="reassign-class" data-point-id="${escapeHtml(pointId)}">${escapeHtml(suggestedClass ? `Switch class to ${suggestedClass}` : "Reassign")}</button>`,
                 `</div>`,
+                renderClassSplitQwenReviewBlock(pointId),
                 `</div>`,
                 `</div>`,
             ].join("");
@@ -42462,6 +42885,23 @@ async function cancelRfDetrTrainingJobRequest() {
                 changeClassSplitPointClass(point, targetClass).catch((error) => {
                     console.error("Class Split vignette relabel failed", error);
                     setSamStatus(`Class change failed: ${error.message || error}`, { variant: "error", duration: 5000 });
+                });
+            });
+        });
+        listEl.querySelectorAll('[data-action="qwen-review"]').forEach((button) => {
+            button.addEventListener("click", (event) => {
+                event.stopPropagation();
+                startClassSplitQwenReview(button.getAttribute("data-point-id") || "").catch((error) => {
+                    console.error("Class Split Qwen review action failed", error);
+                    setSamStatus(`Qwen review failed: ${error.message || error}`, { variant: "error", duration: 5000 });
+                });
+            });
+        });
+        listEl.querySelectorAll('[data-action="qwen-cancel"]').forEach((button) => {
+            button.addEventListener("click", (event) => {
+                event.stopPropagation();
+                cancelClassSplitQwenReview(button.getAttribute("data-point-id") || "").catch((error) => {
+                    console.error("Class Split Qwen review cancel action failed", error);
                 });
             });
         });
@@ -42608,6 +43048,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function hideClassSplitResultUiUntilReady() {
         classSplitState.plotRenderToken += 1;
+        clearClassSplitQwenReviewPolls({ clearJobs: true });
         hideClassSplitGraphHoverPreview();
         if (classSplitElements.results) {
             classSplitElements.results.hidden = true;
@@ -43351,6 +43792,14 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.mobilePush = document.getElementById("classSplitMobilePush");
         classSplitElements.mobileSync = document.getElementById("classSplitMobileSync");
         classSplitElements.mobileStatus = document.getElementById("classSplitMobileStatus");
+        classSplitElements.qwenReviewModel = document.getElementById("classSplitQwenReviewModel");
+        classSplitElements.qwenReviewRefresh = document.getElementById("classSplitQwenReviewRefresh");
+        classSplitElements.qwenReviewStatus = document.getElementById("classSplitQwenReviewStatus");
+        classSplitElements.qwenReviewGlossary = document.getElementById("classSplitQwenReviewGlossary");
+        classSplitElements.qwenReviewGuidance = document.getElementById("classSplitQwenReviewGuidance");
+        classSplitElements.qwenReviewGlossaryReset = document.getElementById("classSplitQwenReviewGlossaryReset");
+        classSplitElements.qwenReviewGlossarySave = document.getElementById("classSplitQwenReviewGlossarySave");
+        classSplitElements.qwenReviewContextStatus = document.getElementById("classSplitQwenReviewContextStatus");
         classSplitElements.wrongList = document.getElementById("classSplitWrongList");
         classSplitElements.inspector = document.getElementById("classSplitInspector");
         classSplitElements.datasetAnalysisPanel = document.getElementById("classSplitDatasetAnalysisPanel");
@@ -43506,6 +43955,49 @@ async function cancelRfDetrTrainingJobRequest() {
                 });
             });
         }
+        if (classSplitElements.qwenReviewRefresh) {
+            classSplitElements.qwenReviewRefresh.addEventListener("click", () => {
+                refreshClassSplitQwenReviewModels().catch((error) => {
+                    console.error("Class Split Qwen model refresh failed", error);
+                });
+            });
+        }
+        if (classSplitElements.qwenReviewModel) {
+            classSplitElements.qwenReviewModel.addEventListener("change", () => {
+                setClassSplitQwenReviewStatus(
+                    classSplitElements.qwenReviewModel.value
+                        ? `Qwen reviewer set to ${classSplitElements.qwenReviewModel.value}.`
+                        : "Qwen reviewer will use the active model.",
+                    "info"
+                );
+            });
+        }
+        if (classSplitElements.qwenReviewGlossary) {
+            classSplitElements.qwenReviewGlossary.addEventListener("input", () => {
+                classSplitState.qwenReviewGlossaryDirty = true;
+                setClassSplitQwenReviewContextStatus("Review glossary has unsaved session edits.", "info");
+            });
+        }
+        if (classSplitElements.qwenReviewGuidance) {
+            classSplitElements.qwenReviewGuidance.addEventListener("input", () => {
+                setClassSplitQwenReviewContextStatus("Review guidance will be sent with each Qwen review.", "info");
+            });
+        }
+        if (classSplitElements.qwenReviewGlossaryReset) {
+            classSplitElements.qwenReviewGlossaryReset.addEventListener("click", () => {
+                loadClassSplitQwenReviewGlossary({ force: true }).catch((error) => {
+                    console.error("Class Split review glossary reset failed", error);
+                    setClassSplitQwenReviewContextStatus(`Glossary reset failed: ${error.message || error}`, "error");
+                });
+            });
+        }
+        if (classSplitElements.qwenReviewGlossarySave) {
+            classSplitElements.qwenReviewGlossarySave.addEventListener("click", () => {
+                saveClassSplitQwenReviewGlossary().catch((error) => {
+                    console.error("Class Split review glossary save failed", error);
+                });
+            });
+        }
         if (classSplitElements.bulkApply) {
             classSplitElements.bulkApply.addEventListener("click", () => {
                 changeClassSplitSelectedPointsClass(classSplitElements.bulkClass?.value || "").catch((error) => {
@@ -43531,6 +44023,12 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         applyEmbeddingRecipePresetToClassSplit(classSplitElements.recipePreset?.value || "precise");
         populateClassSplitClasses({ preserveSelection: true });
+        refreshClassSplitQwenReviewModels().catch((error) => {
+            console.warn("Initial Class Split Qwen model refresh failed", error);
+        });
+        loadClassSplitQwenReviewGlossary().catch((error) => {
+            console.warn("Initial Class Split Qwen glossary load failed", error);
+        });
         refreshClassSplitControls();
         loadClassSplitClipBackbones()
             .then(() => loadClassSplitCapabilities())

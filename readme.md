@@ -261,7 +261,9 @@ The Label Images tab is the everyday workspace.
   analyzed by reference; browser-only workspaces are uploaded only into a
   transient Class Split job workspace, not registered as backend datasets. The
   graph can switch between global, class-balanced, between-class, and
-  within-filter PCA views without changing full-space audit scores.
+  within-filter PCA views without changing full-space audit scores. Likely-wrong
+  vignettes can run an advisory local Qwen review with evidence images; see
+  [docs/class_split_qwen_review_agent.md](docs/class_split_qwen_review_agent.md).
 - After an all-class Class Split run, use Dataset Analysis to rank image-level
   value from class rarity, object-feature rarity, and embedding-map edge cases.
 - Export selected crops through the chunked crop ZIP endpoints.
@@ -306,8 +308,14 @@ model rather than being rewritten by the Instruct/Thinking variant dropdown.
 
 The Qwen Models tab includes CUDA/Transformers presets for official Qwen3-VL
 checkpoints, curated FP8/AWQ/GPTQ checkpoints, and compatible abliterated
-Qwen3-VL checkpoints. Quantized presets are inference checkpoints; dense and
-MoE entries can be selected for LoRA/QLoRA training, and quantized CUDA
+Qwen3-VL checkpoints. The MLX catalog also includes an experimental
+`vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit` reviewer; class-split
+smoke tests passed on Apple Silicon with `mlx-vlm==0.6.1`, but adapter training
+is disabled until tested on that architecture. The Youssofal Heretic 35B-A3B
+Qwen3.6 MLX checkpoint is tracked as a candidate, but is blocked from UI
+selection because smoke tests produced invalid review output. Quantized presets
+are inference checkpoints; dense and MoE entries can be selected for
+LoRA/QLoRA training where supported, and quantized CUDA
 selections resolve to the matching full Transformers checkpoint before training
 starts. QLoRA then applies bitsandbytes NF4 4-bit quantization at training load
 time. MLX model presets are also trainable on Apple Silicon through the MLX-VLM

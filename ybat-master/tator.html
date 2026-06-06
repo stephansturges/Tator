@@ -143,7 +143,7 @@
                                 <div class="training-help">Use higher values for stricter auto-class picks (fewer ambiguous labels).</div>
                             </div>
                             <div class="training-field training-field--inline">
-                                <label for="autoClassMarginWarn">Show ambiguity notice<span class="help-icon" title="If the clarity guard rejects a class, show a quick notice like “CLIP class unclear between car and truck.”">?</span></label>
+                                <label for="autoClassMarginWarn">Show ambiguity notice<span class="help-icon" title="If the clarity guard rejects a class, show a quick notice that the classifier is unclear between candidate classes.">?</span></label>
                                 <input type="checkbox" id="autoClassMarginWarn" />
                             </div>
                             <div class="training-field training-field--inline">
@@ -324,7 +324,7 @@
                                             <button type="button" id="qwenCaptionGlossaryReset" class="training-button secondary">Reset from classes</button>
                                             <button type="button" id="qwenCaptionGlossarySave" class="training-button secondary">Save to dataset</button>
                                         </div>
-                                        <textarea id="qwenCaptionGlossary" rows="5" placeholder='{"light_vehicle": ["small vehicle", "car", "van", "pickup truck", "tuk-tuk"], "gas_tank": ["storage tank", "fuel tank", "water tank", "silo"]}'></textarea>
+                                        <textarea id="qwenCaptionGlossary" rows="5" placeholder='{"class_name": ["broad visual term", "synonym or subtype"], "other_class": ["visual meaning"]}'></textarea>
                                         <div id="qwenCaptionGlossaryStatus" class="training-help"></div>
                                     </details>
                                     <label for="qwenCaptionPreset">Caption style<span class="help-icon" title="Preset that seeds the editable user request prompt. The generated prompt can still be inspected and edited in the prompt stack.">?</span></label>
@@ -1204,6 +1204,24 @@
                             </div>
                             <details id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel class-split-wrong-panel--wide" open>
                                 <summary>Likely wrong class</summary>
+                                <details class="class-split-qwen-context" open>
+                                    <summary>Qwen review context<span class="help-icon" title="Class meaning and session-specific policy sent to Qwen before it reviews a likely-wrong vignette. Qwen recommendations do not apply edits automatically.">?</span></summary>
+                                    <div class="class-split-qwen-context__grid">
+                                        <div>
+                                            <label for="classSplitQwenReviewGlossary">Class glossary<span class="help-icon" title="Semantic class meanings for this dataset. Loaded from the current backend dataset when available. Save only if you want this glossary persisted for the dataset.">?</span></label>
+                                            <textarea id="classSplitQwenReviewGlossary" rows="5" placeholder="ClassA: short definition, allowed visual variants, boundary cases"></textarea>
+                                        </div>
+                                        <div>
+                                            <label for="classSplitQwenReviewGuidance">Additional review guidance<span class="help-icon" title="Session-only instructions for Qwen, such as dataset-specific class policy or ambiguous visual cases. This is not saved unless you copy it into the glossary.">?</span></label>
+                                            <textarea id="classSplitQwenReviewGuidance" rows="5" placeholder="Example: for this dataset, ClassA includes small variants near image edges; ClassB should be used only when the main object is fully visible."></textarea>
+                                        </div>
+                                    </div>
+                                    <div class="class-split-qwen-context__actions">
+                                        <button type="button" id="classSplitQwenReviewGlossaryReset" class="training-button secondary">Reset from dataset/classes</button>
+                                        <button type="button" id="classSplitQwenReviewGlossarySave" class="training-button secondary">Save glossary to dataset</button>
+                                        <span id="classSplitQwenReviewContextStatus" class="training-help"></span>
+                                    </div>
+                                </details>
                                 <div class="class-split-wrong-toolbar">
                                     <span id="classSplitWrongQueueStatus" class="training-help">Run all-class analysis to review likely wrong objects.</span>
                                     <div class="class-split-wrong-toolbar__discard">
@@ -1214,6 +1232,14 @@
                                     <button type="button" id="classSplitWrongShuffle" class="training-button secondary">Shuffle vignettes</button>
                                     <button type="button" id="classSplitMobilePush" class="training-button secondary">Push to mobile</button>
                                     <button type="button" id="classSplitMobileSync" class="training-button secondary" disabled>Sync mobile edits</button>
+                                    <div class="class-split-wrong-toolbar__qwen" title="Run a bounded local Qwen review on one vignette. Qwen only recommends; it does not change labels.">
+                                        <label for="classSplitQwenReviewModel">Qwen reviewer</label>
+                                        <select id="classSplitQwenReviewModel">
+                                            <option value="">Active model</option>
+                                        </select>
+                                        <button type="button" id="classSplitQwenReviewRefresh" class="training-button secondary">Refresh models</button>
+                                    </div>
+                                    <span id="classSplitQwenReviewStatus" class="training-help"></span>
                                     <span id="classSplitMobileStatus" class="training-help"></span>
                                 </div>
                                 <div id="classSplitWrongList" class="class-split-wrong-list"></div>
@@ -1360,7 +1386,7 @@
                                         <select id="qwenAgentGlossarySelect"></select>
                                     </div>
                                     <label for="qwenAgentGlossary">Glossary (preview or custom)</label>
-                                    <textarea id="qwenAgentGlossary" rows="4" placeholder="Paste JSON: {&quot;light_vehicle&quot;: [&quot;car&quot;, &quot;sedan&quot;], ... }"></textarea>
+                                    <textarea id="qwenAgentGlossary" rows="4" placeholder="Paste JSON: {&quot;class_name&quot;: [&quot;broad visual term&quot;, &quot;synonym&quot;], ... }"></textarea>
                                     <div class="training-help">Dataset mode uses the dataset’s canonical glossary. Named/custom modes override the dataset glossary for this run.</div>
                                     <div class="qwen-caption-grid">
                                         <div>
@@ -2605,7 +2631,7 @@
                         <div class="training-note">
                             <strong>Text prompt alignment (read this):</strong><br />
                             • SAM3 class scores come from text embeddings. If you leave variants blank, we use your raw class names as prompts.<br />
-                            • Weird names (e.g., <code>light_vehicle</code>) often don’t match the base model. Add synonyms per class or unfreeze the language backbone (set a small LR, or uncheck “Freeze language”).<br />
+                            • Dataset-specific class names with underscores or abbreviations often don’t match the base model. Add synonyms per class or unfreeze the language backbone (set a small LR, or uncheck “Freeze language”).<br />
                             • Freezing the language encoder is only sensible if you stick to the base vocabulary and just fine-tune boxes/masks.<br />
                             • COCO eval is class-ID based; bad prompt alignment ⇒ wrong class IDs ⇒ low AP even if boxes look reasonable.
                         </div>
@@ -3686,7 +3712,7 @@
 		                        </div>
 				                        <div class="training-field">
                                 <label for="agentExtraPrompts">Extra prompts (optional)<span class="help-icon" title="Optional JSON dict of extra prompts to try.&#10;Keys: class names.&#10;Values: lists of strings.&#10;Special key “__base__” applies to all classes.&#10;These are appended to Qwen suggestions.">?</span></label>
-				                            <textarea id="agentExtraPrompts" rows="8" style="min-width: 480px;" placeholder='{"__base__": ["object", "small object"], "light_vehicle": ["car", "sedan"], "person": ["human", "pedestrian"]}' title="Optional JSON dict of class_name -> list of extra prompt phrases. Special key &quot;__base__&quot; applies to all classes. Example: {&quot;__base__&quot;: [&quot;object&quot;, &quot;small object&quot;], &quot;light_vehicle&quot;: [&quot;car&quot;, &quot;sedan&quot;]}"></textarea>
+				                            <textarea id="agentExtraPrompts" rows="8" style="min-width: 480px;" placeholder='{"__base__": ["object", "small object"], "class_name": ["synonym", "visual subtype"]}' title="Optional JSON dict of class_name -> list of extra prompt phrases. Special key &quot;__base__&quot; applies to all classes. Example: {&quot;__base__&quot;: [&quot;object&quot;, &quot;small object&quot;], &quot;class_name&quot;: [&quot;synonym&quot;, &quot;visual subtype&quot;]}"></textarea>
                                 <div class="training-help">Optional extra words/phrases to try. They are appended to Qwen suggestions. Use &quot;__base__&quot; to add prompts for all classes.</div>
 				                            <div class="training-help" id="agentExtraPromptsParseStatus" aria-live="polite"></div>
 				                        </div>
@@ -4151,7 +4177,7 @@
                                     </div>
                                 </div>
                                 <label for="datasetGlossaryEditor">Glossary (JSON or label: synonyms)</label>
-                                <textarea id="datasetGlossaryEditor" rows="6" placeholder="{&quot;light_vehicle&quot;: [&quot;car&quot;, &quot;sedan&quot;], ... }"></textarea>
+                                <textarea id="datasetGlossaryEditor" rows="6" placeholder="{&quot;class_name&quot;: [&quot;broad visual term&quot;, &quot;synonym&quot;], ... }"></textarea>
                                 <div class="training-actions">
                                     <button type="button" id="datasetGlossaryLoad" class="training-button secondary">Load</button>
                                     <button type="button" id="datasetGlossarySave" class="training-button">Save to dataset</button>
@@ -4175,7 +4201,7 @@
                                     </div>
                                 </div>
                                 <label for="glossaryLibraryEditor">Glossary body</label>
-                                <textarea id="glossaryLibraryEditor" rows="6" placeholder="{&quot;boat&quot;: [&quot;ship&quot;, &quot;kayak&quot;], ... }"></textarea>
+                                <textarea id="glossaryLibraryEditor" rows="6" placeholder="{&quot;class_name&quot;: [&quot;broad visual term&quot;, &quot;synonym&quot;], ... }"></textarea>
                                 <div class="training-actions">
                                     <button type="button" id="glossaryLibraryNew" class="training-button secondary">New</button>
                                     <button type="button" id="glossaryLibrarySave" class="training-button">Save</button>

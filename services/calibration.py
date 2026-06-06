@@ -85,33 +85,12 @@ DEFAULT_ENSEMBLE_POLICY_WINDOW: Dict[str, Any] = {
 
 DEFAULT_ENSEMBLE_POLICY_NONWINDOW_LEGACY: Dict[str, Any] = {
     "logit_bias_by_source_class": {
-        "sam3_text": {
-            "__default__": -0.8,
-            "bike": -1.0,
-            "boat": -0.6,
-            "building": -1.2,
-            "container": -1.2,
-            "digger": -1.2,
-            "light_vehicle": -0.6,
-            "person": -1.2,
-            "utility_pole": -1.2,
-        },
-        "sam3_similarity": {
-            "__default__": -0.4,
-            "bike": -0.8,
-            "building": -0.8,
-            "bus": -0.8,
-            "container": -0.2,
-            "utility_pole": -0.2,
-        },
+        "sam3_text": {"__default__": -0.8},
+        "sam3_similarity": {"__default__": -0.4},
     },
     "sam_only_min_prob_default": 0.0,
     "consensus_iou_default": 0.0,
-    "consensus_iou_by_class": {
-        "building": 0.7,
-        "container": 0.7,
-        "person": 0.7,
-    },
+    "consensus_iou_by_class": {},
     "consensus_class_aware": True,
 }
 

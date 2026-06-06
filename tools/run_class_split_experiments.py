@@ -11,7 +11,7 @@ import sys
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 from sklearn.decomposition import PCA
@@ -63,14 +63,20 @@ def _build_manifest(*, image_dir: Path, label_zip: Path, labelmap: List[str]) ->
             }
         )
     return {
-        "dataset_label": "WALDO v4 active snapshot",
+        "dataset_label": image_dir.name or "active snapshot",
         "labelmap": labelmap,
         "images": rows,
         "yolo_layout": "flat",
     }
 
 
-def _minimum_matrix(sample_cap: int) -> List[Dict[str, Any]]:
+def _class_scopes(classes: Sequence[str]) -> List[Tuple[str, str]]:
+    scopes = [(str(class_name), "selected_class") for class_name in classes if str(class_name or "").strip()]
+    scopes.append(("all_classes", "all_classes"))
+    return scopes
+
+
+def _minimum_matrix(sample_cap: int, classes: Sequence[str]) -> List[Dict[str, Any]]:
     base = {
         "encoder_type": "dinov3",
         "encoder_model": DEFAULT_DINOV3,
@@ -94,11 +100,7 @@ def _minimum_matrix(sample_cap: int) -> List[Dict[str, Any]]:
         "B3": {"preprocess_mode": "canonical", "embedding_adjustment": "remove_size_bias", "projection": "pca"},
         "B5": {"preprocess_mode": "canonical", "embedding_adjustment": "remove_size_bias", "projection": "umap"},
     }
-    scopes = [
-        ("LightVehicle", "selected_class"),
-        ("Person", "selected_class"),
-        ("all_classes", "all_classes"),
-    ]
+    scopes = _class_scopes(classes)
     runs: List[Dict[str, Any]] = []
     for class_name, scope in scopes:
         for variant_id, settings in variants.items():
@@ -111,7 +113,7 @@ def _minimum_matrix(sample_cap: int) -> List[Dict[str, Any]]:
     return runs
 
 
-def _remaining_lever_matrix(sample_cap: int) -> List[Dict[str, Any]]:
+def _remaining_lever_matrix(sample_cap: int, classes: Sequence[str]) -> List[Dict[str, Any]]:
     base = {
         "encoder_type": "dinov3",
         "encoder_model": DEFAULT_DINOV3,
@@ -177,13 +179,7 @@ def _remaining_lever_matrix(sample_cap: int) -> List[Dict[str, Any]]:
         ("umap50", {"projection": "umap", "projection_neighbor_k": 50}),
         ("clip_vitb32", {"encoder_type": "clip", "encoder_model": "ViT-B/32", "dinov3_pooling": "pooler"}),
     ]
-    scopes = [
-        ("LightVehicle", "selected_class"),
-        ("Person", "selected_class"),
-        ("Bike", "selected_class"),
-        ("UPole", "selected_class"),
-        ("all_classes", "all_classes"),
-    ]
+    scopes = _class_scopes(classes)
     runs: List[Dict[str, Any]] = []
     for class_name, scope in scopes:
         for variant_id, settings in variants:
@@ -196,7 +192,7 @@ def _remaining_lever_matrix(sample_cap: int) -> List[Dict[str, Any]]:
     return runs
 
 
-def _finalist_matrix(sample_cap: int) -> List[Dict[str, Any]]:
+def _finalist_matrix(sample_cap: int, classes: Sequence[str]) -> List[Dict[str, Any]]:
     base = {
         "encoder_type": "dinov3",
         "encoder_model": DEFAULT_DINOV3,
@@ -223,17 +219,7 @@ def _finalist_matrix(sample_cap: int) -> List[Dict[str, Any]]:
         ("precise_tight_context", {"embedding_view_mode": "tight_context", "projection": "pca"}),
         ("precise_tight_context_umap", {"embedding_view_mode": "tight_context", "projection": "umap", "projection_neighbor_k": 50}),
     ]
-    scopes = [
-        ("LightVehicle", "selected_class"),
-        ("Person", "selected_class"),
-        ("Bike", "selected_class"),
-        ("UPole", "selected_class"),
-        ("Boat", "selected_class"),
-        ("Truck", "selected_class"),
-        ("Gastank", "selected_class"),
-        ("Building", "selected_class"),
-        ("all_classes", "all_classes"),
-    ]
+    scopes = _class_scopes(classes)
     runs: List[Dict[str, Any]] = []
     for class_name, scope in scopes:
         for variant_id, settings in variants:
@@ -246,7 +232,7 @@ def _finalist_matrix(sample_cap: int) -> List[Dict[str, Any]]:
     return runs
 
 
-def _cradio_matrix(sample_cap: int) -> List[Dict[str, Any]]:
+def _cradio_matrix(sample_cap: int, classes: Sequence[str]) -> List[Dict[str, Any]]:
     base = {
         "encoder_type": "cradio",
         "encoder_model": DEFAULT_CRADIO,
@@ -280,11 +266,7 @@ def _cradio_matrix(sample_cap: int) -> List[Dict[str, Any]]:
             {"projection": "pca", "embedding_view_mode": "tight_context", "cradio_pooling": "summary"},
         ),
     ]
-    scopes = [
-        ("LightVehicle", "selected_class"),
-        ("Person", "selected_class"),
-        ("all_classes", "all_classes"),
-    ]
+    scopes = _class_scopes(classes)
     runs: List[Dict[str, Any]] = []
     for class_name, scope in scopes:
         for variant_id, settings in variants:
@@ -373,7 +355,7 @@ def _run_one(
     request = {
         **run,
         "source_mode": "active_workspace",
-        "workspace_id": "waldo_v4",
+        "workspace_id": "class_split_experiment",
         "workspace_dir": str(image_dir.resolve()),
         "workspace_manifest": manifest,
         "yolo_layout": "flat",
@@ -566,7 +548,7 @@ def _write_leaderboard(output_root: Path, metrics_rows: List[Dict[str, Any]]) ->
         for row in metrics_rows:
             writer.writerow(row)
     (output_root / "metrics.json").write_text(json.dumps(_json_safe(metrics_rows), indent=2), encoding="utf-8")
-    lines = ["# WALDO v4 Class Split Experiment Report", ""]
+    lines = ["# Class Split Experiment Report", ""]
     for row in metrics_rows:
         lines.append(
             "- {run_id}: n={object_count}, projection={projection}, size_abs={strongest_size_axis_abs_correlation:.3f}, "
@@ -606,30 +588,53 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--label-zip", type=Path, required=True)
     parser.add_argument("--labelmap", type=Path, required=True)
     parser.add_argument("--image-dir", type=Path, required=True)
-    parser.add_argument("--output-root", type=Path, default=Path("uploads/class_analysis/experiments/waldo_v4"))
+    parser.add_argument("--output-root", type=Path, default=Path("uploads/class_analysis/experiments/class_split"))
     parser.add_argument("--sample-cap", type=int, default=0, help="0 means all objects in each scope.")
     parser.add_argument("--matrix", choices=["minimum", "remaining", "finalists", "cradio"], default="minimum")
+    parser.add_argument("--classes", default="", help="Optional comma-separated selected classes. Defaults to the first labelmap classes.")
+    parser.add_argument("--selected-class-count", type=int, default=0, help="How many labelmap classes to test when --classes is omitted.")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
 
+def _matrix_default_class_count(matrix: str) -> int:
+    if matrix == "finalists":
+        return 8
+    if matrix == "remaining":
+        return 4
+    return 2
+
+
+def _selected_classes(args: argparse.Namespace, labelmap: Sequence[str]) -> List[str]:
+    requested = [item.strip() for item in str(args.classes or "").split(",") if item.strip()]
+    if requested:
+        labelmap_set = set(labelmap)
+        unknown = [class_name for class_name in requested if class_name not in labelmap_set]
+        if unknown:
+            raise SystemExit(f"--classes contains labels not found in --labelmap: {', '.join(unknown)}")
+        return requested
+    count = int(args.selected_class_count or 0) or _matrix_default_class_count(str(args.matrix or "minimum"))
+    return [str(class_name) for class_name in labelmap[: max(0, count)] if str(class_name or "").strip()]
+
+
 def main() -> None:
     args = parse_args()
     labelmap = _read_labelmap(args.labelmap.expanduser())
+    selected_classes = _selected_classes(args, labelmap)
     manifest = _build_manifest(
         image_dir=args.image_dir.expanduser(),
         label_zip=args.label_zip.expanduser(),
         labelmap=labelmap,
     )
     if args.matrix == "remaining":
-        runs = _remaining_lever_matrix(sample_cap=max(0, int(args.sample_cap or 0)))
+        runs = _remaining_lever_matrix(sample_cap=max(0, int(args.sample_cap or 0)), classes=selected_classes)
     elif args.matrix == "finalists":
-        runs = _finalist_matrix(sample_cap=max(0, int(args.sample_cap or 0)))
+        runs = _finalist_matrix(sample_cap=max(0, int(args.sample_cap or 0)), classes=selected_classes)
     elif args.matrix == "cradio":
-        runs = _cradio_matrix(sample_cap=max(0, int(args.sample_cap or 0)))
+        runs = _cradio_matrix(sample_cap=max(0, int(args.sample_cap or 0)), classes=selected_classes)
     else:
-        runs = _minimum_matrix(sample_cap=max(0, int(args.sample_cap or 0)))
+        runs = _minimum_matrix(sample_cap=max(0, int(args.sample_cap or 0)), classes=selected_classes)
     if args.dry_run:
         for run in runs:
             print(run["run_id"], json.dumps(run, sort_keys=True))

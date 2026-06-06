@@ -19,6 +19,19 @@ QWEN_PLATFORM_ALIASES = {
     "mlx_vlm": QWEN_PLATFORM_MLX,
 }
 QWEN_MLX_DEFAULT_MODEL = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+QWEN_VANCH007_QWEN36_35B_MLX_MODEL = "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit"
+QWEN_VANCH007_QWEN36_35B_MLX_NOTE = (
+    "Experimental Qwen3.6 35B-A3B abliterated MLX-VLM checkpoint. "
+    "Class-split vignette smoke tests passed with mlx-vlm 0.6.1 plus the local "
+    "Qwen3.5/3.6 MoE split-weight compatibility shim; adapter training is not "
+    "enabled until tested on this architecture."
+)
+QWEN_HERETIC_35B_MLX_MODEL = "Youssofal/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit"
+QWEN_HERETIC_35B_MLX_NOTE = (
+    "Candidate Heretic Qwen3.6 35B-A3B MLX checkpoint is tracked but not enabled: "
+    "local mlx-vlm 0.6.1 smoke tests loaded with the Qwen3.5/3.6 compatibility "
+    "shim, but generated invalid text in the class-split vignette benchmark."
+)
 QWEN_MLX_LANGUAGE_ONLY_REPACK_IDS = {
     "introvoyz041/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx-mlx-4Bit",
     "introvoyz041/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx-mlx-4Bit",
@@ -85,8 +98,12 @@ def _external_mlx_entry(
     quantization: str,
     source: str,
     abliterated: bool = False,
+    vision_inference_supported: bool = True,
+    training_supported: bool = True,
+    compatibility_note: Optional[str] = None,
+    training_note: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return {
+    entry = {
         "id": model_id,
         "label": label,
         "model_id": model_id,
@@ -96,9 +113,14 @@ def _external_mlx_entry(
         "runtime_platform": QWEN_PLATFORM_MLX,
         "source": source,
         "abliterated": abliterated,
-        "vision_inference_supported": True,
-        "training_supported": True,
+        "vision_inference_supported": vision_inference_supported,
+        "training_supported": training_supported,
     }
+    if compatibility_note:
+        entry["compatibility_note"] = compatibility_note
+    if training_note:
+        entry["training_note"] = training_note
+    return entry
 
 
 def qwen_mlx_model_options() -> List[Dict[str, Any]]:
@@ -203,6 +225,20 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
             )
     for model_id, size, variant, quantization, source in (
         (
+            QWEN_VANCH007_QWEN36_35B_MLX_MODEL,
+            "35B-A3B",
+            "Abliterated",
+            "4bit",
+            "vanch007",
+        ),
+        (
+            QWEN_HERETIC_35B_MLX_MODEL,
+            "35B-A3B",
+            "Heretic",
+            "4bit",
+            "Youssofal",
+        ),
+        (
             "nightmedia/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx",
             "30B-A3B",
             "Thinking",
@@ -245,19 +281,41 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
             "Goekdeniz-Guelmez",
         ),
     ):
+        if source == "Goekdeniz-Guelmez":
+            label = f"MLX Josiefied Qwen3-VL {size} {variant} abliterated {quantization}"
+        elif source == "vanch007":
+            label = f"MLX Qwen3.6 {size} abliterated {quantization}"
+        elif source == "Youssofal":
+            label = f"MLX Qwen3.6 {size} abliterated Heretic {quantization}"
+        else:
+            label = f"MLX Huihui Qwen3-VL {size} {variant} abliterated {quantization}"
+        is_heretic = model_id == QWEN_HERETIC_35B_MLX_MODEL
+        is_vanch007_qwen36 = model_id == QWEN_VANCH007_QWEN36_35B_MLX_MODEL
         entries.append(
             _external_mlx_entry(
                 model_id,
-                label=(
-                    f"MLX Josiefied Qwen3-VL {size} {variant} abliterated {quantization}"
-                    if source == "Goekdeniz-Guelmez"
-                    else f"MLX Huihui Qwen3-VL {size} {variant} abliterated {quantization}"
-                ),
+                label=label,
                 size=size,
                 variant=variant,
                 quantization=quantization,
                 source=source,
                 abliterated=True,
+                vision_inference_supported=not is_heretic,
+                training_supported=not (is_heretic or is_vanch007_qwen36),
+                compatibility_note=(
+                    QWEN_HERETIC_35B_MLX_NOTE
+                    if is_heretic
+                    else QWEN_VANCH007_QWEN36_35B_MLX_NOTE
+                    if is_vanch007_qwen36
+                    else None
+                ),
+                training_note=(
+                    QWEN_HERETIC_35B_MLX_NOTE
+                    if is_heretic
+                    else QWEN_VANCH007_QWEN36_35B_MLX_NOTE
+                    if is_vanch007_qwen36
+                    else None
+                ),
             )
         )
     preferred = {
@@ -270,6 +328,8 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
         "EZCon/Huihui-Qwen3-VL-2B-Instruct-abliterated-4bit-mlx": 6,
         "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx": 7,
         "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx": 8,
+        QWEN_VANCH007_QWEN36_35B_MLX_MODEL: 9,
+        QWEN_HERETIC_35B_MLX_MODEL: 10,
     }
     for entry in entries:
         if str(entry.get("id")) in QWEN_MLX_LANGUAGE_ONLY_REPACK_IDS:

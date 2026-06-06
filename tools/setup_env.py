@@ -99,7 +99,18 @@ def _pip_check(profile: str, python: Path, *, dry_run: bool) -> None:
         return
     allowed = []
     if profile == "macos":
-        allowed.append("mlx-vlm 0.3.9 has requirement opencv-python>=4.12.0.88")
+        allowed.extend(
+            [
+                "mlx-vlm 0.6.1 has requirement click>=8.2.1",
+                "mlx-vlm 0.6.1 has requirement huggingface-hub>=1.0.0",
+                "mlx-lm 0.31.3 has requirement transformers>=5.0.0",
+                "mlx-vlm 0.6.1 has requirement mlx-audio>=0.4.3",
+                "mlx-vlm 0.6.1 has requirement opencv-python>=4.12.0.88",
+                "mlx-vlm 0.6.1 has requirement starlette>=1.0.1",
+                "mlx-vlm 0.6.1 has requirement transformers>=5.5.0",
+                "mlx-vlm 0.6.1 has requirement transformers>=5.0.0",
+            ]
+        )
     if profile == "falcon-cu118":
         allowed.append("decord 0.6.0 is not supported on this platform")
     if output and all(any(marker in line for marker in allowed) for line in output.splitlines()):

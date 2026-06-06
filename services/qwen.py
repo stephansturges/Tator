@@ -735,11 +735,6 @@ def _caption_is_broad_glossary_alias(term: str, preferred: str, label: str) -> b
         return True
     if val in {pref, label_text}:
         return True
-    # "light vehicle" is a broad alias for "small vehicle"; "delivery vehicle" is not.
-    if pref.endswith(" vehicle") and val.endswith(" vehicle"):
-        subtype_words = {"car", "van", "truck", "pickup", "delivery", "suv", "personal"}
-        if not any(word in val.split() for word in subtype_words):
-            return True
     return False
 
 
@@ -749,9 +744,6 @@ def _caption_broad_source_terms(label: str, preferred: str) -> List[str]:
         str(label or "").replace("_", " "),
         str(label or ""),
     ]
-    preferred_lc = _collapse_whitespace(str(preferred or "").strip()).lower()
-    if preferred_lc.endswith(" vehicle"):
-        terms.append("vehicle")
     cleaned: List[str] = []
     seen: set[str] = set()
     for term in terms:
@@ -784,7 +776,7 @@ def _caption_demote_unstable_glossary_subtypes(
         preferred = _caption_preferred_label(label, glossary_map)
         if not preferred:
             continue
-        replacement = "vehicle" if preferred.lower().endswith(" vehicle") else preferred
+        replacement = preferred
         broad_terms = _caption_broad_source_terms(label, preferred)
         variants: List[str] = []
         seen_variants: set[str] = set()

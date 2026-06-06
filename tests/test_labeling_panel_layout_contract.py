@@ -1062,5 +1062,8 @@ def test_class_split_explorer_panel_contract():
     assert "Class Split analysis is running. The graph will appear when the backend finishes embedding and projection." in js
     assert "startClassSplitAnalysis({ reuseLast: true })" in js
     assert "initClassSplitExplorer();" in js
+    assert "function renderClassSplitQwenReviewModelOptions" in js
+    assert "metadata.inference_supported === false || metadata.vision_inference_supported === false" in js
+    assert "metadata.display_name || metadata.label || metadata.name || entry.label" in js
     assert "max_files=float(\"inf\")" in router
     assert "max_part_size=512 * 1024 * 1024" in router

@@ -139,6 +139,34 @@ def test_qwen_model_registry_exposes_abliterated_mlx_models():
         assert by_id[model_id]["metadata"]["abliterated"] is True
         assert by_id[model_id]["metadata"]["training_supported"] is True
         assert by_id[model_id]["metadata"]["training_modes"] == ["official_lora", "trl_qlora"]
+    heretic_id = "Youssofal/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit"
+    assert heretic_id in by_id
+    heretic_entry = by_id[heretic_id]
+    assert heretic_entry["type"] == "builtin_mlx"
+    assert heretic_entry["metadata"]["runtime_platform"] == "mlx_vlm"
+    assert heretic_entry["metadata"]["abliterated"] is True
+    assert heretic_entry["metadata"]["source"] == "Youssofal"
+    assert heretic_entry["metadata"]["size"] == "35B-A3B"
+    assert heretic_entry["metadata"]["variant"] == "Heretic"
+    assert heretic_entry["metadata"]["vision_inference_supported"] is False
+    assert heretic_entry["metadata"]["training_supported"] is False
+    assert heretic_entry["metadata"]["training_modes"] == []
+    assert "generated invalid text" in heretic_entry["metadata"]["compatibility_note"]
+    assert "vignette benchmark" in heretic_entry["metadata"]["compatibility_note"]
+    assert "Heretic" in heretic_entry["label"]
+    qwen36_id = "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit"
+    assert qwen36_id in by_id
+    qwen36_entry = by_id[qwen36_id]
+    assert qwen36_entry["type"] == "builtin_mlx"
+    assert qwen36_entry["metadata"]["runtime_platform"] == "mlx_vlm"
+    assert qwen36_entry["metadata"]["abliterated"] is True
+    assert qwen36_entry["metadata"]["source"] == "vanch007"
+    assert qwen36_entry["metadata"]["size"] == "35B-A3B"
+    assert qwen36_entry["metadata"]["variant"] == "Abliterated"
+    assert qwen36_entry["metadata"]["vision_inference_supported"] is True
+    assert qwen36_entry["metadata"]["training_supported"] is False
+    assert qwen36_entry["metadata"]["training_modes"] == []
+    assert "smoke tests passed" in qwen36_entry["metadata"]["compatibility_note"]
     for model_id in (
         "introvoyz041/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx-mlx-4Bit",
         "introvoyz041/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx-mlx-4Bit",
@@ -903,6 +931,25 @@ def test_qwen_settings_excludes_language_only_mlx_repack_options():
     assert bad_model_id not in {entry["id"] for entry in settings.mlx_models}
 
 
+def test_qwen_settings_excludes_blocked_heretic_candidate():
+    model_id = "Youssofal/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit"
+
+    settings = api.qwen_settings()
+
+    assert model_id not in {entry["id"] for entry in settings.mlx_models}
+
+
+def test_qwen_settings_includes_working_qwen36_candidate():
+    model_id = "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit"
+
+    settings = api.qwen_settings()
+    by_id = {entry["id"]: entry for entry in settings.mlx_models}
+
+    assert model_id in by_id
+    assert by_id[model_id]["vision_inference_supported"] is True
+    assert by_id[model_id]["training_supported"] is False
+
+
 def test_qwen_settings_mlx_options_include_cache_availability():
     settings = api.qwen_settings()
 
@@ -1038,6 +1085,27 @@ def test_qwen_activation_rejects_language_only_mlx_repack():
     assert "qwen_mlx_incompatible_checkpoint" in str(excinfo.value.detail)
 
 
+def test_qwen_mlx_runtime_rejects_blocked_heretic_candidate(monkeypatch):
+    model_id = "Youssofal/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit"
+    load_called = False
+
+    def fake_load(*_args, **_kwargs):
+        nonlocal load_called
+        load_called = True
+        return object(), object()
+
+    monkeypatch.setattr(api, "MLX_VLM_LOAD", fake_load)
+    monkeypatch.setattr(api, "MLX_VLM_GENERATE", lambda *_args, **_kwargs: "")
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api._load_qwen_mlx_runtime(model_id)
+
+    assert excinfo.value.status_code == 400
+    assert "qwen_mlx_incompatible_checkpoint" in str(excinfo.value.detail)
+    assert "generated invalid text" in str(excinfo.value.detail)
+    assert load_called is False
+
+
 def test_qwen_mlx_model_id_resolution_maps_hf_to_quantized_default():
     assert (
         api._effective_qwen_model_id_for_platform(
@@ -1050,6 +1118,11 @@ def test_qwen_mlx_model_id_resolution_maps_hf_to_quantized_default():
 
 def test_qwen_mlx_model_id_resolution_keeps_explicit_abliterated_mlx_id():
     model_id = "EZCon/Huihui-Qwen3-VL-2B-Instruct-abliterated-4bit-mlx"
+    assert api._effective_qwen_model_id_for_platform(model_id, api.QWEN_PLATFORM_MLX) == model_id
+
+
+def test_qwen_mlx_model_id_resolution_keeps_explicit_heretic_mlx_id():
+    model_id = "Youssofal/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit"
     assert api._effective_qwen_model_id_for_platform(model_id, api.QWEN_PLATFORM_MLX) == model_id
 
 

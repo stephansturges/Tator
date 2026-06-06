@@ -97,39 +97,30 @@ def test_serialize_bbox_polygon_label_line_writes_polygon_coordinates() -> None:
     assert line == "3 0.100000 0.100000 0.400000 0.100000 0.400000 0.600000 0.100000 0.600000"
 
 
-def test_build_falcon_query_tiers_humanizes_special_labels() -> None:
+def test_build_falcon_query_tiers_uses_naturalized_labels_without_static_synonyms() -> None:
     rows = _flat_falcon_query_rows(
         ["light_vehicle", "utility_pole", "person"],
         labelmap=["light_vehicle", "utility_pole", "person"],
         glossary="",
     )
-    assert rows[:5] == [
-        {"class_name": "light_vehicle", "query": "car", "term": "car"},
-        {"class_name": "light_vehicle", "query": "SUV", "term": "SUV"},
-        {"class_name": "light_vehicle", "query": "sedan", "term": "sedan"},
-        {"class_name": "light_vehicle", "query": "van", "term": "van"},
-        {"class_name": "light_vehicle", "query": "pickup truck", "term": "pickup truck"},
+    assert rows == [
+        {"class_name": "light_vehicle", "query": "light vehicle", "term": "light vehicle"},
+        {"class_name": "utility_pole", "query": "utility pole", "term": "utility pole"},
+        {"class_name": "person", "query": "person", "term": "person"},
     ]
-    assert {"class_name": "utility_pole", "query": "utility pole", "term": "utility pole"} in rows
-    assert {"class_name": "utility_pole", "query": "streetlight", "term": "streetlight"} in rows
-    assert {"class_name": "person", "query": "person", "term": "person"} in rows
     assert all("," not in row["query"] for row in rows)
 
 
-def test_build_falcon_query_tiers_uses_singular_natural_labels_for_generic_classes() -> None:
+def test_build_falcon_query_tiers_uses_canonical_label_when_no_glossary_exists() -> None:
     rows = _flat_falcon_query_rows(
         ["building", "truck"],
         labelmap=["building", "truck"],
         glossary="",
     )
-    assert rows[:4] == [
+    assert rows == [
         {"class_name": "building", "query": "building", "term": "building"},
-        {"class_name": "building", "query": "house", "term": "house"},
-        {"class_name": "building", "query": "office building", "term": "office building"},
-        {"class_name": "building", "query": "warehouse", "term": "warehouse"},
+        {"class_name": "truck", "query": "truck", "term": "truck"},
     ]
-    assert {"class_name": "truck", "query": "truck", "term": "truck"} in rows
-    assert {"class_name": "truck", "query": "lorry", "term": "lorry"} in rows
 
 
 def test_build_falcon_query_tiers_uses_glossary_alternatives_as_separate_queries() -> None:
@@ -142,14 +133,15 @@ def test_build_falcon_query_tiers_uses_glossary_alternatives_as_separate_queries
     assert {"class_name": "light_vehicle", "query": "van", "term": "van"} in rows
     assert {"class_name": "light_vehicle", "query": "sedan", "term": "sedan"} in rows
     assert {"class_name": "light_vehicle", "query": "pickup truck", "term": "pickup truck"} in rows
-    assert {"class_name": "light_vehicle", "query": "automobile", "term": "automobile"} not in rows
+    assert {"class_name": "light_vehicle", "query": "automobile", "term": "automobile"} in rows
 
 
-def test_build_falcon_query_tiers_prioritize_primary_term_then_fallback_terms() -> None:
+def test_build_falcon_query_tiers_glossary_only_prioritizes_first_glossary_term() -> None:
     tiers = build_falcon_query_tiers(
         ["light_vehicle"],
         labelmap=["light_vehicle"],
         glossary='{"light_vehicle":["car","sedan","automobile","SUV"]}',
+        prompt_style="glossary_only",
     )
     rows = tiers["light_vehicle"]
     assert rows[0] == {
@@ -159,7 +151,7 @@ def test_build_falcon_query_tiers_prioritize_primary_term_then_fallback_terms() 
         "tier": "A",
     }
     assert any(row["query"] == "SUV" and row["tier"] == "B" for row in rows)
-    assert all(row["query"] != "automobile" for row in rows)
+    assert any(row["query"] == "automobile" and row["tier"] == "B" for row in rows)
 
 
 def test_build_falcon_query_tiers_keeps_canonical_noun_in_tier_a_when_usable() -> None:
@@ -170,7 +162,7 @@ def test_build_falcon_query_tiers_keeps_canonical_noun_in_tier_a_when_usable() -
     )
     assert tiers["boat"][0]["query"] == "boat"
     assert tiers["boat"][0]["tier"] == "A"
-    assert any(row["query"] == "canoe" and row["tier"] == "A" for row in tiers["boat"])
+    assert any(row["query"] == "canoe" and row["tier"] == "C" for row in tiers["boat"])
     assert tiers["building"][0]["query"] == "building"
     assert tiers["utility_pole"][0]["query"] == "utility pole"
 
@@ -200,12 +192,12 @@ def test_build_falcon_query_tiers_can_force_canonical_only_style() -> None:
     ]
 
 
-def test_build_falcon_query_tiers_can_use_priority_only_with_all_instances_frame() -> None:
+def test_build_falcon_query_tiers_can_use_glossary_only_with_all_instances_frame() -> None:
     rows = _flat_falcon_query_rows(
         ["light_vehicle"],
         labelmap=["light_vehicle"],
         glossary='{"light_vehicle":["car","SUV","sedan"]}',
-        prompt_style="priority_only",
+        prompt_style="glossary_only",
         query_frame="all_instances",
     )
     assert rows[:3] == [
@@ -320,53 +312,29 @@ def test_score_falcon_candidate_prefers_object_scale_boxes_over_tiny_fragments()
     assert edge_cluster_score > tiny_fragment_score
 
 
-def test_adjust_falcon_candidate_score_boosts_small_utility_pole_boxes() -> None:
-    base_small = score_falcon_candidate(
+def test_adjust_falcon_candidate_score_keeps_geometry_score_dataset_agnostic() -> None:
+    base_score = score_falcon_candidate(
         bbox_area_fraction=0.0032,
         border_touch_count=0,
         component_count=1,
         derivation_mode="component_split",
     )
-    base_large = score_falcon_candidate(
-        bbox_area_fraction=0.052,
-        border_touch_count=0,
-        component_count=1,
-        derivation_mode="component_split",
-    )
-    adjusted_small = adjust_falcon_candidate_score(
-        class_name="utility_pole",
-        query="power pylon",
-        tier="B",
-        base_score=base_small,
+    adjusted_a = adjust_falcon_candidate_score(
+        class_name="class_a",
+        query="first synonym",
+        tier="A",
+        base_score=base_score,
         bbox_xyxy=(58.0, 264.0, 126.0, 277.0),
         bbox_area_fraction=0.0032,
     )
-    adjusted_large = adjust_falcon_candidate_score(
-        class_name="utility_pole",
-        query="utility pole",
-        tier="A",
-        base_score=base_large,
-        bbox_xyxy=(243.0, 252.0, 367.0, 369.0),
-        bbox_area_fraction=0.052,
-    )
-    assert adjusted_small > adjusted_large
-
-
-def test_adjust_falcon_candidate_score_penalizes_square_utility_pole_false_positives() -> None:
-    elongated = adjust_falcon_candidate_score(
-        class_name="utility_pole",
-        query="power pylon",
-        tier="B",
-        base_score=0.82,
-        bbox_xyxy=(58.0, 264.0, 126.0, 277.0),
-        bbox_area_fraction=0.0032,
-    )
-    square = adjust_falcon_candidate_score(
-        class_name="utility_pole",
-        query="utility pole",
-        tier="A",
-        base_score=0.82,
+    adjusted_b = adjust_falcon_candidate_score(
+        class_name="class_b",
+        query="other synonym",
+        tier="C",
+        base_score=base_score,
         bbox_xyxy=(193.0, 265.0, 224.0, 292.0),
         bbox_area_fraction=0.0030,
     )
-    assert elongated > square
+
+    assert adjusted_a == pytest.approx(base_score)
+    assert adjusted_b == pytest.approx(base_score)

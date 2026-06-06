@@ -2438,6 +2438,54 @@ body.annotation-focus-mode .class-scroll-indicator {
     min-width: 58px;
 }
 
+.class-split-qwen-context {
+    margin: 8px 0 10px;
+    padding: 8px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 7px;
+    background: rgba(248, 250, 252, 0.72);
+}
+
+.class-split-qwen-context > summary {
+    cursor: pointer;
+    color: #0f172a;
+    font-weight: 700;
+}
+
+.class-split-qwen-context__grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.class-split-qwen-context label {
+    display: block;
+    margin-bottom: 4px;
+    color: #475569;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.class-split-qwen-context textarea {
+    width: 100%;
+    min-height: 112px;
+    resize: vertical;
+    box-sizing: border-box;
+}
+
+.class-split-qwen-context__actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.class-split-qwen-context__actions .training-help {
+    margin: 0;
+}
+
 .class-split-dataset-analysis {
     min-width: 0;
     display: block;
@@ -2707,6 +2755,101 @@ body.annotation-focus-mode .class-scroll-indicator {
 .class-split-wrong-item__actions select {
     flex: 1 1 130px;
     min-width: 0;
+}
+
+.class-split-wrong-toolbar__qwen {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: min(100%, 420px);
+}
+
+.class-split-wrong-toolbar__qwen label {
+    white-space: nowrap;
+    font-size: 12px;
+    color: #475569;
+}
+
+.class-split-wrong-toolbar__qwen select {
+    min-width: 170px;
+    max-width: 280px;
+}
+
+.class-split-qwen-review {
+    margin-top: 8px;
+    border: 1px solid rgba(14, 165, 233, 0.35);
+    border-radius: 7px;
+    background: rgba(240, 249, 255, 0.9);
+    overflow: hidden;
+}
+
+.class-split-qwen-review--failed {
+    border-color: rgba(239, 68, 68, 0.45);
+    background: rgba(254, 242, 242, 0.92);
+}
+
+.class-split-qwen-review__bar {
+    height: 4px;
+    background: rgba(148, 163, 184, 0.35);
+}
+
+.class-split-qwen-review__bar span {
+    display: block;
+    height: 100%;
+    background: linear-gradient(90deg, #0ea5e9, #22c55e);
+}
+
+.class-split-qwen-review__body {
+    padding: 7px 8px;
+}
+
+.class-split-qwen-review__body strong,
+.class-split-qwen-review__body span,
+.class-split-qwen-review__body p {
+    display: block;
+    overflow-wrap: anywhere;
+}
+
+.class-split-qwen-review__body p {
+    margin: 4px 0 0;
+    color: #0f172a;
+    font-size: 12px;
+    line-height: 1.35;
+}
+
+.class-split-qwen-review__guarded {
+    margin-top: 7px;
+    padding: 7px;
+    border: 1px solid rgba(245, 158, 11, 0.5);
+    border-radius: 6px;
+    background: rgba(255, 251, 235, 0.92);
+}
+
+.class-split-qwen-review__guarded strong,
+.class-split-qwen-review__guarded span,
+.class-split-qwen-review__guarded p {
+    color: #78350f;
+}
+
+.class-split-qwen-review__evidence {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+    padding: 0 8px 8px;
+}
+
+.class-split-qwen-review__evidence img {
+    display: block;
+    width: 100%;
+    height: 86px;
+    border-radius: 5px;
+    border: 1px solid rgba(14, 165, 233, 0.28);
+    background: #000;
+    object-fit: contain;
+}
+
+.class-split-qwen-review__actions {
+    padding: 0 8px 8px;
 }
 
 .class-split-inspector__crop-shell {

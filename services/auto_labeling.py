@@ -28,40 +28,8 @@ _FALCON_QUERY_TIER_A = "A"
 _FALCON_QUERY_TIER_B = "B"
 _FALCON_QUERY_TIER_C = "C"
 
-_FALCON_QUERY_PRIORITY_TERMS: Dict[str, List[str]] = {
-    "bike": ["motorcycle", "scooter", "bike"],
-    "boat": ["boat", "canoe", "kayak", "ship"],
-    "building": ["building", "house", "office building", "warehouse"],
-    "bus": ["bus", "coach", "autobus"],
-    "container": ["shipping container", "truck container", "container"],
-    "digger": ["excavator", "backhoe", "bulldozer", "digger", "dozer"],
-    "gastank": ["storage tank", "oil tank", "silo", "pressure vessel"],
-    "light_vehicle": ["car", "SUV", "sedan", "van", "pickup truck", "hatchback"],
-    "person": ["person", "pedestrian", "cyclist", "walker", "swimmer"],
-    "solarpanels": ["solar panel", "solar panel array"],
-    "truck": ["truck", "lorry", "semi truck", "18-wheeler", "big rig"],
-    "utility_pole": ["utility pole", "streetlight", "transmission tower", "mast", "power pylon"],
-}
-
-_FALCON_QUERY_BLOCKLIST: Dict[str, set[str]] = {
-    "digger": {"construction vehicle", "heavy machinery", "tractor", "steam shovel"},
-    "light_vehicle": {"light vehicle", "light_vehicle", "passenger vehicle", "automobile", "4x4"},
-    "person": {"human", "individual", "passenger"},
-    "solarpanels": {"array", "solarpanels"},
-    "boat": {"surfboard"},
-    "gastank": {"tank", "barrel", "silos"},
-    "truck": {"commercial vehicle", "heavy-duty vehicle", "semi-trailer truck"},
-    "utility_pole": {
-        "antenna",
-        "pole",
-        "street fixture",
-        "drying rack",
-        "satellite dish",
-        "mounting pole",
-        "light fixture",
-        "utility_pole",
-    },
-}
+_FALCON_QUERY_PRIORITY_TERMS: Dict[str, List[str]] = {}
+_FALCON_QUERY_BLOCKLIST: Dict[str, set[str]] = {}
 
 def _humanize_label(label: str) -> str:
     return str(label or "").replace("_", " ").strip()
@@ -631,53 +599,8 @@ def adjust_falcon_candidate_score(
     bbox_xyxy: Sequence[float],
     bbox_area_fraction: float,
 ) -> float:
-    """Apply light class-aware priors so tiny-object queries are not drowned by coarse boxes."""
+    """Return the geometry score without dataset-specific class priors."""
     score = float(base_score or 0.0)
-    canonical = str(class_name or "").strip().lower()
-    query_text = str(query or "").strip().lower()
-    tier_name = str(tier or "").strip().upper()
-    area = max(0.0, float(bbox_area_fraction or 0.0))
-    bbox = tuple(float(v) for v in (bbox_xyxy or ())[:4])
-    width = max(1.0, (bbox[2] - bbox[0]) if len(bbox) >= 4 else 1.0)
-    height = max(1.0, (bbox[3] - bbox[1]) if len(bbox) >= 4 else 1.0)
-    aspect_ratio = max(width, height) / max(1.0, min(width, height))
-
-    if canonical == "utility_pole":
-        if area > 0.0:
-            ideal = 0.003
-            distance = abs(math.log(max(area, 1e-6) / ideal))
-            score += max(-0.10, min(0.08, 0.08 - 0.12 * distance))
-        if aspect_ratio >= 2.5:
-            score += 0.07
-        elif aspect_ratio >= 1.8:
-            score += 0.04
-        elif aspect_ratio <= 1.35:
-            score -= 0.06
-        if "pylon" in query_text or "tower" in query_text:
-            score += 0.03
-        elif tier_name in {"B", "C"}:
-            score += 0.01
-    elif canonical == "light_vehicle":
-        if area > 0.0:
-            ideal = 0.025
-            distance = abs(math.log(max(area, 1e-6) / ideal))
-            score += max(-0.12, min(0.08, 0.08 - 0.12 * distance))
-        if 1.2 <= aspect_ratio <= 4.5:
-            score += 0.03
-        if tier_name in {"B", "C"}:
-            score += 0.02
-    elif canonical == "person":
-        if 0.002 <= area <= 0.03:
-            score += 0.05
-        elif area > 0.09:
-            score -= 0.08
-        if aspect_ratio >= 2.0:
-            score += 0.03
-    elif canonical == "building":
-        if 0.03 <= area <= 0.4:
-            score += 0.05
-        elif area < 0.008:
-            score -= 0.08
     return max(0.05, min(0.99, score))
 
 

@@ -26,6 +26,10 @@ def build_class_analysis_router(
     get_mobile_review_fn: Callable[[str], Any],
     mobile_review_action_fn: Callable[[str, dict], Any],
     get_mobile_review_context_fn: Callable[[str, str], FileResponse],
+    create_qwen_review_fn: Callable[[str, str, dict], Any],
+    get_qwen_review_fn: Callable[[str], Any],
+    cancel_qwen_review_fn: Callable[[str], Any],
+    get_qwen_review_evidence_fn: Callable[[str, str], FileResponse],
 ) -> APIRouter:
     router = APIRouter()
 
@@ -104,5 +108,21 @@ def build_class_analysis_router(
     @router.get("/class_analysis/mobile_review/{session_id}/context/{point_id}")
     def get_class_analysis_mobile_review_context(session_id: str, point_id: str):
         return get_mobile_review_context_fn(session_id, point_id)
+
+    @router.post("/class_analysis/jobs/{job_id}/points/{point_id}/qwen_review")
+    def create_class_analysis_qwen_review(job_id: str, point_id: str, payload: dict = Body(default_factory=dict)):  # noqa: B008
+        return create_qwen_review_fn(job_id, point_id, payload or {})
+
+    @router.get("/class_analysis/qwen_review/{review_id}")
+    def get_class_analysis_qwen_review(review_id: str):
+        return get_qwen_review_fn(review_id)
+
+    @router.post("/class_analysis/qwen_review/{review_id}/cancel")
+    def cancel_class_analysis_qwen_review(review_id: str):
+        return cancel_qwen_review_fn(review_id)
+
+    @router.get("/class_analysis/qwen_review/{review_id}/evidence/{evidence_id}")
+    def get_class_analysis_qwen_review_evidence(review_id: str, evidence_id: str):
+        return get_qwen_review_evidence_fn(review_id, evidence_id)
 
     return router

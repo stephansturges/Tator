@@ -258,7 +258,7 @@ def test_caption_demotes_disputed_glossary_subtype_to_broad_term():
     )
 
     assert "pickup truck" not in cleaned
-    assert "red vehicle" in cleaned
+    assert "red small vehicle" in cleaned
 
 
 def test_caption_keeps_consistently_supported_glossary_subtype():
@@ -376,7 +376,7 @@ def test_caption_prompt_never_includes_bbox_source_ids():
 
 
 def test_caption_prompt_uses_glossary_as_semantic_class_meaning():
-    glossary = _default_agent_glossary_for_labelmap(["light_vehicle", "gas_tank"])
+    glossary = '{"light_vehicle":["small vehicle","car","van","pickup truck"],"gas_tank":["storage tank","silo"]}'
     prompt, counts, used, truncated = _build_qwen_caption_prompt(
         "Describe this image.",
         [
@@ -397,7 +397,7 @@ def test_caption_prompt_uses_glossary_as_semantic_class_meaning():
     assert truncated is False
     assert "Class meaning glossary" in prompt
     assert 'light_vehicle: broad term "small vehicle"' in prompt
-    assert "possible variants include light vehicle, car, van, pickup truck" in prompt
+    assert "possible variants include car, van, pickup truck" in prompt
     assert 'gas_tank: broad term "storage tank"' in prompt
     assert "Glossary variants are possible members of a class, not assertions" in prompt
     assert "Do not choose a subtype from the glossary unless the image clearly supports that subtype" in prompt
@@ -409,9 +409,9 @@ def test_caption_prompt_uses_glossary_as_semantic_class_meaning():
 def test_default_caption_glossary_matches_camelcase_labelmap_names():
     glossary = _default_agent_glossary_for_labelmap(["LightVehicle", "UPole", "GasTank"])
 
-    assert '"LightVehicle": [\n    "small vehicle"' in glossary
-    assert '"UPole": [\n    "utility pole"' in glossary
-    assert '"GasTank": [\n    "storage tank"' in glossary
+    assert '"LightVehicle": [\n    "Light Vehicle"' in glossary
+    assert '"UPole": [\n    "UPole"' in glossary
+    assert '"GasTank": [\n    "Gas Tank"' in glossary
 
 
 def test_window_caption_prompt_applies_max_boxes_after_window_clipping():

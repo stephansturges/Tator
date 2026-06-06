@@ -969,7 +969,7 @@ def _agent_run_deep_prepass_caption_impl(
         "Write a detailed, multi-sentence caption. Use detection hints as suggestions, "
         "but mention other visible objects. Preserve specific details you see (counts, actions, "
         "notable attributes). Do not mention labels, hints, or coordinates. "
-        "Never output labelmap tags (e.g., light_vehicle); use natural words like car or van. "
+        "Never output raw labelmap tags; use natural words from the active glossary or visible evidence. "
         "Avoid any token with underscores."
     )
     if det_hint_summary and det_hint_summary != "none":

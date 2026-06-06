@@ -1,9 +1,10 @@
 # MLX-VLM install target for the macOS backend.
 #
 # In the full .venv-macos environment, install this file with --no-deps after
-# requirements-macos-inference.txt. mlx-vlm 0.3.9 is the newest release that
-# includes Qwen3-VL support while staying on Transformers 4.57; newer releases
-# require Transformers 5.x, and its OpenCV metadata conflicts with SAHI 0.11.x.
+# requirements-macos-inference.txt. mlx-vlm 0.6.1 adds Qwen3.5/3.6 MoE support.
+# The backend keeps Transformers 4.57 for the rest of the stack and applies a
+# narrow processor fallback for Qwen3.6 MLX smoke-tested models.
 
 mlx>=0.31,<1.0
-mlx-vlm==0.3.9
+mlx-lm==0.31.3
+mlx-vlm==0.6.1

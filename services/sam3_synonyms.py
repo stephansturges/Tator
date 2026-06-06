@@ -87,7 +87,7 @@ def _agent_generate_sam3_synonyms(
                 f"Labelmap: {', '.join(labels)}\n"
                 f"Glossary hints:\n{glossary or 'none'}\n"
                 "JSON example:\n"
-                "{\"light_vehicle\": [\"car\", \"van\", \"pickup truck\", \"suv\", \"sedan\"]}"
+                "{\"class_name\": [\"broad visual term\", \"synonym\", \"visual subtype\"]}"
             )
             raw = ""
             try:

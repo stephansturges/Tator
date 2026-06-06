@@ -629,7 +629,7 @@ def test_auto_label_falcon_window_runs_fallback_tiers_when_tier_a_is_weak(
         tmp_path,
         monkeypatch,
         rows=[{"split": "train", "image_relpath": "img1.jpg", "label_lines": []}],
-        labelmap=["light_vehicle"],
+        labelmap=["target_class"],
     )
 
     queries_seen = []
@@ -645,11 +645,11 @@ def test_auto_label_falcon_window_runs_fallback_tiers_when_tier_a_is_weak(
         out = []
         for query in kwargs.get("queries") or []:
             query = str(query or "")
-            if query == "car":
+            if query == "primary target":
                 mask = np.zeros((64, 64), dtype=np.uint8)
                 mask[20:24, 18:22] = 1
                 out.append([{"mask_rle": _encode_mask(mask)}])
-            elif query == "SUV":
+            elif query == "alternate target":
                 mask = np.zeros((64, 64), dtype=np.uint8)
                 mask[20:34, 18:30] = 1
                 out.append([{"mask_rle": _encode_mask(mask)}])
@@ -662,7 +662,7 @@ def test_auto_label_falcon_window_runs_fallback_tiers_when_tier_a_is_weak(
     payload = api.AutoLabelRequest(
         dataset_id="ds_auto",
         target_mode="detection",
-        class_names=["light_vehicle"],
+        class_names=["target_class"],
         falcon_detection_strategy="segmentation_boxes",
         falcon_backend="embedded",
         falcon_component_mode="component_split",
@@ -673,10 +673,10 @@ def test_auto_label_falcon_window_runs_fallback_tiers_when_tier_a_is_weak(
     result = api._auto_label_falcon_candidates_for_window(
         pil_img=image,
         crop_window={"id": "FULL", "xyxy": (0.0, 0.0, 64.0, 64.0)},
-        class_names=["light_vehicle"],
-        class_id_map={"light_vehicle": 0},
-        labelmap=["light_vehicle"],
-        glossary="",
+        class_names=["target_class"],
+        class_id_map={"target_class": 0},
+        labelmap=["target_class"],
+        glossary='{"target_class":["primary target","alternate target"]}',
         payload=payload,
         target_mode="detection",
     )
@@ -684,10 +684,11 @@ def test_auto_label_falcon_window_runs_fallback_tiers_when_tier_a_is_weak(
     assert result["query_count"] >= 2
     assert len(queries_seen) >= 2
     assert queries_seen[0]["task"] == "segmentation"
-    assert queries_seen[0]["queries"] == ["car"]
-    assert any("SUV" in call["queries"] for call in queries_seen[1:])
+    assert queries_seen[0]["queries"] == ["target class"]
+    assert any("primary target" in call["queries"] for call in queries_seen[1:])
+    assert any("alternate target" in call["queries"] for call in queries_seen[1:])
     assert result["candidates"]
-    assert result["candidates"][0]["class_name"] == "light_vehicle"
+    assert result["candidates"][0]["class_name"] == "target_class"
     assert result["candidates"][0]["derivation_mode"] == "component_split"
     assert result["candidates"][0]["score"] > 0.5
 
@@ -745,6 +746,8 @@ def test_auto_label_falcon_window_collapses_duplicate_query_candidates(
                 mask = np.zeros((64, 64), dtype=np.uint8)
                 mask[30:34, 18:40] = 1
                 out.append([{"mask_rle": _encode_mask(mask)} for _ in range(5)])
+            elif query == "utility pole":
+                out.append([])
             else:
                 mask = np.zeros((64, 64), dtype=np.uint8)
                 mask[10:28, 8:28] = 1
@@ -876,5 +879,5 @@ def test_auto_label_falcon_window_stops_after_strong_tier_a(
         target_mode="detection",
     )
 
-    assert result["query_count"] == 2
-    assert queries_seen == [["boat", "canoe"]]
+    assert result["query_count"] == 1
+    assert queries_seen == [["boat"]]

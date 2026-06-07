@@ -191,10 +191,13 @@ def _record_from_review(
         "guardrail_reasons": final.get("guardrail_reasons") or [],
         "advisory_reasons": final.get("advisory_reasons") or [],
         "guarded_recommendation": final.get("guarded_recommendation"),
+        "cue_verifier": final.get("cue_verifier"),
+        "review_disposition": final.get("review_disposition") or {},
         "evidence_ledger": final.get("evidence_ledger") or {},
         "class_concept_briefs": final.get("class_concept_briefs") or {},
         "rationale_short": final.get("rationale_short") or "",
         "model_compact_arguments": final.get("model_compact_arguments") or {},
+        "controller_preflight": final.get("controller_preflight") or {},
         "controller_reconciliation": final.get("controller_reconciliation") or {"applied": False},
         "review_agent_controller": final.get("review_agent_controller") or "",
         "router": final.get("router"),
@@ -220,6 +223,14 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
     same_image_embedding = Counter(str(record.get("same_image_embedding_evidence") or "missing") for record in records)
     same_image_scale_report = Counter(str(record.get("same_image_scale_report_signal") or "missing") for record in records)
     same_image_embedding_report = Counter(str(record.get("same_image_embedding_report_signal") or "missing") for record in records)
+    disposition_counts = Counter(
+        str((record.get("review_disposition") or {}).get("disposition") or "missing")
+        for record in records
+    )
+    disposition_signal_counts = Counter(
+        str((record.get("review_disposition") or {}).get("signal") or "missing")
+        for record in records
+    )
     return {
         "run_id": run_id,
         "job_id": job_id,
@@ -237,6 +248,22 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
         "same_image_embedding_evidence_counts": dict(same_image_embedding),
         "same_image_scale_report_signal_counts": dict(same_image_scale_report),
         "same_image_embedding_report_signal_counts": dict(same_image_embedding_report),
+        "review_disposition_counts": dict(disposition_counts),
+        "review_disposition_signal_counts": dict(disposition_signal_counts),
+        "effective_human_signal_count": sum(
+            1
+            for record in records
+            if str((record.get("review_disposition") or {}).get("signal") or "") in {
+                "actionable",
+                "guarded_human_triage",
+                "useful_negative",
+            }
+        ),
+        "guarded_human_triage_count": sum(
+            1
+            for record in records
+            if str((record.get("review_disposition") or {}).get("signal") or "") == "guarded_human_triage"
+        ),
         "state_machine_v2_count": sum(
             1 for record in records if record.get("review_agent_controller") == "state_machine_v2"
         ),
@@ -278,6 +305,13 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
             if isinstance(record.get("guarded_recommendation"), dict)
             and record["guarded_recommendation"].get("blocked")
         ),
+        "cue_verifier_count": sum(1 for record in records if isinstance(record.get("cue_verifier"), dict)),
+        "cue_verifier_promoted_count": sum(
+            1
+            for record in records
+            if isinstance(record.get("cue_verifier"), dict)
+            and record["cue_verifier"].get("promoted_from_guarded_recommendation")
+        ),
         "records_written": len(records),
     }
 
@@ -297,6 +331,7 @@ def _make_visual_sheet(
     output_path: Path,
     title: str,
     decisions: Optional[Iterable[str]] = None,
+    guarded_only: bool = False,
     limit: int = 12,
 ) -> None:
     selected_decisions = {str(item) for item in decisions or []}
@@ -304,6 +339,11 @@ def _make_visual_sheet(
         record
         for record in records
         if not selected_decisions or str(record.get("decision") or "") in selected_decisions
+        if not guarded_only
+        or (
+            isinstance(record.get("guarded_recommendation"), dict)
+            and record["guarded_recommendation"].get("blocked")
+        )
     ][: max(1, int(limit or 1))]
     if not rows:
         return
@@ -317,7 +357,7 @@ def _make_visual_sheet(
         y = 44 + (idx // cols) * cell_h
         evidence_list = record.get("evidence") if isinstance(record.get("evidence"), list) else []
         preferred = None
-        for kind in ("target_context", "zoom_region", "local_consensus_context", "class_context_pack"):
+        for kind in ("target_detail", "target_context", "zoom_region", "local_consensus_context", "class_context_pack"):
             preferred = next((ev for ev in evidence_list if isinstance(ev, dict) and ev.get("kind") == kind), None)
             if preferred:
                 break
@@ -348,6 +388,9 @@ def _make_visual_sheet(
                     f"conf {float(guarded.get('confidence') or 0):.2f}"
                 ),
             )
+        disposition = record.get("review_disposition") if isinstance(record.get("review_disposition"), dict) else {}
+        if disposition:
+            lines.insert(4, f"signal {disposition.get('signal')} / {disposition.get('disposition')}")
         for line in lines:
             draw.text((x + 10, text_y), line[:92], fill=(210, 255, 190))
             text_y += 24
@@ -377,6 +420,14 @@ def _write_benchmark_outputs(
         output_path=output.with_name(f"{run_id}_visual_non_skip.jpg"),
         title=f"{run_id} non-skip reviews",
         decisions={"accept_suggested", "confirm_current", "change_to_other"},
+        limit=visual_limit,
+    )
+    _make_visual_sheet(
+        records,
+        parent_job_id=job_id,
+        output_path=output.with_name(f"{run_id}_visual_guarded.jpg"),
+        title=f"{run_id} guarded review opinions",
+        guarded_only=True,
         limit=visual_limit,
     )
     _make_visual_sheet(
@@ -437,13 +488,41 @@ def _run_subprocess_review(
         cmd.append("--enable-local-consensus")
     if args.enable_class_concept_briefs:
         cmd.append("--enable-class-concept-briefs")
+    if args.skip_limited_final_review:
+        cmd.append("--skip-limited-final-review")
+    if args.allow_poor_final_review:
+        cmd.append("--allow-poor-final-review")
+    if args.skip_poor_final_review:
+        cmd.append("--skip-poor-final-review")
+    if args.skip_cue_verifier:
+        cmd.append("--skip-cue-verifier")
     if int(args.mlx_reset_every) >= 0:
         cmd.extend(["--mlx-reset-every", str(max(0, int(args.mlx_reset_every)))])
     if args.reset_qwen_after_review:
         cmd.append("--reset-qwen-after-review")
     started = time.time()
     print(f"[{ordinal}/{total}] {point_id} -> subprocess {child_run_id}")
-    completed = subprocess.run(cmd, text=True, capture_output=True)
+    timeout_seconds = max(1, int(args.review_timeout_seconds or 1))
+    try:
+        completed = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        if exc.stdout:
+            stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout)
+            print(stdout, end="" if stdout.endswith("\n") else "\n")
+        if exc.stderr:
+            stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
+            print(stderr, end="" if stderr.endswith("\n") else "\n")
+        return {
+            "ordinal": ordinal,
+            "review_id": child_run_id,
+            "point_id": point_id,
+            "status": "failed",
+            "error": f"review_timeout_after_{timeout_seconds}s",
+            "elapsed_seconds": time.time() - started,
+            "decision": "missing",
+            "subprocess_run_id": child_run_id,
+            "subprocess_returncode": "timeout",
+        }
     if completed.stdout:
         print(completed.stdout, end="" if completed.stdout.endswith("\n") else "\n")
     if completed.stderr:
@@ -490,6 +569,26 @@ def main() -> int:
     parser.add_argument("--enable-local-consensus", action="store_true")
     parser.add_argument("--enable-class-concept-briefs", action="store_true")
     parser.add_argument(
+        "--skip-limited-final-review",
+        action="store_true",
+        help="Preserve the older controller behavior that skips Qwen finalization for limited-quality targets.",
+    )
+    parser.add_argument(
+        "--skip-poor-final-review",
+        action="store_true",
+        help="Preserve the older controller behavior that skips Qwen finalization for poor-quality targets.",
+    )
+    parser.add_argument(
+        "--allow-poor-final-review",
+        action="store_true",
+        help="Experimental: let poor-quality targets reach Qwen for guarded human-triage opinions.",
+    )
+    parser.add_argument(
+        "--skip-cue-verifier",
+        action="store_true",
+        help="Disable the bounded second-pass verifier for guarded clear-target class changes missing positive cues.",
+    )
+    parser.add_argument(
         "--mlx-reset-every",
         type=int,
         default=-1,
@@ -504,6 +603,12 @@ def main() -> int:
         "--per-review-subprocess",
         action="store_true",
         help="Run each selected vignette in its own Python process so a Metal fault cannot kill the whole benchmark.",
+    )
+    parser.add_argument(
+        "--review-timeout-seconds",
+        type=int,
+        default=240,
+        help="Per-vignette timeout used with --per-review-subprocess; timed-out children become failed records.",
     )
     parser.add_argument("--audit", action="store_true", help="Run the benchmark audit report after writing results.")
     parser.add_argument("--compare-run", default="", help="Optional previous benchmark JSON for audit comparison.")
@@ -569,6 +674,9 @@ def main() -> int:
                 "model_id": model_id or None,
                 "enable_local_consensus_context": bool(args.enable_local_consensus),
                 "enable_class_concept_briefs": bool(args.enable_class_concept_briefs),
+                "allow_limited_final_review": not bool(args.skip_limited_final_review),
+                "allow_poor_final_review": bool(args.allow_poor_final_review) and not bool(args.skip_poor_final_review),
+                "enable_cue_verifier": not bool(args.skip_cue_verifier),
                 "reset_qwen_runtime_after_review": bool(args.reset_qwen_after_review),
                 "benchmark_run_id": run_id,
             },

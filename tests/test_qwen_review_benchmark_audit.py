@@ -1,4 +1,5 @@
 from tools.analyze_class_split_qwen_review_benchmark import audit_records, compare_runs
+from tools.run_class_split_qwen_review_benchmark import _make_visual_sheet
 
 
 def _record(**overrides):
@@ -66,6 +67,44 @@ def test_qwen_review_benchmark_audit_flags_unsafe_low_quality_accept():
     assert audit["issue_counts"]["class_change_low_backend_quality"] == 1
 
 
+def test_qwen_review_benchmark_visual_sheet_can_select_guarded_recommendations(tmp_path):
+    guarded = _record(
+        guarded_recommendation={
+            "blocked": True,
+            "decision": "accept_suggested",
+            "target_class": "LightVehicle",
+            "confidence": 0.9,
+            "guardrail_reasons": ["limited target"],
+        },
+    )
+    unguarded = _record(ordinal=2, decision="accept_suggested", target_class="LightVehicle", backend_tier="clear")
+
+    guarded_output = tmp_path / "guarded.jpg"
+    _make_visual_sheet(
+        [guarded, unguarded],
+        parent_job_id="ca_test",
+        output_path=guarded_output,
+        title="guarded",
+        guarded_only=True,
+        limit=4,
+    )
+
+    assert guarded_output.is_file()
+    assert guarded_output.stat().st_size > 0
+
+    empty_output = tmp_path / "empty.jpg"
+    _make_visual_sheet(
+        [unguarded],
+        parent_job_id="ca_test",
+        output_path=empty_output,
+        title="empty",
+        guarded_only=True,
+        limit=4,
+    )
+
+    assert not empty_output.exists()
+
+
 def test_qwen_review_benchmark_audit_flags_class_change_without_visible_cues():
     record = _record(
         decision="accept_suggested",
@@ -88,6 +127,134 @@ def test_qwen_review_benchmark_audit_flags_class_change_without_visible_cues():
 
     assert audit["issue_counts"]["class_change_missing_visible_target_cues"] == 1
     assert audit["issues"]["class_change_missing_visible_target_cues"][0]["point_id"] == "p1"
+
+
+def test_qwen_review_benchmark_audit_allows_one_cue_with_independent_support():
+    record = _record(
+        decision="accept_suggested",
+        current_class="CurrentClass",
+        suggested_neighbor_class="SuggestedClass",
+        target_class="SuggestedClass",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_evidence="weak",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        anchor_evidence_suggested="strong",
+        local_context_evidence="strong",
+        local_consensus_evidence="supports_suggested",
+        global_context_evidence="strong",
+        same_image_scale_evidence="neutral",
+        same_image_embedding_evidence="questions_current",
+        overlap_assessment="near_context",
+        overlap_explains_candidate_similarity=False,
+        visible_target_cues=["compact target body"],
+        supporting_clean_evidence_ids=["target_context_1", "zoom_region_6"],
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_suggested": "strong",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "supports_suggested",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "neutral",
+            "same_image_embedding_evidence": "questions_current",
+            "overlap_assessment": "near_context",
+            "overlap_explains_candidate_similarity": False,
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert "class_change_missing_visible_target_cues" not in audit["issue_counts"]
+
+
+def test_qwen_review_benchmark_audit_semicolon_positive_cue_does_not_reject_target():
+    record = _record(
+        decision="accept_suggested",
+        current_class="Truck",
+        suggested_neighbor_class="LightVehicle",
+        target_class="LightVehicle",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_evidence="weak",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        anchor_evidence_suggested="strong",
+        local_context_evidence="strong",
+        local_consensus_evidence="supports_suggested",
+        global_context_evidence="strong",
+        same_image_scale_evidence="neutral",
+        same_image_embedding_evidence="questions_current",
+        overlap_assessment="none",
+        overlap_explains_candidate_similarity=False,
+        visible_target_cues=["compact target body"],
+        supporting_clean_evidence_ids=["target_context_1", "zoom_region_6"],
+        rationale_short=(
+            "Target is small, compact, no cargo; matches LightVehicle visual cues; "
+            "no overlap contamination"
+        ),
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_suggested": "strong",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "supports_suggested",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "neutral",
+            "same_image_embedding_evidence": "questions_current",
+            "overlap_assessment": "none",
+            "overlap_explains_candidate_similarity": False,
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert "class_change_text_rejects_target" not in audit["issue_counts"]
+
+
+def test_qwen_review_benchmark_audit_blocks_one_cue_without_independent_support():
+    record = _record(
+        decision="accept_suggested",
+        current_class="CurrentClass",
+        suggested_neighbor_class="SuggestedClass",
+        target_class="SuggestedClass",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_evidence="weak",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        anchor_evidence_suggested="moderate",
+        local_context_evidence="strong",
+        local_consensus_evidence="mixed",
+        global_context_evidence="strong",
+        same_image_scale_evidence="neutral",
+        same_image_embedding_evidence="neutral",
+        overlap_assessment="near_context",
+        visible_target_cues=["compact target body"],
+        supporting_clean_evidence_ids=["target_context_1"],
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_suggested": "moderate",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "mixed",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "neutral",
+            "same_image_embedding_evidence": "neutral",
+            "overlap_assessment": "near_context",
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["issue_counts"]["class_change_missing_visible_target_cues"] == 1
 
 
 def test_qwen_review_benchmark_audit_flags_accept_without_strong_suggested_anchor():
@@ -115,6 +282,38 @@ def test_qwen_review_benchmark_audit_flags_accept_without_strong_suggested_ancho
     assert "moderate" in audit["issues"]["accept_without_strong_suggested_anchor"][0]["reason"]
 
 
+def test_qwen_review_benchmark_audit_allows_moderate_anchor_on_clear_target_path():
+    record = _record(
+        decision="accept_suggested",
+        current_class="CurrentClass",
+        suggested_neighbor_class="SuggestedClass",
+        target_class="SuggestedClass",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        anchor_evidence_suggested="moderate",
+        target_evidence="strong",
+        suggested_evidence="strong",
+        current_evidence="weak",
+        local_context_evidence="strong",
+        global_context_evidence="strong",
+        overlap_assessment="none",
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_suggested": "moderate",
+            "local_context_evidence": "strong",
+            "global_context_evidence": "strong",
+            "overlap_assessment": "none",
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert "accept_without_strong_suggested_anchor" not in audit["issue_counts"]
+
+
 def test_qwen_review_benchmark_audit_ignores_context_only_visible_cues():
     record = _record(
         decision="accept_suggested",
@@ -125,6 +324,34 @@ def test_qwen_review_benchmark_audit_ignores_context_only_visible_cues():
         visual_quality="clear",
         object_visibility="clear",
         visible_target_cues=["top-down perspective", "parked on pavement", "ribbed target surface"],
+        supporting_clean_evidence_ids=["target_context_1"],
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "none",
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["issue_counts"]["class_change_missing_visible_target_cues"] == 1
+
+
+def test_qwen_review_benchmark_audit_ignores_negative_and_color_only_visible_cues():
+    record = _record(
+        decision="accept_suggested",
+        current_class="CurrentClass",
+        suggested_neighbor_class="SuggestedClass",
+        target_class="SuggestedClass",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        visible_target_cues=[
+            "aerial view of parked candidate class",
+            "multiple object colors",
+            "no current-class features",
+        ],
         supporting_clean_evidence_ids=["target_context_1"],
         model_compact_arguments={
             "current_evidence": "weak",
@@ -481,9 +708,44 @@ def test_qwen_review_benchmark_audit_lists_guarded_recommendations():
 
     assert audit["unsafe_issue_count"] == 0
     assert audit["guarded_recommendation_count"] == 1
+    assert audit["effective_human_signal_count"] == 1
+    assert audit["guarded_human_triage_count"] == 1
+    assert audit["review_disposition_signal_counts"] == {"guarded_human_triage": 1}
     guarded = audit["guarded_recommendations"][0]
     assert guarded["point_id"] == "p1"
     assert guarded["guarded_recommendation"]["target_class"] == "LightVehicle"
+    assert guarded["review_disposition"]["disposition"] == "guarded_visual_quality"
+
+
+def test_qwen_review_benchmark_audit_counts_current_overlap_false_alarm_as_useful_negative():
+    record = _record(
+        decision="skip_uncertain",
+        current_class="Building",
+        target_class="Building",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        guarded_recommendation={
+            "blocked": True,
+            "decision": "accept_suggested",
+            "target_class": "LightVehicle",
+            "confidence": 0.95,
+            "guardrail_reasons": [
+                "accept_suggested conflicts with overlap decomposition: current class Building dominates the target bbox (partial_contamination, current_cover=0.63, target_class_cover=0.15)"
+            ],
+            "rationale_short": "target looks like a vehicle",
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["unsafe_issue_count"] == 0
+    assert audit["effective_human_signal_count"] == 1
+    assert audit["review_disposition_signal_counts"] == {"useful_negative": 1}
+    guarded = audit["guarded_recommendations"][0]
+    assert guarded["review_disposition"]["disposition"] == "verified_current_class_overlap"
+    assert guarded["review_disposition"]["advisory_decision"] == "confirm_current"
+    assert guarded["review_disposition"]["advisory_target_class"] == "Building"
 
 
 def test_qwen_review_benchmark_audit_prefers_controller_normalized_evidence():
@@ -507,6 +769,62 @@ def test_qwen_review_benchmark_audit_prefers_controller_normalized_evidence():
     audit = audit_records([record])
 
     assert audit["unsafe_issue_count"] == 0
+
+
+def test_qwen_review_benchmark_audit_allows_overlap_rebutted_confirm_current():
+    record = _record(
+        decision="confirm_current",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_evidence="strong",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        anchor_evidence_current="strong",
+        overlap_assessment="partial_contamination",
+        overlap_explains_candidate_similarity=True,
+        rationale_short="Target shows current-class cues; overlap explains suggested-class signal.",
+        model_compact_arguments={
+            "current_evidence": "strong",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_current": "strong",
+            "overlap_assessment": "partial_contamination",
+            "overlap_explains_candidate_similarity": True,
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["unsafe_issue_count"] == 0
+
+
+def test_qwen_review_benchmark_audit_blocks_unrebutted_strong_suggestion_confirm_current():
+    record = _record(
+        decision="confirm_current",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_evidence="strong",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        anchor_evidence_current="strong",
+        overlap_assessment="none",
+        overlap_explains_candidate_similarity=False,
+        rationale_short="Target looks like current class.",
+        model_compact_arguments={
+            "current_evidence": "strong",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_current": "strong",
+            "overlap_assessment": "none",
+            "overlap_explains_candidate_similarity": False,
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["issue_counts"]["confirm_overrides_strong_suggested"] == 1
 
 
 def test_qwen_review_benchmark_compare_runs_tracks_decision_drift():

@@ -90,6 +90,16 @@ def test_mobile_review_page_contract():
     assert "Change class to ${els.targetClass.value}" in html
 
 
+def test_class_split_qwen_guarded_review_is_prominent_and_actionable():
+    js = _js()
+
+    assert "Guarded suggestion: confirm current class" in js
+    assert "Guarded suggestion: switch class to ${guardedTarget}" in js
+    assert "Model confidence ${Number.isFinite(guardedConfidence)" in js
+    assert "qwenGuarded?.blocked && qwenGuardedDecision !== \"confirm_current\"" in js
+    assert "preferredTargetClass ? `Switch class to ${preferredTargetClass}` : \"Reassign\"" in js
+
+
 def test_local_image_selection_shows_first_image_before_dimension_scan():
     js = _js()
     ingest_start = js.index("async function ingestImageFiles")

@@ -262,8 +262,12 @@ The Label Images tab is the everyday workspace.
   transient Class Split job workspace, not registered as backend datasets. The
   graph can switch between global, class-balanced, between-class, and
   within-filter PCA views without changing full-space audit scores. Likely-wrong
-  vignettes can run an advisory local Qwen review with evidence images; see
-  [docs/class_split_qwen_review_agent.md](docs/class_split_qwen_review_agent.md).
+  vignettes can run an advisory local Qwen review with evidence images. Qwen
+  never edits labels directly; it produces confirm, change, guarded, or skip
+  advice that the human applies through the vignette controls. See
+  [docs/class_split_qwen_review_agent.md](docs/class_split_qwen_review_agent.md)
+  and the V1 benchmark baseline in
+  [docs/class_split_qwen_review_v1_benchmark.md](docs/class_split_qwen_review_v1_benchmark.md).
 - After an all-class Class Split run, use Dataset Analysis to rank image-level
   value from class rarity, object-feature rarity, and embedding-map edge cases.
 - Export selected crops through the chunked crop ZIP endpoints.

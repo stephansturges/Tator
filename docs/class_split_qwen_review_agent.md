@@ -4,6 +4,21 @@ The Class Split Explorer can ask a local Qwen VLM to review one likely-wrong
 vignette before a human applies any label change. This is an advisory workflow:
 Qwen never mutates labels directly.
 
+## Anti-Drift Invariant
+
+The VLM final judgment is the core of this workflow. Deterministic overlap,
+scale, embedding, visual-quality, and cue checks are rails around the VLM
+decision; they are not the default decision-maker. If Qwen finalization is
+unstable, fix the model/runtime/schema/context/evidence path or expose an
+explicit fallback mode. Do not silently replace the VLM review with a
+controller-only skip/triage system and call it complete.
+
+This subsystem follows the repo-level contract in [AGENTS.md](../AGENTS.md),
+the durable project memory in [memory.md](../memory.md), and the governance notes
+in [agent_governance.md](agent_governance.md). Any change to prompts, evidence
+packing, guardrails, model routing, or benchmark interpretation must preserve
+that contract and update this document in the same patch.
+
 ## User Flow
 
 1. Run Class Split in all-class mode so likely-wrong candidates are available.
@@ -81,8 +96,17 @@ The final result schema is:
   "rationale_short": "short reason",
   "counter_evidence": "what could make this wrong",
   "human_review_needed": true,
+  "review_disposition": {
+    "disposition": "actionable_class_change | guarded_visual_quality | guarded_overlap_risk | guarded_missing_visible_cues | verified_no_class_change | no_actionable_opinion",
+    "signal": "actionable | guarded_human_triage | useful_negative | no_signal",
+    "label": "human-readable result label",
+    "priority": "high | normal | low",
+    "advisory_target_class": "class to inspect or apply",
+    "primary_reason": "main controller reason"
+  },
   "model_compact_arguments": {
     "decision": "skip_uncertain",
+    "final_class": "class name recommended by the model",
     "confidence": 0.4
   },
   "expanded_by_controller": true,
@@ -109,11 +133,11 @@ The final result schema is:
     "pair_cache_hits": [false]
   },
   "evidence_ledger": {
-    "clean_visual_evidence_ids": ["target_context_1", "source_clean_2", "zoom_region_6"],
-    "clean_target_source_evidence_ids": ["target_context_1", "source_clean_2", "zoom_region_6"],
-    "geometry_overlay_evidence_ids": ["source_overlay_3", "overlap_decomposition_4"],
-    "local_consensus_evidence_ids": ["local_consensus_context_7"],
-    "clean_visual_reference_evidence_ids": ["class_context_pack_5"],
+    "clean_visual_evidence_ids": ["target_context_1", "target_detail_2", "source_clean_3", "class_context_pack_6", "zoom_region_9"],
+    "clean_target_source_evidence_ids": ["target_context_1", "target_detail_2", "source_clean_3", "zoom_region_9"],
+    "geometry_overlay_evidence_ids": ["source_overlay_4", "overlap_decomposition_5"],
+    "local_consensus_evidence_ids": ["local_consensus_context_10"],
+    "clean_visual_reference_evidence_ids": ["class_context_pack_6"],
     "policy": "visible_target_cues must come from clean visual evidence..."
   },
   "applied": false
@@ -139,7 +163,7 @@ State sequence:
 
 1. `required_evidence`: the controller renders fixed evidence before any model
    decision:
-   `inspect_target_context`, `inspect_source_overlay`,
+   `inspect_target_context`, `inspect_target_detail`, `inspect_source_overlay`,
    `inspect_overlap_decomposition`, `inspect_class_context_pack`,
    `inspect_same_image_scale_report`, `inspect_same_image_embedding_report`, and
    one clean `zoom_source_region` with `draw_bbox=false`.
@@ -160,10 +184,11 @@ State sequence:
    Cache keys include the model id, class name or pair names, glossary entries,
    review guidance, implementation version, and exemplar point ids. The UI
    enables this path for `Review with Qwen`.
-3. `router`: only when local consensus is enabled and backend policy allows it,
-   the model receives one `route_review` schema. The only possible actions are
-   `finalize_now` and `inspect_local_consensus_context`. If policy blocks local
-   consensus, the controller skips this model call and routes directly to final.
+3. `router`: local consensus is enabled by the UI/API default, but backend
+   policy must still allow it before the model sees any consensus evidence. The
+   only possible actions are `finalize_now` and
+   `inspect_local_consensus_context`. If policy blocks local consensus, the
+   controller skips this model call and routes directly to final.
 4. `routed_optional_evidence`: if the router requested local consensus and the
    backend policy allowed it, the controller renders
    `inspect_local_consensus_context` itself and appends the observation.
@@ -183,10 +208,10 @@ State sequence:
    MLX Qwen3.6 runs used an assistant prefix that pre-filled the outer
    `finalize_review` wrapper; benchmark logs showed this induced malformed
    `{}}` completions, so finalization now runs in no-prefix JSON mode. The
-   final message keeps target/source clean images, but compacts class-context
-   packs, local-consensus views, deterministic reports, and geometry overlays to
-   text-only summaries so target-contained pixels dominate the last visual
-   judgment. The backend
+   final message keeps the clean target-detail, clean zoom, and class-context
+   pack images; local-consensus views, deterministic reports, source overlays,
+   and overlap-decomposition views remain compact text/ledger context so
+   target-contained pixels stay central without hiding trusted examples. The backend
    expands that compact object into the full audit payload and applies
    guardrails. Any route call or evidence-tool call in this state is a schema
    failure. Retries remain allowed for malformed output; repeated failure
@@ -213,7 +238,7 @@ Model-facing compact final schema:
 ```json
 {
   "decision": "confirm_current | accept_suggested | change_to_other | skip_uncertain",
-  "target_class": "class name",
+  "final_class": "class name to apply",
   "confidence": 0.0,
   "visual_quality": "clear | limited | poor",
   "object_visibility": "clear | partial | tiny_or_blurry | not_visible",
@@ -222,13 +247,7 @@ Model-facing compact final schema:
   "target_evidence": "strong | moderate | weak | none",
   "overlap_assessment": "none | duplicate_like | partial_contamination | target_contains_other | other_contains_target | near_context | unclear",
   "overlap_explains_candidate_similarity": false,
-  "anchor_evidence_current": "strong | moderate | weak | none",
-  "anchor_evidence_suggested": "strong | moderate | weak | none",
-  "local_context_evidence": "strong | moderate | weak | none",
   "local_consensus_evidence": "supports_current | supports_suggested | mixed | absent | not_applicable",
-  "global_context_evidence": "strong | moderate | weak | none",
-  "same_image_scale_evidence": "supports_current | questions_current | neutral | insufficient | not_applicable",
-  "same_image_embedding_evidence": "supports_current | questions_current | neutral | insufficient | not_applicable",
   "visible_target_cues": ["concrete cue from target/source pixels"],
   "supporting_clean_evidence_ids": ["target_context_1", "zoom_region_6"],
   "counter_evidence": "short counter-evidence",
@@ -237,13 +256,28 @@ Model-facing compact final schema:
 }
 ```
 
-The model must include the anchor and context evidence fields when making a
-class-changing recommendation. In particular, `accept_suggested` requires
-`anchor_evidence_suggested=strong`; otherwise the backend preserves the attempted
-recommendation as `guarded_recommendation` and forces `skip_uncertain`. The
-model should not emit glossary bookkeeping or arbitrary evidence ids. It should
-only cite clean target/source ids in `supporting_clean_evidence_ids` for the
-specific visible cues it claims.
+`final_class` is deliberately model-facing and means the label recommended by
+the VLM, not "the current class of the target object." The controller still
+stores the normalized backend result as `target_class` for compatibility. The
+decision-to-class mapping is:
+
+- `confirm_current`: `final_class` must be the current class.
+- `accept_suggested`: `final_class` must be the suggested class.
+- `change_to_other`: `final_class` must be a third labelmap class.
+- `skip_uncertain`: `final_class` should normally be the current class.
+
+The model is not asked to output anchor, scale, embedding, local-context, or
+global-context bookkeeping fields. It sees those reports as evidence/context and
+the controller writes the normalized audit fields after parsing the compact VLM
+decision. In particular, `accept_suggested` normally
+requires `anchor_evidence_suggested=strong`; a moderate suggested-anchor signal
+is allowed only on the narrow clear-target path where target/source pixels,
+local context, global context, overlap state, and weak current-class evidence
+all agree. Otherwise the backend preserves the attempted recommendation as
+`guarded_recommendation` and forces `skip_uncertain`. The model should not emit
+glossary bookkeeping or arbitrary evidence ids. It should only cite clean
+target/source ids in `supporting_clean_evidence_ids` for the specific visible
+cues it claims.
 
 Controller controls:
 
@@ -256,16 +290,17 @@ Controller controls:
 - model calls are state-scoped: router sees `route_review`; final sees
   `finalize_review`; neither state sees arbitrary evidence tools
 - final-state Qwen output is intentionally compact and generated without an
-  assistant prefix; Python expands aliases such as `target`, `class`, and
-  `uncertain_class`, repairs common legacy JSON-prefill fragments, records
+  assistant prefix; Python prefers `final_class`/`recommended_class` and still
+  expands legacy aliases such as `target_class`, `target`, `class`, and
+  `uncertain_class`, repairs common JSON-prefill fragments, records
   `model_compact_arguments`, and then validates the expanded result
 - the active schema is logged as `tool_schema` and enforced by backend
   validation; on the current MLX-VLM path it is not passed through the
   chat-template `tools` argument because benchmark logs showed that path can
   produce bare `:` or prose instead of the JSON function call
-- local consensus is disabled by default; even when enabled, backend policy
-  requires clear target quality, a suggested class, and no prior consensus
-  evidence before the router can request it
+- local consensus is enabled by the Class Split UI and Qwen review endpoint by
+  default; backend policy still requires clear target quality, a suggested
+  class, and no prior consensus evidence before the router can request it
 - router requests that violate policy are coerced to `finalize_now` and logged
 - overlap decomposition is always available and can return an empty/no-overlap
   section, so the model must actively reason about contamination instead of
@@ -300,6 +335,12 @@ This is less blind than crop-only review, but still remains human-in-the-loop.
 
 `inspect_target_context` renders the target object crop with extra source-image
 context and a bbox overlay. This is the primary visual evidence for the object.
+
+`inspect_target_detail` renders the same target-centered context window without
+any bbox overlay and deterministically enlarges small crops with Lanczos
+interpolation. It is required before finalization so Qwen gets a clean close
+view for visible target cues, but prompts and metadata state that no generated
+detail has been added.
 
 `inspect_source_overlay` returns two source-image views. The first is a clean
 whole/source image with no boxes, used for scene layout and wider visual
@@ -447,10 +488,17 @@ Backend guardrails are stricter than the prompt:
 
 - target crops are measured for bbox pixel size, edge clipping, contrast,
   dynamic range, and a simple sharpness score
-- poor target evidence is forced to `skip_uncertain`
+- poor target evidence is forced to persisted `skip_uncertain`
+- any non-skip recommendation on a non-clear backend visual-quality tier is
+  forced back to `skip_uncertain` and preserved as `guarded_recommendation`;
+  limited-quality targets still get a final Qwen turn by default so humans can
+  see Qwen's best advisory opinion without enabling automatic label
+  recommendations when final model generation is enabled. Poor-quality targets
+  skip Qwen by default because benchmark review showed mostly low-value/noisy
+  advisory opinions; pass `allow_poor_final_review=true` or use the benchmark
+  flag below only for explicit experiments.
 - class-change recommendations (`accept_suggested` or `change_to_other`) require
-  a clear backend visual-quality tier; limited-quality targets can only pass as
-  advisory `confirm_current` when no hard conflict is present
+  a clear backend visual-quality tier before they can become actionable
 - final results include model self-check fields for quality, visibility,
   overlap, and class evidence strength; trusted-anchor, local-context,
   global-context, glossary, and evidence-id bookkeeping is added by the backend
@@ -483,17 +531,21 @@ Backend guardrails are stricter than the prompt:
   only repair contradictory compact output when the target pixels, model text,
   evidence fields, visual quality, and overlap state agree
 - `accept_suggested` requires strong suggested-class target evidence and strong
-  suggested-class anchor agreement based on target-contained features; it is
-  forced to `skip_uncertain` if Qwen also reports `current_evidence=strong`
+  suggested-class anchor agreement based on target-contained features. Moderate
+  suggested-anchor agreement is allowed only for a clear target, weak/none
+  current evidence, strong local and global context, and no material overlap; it
+  stays confidence-capped and human-review-needed. `accept_suggested` is forced
+  to `skip_uncertain` if Qwen also reports `current_evidence=strong`
 - `accept_suggested` and `change_to_other` require at least two concrete
   `visible_target_cues`. The validator removes class-label-only boilerplate such
   as "matches suggested class", so a class-change recommendation has to expose
   visible target evidence like shape, parts, material, texture, posture, or
   target-touching context.
-- Viewpoint, location, and background-only phrases such as overhead perspective,
-  nearby pavement, road, water, shadows, or generic scene placement can remain in
-  the reasoning, but they do not count toward the visible-cue threshold for a
-  class-changing recommendation. A change still needs object-internal evidence.
+- Negative or absence claims, color-only claims, and viewpoint, location, or
+  background-only phrases such as overhead perspective, nearby pavement, road,
+  water, shadows, or generic scene placement can remain in the reasoning, but
+  they do not count toward the visible-cue threshold for a class-changing
+  recommendation. A change still needs positive object-internal evidence.
 - Those class-changing decisions also require `supporting_clean_evidence_ids`
   tied to clean target/source evidence. Clean reference packs can inform the
   comparison, but they cannot be the only evidence cited for visible target
@@ -520,9 +572,10 @@ Backend guardrails are stricter than the prompt:
 - `skip_uncertain` confidence is capped at 0.50, and hard-guardrail skips are
   capped lower, so skipped reviews do not look like high-confidence class
   recommendations
-- evidence crops sent to Qwen use nearest-neighbor zooming for small objects so
-  the true source resolution remains visible instead of being smoothed into
-  artificial detail
+- the boxed `target_context` crop uses nearest-neighbor zooming for human-visible
+  pixel fidelity, while the clean `target_detail` crop uses deterministic
+  Lanczos enlargement for model readability. The prompt explicitly says this is
+  interpolation, not generated super-resolution.
 - images sent to the VLM are bounded to the backend
   `CLASS_ANALYSIS_QWEN_REVIEW_MODEL_IMAGE_MAX_SIDE` limit, while saved evidence
   artifacts remain full-size. This protects MLX/Metal runs from oversized visual
@@ -536,6 +589,46 @@ Backend guardrails are stricter than the prompt:
   glossaries are naturalized label names only; richer semantics have to come
   from the active dataset glossary, user guidance, retrieved examples, or
   generated concept/pair briefs.
+
+### Current Mac/MLX Finalization Policy
+
+`CLASS_ANALYSIS_QWEN_REVIEW_ENABLE_MLX_FINAL` defaults to `true`. The VLM final
+decision is the core of the review flow on Mac: the controller renders the fixed
+evidence pack, sends clean target/detail/zoom/class-context images to the
+selected Qwen reviewer, and parses one compact `finalize_review` JSON object.
+The deterministic scale, embedding, overlap, and anchor reports are rails and
+audit context, not replacements for the VLM.
+
+The current preferred local test model is
+`vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit`. The Heretic MLX variant
+was not exposed as a default reviewer after local smoke tests produced invalid
+text in this harness. If future MLX command-buffer failures recur, use
+`CLASS_ANALYSIS_QWEN_REVIEW_ENABLE_MLX_FINAL=false` only as an explicit fallback
+debug mode; do not treat controller preflights as the main product behavior.
+
+The model-facing final schema uses `final_class`, not `target_class`, because
+the latter caused Qwen to confuse "class of the reviewed target object" with
+"label to apply." The backend still accepts old `target_class` outputs and
+stores normalized results as `target_class` for UI/API compatibility.
+
+Guardrails can still block automatic mutation. In that case the final result is
+`skip_uncertain`, but `guarded_recommendation` and `review_disposition` preserve
+the VLM's recommendation as a first-class human-triage signal. The UI should
+display these as guarded suggestions and preselect the suggested target class
+for manual reassignment.
+
+Latest Mac probe after restoring VLM finalization and the `final_class` schema:
+
+- `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/vlm_finalclass_vanch007_probe2_2_1780820178.json`
+  ran two limited-quality likely-wrong vignettes through the 35B abliterated
+  MLX reviewer with `max_new_tokens=1000`.
+- Result: 2/2 completed, 0 final validation errors, one `finalize_review` schema
+  call per row, 2 guarded VLM recommendations, and 2 effective human-triage
+  signals.
+- Both raw model outputs were coherent `accept_suggested` recommendations with
+  `final_class=LightVehicle` and concrete visible cues. The controller blocked
+  automatic mutation because the crops were limited and/or overlap/scale rails
+  made them unsafe for automatic relabeling.
 
 ## Glossary And Guidance
 
@@ -553,6 +646,12 @@ injects them into the initial user prompt. They are advisory: a final decision
 still has to satisfy the validator.
 
 ## Benchmark Audit Gate
+
+The canonical V1 baseline is documented in
+[class_split_qwen_review_v1_benchmark.md](class_split_qwen_review_v1_benchmark.md).
+Use it as the comparison point for future Qwen reviewer changes: a candidate
+must report automated audit counts and manual visual precision on actionable
+rows, not only raw `skip_uncertain` totals.
 
 Use the benchmark runner with `--audit` after any agent, prompt, evidence,
 model, or validator change. Run this from an activated project environment
@@ -572,6 +671,20 @@ python tools/run_class_split_qwen_review_benchmark.py \
   --fail-on-unsafe
 ```
 
+The benchmark runner reviews limited-quality targets by default for human-triage
+signal, matching the app path. Add `--skip-limited-final-review` when
+intentionally reproducing the older controller behavior that skipped final Qwen
+review for limited targets. Add `--allow-poor-final-review` only for explicit
+poor-evidence experiments; poor targets otherwise skip Qwen because the visual
+audit found little useful signal there.
+Each run writes three visual audit sheets when matching rows exist:
+`*_visual_non_skip.jpg` for actionable recommendations, `*_visual_guarded.jpg`
+for blocked model opinions, and `*_visual_all.jpg` for the sampled review set.
+Use `review_disposition_signal_counts` and `effective_human_signal_count` to
+measure whether the agent produced useful triage work. Raw `skip_uncertain`
+counts are intentionally conservative and include guarded model suggestions
+that are displayed for human review but blocked from automatic relabel advice.
+
 For an existing run, the lightweight analyzer can use system Python:
 
 ```bash
@@ -587,7 +700,9 @@ The audit script checks the safety invariants that should not regress:
 - no class-changing recommendation on non-clear backend visual quality
 - no `accept_suggested` decision when Qwen reports strong evidence for the
   current class
-- no `accept_suggested` decision without strong suggested-class anchor agreement
+- no `accept_suggested` decision without strong suggested-class anchor
+  agreement, except the narrow clear-target path where moderate anchor agreement
+  is confidence-capped and all other target/source evidence is strong
 - no `confirm_current` decision when Qwen reports strong suggested-class
   evidence
 - no class-changing recommendation without at least two concrete target-visible
@@ -979,14 +1094,100 @@ contrast briefs, evidence fields, and overlap state.
   building pixels dominate the target bbox while the candidate vehicle evidence
   comes from overlap/context. Manual contact-sheet inspection found the remaining
   actionable rows plausible but still advisory.
+- Limited-advisory 100-crop activity gate:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/limited_advisory_deep100_100_1780789010.json`
+  reran the same 100 records after enabling limited-quality final review and
+  changing the limited-tier final instruction from "class-changing decisions are
+  forbidden" to "give your best human-triage opinion." Result: 100/100
+  completed, 0 backend failures, 0 final validation errors, 0 unsafe audit
+  issues, 13 `accept_suggested`, 87 `skip_uncertain`, and 44 guarded model
+  recommendations. The audit path is
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/limited_advisory_deep100_100_1780789010_audit.json`.
+  Compared with `deterministic_tools_dominant_overlap_guard_deep100`, final
+  Qwen calls increased from 19 to 70 because limited targets now reach the
+  final state; guarded recommendations increased from 6 to 44. The model was
+  therefore not inherently unopinionated: on limited targets it emitted 38
+  `accept_suggested` opinions and 13 `skip_uncertain` opinions. All limited
+  non-skip opinions remain non-mutating `guarded_recommendation` records because
+  the backend still requires clear target quality for actionable class changes.
+  Visual inspection of the actionable contact sheet found the 13 clear-tier
+  accepts broadly plausible; `limited_advisory_deep100_100_1780789010_visual_guarded.jpg`
+  makes the 44 guarded opinions visible for manual audit. The limited-tier
+  suggestions remain useful for human triage but too visually weak for automatic
+  relabeling.
+- Moderate-anchor clear-target experiment:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/moderate_anchor_clear_relabel_deep100_100_1780791467.json`
+  tested a narrow recall increase for clear targets whose suggested anchors were
+  only moderate but whose target, local context, global context, and overlap
+  fields otherwise supported the suggested class. It completed 100/100 with 0
+  backend failures and 44 guarded recommendations, but visual review found that
+  one Boat-to-LightVehicle accept relied on negative/context cues rather than
+  positive target-object evidence. This experiment was rejected as the final
+  gate and motivated stricter cue normalization.
+- Positive-visible-cue 100-crop gate:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/positive_cue_guard_deep100_100_1780792746.json`
+  reran the same 100 records after stripping negative, absence, color-only, and
+  context-only cue phrases from the class-change cue ledger. Result: 100/100
+  completed, 0 backend failures, 0 final validation errors, 0 unsafe audit
+  issues, 8 `accept_suggested`, 92 `skip_uncertain`, and 45 guarded model
+  recommendations. The audit path is
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/positive_cue_guard_deep100_100_1780792746_audit.json`.
+  Visual inspection of
+  `positive_cue_guard_deep100_100_1780792746_visual_non_skip.jpg` found the
+  remaining actionable changes structurally plausible, while the rejected weak
+  vehicle/boat/context cases stayed visible as guarded human-review suggestions.
+  This is the current preferred balance: fewer automatic recommendations than
+  the limited-advisory run, but clearer distinction between safe actions and
+  useful non-mutating model opinions.
+- Guardrail bottleneck follow-up:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/semicolon_repair100_100_1780799314.json`
+  reran the same 100 records after two targeted fixes. First, partial
+  `verify_visible_cues` outputs now get one repair turn so malformed verifier
+  JSON is not mistaken for an evidence failure. Second, clear targets with only
+  one concrete visible cue can accept the suggested class only when independent
+  support is strong: clear backend/visual/object visibility, weak current
+  evidence, strong suggested/target/anchor/local/global evidence,
+  `local_consensus_evidence=supports_suggested`, no overlap contamination, and
+  deterministic same-image scale/embedding signals that do not support the
+  current class. This path is capped at confidence `0.86` and records an
+  advisory reason. A follow-up audit also tightened semantic text-conflict
+  parsing so `no cargo; matches LightVehicle visual cues` is not treated as
+  rejecting the LightVehicle target class. Result: 100/100 completed, 0 backend
+  failures, 0 unsafe audit issues, 11 `accept_suggested`, 89 `skip_uncertain`,
+  and 50 guarded model recommendations. The audit path is
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/semicolon_repair100_100_1780799314_audit.json`.
+  This supports the diagnosis that the model is often opinionated enough; the
+  remaining low action rate is mainly caused by explicit guardrails and weak
+  target evidence. Further recall increases should improve rendered evidence or
+  add non-mutating human-triage surfacing before relaxing mutation gates.
+- MLX finalization stability diagnosis:
+  local probes after final-context compaction still hit Metal command-buffer
+  timeouts on the MLX visual finalizer, including reduced tests with a two-message
+  final state, 384px image cap, one clean target image, the 2B MLX checkpoint, and
+  explicit runtime resets. For the app path, MLX finalization is therefore
+  disabled by default and deterministic preflights are used before a clean
+  `mlx_final_disabled` skip.
+- Stabilized controller 30-crop replay:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/stabilized_mixed30_tightened_30_1780815007.json`
+  replayed the same 30 rows as
+  `stabilized_mixed30_30_1780814217.json` with MLX finalization disabled. Result:
+  30/30 completed, 0 backend failures, 0 unsafe audit issues, 1
+  `confirm_current`, 29 `skip_uncertain`, and 1 guarded human-triage class-change
+  hint. Visual inspection of the prior guarded sheet showed two local-consensus
+  only hints were not reliable enough; the tightened path now requires local
+  consensus plus scale or embedding evidence that questions the current class.
+  The remaining guarded hint is Truck-to-Building with same-image consensus,
+  scale, and embedding all questioning the current class. This is the current
+  default balance on Mac/MLX: stable and precise, but low recall until the visual
+  finalizer can run without Metal timeouts.
 
-The validation proves the backend/tool protocol is stable on the local
-abliterated 30B MLX model and on the experimental `vanch007` Qwen3.6 35B-A3B
-MLX candidate. It does not prove that Qwen decisions are reliable enough for
-automatic relabeling. The current strict-overlap behavior is intentionally
-conservative: Qwen is useful for triage, confirmations, and evidence-pack
-summaries, but class-changing recommendations should remain blocked unless a
-larger labeled benchmark shows the relabel rails can be loosened safely.
+The validation proves the backend/tool protocol and deterministic evidence
+packaging are stable, but the local Mac/MLX visual finalizer is not currently a
+reliable production path. Qwen decisions are not reliable enough for automatic
+relabeling. The current strict-overlap behavior is intentionally conservative:
+the system is useful for triage, confirmations, and evidence-pack summaries, but
+class-changing recommendations should remain blocked unless a larger labeled
+benchmark shows the relabel rails can be loosened safely.
 
 The current controller implementation adds glossary/guidance injection, overlap
 decomposition, the class context pack, deterministic required-evidence
@@ -1023,6 +1224,15 @@ briefs. Regression tests cover:
   writes, cache reuse, and final-prompt injection as advisory memory
 - visible target cue ledger normalization and class-change blocking when cues are
   absent or class-label-only
+- target-detail and poor-advisory benchmark:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/poor_advisory_subproc30_30_1780805865.json`
+  completed 30/30 reviews with subprocess isolation, 0 backend failures, 0
+  final validation errors, and 0 unsafe audit issues. It produced 2 actionable
+  class changes and 15 guarded human-triage opinions. Manual visual audit found
+  the two actionable changes defensible and showed that limited-quality guarded
+  opinions were useful, while poor-quality advisory added little and could be
+  noisy. The app default therefore keeps limited advisory enabled but skips poor
+  targets unless `allow_poor_final_review=true` is explicitly requested.
 
 A larger labeled real-model benchmark should be run before treating v2
 recommendations as more than advisory.

@@ -42629,7 +42629,10 @@ async function cancelRfDetrTrainingJobRequest() {
                     max_turns: 10,
                     labelmap_glossary: labelmapGlossary || null,
                     review_guidance: reviewGuidance || null,
+                    enable_local_consensus_context: true,
                     enable_class_concept_briefs: true,
+                    allow_limited_final_review: true,
+                    enable_cue_verifier: true,
                 }),
             });
             if (!resp.ok) {
@@ -42682,6 +42685,19 @@ async function cancelRfDetrTrainingJobRequest() {
     function formatClassSplitQwenDecision(result) {
         const decision = String(result?.decision || "").trim();
         const targetClass = String(result?.target_class || "").trim();
+        const guarded = result && typeof result.guarded_recommendation === "object"
+            ? result.guarded_recommendation
+            : null;
+        if (guarded?.blocked) {
+            const guardedDecision = String(guarded.decision || "").trim();
+            const guardedTarget = String(guarded.target_class || "").trim();
+            if (guardedDecision === "confirm_current") {
+                return "Guarded suggestion: confirm current class";
+            }
+            return guardedTarget
+                ? `Guarded suggestion: switch class to ${guardedTarget}`
+                : "Guarded suggestion: review class change";
+        }
         if (decision === "confirm_current") {
             return "Confirm current class";
         }
@@ -42716,16 +42732,33 @@ async function cancelRfDetrTrainingJobRequest() {
             : [];
         const guardedTarget = String(guarded?.target_class || "").trim();
         const guardedDecision = String(guarded?.decision || "").trim();
+        const guardedConfidence = Number(guarded?.confidence);
         const guardedLabel = guardedDecision === "confirm_current"
             ? "confirm current class"
             : guardedTarget
                 ? `switch class to ${guardedTarget}`
                 : "class change";
+        const disposition = result && typeof result.review_disposition === "object"
+            ? result.review_disposition
+            : null;
+        const dispositionLabel = String(disposition?.label || "").trim();
+        const dispositionPriority = String(disposition?.priority || "").trim();
+        const dispositionSignal = String(disposition?.signal || "").trim();
+        const dispositionHtml = dispositionLabel
+            ? `<span>${escapeHtml(dispositionLabel)}${dispositionPriority ? ` • priority ${escapeHtml(dispositionPriority)}` : ""}${dispositionSignal ? ` • ${escapeHtml(dispositionSignal.replace(/_/g, " "))}` : ""}</span>`
+            : "";
+        const guardedUsefulNegative = dispositionSignal === "useful_negative" && dispositionLabel;
+        const guardedHeader = guardedUsefulNegative
+            ? dispositionLabel
+            : `Guarded suggestion: ${guardedLabel}`;
+        const guardedDetail = guardedUsefulNegative
+            ? `Controller rejected model suggestion (${guardedLabel})${guardedReasons.length ? `: ${guardedReasons[0]}` : "."}`
+            : `Model confidence ${Number.isFinite(guardedConfidence) ? `${Math.round(guardedConfidence * 100)}%` : "n/a"} • held for human review${guardedReasons.length ? `: ${guardedReasons[0]}` : "."}`;
         const guardedHtml = guarded?.blocked
             ? [
                 `<div class="class-split-qwen-review__guarded">`,
-                `<strong>Guarded suggestion: ${escapeHtml(guardedLabel)}</strong>`,
-                `<span>Blocked by backend guardrails${guardedReasons.length ? `: ${escapeHtml(guardedReasons[0])}` : "."}</span>`,
+                `<strong>${escapeHtml(guardedHeader)}</strong>`,
+                `<span>${escapeHtml(guardedDetail)}</span>`,
                 guarded.rationale_short ? `<p>${escapeHtml(guarded.rationale_short)}</p>` : "",
                 `</div>`,
             ].join("")
@@ -42742,6 +42775,7 @@ async function cancelRfDetrTrainingJobRequest() {
             ? [
                 `<strong>${escapeHtml(formatClassSplitQwenDecision(result))}</strong>`,
                 `<span>confidence ${Math.round((Number(result.confidence) || 0) * 100)}% • ${escapeHtml(result.reviewed_by_model || "")}</span>`,
+                dispositionHtml,
                 `<span>overlap ${escapeHtml(result.overlap_assessment || "n/a")} • anchors current ${escapeHtml(result.anchor_evidence_current || "n/a")} / suggested ${escapeHtml(result.anchor_evidence_suggested || "n/a")}</span>`,
                 result.rationale_short ? `<p>${escapeHtml(result.rationale_short)}</p>` : "",
                 result.counter_evidence ? `<p><em>Counter-evidence:</em> ${escapeHtml(result.counter_evidence)}</p>` : "",
@@ -42799,10 +42833,28 @@ async function cancelRfDetrTrainingJobRequest() {
             const suggestedClassAvailable = suggestedClass && classNames.includes(suggestedClass);
             const qwenReview = getClassSplitQwenReviewForPoint(pointId);
             const qwenBusy = isClassSplitQwenReviewActive(qwenReview);
+            const qwenResult = qwenReview?.result || null;
+            const qwenGuarded = qwenResult && typeof qwenResult.guarded_recommendation === "object"
+                ? qwenResult.guarded_recommendation
+                : null;
+            const qwenDecision = String(qwenResult?.decision || "").trim();
+            const qwenGuardedDecision = String(qwenGuarded?.decision || "").trim();
+            const qwenGuardedTarget = String(qwenGuarded?.target_class || "").trim();
+            const qwenActionTarget = String(qwenResult?.target_class || "").trim();
+            const qwenPreferredTarget = qwenGuarded?.blocked && qwenGuardedDecision !== "confirm_current"
+                ? qwenGuardedTarget
+                : (qwenDecision === "accept_suggested" || qwenDecision === "change_to_other")
+                    ? qwenActionTarget
+                    : "";
+            const preferredTargetClass = classNames.includes(qwenPreferredTarget)
+                ? qwenPreferredTarget
+                : suggestedClassAvailable
+                    ? suggestedClass
+                    : "";
             const options = [
-                `<option value=""${suggestedClassAvailable ? "" : " selected"}>Choose class</option>`,
+                `<option value=""${preferredTargetClass ? "" : " selected"}>Choose class</option>`,
                 ...classNames.map((className) => {
-                    const selected = className === suggestedClass ? " selected" : "";
+                    const selected = className === preferredTargetClass ? " selected" : "";
                     return `<option value="${escapeHtml(className)}"${selected}>${escapeHtml(className)}</option>`;
                 }),
             ].join("");
@@ -42822,7 +42874,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 `<button type="button" class="training-button secondary" data-action="skip-wrong" data-point-id="${escapeHtml(pointId)}">Skip</button>`,
                 `<button type="button" class="training-button secondary" data-action="qwen-review" data-point-id="${escapeHtml(pointId)}"${qwenBusy ? " disabled" : ""}>${qwenBusy ? "Qwen reviewing ..." : "Review with Qwen"}</button>`,
                 `<select data-action="target-class" data-point-id="${escapeHtml(pointId)}">${options}</select>`,
-                `<button type="button" class="training-button" data-action="reassign-class" data-point-id="${escapeHtml(pointId)}">${escapeHtml(suggestedClass ? `Switch class to ${suggestedClass}` : "Reassign")}</button>`,
+                `<button type="button" class="training-button" data-action="reassign-class" data-point-id="${escapeHtml(pointId)}">${escapeHtml(preferredTargetClass ? `Switch class to ${preferredTargetClass}` : "Reassign")}</button>`,
                 `</div>`,
                 renderClassSplitQwenReviewBlock(pointId),
                 `</div>`,

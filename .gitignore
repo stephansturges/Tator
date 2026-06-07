@@ -267,12 +267,11 @@ pyrightconfig.json
 .idea/
 .vscode/
 
-# Local session/agent notes (never commit)
+# Local session notes (never commit). Project-level agent instructions
+# (`AGENTS.md`, `memory.md`) are intentionally tracked.
 SESSION_SUMMARY.txt
 SESSION.md
-memory.md
 recipe_brief_*.txt
-AGENTS.md
 
 # Local vendor clones / docs / screenshots
 Qwen3-VL/

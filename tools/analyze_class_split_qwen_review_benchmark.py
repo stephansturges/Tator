@@ -145,10 +145,10 @@ def _record_rejects_target_alias(record: Dict[str, Any]) -> Optional[str]:
     for alias in _label_aliases(record.get("target_class")):
         alias_expr = re.escape(alias)
         patterns = (
-            rf"\b(?:target|object|crop|target\s+crop)\b[^.?!]{{0,160}}\bnot\s+(?:a\s+|an\s+|the\s+)?{alias_expr}s?\b",
+            rf"\b(?:target|object|crop|target\s+crop)\b[^.;?!]{{0,160}}\bnot\s+(?:a\s+|an\s+|the\s+)?{alias_expr}s?\b",
             rf"\bnot\s+(?:a\s+|an\s+|the\s+)?{alias_expr}s?\b",
-            rf"\bno\b[^.?!]{{0,80}}\b{alias_expr}s?\b[^.?!]{{0,80}}\b(?:features|cues|evidence|support)\b",
-            rf"\b{alias_expr}s?\b[^.?!]{{0,80}}\b(?:not\s+visible|not\s+present|absent|missing)\b",
+            rf"\bno\b[^.;?!]{{0,80}}\b{alias_expr}s?\b[^.;?!]{{0,80}}\b(?:features|cues|evidence|support)\b",
+            rf"\b{alias_expr}s?\b[^.;?!]{{0,80}}\b(?:not\s+visible|not\s+present|absent|missing)\b",
         )
         for pattern in patterns:
             for match in re.finditer(pattern, text):
@@ -281,11 +281,65 @@ def _normalize_visible_cues(
         "visible",
         "water",
     }
+    concrete_visual_tokens = {
+        "arm",
+        "body",
+        "boom",
+        "box",
+        "bucket",
+        "cab",
+        "cargo",
+        "corner",
+        "corners",
+        "curved",
+        "edge",
+        "edges",
+        "elongated",
+        "flat",
+        "grid",
+        "grille",
+        "hull",
+        "line",
+        "lines",
+        "long",
+        "mast",
+        "material",
+        "metal",
+        "narrow",
+        "oval",
+        "panel",
+        "panels",
+        "pole",
+        "rectangular",
+        "ribbed",
+        "roof",
+        "rooftop",
+        "round",
+        "shape",
+        "shaped",
+        "structure",
+        "structural",
+        "surface",
+        "texture",
+        "thin",
+        "tire",
+        "tires",
+        "vertical",
+        "wall",
+        "walls",
+        "wheel",
+        "wheels",
+        "wide",
+        "window",
+        "windows",
+    }
     connector_tokens = {"a", "an", "and", "at", "by", "from", "in", "of", "the", "to", "with"}
 
     def _context_only_cue(text_value: str) -> bool:
         lowered = str(text_value or "").strip().lower()
         if not lowered:
+            return True
+        if re.search(r"\b(?:no|not|without|lacks?|missing|absent|does\s+not|doesn't)\b", lowered):
             return True
         tokens = [
             token
@@ -299,6 +353,12 @@ def _normalize_visible_cues(
         if (
             re.search(r"\b(?:top[-\s]?down|overhead|aerial)\b", lowered)
             and len([token for token in tokens if token not in context_only_tokens]) == 0
+        ):
+            return True
+        has_concrete_visual_token = any(token in concrete_visual_tokens for token in tokens)
+        if not has_concrete_visual_token and re.search(
+            r"\b(?:top[-\s]?down|overhead|aerial|parked|color|colors|colou?r(?:ed)?|multiple)\b",
+            lowered,
         ):
             return True
         return False
@@ -392,6 +452,73 @@ def _clean_visual_ids_from_record(record: Dict[str, Any]) -> List[str]:
     return ordered
 
 
+def _record_uses_clear_target_relabel_path(record: Dict[str, Any]) -> bool:
+    """Mirror the validator's narrow clear-target advisory path."""
+
+    return (
+        str(record.get("decision") or "") == "accept_suggested"
+        and str(record.get("backend_tier") or "").strip().lower() == "clear"
+        and str(record.get("visual_quality") or "").strip().lower() == "clear"
+        and str(record.get("object_visibility") or "").strip().lower() == "clear"
+        and str(record.get("current_evidence") or "").strip().lower() in {"weak", "none"}
+        and str(record.get("suggested_evidence") or "").strip().lower() == "strong"
+        and str(record.get("target_evidence") or "").strip().lower() == "strong"
+        and str(record.get("local_context_evidence") or "").strip().lower() == "strong"
+        and str(record.get("global_context_evidence") or "").strip().lower() == "strong"
+        and str(record.get("overlap_assessment") or "").strip().lower() in {"none", "near_context"}
+    )
+
+
+def _record_uses_one_cue_supported_relabel_path(record: Dict[str, Any]) -> bool:
+    """Mirror the validator's one-cue relabel path for small but clear targets."""
+
+    payload = record.get("model_compact_arguments") if isinstance(record.get("model_compact_arguments"), dict) else {}
+
+    def _field(name: str) -> str:
+        return str(record.get(name) or payload.get(name) or "").strip().lower()
+
+    return (
+        str(record.get("decision") or "") == "accept_suggested"
+        and len(_explicit_visible_cues_from_record(record)) == 1
+        and _field("backend_tier") == "clear"
+        and _field("visual_quality") == "clear"
+        and _field("object_visibility") == "clear"
+        and _field("current_evidence") in {"weak", "none"}
+        and _field("suggested_evidence") == "strong"
+        and _field("target_evidence") == "strong"
+        and _field("anchor_evidence_suggested") == "strong"
+        and _field("local_context_evidence") == "strong"
+        and _field("global_context_evidence") == "strong"
+        and _field("local_consensus_evidence") == "supports_suggested"
+        and _field("overlap_assessment") in {"none", "near_context"}
+        and _field("same_image_scale_evidence") != "supports_current"
+        and _field("same_image_embedding_evidence") != "supports_current"
+        and not bool(record.get("overlap_explains_candidate_similarity") or payload.get("overlap_explains_candidate_similarity"))
+    )
+
+
+def _record_uses_confirm_current_overlap_rebuttal_path(record: Dict[str, Any]) -> bool:
+    """Mirror the validator's confirm-current path for overlap-driven false alarms."""
+
+    payload = record.get("model_compact_arguments") if isinstance(record.get("model_compact_arguments"), dict) else {}
+
+    def _field(name: str) -> str:
+        return str(record.get(name) or payload.get(name) or "").strip().lower()
+
+    return (
+        str(record.get("decision") or "") == "confirm_current"
+        and _field("backend_tier") == "clear"
+        and _field("visual_quality") == "clear"
+        and _field("object_visibility") == "clear"
+        and _field("current_evidence") == "strong"
+        and _field("target_evidence") == "strong"
+        and _field("anchor_evidence_current") in {"strong", "moderate"}
+        and bool(_explicit_visible_cues_from_record(record))
+        and bool(record.get("overlap_explains_candidate_similarity") or payload.get("overlap_explains_candidate_similarity"))
+        and _field("overlap_assessment") in {"partial_contamination", "near_context", "other_contains_target"}
+    )
+
+
 def _target_source_clean_ids_from_record(record: Dict[str, Any]) -> List[str]:
     ledger = record.get("evidence_ledger") if isinstance(record.get("evidence_ledger"), dict) else {}
     rows = [row for row in (ledger.get("rows") or []) if isinstance(row, dict)]
@@ -451,6 +578,114 @@ def _record_key(record: Dict[str, Any], fallback_index: int) -> str:
     return f"ordinal:{record.get('ordinal') or fallback_index}"
 
 
+def _record_review_disposition(record: Dict[str, Any]) -> Dict[str, Any]:
+    existing = record.get("review_disposition")
+    if isinstance(existing, dict) and existing.get("signal"):
+        return existing
+    decision = str(record.get("decision") or "").strip()
+    target_class = str(record.get("target_class") or "").strip()
+    current_class = str(record.get("current_class") or "").strip()
+    guarded = record.get("guarded_recommendation") if isinstance(record.get("guarded_recommendation"), dict) else None
+    cue_verifier = record.get("cue_verifier") if isinstance(record.get("cue_verifier"), dict) else None
+    backend_tier = str(record.get("backend_tier") or "").strip().lower()
+    visual_quality = str(record.get("visual_quality") or "").strip().lower()
+    object_visibility = str(record.get("object_visibility") or "").strip().lower()
+    guardrail_reasons = [str(item or "").strip() for item in (record.get("guardrail_reasons") or []) if str(item or "").strip()]
+
+    def _make(
+        disposition: str,
+        signal: str,
+        label: str,
+        *,
+        target: str = "",
+        reason: str = "",
+        priority: str = "normal",
+        advisory_decision: str = "",
+    ) -> Dict[str, Any]:
+        return {
+            "disposition": disposition,
+            "signal": signal,
+            "label": label,
+            "priority": priority,
+            "advisory_decision": advisory_decision,
+            "advisory_target_class": target,
+            "primary_reason": reason,
+        }
+
+    if decision in CLASS_CHANGE_DECISIONS:
+        return _make("actionable_class_change", "actionable", f"Switch class to {target_class}", target=target_class, priority="high")
+    if decision == "confirm_current":
+        return _make("actionable_confirm_current", "actionable", "Confirm current class", target=current_class or target_class)
+    if guarded and guarded.get("blocked"):
+        guarded_target = str(guarded.get("target_class") or "").strip()
+        reasons = [
+            str(item or "").strip()
+            for item in (guarded.get("guardrail_reasons") or guardrail_reasons)
+            if str(item or "").strip()
+        ]
+        reason_text = " ".join(item.lower() for item in reasons)
+        guarded_backend = str(guarded.get("backend_tier") or backend_tier or "").strip().lower()
+        guarded_quality = str(guarded.get("visual_quality") or visual_quality or "").strip().lower()
+        guarded_visibility = str(guarded.get("object_visibility") or object_visibility or "").strip().lower()
+        current_dominates_target = "current class" in reason_text and "dominates the target bbox" in reason_text
+        guarded_decision = str(guarded.get("decision") or "").strip()
+        if guarded_decision in CLASS_CHANGE_DECISIONS and current_dominates_target:
+            return _make(
+                "verified_current_class_overlap",
+                "useful_negative",
+                "Confirm current class: overlap false alarm",
+                target=current_class or target_class,
+                reason=reasons[0] if reasons else "Current-class material dominates the target bbox.",
+                advisory_decision="confirm_current",
+            )
+        if guarded_backend not in {"", "clear"} or guarded_quality not in {"", "clear"} or guarded_visibility not in {"", "clear"}:
+            disposition = "guarded_visual_quality"
+        elif "overlap" in reason_text or "contamination" in reason_text or "duplicate_like" in reason_text:
+            disposition = "guarded_overlap_risk"
+        elif "visible target cues" in reason_text:
+            disposition = "guarded_missing_visible_cues"
+        elif "anchor" in reason_text:
+            disposition = "guarded_anchor_support"
+        else:
+            disposition = "guarded_policy_block"
+        return _make(
+            disposition,
+            "guarded_human_triage",
+            f"Guarded suggestion: {guarded_target or 'review class'}",
+            target=guarded_target,
+            reason=reasons[0] if reasons else "Controller guardrail blocked automatic recommendation.",
+            advisory_decision=guarded_decision,
+        )
+    if cue_verifier and not cue_verifier.get("verified"):
+        return _make(
+            "verified_no_class_change",
+            "useful_negative",
+            "Verifier rejected class-change evidence",
+            target=target_class or current_class,
+            reason=str(cue_verifier.get("rejection_reason") or "").strip(),
+            priority="low",
+        )
+    if guardrail_reasons and (
+        backend_tier == "poor" or visual_quality == "poor" or object_visibility in {"tiny_or_blurry", "not_visible"}
+    ):
+        return _make(
+            "target_not_reviewable",
+            "no_signal",
+            "Target not reviewable by Qwen",
+            target=target_class or current_class,
+            reason=guardrail_reasons[0],
+            priority="low",
+        )
+    return _make(
+        "no_actionable_opinion",
+        "no_signal",
+        "No safe Qwen recommendation",
+        target=target_class or current_class,
+        reason=guardrail_reasons[0] if guardrail_reasons else "Qwen did not produce a useful class recommendation.",
+        priority="low",
+    )
+
+
 def _short_record(record: Dict[str, Any]) -> Dict[str, Any]:
     payload = record.get("model_compact_arguments") if isinstance(record.get("model_compact_arguments"), dict) else {}
     def _field(name: str) -> Any:
@@ -482,6 +717,8 @@ def _short_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "guardrail_reasons": record.get("guardrail_reasons") or [],
         "advisory_reasons": record.get("advisory_reasons") or [],
         "guarded_recommendation": record.get("guarded_recommendation"),
+        "cue_verifier": record.get("cue_verifier"),
+        "review_disposition": _record_review_disposition(record),
     }
 
 
@@ -498,8 +735,13 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     guarded_clear_target_candidates: List[Dict[str, Any]] = []
     guarded_recommendations: List[Dict[str, Any]] = []
     actionables: List[Dict[str, Any]] = []
+    review_disposition_counts: Counter[str] = Counter()
+    review_disposition_signal_counts: Counter[str] = Counter()
 
     for record in records:
+        disposition = _record_review_disposition(record)
+        review_disposition_counts[str(disposition.get("disposition") or "missing")] += 1
+        review_disposition_signal_counts[str(disposition.get("signal") or "missing")] += 1
         decision = str(record.get("decision") or "").strip()
         backend_tier = str(record.get("backend_tier") or "").strip().lower()
         visual_quality = str(record.get("visual_quality") or "").strip().lower()
@@ -531,7 +773,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
         if decision in CLASS_CHANGE_DECISIONS:
             visible_target_cues = _explicit_visible_cues_from_record(record)
-            if len(visible_target_cues) < 2:
+            if len(visible_target_cues) < 2 and not _record_uses_one_cue_supported_relabel_path(record):
                 _add_issue(
                     issues,
                     "class_change_missing_visible_target_cues",
@@ -582,7 +824,14 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                 _add_issue(issues, "class_change_overrides_strong_current", record, "current_evidence=strong")
             if suggested_evidence != "strong" and decision == "accept_suggested":
                 _add_issue(issues, "accept_without_strong_suggested", record, f"suggested_evidence={suggested_evidence}")
-            if decision == "accept_suggested" and anchor_evidence_suggested != "strong":
+            if (
+                decision == "accept_suggested"
+                and anchor_evidence_suggested != "strong"
+                and not (
+                    anchor_evidence_suggested == "moderate"
+                    and _record_uses_clear_target_relabel_path(record)
+                )
+            ):
                 _add_issue(
                     issues,
                     "accept_without_strong_suggested_anchor",
@@ -625,7 +874,11 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                     "partial_contamination class change lacks textual rebuttal",
                 )
 
-        if decision == "confirm_current" and suggested_evidence == "strong":
+        if (
+            decision == "confirm_current"
+            and suggested_evidence == "strong"
+            and not _record_uses_confirm_current_overlap_rebuttal_path(record)
+        ):
             _add_issue(issues, "confirm_overrides_strong_suggested", record, "suggested_evidence=strong")
 
         if (
@@ -650,6 +903,21 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "guarded_clear_target_candidate_count": len(guarded_clear_target_candidates),
         "guarded_clear_target_candidates": guarded_clear_target_candidates,
         "guarded_recommendation_count": len(guarded_recommendations),
+        "review_disposition_counts": dict(review_disposition_counts),
+        "review_disposition_signal_counts": dict(review_disposition_signal_counts),
+        "effective_human_signal_count": sum(
+            count
+            for signal, count in review_disposition_signal_counts.items()
+            if signal in {"actionable", "guarded_human_triage", "useful_negative"}
+        ),
+        "guarded_human_triage_count": review_disposition_signal_counts.get("guarded_human_triage", 0),
+        "cue_verifier_count": sum(1 for record in records if isinstance(record.get("cue_verifier"), dict)),
+        "cue_verifier_promoted_count": sum(
+            1
+            for record in records
+            if isinstance(record.get("cue_verifier"), dict)
+            and record["cue_verifier"].get("promoted_from_guarded_recommendation")
+        ),
         "guarded_recommendations": guarded_recommendations,
         "actionables": actionables,
     }
@@ -721,6 +989,11 @@ def print_report(audit: Dict[str, Any], comparison: Optional[Dict[str, Any]] = N
     print(f"Backend tiers: {json.dumps(audit['backend_tier_counts'], sort_keys=True)}")
     print(f"Actionable recommendations: {audit['actionable_count']}")
     print(f"Guarded recommendations: {audit.get('guarded_recommendation_count', 0)}")
+    print(f"Effective human signals: {audit.get('effective_human_signal_count', 0)}")
+    print(f"Disposition signals: {json.dumps(audit.get('review_disposition_signal_counts', {}), sort_keys=True)}")
+    print(f"Disposition counts: {json.dumps(audit.get('review_disposition_counts', {}), sort_keys=True)}")
+    print(f"Cue verifier calls: {audit.get('cue_verifier_count', 0)}")
+    print(f"Cue verifier promotions: {audit.get('cue_verifier_promoted_count', 0)}")
     print(f"Unsafe issue count: {audit['unsafe_issue_count']}")
     print(f"Issue counts: {json.dumps(audit['issue_counts'], sort_keys=True)}")
     for issue_name, rows in audit["issues"].items():

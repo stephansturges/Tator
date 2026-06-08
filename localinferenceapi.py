@@ -29965,6 +29965,8 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
                         "Set anchor_support_basis=conflicting_anchors when trusted anchors/examples support the current class or a third class more strongly than the proposed target class.",
                         "Set anchor_support_basis=insufficient when the anchors/examples are too weak, too sparse, or not visible enough to judge.",
                         "Set anchor_support_verified=true only for target_specific_anchors; otherwise leave it false and explain the uncertainty in anchor_support_reason.",
+                        "Local consensus, neighbor labels, and nearby objects are not clean target-pixel evidence. If they are the main reason the proposed class seems plausible, set verified=false.",
+                        "For moderate-anchor or overlap-entangled proposals, verified=true needs either deterministic same-image evidence that questions the current class or a clean-pixel contradiction in current_class_missing_or_inconsistent_cues.",
                         "Set verified=true only when at least two positive target-class cues are visible, the proposed target class explains the whole target extent, target evidence is not just scene context, overlap_rebutted is true or overlap is not applicable, current_class_positive_cues is empty or clearly irrelevant, and current_class_plausible=false.",
                         "If only one positive cue is independent and another cue is shared, verified=true is allowed only when target_class_defining_cues cite at least two target-specific traits, current_class_missing_or_inconsistent_cues cites at least one visible contradiction or absence for the current class, and anchor_support_basis=target_specific_anchors.",
                         "Set verified=false when the evidence is context-only, negative-only, color-only, target pixels are ambiguous, or the clean crop still plausibly supports the current class.",
@@ -30894,10 +30896,45 @@ def _class_analysis_qwen_review_try_cue_verifier(
         final_result = dict(final_result)
         final_result["cue_verifier"] = verifier_record
         return final_result
+    guarded_guardrail_reasons = [
+        str(item or "").strip().lower()
+        for item in (guarded.get("guardrail_reasons") or [])
+        if str(item or "").strip()
+    ]
+    guarded_overlap_assessment = str(guarded.get("overlap_assessment") or "").strip().lower()
+    overlap_entangled_guarded = (
+        guarded_overlap_assessment == "partial_contamination"
+        or any("overlap" in reason or "contamination" in reason for reason in guarded_guardrail_reasons)
+    )
+    verifier_current_missing_cues = [
+        str(item or "").strip()
+        for item in (verifier_record.get("current_class_missing_or_inconsistent_cues") or [])
+        if str(item or "").strip()
+    ]
+    deterministic_questions_current = scale_signal == "questions_current" or embedding_signal == "questions_current"
+    if needs_moderate_anchor_verification and overlap_entangled_guarded and not deterministic_questions_current:
+        # Local consensus and anchor examples can pull the model toward a plausible
+        # neighboring class even when the target crop contradicts that label. For
+        # moderate-anchor overlap cases, require a contrastive current-class
+        # contradiction that survived generic normalization, or independent
+        # deterministic same-image evidence questioning the current label.
+        if not verifier_current_missing_cues:
+            verifier_record = {
+                **verifier_record,
+                "verified": False,
+                "rejection_reason": (
+                    "Moderate-anchor overlap promotion needs deterministic same-image support "
+                    "or a surviving clean-pixel contradiction for the current class; local "
+                    "consensus alone is not enough."
+                ),
+            }
+            final_result = dict(final_result)
+            final_result["cue_verifier"] = verifier_record
+            return final_result
     if verifier_basis == "shared_generic_cues" and not has_independent_current_questioning:
         target_cues = list(verifier_record.get("independent_positive_visible_target_cues") or [])
         target_defining_cues = list(verifier_record.get("target_class_defining_cues") or [])
-        current_missing_cues = list(verifier_record.get("current_class_missing_or_inconsistent_cues") or [])
+        current_missing_cues = verifier_current_missing_cues
         current_cues = list(verifier_record.get("independent_current_class_positive_cues") or [])
         anchor_rescues_inconsistent_shared_basis = bool(
             needs_moderate_anchor_verification

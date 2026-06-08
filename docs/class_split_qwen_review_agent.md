@@ -1676,6 +1676,26 @@ briefs. Regression tests cover:
   spot checks of `compact_verifier_clear_guarded10_10_1780911588_visual_non_skip.jpg`
   and `_visual_guarded.jpg` found the non-skip examples plausible at crop scale
   and the remaining guarded rows appropriately overlap/context-heavy.
+- Contrastive overlap guardrail rerun:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/contrastive_guardrails_reviewable30_30_1780914058.json`
+  reran the same 30 reviewable rows after a manual visual audit found one bad
+  promotion in
+  `compact_verifier_reviewable30_30_1780912608.json`: row 3
+  `Boat -> LightVehicle` was driven by local-consensus pressure while the clean
+  target crop still looked boat-like. The fix is generic and dataset-agnostic:
+  for moderate-anchor, overlap-entangled class changes, the verifier can promote
+  only when deterministic same-image scale/embedding evidence questions the
+  current class or when the clean pixels provide a surviving contradiction for
+  the current class. Local consensus, neighbor labels, or nearby objects alone
+  are not enough. The rerun completed 30/30 reviews with 0 failures, 0 final
+  validation errors, 0 cue-verifier parse errors, and 0 unsafe audit issues. It
+  produced 6 actionable class-change recommendations, 23 guarded human-triage
+  signals, and 1 useful negative. The cue verifier ran on 9 rows and promoted 6.
+  Visual inspection confirmed row 3 moved back to guarded review, while the six
+  remaining actionable rows looked plausible on the non-skip audit sheet. This
+  remains VLM-centered: deterministic reports constrain only high-risk
+  moderate-overlap promotion; they do not replace Qwen's final visual judgment
+  or erase the raw model evidence from artifacts.
 
 A larger labeled real-model benchmark should be run before treating v2
 recommendations as more than advisory.

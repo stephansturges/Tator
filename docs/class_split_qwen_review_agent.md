@@ -27,7 +27,9 @@ that contract and update this document in the same patch.
    transient workspaces send the text only with the current review request.
 3. In the Likely wrong class toolbar, choose a Qwen reviewer model or leave it
    on the active model.
-4. Click `Review with Qwen` on a vignette.
+4. Click `Review with Qwen` on a vignette. If the vignette has a near-identical
+   cross-class overlapping box, the button reads `Review dual bbox with Qwen` and
+   the review switches to the narrower dual-box question.
 5. The backend starts a bounded review job, renders evidence images, and polls
    the result back into the vignette.
 6. The human still uses `Confirm current class`, `Switch class to ...`, `Skip`,
@@ -68,6 +70,20 @@ The final result schema is:
   "target_evidence": "strong | moderate | weak | none",
   "overlap_assessment": "none | duplicate_like | partial_contamination | target_contains_other | other_contains_target | near_context | unclear",
   "overlap_explains_candidate_similarity": false,
+  "specificity_alignment": "supports_current | supports_suggested | supports_other | mixed | insufficient | not_applicable",
+  "target_background_contrast": "target_specific | background_dominated | overlap_dominated | mixed | insufficient | not_applicable",
+  "dual_bbox_resolution": "not_applicable | current_box_class | overlap_box_class | both_valid_overlapping_objects | uncertain_or_neither",
+  "dual_bbox_conflict": {
+    "enabled": true,
+    "kind": "near_identical_cross_class_bbox",
+    "review_mode": "dual_bbox_class_resolution",
+    "current_class": "current class",
+    "other_class_name": "overlapping box class",
+    "other_point_id": "point id",
+    "iou": 0.95,
+    "target_area_covered": 0.98,
+    "other_area_covered": 0.97
+  },
   "anchor_evidence_current": "strong | moderate | weak | none",
   "anchor_evidence_suggested": "strong | moderate | weak | none",
   "local_context_evidence": "strong | moderate | weak | none",
@@ -97,7 +113,7 @@ The final result schema is:
   "counter_evidence": "what could make this wrong",
   "human_review_needed": true,
   "review_disposition": {
-    "disposition": "actionable_class_change | guarded_visual_quality | guarded_overlap_risk | guarded_missing_visible_cues | verified_no_class_change | no_actionable_opinion",
+    "disposition": "actionable_class_change | dual_bbox_switch_overlap_class | dual_bbox_confirm_current | dual_bbox_both_valid_overlap | dual_bbox_unresolved | guarded_visual_quality | guarded_overlap_risk | guarded_missing_visible_cues | verified_no_class_change | no_actionable_opinion",
     "signal": "actionable | guarded_human_triage | useful_negative | no_signal",
     "label": "human-readable result label",
     "priority": "high | normal | low",
@@ -138,6 +154,12 @@ The final result schema is:
     "geometry_overlay_evidence_ids": ["source_overlay_4", "overlap_decomposition_5"],
     "local_consensus_evidence_ids": ["local_consensus_context_10"],
     "clean_visual_reference_evidence_ids": ["class_context_pack_6"],
+    "dual_bbox_conflict": {
+      "review_mode": "dual_bbox_class_resolution",
+      "current_class": "current class",
+      "other_class_name": "overlapping box class",
+      "iou": 0.95
+    },
     "policy": "visible_target_cues must come from clean visual evidence..."
   },
   "applied": false
@@ -213,7 +235,11 @@ State sequence:
    and overlap-decomposition views remain compact text/ledger context so
    target-contained pixels stay central without hiding trusted examples. The backend
    expands that compact object into the full audit payload and applies
-   guardrails. Any route call or evidence-tool call in this state is a schema
+   guardrails. The compact schema includes an SDDF-inspired specificity audit:
+   `specificity_alignment` states which class hypothesis is supported by
+   target-contained object cues, and `target_background_contrast` states whether
+   those cues are target-specific or dominated by background, overlap, or context.
+   Any route call or evidence-tool call in this state is a schema
    failure. Retries remain allowed for malformed output; repeated failure
    becomes `skip_uncertain`. Degenerate repeated-token outputs are detected
    before JSON parsing and fail closed immediately as `skip_uncertain` so bad
@@ -247,6 +273,9 @@ Model-facing compact final schema:
   "target_evidence": "strong | moderate | weak | none",
   "overlap_assessment": "none | duplicate_like | partial_contamination | target_contains_other | other_contains_target | near_context | unclear",
   "overlap_explains_candidate_similarity": false,
+  "specificity_alignment": "supports_current | supports_suggested | supports_other | mixed | insufficient | not_applicable",
+  "target_background_contrast": "target_specific | background_dominated | overlap_dominated | mixed | insufficient | not_applicable",
+  "dual_bbox_resolution": "not_applicable | current_box_class | overlap_box_class | both_valid_overlapping_objects | uncertain_or_neither",
   "local_consensus_evidence": "supports_current | supports_suggested | mixed | absent | not_applicable",
   "visible_target_cues": ["concrete cue from target/source pixels"],
   "supporting_clean_evidence_ids": ["target_context_1", "zoom_region_6"],
@@ -331,6 +360,43 @@ Qwen is explicitly allowed to use same-image anchors, wider-distribution
 anchors, class glossary text, source context, and overlap decomposition together.
 This is less blind than crop-only review, but still remains human-in-the-loop.
 
+## SDDF Transfer Note
+
+The SDDF paper, [Specificity-Driven Dynamic Focusing for Open-Vocabulary
+Camouflaged Object Detection](https://arxiv.org/html/2603.26109v1), is relevant
+because it addresses the same failure mode that appears in likely-wrong review:
+target-object features can look very close to background or neighboring-object
+features, so a model can over-weight context. SDDF uses fine-grained
+sub-descriptions, removes noisy text components with SVD, contrasts object-region
+and background-region similarities, and spatially focuses feature responses
+toward discriminative target regions. The public
+[SDDF repository](https://github.com/zh1fen/sddf) currently contains README/assets
+and notes that training/inference code is coming later, so there is no code to
+vendor directly.
+
+Our first integration is therefore conceptual and audit-oriented rather than a
+direct detector port. Qwen final review now emits:
+
+- `specificity_alignment`: which class hypothesis is supported by
+  target-contained object cues.
+- `target_background_contrast`: whether the evidence is `target_specific`,
+  `background_dominated`, `overlap_dominated`, mixed, or insufficient.
+
+This keeps the VLM final judgment central while making the SDDF question
+explicit: are we recommending a class change because the target itself has
+discriminative features, or because background/overlap/context made the embedding
+neighborhood look plausible? Class-change recommendations require the
+target-specific path. Background-dominated or overlap-dominated recommendations
+are preserved as guarded human-triage signals, not silently applied.
+
+The deeper integration path is a learned or CLIP-aligned specificity evidence
+module: generate per-class or per-instance sub-descriptions, decorrelate them,
+score target-vs-background regions with a text-image aligned model, and feed that
+score as another evidence tool before final Qwen review. DINOv3 crop embeddings
+alone are not text-aligned enough for direct SDDF contrastive text-region scoring,
+so that should be treated as a future model experiment rather than a small prompt
+patch.
+
 ## Evidence Tools
 
 `inspect_target_context` renders the target object crop with extra source-image
@@ -365,6 +431,18 @@ same-image boxes: IoU, target-area coverage, other-box coverage, relation label,
 and a short interpretation. A common case is a target box crossing another
 object's box: the target may contain texture from the other object, but that
 contamination must not become the reason to relabel the target.
+
+Near-identical cross-class boxes are handled as a separate `dual_bbox_conflict`
+mode, not as generic contamination. The class-analysis result marks a conflict
+when the target and another same-image box have different classes, IoU at least
+0.90, and near-matching corners. Qwen then receives a narrower question:
+resolve the target as the current class, the overlapping box class, both valid
+overlapping objects with malformed geometry, or unresolved. This distinction is
+important because some class pairs legitimately overlap in real datasets, such as
+rider/vehicle, carried object/person, mounted object/support, or other
+dataset-specific relationships from the glossary. The code must not hard-code
+those pairs; Qwen must ground them in clean pixels, source context, glossary or
+guidance, anchors, scale, embedding, and overlap evidence.
 
 `inspect_class_context_pack` renders sectioned contact sheets:
 
@@ -539,13 +617,13 @@ Backend guardrails are stricter than the prompt:
 - `accept_suggested` and `change_to_other` require at least two concrete
   `visible_target_cues`. The validator removes class-label-only boilerplate such
   as "matches suggested class", so a class-change recommendation has to expose
-  visible target evidence like shape, parts, material, texture, posture, or
-  target-touching context.
+  positive target-pixel descriptors rather than class names, neighbor labels, or
+  pure scene context.
 - Negative or absence claims, color-only claims, and viewpoint, location, or
-  background-only phrases such as overhead perspective, nearby pavement, road,
-  water, shadows, or generic scene placement can remain in the reasoning, but
-  they do not count toward the visible-cue threshold for a class-changing
-  recommendation. A change still needs positive object-internal evidence.
+  background-only phrases such as overhead perspective, nearby context,
+  shadows, or generic scene placement can remain in the reasoning, but they do
+  not count toward the visible-cue threshold for a class-changing recommendation.
+  A change still needs positive target-contained evidence.
 - Those class-changing decisions also require `supporting_clean_evidence_ids`
   tied to clean target/source evidence. Clean reference packs can inform the
   comparison, but they cannot be the only evidence cited for visible target
@@ -566,9 +644,24 @@ Backend guardrails are stricter than the prompt:
   suggested-class anchor evidence, local context, and global context are all
   strong and Qwen's rationale explicitly explains why the overlap does not
   account for the target's visible class features
+- the narrow exception is `dual_bbox_conflict`: if a near-identical cross-class
+  box is detected, `duplicate_like` overlap can pass only when Qwen sets
+  `dual_bbox_resolution=overlap_box_class`, the recommended `target_class` is
+  exactly the overlapping box's class, the target/source evidence is clear and
+  strongly target-contained, and all normal clean-evidence requirements pass.
+  Third-class jumps remain blocked in dual-bbox mode.
+- `dual_bbox_resolution=both_valid_overlapping_objects` is represented as
+  `skip_uncertain` plus a `dual_bbox_both_valid_overlap` review disposition,
+  because that means the human should inspect/fix geometry rather than simply
+  relabel the target.
 - the validator has no hard-coded class aliases or dataset-specific subtype
   rules. Subtype ambiguity must come from the active labelmap, glossary, review
   guidance, generated concept briefs, or generated pairwise contrast briefs.
+- cue normalization is deliberately domain-generic. It may remove protocol
+  boilerplate, negations, class labels, color-only cues, and background-only
+  phrases, but it must not carry a committed list of object parts for the current
+  benchmark dataset. Class/object vocabulary belongs in the labelmap, glossary,
+  user guidance, or model-generated concept/pair briefs.
 - `skip_uncertain` confidence is capped at 0.50, and hard-guardrail skips are
   capped lower, so skipped reviews do not look like high-confidence class
   recommendations
@@ -616,6 +709,20 @@ Guardrails can still block automatic mutation. In that case the final result is
 the VLM's recommendation as a first-class human-triage signal. The UI should
 display these as guarded suggestions and preselect the suggested target class
 for manual reassignment.
+
+For moderate-anchor class changes without same-image scale/embedding support,
+the backend runs a second VLM cue-verifier pass. That pass must inspect the
+clean target/source evidence and explicitly set `current_class_plausible`.
+If Qwen says the current class is still plausible, the final result remains
+human-triage `skip_uncertain`; the raw guarded recommendation and verifier
+reason are preserved in the payload.
+
+The cue-verifier pass may not promote a class change from shared generic cues
+alone. If Qwen reports `current_class_plausibility_basis=shared_generic_cues`,
+the promotion needs an independent same-image scale, same-image embedding, or
+local-consensus signal questioning the current class. This prevents top-down
+shape, color, position, or flat-surface language from turning into a class
+change when the same target pixels could still plausibly fit the current label.
 
 Latest Mac probe after restoring VLM finalization and the `final_class` schema:
 
@@ -700,9 +807,13 @@ The audit script checks the safety invariants that should not regress:
 - no class-changing recommendation on non-clear backend visual quality
 - no `accept_suggested` decision when Qwen reports strong evidence for the
   current class
+- no class-changing recommendation when either the final schema or the
+  second-pass cue verifier says the clean target/source pixels still plausibly
+  fit the current class
 - no `accept_suggested` decision without strong suggested-class anchor
   agreement, except the narrow clear-target path where moderate anchor agreement
-  is confidence-capped and all other target/source evidence is strong
+  is confidence-capped, all other target/source evidence is strong, and Qwen has
+  explicitly checked `current_class_plausible=false`
 - no `confirm_current` decision when Qwen reports strong suggested-class
   evidence
 - no class-changing recommendation without at least two concrete target-visible
@@ -721,6 +832,13 @@ the backend forced or kept a skip. Those rows are useful for improving
 usefulness, but they are not failures by themselves; the current workflow
 deliberately prefers missed automation over bad label-change advice.
 
+For dual-bbox changes, the audit report must expose
+`dual_bbox_resolution_counts` in addition to disposition counts. This matters
+because the overlap-specific flow is valuable only when near-identical
+cross-class boxes are resolved by the VLM as `overlap_box_class` or explicitly
+left for human geometry review as `both_valid_overlapping_objects` /
+`uncertain_or_neither`.
+
 ## Validation Evidence
 
 Historical real-model validation was run against the completed all-class Class
@@ -732,6 +850,74 @@ They are not implementation rules; the runtime controller relies on the active
 labelmap, glossary, review guidance, generated concept briefs, generated pairwise
 contrast briefs, evidence fields, and overlap state.
 
+- Genericity V4 100-crop gate:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/genericity_v4_wide100_100_1780875777.json`
+  reran the same 100-row benchmark after removing benchmark-specific cue
+  vocabulary from the validator and adding the shared-generic-cue promotion
+  guard. It completed 100/100 in 858.0 seconds with 0 backend failures, 0 final
+  validation errors, 0 unsafe audit issues, 4 actionable `accept_suggested`
+  recommendations, 66 guarded recommendations, and 70 effective human signals.
+  The cue verifier ran on every row, used the repair path on 11 rows, and
+  promoted one guarded recommendation. Compared with
+  `genericity_v3_wide100_100_1780874346.json`, the only decision change was
+  `#83 Truck->Building`, which was demoted from `accept_suggested` to guarded
+  `skip_uncertain` because Qwen's supporting cues were shared generic geometry
+  without same-image scale, embedding, or local-consensus support. Manual spot
+  checks of the four remaining actionables found them plausible human-reviewed
+  class-change suggestions: `#26 Truck->Building`, `#47 LightVehicle->Building`,
+  `#89 Truck->Building`, and `#92 Building->Solarpanels`.
+- SDDF/dual-bbox V3 100-crop gate:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/sddf_dual_v3_wide100_100_1780857344.json`
+  reran the V1 100-row benchmark with SDDF-style target/background fields,
+  near-identical dual-bbox conflict mode, compact-output overlap normalization,
+  and the repaired benchmark/audit recorder. Result: 100/100 completed, 0
+  backend failures, 0 final validation errors, 4 actionable
+  `accept_suggested` recommendations, 66 guarded recommendations, 70 effective
+  human signals, and 0 unsafe audit issues in
+  `sddf_dual_v3_wide100_100_1780857344_audit.json`.
+  `dual_bbox_resolution_counts` were 93 `not_applicable` and 7
+  `overlap_box_class`; two of the four actionable recommendations were
+  `dual_bbox_switch_overlap_class` cases. Compared with the V1 benchmark,
+  Qwen now promotes two additional clear dual-bbox/building corrections, while
+  the previously questionable Truck to LightVehicle action is demoted to a
+  guarded skip because the clean visible cue verifier found only one concrete
+  target-class cue. Manual review of
+  `sddf_dual_v3_wide100_100_1780857344_visual_non_skip.jpg` found the four
+  actionable recommendations visually plausible and all still advisory/human
+  controlled.
+- Overlap-verifier V5 100-crop gate:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/overlap_verifier_v5_wide100.json`
+  reran the same 100 rows after adding the first visible-cue verifier. It
+  completed 100/100 with 0 backend failures, 0 final validation errors, 0 unsafe
+  audit issues, 7 actionable `accept_suggested` recommendations, 63 guarded
+  recommendations, and 70 effective human signals. Manual visual inspection of
+  `overlap_verifier_v5_wide100_visual_non_skip.jpg` found that two actions were
+  too aggressive (`#41 Truck->Building`, `#83 Truck->Building`) and two
+  `Gastank->Building` actions (`#33`, `#40`) depended on project-specific class
+  semantics. The failure mode was not a missing controller signal; it was that
+  Qwen could accept the suggested class while the current class still remained
+  visually plausible.
+- Current-class-plausibility V2 100-crop gate:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/plausibility_v2_wide100.json`
+  reran the V5 rows with a required second-pass cue verifier for moderate-anchor
+  class changes that lack same-image scale/embedding support. The verifier must
+  explicitly answer whether the clean target/source pixels still plausibly fit
+  the current class. The run completed 100/100 in 872.8 seconds with 0 backend
+  failures, 0 final validation errors, 0 unsafe audit issues, 3 actionable
+  `accept_suggested` recommendations, 67 guarded recommendations, 70 effective
+  human signals, 11 cue-verifier calls, 0 verifier promotions, and 10
+  verifier-reported current-class-plausible cases in
+  `plausibility_v2_wide100_audit.json`. Compared with
+  `overlap_verifier_v5_wide100.json`, exactly four decisions changed:
+  `#33 Gastank->Building`, `#40 Gastank->Building`, `#41 Truck->Building`, and
+  `#83 Truck->Building` were demoted from `accept_suggested` to guarded
+  `skip_uncertain` with VLM-generated current-class plausibility reasons. The
+  remaining actionables stayed `#47 LightVehicle->Building`,
+  `#89 Truck->Building`, and `#92 Building->Solarpanels`; visual inspection of
+  `plausibility_v2_wide100_visual_non_skip.jpg` found those three defensible.
+  Individual spot checks of the four demoted rows confirmed the new behavior:
+  each target is ambiguous enough that automatic relabeling would be too
+  aggressive, while the guarded VLM recommendation remains useful human triage.
 - Pre-hardening 100-crop run:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/real30b_validation_100_1780605874.json`
 - Result: 100/100 review jobs completed, 0 backend failures, 55
@@ -1060,9 +1246,10 @@ contrast briefs, evidence fields, and overlap state.
   controller-normalized evidence fields (`current_evidence`,
   `suggested_evidence`, `target_evidence`, `overlap_assessment`), the explicit
   `visible_target_cues` ledger, `supporting_clean_evidence_ids`, the controller
-  `evidence_ledger`, and `model_compact_arguments`. Otherwise the audit can miss
-  missing-cue or ungrounded class changes, or incorrectly fall back to stale
-  compact model fields after a controller reconciliation.
+  `evidence_ledger`, the nested `cue_verifier` result, and
+  `model_compact_arguments`. Otherwise the audit can miss missing-cue,
+  current-class-plausibility, or ungrounded class changes, or incorrectly fall
+  back to stale compact model fields after a controller reconciliation.
 - Deterministic scale/embedding context focused check:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/deterministic_tools_text_only_guardrail_check_4_1780781763.json`
   completed 4/4 with 0 unsafe audit issues. It produced 2 actionable
@@ -1160,13 +1347,15 @@ contrast briefs, evidence fields, and overlap state.
   remaining low action rate is mainly caused by explicit guardrails and weak
   target evidence. Further recall increases should improve rendered evidence or
   add non-mutating human-triage surfacing before relaxing mutation gates.
-- MLX finalization stability diagnosis:
-  local probes after final-context compaction still hit Metal command-buffer
-  timeouts on the MLX visual finalizer, including reduced tests with a two-message
-  final state, 384px image cap, one clean target image, the 2B MLX checkpoint, and
-  explicit runtime resets. For the app path, MLX finalization is therefore
-  disabled by default and deterministic preflights are used before a clean
-  `mlx_final_disabled` skip.
+- MLX finalization stability recovery:
+  earlier local probes after final-context compaction hit Metal command-buffer
+  timeouts on the MLX visual finalizer, including reduced tests with a
+  two-message final state, 384px image cap, one clean target image, the 2B MLX
+  checkpoint, and explicit runtime resets. The current Mac policy is the
+  opposite of a controller-only fallback: `CLASS_ANALYSIS_QWEN_REVIEW_ENABLE_MLX_FINAL`
+  defaults to `true`, the model-facing schema uses `final_class`, and test runs
+  use a larger final/verifier token budget so the local VLM can produce complete
+  reasoning. Disable MLX finalization only as an explicit fallback/debug mode.
 - Stabilized controller 30-crop replay:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/stabilized_mixed30_tightened_30_1780815007.json`
   replayed the same 30 rows as
@@ -1177,17 +1366,21 @@ contrast briefs, evidence fields, and overlap state.
   only hints were not reliable enough; the tightened path now requires local
   consensus plus scale or embedding evidence that questions the current class.
   The remaining guarded hint is Truck-to-Building with same-image consensus,
-  scale, and embedding all questioning the current class. This is the current
-  default balance on Mac/MLX: stable and precise, but low recall until the visual
-  finalizer can run without Metal timeouts.
+  scale, and embedding all questioning the current class. This was the
+  then-current controller-only fallback balance while MLX finalization was
+  unstable; it is preserved here as historical evidence, not as the current Mac
+  default.
 
 The validation proves the backend/tool protocol and deterministic evidence
-packaging are stable, but the local Mac/MLX visual finalizer is not currently a
-reliable production path. Qwen decisions are not reliable enough for automatic
-relabeling. The current strict-overlap behavior is intentionally conservative:
-the system is useful for triage, confirmations, and evidence-pack summaries, but
-class-changing recommendations should remain blocked unless a larger labeled
-benchmark shows the relabel rails can be loosened safely.
+packaging are stable enough for VLM-centered review experiments. Qwen decisions
+remain human-controlled and rails may block automatic mutation, but the VLM
+final judgment is the product core: deterministic overlap, scale, embedding,
+quality, and cue checks must preserve the raw model recommendation and its
+reasoning as audit context. The current strict-overlap and plausibility behavior
+is intentionally conservative for mutation, not for triage: guarded class-change
+opinions are still useful human-review signals, while automatic relabel advice
+is allowed only when the target is clear and the current class is not plausibly
+supported by clean target/source evidence.
 
 The current controller implementation adds glossary/guidance injection, overlap
 decomposition, the class context pack, deterministic required-evidence
@@ -1233,6 +1426,32 @@ briefs. Regression tests cover:
   opinions were useful, while poor-quality advisory added little and could be
   noisy. The app default therefore keeps limited advisory enabled but skips poor
   targets unless `allow_poor_final_review=true` is explicitly requested.
+- genericity/verifier replay check on the current wide-100 artifact:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/sddf_dual_v3_wide100_100_1780857344.json`
+  recorded one cue-verifier call, but the current verifier gate would route ten
+  clear/reviewable guarded recommendations (`6, 13, 26, 33, 34, 39, 40, 41, 66,
+  87`) into the second VLM pass. Those rows are exactly the cases we should use
+  for the next recall benchmark: clear target pixels, weak current evidence,
+  strong target/suggested evidence, target-specific cues, and a guardrail that
+  needs VLM-grounded cue verification rather than a passive skip. The 30 poor
+  backend-tier rows remain expected no-signal rows unless better source evidence
+  is rendered.
+- genericity v5 review-fix benchmark:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/genericity_v5_reviewfix_wide100_100_1780878216.json`
+  completed 100/100 reviews with 0 failures, 0 final validation errors, and 0
+  unsafe audit issues. Compared with
+  `genericity_v4_wide100_100_1780875777.json`, the corrected verifier-backed
+  partial-overlap path changed one row: `#39 LightVehicle->UPole` moved from a
+  guarded skip to `accept_suggested` after the verifier supplied target-specific
+  visible cues plus an overlap rebuttal and same-image embedding evidence that
+  questioned the current class. The run produced 5 actionable recommendations
+  instead of 4, with 65 guarded recommendations, 70 effective human signals, and
+  2 cue-verifier promotions. Visual inspection of the non-skip sheet found the
+  five actionable recommendations plausible. The corresponding code audit also
+  removed benchmark-side concrete object-token whitelists; visible-cue
+  filtering must remain dataset-agnostic and rely on the labelmap, glossary,
+  generated concept briefs, and actual model evidence rather than committed
+  project vocabulary.
 
 A larger labeled real-model benchmark should be run before treating v2
 recommendations as more than advisory.
@@ -1244,11 +1463,17 @@ review:
 
 - Qwen-Agent README: a framework for Qwen instruction following, tool usage,
   planning, and memory; see https://github.com/QwenLM/Qwen-Agent.
+- Qwen function-calling guidance: model calls are constrained by explicit
+  function/tool descriptions and JSON arguments; see
+  https://qwen.readthedocs.io/en/v2.0/framework/function_call.html.
 - Qwen3-VL Think with Images cookbook: demonstrates iterative visual inspection
   with an `image_zoom_in_tool`; see
   https://github.com/QwenLM/Qwen3-VL/blob/main/cookbooks/think_with_images.ipynb.
 - Hermes Function Calling prompt assets: one-function-at-a-time JSON tool calls;
   see https://github.com/NousResearch/Hermes-Function-Calling.
+- OpenAI practical agent guidance: keep tools, guardrails, and human oversight
+  explicit around the agent loop; see
+  https://openai.com/business/guides-and-resources/a-practical-guide-to-building-ai-agents/.
 - OpenClaw agent-loop/context/loop-detection docs: bounded observe/act loops,
   context accumulation, and loop detection; see https://docs.openclaw.ai.
 - VisHarness multi-turn visual expert routing: evidence-gathering visual agent

@@ -42685,6 +42685,20 @@ async function cancelRfDetrTrainingJobRequest() {
     function formatClassSplitQwenDecision(result) {
         const decision = String(result?.decision || "").trim();
         const targetClass = String(result?.target_class || "").trim();
+        const dualConflict = result && typeof result.dual_bbox_conflict === "object" ? result.dual_bbox_conflict : null;
+        const dualResolution = String(result?.dual_bbox_resolution || "not_applicable").trim();
+        if (dualConflict && dualResolution === "overlap_box_class") {
+            return targetClass ? `Resolve dual bbox: switch class to ${targetClass}` : "Resolve dual bbox: switch class";
+        }
+        if (dualConflict && dualResolution === "current_box_class") {
+            return "Resolve dual bbox: confirm current class";
+        }
+        if (dualConflict && dualResolution === "both_valid_overlapping_objects") {
+            return "Dual bbox: both classes may be valid";
+        }
+        if (dualConflict && dualResolution === "uncertain_or_neither") {
+            return "Dual bbox: unresolved";
+        }
         const guarded = result && typeof result.guarded_recommendation === "object"
             ? result.guarded_recommendation
             : null;
@@ -42708,6 +42722,41 @@ async function cancelRfDetrTrainingJobRequest() {
             return "Skip / human review";
         }
         return "Waiting for decision";
+    }
+
+    function getClassSplitDualBBoxConflict(item, point, result = null) {
+        const sources = [
+            result?.dual_bbox_conflict,
+            point?.dual_bbox_conflict,
+            item?.dual_bbox_conflict,
+        ];
+        for (const source of sources) {
+            if (source && typeof source === "object" && source.enabled !== false) {
+                return source;
+            }
+        }
+        return null;
+    }
+
+    function formatClassSplitDualBBoxConflict(conflict, currentClass = "") {
+        if (!conflict || typeof conflict !== "object") {
+            return "";
+        }
+        const otherClass = String(conflict.other_class_name || conflict.class_name || "").trim();
+        const current = String(conflict.current_class || currentClass || "").trim();
+        const iou = Number(conflict.iou);
+        const cover = Number(conflict.target_area_covered);
+        const parts = [];
+        if (current || otherClass) {
+            parts.push(`${current || "current"} vs ${otherClass || "overlap"}`);
+        }
+        if (Number.isFinite(iou)) {
+            parts.push(`IoU ${iou.toFixed(2)}`);
+        }
+        if (Number.isFinite(cover)) {
+            parts.push(`target cover ${Math.round(cover * 100)}%`);
+        }
+        return parts.join(" • ");
     }
 
     function renderClassSplitQwenReviewBlock(pointId) {
@@ -42763,6 +42812,12 @@ async function cancelRfDetrTrainingJobRequest() {
                 `</div>`,
             ].join("")
             : "";
+        const dualConflict = getClassSplitDualBBoxConflict(null, null, result);
+        const dualResolution = String(result?.dual_bbox_resolution || "not_applicable").trim();
+        const dualConflictLabel = formatClassSplitDualBBoxConflict(dualConflict, result?.current_class || "");
+        const dualHtml = dualConflict
+            ? `<span>dual-bbox ${escapeHtml(dualResolution.replace(/_/g, " "))}${dualConflictLabel ? ` • ${escapeHtml(dualConflictLabel)}` : ""}</span>`
+            : "";
         const evidenceHtml = visibleEvidence.length
             ? `<div class="class-split-qwen-review__evidence">${visibleEvidence.map((item) => {
                 const url = String(item?.artifact_url || "");
@@ -42776,6 +42831,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 `<strong>${escapeHtml(formatClassSplitQwenDecision(result))}</strong>`,
                 `<span>confidence ${Math.round((Number(result.confidence) || 0) * 100)}% • ${escapeHtml(result.reviewed_by_model || "")}</span>`,
                 dispositionHtml,
+                dualHtml,
                 `<span>overlap ${escapeHtml(result.overlap_assessment || "n/a")} • anchors current ${escapeHtml(result.anchor_evidence_current || "n/a")} / suggested ${escapeHtml(result.anchor_evidence_suggested || "n/a")}</span>`,
                 result.rationale_short ? `<p>${escapeHtml(result.rationale_short)}</p>` : "",
                 result.counter_evidence ? `<p><em>Counter-evidence:</em> ${escapeHtml(result.counter_evidence)}</p>` : "",
@@ -42830,10 +42886,15 @@ async function cancelRfDetrTrainingJobRequest() {
             const pointId = String(item.point_id || "");
             const currentClass = String(point?.class_name || item.class_name || "").trim();
             const suggestedClass = String(item.suggested_neighbor_class || "").trim();
+            const dualConflict = getClassSplitDualBBoxConflict(item, point);
+            const dualOtherClass = String(dualConflict?.other_class_name || dualConflict?.class_name || "").trim();
+            const dualConflictLabel = formatClassSplitDualBBoxConflict(dualConflict, currentClass);
             const suggestedClassAvailable = suggestedClass && classNames.includes(suggestedClass);
+            const dualOtherClassAvailable = dualOtherClass && classNames.includes(dualOtherClass);
             const qwenReview = getClassSplitQwenReviewForPoint(pointId);
             const qwenBusy = isClassSplitQwenReviewActive(qwenReview);
             const qwenResult = qwenReview?.result || null;
+            const displayedTargetClass = dualOtherClass || suggestedClass;
             const qwenGuarded = qwenResult && typeof qwenResult.guarded_recommendation === "object"
                 ? qwenResult.guarded_recommendation
                 : null;
@@ -42848,6 +42909,8 @@ async function cancelRfDetrTrainingJobRequest() {
                     : "";
             const preferredTargetClass = classNames.includes(qwenPreferredTarget)
                 ? qwenPreferredTarget
+                : dualOtherClassAvailable
+                    ? dualOtherClass
                 : suggestedClassAvailable
                     ? suggestedClass
                     : "";
@@ -42865,14 +42928,21 @@ async function cancelRfDetrTrainingJobRequest() {
                     ? `<img class="class-split-wrong-item__preview" src="${escapeHtml(thumbUrl)}" alt="Object context crop" loading="lazy" data-context-point-id="${escapeHtml(pointId)}">`
                     : `<div class="class-split-wrong-item__preview" aria-hidden="true"></div>`,
                 `<div class="class-split-wrong-item__body">`,
-                `<strong>${escapeHtml(currentClass || "current class")} → ${escapeHtml(suggestedClass || "neighbor class")}</strong>`,
+                `<strong>${escapeHtml(currentClass || "current class")} → ${escapeHtml(displayedTargetClass || "review target")}</strong>`,
+                dualConflict
+                    ? `<span class="class-split-wrong-item__badge class-split-wrong-item__badge--dual">Dual-box conflict • ${escapeHtml(dualConflictLabel || "near-identical cross-class boxes")}</span>`
+                    : "",
+                dualConflict
+                    ? `<span>Qwen question: choose ${escapeHtml(currentClass || "current class")} vs ${escapeHtml(dualOtherClass || "overlap class")} vs both-valid overlap vs unresolved.</span>`
+                    : "",
                 suggestedClass ? `<span>Suggested target: ${escapeHtml(suggestedClass)}</span>` : "",
+                dualOtherClass && dualOtherClass !== suggestedClass ? `<span>Overlapping target: ${escapeHtml(dualOtherClass)}</span>` : "",
                 `<span>${Math.round(score * 100)}% suspicion • ${escapeHtml(item.image_relpath || "")}</span>`,
                 `<div class="class-split-wrong-item__actions">`,
                 `<button type="button" class="training-button secondary" data-action="jump-instance" data-point-id="${escapeHtml(pointId)}">See instance</button>`,
                 `<button type="button" class="training-button secondary" data-action="correct-class" data-point-id="${escapeHtml(pointId)}">Confirm current class</button>`,
                 `<button type="button" class="training-button secondary" data-action="skip-wrong" data-point-id="${escapeHtml(pointId)}">Skip</button>`,
-                `<button type="button" class="training-button secondary" data-action="qwen-review" data-point-id="${escapeHtml(pointId)}"${qwenBusy ? " disabled" : ""}>${qwenBusy ? "Qwen reviewing ..." : "Review with Qwen"}</button>`,
+                `<button type="button" class="training-button secondary" data-action="qwen-review" data-point-id="${escapeHtml(pointId)}"${qwenBusy ? " disabled" : ""}>${qwenBusy ? "Qwen reviewing ..." : dualConflict ? "Review dual bbox with Qwen" : "Review with Qwen"}</button>`,
                 `<select data-action="target-class" data-point-id="${escapeHtml(pointId)}">${options}</select>`,
                 `<button type="button" class="training-button" data-action="reassign-class" data-point-id="${escapeHtml(pointId)}">${escapeHtml(preferredTargetClass ? `Switch class to ${preferredTargetClass}` : "Reassign")}</button>`,
                 `</div>`,

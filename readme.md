@@ -50,47 +50,6 @@ python3 -m http.server 8080 -d ybat-master
 
 Then open `http://127.0.0.1:8080/tator.html`.
 
-<details>
-<summary>Workflow demos</summary>
-
-Tator lets you use SAM to refine bounding boxes. Draw a rough box, run SAM, and
-turn the rough annotation into a tighter object outline before accepting it.
-
-[Place GIF of SAM bounding-box refinement here]
-
-Tator lets you turn one labeled dataset into the context for the next labeling
-session. Register or upload a dataset, inspect its health, edit its label
-glossary, and open it for annotation without losing track of where the images
-came from.
-
-[Place GIF of dataset registration and glossary editing here]
-
-Tator lets you use Qwen as visual context while you label. Generate captions or
-windowed captions, feed that context back into the annotation flow, and keep the
-final boxes under human control.
-
-[Place GIF of Qwen captioning inside the labeling flow here]
-
-Tator lets you use SAM3 with project vocabulary instead of generic prompts.
-Explore glossary terms, expand prompt language, and use text or visual prompts
-to find objects that ordinary detector passes miss.
-
-[Place GIF of SAM3 vocabulary or prompt exploration here]
-
-Tator lets you package repeatable prelabeling logic as an Ensemble Detection
-Recipe. Build broad candidate pools, calibrate them against reviewed labels, and
-reuse the recipe on the next image batch.
-
-[Place GIF of EDR building, calibration, or application here]
-
-Tator lets you train and switch between local helpers from the UI. CLIP/DINO,
-SAM3, YOLO, RF-DETR, and Qwen workflows can all be selected close to the review
-loop instead of living in separate scripts.
-
-[Place GIF of model training and active-model selection here]
-
-</details>
-
 ## What Tator Helps With
 
 - Start a dataset from raw images with a browser labeling UI.
@@ -159,6 +118,8 @@ context note.
 
 Tator supports three dataset patterns:
 
+![Dataset management workflow](docs/assets/readme-workflows/02-dataset-management.png)
+
 - **Upload a dataset** when you want Tator to own a copy. YOLO and YOLO-seg are
   the preferred internal formats; COCO uploads are converted where possible.
   Managed deletes move the backend-owned folder into a restoreable trash area
@@ -207,6 +168,8 @@ reject items, preview the accepted outputs, and download the kept data as a ZIP.
 Export modes support originals, aspect-preserving resize, stretch resize, center
 crop, and fixed-size tiling.
 
+![Data ingestion workflow](docs/assets/readme-workflows/03-data-ingestion.png)
+
 Reference profiles can be downloaded and re-uploaded as ZIP bundles so a local
 dataset can reuse the same trained baseline later. Matching reference-profile
 builds are reused by signature, and the Data Ingestion UI exposes a media/view
@@ -243,6 +206,8 @@ lives in
 
 The Label Images tab is the everyday workspace.
 
+![Assisted labeling workflow](docs/assets/readme-workflows/01-assisted-labeling.png)
+
 - Draw boxes manually and export labels.
 - Optionally show an image value score based on the active image's boxes and how
   they improve rare or missing class coverage in the loaded dataset.
@@ -275,6 +240,8 @@ The Label Images tab is the everyday workspace.
 The output remains an annotation draft. The UI is built around fast accept,
 correct, and reject loops.
 
+![Class Split and Qwen review workflow](docs/assets/readme-workflows/04-class-split-qwen-review.png)
+
 The top-right `Dark` button toggles the standard dark theme. Double-click the
 same button to switch into the hidden Pip-Boy-inspired terminal skin. In Pip-Boy
 mode, single-click the `Pip` button to switch between green and amber; double-click
@@ -291,6 +258,8 @@ Qwen is the local VLM path. In this repo it is used for:
 - Qwen dataset upload/build workflows
 - Qwen model activation, settings, unload, and training job endpoints
 - optional qwen-agent adapters for local tool-calling experiments
+
+![Qwen and SAM3 vocabulary workflow](docs/assets/readme-workflows/05-qwen-sam3-vocabulary.png)
 
 The portable default model name is `Qwen/Qwen3-VL-4B-Instruct`. Apple Silicon
 can use MLX-VLM when installed; Linux/CUDA uses the Transformers path. Runtime
@@ -422,6 +391,8 @@ Tator keeps helper models close to the annotation workflow:
   selection, and run promotion/deletion.
 - **Qwen**: model registry, settings, cache management, and training jobs.
 
+![Training and runtime workflow](docs/assets/readme-workflows/07-training-runtime.png)
+
 Heavy jobs acquire an automation lock in the UI so competing GPU-heavy actions
 do not run over each other.
 
@@ -434,6 +405,8 @@ proven setup.
 
 Use EDR when a project is past the first few labels and you want repeatable
 automation for extension batches.
+
+![EDR recipe workflow](docs/assets/readme-workflows/06-edr-recipes.png)
 
 <details>
 <summary>EDR details</summary>

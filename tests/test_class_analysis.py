@@ -1,7 +1,9 @@
 import asyncio
 import copy
+import inspect
 import json
 import math
+import re
 import types
 from io import BytesIO
 from pathlib import Path
@@ -221,6 +223,59 @@ def test_class_analysis_flags_neighbor_disagreement_only_in_all_classes():
     assert all("class_cluster_id" not in point for point in selected_class["points"])
 
 
+def test_class_analysis_marks_dual_bbox_conflict_on_near_identical_cross_class_boxes():
+    records = [
+        _record("p0", "car"),
+        _record("p1", "boat"),
+        _record("p2", "boat"),
+        _record("p3", "boat"),
+        _record("p4", "car"),
+        _record("p5", "car"),
+    ]
+    records[0]["image_relpath"] = "shared.jpg"
+    records[1]["image_relpath"] = "shared.jpg"
+    records[0]["bbox_xyxy"] = [10, 20, 110, 120]
+    records[1]["bbox_xyxy"] = [11, 20, 111, 120]
+    embeddings = np.asarray(
+        [
+            [1.0, 0.0, 0.0],
+            [1.0, 0.01, 0.0],
+            [1.0, -0.01, 0.0],
+            [0.99, 0.02, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.99, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+
+    result = api._class_analysis_build_result(
+        records,
+        embeddings,
+        summary={"analysis_scope": "all_classes"},
+        projection="pca",
+        projection_neighbor_k=15,
+        neighbor_k=3,
+        seed=13,
+    )
+
+    p0 = next(point for point in result["points"] if point["point_id"] == "p0")
+    conflict = p0["dual_bbox_conflict"]
+    assert p0["is_dual_bbox_conflict"] is True
+    assert "dual_bbox_conflict" in p0["review_signals"]
+    assert conflict["review_mode"] == "dual_bbox_class_resolution"
+    assert conflict["other_class_name"] == "boat"
+    assert conflict["iou"] >= 0.98
+    candidate = next(item for item in result["wrong_class_candidates"] if item["point_id"] == "p0")
+    assert candidate["is_dual_bbox_conflict"] is True
+    assert candidate["dual_bbox_conflict"]["other_class_name"] == "boat"
+    same_class_candidate = next(item for item in result["wrong_class_candidates"] if item["point_id"] == "p1")
+    assert same_class_candidate["wrong_class_review_reason"] == "dual_bbox_conflict"
+    assert same_class_candidate["embedding_wrong_class_suspicion"] < same_class_candidate["wrong_class_suspicion"]
+    assert same_class_candidate["dual_bbox_conflict"]["other_class_name"] == "car"
+    assert result["summary"]["dual_bbox_conflict_count"] >= 2
+
+
 def test_class_analysis_qwen_review_parses_tool_call_payloads():
     payload, error = api._class_analysis_qwen_review_parse_payload(
         '<tool_call>{"name":"inspect_target_context","arguments":{}}</tool_call>'
@@ -400,7 +455,14 @@ def test_class_analysis_qwen_review_compact_final_schema_expands_to_full_audit_p
 
     assert "anchor_evidence_current" not in required
     assert "evidence_ids" not in required
-    assert {"decision", "final_class", "current_evidence", "suggested_evidence"} <= required
+    assert {
+        "decision",
+        "final_class",
+        "current_evidence",
+        "suggested_evidence",
+        "specificity_alignment",
+        "target_background_contrast",
+    } <= required
 
     expanded = api._class_analysis_qwen_review_expand_compact_final(
         {
@@ -418,6 +480,8 @@ def test_class_analysis_qwen_review_compact_final_schema_expands_to_full_audit_p
             "global_context_evidence": "strong",
             "overlap_assessment": "no material overlap",
             "overlap_explains_candidate_similarity": False,
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
             "visible_target_cues": ["compact road-vehicle body", "visible cargo bed"],
             "rationale_short": "clean pickup-like light vehicle",
         },
@@ -691,6 +755,8 @@ def test_class_analysis_qwen_review_compact_uncertain_class_alias_maps_to_sugges
             "global_context_evidence": "strong",
             "overlap_assessment": "clear",
             "overlap_explains_candidate": False,
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
             "visible_target_cues": ["rectangular panel surface", "grid-like panel texture"],
             "rationale": "target shows a solar panel",
         },
@@ -961,6 +1027,703 @@ def test_class_analysis_qwen_review_blocks_class_change_on_material_overlap():
     assert any("overlap decomposition" in reason for reason in final["advisory_reasons"])
 
 
+def test_class_analysis_qwen_review_allows_verifier_backed_partial_overlap_rebuttal():
+    result = {"summary": {"labelmap": ["Truck", "Building"]}}
+    point = {
+        "point_id": "p0",
+        "class_name": "Truck",
+        "suggested_neighbor_class": "Building",
+    }
+    clear_quality = {
+        "tier": "clear",
+        "bbox_width": 90.0,
+        "bbox_height": 60.0,
+        "bbox_min_dim": 60.0,
+        "bbox_area": 5400.0,
+        "crop_contrast": 50.0,
+        "crop_dynamic_range": 160.0,
+        "crop_sharpness": 18.0,
+        "edge_clipped": False,
+        "reasons": ["usable"],
+    }
+    evidence_ids = {"target_context_1", "target_detail_2", "source_clean_3", "zoom_region_9"}
+    evidence_ledger = {
+        "clean_visual_evidence_ids": sorted(evidence_ids),
+        "clean_target_source_evidence_ids": sorted(evidence_ids),
+        "rows": [
+            {"evidence_id": "target_context_1", "kind": "target_context", "use": "clean_visual"},
+            {"evidence_id": "target_detail_2", "kind": "target_detail", "use": "clean_visual"},
+            {"evidence_id": "source_clean_3", "kind": "source_clean", "use": "clean_visual"},
+            {"evidence_id": "zoom_region_9", "kind": "zoom_region", "use": "clean_visual"},
+        ],
+        "overlap_decomposition": {
+            "overlaps": [
+                {
+                    "point_id": "p1",
+                    "class_name": "OtherClass",
+                    "relation": "partial_contamination",
+                    "target_area_covered": 0.18,
+                    "other_area_covered": 0.22,
+                    "iou": 0.08,
+                }
+            ]
+        },
+    }
+
+    final = api._class_analysis_qwen_review_validate_final(
+        {
+            "decision": "accept_suggested",
+            "target_class": "Building",
+            "confidence": 0.88,
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "partial_contamination",
+            "overlap_explains_candidate_similarity": False,
+            "overlap_adjudication_verified": True,
+            "anchor_evidence_current": "weak",
+            "anchor_evidence_suggested": "moderate",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "mixed",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "questions_current",
+            "same_image_embedding_evidence": "questions_current",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "glossary_or_guidance_used": True,
+            "evidence_ids": sorted(evidence_ids),
+            "visible_target_cues": ["fixed rectangular roof", "corrugated roof texture"],
+            "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+            "rationale_short": (
+                "Target pixels show fixed rectangular roof and corrugated texture; "
+                "overlap does not explain the target-contained building features."
+            ),
+            "counter_evidence": "Truck anchors are only a moderate match.",
+            "human_review_needed": True,
+        },
+        result,
+        point,
+        evidence_ids,
+        clear_quality,
+        evidence_ledger,
+    )
+
+    assert final["decision"] == "accept_suggested"
+    assert final["target_class"] == "Building"
+    assert final["overlap_adjudication_verified"] is True
+    assert final["guardrail_reasons"] == []
+    assert any("moderate suggested-anchor" in reason for reason in final["advisory_reasons"])
+    assert any("partial overlap present" in reason for reason in final["advisory_reasons"])
+
+
+def test_class_analysis_qwen_review_verified_overlap_path_does_not_depend_on_rebuttal_regex():
+    result = {"summary": {"labelmap": ["CurrentClass", "SuggestedClass"]}}
+    point = {
+        "point_id": "p0",
+        "class_name": "CurrentClass",
+        "suggested_neighbor_class": "SuggestedClass",
+    }
+    clear_quality = {
+        "tier": "clear",
+        "bbox_width": 90.0,
+        "bbox_height": 60.0,
+        "bbox_min_dim": 60.0,
+        "bbox_area": 5400.0,
+        "crop_contrast": 50.0,
+        "crop_dynamic_range": 160.0,
+        "crop_sharpness": 18.0,
+        "edge_clipped": False,
+        "reasons": ["usable"],
+    }
+    evidence_ids = {"target_context_1", "target_detail_2", "source_clean_3", "zoom_region_9"}
+    evidence_ledger = {
+        "clean_visual_evidence_ids": sorted(evidence_ids),
+        "clean_target_source_evidence_ids": sorted(evidence_ids),
+        "rows": [
+            {"evidence_id": "target_context_1", "kind": "target_context", "use": "clean_visual"},
+            {"evidence_id": "target_detail_2", "kind": "target_detail", "use": "clean_visual"},
+            {"evidence_id": "source_clean_3", "kind": "source_clean", "use": "clean_visual"},
+            {"evidence_id": "zoom_region_9", "kind": "zoom_region", "use": "clean_visual"},
+        ],
+    }
+
+    final = api._class_analysis_qwen_review_validate_final(
+        {
+            "decision": "accept_suggested",
+            "target_class": "SuggestedClass",
+            "confidence": 0.88,
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "partial_contamination",
+            "overlap_explains_candidate_similarity": False,
+            "overlap_adjudication_verified": True,
+            "anchor_evidence_current": "weak",
+            "anchor_evidence_suggested": "moderate",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "mixed",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "neutral",
+            "same_image_embedding_evidence": "questions_current",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "glossary_or_guidance_used": False,
+            "evidence_ids": sorted(evidence_ids),
+            "visible_target_cues": ["spiral conduit ridges", "triangular bracket lattice"],
+            "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+            "rationale_short": "Verifier isolated target-specific visible features in the clean crop.",
+            "counter_evidence": "Current-class anchors are weak.",
+            "human_review_needed": True,
+        },
+        result,
+        point,
+        evidence_ids,
+        clear_quality,
+        evidence_ledger,
+    )
+
+    assert final["decision"] == "accept_suggested"
+    assert final["target_class"] == "SuggestedClass"
+    assert final["overlap_adjudication_verified"] is True
+    assert final["guardrail_reasons"] == []
+
+
+def test_class_analysis_qwen_review_overlap_guarded_suggestion_runs_cue_verifier():
+    final_result = {
+        "decision": "skip_uncertain",
+        "guarded_recommendation": {
+            "blocked": True,
+            "decision": "accept_suggested",
+            "current_class": "Truck",
+            "suggested_neighbor_class": "Building",
+            "target_class": "Building",
+            "backend_tier": "clear",
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "partial_contamination",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "visible_target_cues": ["fixed rectangular roof", "corrugated roof texture"],
+            "guardrail_reasons": [
+                "accept_suggested requires strong suggested-anchor agreement, got moderate",
+                "overlap assessment partial_contamination is too entangled for relabel recommendation",
+            ],
+        },
+    }
+
+    assert api._class_analysis_qwen_review_should_run_cue_verifier(final_result) is True
+
+    payload, error = api._class_analysis_qwen_review_parse_cue_verifier_payload(
+        json.dumps(
+            {
+                "verified": True,
+                "target_class": "Building",
+                "cue_confidence": 0.91,
+                "positive_visible_target_cues": ["fixed rectangular roof", "corrugated roof texture"],
+                "current_class_positive_cues": [],
+                "current_class_plausible": False,
+                "current_class_plausibility_reason": "No truck-valid shape or parts are visible in the clean target pixels.",
+                "overlap_rebutted": True,
+                "overlap_risk": "target_specific",
+                "overlap_rebuttal": "Overlap does not explain the roof texture inside the target.",
+                "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+                "rejection_reason": "",
+            }
+        ),
+        current_class="Truck",
+        target_class="Building",
+        evidence_ids={"target_detail_2", "source_clean_3"},
+    )
+
+    assert error is None
+    assert payload["verified"] is True
+    assert payload["overlap_rebutted"] is True
+    assert payload["overlap_risk"] == "target_specific"
+
+    reconciled_payload, error = api._class_analysis_qwen_review_parse_cue_verifier_payload(
+        json.dumps(
+            {
+                "verified": True,
+                "target_class": "Building",
+                "cue_confidence": 0.92,
+                "positive_visible_target_cues": ["rectangular footprint", "corrugated roof texture"],
+                "current_class_positive_cues": [],
+                "current_class_plausible": False,
+                "current_class_plausibility_reason": "Clean target pixels show a fixed rectangular roof, not a truck-valid body.",
+                "overlap_rebutted": True,
+                "overlap_risk": "overlap_explains",
+                "overlap_rebuttal": (
+                    "The rectangular footprint and corrugated roof texture are intrinsic "
+                    "to the target object's geometry, not merely artifacts of the partial overlap."
+                ),
+                "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+                "rejection_reason": "",
+            }
+        ),
+        current_class="Truck",
+        target_class="Building",
+        evidence_ids={"target_detail_2", "source_clean_3"},
+    )
+
+    assert error is None
+    assert reconciled_payload["verified"] is True
+    assert reconciled_payload["overlap_risk"] == "target_specific"
+    assert reconciled_payload["overlap_risk_reconciled"] is True
+
+
+def test_class_analysis_qwen_review_visible_cues_are_domain_generic():
+    cues = api._class_analysis_qwen_review_normalize_visible_cues(
+        [
+            "matches class",
+            "visible target",
+            "not a target object",
+            "overhead scene context",
+            "dark specular highlight",
+            "accordion folded fabric boundary",
+            "spiral translucent membrane pattern",
+            "hexagonal clasp geometry",
+        ],
+        current_class="SourceLabel",
+        suggested_class="CandidateLabel",
+        target_class="CandidateLabel",
+    )
+
+    assert cues == [
+        "accordion folded fabric boundary",
+        "spiral translucent membrane pattern",
+        "hexagonal clasp geometry",
+    ]
+    source = inspect.getsource(api._class_analysis_qwen_review_normalize_visible_cues)
+    assert "concrete_visual_tokens" not in source
+    for benchmark_term in ("wheel", "roof", "pole", "panel", "cab", "hull", "cargo"):
+        assert re.search(rf"\b{re.escape(benchmark_term)}\b", source) is None
+
+
+def test_class_analysis_qwen_review_moderate_anchor_requires_current_plausibility_verifier():
+    result = {"summary": {"labelmap": ["Truck", "Building"]}}
+    point = {
+        "point_id": "p0",
+        "class_name": "Truck",
+        "suggested_neighbor_class": "Building",
+    }
+    clear_quality = {
+        "tier": "clear",
+        "bbox_width": 90.0,
+        "bbox_height": 60.0,
+        "bbox_min_dim": 60.0,
+        "bbox_area": 5400.0,
+        "crop_contrast": 50.0,
+        "crop_dynamic_range": 160.0,
+        "crop_sharpness": 18.0,
+        "edge_clipped": False,
+        "reasons": ["usable"],
+    }
+    evidence_ids = {"target_context_1", "target_detail_2", "source_clean_3", "zoom_region_9"}
+    evidence_ledger = {
+        "clean_visual_evidence_ids": sorted(evidence_ids),
+        "clean_target_source_evidence_ids": sorted(evidence_ids),
+        "rows": [
+            {"evidence_id": "target_context_1", "kind": "target_context", "use": "clean_visual"},
+            {"evidence_id": "target_detail_2", "kind": "target_detail", "use": "clean_visual"},
+            {"evidence_id": "source_clean_3", "kind": "source_clean", "use": "clean_visual"},
+            {"evidence_id": "zoom_region_9", "kind": "zoom_region", "use": "clean_visual"},
+        ],
+    }
+
+    final = api._class_analysis_qwen_review_validate_final(
+        {
+            "decision": "accept_suggested",
+            "target_class": "Building",
+            "confidence": 0.88,
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "none",
+            "overlap_explains_candidate_similarity": False,
+            "anchor_evidence_current": "weak",
+            "anchor_evidence_suggested": "moderate",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "mixed",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "insufficient",
+            "same_image_embedding_evidence": "insufficient",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "glossary_or_guidance_used": True,
+            "evidence_ids": sorted(evidence_ids),
+            "visible_target_cues": ["rectangular roof", "flat roof surface"],
+            "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+            "rationale_short": "Target looks like a rectangular fixed roof.",
+            "counter_evidence": "Truck anchors are only a moderate match.",
+            "human_review_needed": True,
+        },
+        result,
+        point,
+        evidence_ids,
+        clear_quality,
+        evidence_ledger,
+    )
+
+    assert final["decision"] == "skip_uncertain"
+    assert any("current-class plausibility verification" in reason for reason in final["guardrail_reasons"])
+    assert api._class_analysis_qwen_review_should_run_cue_verifier(final) is True
+
+
+def test_class_analysis_qwen_review_cue_verifier_refuses_current_class_plausibility():
+    parsed, error = api._class_analysis_qwen_review_parse_cue_verifier_payload(
+        json.dumps(
+            {
+                "verified": True,
+                "target_class": "Building",
+                "cue_confidence": 0.94,
+                "positive_visible_target_cues": ["arched lattice canopy", "riveted panel seam"],
+                "current_class_positive_cues": ["long trailer-like rectangular body"],
+                "current_class_plausibility_basis": "direct_positive_cues",
+                "current_class_plausible": True,
+                "current_class_plausibility_reason": (
+                    "The clean target still plausibly fits Truck because it is an isolated long "
+                    "rectangular trailer-like body."
+                ),
+                "overlap_rebutted": True,
+                "overlap_risk": "target_specific",
+                "overlap_rebuttal": "Overlap does not explain the arched canopy and panel seam.",
+                "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+                "rejection_reason": "",
+            }
+        ),
+        current_class="Truck",
+        target_class="Building",
+        evidence_ids={"target_detail_2", "source_clean_3"},
+    )
+
+    assert error is None
+    assert parsed["verified"] is False
+    assert parsed["current_class_plausible"] is True
+    assert "trailer-like body" in parsed["rejection_reason"]
+
+
+def test_class_analysis_qwen_review_cue_verifier_reconciles_hypothetical_plausibility():
+    parsed, error = api._class_analysis_qwen_review_parse_cue_verifier_payload(
+        json.dumps(
+            {
+                "verified": True,
+                "target_class": "SuggestedClass",
+                "cue_confidence": 0.91,
+                "positive_visible_target_cues": [
+                    "spiral translucent membrane pattern",
+                    "hexagonal clasp geometry",
+                ],
+                "current_class_positive_cues": [],
+                "current_class_plausibility_basis": "hypothetical_or_uncertain",
+                "current_class_plausible": True,
+                "current_class_plausibility_reason": (
+                    "The current class is only imaginable as an edge case, with no direct "
+                    "current-class pixels visible."
+                ),
+                "overlap_rebutted": True,
+                "overlap_risk": "target_specific",
+                "overlap_rebuttal": "Overlap does not explain the membrane and clasp features.",
+                "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+                "rejection_reason": "",
+            }
+        ),
+        current_class="CurrentClass",
+        target_class="SuggestedClass",
+        evidence_ids={"target_detail_2", "source_clean_3"},
+    )
+
+    assert error is None
+    assert parsed["verified"] is True
+    assert parsed["raw_current_class_plausible"] is True
+    assert parsed["current_class_plausible"] is False
+    assert parsed["current_class_plausibility_basis"] == "hypothetical_or_uncertain"
+
+
+def test_class_analysis_qwen_review_cue_verifier_reconciles_overlap_risk_contradiction():
+    assert api._class_analysis_qwen_review_cue_verifier_text_rebuts_overlap(
+        "The partial contamination is accounted for; the target's own pixels clearly display the defining features."
+    )
+
+    parsed, error = api._class_analysis_qwen_review_parse_cue_verifier_payload(
+        json.dumps(
+            {
+                "verified": False,
+                "target_class": "SuggestedClass",
+                "cue_confidence": 0.92,
+                "positive_visible_target_cues": [
+                    "spiral translucent membrane pattern",
+                    "hexagonal clasp geometry",
+                ],
+                "current_class_positive_cues": [],
+                "current_class_plausibility_basis": "none",
+                "current_class_plausible": False,
+                "current_class_plausibility_reason": "No direct current-class cue is visible.",
+                "overlap_rebutted": True,
+                "overlap_risk": "overlap_explains",
+                "overlap_rebuttal": (
+                    "Overlap does not explain the membrane and clasp features inside the target pixels."
+                ),
+                "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+                "rejection_reason": "Overlap risk remained marked as overlap_explains.",
+            }
+        ),
+        current_class="CurrentClass",
+        target_class="SuggestedClass",
+        evidence_ids={"target_detail_2", "source_clean_3"},
+    )
+
+    assert error is None
+    assert parsed["verified"] is True
+    assert parsed["raw_verified"] is False
+    assert parsed["reconciled_to_verified"] is True
+    assert parsed["overlap_risk"] == "target_specific"
+    assert parsed["overlap_risk_reconciled"] is True
+
+
+def test_class_analysis_qwen_review_cue_verifier_rejects_shared_target_current_cues():
+    parsed, error = api._class_analysis_qwen_review_parse_cue_verifier_payload(
+        json.dumps(
+            {
+                "verified": True,
+                "target_class": "SuggestedClass",
+                "cue_confidence": 0.95,
+                "positive_visible_target_cues": [
+                    "ribbed membrane surface",
+                    "hexagonal clasp geometry",
+                ],
+                "current_class_positive_cues": [
+                    "ribbed membrane surface",
+                    "hexagonal clasp geometry",
+                ],
+                "current_class_plausibility_basis": "shared_generic_cues",
+                "current_class_plausible": False,
+                "current_class_plausibility_reason": "Only shared generic cues are visible.",
+                "overlap_rebutted": True,
+                "overlap_risk": "target_specific",
+                "overlap_rebuttal": "Overlap does not explain the shared surface details.",
+                "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+                "rejection_reason": "",
+            }
+        ),
+        current_class="CurrentClass",
+        target_class="SuggestedClass",
+        evidence_ids={"target_detail_2", "source_clean_3"},
+    )
+
+    assert error is None
+    assert parsed["verified"] is False
+    assert parsed["shared_current_class_positive_cues"]
+    assert "independent positive target cues" in parsed["rejection_reason"]
+
+
+def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class_switch():
+    result = {"summary": {"labelmap": ["Truck", "LightVehicle"]}}
+    point = {
+        "point_id": "p0",
+        "class_name": "Truck",
+        "suggested_neighbor_class": "LightVehicle",
+        "dual_bbox_conflict": {
+            "enabled": True,
+            "kind": "near_identical_cross_class_bbox",
+            "review_mode": "dual_bbox_class_resolution",
+            "point_id": "p0",
+            "current_class": "Truck",
+            "other_point_id": "p1",
+            "other_class_name": "LightVehicle",
+            "class_name": "LightVehicle",
+            "classes": ["Truck", "LightVehicle"],
+            "iou": 0.96,
+            "corner_similarity": 0.97,
+            "target_area_covered": 0.98,
+            "other_area_covered": 0.97,
+            "relation": "duplicate_like",
+        },
+    }
+    clear_quality = {
+        "tier": "clear",
+        "bbox_width": 90.0,
+        "bbox_height": 60.0,
+        "bbox_min_dim": 60.0,
+        "bbox_area": 5400.0,
+        "crop_contrast": 50.0,
+        "crop_dynamic_range": 160.0,
+        "crop_sharpness": 18.0,
+        "edge_clipped": False,
+        "reasons": ["usable"],
+    }
+    evidence_ledger = {
+        "clean_visual_evidence_ids": ["target_context_1", "target_detail_2", "zoom_region_8"],
+        "clean_target_source_evidence_ids": ["target_context_1", "target_detail_2", "zoom_region_8"],
+        "rows": [
+            {"evidence_id": "target_context_1", "kind": "target_context", "use": "clean_visual"},
+            {"evidence_id": "target_detail_2", "kind": "target_detail", "use": "clean_visual"},
+            {"evidence_id": "zoom_region_8", "kind": "zoom_region", "use": "clean_visual"},
+        ],
+        "overlap_decomposition": {
+            "overlaps": [
+                {
+                    "point_id": "p1",
+                    "class_name": "LightVehicle",
+                    "relation": "duplicate_like",
+                    "target_area_covered": 0.98,
+                    "other_area_covered": 0.97,
+                    "iou": 0.96,
+                }
+            ]
+        },
+    }
+    instruction = api._class_analysis_qwen_review_final_instruction(
+        required_tools={"inspect_target_context", "inspect_overlap_decomposition", "zoom_source_region_clean"},
+        evidence_ids={"target_context_1", "target_detail_2", "zoom_region_8"},
+        point=point,
+        visual_quality=clear_quality,
+        dual_bbox_conflict=point["dual_bbox_conflict"],
+    )
+    instruction_text = instruction["content"][0]["text"]
+    assert "Dual-bbox conflict mode is active" in instruction_text
+    assert "dual_bbox_resolution" in instruction_text
+
+    expanded = api._class_analysis_qwen_review_expand_compact_final(
+        {
+            "decision": "accept_suggested",
+            "final_class": "LightVehicle",
+            "confidence": 0.9,
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "duplicate_like",
+            "overlap_explains_candidate_similarity": False,
+            "dual_bbox_resolution": "overlap_box_class",
+            "anchor_evidence_current": "weak",
+            "anchor_evidence_suggested": "strong",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "supports_suggested",
+            "global_context_evidence": "strong",
+            "glossary_or_guidance_used": True,
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "visible_target_cues": ["compact vehicle body", "visible windshield"],
+            "supporting_clean_evidence_ids": ["target_detail_2", "zoom_region_8"],
+            "rationale_short": "target pixels match the overlapping LightVehicle box",
+            "counter_evidence": "Truck label is only from the duplicate box metadata.",
+            "human_review_needed": False,
+        },
+        point=point,
+        evidence_ids={"target_context_1", "target_detail_2", "zoom_region_8"},
+        visual_quality=clear_quality,
+        executed_tools={"inspect_target_context", "inspect_target_detail", "zoom_source_region"},
+    )
+    final = api._class_analysis_qwen_review_validate_final(
+        expanded,
+        result,
+        point,
+        {"target_context_1", "target_detail_2", "zoom_region_8"},
+        clear_quality,
+        evidence_ledger,
+    )
+
+    assert expanded["dual_bbox_resolution"] == "overlap_box_class"
+    assert final["decision"] == "accept_suggested"
+    assert final["target_class"] == "LightVehicle"
+    assert final["dual_bbox_resolution"] == "overlap_box_class"
+    assert final["guardrail_reasons"] == []
+    disposition = api._class_analysis_qwen_review_disposition(
+        {
+            **final,
+            "current_class": point["class_name"],
+            "suggested_neighbor_class": point["suggested_neighbor_class"],
+        }
+    )
+    assert disposition["disposition"] == "dual_bbox_switch_overlap_class"
+
+    dynamic_point = {
+        key: value
+        for key, value in point.items()
+        if key != "dual_bbox_conflict"
+    }
+    dynamic_expanded = api._class_analysis_qwen_review_expand_compact_final(
+        dict(expanded["_compact_model_arguments"]),
+        point=dynamic_point,
+        evidence_ids={"target_context_1", "target_detail_2", "zoom_region_8"},
+        visual_quality=clear_quality,
+        executed_tools={"inspect_target_context", "inspect_target_detail", "zoom_source_region"},
+        evidence_ledger=evidence_ledger,
+    )
+    dynamic_final = api._class_analysis_qwen_review_validate_final(
+        dynamic_expanded,
+        result,
+        dynamic_point,
+        {"target_context_1", "target_detail_2", "zoom_region_8"},
+        clear_quality,
+        evidence_ledger,
+    )
+
+    assert dynamic_expanded["dual_bbox_resolution"] == "overlap_box_class"
+    assert dynamic_expanded["dual_bbox_conflict"]["source"] == "overlap_decomposition"
+    assert dynamic_final["decision"] == "accept_suggested"
+    assert dynamic_final["dual_bbox_resolution"] == "overlap_box_class"
+
+    inconsistent_compact = api._class_analysis_qwen_review_expand_compact_final(
+        {
+            "decision": "accept_suggested",
+            "final_class": "LightVehicle",
+            "confidence": 0.92,
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "high_overlap",
+            "overlap_explains_candidate_similarity": True,
+            "dual_bbox_resolution": "both_valid_overlapping_objects",
+            "anchor_evidence_current": "weak",
+            "anchor_evidence_suggested": "moderate",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "mixed",
+            "global_context_evidence": "strong",
+            "glossary_or_guidance_used": True,
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "visible_target_cues": ["compact vehicle body", "visible windshield"],
+            "supporting_clean_evidence_ids": ["target_detail_2", "zoom_region_8"],
+            "rationale_short": "target pixels match the near-identical LightVehicle box, not Truck.",
+            "counter_evidence": "Truck label is only from the duplicate box metadata.",
+            "human_review_needed": False,
+        },
+        point=dynamic_point,
+        evidence_ids={"target_context_1", "target_detail_2", "zoom_region_8"},
+        visual_quality=clear_quality,
+        executed_tools={"inspect_target_context", "inspect_target_detail", "zoom_source_region"},
+        evidence_ledger=evidence_ledger,
+    )
+    inconsistent_final = api._class_analysis_qwen_review_validate_final(
+        inconsistent_compact,
+        result,
+        dynamic_point,
+        {"target_context_1", "target_detail_2", "zoom_region_8"},
+        clear_quality,
+        evidence_ledger,
+    )
+
+    assert inconsistent_compact["overlap_assessment"] == "duplicate_like"
+    assert inconsistent_compact["dual_bbox_resolution"] == "overlap_box_class"
+    assert inconsistent_final["decision"] == "accept_suggested"
+    assert inconsistent_final["target_class"] == "LightVehicle"
+    assert inconsistent_final["dual_bbox_resolution"] == "overlap_box_class"
+    assert "accept_suggested has only moderate suggested-anchor agreement" in inconsistent_final["advisory_reasons"]
+
+
 def test_class_analysis_qwen_review_allows_clear_accept_without_named_class_guard():
     result = {"summary": {"labelmap": ["CurrentClass", "SuggestedClass", "OtherClass"]}}
     point = {
@@ -1014,6 +1777,121 @@ def test_class_analysis_qwen_review_allows_clear_accept_without_named_class_guar
     assert final["decision"] == "accept_suggested"
     assert final["target_class"] == "SuggestedClass"
     assert final["guardrail_reasons"] == []
+
+
+def test_class_analysis_qwen_review_blocks_class_change_when_specificity_is_background_dominated():
+    result = {"summary": {"labelmap": ["CurrentClass", "SuggestedClass"]}}
+    point = {
+        "point_id": "p0",
+        "class_name": "CurrentClass",
+        "suggested_neighbor_class": "SuggestedClass",
+    }
+    clear_quality = {
+        "tier": "clear",
+        "bbox_width": 90.0,
+        "bbox_height": 60.0,
+        "bbox_min_dim": 60.0,
+        "bbox_area": 5400.0,
+        "crop_contrast": 50.0,
+        "crop_dynamic_range": 160.0,
+        "crop_sharpness": 18.0,
+        "edge_clipped": False,
+        "reasons": ["usable"],
+    }
+
+    final = api._class_analysis_qwen_review_validate_final(
+        {
+            "decision": "accept_suggested",
+            "target_class": "SuggestedClass",
+            "confidence": 0.91,
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "none",
+            "overlap_explains_candidate_similarity": False,
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "background_dominated",
+            "anchor_evidence_current": "weak",
+            "anchor_evidence_suggested": "strong",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "mixed",
+            "global_context_evidence": "strong",
+            "glossary_or_guidance_used": False,
+            "visible_target_cues": ["suggested-class texture near target", "scene-compatible surroundings"],
+            "rationale_short": "Suggested class is plausible from surrounding context.",
+            "counter_evidence": "The visible target itself is not distinctive.",
+            "human_review_needed": False,
+        },
+        result,
+        point,
+        {"target_context_1"},
+        clear_quality,
+    )
+
+    assert final["decision"] == "skip_uncertain"
+    assert final["target_class"] == "CurrentClass"
+    assert final["guarded_recommendation"]["target_background_contrast"] == "background_dominated"
+    assert any("target_background_contrast=target_specific" in reason for reason in final["guardrail_reasons"])
+
+
+def test_class_analysis_qwen_review_blocks_expanded_class_change_missing_specificity_audit():
+    result = {"summary": {"labelmap": ["CurrentClass", "SuggestedClass"]}}
+    point = {
+        "point_id": "p0",
+        "class_name": "CurrentClass",
+        "suggested_neighbor_class": "SuggestedClass",
+    }
+    clear_quality = {
+        "tier": "clear",
+        "bbox_width": 90.0,
+        "bbox_height": 60.0,
+        "bbox_min_dim": 60.0,
+        "bbox_area": 5400.0,
+        "crop_contrast": 50.0,
+        "crop_dynamic_range": 160.0,
+        "crop_sharpness": 18.0,
+        "edge_clipped": False,
+        "reasons": ["usable"],
+    }
+
+    expanded = api._class_analysis_qwen_review_expand_compact_final(
+        {
+            "decision": "accept_suggested",
+            "final_class": "SuggestedClass",
+            "confidence": 0.88,
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_current": "weak",
+            "anchor_evidence_suggested": "strong",
+            "local_context_evidence": "strong",
+            "global_context_evidence": "strong",
+            "overlap_assessment": "none",
+            "overlap_explains_candidate_similarity": False,
+            "visible_target_cues": ["rectangular target body", "ribbed target surface"],
+            "rationale_short": "Model omitted the specificity audit fields.",
+        },
+        point=point,
+        evidence_ids={"target_context_1"},
+        visual_quality=clear_quality,
+        executed_tools={"inspect_target_context"},
+    )
+    final = api._class_analysis_qwen_review_validate_final(
+        expanded,
+        result,
+        point,
+        {"target_context_1"},
+        clear_quality,
+    )
+
+    assert expanded["specificity_alignment"] == "insufficient"
+    assert expanded["target_background_contrast"] == "insufficient"
+    assert final["decision"] == "skip_uncertain"
+    assert any("specificity_alignment=supports_suggested" in reason for reason in final["guardrail_reasons"])
 
 
 def test_class_analysis_qwen_review_cue_verifier_promotes_guarded_clear_target(tmp_path, monkeypatch):
@@ -1094,6 +1972,11 @@ def test_class_analysis_qwen_review_cue_verifier_promotes_guarded_clear_target(t
                     "ribbed surface texture",
                 ],
                 "current_class_positive_cues": [],
+                "current_class_plausible": False,
+                "current_class_plausibility_reason": "Clean target pixels do not match the current class concept.",
+                "overlap_rebutted": False,
+                "overlap_risk": "not_applicable",
+                "overlap_rebuttal": "",
                 "supporting_clean_evidence_ids": ["target_context_1", "zoom_region_8"],
                 "rejection_reason": "",
             }
@@ -1132,6 +2015,123 @@ def test_class_analysis_qwen_review_cue_verifier_promotes_guarded_clear_target(t
     ]
     assert promoted["cue_verifier"]["promoted_from_guarded_recommendation"] is True
     assert promoted["applied"] is False
+
+
+def test_class_analysis_qwen_review_cue_verifier_blocks_shared_generic_without_support(tmp_path, monkeypatch):
+    class_root = tmp_path / "class_analysis"
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    parent_id = "ca_cue_verify_generic"
+    (class_root / parent_id).mkdir(parents=True)
+    result = {"summary": {"labelmap": ["CurrentClass", "SuggestedClass"]}}
+    point = {
+        "point_id": "p0",
+        "class_name": "CurrentClass",
+        "suggested_neighbor_class": "SuggestedClass",
+    }
+    clear_quality = {
+        "tier": "clear",
+        "bbox_width": 90.0,
+        "bbox_height": 60.0,
+        "bbox_min_dim": 60.0,
+        "bbox_area": 5400.0,
+        "crop_contrast": 50.0,
+        "crop_dynamic_range": 160.0,
+        "crop_sharpness": 18.0,
+        "edge_clipped": False,
+        "reasons": ["usable"],
+    }
+    evidence_ledger = {
+        "clean_visual_evidence_ids": ["target_context_1", "zoom_region_8"],
+        "clean_target_source_evidence_ids": ["target_context_1", "zoom_region_8"],
+        "rows": [
+            {"evidence_id": "target_context_1", "kind": "target_context", "use": "clean_visual"},
+            {"evidence_id": "zoom_region_8", "kind": "zoom_region", "use": "clean_visual"},
+        ],
+    }
+    initial = api._class_analysis_qwen_review_validate_final(
+        {
+            "decision": "accept_suggested",
+            "target_class": "SuggestedClass",
+            "confidence": 0.91,
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "none",
+            "overlap_explains_candidate_similarity": False,
+            "anchor_evidence_current": "weak",
+            "anchor_evidence_suggested": "strong",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "mixed",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "insufficient",
+            "same_image_embedding_evidence": "insufficient",
+            "glossary_or_guidance_used": False,
+            "visible_target_cues": ["generic target shape"],
+            "supporting_clean_evidence_ids": ["target_context_1"],
+            "rationale_short": "Target uses generic shape language.",
+            "counter_evidence": "CurrentClass is not independently excluded.",
+            "human_review_needed": True,
+        },
+        result,
+        point,
+        {"target_context_1", "zoom_region_8"},
+        clear_quality,
+        evidence_ledger,
+    )
+    assert api._class_analysis_qwen_review_should_run_cue_verifier(initial) is True
+
+    def fake_model_call(*args, **kwargs):
+        return json.dumps(
+            {
+                "verified": True,
+                "target_class": "SuggestedClass",
+                "cue_confidence": 0.93,
+                "positive_visible_target_cues": [
+                    "generic rectangular target outline",
+                    "flat top surface",
+                    "stationary placement",
+                ],
+                "current_class_positive_cues": [],
+                "current_class_plausibility_basis": "shared_generic_cues",
+                "current_class_plausible": False,
+                "current_class_plausibility_reason": "The cues are generic and shared rather than current-class-specific.",
+                "overlap_rebutted": False,
+                "overlap_risk": "not_applicable",
+                "overlap_rebuttal": "",
+                "supporting_clean_evidence_ids": ["target_context_1", "zoom_region_8"],
+                "rejection_reason": "",
+            }
+        )
+
+    monkeypatch.setattr(api, "_class_analysis_qwen_review_model_call", fake_model_call)
+    job = api.ClassAnalysisQwenReviewJob(
+        review_id="cqr_cue_verify_generic",
+        parent_job_id=parent_id,
+        point_id="p0",
+        request={},
+    )
+    guarded = api._class_analysis_qwen_review_try_cue_verifier(
+        job,
+        final_result=initial,
+        final_base_messages=[{"role": "user", "content": [{"type": "text", "text": "base"}]}],
+        point=point,
+        result=result,
+        evidence_ids={"target_context_1", "zoom_region_8"},
+        visual_quality=clear_quality,
+        evidence_ledger=evidence_ledger,
+        labelmap_glossary="",
+        review_guidance="",
+        deterministic_context={},
+        model_id="test-model",
+        executed_tools={"inspect_target_context", "zoom_source_region"},
+        labelmap=["CurrentClass", "SuggestedClass"],
+    )
+
+    assert guarded["decision"] == "skip_uncertain"
+    assert guarded["cue_verifier"]["verified"] is False
+    assert "shared generic" in guarded["cue_verifier"]["rejection_reason"]
 
 
 def test_class_analysis_qwen_review_cue_verifier_repairs_partial_schema(tmp_path, monkeypatch):
@@ -1209,6 +2209,11 @@ def test_class_analysis_qwen_review_cue_verifier_repairs_partial_schema(tmp_path
                     "ribbed surface texture",
                 ],
                 "current_class_positive_cues": [],
+                "current_class_plausible": False,
+                "current_class_plausibility_reason": "Clean target pixels do not match the current class concept.",
+                "overlap_rebutted": False,
+                "overlap_risk": "not_applicable",
+                "overlap_rebuttal": "",
                 "supporting_clean_evidence_ids": ["target_context_1", "zoom_region_8"],
                 "rejection_reason": "",
             }
@@ -1372,6 +2377,11 @@ def test_class_analysis_qwen_review_cue_verifier_refuses_current_class_cues():
                     "ribbed surface texture",
                 ],
                 "current_class_positive_cues": ["round current-class wheel"],
+                "current_class_plausible": True,
+                "current_class_plausibility_reason": "A current-class wheel is visible in the clean target pixels.",
+                "overlap_rebutted": False,
+                "overlap_risk": "not_applicable",
+                "overlap_rebuttal": "",
                 "supporting_clean_evidence_ids": ["target_context_1"],
                 "rejection_reason": "",
             }
@@ -1383,7 +2393,7 @@ def test_class_analysis_qwen_review_cue_verifier_refuses_current_class_cues():
 
     assert error is None
     assert parsed["verified"] is False
-    assert "current-class cues" in parsed["rejection_reason"]
+    assert "current-class wheel" in parsed["rejection_reason"]
 
 
 def test_class_analysis_qwen_review_disposition_separates_guarded_signal():
@@ -1613,6 +2623,8 @@ def test_class_analysis_qwen_review_caps_clear_accept_with_moderate_suggested_an
             "target_evidence": "strong",
             "overlap_assessment": "none",
             "overlap_explains_candidate_similarity": False,
+            "current_class_plausible": False,
+            "current_class_plausibility_reason": "Clean target pixels do not fit CurrentClass.",
             "anchor_evidence_current": "weak",
             "anchor_evidence_suggested": "moderate",
             "local_context_evidence": "strong",
@@ -3342,6 +4354,7 @@ def test_class_analysis_qwen_review_allows_adjacent_not_target_overlap_wording()
             "global_context_evidence": "strong",
             "glossary_or_guidance_used": True,
             "evidence_ids": ["ctx_1"],
+            "visible_target_cues": ["fixed roof plane", "rectangular roof edge"],
             "rationale_short": "Target is a clear building roof. Overlapping containers are adjacent, not the target itself.",
             "counter_evidence": "No explicit counterevidence provided.",
             "human_review_needed": False,
@@ -3658,7 +4671,7 @@ def test_class_analysis_qwen_review_loop_enforces_evidence_and_writes_artifacts(
         [
             '<tool_call>{"name":"route_review","arguments":{"action":"inspect_local_consensus_context","reason_code":"needs_same_image_consensus","confidence":0.78,"rationale_short":"same-image consensus may resolve this"}}</tool_call>',
             "{}}",
-            '{"decision":"accept_suggested","target_class":"boat","confidence":0.82,"visual_quality":"clear","object_visibility":"clear","current_evidence":"weak","suggested_evidence":"strong","target_evidence":"strong","anchor_evidence_current":"weak","anchor_evidence_suggested":"strong","local_context_evidence":"strong","global_context_evidence":"strong","same_image_scale_evidence":"insufficient","same_image_embedding_evidence":"insufficient","overlap_assessment":"none","overlap_explains_candidate_similarity":false,"local_consensus_evidence":"mixed","visible_target_cues":["elongated bright target shape","visible grid texture"],"supporting_clean_evidence_ids":["target_detail_2","zoom_region_9"],"rationale_short":"target evidence and anchors fit better","counter_evidence":"synthetic fixture","human_review_needed":false}',
+            '{"decision":"accept_suggested","target_class":"boat","confidence":0.82,"visual_quality":"clear","object_visibility":"clear","current_evidence":"weak","suggested_evidence":"strong","target_evidence":"strong","anchor_evidence_current":"weak","anchor_evidence_suggested":"strong","local_context_evidence":"strong","global_context_evidence":"strong","same_image_scale_evidence":"insufficient","same_image_embedding_evidence":"insufficient","overlap_assessment":"none","overlap_explains_candidate_similarity":false,"specificity_alignment":"supports_suggested","target_background_contrast":"target_specific","local_consensus_evidence":"mixed","visible_target_cues":["elongated bright target shape","visible grid texture"],"supporting_clean_evidence_ids":["target_detail_2","zoom_region_9"],"rationale_short":"target evidence and anchors fit better","counter_evidence":"synthetic fixture","human_review_needed":false}',
         ]
     )
     calls = []
@@ -3722,12 +4735,16 @@ def test_class_analysis_qwen_review_loop_enforces_evidence_and_writes_artifacts(
     assert "Clean visual evidence ids" in final_user_text
     assert "Use clean target/source/zoom pixels for visible_target_cues" in final_user_text
     assert "Use same-image scale and embedding reports to guide visual attention" in final_user_text
+    assert "specificity_alignment" in final_user_text
+    assert "target_background_contrast" in final_user_text
     assert "supporting_clean_evidence_ids" in final_user_text
     assert "Local consensus evidence has been inspected" in final_user_text
     assert "previous final response failed validation" in final_user_text
     assert review.status == "completed"
     assert review.result["decision"] == "accept_suggested"
     assert review.result["target_class"] == "boat"
+    assert review.result["specificity_alignment"] == "supports_suggested"
+    assert review.result["target_background_contrast"] == "target_specific"
     assert review.result["supporting_clean_evidence_ids"] == ["target_detail_2", "zoom_region_9"]
     assert review.result["applied"] is False
     assert review.result["executed_tools"] == [

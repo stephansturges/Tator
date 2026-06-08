@@ -39,6 +39,39 @@ def _json_sanitize(value: Any) -> Any:
     return value
 
 
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _record_current_class_plausible(record: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+    if _coerce_bool(record.get("current_class_plausible")):
+        return True
+    if "current_class_plausible" not in record and _coerce_bool(payload.get("current_class_plausible")):
+        return True
+    verifier = record.get("cue_verifier")
+    if isinstance(verifier, dict) and _coerce_bool(verifier.get("current_class_plausible")):
+        return True
+    return False
+
+
+def _record_current_class_plausibility_reason(record: Dict[str, Any], payload: Dict[str, Any]) -> str:
+    reason = str(
+        record.get("current_class_plausibility_reason")
+        or payload.get("current_class_plausibility_reason")
+        or ""
+    ).strip()
+    if reason:
+        return reason
+    verifier = record.get("cue_verifier")
+    if isinstance(verifier, dict):
+        return str(verifier.get("current_class_plausibility_reason") or "").strip()
+    return ""
+
+
 def _load_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
@@ -71,6 +104,7 @@ def _text_rebuts_overlap_contamination(payload: Dict[str, Any], *, target_class:
         return False
     patterns: List[str] = [
         r"\boverlap(?:ping)?\b[^.?!]{0,180}\b(?:does\s+not|doesn't|do\s+not|not)\b[^.?!]{0,180}\b(?:explain|account\s+for)\b[^.?!]{0,180}\b(?:target|object|own|features?)\b",
+        r"\boverlap(?:ping)?\b[^.?!]{0,180}\b(?:does\s+not|doesn't|do\s+not|not)\b[^.?!]{0,180}\b(?:explain|account\s+for)\b[^.?!]{0,180}\btarget[-\s]?contained\b",
         r"\b(?:target|object)\b[^.?!]{0,180}\b(?:own|intrinsic|visible)\b[^.?!]{0,180}\bfeatures?\b[^.?!]{0,180}\b(?:not|do\s+not|does\s+not|doesn't)\b[^.?!]{0,180}\b(?:explained|caused|accounted\s+for)\b[^.?!]{0,180}\boverlap\b",
         r"\boverlap\b[^.?!]{0,80}\b(?:minor|minimal|small|low|weak|slight)\b",
         r"\b(?:minor|minimal|small|low|weak|slight)\b[^.?!]{0,80}\boverlap\b",
@@ -79,6 +113,11 @@ def _text_rebuts_overlap_contamination(payload: Dict[str, Any], *, target_class:
         r"\boverlap\b[^.?!]{0,120}\bbackground\b[^.?!]{0,120}\bnot\b[^.?!]{0,80}\b(?:target|object|primary|main)\b",
         r"\boverlap\b[^.?!]{0,180}\b(?:minor|background)\b[^.?!]{0,80}\b(?:element|object|structure)\b",
         r"\b(?:background|minor)\b[^.?!]{0,80}\b(?:element|object|structure)\b[^.?!]{0,180}\bnot\b[^.?!]{0,80}\b(?:target|object|primary|main)\b",
+        r"\bnot\s+(?:merely\s+)?(?:an?\s+)?(?:artifact|artifacts?)\s+of\s+(?:the\s+)?(?:partial\s+)?overlap\b",
+        r"\b(?:partial\s+)?(?:overlap|contamination)\s+(?:does\s+not|doesn't)\s+(?:obscure|explain|account\s+for)\b",
+        r"\b(?:target|target\s+pixels?)\s+(?:clearly\s+)?show(?:s)?\b[^.?!]{0,180}\b(?:distinct|intrinsic|primary|structural|defining)\b",
+        r"\b(?:intrinsic|primary|defining|target-contained|target-specific)\b[^.?!]{0,180}\b(?:target|object|geometry|surface|features?|cues?)\b",
+        r"\b(?:visually|structurally)\s+distinct\s+from\s+(?:the\s+)?(?:partial\s+)?(?:overlap|contamination|background|nearby|adjacent)\b",
     ]
     alias_patterns = [
         re.escape(alias).replace(r"\ ", r"\s+")
@@ -125,8 +164,7 @@ def _record_text(record: Dict[str, Any]) -> str:
             elif isinstance(value, str) and value.strip():
                 parts.append(value)
     # Keep separate model fields as separate sentences. Joining raw fields with a
-    # plain space can synthesize false negations such as "no overlap contamination
-    # flat roof ... building features".
+    # plain space can synthesize false negations across unrelated observations.
     return ". ".join(parts).strip().lower()
 
 
@@ -247,13 +285,16 @@ def _normalize_visible_cues(
         "fit",
         "suggested",
         "current",
+        "candidate",
     )
     context_only_tokens = {
         "aerial",
         "adjacent",
+        "area",
         "background",
         "beside",
         "clear",
+        "context",
         "crop",
         "down",
         "ground",
@@ -261,6 +302,7 @@ def _normalize_visible_cues(
         "inside",
         "located",
         "location",
+        "multiple",
         "near",
         "nearby",
         "on",
@@ -270,6 +312,7 @@ def _normalize_visible_cues(
         "partial",
         "pavement",
         "perspective",
+        "region",
         "road",
         "scene",
         "shadow",
@@ -281,57 +324,43 @@ def _normalize_visible_cues(
         "visible",
         "water",
     }
-    concrete_visual_tokens = {
-        "arm",
-        "body",
-        "boom",
-        "box",
-        "bucket",
-        "cab",
-        "cargo",
-        "corner",
-        "corners",
-        "curved",
-        "edge",
-        "edges",
-        "elongated",
-        "flat",
-        "grid",
-        "grille",
-        "hull",
-        "line",
-        "lines",
-        "long",
-        "mast",
-        "material",
-        "metal",
-        "narrow",
-        "oval",
-        "panel",
-        "panels",
-        "pole",
-        "rectangular",
-        "ribbed",
-        "roof",
-        "rooftop",
-        "round",
+    color_or_lighting_tokens = {
+        "black",
+        "blue",
+        "bright",
+        "brown",
+        "color",
+        "colors",
+        "colored",
+        "colour",
+        "colours",
+        "coloured",
+        "dark",
+        "gray",
+        "green",
+        "grey",
+        "highlight",
+        "highlights",
+        "light",
+        "orange",
+        "purple",
+        "red",
+        "shadow",
+        "shadows",
+        "specular",
+        "white",
+        "yellow",
+    }
+    abstract_visual_tokens = {
+        "boundary",
+        "detail",
+        "details",
+        "geometry",
+        "outline",
+        "pattern",
         "shape",
-        "shaped",
-        "structure",
-        "structural",
         "surface",
         "texture",
-        "thin",
-        "tire",
-        "tires",
-        "vertical",
-        "wall",
-        "walls",
-        "wheel",
-        "wheels",
-        "wide",
-        "window",
-        "windows",
     }
     connector_tokens = {"a", "an", "and", "at", "by", "from", "in", "of", "the", "to", "with"}
 
@@ -340,6 +369,25 @@ def _normalize_visible_cues(
         if not lowered:
             return True
         if re.search(r"\b(?:no|not|without|lacks?|missing|absent|does\s+not|doesn't)\b", lowered):
+            return True
+        if (
+            re.search(r"\b(?:adjacent|beside|nearby|surrounding)\b", lowered)
+            and not re.search(r"\b(?:attached|connected|touching|mounted|joined|linked)\b", lowered)
+        ):
+            return True
+        if re.search(
+            r"\b(?:flat|open|empty|bright|dark|gray|grey|green|brown)?\s*"
+            r"(?:ground|pavement|road|water|background|scene|shadow|shadows)\s+"
+            r"(?:surface|area|region|texture|context)\b",
+            lowered,
+        ):
+            return True
+        if re.search(
+            r"\b(?:surface|area|region|texture|context)\s+"
+            r"(?:of|on|from)?\s*"
+            r"(?:ground|pavement|road|water|background|scene|shadow|shadows)\b",
+            lowered,
+        ):
             return True
         tokens = [
             token
@@ -355,11 +403,24 @@ def _normalize_visible_cues(
             and len([token for token in tokens if token not in context_only_tokens]) == 0
         ):
             return True
-        has_concrete_visual_token = any(token in concrete_visual_tokens for token in tokens)
-        if not has_concrete_visual_token and re.search(
+        if re.search(
             r"\b(?:top[-\s]?down|overhead|aerial|parked|color|colors|colou?r(?:ed)?|multiple)\b",
             lowered,
-        ):
+        ) and all(token in context_only_tokens or token in color_or_lighting_tokens for token in tokens):
+            return True
+        informative_tokens = [
+            token
+            for token in tokens
+            if token not in context_only_tokens
+            and token not in color_or_lighting_tokens
+            and len(token) >= 3
+        ]
+        # Keep this domain-agnostic: the model must supply concrete target-pixel
+        # descriptors, but class/object vocabulary itself comes from the labelmap,
+        # glossary, and generated concept briefs rather than committed word lists.
+        if not informative_tokens:
+            return True
+        if len(informative_tokens) == 1 and informative_tokens[0] in abstract_visual_tokens:
             return True
         return False
 
@@ -455,17 +516,24 @@ def _clean_visual_ids_from_record(record: Dict[str, Any]) -> List[str]:
 def _record_uses_clear_target_relabel_path(record: Dict[str, Any]) -> bool:
     """Mirror the validator's narrow clear-target advisory path."""
 
+    payload = record.get("model_compact_arguments") if isinstance(record.get("model_compact_arguments"), dict) else {}
+
+    def _field(name: str) -> str:
+        return str(record.get(name) or payload.get(name) or "").strip().lower()
+
     return (
         str(record.get("decision") or "") == "accept_suggested"
-        and str(record.get("backend_tier") or "").strip().lower() == "clear"
-        and str(record.get("visual_quality") or "").strip().lower() == "clear"
-        and str(record.get("object_visibility") or "").strip().lower() == "clear"
-        and str(record.get("current_evidence") or "").strip().lower() in {"weak", "none"}
-        and str(record.get("suggested_evidence") or "").strip().lower() == "strong"
-        and str(record.get("target_evidence") or "").strip().lower() == "strong"
-        and str(record.get("local_context_evidence") or "").strip().lower() == "strong"
-        and str(record.get("global_context_evidence") or "").strip().lower() == "strong"
-        and str(record.get("overlap_assessment") or "").strip().lower() in {"none", "near_context"}
+        and _field("backend_tier") == "clear"
+        and _field("visual_quality") == "clear"
+        and _field("object_visibility") == "clear"
+        and _field("current_evidence") in {"weak", "none"}
+        and _field("suggested_evidence") == "strong"
+        and _field("target_evidence") == "strong"
+        and _field("local_context_evidence") == "strong"
+        and _field("global_context_evidence") == "strong"
+        and _field("overlap_assessment") in {"none", "near_context"}
+        and _field("specificity_alignment") == "supports_suggested"
+        and _field("target_background_contrast") == "target_specific"
     )
 
 
@@ -491,9 +559,76 @@ def _record_uses_one_cue_supported_relabel_path(record: Dict[str, Any]) -> bool:
         and _field("global_context_evidence") == "strong"
         and _field("local_consensus_evidence") == "supports_suggested"
         and _field("overlap_assessment") in {"none", "near_context"}
+        and _field("specificity_alignment") == "supports_suggested"
+        and _field("target_background_contrast") == "target_specific"
         and _field("same_image_scale_evidence") != "supports_current"
         and _field("same_image_embedding_evidence") != "supports_current"
         and not bool(record.get("overlap_explains_candidate_similarity") or payload.get("overlap_explains_candidate_similarity"))
+    )
+
+
+def _record_uses_dual_bbox_switch_path(record: Dict[str, Any]) -> bool:
+    """Mirror the validator's near-identical dual-bbox class-switch path."""
+
+    payload = record.get("model_compact_arguments") if isinstance(record.get("model_compact_arguments"), dict) else {}
+
+    def _field(name: str) -> str:
+        return str(record.get(name) or payload.get(name) or "").strip().lower()
+
+    dual_conflict = record.get("dual_bbox_conflict")
+    disposition = record.get("review_disposition") if isinstance(record.get("review_disposition"), dict) else {}
+    return (
+        str(record.get("decision") or "") in {"accept_suggested", "change_to_other"}
+        and (
+            isinstance(dual_conflict, dict)
+            or str(disposition.get("disposition") or "") == "dual_bbox_switch_overlap_class"
+        )
+        and _field("dual_bbox_resolution") == "overlap_box_class"
+        and _field("backend_tier") == "clear"
+        and _field("visual_quality") == "clear"
+        and _field("object_visibility") == "clear"
+        and _field("current_evidence") in {"weak", "none"}
+        and _field("target_evidence") == "strong"
+        and _field("local_context_evidence") == "strong"
+        and _field("global_context_evidence") == "strong"
+        and _field("specificity_alignment") in {"supports_suggested", "supports_other"}
+        and _field("target_background_contrast") == "target_specific"
+        and _field("overlap_assessment") == "duplicate_like"
+    )
+
+
+def _record_uses_verified_overlap_rebuttal_path(record: Dict[str, Any]) -> bool:
+    """Mirror the validator's verifier-backed partial-overlap relabel path."""
+
+    payload = record.get("model_compact_arguments") if isinstance(record.get("model_compact_arguments"), dict) else {}
+
+    def _field(name: str) -> str:
+        return str(record.get(name) or payload.get(name) or "").strip().lower()
+
+    return (
+        str(record.get("decision") or "") == "accept_suggested"
+        and bool(record.get("overlap_adjudication_verified") or payload.get("overlap_adjudication_verified"))
+        and _field("backend_tier") == "clear"
+        and _field("visual_quality") == "clear"
+        and _field("object_visibility") == "clear"
+        and _field("current_evidence") in {"weak", "none"}
+        and _field("suggested_evidence") == "strong"
+        and _field("target_evidence") == "strong"
+        and _field("anchor_evidence_suggested") == "moderate"
+        and _field("local_context_evidence") == "strong"
+        and _field("global_context_evidence") == "strong"
+        and _field("overlap_assessment") == "partial_contamination"
+        and not bool(record.get("overlap_explains_candidate_similarity") or payload.get("overlap_explains_candidate_similarity"))
+        and _field("specificity_alignment") == "supports_suggested"
+        and _field("target_background_contrast") == "target_specific"
+        and _field("same_image_scale_evidence") != "supports_current"
+        and _field("same_image_embedding_evidence") != "supports_current"
+        and (
+            _field("same_image_scale_evidence") == "questions_current"
+            or _field("same_image_embedding_evidence") == "questions_current"
+            or _field("local_consensus_evidence") == "supports_suggested"
+        )
+        and len(_explicit_visible_cues_from_record(record)) >= 2
     )
 
 
@@ -513,6 +648,8 @@ def _record_uses_confirm_current_overlap_rebuttal_path(record: Dict[str, Any]) -
         and _field("current_evidence") == "strong"
         and _field("target_evidence") == "strong"
         and _field("anchor_evidence_current") in {"strong", "moderate"}
+        and _field("specificity_alignment") in {"supports_current", "mixed", "not_applicable"}
+        and _field("target_background_contrast") in {"target_specific", "overlap_dominated", "mixed", "not_applicable"}
         and bool(_explicit_visible_cues_from_record(record))
         and bool(record.get("overlap_explains_candidate_similarity") or payload.get("overlap_explains_candidate_similarity"))
         and _field("overlap_assessment") in {"partial_contamination", "near_context", "other_contains_target"}
@@ -707,6 +844,8 @@ def _short_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "current_evidence": _field("current_evidence"),
         "suggested_evidence": _field("suggested_evidence"),
         "target_evidence": _field("target_evidence"),
+        "specificity_alignment": _field("specificity_alignment"),
+        "target_background_contrast": _field("target_background_contrast"),
         "same_image_scale_evidence": _field("same_image_scale_evidence"),
         "same_image_embedding_evidence": _field("same_image_embedding_evidence"),
         "same_image_scale_report_signal": record.get("same_image_scale_report_signal"),
@@ -737,6 +876,11 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     actionables: List[Dict[str, Any]] = []
     review_disposition_counts: Counter[str] = Counter()
     review_disposition_signal_counts: Counter[str] = Counter()
+    specificity_alignment_counts: Counter[str] = Counter()
+    target_background_contrast_counts: Counter[str] = Counter()
+    dual_bbox_resolution_counts: Counter[str] = Counter()
+    overlap_adjudication_verified_count = 0
+    current_class_plausible_count = 0
 
     for record in records:
         disposition = _record_review_disposition(record)
@@ -750,6 +894,23 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         current_evidence = str(record.get("current_evidence") or payload.get("current_evidence") or "").strip().lower()
         suggested_evidence = str(record.get("suggested_evidence") or payload.get("suggested_evidence") or "").strip().lower()
         target_evidence = str(record.get("target_evidence") or payload.get("target_evidence") or "").strip().lower()
+        specificity_alignment = str(
+            record.get("specificity_alignment") or payload.get("specificity_alignment") or ""
+        ).strip().lower()
+        target_background_contrast = str(
+            record.get("target_background_contrast") or payload.get("target_background_contrast") or ""
+        ).strip().lower()
+        dual_bbox_resolution = str(
+            record.get("dual_bbox_resolution") or payload.get("dual_bbox_resolution") or ""
+        ).strip().lower()
+        specificity_alignment_counts[specificity_alignment or "missing"] += 1
+        target_background_contrast_counts[target_background_contrast or "missing"] += 1
+        dual_bbox_resolution_counts[dual_bbox_resolution or "missing"] += 1
+        if bool(record.get("overlap_adjudication_verified")):
+            overlap_adjudication_verified_count += 1
+        current_class_plausible = _record_current_class_plausible(record, payload)
+        if current_class_plausible:
+            current_class_plausible_count += 1
         anchor_evidence_suggested = str(
             record.get("anchor_evidence_suggested") or payload.get("anchor_evidence_suggested") or ""
         ).strip().lower()
@@ -772,6 +933,8 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                 _add_issue(issues, "non_skip_with_guardrails", record, "; ".join(guardrails))
 
         if decision in CLASS_CHANGE_DECISIONS:
+            dual_bbox_switch_path = _record_uses_dual_bbox_switch_path(record)
+            verified_overlap_rebuttal_path = _record_uses_verified_overlap_rebuttal_path(record)
             visible_target_cues = _explicit_visible_cues_from_record(record)
             if len(visible_target_cues) < 2 and not _record_uses_one_cue_supported_relabel_path(record):
                 _add_issue(
@@ -822,14 +985,49 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                 _add_issue(issues, "class_change_low_backend_quality", record, f"backend_tier={backend_tier}")
             if current_evidence == "strong":
                 _add_issue(issues, "class_change_overrides_strong_current", record, "current_evidence=strong")
+            if current_class_plausible:
+                plausibility_reason = _record_current_class_plausibility_reason(record, payload)
+                if not plausibility_reason:
+                    plausibility_reason = "current class remains plausible"
+                _add_issue(
+                    issues,
+                    "class_change_current_class_still_plausible",
+                    record,
+                    plausibility_reason,
+                )
             if suggested_evidence != "strong" and decision == "accept_suggested":
                 _add_issue(issues, "accept_without_strong_suggested", record, f"suggested_evidence={suggested_evidence}")
+            if decision == "accept_suggested" and specificity_alignment != "supports_suggested":
+                _add_issue(
+                    issues,
+                    "class_change_bad_specificity_alignment",
+                    record,
+                    f"specificity_alignment={specificity_alignment or 'missing'}",
+                )
+            if decision == "change_to_other" and specificity_alignment != "supports_other":
+                _add_issue(
+                    issues,
+                    "class_change_bad_specificity_alignment",
+                    record,
+                    f"specificity_alignment={specificity_alignment or 'missing'}",
+                )
+            if target_background_contrast != "target_specific":
+                _add_issue(
+                    issues,
+                    "class_change_bad_target_background_contrast",
+                    record,
+                    f"target_background_contrast={target_background_contrast or 'missing'}",
+                )
             if (
                 decision == "accept_suggested"
                 and anchor_evidence_suggested != "strong"
                 and not (
                     anchor_evidence_suggested == "moderate"
-                    and _record_uses_clear_target_relabel_path(record)
+                    and (
+                        _record_uses_clear_target_relabel_path(record)
+                        or dual_bbox_switch_path
+                        or verified_overlap_rebuttal_path
+                    )
                 )
             ):
                 _add_issue(
@@ -838,7 +1036,11 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                     record,
                     f"anchor_evidence_suggested={anchor_evidence_suggested or 'missing'}",
                 )
-            if overlap_assessment in BAD_CLASS_CHANGE_OVERLAPS:
+            if (
+                overlap_assessment in BAD_CLASS_CHANGE_OVERLAPS
+                and not dual_bbox_switch_path
+                and not verified_overlap_rebuttal_path
+            ):
                 _add_issue(issues, "class_change_bad_overlap", record, f"overlap_assessment={overlap_assessment}")
             current_overlap = _record_best_class_material_overlap(record, record.get("current_class"))
             target_overlap = _record_best_class_material_overlap(record, record.get("target_class"))
@@ -863,9 +1065,13 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                     record,
                     f"model text rejects target-class cue `{rejected_alias}`",
                 )
-            if overlap_assessment == "partial_contamination" and not _text_rebuts_overlap_contamination(
-                _text_payload(record),
-                target_class=str(record.get("target_class") or ""),
+            if (
+                overlap_assessment == "partial_contamination"
+                and not verified_overlap_rebuttal_path
+                and not _text_rebuts_overlap_contamination(
+                    _text_payload(record),
+                    target_class=str(record.get("target_class") or ""),
+                )
             ):
                 _add_issue(
                     issues,
@@ -905,6 +1111,11 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "guarded_recommendation_count": len(guarded_recommendations),
         "review_disposition_counts": dict(review_disposition_counts),
         "review_disposition_signal_counts": dict(review_disposition_signal_counts),
+        "specificity_alignment_counts": dict(specificity_alignment_counts),
+        "target_background_contrast_counts": dict(target_background_contrast_counts),
+        "dual_bbox_resolution_counts": dict(dual_bbox_resolution_counts),
+        "overlap_adjudication_verified_count": overlap_adjudication_verified_count,
+        "current_class_plausible_count": current_class_plausible_count,
         "effective_human_signal_count": sum(
             count
             for signal, count in review_disposition_signal_counts.items()
@@ -992,6 +1203,11 @@ def print_report(audit: Dict[str, Any], comparison: Optional[Dict[str, Any]] = N
     print(f"Effective human signals: {audit.get('effective_human_signal_count', 0)}")
     print(f"Disposition signals: {json.dumps(audit.get('review_disposition_signal_counts', {}), sort_keys=True)}")
     print(f"Disposition counts: {json.dumps(audit.get('review_disposition_counts', {}), sort_keys=True)}")
+    print(f"Specificity alignment: {json.dumps(audit.get('specificity_alignment_counts', {}), sort_keys=True)}")
+    print(f"Target/background contrast: {json.dumps(audit.get('target_background_contrast_counts', {}), sort_keys=True)}")
+    print(f"Dual-bbox resolution: {json.dumps(audit.get('dual_bbox_resolution_counts', {}), sort_keys=True)}")
+    print(f"Overlap adjudication verified: {audit.get('overlap_adjudication_verified_count', 0)}")
+    print(f"Current class plausible: {audit.get('current_class_plausible_count', 0)}")
     print(f"Cue verifier calls: {audit.get('cue_verifier_count', 0)}")
     print(f"Cue verifier promotions: {audit.get('cue_verifier_promoted_count', 0)}")
     print(f"Unsafe issue count: {audit['unsafe_issue_count']}")

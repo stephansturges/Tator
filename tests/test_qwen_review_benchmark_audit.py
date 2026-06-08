@@ -1,5 +1,8 @@
+import inspect
+
+import tools.analyze_class_split_qwen_review_benchmark as audit_mod
 from tools.analyze_class_split_qwen_review_benchmark import audit_records, compare_runs
-from tools.run_class_split_qwen_review_benchmark import _make_visual_sheet
+from tools.run_class_split_qwen_review_benchmark import _make_visual_sheet, _summarize
 
 
 def _record(**overrides):
@@ -57,6 +60,8 @@ def test_qwen_review_benchmark_audit_flags_unsafe_low_quality_accept():
             "suggested_evidence": "strong",
             "target_evidence": "strong",
             "overlap_assessment": "none",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
         },
     )
 
@@ -129,6 +134,66 @@ def test_qwen_review_benchmark_audit_flags_class_change_without_visible_cues():
     assert audit["issues"]["class_change_missing_visible_target_cues"][0]["point_id"] == "p1"
 
 
+def test_qwen_review_benchmark_audit_flags_background_dominated_class_change():
+    record = _record(
+        decision="accept_suggested",
+        current_class="CurrentClass",
+        suggested_neighbor_class="SuggestedClass",
+        target_class="SuggestedClass",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_evidence="weak",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        visible_target_cues=["rectangular target body", "visible target surface texture"],
+        supporting_clean_evidence_ids=["target_context_1"],
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "none",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "background_dominated",
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["issue_counts"]["class_change_bad_target_background_contrast"] == 1
+    assert audit["target_background_contrast_counts"]["background_dominated"] == 1
+
+
+def test_qwen_review_benchmark_audit_flags_missing_specificity_for_class_change():
+    record = _record(
+        decision="accept_suggested",
+        current_class="CurrentClass",
+        suggested_neighbor_class="SuggestedClass",
+        target_class="SuggestedClass",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_evidence="weak",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        visible_target_cues=["rectangular target body", "visible target surface texture"],
+        supporting_clean_evidence_ids=["target_context_1"],
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "none",
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["issue_counts"]["class_change_bad_specificity_alignment"] == 1
+    assert audit["issue_counts"]["class_change_bad_target_background_contrast"] == 1
+    assert audit["specificity_alignment_counts"]["missing"] == 1
+    assert audit["target_background_contrast_counts"]["missing"] == 1
+
+
 def test_qwen_review_benchmark_audit_allows_one_cue_with_independent_support():
     record = _record(
         decision="accept_suggested",
@@ -163,6 +228,8 @@ def test_qwen_review_benchmark_audit_allows_one_cue_with_independent_support():
             "same_image_embedding_evidence": "questions_current",
             "overlap_assessment": "near_context",
             "overlap_explains_candidate_similarity": False,
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
         },
     )
 
@@ -306,6 +373,8 @@ def test_qwen_review_benchmark_audit_allows_moderate_anchor_on_clear_target_path
             "local_context_evidence": "strong",
             "global_context_evidence": "strong",
             "overlap_assessment": "none",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
         },
     )
 
@@ -364,6 +433,42 @@ def test_qwen_review_benchmark_audit_ignores_negative_and_color_only_visible_cue
     audit = audit_records([record])
 
     assert audit["issue_counts"]["class_change_missing_visible_target_cues"] == 1
+
+
+def test_qwen_review_benchmark_visible_cue_filter_is_domain_agnostic():
+    cues = audit_mod._normalize_visible_cues(
+        [
+            "spiral conduit ridges",
+            "triangular bracket lattice",
+            "translucent membrane fold",
+            "aerial view of parked candidate",
+            "green background region",
+            "matches suggested class",
+        ],
+        current_class="CurrentClass",
+        suggested_class="SuggestedClass",
+        target_class="SuggestedClass",
+    )
+
+    assert cues == [
+        "spiral conduit ridges",
+        "triangular bracket lattice",
+        "translucent membrane fold",
+    ]
+
+    source = inspect.getsource(audit_mod._normalize_visible_cues)
+    forbidden_terms = [
+        "concrete_visual_tokens",
+        '"wheel"',
+        '"roof"',
+        '"pole"',
+        '"hull"',
+        '"cab"',
+        '"boom"',
+        '"bucket"',
+    ]
+    for term in forbidden_terms:
+        assert term not in source
 
 
 def test_qwen_review_benchmark_audit_flags_class_change_without_clean_visual_ledger():
@@ -569,6 +674,8 @@ def test_qwen_review_benchmark_audit_requires_partial_overlap_rebuttal():
             "suggested_evidence": "strong",
             "target_evidence": "strong",
             "overlap_assessment": "partial_contamination",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
         },
     )
     safe = _record(
@@ -585,6 +692,8 @@ def test_qwen_review_benchmark_audit_requires_partial_overlap_rebuttal():
             "suggested_evidence": "strong",
             "target_evidence": "strong",
             "overlap_assessment": "partial_contamination",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
         },
     )
 
@@ -613,6 +722,8 @@ def test_qwen_review_benchmark_audit_accepts_minor_or_adjacent_overlap_rebuttals
             "suggested_evidence": "strong",
             "target_evidence": "strong",
             "overlap_assessment": "partial_contamination",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
         },
     )
     adjacent = _record(
@@ -633,6 +744,8 @@ def test_qwen_review_benchmark_audit_accepts_minor_or_adjacent_overlap_rebuttals
             "suggested_evidence": "strong",
             "target_evidence": "strong",
             "overlap_assessment": "partial_contamination",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
         },
     )
 
@@ -658,7 +771,156 @@ def test_qwen_review_benchmark_audit_accepts_background_not_vehicle_rebuttal():
             "suggested_evidence": "strong",
             "target_evidence": "strong",
             "overlap_assessment": "partial_contamination",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
         },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["unsafe_issue_count"] == 0
+
+
+def test_qwen_review_benchmark_audit_accepts_verifier_backed_partial_overlap_rebuttal():
+    record = _record(
+        decision="accept_suggested",
+        target_class="Building",
+        current_class="Truck",
+        suggested_neighbor_class="Building",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_evidence="weak",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        overlap_assessment="partial_contamination",
+        overlap_explains_candidate_similarity=False,
+        overlap_adjudication_verified=True,
+        anchor_evidence_suggested="moderate",
+        local_context_evidence="strong",
+        global_context_evidence="strong",
+        same_image_scale_evidence="questions_current",
+        same_image_embedding_evidence="questions_current",
+        specificity_alignment="supports_suggested",
+        target_background_contrast="target_specific",
+        visible_target_cues=["fixed rectangular roof", "corrugated roof texture"],
+        supporting_clean_evidence_ids=["target_context_1", "source_clean_2"],
+        rationale_short=(
+            "Target pixels show a fixed rectangular roof and corrugated texture; "
+            "overlap does not explain the target-contained building features."
+        ),
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_suggested": "moderate",
+            "local_context_evidence": "strong",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "questions_current",
+            "same_image_embedding_evidence": "questions_current",
+            "overlap_assessment": "partial_contamination",
+            "overlap_explains_candidate_similarity": False,
+            "overlap_adjudication_verified": True,
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["unsafe_issue_count"] == 0
+    assert audit["overlap_adjudication_verified_count"] == 1
+
+
+def test_qwen_review_benchmark_audit_accepts_verified_overlap_without_rebuttal_phrase():
+    record = _record(
+        decision="accept_suggested",
+        target_class="SuggestedClass",
+        current_class="CurrentClass",
+        suggested_neighbor_class="SuggestedClass",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_evidence="weak",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        overlap_assessment="partial_contamination",
+        overlap_explains_candidate_similarity=False,
+        overlap_adjudication_verified=True,
+        anchor_evidence_suggested="moderate",
+        local_context_evidence="strong",
+        local_consensus_evidence="mixed",
+        global_context_evidence="strong",
+        same_image_scale_evidence="neutral",
+        same_image_embedding_evidence="questions_current",
+        specificity_alignment="supports_suggested",
+        target_background_contrast="target_specific",
+        visible_target_cues=["spiral conduit ridges", "triangular bracket lattice"],
+        supporting_clean_evidence_ids=["target_context_1", "source_clean_2"],
+        rationale_short="Verifier isolated target-specific visible features in the clean crop.",
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_suggested": "moderate",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "mixed",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "neutral",
+            "same_image_embedding_evidence": "questions_current",
+            "overlap_assessment": "partial_contamination",
+            "overlap_explains_candidate_similarity": False,
+            "overlap_adjudication_verified": True,
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["unsafe_issue_count"] == 0
+    assert "class_change_bad_overlap" not in audit["issue_counts"]
+    assert "partial_overlap_without_explicit_rebuttal" not in audit["issue_counts"]
+
+
+def test_qwen_review_benchmark_audit_accepts_dual_bbox_overlap_switch_path():
+    record = _record(
+        decision="accept_suggested",
+        target_class="Building",
+        current_class="Truck",
+        suggested_neighbor_class="Building",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_evidence="weak",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        overlap_assessment="duplicate_like",
+        dual_bbox_resolution="overlap_box_class",
+        dual_bbox_conflict={
+            "enabled": True,
+            "kind": "near_identical_cross_class_bbox",
+            "current_class": "Truck",
+            "other_class_name": "Building",
+            "iou": 0.96,
+            "relation": "duplicate_like",
+        },
+        review_disposition={"disposition": "dual_bbox_switch_overlap_class", "signal": "actionable"},
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_suggested": "moderate",
+            "local_context_evidence": "strong",
+            "global_context_evidence": "strong",
+            "overlap_assessment": "duplicate_like",
+            "dual_bbox_resolution": "overlap_box_class",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+        },
+        specificity_alignment="supports_suggested",
+        target_background_contrast="target_specific",
+        visible_target_cues=["flat roof surface", "fixed building structure"],
     )
 
     audit = audit_records([record])
@@ -771,6 +1033,90 @@ def test_qwen_review_benchmark_audit_prefers_controller_normalized_evidence():
     assert audit["unsafe_issue_count"] == 0
 
 
+def test_qwen_review_benchmark_audit_flags_class_change_when_current_still_plausible():
+    record = _record(
+        decision="accept_suggested",
+        current_class="Truck",
+        suggested_neighbor_class="Building",
+        target_class="Building",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_evidence="weak",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        anchor_evidence_suggested="strong",
+        overlap_assessment="none",
+        specificity_alignment="supports_suggested",
+        target_background_contrast="target_specific",
+        current_class_plausible=True,
+        current_class_plausibility_reason="clean target still looks like an isolated trailer body",
+        visible_target_cues=["rectangular white body", "flat roof surface"],
+        supporting_clean_evidence_ids=["target_context_1"],
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_suggested": "strong",
+            "overlap_assessment": "none",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "current_class_plausible": True,
+            "current_class_plausibility_reason": "clean target still looks like an isolated trailer body",
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["current_class_plausible_count"] == 1
+    assert audit["issue_counts"]["class_change_current_class_still_plausible"] == 1
+    assert "isolated trailer" in audit["issues"]["class_change_current_class_still_plausible"][0]["reason"]
+
+
+def test_qwen_review_benchmark_audit_counts_nested_cue_verifier_current_plausibility():
+    record = _record(
+        decision="accept_suggested",
+        current_class="Truck",
+        suggested_neighbor_class="Building",
+        target_class="Building",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_evidence="weak",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        anchor_evidence_suggested="strong",
+        overlap_assessment="none",
+        specificity_alignment="supports_suggested",
+        target_background_contrast="target_specific",
+        current_class_plausible=False,
+        current_class_plausibility_reason="",
+        cue_verifier={
+            "current_class_plausible": True,
+            "current_class_plausibility_reason": "verifier sees a plausible truck/trailer body",
+        },
+        visible_target_cues=["rectangular white body", "flat roof surface"],
+        supporting_clean_evidence_ids=["target_context_1"],
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_suggested": "strong",
+            "overlap_assessment": "none",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+        },
+    )
+
+    audit = audit_records([record])
+    summary = _summarize([record], run_id="r", job_id="j", model_id="m", started_at=0.0)
+
+    assert audit["current_class_plausible_count"] == 1
+    assert audit["issue_counts"]["class_change_current_class_still_plausible"] == 1
+    assert "truck/trailer" in audit["issues"]["class_change_current_class_still_plausible"][0]["reason"]
+    assert summary["current_class_plausible_count"] == 1
+
+
 def test_qwen_review_benchmark_audit_allows_overlap_rebutted_confirm_current():
     record = _record(
         decision="confirm_current",
@@ -791,6 +1137,8 @@ def test_qwen_review_benchmark_audit_allows_overlap_rebutted_confirm_current():
             "anchor_evidence_current": "strong",
             "overlap_assessment": "partial_contamination",
             "overlap_explains_candidate_similarity": True,
+            "specificity_alignment": "supports_current",
+            "target_background_contrast": "overlap_dominated",
         },
     )
 

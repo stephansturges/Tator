@@ -792,6 +792,7 @@ def test_class_split_explorer_panel_contract():
     assert ".class-split-wrong-panel--wide" in css
     assert ".class-split-wrong-toolbar__discard" in css
     assert ".class-split-wrong-item__preview" in css
+    assert ".class-split-wrong-item__badge--dual" in css
     assert "grid-template-columns: 232px minmax(0, 1fr);" in css
     assert "width: 232px;" in css
     assert "height: 192px;" in css
@@ -1030,6 +1031,9 @@ def test_class_split_explorer_panel_contract():
     assert "Reassign" in js
     assert "Switch class to ${suggestedClass}" in js
     assert ">Choose class</option>" in js
+    assert "Review dual bbox with Qwen" in js
+    assert "dual_bbox_resolution" in js
+    assert "Dual-box conflict" in js
     assert "function getClassSplitContextCropUrl" in js
     assert "const maxPreviewDim = 1400;" in js
     assert 'alt="Object context crop"' in js

@@ -20772,6 +20772,109 @@ def _class_analysis_bbox_corner_similarity(a: Sequence[float], b: Sequence[float
     return float(max(0.0, min(1.0, 1.0 - (mean_corner_delta / scale))))
 
 
+def _class_analysis_bbox_overlap_geometry(
+    target_bbox: Sequence[float],
+    other_bbox: Sequence[float],
+) -> Optional[Dict[str, float]]:
+    try:
+        ax1, ay1, ax2, ay2 = [float(v) for v in list(target_bbox)[:4]]
+        bx1, by1, bx2, by2 = [float(v) for v in list(other_bbox)[:4]]
+    except Exception:
+        return None
+    aw = max(0.0, ax2 - ax1)
+    ah = max(0.0, ay2 - ay1)
+    bw = max(0.0, bx2 - bx1)
+    bh = max(0.0, by2 - by1)
+    if aw <= 0.0 or ah <= 0.0 or bw <= 0.0 or bh <= 0.0:
+        return None
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    intersection = iw * ih
+    target_area = aw * ah
+    other_area = bw * bh
+    union = max(1.0, target_area + other_area - intersection)
+    iou = float(intersection / union)
+    target_cover = float(intersection / max(1.0, target_area))
+    other_cover = float(intersection / max(1.0, other_area))
+    relation = "none"
+    if iou >= 0.85 or (target_cover >= 0.85 and other_cover >= 0.85):
+        relation = "duplicate_like"
+    elif target_cover >= 0.75 and other_cover < 0.75:
+        relation = "other_contains_target"
+    elif other_cover >= 0.75 and target_cover < 0.75:
+        relation = "target_contains_other"
+    elif intersection > 0.0 and (iou >= 0.02 or target_cover >= 0.04 or other_cover >= 0.04):
+        relation = "partial_contamination"
+    return {
+        "iou": iou,
+        "target_area_covered": target_cover,
+        "other_area_covered": other_cover,
+        "relation": relation,
+    }
+
+
+def _class_analysis_dual_bbox_conflict(
+    target: Dict[str, Any],
+    other: Dict[str, Any],
+    *,
+    iou_threshold: float = 0.90,
+    corner_threshold: float = 0.90,
+) -> Optional[Dict[str, Any]]:
+    """Return a canonical near-identical cross-class bbox conflict record.
+
+    This is intentionally geometry-only and class-name agnostic. The VLM still
+    decides whether the duplicate-looking geometry represents one mislabeled box
+    or two legitimate overlapping objects.
+    """
+
+    current_class = str(target.get("class_name") or "").strip()
+    other_class = str(other.get("class_name") or "").strip()
+    if not current_class or not other_class or current_class == other_class:
+        return None
+    geometry = _class_analysis_bbox_overlap_geometry(
+        target.get("bbox_xyxy") or [],
+        other.get("bbox_xyxy") or [],
+    )
+    if geometry is None:
+        return None
+    corner_similarity = _class_analysis_bbox_corner_similarity(
+        target.get("bbox_xyxy") or [],
+        other.get("bbox_xyxy") or [],
+    )
+    iou = float(geometry.get("iou") or 0.0)
+    if iou < float(iou_threshold) or corner_similarity < float(corner_threshold):
+        return None
+    point_id = str(target.get("point_id") or "")
+    other_point_id = str(other.get("point_id") or "")
+    return {
+        "enabled": True,
+        "kind": "near_identical_cross_class_bbox",
+        "review_mode": "dual_bbox_class_resolution",
+        "point_id": point_id,
+        "current_class": current_class,
+        "other_point_id": other_point_id,
+        "other_class_name": other_class,
+        "class_name": other_class,
+        "classes": [current_class, other_class],
+        "image_relpath": target.get("image_relpath") or other.get("image_relpath") or "",
+        "split": target.get("split") or other.get("split") or "train",
+        "iou": iou,
+        "corner_similarity": float(corner_similarity),
+        "target_area_covered": float(geometry.get("target_area_covered") or 0.0),
+        "other_area_covered": float(geometry.get("other_area_covered") or 0.0),
+        "relation": str(geometry.get("relation") or "duplicate_like"),
+        "score": float(min(iou, corner_similarity)),
+        "question": (
+            f"Resolve near-identical boxes: should this target be {current_class}, "
+            f"{other_class}, both valid overlapping objects, or unresolved?"
+        ),
+    }
+
+
 def _class_analysis_close_overlap_candidates(
     records: Sequence[Dict[str, Any]],
     *,
@@ -20934,6 +21037,7 @@ def _class_analysis_build_result(
     points: List[Dict[str, Any]] = []
     wrong_class_candidates: List[Dict[str, Any]] = []
     close_overlap_matches_by_point, close_overlap_candidates = _class_analysis_close_overlap_candidates(records)
+    records_by_id = {str(record.get("point_id") or ""): record for record in records if str(record.get("point_id") or "")}
     for idx, record in enumerate(records):
         neighbor_indices = neighbor_ids_by_idx[idx]
         neighbor_classes = [str(records[n].get("class_name") or "") for n in neighbor_indices]
@@ -20953,11 +21057,29 @@ def _class_analysis_build_result(
         )
         point_id = str(record.get("point_id") or "")
         close_overlap_matches = close_overlap_matches_by_point.get(point_id, [])
+        dual_bbox_conflicts = []
+        for match in close_overlap_matches:
+            other_record = records_by_id.get(str(match.get("point_id") or ""))
+            if not isinstance(other_record, dict):
+                continue
+            conflict = _class_analysis_dual_bbox_conflict(record, other_record)
+            if conflict is not None:
+                dual_bbox_conflicts.append(conflict)
+        dual_bbox_conflicts.sort(
+            key=lambda item: (float(item.get("score") or 0.0), float(item.get("iou") or 0.0)),
+            reverse=True,
+        )
+        dual_bbox_conflict = dual_bbox_conflicts[0] if dual_bbox_conflicts else None
+        dual_conflict_score = float(dual_bbox_conflict.get("score") or 0.0) if dual_bbox_conflict else 0.0
+        review_priority_score = max(float(suspicion_score), dual_conflict_score)
+        is_review_candidate = bool(is_suspicious or dual_bbox_conflict)
         review_signals = []
         if is_suspicious:
             review_signals.append("wrong_class")
         if close_overlap_matches:
             review_signals.append("close_overlap")
+        if dual_bbox_conflict:
+            review_signals.append("dual_bbox_conflict")
         point = {
             **record,
             "projection": [float(coords[idx, 0]), float(coords[idx, 1])],
@@ -20969,23 +21091,35 @@ def _class_analysis_build_result(
             "same_class_neighbor_ratio": same_ratio,
             "top_other_neighbor_ratio": top_other_ratio,
             "suggested_neighbor_class": suggested_class,
-            "wrong_class_suspicion": suspicion_score,
-            "is_wrong_class_candidate": is_suspicious,
+            "embedding_wrong_class_suspicion": suspicion_score,
+            "wrong_class_suspicion": review_priority_score,
+            "wrong_class_review_reason": "embedding_outlier" if is_suspicious else "dual_bbox_conflict" if dual_bbox_conflict else "",
+            "is_wrong_class_candidate": is_review_candidate,
             "is_close_overlap_candidate": bool(close_overlap_matches),
             "close_overlap_matches": close_overlap_matches,
+            "is_dual_bbox_conflict": bool(dual_bbox_conflict),
+            "dual_bbox_conflict": dual_bbox_conflict,
+            "dual_bbox_conflicts": dual_bbox_conflicts,
             "review_signals": review_signals,
         }
         points.append(point)
-        if is_suspicious:
+        if is_review_candidate:
+            candidate_suggested_class = suggested_class
+            if dual_bbox_conflict and not candidate_suggested_class:
+                candidate_suggested_class = str(dual_bbox_conflict.get("other_class_name") or dual_bbox_conflict.get("class_name") or "")
             wrong_class_candidates.append(
                 {
                     "point_id": point["point_id"],
                     "class_name": current_class,
-                    "suggested_neighbor_class": suggested_class,
-                    "wrong_class_suspicion": suspicion_score,
+                    "suggested_neighbor_class": candidate_suggested_class,
+                    "embedding_wrong_class_suspicion": suspicion_score,
+                    "wrong_class_suspicion": review_priority_score,
+                    "wrong_class_review_reason": point["wrong_class_review_reason"],
                     "top_other_neighbor_ratio": top_other_ratio,
                     "same_class_neighbor_ratio": same_ratio,
                     "image_relpath": point["image_relpath"],
+                    "is_dual_bbox_conflict": bool(dual_bbox_conflict),
+                    "dual_bbox_conflict": dual_bbox_conflict,
                 }
             )
     clusters: List[Dict[str, Any]] = []
@@ -21033,6 +21167,7 @@ def _class_analysis_build_result(
         "wrong_class_candidate_count": len(wrong_class_candidates),
         "close_overlap_candidate_count": len(close_overlap_matches_by_point),
         "close_overlap_pair_count": len(close_overlap_candidates),
+        "dual_bbox_conflict_count": sum(1 for point in points if bool(point.get("is_dual_bbox_conflict"))),
         "warnings": warnings,
     }
     cluster_summary["clusters"] = clusters
@@ -23281,46 +23416,19 @@ def _class_analysis_qwen_review_bbox_overlap_stats(
     target: Dict[str, Any],
     other: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    try:
-        ax1, ay1, ax2, ay2 = [float(v) for v in (target.get("bbox_xyxy") or [])[:4]]
-        bx1, by1, bx2, by2 = [float(v) for v in (other.get("bbox_xyxy") or [])[:4]]
-    except Exception:
+    geometry = _class_analysis_bbox_overlap_geometry(
+        target.get("bbox_xyxy") or [],
+        other.get("bbox_xyxy") or [],
+    )
+    if geometry is None:
         return None
-    aw = max(0.0, ax2 - ax1)
-    ah = max(0.0, ay2 - ay1)
-    bw = max(0.0, bx2 - bx1)
-    bh = max(0.0, by2 - by1)
-    if aw <= 0.0 or ah <= 0.0 or bw <= 0.0 or bh <= 0.0:
-        return None
-    ix1 = max(ax1, bx1)
-    iy1 = max(ay1, by1)
-    ix2 = min(ax2, bx2)
-    iy2 = min(ay2, by2)
-    iw = max(0.0, ix2 - ix1)
-    ih = max(0.0, iy2 - iy1)
-    intersection = iw * ih
-    target_area = aw * ah
-    other_area = bw * bh
-    union = max(1.0, target_area + other_area - intersection)
-    iou = float(intersection / union)
-    target_cover = float(intersection / max(1.0, target_area))
-    other_cover = float(intersection / max(1.0, other_area))
-    relation = "none"
-    if iou >= 0.85 or (target_cover >= 0.85 and other_cover >= 0.85):
-        relation = "duplicate_like"
-    elif target_cover >= 0.75 and other_cover < 0.75:
-        relation = "other_contains_target"
-    elif other_cover >= 0.75 and target_cover < 0.75:
-        relation = "target_contains_other"
-    elif intersection > 0.0 and (iou >= 0.02 or target_cover >= 0.04 or other_cover >= 0.04):
-        relation = "partial_contamination"
     return {
         "point_id": str(other.get("point_id") or ""),
         "class_name": str(other.get("class_name") or ""),
-        "iou": iou,
-        "target_area_covered": target_cover,
-        "other_area_covered": other_cover,
-        "relation": relation,
+        "iou": float(geometry.get("iou") or 0.0),
+        "target_area_covered": float(geometry.get("target_area_covered") or 0.0),
+        "other_area_covered": float(geometry.get("other_area_covered") or 0.0),
+        "relation": str(geometry.get("relation") or "none"),
     }
 
 
@@ -25793,6 +25901,30 @@ def _class_analysis_qwen_review_final_tool_spec(labelmap: Sequence[str]) -> Dict
                     ],
                 },
                 "overlap_explains_candidate_similarity": {"type": "boolean"},
+                "specificity_alignment": {
+                    "type": "string",
+                    "enum": list(CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_ALIGNMENT_LEVELS),
+                    "description": (
+                        "SDDF-inspired target/background grounding check. State which class hypothesis is supported by "
+                        "target-contained object-specific cues, not by background, overlap, labels, or neighbor counts."
+                    ),
+                },
+                "target_background_contrast": {
+                    "type": "string",
+                    "enum": list(CLASS_ANALYSIS_QWEN_REVIEW_TARGET_BACKGROUND_CONTRAST_LEVELS),
+                    "description": (
+                        "Whether the visible evidence is target-object specific or dominated by background/overlap/context."
+                    ),
+                },
+                "dual_bbox_resolution": {
+                    "type": "string",
+                    "enum": list(CLASS_ANALYSIS_QWEN_REVIEW_DUAL_BBOX_RESOLUTIONS),
+                    "description": (
+                        "Use not_applicable unless the controller reports a near-identical cross-class bbox conflict. "
+                        "For such conflicts, resolve the target as current_box_class, overlap_box_class, "
+                        "both_valid_overlapping_objects, or uncertain_or_neither."
+                    ),
+                },
                 "local_consensus_evidence": {
                     "type": "string",
                     "enum": ["supports_current", "supports_suggested", "mixed", "absent", "not_applicable"],
@@ -25829,6 +25961,8 @@ def _class_analysis_qwen_review_final_tool_spec(labelmap: Sequence[str]) -> Dict
                 "target_evidence",
                 "overlap_assessment",
                 "overlap_explains_candidate_similarity",
+                "specificity_alignment",
+                "target_background_contrast",
                 "visible_target_cues",
                 "rationale_short",
             ],
@@ -25874,6 +26008,46 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                     "maxItems": 6,
                     "description": "Positive cues that still support the current class, if visible.",
                 },
+                "current_class_plausibility_basis": {
+                    "type": "string",
+                    "enum": [
+                        "direct_positive_cues",
+                        "shared_generic_cues",
+                        "hypothetical_or_uncertain",
+                        "none",
+                    ],
+                    "description": (
+                        "Why the current class is still plausible. Use direct_positive_cues only for "
+                        "concrete current-class evidence visible in clean target/source pixels."
+                    ),
+                },
+                "current_class_plausible": {
+                    "type": "boolean",
+                    "description": (
+                        "True only when clean target/source pixels show direct positive evidence for the current class. "
+                        "Do not use hypothetical edge cases or shared generic shape/color cues as this boolean."
+                    ),
+                },
+                "current_class_plausibility_reason": {
+                    "type": "string",
+                    "description": "Short visible-fact reason for why the current class is or is not still plausible.",
+                },
+                "overlap_rebutted": {
+                    "type": "boolean",
+                    "description": (
+                        "True only when overlap/background/nearby objects do not explain the proposed target-class "
+                        "cues in the clean target/source pixels."
+                    ),
+                },
+                "overlap_risk": {
+                    "type": "string",
+                    "enum": ["target_specific", "overlap_explains", "uncertain", "not_applicable"],
+                    "description": "Whether the apparent target-class evidence is target-contained or overlap/background-driven.",
+                },
+                "overlap_rebuttal": {
+                    "type": "string",
+                    "description": "Short visible-fact explanation of why overlap does or does not explain the target-class evidence.",
+                },
                 "supporting_clean_evidence_ids": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -25892,6 +26066,12 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                 "cue_confidence",
                 "positive_visible_target_cues",
                 "current_class_positive_cues",
+                "current_class_plausibility_basis",
+                "current_class_plausible",
+                "current_class_plausibility_reason",
+                "overlap_rebutted",
+                "overlap_risk",
+                "overlap_rebuttal",
                 "supporting_clean_evidence_ids",
                 "rejection_reason",
             ],
@@ -26025,10 +26205,103 @@ CLASS_ANALYSIS_QWEN_REVIEW_DETERMINISTIC_CONTEXT_LEVELS: Tuple[str, ...] = (
     "insufficient",
     "not_applicable",
 )
+CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_ALIGNMENT_LEVELS: Tuple[str, ...] = (
+    "supports_current",
+    "supports_suggested",
+    "supports_other",
+    "mixed",
+    "insufficient",
+    "not_applicable",
+)
+CLASS_ANALYSIS_QWEN_REVIEW_TARGET_BACKGROUND_CONTRAST_LEVELS: Tuple[str, ...] = (
+    "target_specific",
+    "background_dominated",
+    "overlap_dominated",
+    "mixed",
+    "insufficient",
+    "not_applicable",
+)
+CLASS_ANALYSIS_QWEN_REVIEW_DUAL_BBOX_RESOLUTIONS: Tuple[str, ...] = (
+    "not_applicable",
+    "current_box_class",
+    "overlap_box_class",
+    "both_valid_overlapping_objects",
+    "uncertain_or_neither",
+)
 
 
 def _class_analysis_qwen_review_normalize_label(label: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(label or "").strip().lower())
+
+
+def _class_analysis_qwen_review_dual_bbox_conflict(
+    point: Dict[str, Any],
+    evidence_ledger: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    current_class = str(point.get("class_name") or "").strip()
+    current_norm = _class_analysis_qwen_review_normalize_label(current_class)
+    existing = point.get("dual_bbox_conflict") if isinstance(point.get("dual_bbox_conflict"), dict) else None
+    if existing and bool(existing.get("enabled")):
+        conflict = dict(existing)
+        conflict.setdefault("current_class", current_class)
+        conflict.setdefault("classes", [current_class, str(conflict.get("other_class_name") or conflict.get("class_name") or "")])
+        conflict.setdefault("review_mode", "dual_bbox_class_resolution")
+        conflict.setdefault("kind", "near_identical_cross_class_bbox")
+        conflict.setdefault("source", "analysis_point")
+        return conflict
+    overlap_context = (
+        evidence_ledger.get("overlap_decomposition")
+        if isinstance(evidence_ledger, dict) and isinstance(evidence_ledger.get("overlap_decomposition"), dict)
+        else {}
+    )
+    candidates: List[Dict[str, Any]] = []
+    for item in overlap_context.get("overlaps") or []:
+        if not isinstance(item, dict):
+            continue
+        other_class = str(item.get("class_name") or "").strip()
+        if not other_class or _class_analysis_qwen_review_normalize_label(other_class) == current_norm:
+            continue
+        try:
+            iou = float(item.get("iou") or 0.0)
+            target_cover = float(item.get("target_area_covered") or 0.0)
+            other_cover = float(item.get("other_area_covered") or 0.0)
+        except Exception:
+            continue
+        if iou < 0.90:
+            continue
+        candidates.append(
+            {
+                "enabled": True,
+                "kind": "near_identical_cross_class_bbox",
+                "review_mode": "dual_bbox_class_resolution",
+                "point_id": str(point.get("point_id") or ""),
+                "current_class": current_class,
+                "other_point_id": str(item.get("point_id") or ""),
+                "other_class_name": other_class,
+                "class_name": other_class,
+                "classes": [current_class, other_class],
+                "iou": iou,
+                "corner_similarity": None,
+                "target_area_covered": target_cover,
+                "other_area_covered": other_cover,
+                "relation": str(item.get("relation") or "duplicate_like"),
+                "score": iou,
+                "source": "overlap_decomposition",
+                "question": (
+                    f"Resolve near-identical boxes: should this target be {current_class}, "
+                    f"{other_class}, both valid overlapping objects, or unresolved?"
+                ),
+            }
+        )
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: float(item.get("score") or 0.0))
+
+
+def _class_analysis_qwen_review_dual_bbox_other_class(conflict: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(conflict, dict):
+        return ""
+    return str(conflict.get("other_class_name") or conflict.get("class_name") or "").strip()
 
 
 def _class_analysis_qwen_review_label_aliases(label: str) -> Tuple[str, ...]:
@@ -26170,6 +26443,7 @@ def _class_analysis_qwen_review_current_overlap_false_alarm_result(
     if current_cover < 0.50 or suggested_cover > min(0.25, current_cover * 0.50):
         return None
     relation = str(current_overlap.get("relation") or "material_overlap")
+    dual_bbox_conflict = _class_analysis_qwen_review_dual_bbox_conflict(point, evidence_ledger)
     evidence_ids = [
         str(item or "").strip()
         for item in (evidence_ledger.get("clean_target_source_evidence_ids") or [])
@@ -26191,6 +26465,10 @@ def _class_analysis_qwen_review_current_overlap_false_alarm_result(
         "target_evidence": "strong",
         "overlap_assessment": "partial_contamination" if relation != "near_context" else "near_context",
         "overlap_explains_candidate_similarity": True,
+        "specificity_alignment": "supports_current",
+        "target_background_contrast": "overlap_dominated",
+        "dual_bbox_resolution": "current_box_class" if dual_bbox_conflict else "not_applicable",
+        "dual_bbox_conflict": copy.deepcopy(dual_bbox_conflict) if dual_bbox_conflict else None,
         "visible_target_cues": [
             f"current-class overlap covers {current_cover:.2f} of target bbox",
             f"suggested-class overlap covers {suggested_cover:.2f} of target bbox",
@@ -26311,6 +26589,7 @@ def _class_analysis_qwen_review_deterministic_triage_result(
     local_signal = _class_analysis_qwen_review_local_consensus_signal(job)
     scale_signal = _class_analysis_qwen_review_deterministic_signal(deterministic_context, "scale")
     embedding_signal = _class_analysis_qwen_review_deterministic_signal(deterministic_context, "embedding")
+    dual_bbox_conflict = _class_analysis_qwen_review_dual_bbox_conflict(point, evidence_ledger)
     deterministic_current_supported = (
         embedding_signal == "supports_current" and scale_signal in {"supports_current", "neutral"}
     ) or (
@@ -26336,6 +26615,10 @@ def _class_analysis_qwen_review_deterministic_triage_result(
             "target_evidence": "moderate",
             "overlap_assessment": "none",
             "overlap_explains_candidate_similarity": False,
+            "specificity_alignment": "not_applicable",
+            "target_background_contrast": "not_applicable",
+            "dual_bbox_resolution": "current_box_class" if dual_bbox_conflict else "not_applicable",
+            "dual_bbox_conflict": copy.deepcopy(dual_bbox_conflict) if dual_bbox_conflict else None,
             "visible_target_cues": [],
             "supporting_clean_evidence_ids": list(evidence_ledger.get("clean_target_source_evidence_ids") or [])[:3],
             "anchor_evidence_current": "moderate",
@@ -26377,6 +26660,10 @@ def _class_analysis_qwen_review_deterministic_triage_result(
             "target_evidence": "moderate",
             "overlap_assessment": "none",
             "overlap_explains_candidate_similarity": False,
+            "specificity_alignment": "not_applicable",
+            "target_background_contrast": "not_applicable",
+            "dual_bbox_resolution": "current_box_class" if dual_bbox_conflict else "not_applicable",
+            "dual_bbox_conflict": copy.deepcopy(dual_bbox_conflict) if dual_bbox_conflict else None,
             "visible_target_cues": [],
             "supporting_clean_evidence_ids": list(evidence_ledger.get("clean_target_source_evidence_ids") or [])[:3],
             "anchor_evidence_current": "moderate",
@@ -26433,6 +26720,10 @@ def _class_analysis_qwen_review_deterministic_triage_result(
         "target_evidence": "weak",
         "overlap_assessment": "none" if max(current_cover, suggested_cover) <= 0.0 else "near_context",
         "overlap_explains_candidate_similarity": False,
+        "specificity_alignment": "insufficient",
+        "target_background_contrast": "insufficient",
+        "dual_bbox_resolution": "uncertain_or_neither" if dual_bbox_conflict else "not_applicable",
+        "dual_bbox_conflict": copy.deepcopy(dual_bbox_conflict) if dual_bbox_conflict else None,
         "visible_target_cues": [],
         "supporting_clean_evidence_ids": [],
         "anchor_evidence_current": "weak",
@@ -26462,6 +26753,10 @@ def _class_analysis_qwen_review_deterministic_triage_result(
             "same_image_scale_evidence": scale_signal,
             "same_image_embedding_evidence": embedding_signal,
             "overlap_assessment": "none" if max(current_cover, suggested_cover) <= 0.0 else "near_context",
+            "specificity_alignment": "insufficient",
+            "target_background_contrast": "insufficient",
+            "dual_bbox_resolution": "uncertain_or_neither" if dual_bbox_conflict else "not_applicable",
+            "dual_bbox_conflict": copy.deepcopy(dual_bbox_conflict) if dual_bbox_conflict else None,
             "visible_target_cues": [],
             "supporting_clean_evidence_ids": [],
             "guardrail_reasons": ["controller deterministic triage lacks target-visible VLM confirmation"],
@@ -26515,6 +26810,7 @@ def _class_analysis_qwen_review_mlx_final_disabled_result(
         "hit Metal GPU timeouts in review benchmarks; deterministic preflight was insufficient."
     )
     backend_tier = str(visual_quality.get("tier") or "unknown").strip().lower()
+    dual_bbox_conflict = _class_analysis_qwen_review_dual_bbox_conflict(point, evidence_ledger)
     return {
         **_class_analysis_qwen_review_skip_result(point, reason),
         "visual_quality": backend_tier if backend_tier in {"clear", "limited"} else "poor",
@@ -26522,6 +26818,8 @@ def _class_analysis_qwen_review_mlx_final_disabled_result(
         "backend_visual_quality": visual_quality,
         "evidence_ids": list(evidence_ledger.get("clean_visual_evidence_ids") or []),
         "supporting_clean_evidence_ids": [],
+        "dual_bbox_resolution": "uncertain_or_neither" if dual_bbox_conflict else "not_applicable",
+        "dual_bbox_conflict": copy.deepcopy(dual_bbox_conflict) if dual_bbox_conflict else None,
         "guardrail_reasons": [reason],
         "rationale_short": reason,
         "controller_preflight": {
@@ -26845,6 +27143,7 @@ def _class_analysis_qwen_review_text_rebuts_overlap_contamination(
         return False
     rebuttal_patterns: List[str] = [
         r"\boverlap(?:ping)?\b[^.?!]{0,180}\b(?:does\s+not|doesn't|do\s+not|not)\b[^.?!]{0,180}\b(?:explain|account\s+for)\b[^.?!]{0,180}\b(?:target|object|own|features?)\b",
+        r"\boverlap(?:ping)?\b[^.?!]{0,180}\b(?:does\s+not|doesn't|do\s+not|not)\b[^.?!]{0,180}\b(?:explain|account\s+for)\b[^.?!]{0,180}\btarget[-\s]?contained\b",
         r"\b(?:target|object)\b[^.?!]{0,180}\b(?:own|intrinsic|visible)\b[^.?!]{0,180}\bfeatures?\b[^.?!]{0,180}\b(?:not|do\s+not|does\s+not|doesn't)\b[^.?!]{0,180}\b(?:explained|caused|accounted\s+for)\b[^.?!]{0,180}\boverlap\b",
         r"\boverlap\b[^.?!]{0,80}\b(?:minor|minimal|small|low|weak|slight)\b",
         r"\b(?:minor|minimal|small|low|weak|slight)\b[^.?!]{0,80}\boverlap\b",
@@ -26853,6 +27152,11 @@ def _class_analysis_qwen_review_text_rebuts_overlap_contamination(
         r"\boverlap\b[^.?!]{0,120}\bbackground\b[^.?!]{0,120}\bnot\b[^.?!]{0,80}\b(?:target|object|primary|main)\b",
         r"\b(?:minor|small)\s+background\s+(?:element|object|structure)\b",
         r"\b(?:background|minor)\b[^.?!]{0,80}\b(?:element|object|structure)\b[^.?!]{0,80}\b(?:not|rather\s+than|instead\s+of)\b[^.?!]{0,80}\b(?:target|primary|main)\b",
+        r"\bnot\s+(?:merely\s+)?(?:an?\s+)?(?:artifact|artifacts?)\s+of\s+(?:the\s+)?(?:partial\s+)?overlap\b",
+        r"\b(?:partial\s+)?(?:overlap|contamination)\s+(?:does\s+not|doesn't)\s+(?:obscure|explain|account\s+for)\b",
+        r"\b(?:target|target\s+pixels?)\s+(?:clearly\s+)?show(?:s)?\b[^.?!]{0,180}\b(?:distinct|intrinsic|primary|structural|defining)\b",
+        r"\b(?:intrinsic|primary|defining|target-contained|target-specific)\b[^.?!]{0,180}\b(?:target|object|geometry|surface|features?|cues?)\b",
+        r"\b(?:visually|structurally)\s+distinct\s+from\s+(?:the\s+)?(?:partial\s+)?(?:overlap|contamination|background|nearby|adjacent)\b",
     ]
     target_aliases = _class_analysis_qwen_review_semantic_aliases_for_label(
         target_class,
@@ -26944,13 +27248,16 @@ def _class_analysis_qwen_review_normalize_visible_cues(
         "fit",
         "suggested",
         "current",
+        "candidate",
     )
     context_only_tokens = {
         "aerial",
         "adjacent",
+        "area",
         "background",
         "beside",
         "clear",
+        "context",
         "crop",
         "down",
         "ground",
@@ -26958,6 +27265,7 @@ def _class_analysis_qwen_review_normalize_visible_cues(
         "inside",
         "located",
         "location",
+        "multiple",
         "near",
         "nearby",
         "on",
@@ -26967,6 +27275,7 @@ def _class_analysis_qwen_review_normalize_visible_cues(
         "partial",
         "pavement",
         "perspective",
+        "region",
         "road",
         "scene",
         "shadow",
@@ -26978,57 +27287,43 @@ def _class_analysis_qwen_review_normalize_visible_cues(
         "visible",
         "water",
     }
-    concrete_visual_tokens = {
-        "arm",
-        "body",
-        "boom",
-        "box",
-        "bucket",
-        "cab",
-        "cargo",
-        "corner",
-        "corners",
-        "curved",
-        "edge",
-        "edges",
-        "elongated",
-        "flat",
-        "grid",
-        "grille",
-        "hull",
-        "line",
-        "lines",
-        "long",
-        "mast",
-        "material",
-        "metal",
-        "narrow",
-        "oval",
-        "panel",
-        "panels",
-        "pole",
-        "rectangular",
-        "ribbed",
-        "roof",
-        "rooftop",
-        "round",
+    color_or_lighting_tokens = {
+        "black",
+        "blue",
+        "bright",
+        "brown",
+        "color",
+        "colors",
+        "colored",
+        "colour",
+        "colours",
+        "coloured",
+        "dark",
+        "gray",
+        "green",
+        "grey",
+        "highlight",
+        "highlights",
+        "light",
+        "orange",
+        "purple",
+        "red",
+        "shadow",
+        "shadows",
+        "specular",
+        "white",
+        "yellow",
+    }
+    abstract_visual_tokens = {
+        "boundary",
+        "detail",
+        "details",
+        "geometry",
+        "outline",
+        "pattern",
         "shape",
-        "shaped",
-        "structure",
-        "structural",
         "surface",
         "texture",
-        "thin",
-        "tire",
-        "tires",
-        "vertical",
-        "wall",
-        "walls",
-        "wheel",
-        "wheels",
-        "wide",
-        "window",
-        "windows",
     }
     connector_tokens = {"a", "an", "and", "at", "by", "from", "in", "of", "the", "to", "with"}
 
@@ -27037,6 +27332,11 @@ def _class_analysis_qwen_review_normalize_visible_cues(
         if not lowered:
             return True
         if re.search(r"\b(?:no|not|without|lacks?|missing|absent|does\s+not|doesn't)\b", lowered):
+            return True
+        if (
+            re.search(r"\b(?:adjacent|beside|nearby|surrounding)\b", lowered)
+            and not re.search(r"\b(?:attached|connected|touching|mounted|joined|linked)\b", lowered)
+        ):
             return True
         if re.search(
             r"\b(?:flat|open|empty|bright|dark|gray|grey|green|brown)?\s*"
@@ -27066,11 +27366,24 @@ def _class_analysis_qwen_review_normalize_visible_cues(
             and len([token for token in tokens if token not in context_only_tokens]) == 0
         ):
             return True
-        has_concrete_visual_token = any(token in concrete_visual_tokens for token in tokens)
-        if not has_concrete_visual_token and re.search(
+        if re.search(
             r"\b(?:top[-\s]?down|overhead|aerial|parked|color|colors|colou?r(?:ed)?|multiple)\b",
             lowered,
-        ):
+        ) and all(token in context_only_tokens or token in color_or_lighting_tokens for token in tokens):
+            return True
+        informative_tokens = [
+            token
+            for token in tokens
+            if token not in context_only_tokens
+            and token not in color_or_lighting_tokens
+            and len(token) >= 3
+        ]
+        # Keep this domain-agnostic: the model must supply concrete target-pixel
+        # descriptors, but class/object vocabulary itself comes from the labelmap,
+        # glossary, and generated concept briefs rather than committed word lists.
+        if not informative_tokens:
+            return True
+        if len(informative_tokens) == 1 and informative_tokens[0] in abstract_visual_tokens:
             return True
         return False
 
@@ -27140,6 +27453,77 @@ def _class_analysis_qwen_review_visible_cues_from_payload(
         suggested_class=suggested_class,
         target_class=target_class,
     )
+
+
+def _class_analysis_qwen_review_split_independent_current_cues(
+    *,
+    target_cues: Sequence[str],
+    current_cues: Sequence[str],
+) -> Tuple[List[str], List[str]]:
+    """Separate independent current-class cues from cues already claimed for target.
+
+    This deliberately uses only lexical overlap between model-emitted cue text.
+    It is a domain-generic consistency check: if Qwen lists the same target-pixel
+    property as evidence for both classes, that property is shared/ambiguous and
+    cannot independently block or support a relabel recommendation.
+    """
+
+    def _tokens(text_value: str) -> Set[str]:
+        tokens = set(re.findall(r"[a-z0-9]+", str(text_value or "").lower()))
+        stop = {
+            "a",
+            "an",
+            "and",
+            "as",
+            "at",
+            "by",
+            "for",
+            "from",
+            "in",
+            "inside",
+            "of",
+            "on",
+            "the",
+            "to",
+            "with",
+            "target",
+            "object",
+            "visible",
+            "class",
+            "cue",
+            "cues",
+            "shape",
+            "structure",
+            "surface",
+            "texture",
+        }
+        return {token for token in tokens if len(token) >= 3 and token not in stop}
+
+    target_token_sets = [_tokens(cue) for cue in target_cues if str(cue or "").strip()]
+    independent: List[str] = []
+    shared: List[str] = []
+    for cue in current_cues:
+        text = str(cue or "").strip()
+        if not text:
+            continue
+        cue_tokens = _tokens(text)
+        is_shared = False
+        if cue_tokens and target_token_sets:
+            for target_tokens in target_token_sets:
+                if not target_tokens:
+                    continue
+                intersection = cue_tokens.intersection(target_tokens)
+                union = cue_tokens.union(target_tokens)
+                overlap = len(intersection) / max(1, min(len(cue_tokens), len(target_tokens)))
+                jaccard = len(intersection) / max(1, len(union))
+                if overlap >= 0.80 or jaccard >= 0.62:
+                    is_shared = True
+                    break
+        if is_shared:
+            shared.append(text)
+        else:
+            independent.append(text)
+    return independent, shared
 
 
 def _class_analysis_qwen_review_normalize_evidence_id_list(
@@ -27254,6 +27638,7 @@ def _class_analysis_qwen_review_expand_compact_final(
     labelmap_glossary: str = "",
     review_guidance: str = "",
     deterministic_context: Optional[Dict[str, Any]] = None,
+    evidence_ledger: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Expand the model's compact final call into the full validator payload.
 
@@ -27345,6 +27730,10 @@ def _class_analysis_qwen_review_expand_compact_final(
             "partial": "partial_contamination",
             "contamination": "partial_contamination",
             "duplicate": "duplicate_like",
+            "high_overlap": "duplicate_like",
+            "high overlap": "duplicate_like",
+            "near_identical": "duplicate_like",
+            "near identical": "duplicate_like",
             "contains_other": "target_contains_other",
             "other_contains": "other_contains_target",
             "near": "near_context",
@@ -27362,6 +27751,72 @@ def _class_analysis_qwen_review_expand_compact_final(
     )
     if "overlap_explanation" in args and "no" in str(args.get("overlap_explanation") or "").strip().lower():
         overlap_explains = False
+    dual_bbox_conflict = _class_analysis_qwen_review_dual_bbox_conflict(point, evidence_ledger)
+    dual_bbox_resolution = _class_analysis_qwen_review_coerce_choice(
+        args.get("dual_bbox_resolution")
+        if args.get("dual_bbox_resolution") is not None
+        else args.get("dual_box_resolution")
+        if args.get("dual_box_resolution") is not None
+        else args.get("overlap_resolution"),
+        CLASS_ANALYSIS_QWEN_REVIEW_DUAL_BBOX_RESOLUTIONS,
+        "not_applicable",
+        synonyms={
+            "current": "current_box_class",
+            "current_class": "current_box_class",
+            "keep_current": "current_box_class",
+            "overlap": "overlap_box_class",
+            "other": "overlap_box_class",
+            "other_class": "overlap_box_class",
+            "suggested": "overlap_box_class",
+            "both": "both_valid_overlapping_objects",
+            "both_valid": "both_valid_overlapping_objects",
+            "both valid": "both_valid_overlapping_objects",
+            "valid_overlap": "both_valid_overlapping_objects",
+            "uncertain": "uncertain_or_neither",
+            "neither": "uncertain_or_neither",
+            "skip": "uncertain_or_neither",
+            "n/a": "not_applicable",
+            "not applicable": "not_applicable",
+        },
+    )
+    if dual_bbox_conflict:
+        dual_other_class = _class_analysis_qwen_review_dual_bbox_other_class(dual_bbox_conflict)
+        target_norm_for_dual = _class_analysis_qwen_review_normalize_label(target_class)
+        current_norm_for_dual = _class_analysis_qwen_review_normalize_label(current_class)
+        other_norm_for_dual = _class_analysis_qwen_review_normalize_label(dual_other_class)
+        if dual_bbox_resolution == "not_applicable":
+            if decision == "confirm_current":
+                dual_bbox_resolution = "current_box_class"
+            elif decision in {"accept_suggested", "change_to_other"} and target_norm_for_dual == other_norm_for_dual:
+                dual_bbox_resolution = "overlap_box_class"
+            elif decision == "skip_uncertain":
+                dual_bbox_resolution = "uncertain_or_neither"
+        elif (
+            dual_bbox_resolution == "both_valid_overlapping_objects"
+            and decision in {"accept_suggested", "change_to_other"}
+            and target_norm_for_dual == other_norm_for_dual
+            and current_evidence in {"weak", "none"}
+            and target_evidence == "strong"
+        ):
+            # Compact VLM outputs sometimes say "both valid" while their
+            # decision/rationale explicitly picks the near-identical overlap
+            # box class. Preserve the model's semantic choice; the validator
+            # still blocks unsafe overlap/background cases below.
+            dual_bbox_resolution = "overlap_box_class"
+        if dual_bbox_resolution == "current_box_class" and decision == "skip_uncertain" and current_norm_for_dual:
+            target_class = current_class
+        elif dual_bbox_resolution == "overlap_box_class" and dual_other_class and target_norm_for_dual in {"", current_norm_for_dual}:
+            target_class = dual_other_class
+            if _class_analysis_qwen_review_normalize_label(suggested_class) == other_norm_for_dual:
+                decision = "accept_suggested"
+            elif decision != "accept_suggested":
+                decision = "change_to_other"
+        elif dual_bbox_resolution in {"both_valid_overlapping_objects", "uncertain_or_neither"} and decision != "skip_uncertain":
+            decision = "skip_uncertain"
+            target_class = current_class
+            target_evidence = _class_analysis_qwen_review_max_evidence(target_evidence, "moderate")
+    else:
+        dual_bbox_resolution = "not_applicable"
     local_consensus_evidence = _class_analysis_qwen_review_coerce_choice(
         args.get("local_consensus_evidence"),
         CLASS_ANALYSIS_QWEN_REVIEW_LOCAL_CONSENSUS_LEVELS,
@@ -27434,6 +27889,64 @@ def _class_analysis_qwen_review_expand_compact_final(
         same_image_scale_evidence = scale_context_signal
     if embedding_context_signal != "not_applicable":
         same_image_embedding_evidence = embedding_context_signal
+    specificity_alignment = _class_analysis_qwen_review_coerce_choice(
+        args.get("specificity_alignment")
+        if args.get("specificity_alignment") is not None
+        else args.get("target_specificity_alignment")
+        if args.get("target_specificity_alignment") is not None
+        else args.get("target_vs_background_alignment"),
+        CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_ALIGNMENT_LEVELS,
+        "insufficient",
+        synonyms={
+            "current": "supports_current",
+            "current_class": "supports_current",
+            "supports current": "supports_current",
+            "suggested": "supports_suggested",
+            "suggested_class": "supports_suggested",
+            "target_suggested": "supports_suggested",
+            "supports suggested": "supports_suggested",
+            "other": "supports_other",
+            "third_class": "supports_other",
+            "supports other": "supports_other",
+            "mixed": "mixed",
+            "ambiguous": "mixed",
+            "insufficient": "insufficient",
+            "none": "insufficient",
+            "not applicable": "not_applicable",
+            "n/a": "not_applicable",
+        },
+    )
+    target_background_contrast = _class_analysis_qwen_review_coerce_choice(
+        args.get("target_background_contrast")
+        if args.get("target_background_contrast") is not None
+        else args.get("target_vs_background_contrast")
+        if args.get("target_vs_background_contrast") is not None
+        else args.get("object_background_contrast"),
+        CLASS_ANALYSIS_QWEN_REVIEW_TARGET_BACKGROUND_CONTRAST_LEVELS,
+        "insufficient",
+        synonyms={
+            "target": "target_specific",
+            "target_specific": "target_specific",
+            "target-specific": "target_specific",
+            "clear_target_cues": "target_specific",
+            "object_specific": "target_specific",
+            "object-specific": "target_specific",
+            "background": "background_dominated",
+            "background_dominated": "background_dominated",
+            "background-dominated": "background_dominated",
+            "context": "background_dominated",
+            "context_dominated": "background_dominated",
+            "overlap": "overlap_dominated",
+            "overlap_dominated": "overlap_dominated",
+            "overlap-dominated": "overlap_dominated",
+            "mixed": "mixed",
+            "ambiguous": "mixed",
+            "insufficient": "insufficient",
+            "none": "insufficient",
+            "not applicable": "not_applicable",
+            "n/a": "not_applicable",
+        },
+    )
     rationale = (
         str(
             args.get("rationale_short")
@@ -27509,6 +28022,10 @@ def _class_analysis_qwen_review_expand_compact_final(
         "target_evidence": target_evidence,
         "overlap_assessment": overlap_assessment,
         "overlap_explains_candidate_similarity": overlap_explains,
+        "specificity_alignment": specificity_alignment,
+        "target_background_contrast": target_background_contrast,
+        "dual_bbox_resolution": dual_bbox_resolution,
+        "dual_bbox_conflict": copy.deepcopy(dual_bbox_conflict) if dual_bbox_conflict else None,
         "anchor_evidence_current": anchor_evidence_current,
         "anchor_evidence_suggested": anchor_evidence_suggested,
         "local_context_evidence": local_context_evidence,
@@ -27671,6 +28188,81 @@ def _class_analysis_qwen_review_validate_final(
     global_context_evidence = str(payload.get("global_context_evidence") or "").strip().lower()
     same_image_scale_evidence = str(payload.get("same_image_scale_evidence") or "").strip().lower() or "not_applicable"
     same_image_embedding_evidence = str(payload.get("same_image_embedding_evidence") or "").strip().lower() or "not_applicable"
+    expanded_by_controller = bool(payload.get("_expanded_by_controller") or payload.get("expanded_by_controller"))
+
+    def _default_specificity_alignment() -> str:
+        if expanded_by_controller:
+            return "insufficient"
+        if decision == "confirm_current":
+            return "supports_current"
+        if decision == "accept_suggested":
+            return "supports_suggested"
+        if decision == "change_to_other":
+            return "supports_other"
+        return "insufficient"
+
+    def _default_target_background_contrast() -> str:
+        if expanded_by_controller:
+            return "insufficient"
+        return "target_specific" if decision != "skip_uncertain" else "insufficient"
+
+    specificity_alignment = _class_analysis_qwen_review_coerce_choice(
+        payload.get("specificity_alignment")
+        if payload.get("specificity_alignment") is not None
+        else payload.get("target_specificity_alignment")
+        if payload.get("target_specificity_alignment") is not None
+        else payload.get("target_vs_background_alignment"),
+        CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_ALIGNMENT_LEVELS,
+        _default_specificity_alignment(),
+        synonyms={
+            "current": "supports_current",
+            "current_class": "supports_current",
+            "supports current": "supports_current",
+            "suggested": "supports_suggested",
+            "suggested_class": "supports_suggested",
+            "supports suggested": "supports_suggested",
+            "other": "supports_other",
+            "third_class": "supports_other",
+            "supports other": "supports_other",
+            "ambiguous": "mixed",
+            "none": "insufficient",
+            "not applicable": "not_applicable",
+            "n/a": "not_applicable",
+        },
+    )
+    target_background_contrast = _class_analysis_qwen_review_coerce_choice(
+        payload.get("target_background_contrast")
+        if payload.get("target_background_contrast") is not None
+        else payload.get("target_vs_background_contrast")
+        if payload.get("target_vs_background_contrast") is not None
+        else payload.get("object_background_contrast"),
+        CLASS_ANALYSIS_QWEN_REVIEW_TARGET_BACKGROUND_CONTRAST_LEVELS,
+        _default_target_background_contrast(),
+        synonyms={
+            "target": "target_specific",
+            "target-specific": "target_specific",
+            "clear_target_cues": "target_specific",
+            "object_specific": "target_specific",
+            "object-specific": "target_specific",
+            "background": "background_dominated",
+            "background-dominated": "background_dominated",
+            "context": "background_dominated",
+            "context_dominated": "background_dominated",
+            "overlap": "overlap_dominated",
+            "overlap-dominated": "overlap_dominated",
+            "ambiguous": "mixed",
+            "none": "insufficient",
+            "not applicable": "not_applicable",
+            "n/a": "not_applicable",
+        },
+    )
+    dual_bbox_conflict = _class_analysis_qwen_review_dual_bbox_conflict(point, evidence_ledger)
+    payload_dual_conflict = payload.get("dual_bbox_conflict") if isinstance(payload.get("dual_bbox_conflict"), dict) else None
+    if not dual_bbox_conflict and payload_dual_conflict:
+        dual_bbox_conflict = dict(payload_dual_conflict)
+    dual_bbox_resolution = str(payload.get("dual_bbox_resolution") or "").strip().lower() or "not_applicable"
+    if dual_bbox_resolution not in CLASS_ANALYSIS_QWEN_REVIEW_DUAL_BBOX_RESOLUTIONS:
+        dual_bbox_resolution = "not_applicable"
     def _coerce_payload_bool(value: Any) -> bool:
         if isinstance(value, bool):
             return value
@@ -27679,6 +28271,14 @@ def _class_analysis_qwen_review_validate_final(
         return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
     overlap_explains_candidate_similarity = _coerce_payload_bool(payload.get("overlap_explains_candidate_similarity"))
+    overlap_adjudication_verified = _coerce_payload_bool(
+        payload.get("overlap_adjudication_verified")
+        if "overlap_adjudication_verified" in payload
+        else payload.get("_overlap_adjudication_verified")
+    )
+    current_class_plausible = _coerce_payload_bool(payload.get("current_class_plausible"))
+    current_class_plausibility_checked = "current_class_plausible" in payload
+    current_class_plausibility_reason = str(payload.get("current_class_plausibility_reason") or "")[:1200]
     glossary_or_guidance_used = _coerce_payload_bool(payload.get("glossary_or_guidance_used"))
     visible_target_cues = _class_analysis_qwen_review_visible_cues_from_payload(
         payload,
@@ -27706,6 +28306,8 @@ def _class_analysis_qwen_review_validate_final(
         "insufficient",
         "not_applicable",
     }
+    specificity_alignment_allowed = set(CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_ALIGNMENT_LEVELS)
+    target_background_contrast_allowed = set(CLASS_ANALYSIS_QWEN_REVIEW_TARGET_BACKGROUND_CONTRAST_LEVELS)
     overlap_allowed = {
         "none",
         "duplicate_like",
@@ -27748,6 +28350,10 @@ def _class_analysis_qwen_review_validate_final(
         same_image_scale_evidence = "not_applicable"
     if same_image_embedding_evidence not in deterministic_context_allowed:
         same_image_embedding_evidence = "not_applicable"
+    if specificity_alignment not in specificity_alignment_allowed:
+        raise ValueError("specificity_alignment must be supports_current, supports_suggested, supports_other, mixed, insufficient, or not_applicable")
+    if target_background_contrast not in target_background_contrast_allowed:
+        raise ValueError("target_background_contrast must be target_specific, background_dominated, overlap_dominated, mixed, insufficient, or not_applicable")
     if overlap_assessment not in overlap_allowed:
         raise ValueError("overlap_assessment must be none, duplicate_like, partial_contamination, target_contains_other, other_contains_target, near_context, or unclear")
     for field_name, field_value in (
@@ -27787,6 +28393,50 @@ def _class_analysis_qwen_review_validate_final(
         advisory_reasons.append(reason)
         confidence_cap = cap if confidence_cap is None else min(confidence_cap, cap)
 
+    dual_other_class = _class_analysis_qwen_review_dual_bbox_other_class(dual_bbox_conflict)
+    dual_current_norm = _class_analysis_qwen_review_normalize_label(current_class)
+    dual_other_norm = _class_analysis_qwen_review_normalize_label(dual_other_class)
+    dual_target_norm = _class_analysis_qwen_review_normalize_label(target_class)
+    dual_bbox_active = bool(dual_bbox_conflict and dual_other_class and dual_other_norm != dual_current_norm)
+    dual_bbox_target_switch_path = (
+        dual_bbox_active
+        and decision in {"accept_suggested", "change_to_other"}
+        and dual_bbox_resolution == "overlap_box_class"
+        and dual_target_norm == dual_other_norm
+        and backend_tier == "clear"
+        and visual_quality_value == "clear"
+        and object_visibility == "clear"
+        and current_evidence in {"weak", "none"}
+        and target_evidence == "strong"
+        and local_context_evidence == "strong"
+        and global_context_evidence == "strong"
+    )
+    if dual_bbox_active:
+        _advise(
+            (
+                f"dual-bbox conflict active: near-identical cross-class boxes "
+                f"{current_class} vs {dual_other_class}"
+            ),
+            0.86,
+        )
+        if dual_bbox_resolution == "not_applicable":
+            _hard("dual-bbox conflict requires dual_bbox_resolution")
+        elif dual_bbox_resolution == "current_box_class" and decision not in {"confirm_current", "skip_uncertain"}:
+            _hard("dual_bbox_resolution=current_box_class requires confirm_current or skip_uncertain")
+        elif dual_bbox_resolution == "overlap_box_class":
+            if decision not in {"accept_suggested", "change_to_other"}:
+                _hard("dual_bbox_resolution=overlap_box_class requires a class-change decision")
+            elif dual_target_norm != dual_other_norm:
+                _hard(
+                    f"dual-bbox overlap resolution may only switch to overlapping class {dual_other_class}, got {target_class}"
+                )
+        elif dual_bbox_resolution in {"both_valid_overlapping_objects", "uncertain_or_neither"} and decision != "skip_uncertain":
+            _hard(f"dual_bbox_resolution={dual_bbox_resolution} requires skip_uncertain")
+        if decision == "change_to_other" and dual_bbox_resolution == "overlap_box_class" and dual_other_class == suggested_class:
+            _hard("dual-bbox overlap class equals suggested class; use accept_suggested")
+    elif dual_bbox_resolution != "not_applicable":
+        _advise("dual_bbox_resolution supplied without a controller-detected dual-bbox conflict", 0.72)
+
     if backend_tier == "poor":
         _hard("backend visual-quality tier is poor")
     elif backend_tier and backend_tier != "clear":
@@ -27805,6 +28455,28 @@ def _class_analysis_qwen_review_validate_final(
         _hard(f"target class evidence is only {target_evidence}")
     if decision in {"accept_suggested", "change_to_other"} and backend_tier != "clear":
         _hard(f"{decision} requires clear backend visual-quality tier, got {backend_tier or 'unknown'}")
+    if decision in {"accept_suggested", "change_to_other"}:
+        required_specificity = "supports_suggested" if decision == "accept_suggested" else "supports_other"
+        if specificity_alignment != required_specificity:
+            _hard(
+                f"{decision} requires target-contained specificity_alignment={required_specificity}, "
+                f"got {specificity_alignment}"
+            )
+        if target_background_contrast != "target_specific":
+            _hard(
+                f"{decision} requires target_background_contrast=target_specific, got {target_background_contrast}"
+            )
+    elif decision == "confirm_current":
+        if specificity_alignment == "supports_suggested" and suggested_evidence in {"strong", "moderate"}:
+            _advise(
+                "specificity alignment supports the suggested class, so confirm_current remains human-review only",
+                0.68,
+            )
+        if target_background_contrast in {"background_dominated", "overlap_dominated"}:
+            _advise(
+                f"target/background contrast is {target_background_contrast}; confirmation evidence may be context-contaminated",
+                0.68,
+            )
     clear_target_relabel_path = (
         decision == "accept_suggested"
         and backend_tier == "clear"
@@ -27817,6 +28489,31 @@ def _class_analysis_qwen_review_validate_final(
         and global_context_evidence == "strong"
         and overlap_assessment in {"none", "near_context"}
     )
+    verified_overlap_rebuttal_relabel_path = (
+        decision == "accept_suggested"
+        and len(visible_target_cues) >= 2
+        and backend_tier == "clear"
+        and visual_quality_value == "clear"
+        and object_visibility == "clear"
+        and current_evidence in {"weak", "none"}
+        and suggested_evidence == "strong"
+        and target_evidence == "strong"
+        and anchor_evidence_suggested == "moderate"
+        and local_context_evidence == "strong"
+        and global_context_evidence == "strong"
+        and overlap_assessment == "partial_contamination"
+        and not overlap_explains_candidate_similarity
+        and overlap_adjudication_verified
+        and specificity_alignment == "supports_suggested"
+        and target_background_contrast == "target_specific"
+        and same_image_scale_evidence != "supports_current"
+        and same_image_embedding_evidence != "supports_current"
+        and (
+            same_image_scale_evidence == "questions_current"
+            or same_image_embedding_evidence == "questions_current"
+            or local_consensus_evidence == "supports_suggested"
+        )
+    )
     single_cue_supported_relabel_path = (
         decision == "accept_suggested"
         and len(visible_target_cues) == 1
@@ -27826,7 +28523,10 @@ def _class_analysis_qwen_review_validate_final(
         and current_evidence in {"weak", "none"}
         and suggested_evidence == "strong"
         and target_evidence == "strong"
-        and anchor_evidence_suggested == "strong"
+        and (
+            anchor_evidence_suggested == "strong"
+            or verified_overlap_rebuttal_relabel_path
+        )
         and local_context_evidence == "strong"
         and global_context_evidence == "strong"
         and local_consensus_evidence == "supports_suggested"
@@ -27834,6 +28534,16 @@ def _class_analysis_qwen_review_validate_final(
         and not overlap_explains_candidate_similarity
         and same_image_scale_evidence != "supports_current"
         and same_image_embedding_evidence != "supports_current"
+    )
+    moderate_anchor_needs_plausibility_check = (
+        decision in {"accept_suggested", "change_to_other"}
+        and anchor_evidence_suggested == "moderate"
+        and not dual_bbox_target_switch_path
+        and not verified_overlap_rebuttal_relabel_path
+        and current_evidence in {"weak", "none"}
+        and target_evidence == "strong"
+        and same_image_scale_evidence in {"insufficient", "neutral", "not_applicable"}
+        and same_image_embedding_evidence in {"insufficient", "neutral", "not_applicable"}
     )
     confirm_current_overlap_rebuttal_path = (
         decision == "confirm_current"
@@ -27903,8 +28613,21 @@ def _class_analysis_qwen_review_validate_final(
             _advise(f"accept_suggested conflicts with current_evidence={current_evidence}", 0.72)
     if decision == "accept_suggested" and suggested_evidence != "strong":
         _hard(f"accept_suggested requires suggested_evidence strong, got {suggested_evidence}")
+    if decision in {"accept_suggested", "change_to_other"} and current_class_plausible:
+        _hard(
+            "class-change target still plausibly fits the current class"
+            + (f": {current_class_plausibility_reason}" if current_class_plausibility_reason else "")
+        )
+    elif moderate_anchor_needs_plausibility_check and not current_class_plausibility_checked:
+        _hard(
+            "moderate-anchor class change with no same-image deterministic support requires current-class plausibility verification"
+        )
     if decision == "accept_suggested" and anchor_evidence_suggested != "strong":
-        if anchor_evidence_suggested == "moderate" and clear_target_relabel_path:
+        if anchor_evidence_suggested == "moderate" and (
+            clear_target_relabel_path
+            or dual_bbox_target_switch_path
+            or verified_overlap_rebuttal_relabel_path
+        ):
             _advise("accept_suggested has only moderate suggested-anchor agreement", 0.72)
         else:
             _hard(f"accept_suggested requires strong suggested-anchor agreement, got {anchor_evidence_suggested}")
@@ -27948,6 +28671,12 @@ def _class_analysis_qwen_review_validate_final(
             _hard("overlap decomposition says overlapping-object pixels explain candidate-class similarity")
     if decision != "skip_uncertain" and overlap_assessment == "unclear":
         _advise("overlap assessment is unclear", 0.65)
+    overlap_rebuttal_text_supported = _class_analysis_qwen_review_text_rebuts_overlap_contamination(
+        payload,
+        target_class=target_class,
+        labelmap=labelmap,
+        labelmap_glossary=labelmap_glossary,
+    )
     partial_overlap_rebutted = (
         decision in {"accept_suggested", "change_to_other"}
         and overlap_assessment == "partial_contamination"
@@ -27957,14 +28686,15 @@ def _class_analysis_qwen_review_validate_final(
         and current_evidence in {"weak", "none"}
         and suggested_evidence == "strong"
         and target_evidence == "strong"
-        and anchor_evidence_suggested == "strong"
         and local_context_evidence == "strong"
         and global_context_evidence == "strong"
-        and _class_analysis_qwen_review_text_rebuts_overlap_contamination(
-            payload,
-            target_class=target_class,
-            labelmap=labelmap,
-            labelmap_glossary=labelmap_glossary,
+        and (
+            overlap_rebuttal_text_supported
+            or verified_overlap_rebuttal_relabel_path
+        )
+        and (
+            anchor_evidence_suggested == "strong"
+            or verified_overlap_rebuttal_relabel_path
         )
     )
     target_class_material_overlap = _class_analysis_qwen_review_target_class_material_overlap(
@@ -27994,13 +28724,17 @@ def _class_analysis_qwen_review_validate_final(
             )
     if partial_overlap_rebutted:
         _advise("partial overlap present, but model text explicitly says target features are not explained by overlap", 0.68)
-    elif decision in {"accept_suggested", "change_to_other"} and overlap_assessment in {
+    elif (
+        decision in {"accept_suggested", "change_to_other"}
+        and overlap_assessment in {
         "duplicate_like",
         "partial_contamination",
         "target_contains_other",
         "other_contains_target",
         "unclear",
-    }:
+        }
+        and not (dual_bbox_target_switch_path and overlap_assessment == "duplicate_like")
+    ):
         _hard(f"overlap assessment {overlap_assessment} is too entangled for relabel recommendation")
     if decision == "accept_suggested":
         text_conflict_reason = _class_analysis_qwen_review_text_conflicts_with_accept_suggested(
@@ -28033,7 +28767,12 @@ def _class_analysis_qwen_review_validate_final(
             "target_evidence": target_evidence,
             "same_image_scale_evidence": same_image_scale_evidence,
             "same_image_embedding_evidence": same_image_embedding_evidence,
+            "specificity_alignment": specificity_alignment,
+            "target_background_contrast": target_background_contrast,
             "overlap_assessment": overlap_assessment,
+            "dual_bbox_resolution": dual_bbox_resolution,
+            "dual_bbox_conflict": copy.deepcopy(dual_bbox_conflict) if dual_bbox_conflict else None,
+            "overlap_adjudication_verified": overlap_adjudication_verified,
             "visible_target_cues": list(visible_target_cues),
             "supporting_clean_evidence_ids": list(supporting_clean_evidence_ids),
             "guardrail_reasons": list(guardrail_reasons),
@@ -28079,6 +28818,11 @@ def _class_analysis_qwen_review_validate_final(
         "target_evidence": target_evidence,
         "overlap_assessment": overlap_assessment,
         "overlap_explains_candidate_similarity": overlap_explains_candidate_similarity,
+        "overlap_adjudication_verified": overlap_adjudication_verified,
+        "current_class_plausible": current_class_plausible,
+        "current_class_plausibility_reason": current_class_plausibility_reason,
+        "dual_bbox_resolution": dual_bbox_resolution,
+        "dual_bbox_conflict": copy.deepcopy(dual_bbox_conflict) if dual_bbox_conflict else None,
         "visible_target_cues": list(visible_target_cues),
         "supporting_clean_evidence_ids": list(supporting_clean_evidence_ids),
         "anchor_evidence_current": anchor_evidence_current,
@@ -28088,6 +28832,8 @@ def _class_analysis_qwen_review_validate_final(
         "global_context_evidence": global_context_evidence,
         "same_image_scale_evidence": same_image_scale_evidence,
         "same_image_embedding_evidence": same_image_embedding_evidence,
+        "specificity_alignment": specificity_alignment,
+        "target_background_contrast": target_background_contrast,
         "glossary_or_guidance_used": glossary_or_guidance_used,
         "backend_visual_quality": backend_quality,
         "guardrail_reasons": guardrail_reasons,
@@ -28116,6 +28862,11 @@ def _class_analysis_qwen_review_skip_result(
         "target_evidence": "none",
         "overlap_assessment": "unclear",
         "overlap_explains_candidate_similarity": False,
+        "overlap_adjudication_verified": False,
+        "specificity_alignment": "insufficient",
+        "target_background_contrast": "insufficient",
+        "dual_bbox_resolution": "not_applicable",
+        "dual_bbox_conflict": None,
         "visible_target_cues": [],
         "supporting_clean_evidence_ids": [],
         "anchor_evidence_current": "none",
@@ -28158,6 +28909,9 @@ def _class_analysis_qwen_review_disposition(final_result: Dict[str, Any]) -> Dic
     advisory_reasons = [str(item or "").strip() for item in (result.get("advisory_reasons") or []) if str(item or "").strip()]
     guarded = result.get("guarded_recommendation") if isinstance(result.get("guarded_recommendation"), dict) else None
     cue_verifier = result.get("cue_verifier") if isinstance(result.get("cue_verifier"), dict) else None
+    dual_bbox_conflict = result.get("dual_bbox_conflict") if isinstance(result.get("dual_bbox_conflict"), dict) else None
+    dual_bbox_resolution = str(result.get("dual_bbox_resolution") or "not_applicable").strip()
+    dual_other_class = _class_analysis_qwen_review_dual_bbox_other_class(dual_bbox_conflict)
 
     def _base(
         disposition: str,
@@ -28180,6 +28934,51 @@ def _class_analysis_qwen_review_disposition(final_result: Dict[str, Any]) -> Dic
             "human_action": human_action,
             "primary_reason": primary_reason,
         }
+
+    if dual_bbox_conflict and dual_other_class and dual_bbox_resolution == "overlap_box_class" and decision in {"accept_suggested", "change_to_other"}:
+        return _base(
+            "dual_bbox_switch_overlap_class",
+            signal="actionable",
+            label=f"Resolve dual bbox: switch class to {target_class or dual_other_class}",
+            priority="high",
+            advisory_decision=decision,
+            advisory_target_class=target_class or dual_other_class,
+            human_action="Review the near-identical overlapping boxes, then apply the class switch if the target pixels match.",
+            primary_reason=(advisory_reasons[0] if advisory_reasons else "Qwen resolved the near-identical cross-class bbox to the overlapping class."),
+        )
+    if dual_bbox_conflict and dual_bbox_resolution == "current_box_class" and decision == "confirm_current":
+        return _base(
+            "dual_bbox_confirm_current",
+            signal="actionable",
+            label="Resolve dual bbox: confirm current class",
+            priority="normal",
+            advisory_decision=decision,
+            advisory_target_class=current_class or target_class,
+            human_action="Confirm the current class or inspect the overlapping box geometry.",
+            primary_reason=(advisory_reasons[0] if advisory_reasons else "Qwen resolved the near-identical cross-class bbox to the current class."),
+        )
+    if dual_bbox_conflict and dual_bbox_resolution == "both_valid_overlapping_objects":
+        return _base(
+            "dual_bbox_both_valid_overlap",
+            signal="guarded_human_triage",
+            label="Dual bbox: both classes may be valid",
+            priority="high",
+            advisory_decision="skip_uncertain",
+            advisory_target_class=current_class or target_class,
+            human_action="Inspect both boxes in source context; this may be a valid overlap with malformed geometry.",
+            primary_reason=(advisory_reasons[0] if advisory_reasons else "Qwen found evidence for two legitimate overlapping objects."),
+        )
+    if dual_bbox_conflict and dual_bbox_resolution == "uncertain_or_neither" and not guarded:
+        return _base(
+            "dual_bbox_unresolved",
+            signal="guarded_human_triage",
+            label="Dual bbox: unresolved",
+            priority="normal",
+            advisory_decision="skip_uncertain",
+            advisory_target_class=current_class or target_class,
+            human_action="Inspect manually; the model could not resolve the near-identical cross-class boxes.",
+            primary_reason=(advisory_reasons[0] if advisory_reasons else "Dual-bbox conflict remained ambiguous."),
+        )
 
     if decision in {"accept_suggested", "change_to_other"}:
         label = f"Switch class to {target_class}" if target_class else "Switch class"
@@ -28418,14 +29217,18 @@ Decision policy:
   not ground truth. Do not accept it just because it is suggested.
 - The glossary defines class meaning. Review guidance is dataset/session policy
   and may make a visually odd subtype valid for a class.
-	- Trusted anchors provide local/global class context. They are statistical
-	  reference examples, not ground truth certification.
-	- Same-image scale and embedding reports are deterministic context modules.
-	  They may support or question whether the current label is plausible inside
-	  this image, but they are not visual class evidence by themselves.
+- Trusted anchors provide local/global class context. They are statistical
+  reference examples, not ground truth certification.
+- Same-image scale and embedding reports are deterministic context modules.
+  They may support or question whether the current label is plausible inside
+  this image, but they are not visual class evidence by themselves.
 - If advisory class concept or pairwise contrast briefs are provided, use them
   only as compressed memory from trusted exemplars. They cannot override fresh
   target pixels, overlap evidence, or backend guardrails.
+- Use an SDDF-style target/background separation: target-specific object cues
+  must be distinguished from background texture, nearby objects, overlap pixels,
+  scene context, class labels, and neighbor statistics before any class-change
+  recommendation.
 - If local consensus is rendered, the clean crop is visual evidence. The dot map
   is annotation-distribution context only and cannot override unclear target
   pixels.
@@ -28440,15 +29243,19 @@ Decision policy:
 - Overlapping-object pixels can explain misleading embedding similarity. If
   candidate-class evidence comes mainly from a materially overlapping other box,
   do not relabel to that overlapping object's class.
+- If the controller reports a near-identical cross-class dual-bbox conflict,
+  switch from generic outlier review to the narrower conflict question: current
+  box class vs overlapping box class vs both-valid overlapping objects vs
+  unresolved. Use this mode only when the final instruction says it is active.
 - For accept_suggested or change_to_other, overlap assessment should normally be
   none or near_context. Partial_contamination is only acceptable as advisory
   evidence when the target crop is clear, target/suggested evidence is strong,
   current evidence is weak, and your rationale explicitly says why the visible
   target features are not explained by the overlapping object. duplicate_like, target_contains_other,
   other_contains_target, and unclear must stay skip_uncertain.
-	- You may use target evidence, source context, anchors, and overlap logic
-	  together. A non-skip decision needs these sources to agree, not merely neighbor
-	  majority, scale similarity, or embedding distance.
+- You may use target evidence, source context, anchors, and overlap logic
+  together. A non-skip decision needs these sources to agree, not merely neighbor
+  majority, scale similarity, or embedding distance.
 - If the current and suggested classes share visible attributes, context, or
   subtypes according to the glossary, review guidance, or pairwise contrast
   brief, choose a non-skip decision only when the target pixels and overlap
@@ -28534,6 +29341,7 @@ def _class_analysis_qwen_review_final_instruction(
     visual_quality: Dict[str, Any],
     local_consensus_inspected: bool = False,
     class_concept_brief_text: str = "",
+    dual_bbox_conflict: Optional[Dict[str, Any]] = None,
     allow_poor_advisory: bool = False,
 ) -> Dict[str, Any]:
     evidence_list = ", ".join(sorted(evidence_ids)) or "(none)"
@@ -28579,13 +29387,44 @@ def _class_analysis_qwen_review_final_instruction(
         if concept_brief_text
         else ["No class concept or pairwise contrast brief is available; rely on the rendered evidence and glossary/guidance."]
     )
+    dual_conflict_lines: List[str] = []
+    if isinstance(dual_bbox_conflict, dict) and dual_bbox_conflict.get("enabled"):
+        dual_other_class = _class_analysis_qwen_review_dual_bbox_other_class(dual_bbox_conflict)
+        dual_conflict_lines = [
+            "Dual-bbox conflict mode is active.",
+            (
+                f"The target bbox and another bbox are near-identical but have different classes: "
+                f"current={point.get('class_name')}, overlapping={dual_other_class or '(unknown)'}, "
+                f"IoU={float(dual_bbox_conflict.get('iou') or 0.0):.3f}, "
+                f"target_cover={float(dual_bbox_conflict.get('target_area_covered') or 0.0):.3f}, "
+                f"other_cover={float(dual_bbox_conflict.get('other_area_covered') or 0.0):.3f}."
+            ),
+            (
+                "Your final question is narrower than normal likely-wrong review: decide whether this target box should keep "
+                "the current class, switch to the overlapping box class, be treated as two valid overlapping objects with "
+                "bbox deformation, or remain unresolved."
+            ),
+            (
+                "Some object classes legitimately overlap in real datasets, such as rider/vehicle, carried object/person, "
+                "mounted object/support, trailer/vehicle, or other dataset-specific relationships. Do not assume one box is "
+                "wrong merely because overlap is high; use clean pixels, source context, glossary/guidance, anchors, scale, "
+                "embedding, and overlap evidence together."
+            ),
+            (
+                "Set dual_bbox_resolution exactly: current_box_class, overlap_box_class, "
+                "both_valid_overlapping_objects, or uncertain_or_neither. For overlap_box_class, final_class must be the "
+                f"overlapping class {dual_other_class or '(unknown)'} and the target pixels must visibly support it."
+            ),
+        ]
+    else:
+        dual_conflict_lines = ["No near-identical cross-class dual-bbox conflict is active. Set dual_bbox_resolution=not_applicable."]
     policy_lines = [
         "Return only JSON. No markdown, prose, chain-of-thought, tool names, or outer wrapper.",
-        'Required keys: decision, final_class, confidence, visual_quality, object_visibility, current_evidence, suggested_evidence, target_evidence, overlap_assessment, overlap_explains_candidate_similarity, visible_target_cues, rationale_short.',
+        'Required keys: decision, final_class, confidence, visual_quality, object_visibility, current_evidence, suggested_evidence, target_evidence, overlap_assessment, overlap_explains_candidate_similarity, specificity_alignment, target_background_contrast, dual_bbox_resolution, visible_target_cues, rationale_short.',
         "Optional but preferred: supporting_clean_evidence_ids, local_consensus_evidence, counter_evidence, human_review_needed.",
         'Minimal valid example: {"decision":"skip_uncertain","final_class":"'
         + str(point.get("class_name") or "")
-        + '","confidence":0.2,"visual_quality":"limited","object_visibility":"partial","current_evidence":"weak","suggested_evidence":"weak","target_evidence":"weak","overlap_assessment":"unclear","overlap_explains_candidate_similarity":false,"visible_target_cues":[],"supporting_clean_evidence_ids":[],"rationale_short":"target is not clear enough"}',
+        + '","confidence":0.2,"visual_quality":"limited","object_visibility":"partial","current_evidence":"weak","suggested_evidence":"weak","target_evidence":"weak","overlap_assessment":"unclear","overlap_explains_candidate_similarity":false,"specificity_alignment":"insufficient","target_background_contrast":"insufficient","dual_bbox_resolution":"not_applicable","visible_target_cues":[],"supporting_clean_evidence_ids":[],"rationale_short":"target is not clear enough"}',
         f"Required tools already inspected: {required_list}.",
         f"Available evidence ids: {evidence_list}.",
         f"Current class: {point.get('class_name')}",
@@ -28595,8 +29434,10 @@ def _class_analysis_qwen_review_final_instruction(
         quality_summary,
         quality_policy,
         "Use clean target/source/zoom pixels for visible_target_cues. Do not use overlay boxes, dot maps, neighbor labels, deterministic reports, or class names as visible cues.",
+        "Use specificity_alignment to state which hypothesis is supported by target-contained object-specific cues: supports_current, supports_suggested, supports_other, mixed, insufficient, or not_applicable.",
+        "Use target_background_contrast to separate target-object evidence from context: target_specific, background_dominated, overlap_dominated, mixed, insufficient, or not_applicable.",
         "For accept_suggested/change_to_other, include at least two concrete positive target cues and cite clean target/source evidence ids in supporting_clean_evidence_ids.",
-        "Class changes require target-contained evidence: suggested_evidence=strong, target_evidence=strong, current_evidence weak/none, and no overlap explanation for the suggested class.",
+        "Class changes require target-contained evidence: suggested_evidence=strong, target_evidence=strong, current_evidence weak/none, target_background_contrast=target_specific, the matching specificity_alignment, and no overlap explanation for the suggested class.",
         "confirm_current is valid when the clean target supports the current class. If suggested evidence is moderate/strong, explain why overlap or near context accounts for that signal.",
         "Use same-image scale and embedding reports to guide visual attention, but do not output scale/embedding fields; the controller records those reports separately.",
         "Local consensus is not ground truth; use its clean crop as context and its dot map only as annotation-distribution context.",
@@ -28609,7 +29450,7 @@ def _class_analysis_qwen_review_final_instruction(
         "content": [
             {
                 "type": "text",
-                "text": "\n".join(policy_lines + concept_lines + [local_consensus_policy]),
+                "text": "\n".join(policy_lines + dual_conflict_lines + concept_lines + [local_consensus_policy]),
             }
         ],
     }
@@ -28640,19 +29481,31 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
                 "text": "\n".join(
                     [
                         "Cue-verifier state.",
-                        "A previous finalize_review tried to change this class, but the controller blocked it because the positive visible-cue ledger was insufficient.",
-                        "Your job is not to re-argue the whole label decision. Verify only whether clean target/source pixels show enough positive target-object cues for the proposed target class.",
+                        "A previous finalize_review tried to change this class, but the controller blocked it because the visible-cue, anchor, or overlap guardrails were not strong enough.",
+                        "Your job is not to re-argue the whole label decision. Verify only whether clean target/source pixels show enough positive target-object cues for the proposed target class, and whether overlap/background actually explains those cues.",
                         'Return one complete verify_visible_cues JSON arguments object. Return only the arguments object, not an outer name/tool wrapper.',
                         f"Current class: {point.get('class_name')}",
                         f"Proposed target class: {target_class or '(none)'}",
                         f"Original model rationale: {str(guarded_recommendation.get('rationale_short') or '')[:300]}",
+                        f"Controller guardrails that blocked the recommendation: {json.dumps(guarded_recommendation.get('guardrail_reasons') or [], ensure_ascii=False)}",
                         f"Existing normalized target cues: {json.dumps(existing_cues, ensure_ascii=False)}",
                         f"Clean target/source evidence ids allowed for support: {', '.join(clean_target_ids) or '(none)'}",
                         "Use only clean target_context, target_detail, clean source, and clean zoom/source-region pixels for positive_visible_target_cues.",
+                        "Use the current and target class concept briefs in the compact context, especially valid_variations, exclude_when, common_confusions, and uncertainty_triggers.",
                         "Do not count class names, `matches class`, local-consensus dots, neighbor labels, overlay boxes, negative claims, absence claims, color-only claims, or generic overhead/parked/context claims.",
                         "Each positive_visible_target_cue must be a concrete visible property such as shape, parts, material, structure, texture, edges, posture, or target-touching context.",
-                        "If a visible cue supports the current class, put it in current_class_positive_cues and set verified=false unless the target-class evidence is still unambiguous and current cues are clearly not target-contained.",
-                        "Set verified=true only when at least two positive target-class cues are visible, target evidence is not just scene context, and current_class_positive_cues is empty or clearly irrelevant.",
+                        "Use current_class_positive_cues only for concrete, direct current-class evidence visible in clean target/source pixels.",
+                        "Do not copy proposed-target cues into current_class_positive_cues just because they are generic shared shape, color, texture, or context cues.",
+                        "Set current_class_plausibility_basis=direct_positive_cues only when current_class_positive_cues contain independent current-class evidence.",
+                        "Set current_class_plausibility_basis=shared_generic_cues when the target pixels have generic cues that could fit both classes but are not independently current-class-specific.",
+                        "Set current_class_plausibility_basis=hypothetical_or_uncertain when the current class is only imaginable as an edge case or uncertainty-trigger without direct positive current-class pixels.",
+                        "Set current_class_plausibility_basis=none when the clean pixels do not support the current class.",
+                        "Set current_class_plausible=true only for direct_positive_cues; leave it false for shared_generic_cues or hypothetical_or_uncertain.",
+                        "Set verified=false when direct current-class cues remain. Shared generic cues or hypothetical edge cases should be reported but should not alone block verified=true when the target-class evidence is visually obvious.",
+                        "Set overlap_rebutted=true only when clean target/source pixels show that overlap/background/nearby objects do not explain the proposed target-class cues.",
+                        "Set overlap_risk=target_specific when overlap_rebutted=true and the target-class cues are visible inside the clean target/source pixels.",
+                        "Set overlap_risk=overlap_explains only when the proposed class evidence comes mainly from overlap pixels, nearby objects, background texture, or geometry overlays.",
+                        "Set verified=true only when at least two positive target-class cues are visible, target evidence is not just scene context, overlap_rebutted is true or overlap is not applicable, current_class_positive_cues is empty or clearly irrelevant, and current_class_plausible=false.",
                         "Set verified=false when the evidence is context-only, negative-only, color-only, target pixels are ambiguous, or the clean crop still plausibly supports the current class.",
                         "Set cue_confidence above 0.85 only for visually obvious positive target-object evidence.",
                         "The controller will re-run the normal validator; this verifier cannot bypass overlap, quality, anchor, or clean-evidence guardrails.",
@@ -28689,7 +29542,7 @@ def _class_analysis_qwen_review_cue_verifier_repair_instruction(
                         "Return one full JSON arguments object with every required key.",
                         f"target_class must be exactly: {target_class or '(none)'}",
                         f"Allowed supporting_clean_evidence_ids: {', '.join(clean_target_ids) or '(none)'}",
-                        "Required keys: verified, target_class, cue_confidence, positive_visible_target_cues, current_class_positive_cues, supporting_clean_evidence_ids, rejection_reason.",
+                        "Required keys: verified, target_class, cue_confidence, positive_visible_target_cues, current_class_positive_cues, current_class_plausibility_basis, current_class_plausible, current_class_plausibility_reason, overlap_rebutted, overlap_risk, overlap_rebuttal, supporting_clean_evidence_ids, rejection_reason.",
                         "If you cannot verify two concrete target-positive cues, still return the full schema with verified=false, empty arrays where appropriate, cue_confidence no higher than 0.84, and a short rejection_reason.",
                         "Do not return a partial object. Do not omit target_class. Do not include markdown or prose outside JSON.",
                     ]
@@ -28775,6 +29628,21 @@ def _class_analysis_qwen_review_initial_user_message(
         quality_text,
         f"Dataset classes: {', '.join(labelmap)}",
     ]
+    dual_bbox_conflict = _class_analysis_qwen_review_dual_bbox_conflict(point)
+    if dual_bbox_conflict:
+        dual_other_class = _class_analysis_qwen_review_dual_bbox_other_class(dual_bbox_conflict)
+        lines.extend(
+            [
+                "Dual-bbox conflict detected before review:",
+                (
+                    f"Near-identical cross-class bbox: current={point.get('class_name')}, "
+                    f"overlap={dual_other_class or '(unknown)'}, "
+                    f"IoU={float(dual_bbox_conflict.get('iou') or 0.0):.3f}, "
+                    f"corner_similarity={float(dual_bbox_conflict.get('corner_similarity') or 0.0):.3f}."
+                ),
+                "The final answer must explicitly resolve this as current, overlap class, both valid overlapping objects, or unresolved.",
+            ]
+        )
     if glossary_text:
         lines.extend(
             [
@@ -28967,9 +29835,10 @@ def _class_analysis_qwen_review_final_context_messages(
                     "type": "text",
                     "text": (
                         "You are a visual class-review agent. Return exactly one JSON object for the latest "
-                        "final schema. Use clean target/source/zoom pixels for visible cues. Treat overlays, "
-                        "dot maps, neighbors, and deterministic reports as context only. Suggested class is a "
-                        "hypothesis. No prose."
+                        "final schema. Use clean target/source/zoom pixels for visible cues. Separate "
+                        "target-contained object specificity from background, overlap, scene context, labels, "
+                        "and neighbor statistics. Treat overlays, dot maps, neighbors, and deterministic reports "
+                        "as context only. Suggested class is a hypothesis. No prose."
                     ),
                 }
             ],
@@ -29048,13 +29917,67 @@ def _class_analysis_qwen_review_should_run_cue_verifier(
     guardrails = [str(item or "") for item in (guarded.get("guardrail_reasons") or [])]
     if not guardrails:
         return False
+    reason_text = " ".join(item.lower() for item in guardrails)
+    if "current class" in reason_text and "dominates the target bbox" in reason_text:
+        return False
+    if "visible target text supporting current class" in reason_text:
+        return False
     cue_guardrails = [
         item for item in guardrails
         if "requires at least two concrete visible target cues" in item
     ]
-    if not cue_guardrails:
+    if cue_guardrails and len(cue_guardrails) == len(guardrails):
+        return True
+    plausibility_guarded = "current-class plausibility verification" in reason_text
+    if plausibility_guarded:
+        if str(guarded.get("specificity_alignment") or "").strip().lower() not in {"supports_suggested", "supports_other"}:
+            return False
+        if str(guarded.get("target_background_contrast") or "").strip().lower() != "target_specific":
+            return False
+        return len(_class_analysis_qwen_review_normalize_visible_cues(
+            guarded.get("visible_target_cues"),
+            current_class=str(guarded.get("current_class") or ""),
+            suggested_class=str(guarded.get("suggested_neighbor_class") or ""),
+            target_class=str(guarded.get("target_class") or ""),
+        )) >= 2
+    overlap_guarded = (
+        "overlap assessment partial_contamination is too entangled" in reason_text
+        or "overlap decomposition may explain candidate-class similarity" in reason_text
+    )
+    if not overlap_guarded:
         return False
-    return len(cue_guardrails) == len(guardrails)
+    if str(guarded.get("overlap_assessment") or "").strip().lower() != "partial_contamination":
+        return False
+    if str(guarded.get("specificity_alignment") or "").strip().lower() not in {"supports_suggested", "supports_other"}:
+        return False
+    if str(guarded.get("target_background_contrast") or "").strip().lower() != "target_specific":
+        return False
+    if len(_class_analysis_qwen_review_normalize_visible_cues(
+        guarded.get("visible_target_cues"),
+        current_class=str(guarded.get("current_class") or ""),
+        suggested_class=str(guarded.get("suggested_neighbor_class") or ""),
+        target_class=str(guarded.get("target_class") or ""),
+    )) < 2:
+        return False
+    return True
+
+
+def _class_analysis_qwen_review_cue_verifier_text_rebuts_overlap(text: str) -> bool:
+    compact = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if not compact:
+        return False
+    patterns = (
+        r"\boverlap\s+does\s+not\s+explain\b",
+        r"\bnot\s+(?:merely\s+)?(?:an?\s+)?(?:artifact|artifacts?)\s+of\s+(?:the\s+)?(?:partial\s+)?overlap\b",
+        r"\bnot\s+(?:merely\s+)?(?:from|due\s+to|caused\s+by)\s+(?:the\s+)?(?:overlap|background|nearby|adjacent)\b",
+        r"\b(?:partial\s+)?(?:overlap|contamination)\s+(?:does\s+not|doesn't)\s+(?:obscure|explain|account\s+for)\b",
+        r"\b(?:partial\s+)?(?:overlap|contamination)\s+(?:is\s+)?accounted\s+for\b",
+        r"\b(?:target|target\s+pixels?)\s+(?:clearly\s+)?show(?:s)?\b.*\b(?:distinct|intrinsic|primary|structural|defining)\b",
+        r"\b(?:target|target'?s\s+own|target\s+pixels?)\s+(?:pixels?\s+)?(?:clearly\s+)?(?:display|displays|depict|depicts|contain|contains|show|shows)\b",
+        r"\b(?:intrinsic|primary|defining|target-contained|target-specific)\s+.*\b(?:target|object|geometry|surface|features?|cues?)\b",
+        r"\b(?:visually|structurally)\s+distinct\s+from\s+(?:the\s+)?(?:partial\s+)?(?:overlap|contamination|background|nearby|adjacent)\b",
+    )
+    return any(re.search(pattern, compact) for pattern in patterns)
 
 
 def _class_analysis_qwen_review_parse_cue_verifier_payload(
@@ -29087,6 +30010,16 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
         )
     except Exception as exc:
         return None, str(exc)
+    missing_verifier_fields = [
+        field_name
+        for field_name in (
+            "current_class_plausible",
+            "current_class_plausibility_reason",
+        )
+        if field_name not in args
+    ]
+    if missing_verifier_fields:
+        return None, f"cue verifier missing: {', '.join(missing_verifier_fields)}"
     normalized_target = str(args.get("target_class") or "").strip()
     if target_class and normalized_target != target_class:
         return None, f"cue verifier target_class mismatch: {normalized_target or '(missing)'}"
@@ -29102,6 +30035,14 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
         suggested_class=target_class,
         target_class=current_class,
     )
+    independent_current_cues, shared_current_cues = _class_analysis_qwen_review_split_independent_current_cues(
+        target_cues=target_cues,
+        current_cues=current_cues,
+    )
+    independent_target_cues, shared_target_cues = _class_analysis_qwen_review_split_independent_current_cues(
+        target_cues=current_cues,
+        current_cues=target_cues,
+    )
     supporting_ids = _class_analysis_qwen_review_normalize_evidence_id_list(
         args.get("supporting_clean_evidence_ids"),
         allowed_ids=evidence_ids,
@@ -29114,30 +30055,138 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
     if not math.isfinite(cue_confidence):
         cue_confidence = 0.0
     verified = _class_analysis_qwen_review_coerce_bool(args.get("verified"), default=False)
+    overlap_rebutted = _class_analysis_qwen_review_coerce_bool(args.get("overlap_rebutted"), default=False)
+    current_class_plausible = _class_analysis_qwen_review_coerce_bool(
+        args.get("current_class_plausible"),
+        default=False,
+    )
+    current_class_plausibility_basis = _class_analysis_qwen_review_coerce_choice(
+        args.get("current_class_plausibility_basis"),
+        (
+            "direct_positive_cues",
+            "shared_generic_cues",
+            "hypothetical_or_uncertain",
+            "none",
+        ),
+        "",
+    )
+    if not current_class_plausibility_basis:
+        if independent_current_cues:
+            current_class_plausibility_basis = "direct_positive_cues"
+        elif shared_current_cues:
+            current_class_plausibility_basis = "shared_generic_cues"
+        elif current_class_plausible:
+            current_class_plausibility_basis = "hypothetical_or_uncertain"
+        else:
+            current_class_plausibility_basis = "none"
+    if independent_current_cues and current_class_plausibility_basis != "direct_positive_cues":
+        current_class_plausibility_basis = "direct_positive_cues"
+    effective_current_class_plausible = bool(
+        current_class_plausible and current_class_plausibility_basis == "direct_positive_cues"
+    ) or bool(independent_current_cues)
+    current_class_plausibility_reason = str(args.get("current_class_plausibility_reason") or "")[:1200]
+    overlap_risk = _class_analysis_qwen_review_coerce_choice(
+        args.get("overlap_risk"),
+        ("target_specific", "overlap_explains", "uncertain", "not_applicable"),
+        "uncertain",
+        synonyms={
+            "target": "target_specific",
+            "target-specific": "target_specific",
+            "object_specific": "target_specific",
+            "object-specific": "target_specific",
+            "overlap": "overlap_explains",
+            "background": "overlap_explains",
+            "context": "overlap_explains",
+            "none": "not_applicable",
+            "n/a": "not_applicable",
+            "not applicable": "not_applicable",
+        },
+    )
+    overlap_rebuttal = str(args.get("overlap_rebuttal") or "")[:1200]
+    overlap_risk_reconciled = False
+    overlap_text_rebutted = _class_analysis_qwen_review_cue_verifier_text_rebuts_overlap(overlap_rebuttal)
+    if (
+        overlap_rebutted
+        and overlap_risk == "overlap_explains"
+        and not effective_current_class_plausible
+        and len(independent_target_cues) >= 2
+        and overlap_text_rebutted
+    ):
+        # Qwen sometimes uses overlap_risk as "there is overlap" while its
+        # visual rebuttal says the target cues are target-contained. Normalize
+        # only this fully specified contradiction; validation still owns the
+        # final class-change decision.
+        overlap_risk = "target_specific"
+        overlap_risk_reconciled = True
+    original_verified = bool(verified)
+    original_rejection_reason = str(args.get("rejection_reason") or "")[:1200]
+    verifier_reconciled_to_verified = False
+    if (
+        not verified
+        and len(independent_target_cues) >= 2
+        and not effective_current_class_plausible
+        and bool(overlap_rebutted)
+        and overlap_risk in {"target_specific", "not_applicable"}
+        and len(supporting_ids) > 0
+        and max(0.0, min(1.0, cue_confidence)) >= 0.85
+    ):
+        verified = True
+        verifier_reconciled_to_verified = True
     normalized = {
         "verified": bool(verified),
+        "raw_verified": original_verified,
+        "reconciled_to_verified": verifier_reconciled_to_verified,
         "target_class": normalized_target or target_class,
         "cue_confidence": max(0.0, min(1.0, cue_confidence)),
         "positive_visible_target_cues": target_cues,
         "current_class_positive_cues": current_cues,
+        "independent_positive_visible_target_cues": independent_target_cues,
+        "shared_positive_visible_target_cues": shared_target_cues,
+        "independent_current_class_positive_cues": independent_current_cues,
+        "shared_current_class_positive_cues": shared_current_cues,
+        "current_class_plausible": bool(effective_current_class_plausible),
+        "raw_current_class_plausible": bool(current_class_plausible),
+        "current_class_plausibility_basis": current_class_plausibility_basis,
+        "current_class_plausibility_reason": current_class_plausibility_reason,
+        "overlap_rebutted": bool(overlap_rebutted),
+        "overlap_risk": overlap_risk,
+        "overlap_risk_reconciled": overlap_risk_reconciled,
+        "overlap_rebuttal": overlap_rebuttal,
         "supporting_clean_evidence_ids": supporting_ids,
-        "rejection_reason": str(args.get("rejection_reason") or "")[:1200],
+        "rejection_reason": original_rejection_reason,
         "raw_arguments": args,
     }
     if not verified:
         return normalized, None
-    if len(target_cues) < 2:
+    if len(independent_target_cues) < 2:
         normalized["verified"] = False
-        normalized["rejection_reason"] = "Verifier did not provide two concrete positive target cues."
-    elif current_cues:
+        normalized["rejection_reason"] = "Verifier did not provide two independent positive target cues."
+    elif independent_current_cues:
         normalized["verified"] = False
-        normalized["rejection_reason"] = "Verifier reported positive current-class cues."
+        normalized["rejection_reason"] = (
+            current_class_plausibility_reason
+            or "Verifier reported independent positive current-class cues."
+        )
+    elif effective_current_class_plausible:
+        normalized["verified"] = False
+        normalized["rejection_reason"] = (
+            current_class_plausibility_reason
+            or "Verifier reported that the clean target/source pixels still plausibly support the current class."
+        )
+    elif overlap_risk != "not_applicable" and (overlap_risk == "overlap_explains" or not overlap_rebutted):
+        normalized["verified"] = False
+        normalized["rejection_reason"] = "Verifier did not rebut overlap/background as an explanation for target-class evidence."
     elif len(supporting_ids) == 0:
         normalized["verified"] = False
         normalized["rejection_reason"] = "Verifier did not cite clean target/source evidence ids."
     elif normalized["cue_confidence"] < 0.85:
         normalized["verified"] = False
         normalized["rejection_reason"] = "Verifier cue confidence is below promotion threshold."
+    elif verifier_reconciled_to_verified:
+        normalized["rejection_reason"] = (
+            "Reconciled verifier contradiction: raw verified=false, but the same output provided "
+            "high-confidence independent target cues, clean evidence IDs, and an overlap rebuttal."
+        )
     return normalized, None
 
 
@@ -29194,7 +30243,7 @@ def _class_analysis_qwen_review_try_cue_verifier(
             tool_specs=_class_analysis_qwen_review_tool_specs_for_template(
                 _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap)
             ),
-            max_new_tokens=320,
+            max_new_tokens=900,
             progress=0.78 + (0.03 * attempt_idx),
             event_extra={
                 "attempt": attempt_idx + 1,
@@ -29226,6 +30275,11 @@ def _class_analysis_qwen_review_try_cue_verifier(
         "cue_confidence": 0.0,
         "positive_visible_target_cues": [],
         "current_class_positive_cues": [],
+        "current_class_plausible": False,
+        "current_class_plausibility_reason": "",
+        "overlap_rebutted": False,
+        "overlap_risk": "uncertain",
+        "overlap_rebuttal": "",
         "supporting_clean_evidence_ids": [],
         "rejection_reason": verifier_error or "cue_verifier_parse_error",
     }
@@ -29240,8 +30294,47 @@ def _class_analysis_qwen_review_try_cue_verifier(
     if not verifier_record.get("verified"):
         final_result = dict(final_result)
         final_result["cue_verifier"] = verifier_record
+        if verifier_record.get("current_class_plausible"):
+            final_result["current_class_plausible"] = True
+            final_result["current_class_plausibility_reason"] = str(
+                verifier_record.get("current_class_plausibility_reason") or ""
+            )[:1200]
+        return final_result
+    scale_signal = _class_analysis_qwen_review_deterministic_signal(deterministic_context, "scale")
+    embedding_signal = _class_analysis_qwen_review_deterministic_signal(deterministic_context, "embedding")
+    if str(final_result.get("same_image_scale_evidence") or "").strip().lower() == "questions_current":
+        scale_signal = "questions_current"
+    if str(final_result.get("same_image_embedding_evidence") or "").strip().lower() == "questions_current":
+        embedding_signal = "questions_current"
+    local_signal = str(final_result.get("local_consensus_evidence") or "").strip().lower()
+    if local_signal not in {"supports_current", "supports_suggested", "mixed", "absent", "not_applicable"}:
+        local_signal = "not_applicable"
+    verifier_basis = str(verifier_record.get("current_class_plausibility_basis") or "").strip().lower()
+    has_independent_current_questioning = (
+        scale_signal == "questions_current"
+        or embedding_signal == "questions_current"
+        or local_signal == "supports_suggested"
+    )
+    if verifier_basis == "shared_generic_cues" and not has_independent_current_questioning:
+        verifier_record = {
+            **verifier_record,
+            "verified": False,
+            "rejection_reason": (
+                "Cue verifier found only shared generic target/current cues and no same-image "
+                "scale, embedding, or local-consensus signal questioning the current class."
+            ),
+        }
+        final_result = dict(final_result)
+        final_result["cue_verifier"] = verifier_record
         return final_result
     augmented_args = dict(guarded)
+    overlap_rebuttal = str(verifier_record.get("overlap_rebuttal") or "").strip()
+    guarded_rationale = str(guarded.get("rationale_short") or "").strip()
+    if verifier_record.get("overlap_rebutted"):
+        overlap_rebuttal = (
+            overlap_rebuttal
+            or "Overlap does not explain the target-contained visible class features."
+        )
     augmented_args.update(
         {
             "decision": guarded.get("decision"),
@@ -29249,9 +30342,29 @@ def _class_analysis_qwen_review_try_cue_verifier(
             "confidence": min(float(guarded.get("confidence") or 0.0), float(verifier_record.get("cue_confidence") or 0.0)),
             "visible_target_cues": list(verifier_record.get("positive_visible_target_cues") or []),
             "supporting_clean_evidence_ids": list(verifier_record.get("supporting_clean_evidence_ids") or []),
-            "rationale_short": str(guarded.get("rationale_short") or "")[:800],
+            "rationale_short": (
+                f"{guarded_rationale} {overlap_rebuttal}".strip()
+                if overlap_rebuttal
+                else guarded_rationale
+            )[:800],
             "counter_evidence": str(guarded.get("counter_evidence") or "Cue verifier found no positive current-class cues.")[:800],
+            "overlap_explains_candidate_similarity": False
+            if verifier_record.get("overlap_rebutted")
+            else guarded.get("overlap_explains_candidate_similarity", False),
+            "overlap_adjudication_verified": bool(verifier_record.get("overlap_rebutted")),
+            "_overlap_adjudication_verified": bool(verifier_record.get("overlap_rebutted")),
+            "overlap_adjudication_reason": overlap_rebuttal,
+            "current_class_plausible": bool(verifier_record.get("current_class_plausible")),
+            "current_class_plausibility_reason": str(
+                verifier_record.get("current_class_plausibility_reason") or ""
+            )[:1200],
             "human_review_needed": True,
+            "specificity_alignment": "supports_suggested"
+            if str(guarded.get("decision") or "") == "accept_suggested"
+            else "supports_other"
+            if str(guarded.get("decision") or "") == "change_to_other"
+            else str(guarded.get("specificity_alignment") or "insufficient"),
+            "target_background_contrast": "target_specific",
             "glossary_or_guidance_used": True
             if str(labelmap_glossary or "").strip() or str(review_guidance or "").strip()
             else False,
@@ -29266,7 +30379,17 @@ def _class_analysis_qwen_review_try_cue_verifier(
         labelmap_glossary=labelmap_glossary,
         review_guidance=review_guidance,
         deterministic_context=deterministic_context,
+        evidence_ledger=evidence_ledger,
     )
+    for verifier_key in (
+        "overlap_adjudication_verified",
+        "_overlap_adjudication_verified",
+        "overlap_adjudication_reason",
+        "current_class_plausible",
+        "current_class_plausibility_reason",
+    ):
+        if verifier_key in augmented_args:
+            expanded_args[verifier_key] = copy.deepcopy(augmented_args[verifier_key])
     _class_analysis_qwen_review_append_event(
         job,
         {
@@ -29437,6 +30560,19 @@ def _class_analysis_qwen_review_evidence_ledger_message(
         str(ledger.get("policy") or ""),
         "Evidence rows:",
     ]
+    dual_bbox_conflict = ledger.get("dual_bbox_conflict") if isinstance(ledger.get("dual_bbox_conflict"), dict) else None
+    if dual_bbox_conflict:
+        lines.insert(
+            7,
+            (
+                "Dual-bbox conflict: current={current}, overlap={other}, IoU={iou:.3f}. "
+                "Resolve via dual_bbox_resolution in the final JSON."
+            ).format(
+                current=str(dual_bbox_conflict.get("current_class") or ""),
+                other=_class_analysis_qwen_review_dual_bbox_other_class(dual_bbox_conflict),
+                iou=float(dual_bbox_conflict.get("iou") or 0.0),
+            ),
+        )
     for row in rows[:14]:
         lines.append(
             "- {evidence_id} [{use}] {title}: {summary}".format(
@@ -29684,6 +30820,9 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                 "point_id": point.get("point_id"),
                 "current_class": point.get("class_name"),
                 "suggested_neighbor_class": point.get("suggested_neighbor_class") or "",
+                "dual_bbox_conflict": copy.deepcopy(point.get("dual_bbox_conflict"))
+                if isinstance(point.get("dual_bbox_conflict"), dict)
+                else None,
             },
         )
         required_tools = {
@@ -29918,6 +31057,9 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
             messages.append(_class_analysis_qwen_review_observation_message(tool_name, observation))
 
         evidence_ledger = _class_analysis_qwen_review_evidence_ledger(job)
+        dual_bbox_conflict = _class_analysis_qwen_review_dual_bbox_conflict(point, evidence_ledger)
+        if dual_bbox_conflict:
+            evidence_ledger["dual_bbox_conflict"] = copy.deepcopy(dual_bbox_conflict)
         deterministic_context = _class_analysis_qwen_review_deterministic_context(job)
         _class_analysis_qwen_review_write_json(job, "evidence_ledger.json", evidence_ledger)
         _class_analysis_qwen_review_append_event(
@@ -29930,6 +31072,7 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                 "local_consensus_evidence_ids": list(evidence_ledger.get("local_consensus_evidence_ids") or []),
                 "clean_visual_reference_evidence_ids": list(evidence_ledger.get("clean_visual_reference_evidence_ids") or []),
                 "deterministic_context_evidence_ids": list(evidence_ledger.get("deterministic_context_evidence_ids") or []),
+                "dual_bbox_conflict": copy.deepcopy(dual_bbox_conflict) if dual_bbox_conflict else None,
             },
         )
         messages.append(
@@ -30043,6 +31186,7 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                         visual_quality=visual_quality,
                         local_consensus_inspected="inspect_local_consensus_context" in executed_tools,
                         class_concept_brief_text=str(concept_briefs_packet.get("prompt_text") or ""),
+                        dual_bbox_conflict=dual_bbox_conflict,
                         allow_poor_advisory=poor_final_review_enabled,
                     )
                 )
@@ -30111,6 +31255,7 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                     labelmap_glossary=labelmap_glossary,
                     review_guidance=review_guidance,
                     deterministic_context=deterministic_context,
+                    evidence_ledger=evidence_ledger,
                 )
                 _class_analysis_qwen_review_append_event(
                     job,
@@ -30185,8 +31330,12 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
             "reviewed_by_model": model_id or (active_qwen_metadata or {}).get("model_id") or active_qwen_model_id or "default",
             "review_agent_controller": "state_machine_v2",
             "router": router_result,
+            "dual_bbox_conflict": copy.deepcopy(final_result.get("dual_bbox_conflict") or dual_bbox_conflict)
+            if (final_result.get("dual_bbox_conflict") or dual_bbox_conflict)
+            else None,
+            "dual_bbox_resolution": str(final_result.get("dual_bbox_resolution") or "not_applicable"),
             "deterministic_context": deterministic_context,
-                "class_concept_briefs": {
+            "class_concept_briefs": {
                 "enabled": bool(concept_briefs_packet.get("enabled")),
                 "version": concept_briefs_packet.get("version") or CLASS_ANALYSIS_QWEN_REVIEW_CONCEPT_BRIEF_VERSION,
                 "pair_contrast_version": concept_briefs_packet.get("pair_contrast_version") or CLASS_ANALYSIS_QWEN_REVIEW_PAIR_CONTRAST_VERSION,

@@ -34,6 +34,23 @@ def _load_json(path: Path) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _record_current_class_plausible(record: Dict[str, Any]) -> bool:
+    if _coerce_bool(record.get("current_class_plausible")):
+        return True
+    verifier = record.get("cue_verifier")
+    if isinstance(verifier, dict) and _coerce_bool(verifier.get("current_class_plausible")):
+        return True
+    return False
+
+
 def _safe_read_events(path: Path) -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = []
     if not path.is_file():
@@ -154,6 +171,15 @@ def _record_from_review(
     deterministic_context = final.get("deterministic_context") if isinstance(final.get("deterministic_context"), dict) else {}
     scale_context = deterministic_context.get("scale") if isinstance(deterministic_context.get("scale"), dict) else {}
     embedding_context = deterministic_context.get("embedding") if isinstance(deterministic_context.get("embedding"), dict) else {}
+    cue_verifier = final.get("cue_verifier") if isinstance(final.get("cue_verifier"), dict) else {}
+    final_current_plausible = _coerce_bool(final.get("current_class_plausible"))
+    cue_current_plausible = _coerce_bool(cue_verifier.get("current_class_plausible"))
+    current_plausible = final_current_plausible or cue_current_plausible
+    current_plausibility_reason = str(
+        final.get("current_class_plausibility_reason")
+        or cue_verifier.get("current_class_plausibility_reason")
+        or ""
+    )
     return {
         "ordinal": ordinal,
         "review_id": review.review_id,
@@ -173,6 +199,14 @@ def _record_from_review(
         "target_evidence": final.get("target_evidence"),
         "overlap_assessment": final.get("overlap_assessment"),
         "overlap_explains_candidate_similarity": final.get("overlap_explains_candidate_similarity"),
+        "overlap_adjudication_verified": final.get("overlap_adjudication_verified"),
+        "current_class_plausible": current_plausible,
+        "current_class_plausibility_reason": current_plausibility_reason,
+        "cue_verifier_current_class_plausible": cue_current_plausible,
+        "dual_bbox_resolution": final.get("dual_bbox_resolution"),
+        "dual_bbox_conflict": final.get("dual_bbox_conflict"),
+        "specificity_alignment": final.get("specificity_alignment"),
+        "target_background_contrast": final.get("target_background_contrast"),
         "visible_target_cues": final.get("visible_target_cues") or [],
         "supporting_clean_evidence_ids": final.get("supporting_clean_evidence_ids") or [],
         "anchor_evidence_current": final.get("anchor_evidence_current"),
@@ -191,7 +225,7 @@ def _record_from_review(
         "guardrail_reasons": final.get("guardrail_reasons") or [],
         "advisory_reasons": final.get("advisory_reasons") or [],
         "guarded_recommendation": final.get("guarded_recommendation"),
-        "cue_verifier": final.get("cue_verifier"),
+        "cue_verifier": cue_verifier,
         "review_disposition": final.get("review_disposition") or {},
         "evidence_ledger": final.get("evidence_ledger") or {},
         "class_concept_briefs": final.get("class_concept_briefs") or {},
@@ -223,6 +257,11 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
     same_image_embedding = Counter(str(record.get("same_image_embedding_evidence") or "missing") for record in records)
     same_image_scale_report = Counter(str(record.get("same_image_scale_report_signal") or "missing") for record in records)
     same_image_embedding_report = Counter(str(record.get("same_image_embedding_report_signal") or "missing") for record in records)
+    specificity_alignment = Counter(str(record.get("specificity_alignment") or "missing") for record in records)
+    target_background_contrast = Counter(str(record.get("target_background_contrast") or "missing") for record in records)
+    dual_bbox_resolution = Counter(str(record.get("dual_bbox_resolution") or "missing") for record in records)
+    overlap_adjudication_verified = sum(1 for record in records if bool(record.get("overlap_adjudication_verified")))
+    current_class_plausible = sum(1 for record in records if _record_current_class_plausible(record))
     disposition_counts = Counter(
         str((record.get("review_disposition") or {}).get("disposition") or "missing")
         for record in records
@@ -248,6 +287,11 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
         "same_image_embedding_evidence_counts": dict(same_image_embedding),
         "same_image_scale_report_signal_counts": dict(same_image_scale_report),
         "same_image_embedding_report_signal_counts": dict(same_image_embedding_report),
+        "specificity_alignment_counts": dict(specificity_alignment),
+        "target_background_contrast_counts": dict(target_background_contrast),
+        "dual_bbox_resolution_counts": dict(dual_bbox_resolution),
+        "overlap_adjudication_verified_count": overlap_adjudication_verified,
+        "current_class_plausible_count": current_class_plausible,
         "review_disposition_counts": dict(disposition_counts),
         "review_disposition_signal_counts": dict(disposition_signal_counts),
         "effective_human_signal_count": sum(
@@ -376,6 +420,7 @@ def _make_visual_sheet(
             f"#{record.get('ordinal')} {record.get('decision')} conf {float(record.get('confidence') or 0):.2f}",
             f"{record.get('current_class')} -> {record.get('suggested_neighbor_class')} target {record.get('target_class')}",
             f"tier {record.get('backend_tier')} vis {record.get('visual_quality')}/{record.get('object_visibility')}",
+            f"specificity {record.get('specificity_alignment')} contrast {record.get('target_background_contrast')}",
             f"router {(record.get('router') or {}).get('action')}",
             str(record.get("rationale_short") or "")[:90],
         ]

@@ -917,6 +917,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     review_disposition_signal_counts: Counter[str] = Counter()
     specificity_alignment_counts: Counter[str] = Counter()
     target_background_contrast_counts: Counter[str] = Counter()
+    target_identity_uncertainty_counts: Counter[str] = Counter()
     dual_bbox_resolution_counts: Counter[str] = Counter()
     overlap_adjudication_verified_count = 0
     anchor_adjudication_verified_count = 0
@@ -942,11 +943,15 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         target_background_contrast = str(
             record.get("target_background_contrast") or payload.get("target_background_contrast") or ""
         ).strip().lower()
+        target_identity_uncertainty = str(
+            record.get("target_identity_uncertainty") or payload.get("target_identity_uncertainty") or ""
+        ).strip().lower()
         dual_bbox_resolution = str(
             record.get("dual_bbox_resolution") or payload.get("dual_bbox_resolution") or ""
         ).strip().lower()
         specificity_alignment_counts[specificity_alignment or "missing"] += 1
         target_background_contrast_counts[target_background_contrast or "missing"] += 1
+        target_identity_uncertainty_counts[target_identity_uncertainty or "missing"] += 1
         dual_bbox_resolution_counts[dual_bbox_resolution or "missing"] += 1
         if bool(record.get("overlap_adjudication_verified")):
             overlap_adjudication_verified_count += 1
@@ -1165,6 +1170,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "review_disposition_signal_counts": dict(review_disposition_signal_counts),
         "specificity_alignment_counts": dict(specificity_alignment_counts),
         "target_background_contrast_counts": dict(target_background_contrast_counts),
+        "target_identity_uncertainty_counts": dict(target_identity_uncertainty_counts),
         "dual_bbox_resolution_counts": dict(dual_bbox_resolution_counts),
         "overlap_adjudication_verified_count": overlap_adjudication_verified_count,
         "anchor_adjudication_verified_count": anchor_adjudication_verified_count,
@@ -1266,6 +1272,7 @@ def print_report(audit: Dict[str, Any], comparison: Optional[Dict[str, Any]] = N
     print(f"Disposition counts: {json.dumps(audit.get('review_disposition_counts', {}), sort_keys=True)}")
     print(f"Specificity alignment: {json.dumps(audit.get('specificity_alignment_counts', {}), sort_keys=True)}")
     print(f"Target/background contrast: {json.dumps(audit.get('target_background_contrast_counts', {}), sort_keys=True)}")
+    print(f"Target identity uncertainty: {json.dumps(audit.get('target_identity_uncertainty_counts', {}), sort_keys=True)}")
     print(f"Dual-bbox resolution: {json.dumps(audit.get('dual_bbox_resolution_counts', {}), sort_keys=True)}")
     print(f"Overlap adjudication verified: {audit.get('overlap_adjudication_verified_count', 0)}")
     print(f"Anchor adjudication verified: {audit.get('anchor_adjudication_verified_count', 0)}")

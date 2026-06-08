@@ -251,6 +251,9 @@ def _record_from_review(
         "dual_bbox_conflict": final.get("dual_bbox_conflict"),
         "specificity_alignment": final.get("specificity_alignment"),
         "target_background_contrast": final.get("target_background_contrast"),
+        "target_identity_summary": final.get("target_identity_summary") or "",
+        "target_identity_uncertainty": final.get("target_identity_uncertainty") or "",
+        "target_identity_evidence_ids": final.get("target_identity_evidence_ids") or [],
         "whole_target_extent_supported": final.get("whole_target_extent_supported"),
         "whole_target_extent_reason": final.get("whole_target_extent_reason") or "",
         "visible_target_cues": final.get("visible_target_cues") or [],
@@ -305,6 +308,7 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
     same_image_embedding_report = Counter(str(record.get("same_image_embedding_report_signal") or "missing") for record in records)
     specificity_alignment = Counter(str(record.get("specificity_alignment") or "missing") for record in records)
     target_background_contrast = Counter(str(record.get("target_background_contrast") or "missing") for record in records)
+    target_identity_uncertainty = Counter(str(record.get("target_identity_uncertainty") or "missing") for record in records)
     whole_target_extent = Counter(
         "supported" if record.get("whole_target_extent_supported") is True
         else "unsupported" if record.get("whole_target_extent_supported") is False
@@ -353,6 +357,7 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
         "same_image_embedding_report_signal_counts": dict(same_image_embedding_report),
         "specificity_alignment_counts": dict(specificity_alignment),
         "target_background_contrast_counts": dict(target_background_contrast),
+        "target_identity_uncertainty_counts": dict(target_identity_uncertainty),
         "whole_target_extent_counts": dict(whole_target_extent),
         "dual_bbox_resolution_counts": dict(dual_bbox_resolution),
         "overlap_adjudication_verified_count": overlap_adjudication_verified,

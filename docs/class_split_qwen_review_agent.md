@@ -72,6 +72,9 @@ The final result schema is:
   "overlap_explains_candidate_similarity": false,
   "specificity_alignment": "supports_current | supports_suggested | supports_other | mixed | insufficient | not_applicable",
   "target_background_contrast": "target_specific | background_dominated | overlap_dominated | mixed | insufficient | not_applicable",
+  "target_identity_summary": "class-neutral visible description of the whole target",
+  "target_identity_uncertainty": "low | moderate | high",
+  "target_identity_evidence_ids": ["target_context_1", "zoom_region_6"],
   "dual_bbox_resolution": "not_applicable | current_box_class | overlap_box_class | both_valid_overlapping_objects | uncertain_or_neither",
   "dual_bbox_conflict": {
     "enabled": true,
@@ -233,6 +236,15 @@ State sequence:
    final message keeps the clean target-detail, clean zoom, and class-context
    pack images; local-consensus views, deterministic reports, source overlays,
    and overlap-decomposition views remain compact text/ledger context so
+   evidence stays visible without overwhelming the MLX context path. Before any
+   class decision, Qwen must write `target_identity_summary`: a short,
+   class-neutral description of the reviewed target's visible shape, parts,
+   material, extent, and target-touching context. It must also cite clean
+   target/source evidence IDs in `target_identity_evidence_ids` and set
+   `target_identity_uncertainty`. This prompt-chaining step is deliberately
+   separate from the final class label: it makes the VLM commit to what it sees
+   before choosing a label, which gives the validator an auditable hook for
+   class-change contradictions.
    target-contained pixels stay central without hiding trusted examples. The backend
    expands that compact object into the full audit payload and applies
    guardrails. The compact schema includes an SDDF-inspired specificity audit:
@@ -244,6 +256,14 @@ State sequence:
    becomes `skip_uncertain`. Degenerate repeated-token outputs are detected
    before JSON parsing and fail closed immediately as `skip_uncertain` so bad
    assistant text is never replayed into the next final attempt.
+7. `cue_verifier`: when Qwen made a guarded class-change recommendation that
+   failed a deterministic rail but still contains potentially useful visual
+   signal, the controller can ask one stricter verifier pass to check positive
+   target cues against clean target/source evidence. If that pass verifies the
+   cue set, the promotion path carries or synthesizes
+   `target_identity_summary`, `target_identity_uncertainty`, and
+   `target_identity_evidence_ids` from verified visible cues. Promotion therefore
+   cannot bypass the identity-first rail.
 
 Required route schema:
 
@@ -275,6 +295,9 @@ Model-facing compact final schema:
   "overlap_explains_candidate_similarity": false,
   "specificity_alignment": "supports_current | supports_suggested | supports_other | mixed | insufficient | not_applicable",
   "target_background_contrast": "target_specific | background_dominated | overlap_dominated | mixed | insufficient | not_applicable",
+  "target_identity_summary": "class-neutral visible description of the whole target",
+  "target_identity_uncertainty": "low | moderate | high",
+  "target_identity_evidence_ids": ["target_context_1", "zoom_region_6"],
   "dual_bbox_resolution": "not_applicable | current_box_class | overlap_box_class | both_valid_overlapping_objects | uncertain_or_neither",
   "local_consensus_evidence": "supports_current | supports_suggested | mixed | absent | not_applicable",
   "visible_target_cues": ["concrete cue from target/source pixels"],
@@ -304,9 +327,13 @@ is allowed only on the narrow clear-target path where target/source pixels,
 local context, global context, overlap state, and weak current-class evidence
 all agree. Otherwise the backend preserves the attempted recommendation as
 `guarded_recommendation` and forces `skip_uncertain`. The model should not emit
-glossary bookkeeping or arbitrary evidence ids. It should only cite clean
-target/source ids in `supporting_clean_evidence_ids` for the specific visible
-cues it claims.
+glossary bookkeeping or arbitrary evidence ids. It should cite clean
+target/source ids in `target_identity_evidence_ids` for the class-neutral target
+identity summary, and in `supporting_clean_evidence_ids` for the specific
+visible class cues it claims. Class-changing compact outputs with missing
+identity summaries, high identity uncertainty, or summaries that still support
+the current class are guarded back to `skip_uncertain` while preserving the raw
+VLM recommendation for human triage.
 
 Controller controls:
 
@@ -810,6 +837,14 @@ Targeted verifier probe after adding anchor-support adjudication:
   `whole_target_extent_counts={"supported": 1}`. This preserves the VLM's
   recommendation for the reviewer while preventing a self-contradictory VLM
   class-change signal from becoming actionable.
+- Identity-first schema smoke:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/identity_first_suspect1_1_1780899057.json`
+  reran one clear-tier review after adding class-neutral target identity fields
+  to the final schema and cue-verifier promotion path. Result: 1/1 completed,
+  one `finalize_review` schema call, `target_identity_uncertainty_counts={"low": 1}`,
+  0 final validation errors, 0 unsafe audit issues, and one actionable VLM
+  recommendation. This confirms the local MLX Qwen path can emit the new
+  identity-first fields instead of being forced into controller-only fallback.
 
 Latest Mac probe after restoring VLM finalization and the `final_class` schema:
 

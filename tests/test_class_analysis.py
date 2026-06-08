@@ -462,6 +462,9 @@ def test_class_analysis_qwen_review_compact_final_schema_expands_to_full_audit_p
         "suggested_evidence",
         "specificity_alignment",
         "target_background_contrast",
+        "target_identity_summary",
+        "target_identity_uncertainty",
+        "target_identity_evidence_ids",
         "whole_target_extent_supported",
         "whole_target_extent_reason",
     } <= required
@@ -484,6 +487,9 @@ def test_class_analysis_qwen_review_compact_final_schema_expands_to_full_audit_p
             "overlap_explains_candidate_similarity": False,
             "specificity_alignment": "supports_suggested",
             "target_background_contrast": "target_specific",
+            "target_identity_summary": "compact road-vehicle body with open rear bed",
+            "target_identity_uncertainty": "low",
+            "target_identity_evidence_ids": ["target_context_1", "zoom_region_6"],
             "whole_target_extent_supported": True,
             "whole_target_extent_reason": "The suggested class explains the full target extent.",
             "visible_target_cues": ["compact road-vehicle body", "visible cargo bed"],
@@ -821,6 +827,9 @@ def test_class_analysis_qwen_review_compact_uncertain_class_alias_maps_to_sugges
             "overlap_explains_candidate": False,
             "specificity_alignment": "supports_suggested",
             "target_background_contrast": "target_specific",
+            "target_identity_summary": "rectangular gridded flat panel surface",
+            "target_identity_uncertainty": "low",
+            "target_identity_evidence_ids": ["target_context_1"],
             "whole_target_extent_supported": True,
             "whole_target_extent_reason": "The suggested class explains the full target extent.",
             "visible_target_cues": ["rectangular panel surface", "grid-like panel texture"],
@@ -1691,6 +1700,9 @@ def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class
             "glossary_or_guidance_used": True,
             "specificity_alignment": "supports_suggested",
             "target_background_contrast": "target_specific",
+            "target_identity_summary": "compact object body with visible windshield",
+            "target_identity_uncertainty": "low",
+            "target_identity_evidence_ids": ["target_detail_2", "zoom_region_8"],
             "whole_target_extent_supported": True,
             "whole_target_extent_reason": "The overlapping class explains the full target extent.",
             "visible_target_cues": ["compact vehicle body", "visible windshield"],
@@ -1775,6 +1787,9 @@ def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class
             "glossary_or_guidance_used": True,
             "specificity_alignment": "supports_suggested",
             "target_background_contrast": "target_specific",
+            "target_identity_summary": "compact object body with visible windshield",
+            "target_identity_uncertainty": "low",
+            "target_identity_evidence_ids": ["target_detail_2", "zoom_region_8"],
             "whole_target_extent_supported": True,
             "whole_target_extent_reason": "The overlapping class explains the full target extent.",
             "visible_target_cues": ["compact vehicle body", "visible windshield"],
@@ -5151,7 +5166,7 @@ def test_class_analysis_qwen_review_loop_enforces_evidence_and_writes_artifacts(
         [
             '<tool_call>{"name":"route_review","arguments":{"action":"inspect_local_consensus_context","reason_code":"needs_same_image_consensus","confidence":0.78,"rationale_short":"same-image consensus may resolve this"}}</tool_call>',
             "{}}",
-            '{"decision":"accept_suggested","target_class":"boat","confidence":0.82,"visual_quality":"clear","object_visibility":"clear","current_evidence":"weak","suggested_evidence":"strong","target_evidence":"strong","anchor_evidence_current":"weak","anchor_evidence_suggested":"strong","local_context_evidence":"strong","global_context_evidence":"strong","same_image_scale_evidence":"insufficient","same_image_embedding_evidence":"insufficient","overlap_assessment":"none","overlap_explains_candidate_similarity":false,"specificity_alignment":"supports_suggested","target_background_contrast":"target_specific","whole_target_extent_supported":true,"whole_target_extent_reason":"the suggested class explains the full target extent","local_consensus_evidence":"mixed","visible_target_cues":["elongated bright target shape","visible grid texture"],"supporting_clean_evidence_ids":["target_detail_2","zoom_region_9"],"rationale_short":"target evidence and anchors fit better","counter_evidence":"synthetic fixture","human_review_needed":false}',
+            '{"decision":"accept_suggested","target_class":"boat","confidence":0.82,"visual_quality":"clear","object_visibility":"clear","current_evidence":"weak","suggested_evidence":"strong","target_evidence":"strong","anchor_evidence_current":"weak","anchor_evidence_suggested":"strong","local_context_evidence":"strong","global_context_evidence":"strong","same_image_scale_evidence":"insufficient","same_image_embedding_evidence":"insufficient","overlap_assessment":"none","overlap_explains_candidate_similarity":false,"specificity_alignment":"supports_suggested","target_background_contrast":"target_specific","target_identity_summary":"elongated bright target with visible grid texture","target_identity_uncertainty":"low","target_identity_evidence_ids":["target_detail_2","zoom_region_9"],"whole_target_extent_supported":true,"whole_target_extent_reason":"the suggested class explains the full target extent","local_consensus_evidence":"mixed","visible_target_cues":["elongated bright target shape","visible grid texture"],"supporting_clean_evidence_ids":["target_detail_2","zoom_region_9"],"rationale_short":"target evidence and anchors fit better","counter_evidence":"synthetic fixture","human_review_needed":false}',
         ]
     )
     calls = []

@@ -25941,6 +25941,28 @@ def _class_analysis_qwen_review_final_tool_spec(labelmap: Sequence[str]) -> Dict
                         "Whether the visible evidence is target-object specific or dominated by background/overlap/context."
                     ),
                 },
+                "target_identity_summary": {
+                    "type": "string",
+                    "description": (
+                        "Under 30 words; class-neutral visible description of the whole reviewed target. "
+                        "Describe shape, parts, material, extent, and target-touching context before naming a class."
+                    ),
+                },
+                "target_identity_uncertainty": {
+                    "type": "string",
+                    "enum": ["low", "moderate", "high"],
+                    "description": (
+                        "Uncertainty in the class-neutral target identity summary. Use high when the whole object "
+                        "cannot be described without guessing."
+                    ),
+                },
+                "target_identity_evidence_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 0,
+                    "maxItems": 6,
+                    "description": "Clean target/source evidence ids used for target_identity_summary.",
+                },
                 "whole_target_extent_supported": {
                     "type": "boolean",
                     "description": (
@@ -26001,6 +26023,9 @@ def _class_analysis_qwen_review_final_tool_spec(labelmap: Sequence[str]) -> Dict
                 "overlap_explains_candidate_similarity",
                 "specificity_alignment",
                 "target_background_contrast",
+                "target_identity_summary",
+                "target_identity_uncertainty",
+                "target_identity_evidence_ids",
                 "whole_target_extent_supported",
                 "whole_target_extent_reason",
                 "visible_target_cues",
@@ -26304,6 +26329,11 @@ CLASS_ANALYSIS_QWEN_REVIEW_TARGET_BACKGROUND_CONTRAST_LEVELS: Tuple[str, ...] = 
     "insufficient",
     "not_applicable",
 )
+CLASS_ANALYSIS_QWEN_REVIEW_TARGET_IDENTITY_UNCERTAINTY_LEVELS: Tuple[str, ...] = (
+    "low",
+    "moderate",
+    "high",
+)
 CLASS_ANALYSIS_QWEN_REVIEW_DUAL_BBOX_RESOLUTIONS: Tuple[str, ...] = (
     "not_applicable",
     "current_box_class",
@@ -26407,7 +26437,7 @@ def _class_analysis_qwen_review_label_aliases(label: str) -> Tuple[str, ...]:
 
 def _class_analysis_qwen_review_text_parts(payload: Dict[str, Any]) -> List[str]:
     text_parts: List[str] = []
-    for key in ("rationale_short", "counter_evidence", "reason", "rationale"):
+    for key in ("target_identity_summary", "rationale_short", "counter_evidence", "reason", "rationale"):
         value = payload.get(key)
         if isinstance(value, str):
             text_parts.append(value)
@@ -26419,7 +26449,7 @@ def _class_analysis_qwen_review_text_parts(payload: Dict[str, Any]) -> List[str]
             text_parts.append(value)
     compact = payload.get("_compact_model_arguments")
     if isinstance(compact, dict):
-        for key in ("rationale_short", "counter_evidence", "reason", "rationale"):
+        for key in ("target_identity_summary", "rationale_short", "counter_evidence", "reason", "rationale"):
             value = compact.get(key)
             if isinstance(value, str):
                 text_parts.append(value)
@@ -28044,6 +28074,31 @@ def _class_analysis_qwen_review_expand_compact_final(
             "n/a": "not_applicable",
         },
     )
+    target_identity_summary = str(
+        args.get("target_identity_summary")
+        or args.get("identity_summary")
+        or args.get("target_description")
+        or args.get("class_neutral_target_description")
+        or ""
+    ).strip()[:1200]
+    target_identity_uncertainty = _class_analysis_qwen_review_coerce_choice(
+        args.get("target_identity_uncertainty")
+        if args.get("target_identity_uncertainty") is not None
+        else args.get("identity_uncertainty")
+        if args.get("identity_uncertainty") is not None
+        else args.get("target_uncertainty"),
+        CLASS_ANALYSIS_QWEN_REVIEW_TARGET_IDENTITY_UNCERTAINTY_LEVELS,
+        "high" if decision in {"accept_suggested", "change_to_other"} else "moderate",
+        synonyms={
+            "clear": "low",
+            "certain": "low",
+            "confident": "low",
+            "medium": "moderate",
+            "uncertain": "high",
+            "unclear": "high",
+            "ambiguous": "high",
+        },
+    )
     whole_target_extent_supported = _class_analysis_qwen_review_coerce_bool(
         args.get("whole_target_extent_supported"),
         default=decision not in {"accept_suggested", "change_to_other"},
@@ -28113,6 +28168,15 @@ def _class_analysis_qwen_review_expand_compact_final(
         allowed_ids=evidence_ids,
         limit=6,
     )
+    target_identity_evidence_ids = _class_analysis_qwen_review_normalize_evidence_id_list(
+        args.get("target_identity_evidence_ids")
+        if args.get("target_identity_evidence_ids") is not None
+        else args.get("identity_evidence_ids")
+        if args.get("identity_evidence_ids") is not None
+        else supporting_clean_evidence_ids,
+        allowed_ids=evidence_ids,
+        limit=6,
+    )
     expanded = {
         "decision": decision,
         "target_class": target_class,
@@ -28126,6 +28190,9 @@ def _class_analysis_qwen_review_expand_compact_final(
         "overlap_explains_candidate_similarity": overlap_explains,
         "specificity_alignment": specificity_alignment,
         "target_background_contrast": target_background_contrast,
+        "target_identity_summary": target_identity_summary,
+        "target_identity_uncertainty": target_identity_uncertainty,
+        "target_identity_evidence_ids": target_identity_evidence_ids,
         "whole_target_extent_supported": whole_target_extent_supported,
         "whole_target_extent_reason": whole_target_extent_reason,
         "dual_bbox_resolution": dual_bbox_resolution,
@@ -28360,6 +28427,23 @@ def _class_analysis_qwen_review_validate_final(
             "n/a": "not_applicable",
         },
     )
+    target_identity_summary = str(payload.get("target_identity_summary") or "").strip()[:1200]
+    target_identity_uncertainty = _class_analysis_qwen_review_coerce_choice(
+        payload.get("target_identity_uncertainty")
+        if payload.get("target_identity_uncertainty") is not None
+        else payload.get("identity_uncertainty"),
+        CLASS_ANALYSIS_QWEN_REVIEW_TARGET_IDENTITY_UNCERTAINTY_LEVELS,
+        "high" if expanded_by_controller and decision in {"accept_suggested", "change_to_other"} else "low",
+        synonyms={
+            "clear": "low",
+            "certain": "low",
+            "confident": "low",
+            "medium": "moderate",
+            "uncertain": "high",
+            "unclear": "high",
+            "ambiguous": "high",
+        },
+    )
     dual_bbox_conflict = _class_analysis_qwen_review_dual_bbox_conflict(point, evidence_ledger)
     payload_dual_conflict = payload.get("dual_bbox_conflict") if isinstance(payload.get("dual_bbox_conflict"), dict) else None
     if not dual_bbox_conflict and payload_dual_conflict:
@@ -28406,6 +28490,15 @@ def _class_analysis_qwen_review_validate_final(
         else payload.get("visible_cue_evidence_ids")
         if payload.get("visible_cue_evidence_ids") is not None
         else payload.get("clean_evidence_ids"),
+        allowed_ids=evidence_ids,
+        limit=6,
+    )
+    target_identity_evidence_ids = _class_analysis_qwen_review_normalize_evidence_id_list(
+        payload.get("target_identity_evidence_ids")
+        if payload.get("target_identity_evidence_ids") is not None
+        else payload.get("identity_evidence_ids")
+        if payload.get("identity_evidence_ids") is not None
+        else supporting_clean_evidence_ids,
         allowed_ids=evidence_ids,
         limit=6,
     )
@@ -28580,6 +28673,25 @@ def _class_analysis_qwen_review_validate_final(
             _hard(
                 f"{decision} requires target_background_contrast=target_specific, got {target_background_contrast}"
             )
+        if expanded_by_controller and not target_identity_summary:
+            _hard(f"{decision} requires a class-neutral target_identity_summary")
+        if expanded_by_controller and target_identity_uncertainty == "high":
+            _hard(f"{decision} cannot proceed with high target identity uncertainty")
+        elif target_identity_uncertainty == "moderate":
+            _advise("target identity summary has moderate uncertainty", 0.72)
+        if target_identity_summary:
+            identity_payload = {"rationale_short": f"Target object shows {target_identity_summary}"}
+            if (
+                _class_analysis_qwen_review_text_directly_supports_label(
+                    label=current_class,
+                    payload=identity_payload,
+                )
+                and not _class_analysis_qwen_review_text_rejects_label_for_target(
+                    label=current_class,
+                    payload=identity_payload,
+                )
+            ):
+                _hard(f"{decision} conflicts with target_identity_summary supporting current class {current_class}")
     elif decision == "confirm_current":
         if specificity_alignment == "supports_suggested" and suggested_evidence in {"strong", "moderate"}:
             _advise(
@@ -28758,6 +28870,13 @@ def _class_analysis_qwen_review_validate_final(
             _hard(f"{decision} supporting_clean_evidence_ids do not reference clean visual evidence")
         elif not supporting_ids.intersection(target_clean_ids):
             _hard(f"{decision} must cite at least one clean target/source evidence id, not reference-only context")
+        identity_ids = set(target_identity_evidence_ids)
+        if expanded_by_controller and target_identity_summary and not identity_ids:
+            _hard(f"{decision} target_identity_summary requires target_identity_evidence_ids")
+        elif identity_ids and not identity_ids.intersection(clean_visual_ids):
+            _hard(f"{decision} target_identity_evidence_ids do not reference clean visual evidence")
+        elif identity_ids and not identity_ids.intersection(target_clean_ids):
+            _hard(f"{decision} target_identity_evidence_ids must include clean target/source evidence")
     if decision == "accept_suggested" and current_evidence not in {"weak", "none"}:
         if current_evidence == "strong":
             _hard("accept_suggested cannot override current_evidence=strong")
@@ -28925,6 +29044,9 @@ def _class_analysis_qwen_review_validate_final(
             "same_image_embedding_evidence": same_image_embedding_evidence,
             "specificity_alignment": specificity_alignment,
             "target_background_contrast": target_background_contrast,
+            "target_identity_summary": target_identity_summary,
+            "target_identity_uncertainty": target_identity_uncertainty,
+            "target_identity_evidence_ids": list(target_identity_evidence_ids),
             "whole_target_extent_supported": whole_target_extent_supported,
             "whole_target_extent_reason": whole_target_extent_reason,
             "overlap_assessment": overlap_assessment,
@@ -28996,6 +29118,9 @@ def _class_analysis_qwen_review_validate_final(
         "same_image_embedding_evidence": same_image_embedding_evidence,
         "specificity_alignment": specificity_alignment,
         "target_background_contrast": target_background_contrast,
+        "target_identity_summary": target_identity_summary,
+        "target_identity_uncertainty": target_identity_uncertainty,
+        "target_identity_evidence_ids": target_identity_evidence_ids,
         "whole_target_extent_supported": whole_target_extent_supported,
         "whole_target_extent_reason": whole_target_extent_reason,
         "glossary_or_guidance_used": glossary_or_guidance_used,
@@ -29031,6 +29156,9 @@ def _class_analysis_qwen_review_skip_result(
         "anchor_adjudication_reason": "",
         "specificity_alignment": "insufficient",
         "target_background_contrast": "insufficient",
+        "target_identity_summary": "",
+        "target_identity_uncertainty": "high",
+        "target_identity_evidence_ids": [],
         "whole_target_extent_supported": False,
         "whole_target_extent_reason": str(reason or "Qwen review did not reach a class-change decision.")[:1200],
         "dual_bbox_resolution": "not_applicable",
@@ -29588,11 +29716,11 @@ def _class_analysis_qwen_review_final_instruction(
         dual_conflict_lines = ["No near-identical cross-class dual-bbox conflict is active. Set dual_bbox_resolution=not_applicable."]
     policy_lines = [
         "Return only JSON. No markdown, prose, chain-of-thought, tool names, or outer wrapper.",
-        'Required keys: decision, final_class, confidence, visual_quality, object_visibility, current_evidence, suggested_evidence, target_evidence, overlap_assessment, overlap_explains_candidate_similarity, specificity_alignment, target_background_contrast, whole_target_extent_supported, whole_target_extent_reason, dual_bbox_resolution, visible_target_cues, rationale_short.',
+        'Required keys: decision, final_class, confidence, visual_quality, object_visibility, current_evidence, suggested_evidence, target_evidence, overlap_assessment, overlap_explains_candidate_similarity, specificity_alignment, target_background_contrast, target_identity_summary, target_identity_uncertainty, target_identity_evidence_ids, whole_target_extent_supported, whole_target_extent_reason, dual_bbox_resolution, visible_target_cues, rationale_short.',
         "Optional but preferred: supporting_clean_evidence_ids, local_consensus_evidence, counter_evidence, human_review_needed.",
         'Minimal valid example: {"decision":"skip_uncertain","final_class":"'
         + str(point.get("class_name") or "")
-        + '","confidence":0.2,"visual_quality":"limited","object_visibility":"partial","current_evidence":"weak","suggested_evidence":"weak","target_evidence":"weak","overlap_assessment":"unclear","overlap_explains_candidate_similarity":false,"specificity_alignment":"insufficient","target_background_contrast":"insufficient","whole_target_extent_supported":false,"whole_target_extent_reason":"target extent is not clear","dual_bbox_resolution":"not_applicable","visible_target_cues":[],"supporting_clean_evidence_ids":[],"rationale_short":"target is not clear enough"}',
+        + '","confidence":0.2,"visual_quality":"limited","object_visibility":"partial","current_evidence":"weak","suggested_evidence":"weak","target_evidence":"weak","overlap_assessment":"unclear","overlap_explains_candidate_similarity":false,"specificity_alignment":"insufficient","target_background_contrast":"insufficient","target_identity_summary":"unclear partial target","target_identity_uncertainty":"high","target_identity_evidence_ids":[],"whole_target_extent_supported":false,"whole_target_extent_reason":"target extent is not clear","dual_bbox_resolution":"not_applicable","visible_target_cues":[],"supporting_clean_evidence_ids":[],"rationale_short":"target is not clear enough"}',
         f"Required tools already inspected: {required_list}.",
         f"Available evidence ids: {evidence_list}.",
         f"Current class: {point.get('class_name')}",
@@ -29602,6 +29730,9 @@ def _class_analysis_qwen_review_final_instruction(
         quality_summary,
         quality_policy,
         "Use clean target/source/zoom pixels for visible_target_cues. Do not use overlay boxes, dot maps, neighbor labels, deterministic reports, or class names as visible cues.",
+        "Before choosing a class, write target_identity_summary as a class-neutral description of the whole reviewed target from clean pixels. Prefer shape, parts, material, extent, and target-touching context over class names.",
+        "Set target_identity_uncertainty=high if you cannot describe the whole target without guessing; class changes with high target identity uncertainty will be guarded.",
+        "Use target_identity_evidence_ids to cite clean target/source evidence ids for the target_identity_summary.",
         "Use specificity_alignment to state which hypothesis is supported by target-contained object-specific cues: supports_current, supports_suggested, supports_other, mixed, insufficient, or not_applicable.",
         "Use target_background_contrast to separate target-object evidence from context: target_specific, background_dominated, overlap_dominated, mixed, insufficient, or not_applicable.",
         "Set whole_target_extent_supported=true only when your recommended final class explains the whole reviewed bbox/object extent.",
@@ -30620,6 +30751,26 @@ def _class_analysis_qwen_review_try_cue_verifier(
     augmented_args = dict(guarded)
     overlap_rebuttal = str(verifier_record.get("overlap_rebuttal") or "").strip()
     guarded_rationale = str(guarded.get("rationale_short") or "").strip()
+    verifier_positive_cues = [
+        str(item or "").strip()
+        for item in (verifier_record.get("positive_visible_target_cues") or [])
+        if str(item or "").strip()
+    ]
+    verifier_supporting_ids = list(verifier_record.get("supporting_clean_evidence_ids") or [])
+    target_identity_summary = str(guarded.get("target_identity_summary") or "").strip()
+    if not target_identity_summary and verifier_positive_cues:
+        target_identity_summary = "; ".join(verifier_positive_cues[:3])[:1200]
+    target_identity_uncertainty = str(guarded.get("target_identity_uncertainty") or "").strip().lower()
+    if target_identity_summary and target_identity_uncertainty not in CLASS_ANALYSIS_QWEN_REVIEW_TARGET_IDENTITY_UNCERTAINTY_LEVELS:
+        target_identity_uncertainty = (
+            "low"
+            if float(verifier_record.get("cue_confidence") or 0.0) >= 0.9
+            and bool(verifier_record.get("whole_target_extent_supported"))
+            else "moderate"
+        )
+    target_identity_evidence_ids = list(guarded.get("target_identity_evidence_ids") or [])
+    if not target_identity_evidence_ids and target_identity_summary:
+        target_identity_evidence_ids = verifier_supporting_ids
     if verifier_record.get("overlap_rebutted"):
         overlap_rebuttal = (
             overlap_rebuttal
@@ -30630,8 +30781,11 @@ def _class_analysis_qwen_review_try_cue_verifier(
             "decision": guarded.get("decision"),
             "target_class": guarded.get("target_class"),
             "confidence": min(float(guarded.get("confidence") or 0.0), float(verifier_record.get("cue_confidence") or 0.0)),
-            "visible_target_cues": list(verifier_record.get("positive_visible_target_cues") or []),
-            "supporting_clean_evidence_ids": list(verifier_record.get("supporting_clean_evidence_ids") or []),
+            "visible_target_cues": verifier_positive_cues,
+            "supporting_clean_evidence_ids": verifier_supporting_ids,
+            "target_identity_summary": target_identity_summary,
+            "target_identity_uncertainty": target_identity_uncertainty or "moderate",
+            "target_identity_evidence_ids": target_identity_evidence_ids,
             "rationale_short": (
                 f"{guarded_rationale} {overlap_rebuttal}".strip()
                 if overlap_rebuttal

@@ -29922,6 +29922,10 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
                         "Your job is not to re-argue the whole label decision. Verify only whether clean target/source pixels show enough positive target-object cues for the proposed target class, and whether overlap/background actually explains those cues.",
                         "Return one complete verify_visible_cues JSON arguments object with exactly the required keys and no extra keys.",
                         "Return only the arguments object, not an outer name/tool wrapper, markdown, prose, comments, or partial object.",
+                        "Output compact JSON. Do not put newlines inside string values, and do not continue any reason field into a second sentence.",
+                        "Use numeric JSON values with no spaces inside numbers, for example 0.92 not 0. 92.",
+                        "Keep current_class_plausibility_reason, whole_target_extent_reason, overlap_rebuttal, anchor_support_reason, and rejection_reason under 18 words each.",
+                        "If the evidence is ambiguous, return verified=false with the full schema and short reasons instead of a long explanation.",
                         f"Required keys: {required_fields}.",
                         f"JSON shape to fill: {json.dumps(skeleton, ensure_ascii=False)}",
                         "Do not include legacy or diagnostic keys such as current_class, proposed_target_class, verified_evidence_ids, cue_counts, specificity scores, overlap ratios, or any *_confidence field other than cue_confidence.",
@@ -29998,6 +30002,9 @@ def _class_analysis_qwen_review_cue_verifier_repair_instruction(
                         f"The previous verifier response failed controller parsing: {str(parse_error or 'parse_error')[:300]}",
                         f"Previous response preview: {str(previous_output or '')[:500]}",
                         "Return one full JSON arguments object with every required key.",
+                        "Use compact JSON, no markdown, no prose outside JSON, no newlines inside string values.",
+                        "Use numeric JSON values with no spaces inside numbers, for example 0.92 not 0. 92.",
+                        "Keep every reason field under 18 words and one sentence.",
                         f"target_class must be exactly: {target_class or '(none)'}",
                         f"Allowed supporting_clean_evidence_ids: {', '.join(clean_target_ids) or '(none)'}",
                         f"Required keys: {required_fields}.",
@@ -30793,7 +30800,7 @@ def _class_analysis_qwen_review_try_cue_verifier(
             tool_specs=_class_analysis_qwen_review_tool_specs_for_template(
                 _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap)
             ),
-            max_new_tokens=900,
+            max_new_tokens=1200,
             progress=0.78 + (0.03 * attempt_idx),
             event_extra={
                 "attempt": attempt_idx + 1,

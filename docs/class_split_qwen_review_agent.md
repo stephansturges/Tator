@@ -1650,6 +1650,32 @@ briefs. Regression tests cover:
   The focused visual sheets were inspected; the newly promoted examples were
   building-like structures, while ambiguous current-object and overlap-heavy
   rows remained guarded.
+- Verifier transport-contract follow-up: the same run still recorded one
+  `cue_verifier_parse_error` on child row 2. The first verifier output was not a
+  weak visual judgment; it was a malformed transport object with `0. 92` in a
+  numeric field and a truncated `whole_target_extent_reason`. The repair turn
+  recovered the VLM judgment and kept the row as guarded human triage. The
+  first-pass verifier prompt now follows the Qwen/Hermes-style tool-call
+  discipline more tightly: compact JSON only, no newlines inside string values,
+  no spaces inside numeric literals, one short sentence per reason field, and
+  1200 verifier tokens. This preserves the VLM-centered verifier while reducing
+  avoidable schema-repair turns in future benchmarks.
+- Compact-verifier rerun:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/compact_verifier_clear_guarded10_10_1780911588.json`
+  replayed the same 10 clear guarded rows against the previous
+  `verifier_overlap_coherent_clear_guarded10_10_1780906367.json` baseline. The
+  run completed 10/10 reviews with 0 failures, 0 final validation errors, 0
+  unsafe audit issues, and 0 `cue_verifier_parse_error` events. Schema sequences
+  were `finalize_review` for 2 rows and direct
+  `finalize_review->verify_visible_cues` for all 8 verifier rows, with no repair
+  verifier turn. It produced 6 actionable class-change recommendations, 3
+  guarded human-triage signals, and 1 useful negative. The only decision change
+  versus the prior run was one additional `Gastank -> Building` actionable
+  recommendation where Qwen supplied target-specific roof/rectangular cues,
+  target-specific anchors, clean evidence ids, and whole-target support. Visual
+  spot checks of `compact_verifier_clear_guarded10_10_1780911588_visual_non_skip.jpg`
+  and `_visual_guarded.jpg` found the non-skip examples plausible at crop scale
+  and the remaining guarded rows appropriately overlap/context-heavy.
 
 A larger labeled real-model benchmark should be run before treating v2
 recommendations as more than advisory.

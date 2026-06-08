@@ -2656,7 +2656,48 @@ def test_class_analysis_qwen_review_cue_verifier_instruction_names_strict_schema
     assert "current_class, proposed_target_class, verified_evidence_ids" in text
     assert "Use supporting_clean_evidence_ids, not verified_evidence_ids." in text
     assert "whole reviewed bbox/object extent" in text
+    assert "Output compact JSON" in text
+    assert "0.92 not 0. 92" in text
+    assert "under 18 words" in text
     assert "subcomponent" in text
+
+
+def test_class_analysis_qwen_review_cue_verifier_repairs_numeric_whitespace():
+    raw = """
+    {
+      "verified": true,
+      "target_class": "SuggestedClass",
+      "cue_confidence": 0. 92,
+      "positive_visible_target_cues": ["rectangular target body", "ribbed surface texture"],
+      "target_class_defining_cues": ["rectangular target body", "ribbed surface texture"],
+      "current_class_positive_cues": [],
+      "current_class_missing_or_inconsistent_cues": ["no visible current-class parts"],
+      "current_class_plausibility_basis": "none",
+      "current_class_plausible": false,
+      "current_class_plausibility_reason": "",
+      "whole_target_extent_supported": true,
+      "whole_target_extent_reason": "SuggestedClass explains the full target.",
+      "overlap_rebutted": true,
+      "overlap_risk": "target_specific",
+      "overlap_rebuttal": "Target cues are visible inside the clean crop.",
+      "anchor_support_verified": true,
+      "anchor_support_basis": "target_specific_anchors",
+      "anchor_support_reason": "Anchors share the same target structure.",
+      "supporting_clean_evidence_ids": ["target_detail_2", "zoom_region_9"],
+      "rejection_reason": ""
+    }
+    """
+
+    payload, error = api._class_analysis_qwen_review_parse_cue_verifier_payload(
+        raw,
+        current_class="CurrentClass",
+        target_class="SuggestedClass",
+        evidence_ids={"target_detail_2", "zoom_region_9"},
+    )
+
+    assert error is None
+    assert payload["cue_confidence"] == pytest.approx(0.92)
+    assert payload["verified"] is True
 
 
 def test_class_analysis_qwen_review_cue_verifier_refuses_partial_subcomponent_extent():

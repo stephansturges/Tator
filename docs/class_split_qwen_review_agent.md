@@ -773,6 +773,32 @@ Targeted verifier probe after adding anchor-support adjudication:
   target-specific anchor cases without replacing Qwen's final judgment. The 10
   remaining guarded rows are still useful human-triage signals, mostly blocked
   by overlap risk, missing visible cues, or current-class overlap evidence.
+- Prompt-contract follow-up: the same run showed `cue_verifier_parse_error` on
+  all 9 verifier calls before the repair turn. The repair responses were valid,
+  so the issue was not missing visual reasoning; the first-pass verifier prompt
+  was too loose and let Qwen return legacy keys such as `current_class`,
+  `proposed_target_class`, or `verified_evidence_ids` while omitting required
+  fields. The first verifier prompt now mirrors the repair contract: exact
+  required keys, a JSON skeleton, no extra legacy keys, and direct instruction
+  to use `supporting_clean_evidence_ids`. Benchmark summaries and audits now
+  report `cue_verifier_parse_error_count` directly so future runs can measure
+  whether verifier protocol quality improves.
+- Prompt-contract rerun:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/cueverifier_promptfix_clear_guarded14_14_1780888993.json`
+  reran the same 14 clear-tier guarded source rows after tightening the first
+  verifier prompt. Result: 14/14 completed, 0 failures, 0 unsafe audit issues,
+  0 `cue_verifier_parse_error` events, 4 actionable `accept_suggested`
+  recommendations, 10 guarded recommendations, and 14 effective human signals.
+  The cue verifier ran on 9 rows, promoted 4 rows, and now used the direct
+  `finalize_review->verify_visible_cues` sequence instead of requiring a second
+  verifier repair turn.
+- Visual audit note: the actionable sheet
+  `cueverifier_promptfix_clear_guarded14_14_1780888993_visual_non_skip.jpg`
+  showed no obvious automatic-mutation hazard in the advisory output, but one
+  `Truck -> LightVehicle` case remains visually arguable at crop scale because
+  the vehicle is attached to a box/trailer-like structure. That is acceptable for
+  this patch because Class Split Qwen review remains advisory and human-applied;
+  it is not evidence that the VLM review problem is solved end-to-end.
 
 Latest Mac probe after restoring VLM finalization and the `final_class` schema:
 

@@ -1189,6 +1189,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             and record["cue_verifier"]
             and record["cue_verifier"].get("promoted_from_guarded_recommendation")
         ),
+        "cue_verifier_parse_error_count": sum(int(record.get("cue_verifier_parse_errors") or 0) for record in records),
         "guarded_recommendations": guarded_recommendations,
         "actionables": actionables,
     }
@@ -1273,6 +1274,7 @@ def print_report(audit: Dict[str, Any], comparison: Optional[Dict[str, Any]] = N
     print(f"Current class plausible: {audit.get('current_class_plausible_count', 0)}")
     print(f"Cue verifier calls: {audit.get('cue_verifier_count', 0)}")
     print(f"Cue verifier promotions: {audit.get('cue_verifier_promoted_count', 0)}")
+    print(f"Cue verifier parse errors: {audit.get('cue_verifier_parse_error_count', 0)}")
     print(f"Unsafe issue count: {audit['unsafe_issue_count']}")
     print(f"Issue counts: {json.dumps(audit['issue_counts'], sort_keys=True)}")
     for issue_name, rows in audit["issues"].items():

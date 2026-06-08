@@ -163,6 +163,7 @@ def _event_counts(events: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     tool_results = [event for event in events if event.get("type") == "tool_result"]
     router_events = [event for event in events if event.get("type") == "router_decision"]
     final_errors = [event for event in events if event.get("type") == "final_validation_error"]
+    cue_verifier_errors = [event for event in events if event.get("type") == "cue_verifier_parse_error"]
 
     def _schema_label(event: Dict[str, Any]) -> str:
         schema = event.get("tool_schema") if isinstance(event.get("tool_schema"), list) else []
@@ -190,6 +191,7 @@ def _event_counts(events: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "tool_result_events": len(tool_results),
         "router_decisions": len(router_events),
         "final_validation_errors": len(final_errors),
+        "cue_verifier_parse_errors": len(cue_verifier_errors),
         "local_consensus_controller_calls": sum(
             1 for event in controller_calls if event.get("tool") == "inspect_local_consensus_context"
         ),
@@ -418,6 +420,7 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
             and record["cue_verifier"]
             and record["cue_verifier"].get("promoted_from_guarded_recommendation")
         ),
+        "cue_verifier_parse_error_count": sum(int(record.get("cue_verifier_parse_errors") or 0) for record in records),
         "records_written": len(records),
     }
 

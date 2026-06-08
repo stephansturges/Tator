@@ -1123,6 +1123,16 @@ def test_qwen_review_benchmark_audit_counts_nested_cue_verifier_current_plausibi
     assert summary["current_class_plausible_count"] == 1
 
 
+def test_qwen_review_benchmark_audit_counts_cue_verifier_parse_errors():
+    record = _record(cue_verifier_parse_errors=2)
+
+    audit = audit_records([record])
+    summary = _summarize([record], run_id="r", job_id="j", model_id="m", started_at=0.0)
+
+    assert audit["cue_verifier_parse_error_count"] == 2
+    assert summary["cue_verifier_parse_error_count"] == 2
+
+
 def test_qwen_review_benchmark_audit_allows_overlap_rebutted_confirm_current():
     record = _record(
         decision="confirm_current",

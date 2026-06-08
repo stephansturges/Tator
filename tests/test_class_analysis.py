@@ -2387,6 +2387,29 @@ def test_class_analysis_qwen_review_cue_verifier_blocks_shared_generic_without_s
     assert "shared generic" in guarded["cue_verifier"]["rejection_reason"]
 
 
+def test_class_analysis_qwen_review_cue_verifier_instruction_names_strict_schema():
+    instruction = api._class_analysis_qwen_review_cue_verifier_instruction(
+        point={"class_name": "CurrentClass"},
+        guarded_recommendation={
+            "target_class": "SuggestedClass",
+            "visible_target_cues": ["ribbed surface texture"],
+            "rationale_short": "Target visibly fits SuggestedClass.",
+            "guardrail_reasons": ["moderate suggested-anchor agreement"],
+        },
+        evidence_ledger={
+            "clean_target_source_evidence_ids": ["target_detail_2", "zoom_region_9"],
+        },
+    )
+    text = instruction["content"][0]["text"]
+
+    for field_name in api.CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_REQUIRED_FIELDS:
+        assert field_name in text
+    assert '"target_class": "SuggestedClass"' in text
+    assert "Do not include legacy or diagnostic keys" in text
+    assert "current_class, proposed_target_class, verified_evidence_ids" in text
+    assert "Use supporting_clean_evidence_ids, not verified_evidence_ids." in text
+
+
 def test_class_analysis_qwen_review_cue_verifier_repairs_partial_schema(tmp_path, monkeypatch):
     class_root = tmp_path / "class_analysis"
     monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)

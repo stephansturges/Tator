@@ -25802,6 +25802,29 @@ CLASS_ANALYSIS_QWEN_REVIEW_ROUTER_REASON_CODES: Tuple[str, ...] = (
     "policy_blocked",
 )
 
+CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_REQUIRED_FIELDS: Tuple[str, ...] = (
+    "verified",
+    "target_class",
+    "cue_confidence",
+    "positive_visible_target_cues",
+    "current_class_positive_cues",
+    "current_class_plausibility_basis",
+    "current_class_plausible",
+    "current_class_plausibility_reason",
+    "overlap_rebutted",
+    "overlap_risk",
+    "overlap_rebuttal",
+    "anchor_support_verified",
+    "anchor_support_basis",
+    "anchor_support_reason",
+    "supporting_clean_evidence_ids",
+    "rejection_reason",
+)
+
+
+def _class_analysis_qwen_review_cue_verifier_required_fields_text() -> str:
+    return ", ".join(CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_REQUIRED_FIELDS)
+
 
 def _class_analysis_qwen_review_router_tool_spec(
     *,
@@ -29551,6 +29574,25 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
         if str(item or "").strip()
     ]
     target_class = str(guarded_recommendation.get("target_class") or "").strip()
+    required_fields = _class_analysis_qwen_review_cue_verifier_required_fields_text()
+    skeleton = {
+        "verified": False,
+        "target_class": target_class,
+        "cue_confidence": 0.0,
+        "positive_visible_target_cues": [],
+        "current_class_positive_cues": [],
+        "current_class_plausibility_basis": "none",
+        "current_class_plausible": False,
+        "current_class_plausibility_reason": "",
+        "overlap_rebutted": False,
+        "overlap_risk": "not_applicable",
+        "overlap_rebuttal": "",
+        "anchor_support_verified": False,
+        "anchor_support_basis": "not_applicable",
+        "anchor_support_reason": "",
+        "supporting_clean_evidence_ids": [],
+        "rejection_reason": "",
+    }
     return {
         "role": "user",
         "content": [
@@ -29561,7 +29603,13 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
                         "Cue-verifier state.",
                         "A previous finalize_review tried to change this class, but the controller blocked it because the visible-cue, anchor, or overlap guardrails were not strong enough.",
                         "Your job is not to re-argue the whole label decision. Verify only whether clean target/source pixels show enough positive target-object cues for the proposed target class, and whether overlap/background actually explains those cues.",
-                        'Return one complete verify_visible_cues JSON arguments object. Return only the arguments object, not an outer name/tool wrapper.',
+                        "Return one complete verify_visible_cues JSON arguments object with exactly the required keys and no extra keys.",
+                        "Return only the arguments object, not an outer name/tool wrapper, markdown, prose, comments, or partial object.",
+                        f"Required keys: {required_fields}.",
+                        f"JSON shape to fill: {json.dumps(skeleton, ensure_ascii=False)}",
+                        "Do not include legacy or diagnostic keys such as current_class, proposed_target_class, verified_evidence_ids, cue_counts, specificity scores, overlap ratios, or any *_confidence field other than cue_confidence.",
+                        "Use supporting_clean_evidence_ids, not verified_evidence_ids.",
+                        "current_class_plausibility_reason, overlap_rebuttal, anchor_support_reason, and rejection_reason must always be strings. Use an empty string when no reason applies.",
                         f"Current class: {point.get('class_name')}",
                         f"Proposed target class: {target_class or '(none)'}",
                         f"Original model rationale: {str(guarded_recommendation.get('rationale_short') or '')[:300]}",
@@ -29613,6 +29661,7 @@ def _class_analysis_qwen_review_cue_verifier_repair_instruction(
         if str(item or "").strip()
     ]
     target_class = str(guarded_recommendation.get("target_class") or "").strip()
+    required_fields = _class_analysis_qwen_review_cue_verifier_required_fields_text()
     return {
         "role": "user",
         "content": [
@@ -29626,9 +29675,9 @@ def _class_analysis_qwen_review_cue_verifier_repair_instruction(
                         "Return one full JSON arguments object with every required key.",
                         f"target_class must be exactly: {target_class or '(none)'}",
                         f"Allowed supporting_clean_evidence_ids: {', '.join(clean_target_ids) or '(none)'}",
-                        "Required keys: verified, target_class, cue_confidence, positive_visible_target_cues, current_class_positive_cues, current_class_plausibility_basis, current_class_plausible, current_class_plausibility_reason, overlap_rebutted, overlap_risk, overlap_rebuttal, anchor_support_verified, anchor_support_basis, anchor_support_reason, supporting_clean_evidence_ids, rejection_reason.",
+                        f"Required keys: {required_fields}.",
                         "If you cannot verify two concrete target-positive cues, still return the full schema with verified=false, empty arrays where appropriate, cue_confidence no higher than 0.84, and a short rejection_reason.",
-                        "Do not return a partial object. Do not omit target_class. Do not include markdown or prose outside JSON.",
+                        "Do not return a partial object. Do not omit target_class. Do not include extra legacy keys, markdown, or prose outside JSON.",
                     ]
                 ),
             }

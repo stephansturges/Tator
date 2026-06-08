@@ -632,6 +632,45 @@ def _record_uses_verified_overlap_rebuttal_path(record: Dict[str, Any]) -> bool:
     )
 
 
+def _record_uses_verified_moderate_anchor_path(record: Dict[str, Any]) -> bool:
+    """Mirror the validator's VLM-verified moderate-anchor relabel path."""
+
+    payload = record.get("model_compact_arguments") if isinstance(record.get("model_compact_arguments"), dict) else {}
+
+    def _field(name: str) -> str:
+        return str(record.get(name) or payload.get(name) or "").strip().lower()
+
+    overlap_explains = bool(record.get("overlap_explains_candidate_similarity") or payload.get("overlap_explains_candidate_similarity"))
+    return (
+        str(record.get("decision") or "") == "accept_suggested"
+        and len(_explicit_visible_cues_from_record(record)) >= 2
+        and _field("backend_tier") == "clear"
+        and _field("visual_quality") == "clear"
+        and _field("object_visibility") == "clear"
+        and _field("current_evidence") in {"weak", "none"}
+        and not _record_current_class_plausible(record, payload)
+        and _field("suggested_evidence") == "strong"
+        and _field("target_evidence") == "strong"
+        and _field("anchor_evidence_suggested") == "moderate"
+        and bool(record.get("anchor_adjudication_verified") or payload.get("anchor_adjudication_verified"))
+        and _field("local_context_evidence") == "strong"
+        and _field("global_context_evidence") == "strong"
+        and _field("specificity_alignment") == "supports_suggested"
+        and _field("target_background_contrast") == "target_specific"
+        and _field("local_consensus_evidence") != "supports_current"
+        and _field("same_image_scale_evidence") != "supports_current"
+        and _field("same_image_embedding_evidence") != "supports_current"
+        and (
+            (_field("overlap_assessment") in {"none", "near_context"} and not overlap_explains)
+            or (
+                _field("overlap_assessment") == "partial_contamination"
+                and bool(record.get("overlap_adjudication_verified") or payload.get("overlap_adjudication_verified"))
+                and not overlap_explains
+            )
+        )
+    )
+
+
 def _record_uses_confirm_current_overlap_rebuttal_path(record: Dict[str, Any]) -> bool:
     """Mirror the validator's confirm-current path for overlap-driven false alarms."""
 
@@ -880,6 +919,9 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     target_background_contrast_counts: Counter[str] = Counter()
     dual_bbox_resolution_counts: Counter[str] = Counter()
     overlap_adjudication_verified_count = 0
+    anchor_adjudication_verified_count = 0
+    anchor_support_basis_counts: Counter[str] = Counter()
+    anchor_support_verified_count = 0
     current_class_plausible_count = 0
 
     for record in records:
@@ -908,6 +950,13 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         dual_bbox_resolution_counts[dual_bbox_resolution or "missing"] += 1
         if bool(record.get("overlap_adjudication_verified")):
             overlap_adjudication_verified_count += 1
+        if bool(record.get("anchor_adjudication_verified")):
+            anchor_adjudication_verified_count += 1
+        cue_verifier = record.get("cue_verifier") if isinstance(record.get("cue_verifier"), dict) else None
+        if cue_verifier:
+            anchor_support_basis_counts[str(cue_verifier.get("anchor_support_basis") or "missing")] += 1
+            if _coerce_bool(cue_verifier.get("anchor_support_verified")):
+                anchor_support_verified_count += 1
         current_class_plausible = _record_current_class_plausible(record, payload)
         if current_class_plausible:
             current_class_plausible_count += 1
@@ -935,6 +984,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         if decision in CLASS_CHANGE_DECISIONS:
             dual_bbox_switch_path = _record_uses_dual_bbox_switch_path(record)
             verified_overlap_rebuttal_path = _record_uses_verified_overlap_rebuttal_path(record)
+            verified_moderate_anchor_path = _record_uses_verified_moderate_anchor_path(record)
             visible_target_cues = _explicit_visible_cues_from_record(record)
             if len(visible_target_cues) < 2 and not _record_uses_one_cue_supported_relabel_path(record):
                 _add_issue(
@@ -1027,6 +1077,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                         _record_uses_clear_target_relabel_path(record)
                         or dual_bbox_switch_path
                         or verified_overlap_rebuttal_path
+                        or verified_moderate_anchor_path
                     )
                 )
             ):
@@ -1040,6 +1091,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                 overlap_assessment in BAD_CLASS_CHANGE_OVERLAPS
                 and not dual_bbox_switch_path
                 and not verified_overlap_rebuttal_path
+                and not verified_moderate_anchor_path
             ):
                 _add_issue(issues, "class_change_bad_overlap", record, f"overlap_assessment={overlap_assessment}")
             current_overlap = _record_best_class_material_overlap(record, record.get("current_class"))
@@ -1115,6 +1167,9 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "target_background_contrast_counts": dict(target_background_contrast_counts),
         "dual_bbox_resolution_counts": dict(dual_bbox_resolution_counts),
         "overlap_adjudication_verified_count": overlap_adjudication_verified_count,
+        "anchor_adjudication_verified_count": anchor_adjudication_verified_count,
+        "anchor_support_basis_counts": dict(anchor_support_basis_counts),
+        "anchor_support_verified_count": anchor_support_verified_count,
         "current_class_plausible_count": current_class_plausible_count,
         "effective_human_signal_count": sum(
             count
@@ -1207,6 +1262,9 @@ def print_report(audit: Dict[str, Any], comparison: Optional[Dict[str, Any]] = N
     print(f"Target/background contrast: {json.dumps(audit.get('target_background_contrast_counts', {}), sort_keys=True)}")
     print(f"Dual-bbox resolution: {json.dumps(audit.get('dual_bbox_resolution_counts', {}), sort_keys=True)}")
     print(f"Overlap adjudication verified: {audit.get('overlap_adjudication_verified_count', 0)}")
+    print(f"Anchor adjudication verified: {audit.get('anchor_adjudication_verified_count', 0)}")
+    print(f"Anchor support verified: {audit.get('anchor_support_verified_count', 0)}")
+    print(f"Anchor support basis: {json.dumps(audit.get('anchor_support_basis_counts', {}), sort_keys=True)}")
     print(f"Current class plausible: {audit.get('current_class_plausible_count', 0)}")
     print(f"Cue verifier calls: {audit.get('cue_verifier_count', 0)}")
     print(f"Cue verifier promotions: {audit.get('cue_verifier_promoted_count', 0)}")

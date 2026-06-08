@@ -26048,6 +26048,25 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                     "type": "string",
                     "description": "Short visible-fact explanation of why overlap does or does not explain the target-class evidence.",
                 },
+                "anchor_support_verified": {
+                    "type": "boolean",
+                    "description": (
+                        "True only when the trusted target-class anchors/examples and class context are specific enough "
+                        "to support the proposed target class for this target, not just generic shape/color/context."
+                    ),
+                },
+                "anchor_support_basis": {
+                    "type": "string",
+                    "enum": list(CLASS_ANALYSIS_QWEN_REVIEW_ANCHOR_SUPPORT_BASIS_LEVELS),
+                    "description": (
+                        "How the trusted anchors/examples support the proposed class. Use target_specific_anchors only "
+                        "for object-specific anchor evidence; use shared_generic_anchors for broad shape/color/context."
+                    ),
+                },
+                "anchor_support_reason": {
+                    "type": "string",
+                    "description": "Short visible-fact reason explaining the anchor-support judgment.",
+                },
                 "supporting_clean_evidence_ids": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -26072,6 +26091,9 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                 "overlap_rebutted",
                 "overlap_risk",
                 "overlap_rebuttal",
+                "anchor_support_verified",
+                "anchor_support_basis",
+                "anchor_support_reason",
                 "supporting_clean_evidence_ids",
                 "rejection_reason",
             ],
@@ -26227,6 +26249,13 @@ CLASS_ANALYSIS_QWEN_REVIEW_DUAL_BBOX_RESOLUTIONS: Tuple[str, ...] = (
     "overlap_box_class",
     "both_valid_overlapping_objects",
     "uncertain_or_neither",
+)
+CLASS_ANALYSIS_QWEN_REVIEW_ANCHOR_SUPPORT_BASIS_LEVELS: Tuple[str, ...] = (
+    "target_specific_anchors",
+    "shared_generic_anchors",
+    "conflicting_anchors",
+    "insufficient",
+    "not_applicable",
 )
 
 
@@ -28276,6 +28305,12 @@ def _class_analysis_qwen_review_validate_final(
         if "overlap_adjudication_verified" in payload
         else payload.get("_overlap_adjudication_verified")
     )
+    anchor_adjudication_verified = _coerce_payload_bool(
+        payload.get("anchor_adjudication_verified")
+        if "anchor_adjudication_verified" in payload
+        else payload.get("_anchor_adjudication_verified")
+    )
+    anchor_adjudication_reason = str(payload.get("anchor_adjudication_reason") or "")[:1200]
     current_class_plausible = _coerce_payload_bool(payload.get("current_class_plausible"))
     current_class_plausibility_checked = "current_class_plausible" in payload
     current_class_plausibility_reason = str(payload.get("current_class_plausibility_reason") or "")[:1200]
@@ -28514,6 +28549,38 @@ def _class_analysis_qwen_review_validate_final(
             or local_consensus_evidence == "supports_suggested"
         )
     )
+    verified_moderate_anchor_relabel_path = (
+        decision == "accept_suggested"
+        and len(visible_target_cues) >= 2
+        and backend_tier == "clear"
+        and visual_quality_value == "clear"
+        and object_visibility == "clear"
+        and current_evidence in {"weak", "none"}
+        and current_class_plausibility_checked
+        and not current_class_plausible
+        and suggested_evidence == "strong"
+        and target_evidence == "strong"
+        and anchor_evidence_suggested == "moderate"
+        and anchor_adjudication_verified
+        and local_context_evidence == "strong"
+        and global_context_evidence == "strong"
+        and specificity_alignment == "supports_suggested"
+        and target_background_contrast == "target_specific"
+        and local_consensus_evidence != "supports_current"
+        and same_image_scale_evidence != "supports_current"
+        and same_image_embedding_evidence != "supports_current"
+        and (
+            (
+                overlap_assessment in {"none", "near_context"}
+                and not overlap_explains_candidate_similarity
+            )
+            or (
+                overlap_assessment == "partial_contamination"
+                and overlap_adjudication_verified
+                and not overlap_explains_candidate_similarity
+            )
+        )
+    )
     single_cue_supported_relabel_path = (
         decision == "accept_suggested"
         and len(visible_target_cues) == 1
@@ -28540,6 +28607,7 @@ def _class_analysis_qwen_review_validate_final(
         and anchor_evidence_suggested == "moderate"
         and not dual_bbox_target_switch_path
         and not verified_overlap_rebuttal_relabel_path
+        and not verified_moderate_anchor_relabel_path
         and current_evidence in {"weak", "none"}
         and target_evidence == "strong"
         and same_image_scale_evidence in {"insufficient", "neutral", "not_applicable"}
@@ -28627,6 +28695,7 @@ def _class_analysis_qwen_review_validate_final(
             clear_target_relabel_path
             or dual_bbox_target_switch_path
             or verified_overlap_rebuttal_relabel_path
+            or verified_moderate_anchor_relabel_path
         ):
             _advise("accept_suggested has only moderate suggested-anchor agreement", 0.72)
         else:
@@ -28695,6 +28764,7 @@ def _class_analysis_qwen_review_validate_final(
         and (
             anchor_evidence_suggested == "strong"
             or verified_overlap_rebuttal_relabel_path
+            or verified_moderate_anchor_relabel_path
         )
     )
     target_class_material_overlap = _class_analysis_qwen_review_target_class_material_overlap(
@@ -28765,6 +28835,8 @@ def _class_analysis_qwen_review_validate_final(
             "current_evidence": current_evidence,
             "suggested_evidence": suggested_evidence,
             "target_evidence": target_evidence,
+            "anchor_evidence_current": anchor_evidence_current,
+            "anchor_evidence_suggested": anchor_evidence_suggested,
             "same_image_scale_evidence": same_image_scale_evidence,
             "same_image_embedding_evidence": same_image_embedding_evidence,
             "specificity_alignment": specificity_alignment,
@@ -28773,6 +28845,8 @@ def _class_analysis_qwen_review_validate_final(
             "dual_bbox_resolution": dual_bbox_resolution,
             "dual_bbox_conflict": copy.deepcopy(dual_bbox_conflict) if dual_bbox_conflict else None,
             "overlap_adjudication_verified": overlap_adjudication_verified,
+            "anchor_adjudication_verified": anchor_adjudication_verified,
+            "anchor_adjudication_reason": anchor_adjudication_reason,
             "visible_target_cues": list(visible_target_cues),
             "supporting_clean_evidence_ids": list(supporting_clean_evidence_ids),
             "guardrail_reasons": list(guardrail_reasons),
@@ -28819,6 +28893,8 @@ def _class_analysis_qwen_review_validate_final(
         "overlap_assessment": overlap_assessment,
         "overlap_explains_candidate_similarity": overlap_explains_candidate_similarity,
         "overlap_adjudication_verified": overlap_adjudication_verified,
+        "anchor_adjudication_verified": anchor_adjudication_verified,
+        "anchor_adjudication_reason": anchor_adjudication_reason,
         "current_class_plausible": current_class_plausible,
         "current_class_plausibility_reason": current_class_plausibility_reason,
         "dual_bbox_resolution": dual_bbox_resolution,
@@ -28863,6 +28939,8 @@ def _class_analysis_qwen_review_skip_result(
         "overlap_assessment": "unclear",
         "overlap_explains_candidate_similarity": False,
         "overlap_adjudication_verified": False,
+        "anchor_adjudication_verified": False,
+        "anchor_adjudication_reason": "",
         "specificity_alignment": "insufficient",
         "target_background_contrast": "insufficient",
         "dual_bbox_resolution": "not_applicable",
@@ -29505,6 +29583,12 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
                         "Set overlap_rebutted=true only when clean target/source pixels show that overlap/background/nearby objects do not explain the proposed target-class cues.",
                         "Set overlap_risk=target_specific when overlap_rebutted=true and the target-class cues are visible inside the clean target/source pixels.",
                         "Set overlap_risk=overlap_explains only when the proposed class evidence comes mainly from overlap pixels, nearby objects, background texture, or geometry overlays.",
+                        "If the original guardrails mention moderate suggested-anchor agreement, inspect the class-context anchors/examples and concept brief before deciding anchor_support_verified.",
+                        "Set anchor_support_basis=target_specific_anchors only when trusted anchors/examples share object-specific traits with the clean target cues for the proposed class.",
+                        "Set anchor_support_basis=shared_generic_anchors when the anchor match is broad shape, color, position, size, background, or context that could fit multiple classes.",
+                        "Set anchor_support_basis=conflicting_anchors when trusted anchors/examples support the current class or a third class more strongly than the proposed target class.",
+                        "Set anchor_support_basis=insufficient when the anchors/examples are too weak, too sparse, or not visible enough to judge.",
+                        "Set anchor_support_verified=true only for target_specific_anchors; otherwise leave it false and explain the uncertainty in anchor_support_reason.",
                         "Set verified=true only when at least two positive target-class cues are visible, target evidence is not just scene context, overlap_rebutted is true or overlap is not applicable, current_class_positive_cues is empty or clearly irrelevant, and current_class_plausible=false.",
                         "Set verified=false when the evidence is context-only, negative-only, color-only, target pixels are ambiguous, or the clean crop still plausibly supports the current class.",
                         "Set cue_confidence above 0.85 only for visually obvious positive target-object evidence.",
@@ -29542,7 +29626,7 @@ def _class_analysis_qwen_review_cue_verifier_repair_instruction(
                         "Return one full JSON arguments object with every required key.",
                         f"target_class must be exactly: {target_class or '(none)'}",
                         f"Allowed supporting_clean_evidence_ids: {', '.join(clean_target_ids) or '(none)'}",
-                        "Required keys: verified, target_class, cue_confidence, positive_visible_target_cues, current_class_positive_cues, current_class_plausibility_basis, current_class_plausible, current_class_plausibility_reason, overlap_rebutted, overlap_risk, overlap_rebuttal, supporting_clean_evidence_ids, rejection_reason.",
+                        "Required keys: verified, target_class, cue_confidence, positive_visible_target_cues, current_class_positive_cues, current_class_plausibility_basis, current_class_plausible, current_class_plausibility_reason, overlap_rebutted, overlap_risk, overlap_rebuttal, anchor_support_verified, anchor_support_basis, anchor_support_reason, supporting_clean_evidence_ids, rejection_reason.",
                         "If you cannot verify two concrete target-positive cues, still return the full schema with verified=false, empty arrays where appropriate, cue_confidence no higher than 0.84, and a short rejection_reason.",
                         "Do not return a partial object. Do not omit target_class. Do not include markdown or prose outside JSON.",
                     ]
@@ -30118,6 +30202,36 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
         # final class-change decision.
         overlap_risk = "target_specific"
         overlap_risk_reconciled = True
+    anchor_support_basis = _class_analysis_qwen_review_coerce_choice(
+        args.get("anchor_support_basis"),
+        CLASS_ANALYSIS_QWEN_REVIEW_ANCHOR_SUPPORT_BASIS_LEVELS,
+        "not_applicable",
+        synonyms={
+            "target_specific": "target_specific_anchors",
+            "target-specific": "target_specific_anchors",
+            "object_specific": "target_specific_anchors",
+            "object-specific": "target_specific_anchors",
+            "specific": "target_specific_anchors",
+            "shared": "shared_generic_anchors",
+            "generic": "shared_generic_anchors",
+            "shared_generic": "shared_generic_anchors",
+            "conflict": "conflicting_anchors",
+            "conflicting": "conflicting_anchors",
+            "insufficient_evidence": "insufficient",
+            "none": "not_applicable",
+            "n/a": "not_applicable",
+            "not applicable": "not_applicable",
+        },
+    )
+    anchor_support_verified = _class_analysis_qwen_review_coerce_bool(
+        args.get("anchor_support_verified"),
+        default=False,
+    )
+    if anchor_support_verified and anchor_support_basis in {"not_applicable", "insufficient"}:
+        anchor_support_basis = "target_specific_anchors"
+    if anchor_support_basis != "target_specific_anchors":
+        anchor_support_verified = False
+    anchor_support_reason = str(args.get("anchor_support_reason") or "")[:1200]
     original_verified = bool(verified)
     original_rejection_reason = str(args.get("rejection_reason") or "")[:1200]
     verifier_reconciled_to_verified = False
@@ -30152,6 +30266,9 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
         "overlap_risk": overlap_risk,
         "overlap_risk_reconciled": overlap_risk_reconciled,
         "overlap_rebuttal": overlap_rebuttal,
+        "anchor_support_verified": bool(anchor_support_verified),
+        "anchor_support_basis": anchor_support_basis,
+        "anchor_support_reason": anchor_support_reason,
         "supporting_clean_evidence_ids": supporting_ids,
         "rejection_reason": original_rejection_reason,
         "raw_arguments": args,
@@ -30315,18 +30432,48 @@ def _class_analysis_qwen_review_try_cue_verifier(
         or embedding_signal == "questions_current"
         or local_signal == "supports_suggested"
     )
-    if verifier_basis == "shared_generic_cues" and not has_independent_current_questioning:
+    needs_moderate_anchor_verification = (
+        str(guarded.get("anchor_evidence_suggested") or "").strip().lower() == "moderate"
+    )
+    anchor_support_verified = bool(verifier_record.get("anchor_support_verified"))
+    anchor_support_basis = str(verifier_record.get("anchor_support_basis") or "").strip().lower()
+    if needs_moderate_anchor_verification and (
+        not anchor_support_verified
+        or anchor_support_basis != "target_specific_anchors"
+    ):
         verifier_record = {
             **verifier_record,
             "verified": False,
             "rejection_reason": (
-                "Cue verifier found only shared generic target/current cues and no same-image "
-                "scale, embedding, or local-consensus signal questioning the current class."
+                "Cue verifier did not verify target-specific anchor support for the moderate "
+                "suggested-anchor recommendation."
             ),
         }
         final_result = dict(final_result)
         final_result["cue_verifier"] = verifier_record
         return final_result
+    if verifier_basis == "shared_generic_cues" and not has_independent_current_questioning:
+        target_cues = list(verifier_record.get("independent_positive_visible_target_cues") or [])
+        current_cues = list(verifier_record.get("current_class_positive_cues") or [])
+        anchor_rescues_inconsistent_shared_basis = bool(
+            needs_moderate_anchor_verification
+            and anchor_support_verified
+            and len(target_cues) >= 2
+            and not current_cues
+            and not verifier_record.get("current_class_plausible")
+        )
+        if not anchor_rescues_inconsistent_shared_basis:
+            verifier_record = {
+                **verifier_record,
+                "verified": False,
+                "rejection_reason": (
+                    "Cue verifier found only shared generic target/current cues and no same-image "
+                    "scale, embedding, or local-consensus signal questioning the current class."
+                ),
+            }
+            final_result = dict(final_result)
+            final_result["cue_verifier"] = verifier_record
+            return final_result
     augmented_args = dict(guarded)
     overlap_rebuttal = str(verifier_record.get("overlap_rebuttal") or "").strip()
     guarded_rationale = str(guarded.get("rationale_short") or "").strip()
@@ -30354,6 +30501,9 @@ def _class_analysis_qwen_review_try_cue_verifier(
             "overlap_adjudication_verified": bool(verifier_record.get("overlap_rebutted")),
             "_overlap_adjudication_verified": bool(verifier_record.get("overlap_rebutted")),
             "overlap_adjudication_reason": overlap_rebuttal,
+            "anchor_adjudication_verified": bool(anchor_support_verified),
+            "_anchor_adjudication_verified": bool(anchor_support_verified),
+            "anchor_adjudication_reason": str(verifier_record.get("anchor_support_reason") or "")[:1200],
             "current_class_plausible": bool(verifier_record.get("current_class_plausible")),
             "current_class_plausibility_reason": str(
                 verifier_record.get("current_class_plausibility_reason") or ""
@@ -30385,6 +30535,9 @@ def _class_analysis_qwen_review_try_cue_verifier(
         "overlap_adjudication_verified",
         "_overlap_adjudication_verified",
         "overlap_adjudication_reason",
+        "anchor_adjudication_verified",
+        "_anchor_adjudication_verified",
+        "anchor_adjudication_reason",
         "current_class_plausible",
         "current_class_plausibility_reason",
     ):

@@ -717,12 +717,45 @@ If Qwen says the current class is still plausible, the final result remains
 human-triage `skip_uncertain`; the raw guarded recommendation and verifier
 reason are preserved in the payload.
 
+The same verifier also adjudicates the moderate anchor itself. It must return
+`anchor_support_verified`, `anchor_support_basis`, and `anchor_support_reason`.
+Moderate suggested-anchor recommendations can become actionable only when Qwen
+sets `anchor_support_basis=target_specific_anchors`, verifies no direct
+current-class target pixels remain, and either no material overlap is present or
+the overlap is separately rebutted from clean target/source pixels. Shared broad
+shape, color, size, position, background, or context matches use
+`shared_generic_anchors` and remain guarded human-triage output. This keeps the
+promotion path VLM-centered: the controller validates quality, overlap, clean
+evidence ids, and mutation safety, but Qwen owns the visual anchor sufficiency
+judgment.
+
 The cue-verifier pass may not promote a class change from shared generic cues
 alone. If Qwen reports `current_class_plausibility_basis=shared_generic_cues`,
 the promotion needs an independent same-image scale, same-image embedding, or
 local-consensus signal questioning the current class. This prevents top-down
 shape, color, position, or flat-surface language from turning into a class
 change when the same target pixels could still plausibly fit the current label.
+If the verifier reports shared generic current-class plausibility while also
+reporting no current-class positive cues and verified target-specific anchors,
+the backend treats that as an inconsistent wording issue and lets the normal
+validator decide from the explicit cue and anchor fields.
+
+Targeted verifier probe after adding anchor-support adjudication:
+
+- `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/anchor_verifier_probe3_recordfix_3_1780884420.json`
+  reran three clear-tier moderate-anchor guarded rows with the 35B abliterated
+  MLX reviewer, local consensus, class concept briefs, and per-review
+  subprocess isolation.
+- Result: 3/3 completed, 0 failures, 0 final validation errors, 0 unsafe audit
+  issues, and schema sequence `finalize_review->verify_visible_cues->verify_visible_cues`
+  for all rows.
+- The verifier returned `anchor_support_basis=target_specific_anchors` for all
+  three rows. Two previously guarded rows promoted to actionable
+  `accept_suggested`; one stayed guarded because overlap still remained too
+  entangled after validation.
+- This is not a replacement for the 100-row benchmark. It proves the new
+  moderate-anchor verifier path is live, auditable, and capable of increasing
+  useful action rate on the exact failure mode it targets.
 
 Latest Mac probe after restoring VLM finalization and the `final_class` schema:
 

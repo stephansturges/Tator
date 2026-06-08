@@ -2017,6 +2017,259 @@ def test_class_analysis_qwen_review_cue_verifier_promotes_guarded_clear_target(t
     assert promoted["applied"] is False
 
 
+def test_class_analysis_qwen_review_cue_verifier_promotes_verified_moderate_anchor_overlap(tmp_path, monkeypatch):
+    class_root = tmp_path / "class_analysis"
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    parent_id = "ca_cue_verify_moderate_anchor"
+    (class_root / parent_id).mkdir(parents=True)
+    result = {"summary": {"labelmap": ["CurrentClass", "SuggestedClass"]}}
+    point = {
+        "point_id": "p0",
+        "class_name": "CurrentClass",
+        "suggested_neighbor_class": "SuggestedClass",
+    }
+    clear_quality = {
+        "tier": "clear",
+        "bbox_width": 90.0,
+        "bbox_height": 60.0,
+        "bbox_min_dim": 60.0,
+        "bbox_area": 5400.0,
+        "crop_contrast": 50.0,
+        "crop_dynamic_range": 160.0,
+        "crop_sharpness": 18.0,
+        "edge_clipped": False,
+        "reasons": ["usable"],
+    }
+    evidence_ledger = {
+        "clean_visual_evidence_ids": ["target_detail_2", "source_clean_3"],
+        "clean_target_source_evidence_ids": ["target_detail_2", "source_clean_3"],
+        "rows": [
+            {"evidence_id": "target_detail_2", "kind": "target_detail", "use": "clean_visual"},
+            {"evidence_id": "source_clean_3", "kind": "source_clean", "use": "clean_visual"},
+        ],
+    }
+    initial = api._class_analysis_qwen_review_validate_final(
+        {
+            "decision": "accept_suggested",
+            "target_class": "SuggestedClass",
+            "confidence": 0.9,
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "partial_contamination",
+            "overlap_explains_candidate_similarity": False,
+            "anchor_evidence_current": "weak",
+            "anchor_evidence_suggested": "moderate",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "mixed",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "insufficient",
+            "same_image_embedding_evidence": "insufficient",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "glossary_or_guidance_used": True,
+            "visible_target_cues": [
+                "spiral translucent membrane pattern",
+                "hexagonal clasp geometry",
+            ],
+            "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+            "rationale_short": "Clean target cues fit SuggestedClass.",
+            "counter_evidence": "Anchors are only moderate.",
+            "human_review_needed": True,
+        },
+        result,
+        point,
+        {"target_detail_2", "source_clean_3"},
+        clear_quality,
+        evidence_ledger,
+    )
+    assert initial["decision"] == "skip_uncertain"
+    assert initial["guarded_recommendation"]["anchor_evidence_suggested"] == "moderate"
+    assert api._class_analysis_qwen_review_should_run_cue_verifier(initial) is True
+
+    def fake_model_call(*args, **kwargs):
+        return json.dumps(
+            {
+                "verified": True,
+                "target_class": "SuggestedClass",
+                "cue_confidence": 0.93,
+                "positive_visible_target_cues": [
+                    "spiral translucent membrane pattern",
+                    "hexagonal clasp geometry",
+                ],
+                "current_class_positive_cues": [],
+                "current_class_plausibility_basis": "none",
+                "current_class_plausible": False,
+                "current_class_plausibility_reason": "No current-class-specific target pixels are visible.",
+                "overlap_rebutted": True,
+                "overlap_risk": "target_specific",
+                "overlap_rebuttal": "Overlap does not explain the target-contained membrane and clasp cues.",
+                "anchor_support_verified": True,
+                "anchor_support_basis": "target_specific_anchors",
+                "anchor_support_reason": "Trusted anchors share the same target-internal membrane and clasp traits.",
+                "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+                "rejection_reason": "",
+            }
+        )
+
+    monkeypatch.setattr(api, "_class_analysis_qwen_review_model_call", fake_model_call)
+    job = api.ClassAnalysisQwenReviewJob(
+        review_id="cqr_cue_verify_moderate_anchor",
+        parent_job_id=parent_id,
+        point_id="p0",
+        request={},
+    )
+    promoted = api._class_analysis_qwen_review_try_cue_verifier(
+        job,
+        final_result=initial,
+        final_base_messages=[{"role": "user", "content": [{"type": "text", "text": "base"}]}],
+        point=point,
+        result=result,
+        evidence_ids={"target_detail_2", "source_clean_3"},
+        visual_quality=clear_quality,
+        evidence_ledger=evidence_ledger,
+        labelmap_glossary="",
+        review_guidance="",
+        deterministic_context={},
+        model_id="test-model",
+        executed_tools={"inspect_target_detail", "inspect_source_overlay"},
+        labelmap=["CurrentClass", "SuggestedClass"],
+    )
+
+    assert promoted["decision"] == "accept_suggested"
+    assert promoted["target_class"] == "SuggestedClass"
+    assert promoted["anchor_adjudication_verified"] is True
+    assert promoted["overlap_adjudication_verified"] is True
+    assert promoted["cue_verifier"]["anchor_support_basis"] == "target_specific_anchors"
+    assert promoted["cue_verifier"]["promoted_from_guarded_recommendation"] is True
+
+
+def test_class_analysis_qwen_review_cue_verifier_blocks_moderate_shared_anchors(tmp_path, monkeypatch):
+    class_root = tmp_path / "class_analysis"
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    parent_id = "ca_cue_verify_shared_anchor"
+    (class_root / parent_id).mkdir(parents=True)
+    result = {"summary": {"labelmap": ["CurrentClass", "SuggestedClass"]}}
+    point = {
+        "point_id": "p0",
+        "class_name": "CurrentClass",
+        "suggested_neighbor_class": "SuggestedClass",
+    }
+    clear_quality = {
+        "tier": "clear",
+        "bbox_width": 90.0,
+        "bbox_height": 60.0,
+        "bbox_min_dim": 60.0,
+        "bbox_area": 5400.0,
+        "crop_contrast": 50.0,
+        "crop_dynamic_range": 160.0,
+        "crop_sharpness": 18.0,
+        "edge_clipped": False,
+        "reasons": ["usable"],
+    }
+    evidence_ledger = {
+        "clean_visual_evidence_ids": ["target_detail_2", "source_clean_3"],
+        "clean_target_source_evidence_ids": ["target_detail_2", "source_clean_3"],
+        "rows": [
+            {"evidence_id": "target_detail_2", "kind": "target_detail", "use": "clean_visual"},
+            {"evidence_id": "source_clean_3", "kind": "source_clean", "use": "clean_visual"},
+        ],
+    }
+    initial = api._class_analysis_qwen_review_validate_final(
+        {
+            "decision": "accept_suggested",
+            "target_class": "SuggestedClass",
+            "confidence": 0.9,
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "none",
+            "overlap_explains_candidate_similarity": False,
+            "anchor_evidence_current": "weak",
+            "anchor_evidence_suggested": "moderate",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "mixed",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "insufficient",
+            "same_image_embedding_evidence": "insufficient",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "glossary_or_guidance_used": True,
+            "visible_target_cues": [
+                "large rectangular target footprint",
+                "flat top surface",
+            ],
+            "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+            "rationale_short": "Target may fit SuggestedClass.",
+            "counter_evidence": "Anchor cues are broad.",
+            "human_review_needed": True,
+        },
+        result,
+        point,
+        {"target_detail_2", "source_clean_3"},
+        clear_quality,
+        evidence_ledger,
+    )
+    assert api._class_analysis_qwen_review_should_run_cue_verifier(initial) is True
+
+    def fake_model_call(*args, **kwargs):
+        return json.dumps(
+            {
+                "verified": True,
+                "target_class": "SuggestedClass",
+                "cue_confidence": 0.93,
+                "positive_visible_target_cues": [
+                    "large rectangular target footprint",
+                    "flat top surface",
+                ],
+                "current_class_positive_cues": [],
+                "current_class_plausibility_basis": "shared_generic_cues",
+                "current_class_plausible": False,
+                "current_class_plausibility_reason": "The visible cues are broad and shared.",
+                "overlap_rebutted": True,
+                "overlap_risk": "target_specific",
+                "overlap_rebuttal": "Overlap does not explain the visible broad shape.",
+                "anchor_support_verified": False,
+                "anchor_support_basis": "shared_generic_anchors",
+                "anchor_support_reason": "Trusted anchors only share broad footprint and surface cues.",
+                "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+                "rejection_reason": "Anchors are shared generic cues.",
+            }
+        )
+
+    monkeypatch.setattr(api, "_class_analysis_qwen_review_model_call", fake_model_call)
+    job = api.ClassAnalysisQwenReviewJob(
+        review_id="cqr_cue_verify_shared_anchor",
+        parent_job_id=parent_id,
+        point_id="p0",
+        request={},
+    )
+    guarded = api._class_analysis_qwen_review_try_cue_verifier(
+        job,
+        final_result=initial,
+        final_base_messages=[{"role": "user", "content": [{"type": "text", "text": "base"}]}],
+        point=point,
+        result=result,
+        evidence_ids={"target_detail_2", "source_clean_3"},
+        visual_quality=clear_quality,
+        evidence_ledger=evidence_ledger,
+        labelmap_glossary="",
+        review_guidance="",
+        deterministic_context={},
+        model_id="test-model",
+        executed_tools={"inspect_target_detail", "inspect_source_overlay"},
+        labelmap=["CurrentClass", "SuggestedClass"],
+    )
+
+    assert guarded["decision"] == "skip_uncertain"
+    assert guarded["cue_verifier"]["verified"] is False
+    assert "target-specific anchor support" in guarded["cue_verifier"]["rejection_reason"]
+
+
 def test_class_analysis_qwen_review_cue_verifier_blocks_shared_generic_without_support(tmp_path, monkeypatch):
     class_root = tmp_path / "class_analysis"
     monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)

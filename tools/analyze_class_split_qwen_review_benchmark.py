@@ -1131,6 +1131,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             if (
                 overlap_assessment == "partial_contamination"
                 and not verified_overlap_rebuttal_path
+                and not verified_moderate_anchor_path
                 and not _text_rebuts_overlap_contamination(
                     _text_payload(record),
                     target_class=str(record.get("target_class") or ""),

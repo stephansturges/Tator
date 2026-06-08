@@ -889,6 +889,61 @@ def test_qwen_review_benchmark_audit_accepts_verified_overlap_without_rebuttal_p
     assert "partial_overlap_without_explicit_rebuttal" not in audit["issue_counts"]
 
 
+def test_qwen_review_benchmark_audit_accepts_verified_moderate_anchor_overlap_without_rebuttal_phrase():
+    record = _record(
+        decision="accept_suggested",
+        target_class="SuggestedClass",
+        current_class="CurrentClass",
+        suggested_neighbor_class="SuggestedClass",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_evidence="weak",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        overlap_assessment="partial_contamination",
+        overlap_explains_candidate_similarity=False,
+        overlap_adjudication_verified=True,
+        anchor_adjudication_verified=True,
+        current_class_plausible=False,
+        anchor_evidence_suggested="moderate",
+        local_context_evidence="strong",
+        local_consensus_evidence="mixed",
+        global_context_evidence="strong",
+        same_image_scale_evidence="insufficient",
+        same_image_embedding_evidence="insufficient",
+        specificity_alignment="supports_suggested",
+        target_background_contrast="target_specific",
+        visible_target_cues=["spiral conduit ridges", "triangular bracket lattice"],
+        supporting_clean_evidence_ids=["target_context_1", "source_clean_2"],
+        rationale_short="Verifier isolated target-specific visible features in the clean crop.",
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_suggested": "moderate",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "mixed",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "insufficient",
+            "same_image_embedding_evidence": "insufficient",
+            "overlap_assessment": "partial_contamination",
+            "overlap_explains_candidate_similarity": False,
+            "overlap_adjudication_verified": True,
+            "anchor_adjudication_verified": True,
+            "current_class_plausible": False,
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["unsafe_issue_count"] == 0
+    assert "class_change_bad_overlap" not in audit["issue_counts"]
+    assert "partial_overlap_without_explicit_rebuttal" not in audit["issue_counts"]
+
+
 def test_qwen_review_benchmark_audit_accepts_dual_bbox_overlap_switch_path():
     record = _record(
         decision="accept_suggested",

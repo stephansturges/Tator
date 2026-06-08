@@ -2206,7 +2206,10 @@ def test_class_analysis_qwen_review_cue_verifier_promotes_verified_moderate_anch
                 "whole_target_extent_reason": "The proposed class explains the whole target extent.",
                 "overlap_rebutted": True,
                 "overlap_risk": "target_specific",
-                "overlap_rebuttal": "Overlap does not explain the target-contained membrane and clasp cues.",
+                "overlap_rebuttal": (
+                    "The reviewed pixels carry the membrane and clasp cues inside the object extent, "
+                    "with the nearby overlap kept separate in clean evidence."
+                ),
                 "anchor_support_verified": True,
                 "anchor_support_basis": "target_specific_anchors",
                 "anchor_support_reason": "Trusted anchors share the same target-internal membrane and clasp traits.",

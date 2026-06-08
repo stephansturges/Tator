@@ -29074,6 +29074,7 @@ def _class_analysis_qwen_review_validate_final(
         and (
             overlap_rebuttal_text_supported
             or verified_overlap_rebuttal_relabel_path
+            or verified_moderate_anchor_relabel_path
         )
         and (
             anchor_evidence_suggested == "strong"
@@ -29107,7 +29108,7 @@ def _class_analysis_qwen_review_validate_final(
                 f"target_class_cover={target_cover:.2f})"
             )
     if partial_overlap_rebutted:
-        _advise("partial overlap present, but model text explicitly says target features are not explained by overlap", 0.68)
+        _advise("partial overlap present, but verified target-specific evidence rebuts overlap contamination", 0.68)
     elif (
         decision in {"accept_suggested", "change_to_other"}
         and overlap_assessment in {

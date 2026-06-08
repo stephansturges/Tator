@@ -790,6 +790,16 @@ target-specific anchors, the backend treats that as an inconsistent wording
 issue and lets the normal validator decide from the explicit cue, contrast, and
 anchor fields.
 
+For partial-overlap cases, the final validator and benchmark auditor accept two
+generic rebuttal forms. A direct text rebuttal is enough only when the rest of
+the class-change evidence is already strong. The newer VLM-centered route uses
+the structured moderate-anchor verifier fields instead: Qwen must verify
+target-specific anchors, no plausible current-class pixels, target-specific
+contrast, whole-target extent support, clean target/source evidence ids, overlap
+adjudication, and `overlap_explains_candidate_similarity=false`. That route
+does not depend on a fixed phrase such as "overlap does not explain"; the
+auditable fields are the contract.
+
 Targeted verifier probe after adding anchor-support adjudication:
 
 - `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/anchor_verifier_probe3_recordfix_3_1780884420.json`
@@ -1624,6 +1634,22 @@ briefs. Regression tests cover:
   ambiguous, which is acceptable for this workflow because the recommendation is
   not applied automatically and is preserved as a human-facing signal rather
   than a backend mutation.
+- verifier-overlap coherence focused benchmark:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/verifier_overlap_coherent_clear_guarded10_10_1780906367.json`
+  reran the same 10 clear guarded rows after aligning the partial-overlap gate
+  with the structured moderate-anchor verifier path. The run completed 10/10
+  reviews with 0 failures, 0 final validation errors, and 0 unsafe audit issues.
+  It produced 5 actionable class-change recommendations, 4 guarded human-triage
+  signals, and 1 useful negative, with 10 effective human signals. The cue
+  verifier ran on 8 rows, emitted contrastive support on 8 rows, promoted 5 rows,
+  and recorded 1 parse/repair path. Compared with
+  `contrastive_contextfilter_clear_guarded10_10_1780904650.json`, two additional
+  partial-overlap rows moved from guarded skip to `accept_suggested` because
+  Qwen supplied structured target-specific anchors, clean evidence ids,
+  whole-target support, no current-class plausibility, and overlap adjudication.
+  The focused visual sheets were inspected; the newly promoted examples were
+  building-like structures, while ambiguous current-object and overlap-heavy
+  rows remained guarded.
 
 A larger labeled real-model benchmark should be run before treating v2
 recommendations as more than advisory.

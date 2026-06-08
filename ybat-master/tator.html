@@ -682,19 +682,27 @@
                             </div>
                             <hr />
                             <div id="description">
-                                SHORTCUTS:
-                                <ul>
-                                    <li><strong>Images:</strong> Space = next image; Tab = previous image; ← / → = previous / next image.</li>
-                                    <li><strong>Focus:</strong> V toggles image-only focus mode; Esc exits focus mode or clears a polygon draft.</li>
-                                    <li><strong>Classes:</strong> ↓ / R = next class; ↑ / E = previous class.</li>
-                                    <li><strong>Selection:</strong> Shift + click adds/removes positive selections; Shift + drag draws a positive selection box; Shift + Alt + click/drag marks SAM3 similarity negatives.</li>
-                                    <li><strong>Box edits:</strong> Delete / Backspace / X removes selected or current bboxes; Q deletes the latest bbox.</li>
-                                    <li><strong>SAM:</strong> S toggles SAM; W runs magic tweak; double W tweaks selected boxes first, otherwise the carousel class.</li>
-                                    <li><strong>Point prompts:</strong> D toggles SAM point mode; M toggles multi-point; F/G add positive/negative points; Enter submits multi-point masks.</li>
-                                    <li><strong>Detection/export:</strong> Shift + R + drag runs YOLO/RF-DETR region detect; 1 runs SAM3 similarity; Shift + Y requests Save YOLO + captions.</li>
-                                    <li><strong>Canvas:</strong> Mouse wheel zooms; Shift + wheel pans; right-click drag pans.</li>
-                                    <li><strong>Modes:</strong> A toggles auto-class; P switches to seg mode or toggles polygon drawing; hold Z temporarily pauses Auto Class and SAM modes for selection/deletion.</li>
-                                </ul>
+                                <div class="shortcut-header">
+                                    <strong>SHORTCUTS</strong>
+                                    <span class="training-help">Active keyboard bindings for Label Images.</span>
+                                </div>
+                                <ul id="shortcutHelpList" class="shortcut-help-list" aria-live="polite"></ul>
+                                <details class="shortcut-settings-panel" id="shortcutSettingsPanel">
+                                    <summary>Customize keyboard shortcuts</summary>
+                                    <div class="shortcut-settings-body">
+                                        <div class="training-help">
+                                            Add, remove, or replace Label Images keyboard bindings. New bindings are saved in this browser and the shortcut list above updates immediately.
+                                        </div>
+                                        <div class="shortcut-settings-actions">
+                                            <button type="button" class="training-button secondary" id="shortcutResetAll">Reset all shortcuts</button>
+                                            <button type="button" class="training-button secondary" id="shortcutExportConfig">Export shortcuts</button>
+                                            <button type="button" class="training-button secondary" id="shortcutImportConfigButton">Import shortcuts</button>
+                                            <input type="file" id="shortcutImportConfig" accept=".json,application/json" hidden />
+                                        </div>
+                                        <div class="training-message" id="shortcutSettingsMessage" role="status"></div>
+                                        <div id="shortcutSettingsList" class="shortcut-settings-list"></div>
+                                    </div>
+                                </details>
                             </div>
                         </form>
                     </div>

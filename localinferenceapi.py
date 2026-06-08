@@ -14594,6 +14594,7 @@ CLASS_ANALYSIS_QWEN_REVIEW_MAX_TURNS = max(
 )
 CLASS_ANALYSIS_QWEN_REVIEW_CONCEPT_BRIEF_VERSION = "class_visual_concept_brief_v3"
 CLASS_ANALYSIS_QWEN_REVIEW_PAIR_CONTRAST_VERSION = "class_pair_contrast_brief_v2"
+CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_PROBE_VERSION = "qwen_specificity_probe_v3_region_contrast"
 CLASS_ANALYSIS_QWEN_REVIEW_CONCEPT_BRIEF_MAX_CLASSES = max(
     1,
     min(4, _env_int("CLASS_ANALYSIS_QWEN_REVIEW_CONCEPT_BRIEF_MAX_CLASSES", 3)),
@@ -24512,6 +24513,194 @@ def _class_analysis_qwen_review_tool_class_context_pack(
     return {"summary": evidence["summary"], "evidence": [evidence], "image_paths": [str(path)]}
 
 
+def _class_analysis_qwen_review_relative_rect(
+    bbox: Sequence[float],
+    *,
+    crop_left: float,
+    crop_top: float,
+    width: int,
+    height: int,
+) -> Optional[Tuple[int, int, int, int]]:
+    try:
+        left, top, right, bottom = [float(v) for v in bbox[:4]]
+    except Exception:
+        return None
+    rect = (
+        max(0, min(width, int(round(left - crop_left)))),
+        max(0, min(height, int(round(top - crop_top)))),
+        max(0, min(width, int(round(right - crop_left)))),
+        max(0, min(height, int(round(bottom - crop_top)))),
+    )
+    if rect[2] <= rect[0] or rect[3] <= rect[1]:
+        return None
+    return rect
+
+
+def _class_analysis_qwen_review_specificity_region_contrast_image(
+    job: ClassAnalysisQwenReviewJob,
+    result: Dict[str, Any],
+    point: Dict[str, Any],
+) -> Tuple[Image.Image, Dict[str, Any]]:
+    """Render SDDF-shaped visual evidence without adding class-specific rules.
+
+    The panels are deterministic transformations of source pixels. They give
+    Qwen the region-contrast structure SDDF uses conceptually: clean context,
+    target-only pixels, context with the target removed, and the strongest
+    material-overlap region when one exists.
+    """
+
+    bbox = _class_analysis_qwen_review_bbox(point)
+    image_path = _class_analysis_qwen_review_point_image_path(job, result, point)
+    overlaps = _class_analysis_qwen_review_overlap_decomposition(result, point)
+    points_by_id = _class_analysis_qwen_points_by_id(result)
+    top_overlap = overlaps[0] if overlaps else None
+    top_overlap_point = (
+        points_by_id.get(str(top_overlap.get("point_id") or ""))
+        if isinstance(top_overlap, dict)
+        else None
+    )
+    with Image.open(image_path) as loaded:
+        source = loaded.convert("RGB")
+    try:
+        source_width, source_height = source.size
+        left, top, right, bottom = bbox
+        target_width = max(1.0, right - left)
+        target_height = max(1.0, bottom - top)
+        extra = max(96.0, min(420.0, max(target_width, target_height) * 1.4))
+        crop_left = left - extra
+        crop_top = top - extra
+        crop_right = right + extra
+        crop_bottom = bottom + extra
+        min_side = 420.0
+        if crop_right - crop_left < min_side:
+            expand = (min_side - (crop_right - crop_left)) / 2.0
+            crop_left -= expand
+            crop_right += expand
+        if crop_bottom - crop_top < min_side:
+            expand = (min_side - (crop_bottom - crop_top)) / 2.0
+            crop_top -= expand
+            crop_bottom += expand
+        crop_box = [crop_left, crop_top, crop_right, crop_bottom]
+        clean_context = _class_analysis_qwen_review_crop_with_padding(source, crop_box)
+        width, height = clean_context.size
+        target_rect = _class_analysis_qwen_review_relative_rect(
+            bbox,
+            crop_left=crop_left,
+            crop_top=crop_top,
+            width=width,
+            height=height,
+        )
+
+        target_only = Image.new("RGB", clean_context.size, (0, 0, 0))
+        context_without_target = clean_context.copy()
+        if target_rect is not None:
+            target_only.paste(clean_context.crop(target_rect), target_rect)
+            ImageDraw.Draw(context_without_target).rectangle(target_rect, fill=(0, 0, 0))
+
+        overlap_only = Image.new("RGB", clean_context.size, (0, 0, 0))
+        overlap_rect: Optional[Tuple[int, int, int, int]] = None
+        if isinstance(top_overlap_point, dict):
+            overlap_bbox = _class_analysis_qwen_review_point_bbox(top_overlap_point)
+            if overlap_bbox is not None:
+                overlap_rect = _class_analysis_qwen_review_relative_rect(
+                    overlap_bbox,
+                    crop_left=crop_left,
+                    crop_top=crop_top,
+                    width=width,
+                    height=height,
+                )
+                if overlap_rect is not None:
+                    overlap_only.paste(clean_context.crop(overlap_rect), overlap_rect)
+
+        panels: List[Tuple[str, Image.Image]] = [
+            ("A clean context", clean_context),
+            ("B target pixels only", target_only),
+            ("C context with target removed", context_without_target),
+            ("D strongest overlap region only" if overlap_rect else "D no material overlap region", overlap_only),
+        ]
+        panel_w = 430
+        panel_h = 430
+        label_h = 36
+        gutter = 14
+        composite = Image.new("RGB", (panel_w * 2 + gutter, (panel_h + label_h) * 2 + gutter), (8, 20, 10))
+        draw = ImageDraw.Draw(composite)
+
+        def _fit_panel(image: Image.Image) -> Image.Image:
+            fitted = image.copy()
+            fitted.thumbnail((panel_w, panel_h), Image.Resampling.LANCZOS)
+            canvas = Image.new("RGB", (panel_w, panel_h), (0, 0, 0))
+            canvas.paste(fitted, ((panel_w - fitted.width) // 2, (panel_h - fitted.height) // 2))
+            return canvas
+
+        for idx, (label, image) in enumerate(panels):
+            col = idx % 2
+            row = idx // 2
+            x = col * (panel_w + gutter)
+            y = row * (panel_h + label_h + gutter)
+            draw.rectangle([x, y, x + panel_w, y + label_h], fill=(13, 40, 18))
+            draw.text((x + 10, y + 10), label[:70], fill=(142, 255, 102))
+            composite.paste(_fit_panel(image), (x, y + label_h))
+        composite.thumbnail((1180, 1180), Image.Resampling.LANCZOS)
+        metadata = {
+            "point_id": point.get("point_id"),
+            "current_class": point.get("class_name"),
+            "suggested_neighbor_class": point.get("suggested_neighbor_class") or "",
+            "image_relpath": point.get("image_relpath"),
+            "crop_bounds_xyxy": [float(v) for v in crop_box],
+            "target_bbox_xyxy": [float(v) for v in bbox],
+            "target_rect_within_crop_xyxy": list(target_rect) if target_rect else [],
+            "top_overlap": copy.deepcopy(top_overlap) if isinstance(top_overlap, dict) else None,
+            "top_overlap_rect_within_crop_xyxy": list(overlap_rect) if overlap_rect else [],
+            "panel_policy": (
+                "Panel A is clean context; panel B isolates the reviewed target bbox pixels; "
+                "panel C removes the reviewed target so background/context support can be checked; "
+                "panel D isolates the strongest material-overlap bbox when present. Labels are panel names only."
+            ),
+            "bbox_overlay": False,
+            "deterministic_region_masks": True,
+        }
+        return composite, json_sanitize(metadata)
+    finally:
+        try:
+            source.close()
+        except Exception:
+            pass
+
+
+def _class_analysis_qwen_review_tool_specificity_region_contrast(
+    job: ClassAnalysisQwenReviewJob,
+    result: Dict[str, Any],
+    point: Dict[str, Any],
+    _args: Dict[str, Any],
+) -> Dict[str, Any]:
+    image, metadata = _class_analysis_qwen_review_specificity_region_contrast_image(job, result, point)
+    overlap = metadata.get("top_overlap") if isinstance(metadata.get("top_overlap"), dict) else None
+    overlap_summary = (
+        (
+            f"Strongest material overlap: {overlap.get('class_name') or '?'} "
+            f"target_cover={float(overlap.get('target_area_covered') or 0.0):.2f} "
+            f"other_cover={float(overlap.get('other_area_covered') or 0.0):.2f} "
+            f"IoU={float(overlap.get('iou') or 0.0):.2f}."
+        )
+        if overlap
+        else "No material overlap region was available."
+    )
+    evidence, path = _class_analysis_qwen_review_save_evidence(
+        job,
+        kind="specificity_region_contrast",
+        title="Target/background region contrast",
+        image=image,
+        summary=(
+            "SDDF-style region contrast: A clean context, B target pixels only, "
+            "C context with the target removed, D strongest material-overlap region only when present. "
+            "Use it to test whether class sub-descriptions are supported by target pixels or by background/overlap/context. "
+            f"{overlap_summary}"
+        ),
+        metadata=metadata,
+    )
+    return {"summary": evidence["summary"], "evidence": [evidence], "image_paths": [str(path)]}
+
+
 def _class_analysis_qwen_review_tool_same_image_scale_report(
     job: ClassAnalysisQwenReviewJob,
     result: Dict[str, Any],
@@ -25524,7 +25713,7 @@ def _class_analysis_qwen_review_format_pair_contrasts(artifacts: Sequence[Dict[s
             (f"Choose {class_a} when", "choose_class_a_when"),
             (f"Choose {class_b} when", "choose_class_b_when"),
             ("Shared/ambiguous cues", "shared_or_ambiguous_cues"),
-            ("Hard negative cues", "hard_negative_cues"),
+            ("Switch blockers / hard negatives", "hard_negative_cues"),
             ("Must skip when", "must_skip_when"),
         ):
             values = [str(item).strip() for item in (brief.get(key) or []) if str(item or "").strip()]
@@ -25554,7 +25743,7 @@ def _class_analysis_qwen_review_build_concept_briefs(
     *,
     labelmap_glossary: str,
     review_guidance: str,
-    model_id: Optional[str],
+    model_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     classes = _class_analysis_qwen_review_relevant_classes_for_concepts(point)
     artifacts: List[Dict[str, Any]] = []
@@ -25766,6 +25955,7 @@ CLASS_ANALYSIS_QWEN_REVIEW_TOOLS: Dict[str, Callable[[ClassAnalysisQwenReviewJob
     "inspect_neighbors": _class_analysis_qwen_review_tool_neighbors,
     "compare_classes": _class_analysis_qwen_review_tool_compare_classes,
     "inspect_class_context_pack": _class_analysis_qwen_review_tool_class_context_pack,
+    "inspect_specificity_region_contrast": _class_analysis_qwen_review_tool_specificity_region_contrast,
     "inspect_same_image_scale_report": _class_analysis_qwen_review_tool_same_image_scale_report,
     "inspect_same_image_embedding_report": _class_analysis_qwen_review_tool_same_image_embedding_report,
     "inspect_overlap_decomposition": _class_analysis_qwen_review_tool_overlap_decomposition,
@@ -25779,6 +25969,7 @@ CLASS_ANALYSIS_QWEN_REVIEW_REQUIRED_TOOL_SEQUENCE: List[Tuple[str, Dict[str, Any
     ("inspect_source_overlay", {}),
     ("inspect_overlap_decomposition", {}),
     ("inspect_class_context_pack", {}),
+    ("inspect_specificity_region_contrast", {}),
     ("inspect_same_image_scale_report", {}),
     ("inspect_same_image_embedding_report", {}),
     ("zoom_source_region", {"extra_px": 160, "draw_bbox": False}),
@@ -26212,6 +26403,171 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
     }
 
 
+def _class_analysis_qwen_review_specificity_probe_tool_spec(labelmap: Sequence[str]) -> Dict[str, Any]:
+    clean_labelmap = [str(name or "").strip() for name in labelmap if str(name or "").strip()]
+    class_schema: Dict[str, Any] = {
+        "type": "string",
+        "description": "Dataset class best supported by target-contained visible cues, or empty when unresolved.",
+    }
+    if clean_labelmap:
+        class_schema["enum"] = [""] + clean_labelmap
+    return {
+        "name": "probe_specificity",
+        "description": (
+            "Probe target-vs-background specificity before final class review. "
+            "This is a VLM evidence pass, not a label mutation."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "target_identity_summary": {
+                    "type": "string",
+                    "description": "Class-neutral visible description of the whole reviewed target.",
+                },
+                "target_identity_uncertainty": {
+                    "type": "string",
+                    "enum": list(CLASS_ANALYSIS_QWEN_REVIEW_TARGET_IDENTITY_UNCERTAINTY_LEVELS),
+                },
+                "specificity_alignment": {
+                    "type": "string",
+                    "enum": list(CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_ALIGNMENT_LEVELS),
+                    "description": "Which class hypothesis is supported by target-contained object-specific cues.",
+                },
+                "target_background_contrast": {
+                    "type": "string",
+                    "enum": list(CLASS_ANALYSIS_QWEN_REVIEW_TARGET_BACKGROUND_CONTRAST_LEVELS),
+                    "description": "Whether evidence is target-specific or dominated by background/overlap/context.",
+                },
+                "best_supported_class": class_schema,
+                "target_specific_cues": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 0,
+                    "maxItems": 6,
+                    "description": "Positive cues visible on the reviewed target itself.",
+                },
+                "background_or_overlap_cues": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 0,
+                    "maxItems": 6,
+                    "description": "Cues that come from background, neighboring objects, overlap, or scene context.",
+                },
+                "subdescription_assessments": {
+                    "type": "array",
+                    "minItems": 0,
+                    "maxItems": 8,
+                    "description": (
+                        "Qwen region-contrast specificity checks. Generate compact class sub-descriptions from the "
+                        "active class names, glossary/guidance, and trusted exemplar briefs, then score "
+                        "whether each sub-description is supported by target-only pixels, target-removed "
+                        "background/context, or overlap-only pixels."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "class_name": class_schema,
+                            "subdescription": {
+                                "type": "string",
+                                "description": "A short class-specific visual attribute or part description.",
+                            },
+                            "target_support": {
+                                "type": "string",
+                                "enum": list(CLASS_ANALYSIS_QWEN_REVIEW_FOCUS_SUPPORT_LEVELS),
+                                "description": "How strongly the reviewed target itself supports this sub-description.",
+                            },
+                            "background_or_overlap_support": {
+                                "type": "string",
+                                "enum": list(CLASS_ANALYSIS_QWEN_REVIEW_FOCUS_SUPPORT_LEVELS),
+                                "description": "How strongly background, overlap, or neighboring objects support it.",
+                            },
+                            "support_location": {
+                                "type": "string",
+                                "enum": ["target", "background", "overlap", "mixed", "absent"],
+                            },
+                            "supporting_clean_evidence_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 0,
+                                "maxItems": 4,
+                            },
+                            "note": {"type": "string", "description": "Short visible-fact note."},
+                        },
+                        "required": [
+                            "class_name",
+                            "subdescription",
+                            "target_support",
+                            "background_or_overlap_support",
+                            "support_location",
+                            "supporting_clean_evidence_ids",
+                            "note",
+                        ],
+                    },
+                },
+                "specificity_margin": {
+                    "type": "string",
+                    "enum": list(CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_MARGIN_LEVELS),
+                    "description": (
+                        "Summary of the target-vs-background contrast across sub-descriptions. "
+                        "Use background_or_overlap_favored when suggested/current support mostly comes from context."
+                    ),
+                },
+                "margin_rationale": {
+                    "type": "string",
+                    "description": "Under 25 words; summarize why the target/background margin points that way.",
+                },
+                "current_class_cues": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 0,
+                    "maxItems": 6,
+                    "description": "Target-contained cues supporting the current class, if any.",
+                },
+                "suggested_class_cues": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 0,
+                    "maxItems": 6,
+                    "description": "Target-contained cues supporting the suggested class, if any.",
+                },
+                "whole_target_extent_supported": {
+                    "type": "boolean",
+                    "description": "True only if the best-supported class explains the whole reviewed bbox/object extent.",
+                },
+                "supporting_clean_evidence_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 0,
+                    "maxItems": 6,
+                    "description": "Clean target/source evidence ids used for target-specific cue claims.",
+                },
+                "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "rationale_short": {"type": "string", "description": "Under 25 words; no hidden reasoning."},
+            },
+            "required": [
+                "target_identity_summary",
+                "target_identity_uncertainty",
+                "specificity_alignment",
+                "target_background_contrast",
+                "best_supported_class",
+                "target_specific_cues",
+                "background_or_overlap_cues",
+                "subdescription_assessments",
+                "specificity_margin",
+                "margin_rationale",
+                "current_class_cues",
+                "suggested_class_cues",
+                "whole_target_extent_supported",
+                "supporting_clean_evidence_ids",
+                "confidence",
+                "rationale_short",
+            ],
+        },
+    }
+
+
 def _class_analysis_qwen_review_tool_specs_for_template(*specs: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [copy.deepcopy(spec) for spec in specs if isinstance(spec, dict) and spec.get("name")]
 
@@ -26358,6 +26714,22 @@ CLASS_ANALYSIS_QWEN_REVIEW_TARGET_IDENTITY_UNCERTAINTY_LEVELS: Tuple[str, ...] =
     "low",
     "moderate",
     "high",
+)
+CLASS_ANALYSIS_QWEN_REVIEW_FOCUS_SUPPORT_LEVELS: Tuple[str, ...] = (
+    "strong",
+    "moderate",
+    "weak",
+    "none",
+    "not_applicable",
+)
+CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_MARGIN_LEVELS: Tuple[str, ...] = (
+    "current_target_favored",
+    "suggested_target_favored",
+    "other_target_favored",
+    "background_or_overlap_favored",
+    "low_contrast",
+    "insufficient",
+    "not_applicable",
 )
 CLASS_ANALYSIS_QWEN_REVIEW_DUAL_BBOX_RESOLUTIONS: Tuple[str, ...] = (
     "not_applicable",
@@ -28407,6 +28779,1007 @@ def _class_analysis_qwen_review_parse_payload(raw_text: str) -> Tuple[Optional[D
     return None, error or "parse_error"
 
 
+def _class_analysis_qwen_review_parse_specificity_probe_raw(raw_text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Parse a specificity probe without the final-output compact fallback.
+
+    `_class_analysis_qwen_review_parse_payload` intentionally prefers compact
+    final-review argument objects; that heuristic can reduce a direct
+    specificity probe response to only `{confidence, rationale_short}`. The
+    probe is a separate VLM evidence pass, so keep it schema-aware here.
+    """
+
+    initial_payload, error = _parse_tool_call_json(raw_text)
+    text = str(raw_text or "")
+    repaired_text = re.sub(r"(?<=\d)\.\s+(?=\d)", ".", text).replace("{%", "{")
+    candidates: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+
+    def _add_candidate(decoded: Any) -> None:
+        if not isinstance(decoded, dict):
+            return
+        try:
+            key = json.dumps(decoded, sort_keys=True, default=str)
+        except Exception:
+            key = repr(decoded)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(decoded)
+
+    _add_candidate(initial_payload)
+    for candidate_text in (text, repaired_text):
+        stripped = candidate_text.strip()
+        if not stripped:
+            continue
+        try:
+            _add_candidate(json.loads(stripped))
+        except Exception:
+            pass
+        for pattern in (r"```json\s*(\{.*?\})\s*```", r"```\s*(\{.*?\})\s*```", r"(\{.*\})"):
+            match = re.search(pattern, stripped, flags=re.DOTALL)
+            if not match:
+                continue
+            try:
+                _add_candidate(json.loads(match.group(1)))
+            except Exception:
+                continue
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"\{", stripped):
+            try:
+                decoded, _end = decoder.raw_decode(stripped[match.start():])
+            except Exception:
+                continue
+            _add_candidate(decoded)
+
+    probe_aliases = {"probe_specificity", "specificity_probe", "specificity", "target_specificity_probe"}
+    probe_keys = {
+        "specificity_alignment",
+        "target_background_contrast",
+        "target_vs_background_contrast",
+        "target_specific_cues",
+        "best_supported_class",
+        "target_identity_summary",
+        "subdescription_assessments",
+        "contrastive_subdescriptions",
+        "specificity_margin",
+    }
+    for candidate in candidates:
+        tool_name = str(candidate.get("name") or candidate.get("tool") or "").strip()
+        if tool_name in probe_aliases:
+            return candidate, None
+    for candidate in candidates:
+        args = candidate.get("arguments") if isinstance(candidate.get("arguments"), dict) else None
+        if args and any(key in args for key in probe_keys):
+            return candidate, None
+    for candidate in candidates:
+        if any(key in candidate for key in probe_keys):
+            return candidate, None
+    if candidates:
+        return candidates[0], None
+    salvaged = _class_analysis_qwen_review_salvage_specificity_probe_args(repaired_text)
+    if salvaged:
+        return salvaged, "salvaged_malformed_specificity_probe_json"
+    return None, error or "specificity_probe_parse_error"
+
+
+def _class_analysis_qwen_review_salvage_specificity_probe_args(raw_text: str) -> Dict[str, Any]:
+    """Recover leading probe fields from malformed Qwen JSON.
+
+    MLX VLM generations sometimes stop in the middle of a later array/string
+    while earlier specificity-probe fields are complete. Keep this scoped to
+    the pre-final evidence probe so final decisions still require valid JSON.
+    """
+
+    text = str(raw_text or "")
+    if not text.strip():
+        return {}
+    recovered: Dict[str, Any] = {}
+
+    def _decode_json_string(value: str) -> str:
+        try:
+            return str(json.loads(f'"{value}"'))
+        except Exception:
+            return value.replace('\\"', '"').replace("\\n", "\n").replace("\\/", "/")
+
+    for key in (
+        "target_identity_summary",
+        "target_identity_uncertainty",
+        "specificity_alignment",
+        "target_background_contrast",
+        "target_vs_background_contrast",
+        "best_supported_class",
+        "target_class",
+        "supported_class",
+        "specificity_margin",
+        "margin_rationale",
+        "rationale_short",
+        "reason",
+    ):
+        match = re.search(rf'"{re.escape(key)}"\s*:\s*"((?:\\.|[^"\\])*)"', text, flags=re.DOTALL)
+        if match:
+            recovered[key] = _decode_json_string(match.group(1)).strip()
+
+    for key in (
+        "target_specific_cues",
+        "background_or_overlap_cues",
+        "target_background_cues",
+        "background_cues",
+        "context_cues",
+        "current_class_cues",
+        "suggested_class_cues",
+        "supporting_clean_evidence_ids",
+        "clean_evidence_ids",
+    ):
+        match = re.search(rf'"{re.escape(key)}"\s*:\s*(\[[^\]]*\])', text, flags=re.DOTALL)
+        if not match:
+            continue
+        try:
+            decoded = json.loads(match.group(1))
+        except Exception:
+            decoded = re.findall(r'"((?:\\.|[^"\\])*)"', match.group(1))
+            decoded = [_decode_json_string(item).strip() for item in decoded]
+        if isinstance(decoded, list):
+            recovered[key] = decoded
+
+    match = re.search(r'"confidence"\s*:\s*(-?\d+(?:\.\d+)?)', text)
+    if match:
+        try:
+            recovered["confidence"] = float(match.group(1))
+        except Exception:
+            pass
+    match = re.search(r'"whole_target_extent_supported"\s*:\s*(true|false)', text, flags=re.IGNORECASE)
+    if match:
+        recovered["whole_target_extent_supported"] = match.group(1).lower() == "true"
+
+    probe_keys = {
+        "target_identity_summary",
+        "specificity_alignment",
+        "target_background_contrast",
+        "target_specific_cues",
+        "best_supported_class",
+    }
+    if len([key for key in probe_keys if recovered.get(key)]) < 2:
+        return {}
+    return recovered
+
+
+def _class_analysis_qwen_review_normalize_subdescription_assessments(
+    raw_value: Any,
+    *,
+    labelmap: Sequence[str],
+    evidence_ids: Set[str],
+    limit: int = 8,
+) -> List[Dict[str, Any]]:
+    label_names = [str(item or "").strip() for item in labelmap if str(item or "").strip()]
+    label_by_norm = {
+        _class_analysis_qwen_review_normalize_label(name): name
+        for name in label_names
+        if _class_analysis_qwen_review_normalize_label(name)
+    }
+    if isinstance(raw_value, dict):
+        raw_items = raw_value.get("items") or raw_value.get("assessments") or raw_value.get("subdescriptions") or []
+    elif isinstance(raw_value, list):
+        raw_items = raw_value
+    else:
+        raw_items = []
+    normalized: List[Dict[str, Any]] = []
+    seen: Set[Tuple[str, str]] = set()
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        class_raw = str(
+            item.get("class_name")
+            or item.get("class")
+            or item.get("target_class")
+            or item.get("hypothesis_class")
+            or ""
+        ).strip()
+        class_name = label_by_norm.get(_class_analysis_qwen_review_normalize_label(class_raw), "")
+        subdescription = str(
+            item.get("subdescription")
+            or item.get("description")
+            or item.get("attribute")
+            or item.get("cue")
+            or ""
+        ).strip()
+        if not subdescription:
+            continue
+        key = (class_name, subdescription.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        target_support = _class_analysis_qwen_review_coerce_choice(
+            item.get("target_support")
+            if item.get("target_support") is not None
+            else item.get("target_score")
+            if item.get("target_score") is not None
+            else item.get("target"),
+            CLASS_ANALYSIS_QWEN_REVIEW_FOCUS_SUPPORT_LEVELS,
+            "none",
+            synonyms={
+                "present": "strong",
+                "visible": "strong",
+                "partial": "moderate",
+                "maybe": "weak",
+                "absent": "none",
+                "background": "none",
+                "overlap": "none",
+            },
+        )
+        background_support = _class_analysis_qwen_review_coerce_choice(
+            item.get("background_or_overlap_support")
+            if item.get("background_or_overlap_support") is not None
+            else item.get("context_support")
+            if item.get("context_support") is not None
+            else item.get("background_support")
+            if item.get("background_support") is not None
+            else item.get("overlap_support"),
+            CLASS_ANALYSIS_QWEN_REVIEW_FOCUS_SUPPORT_LEVELS,
+            "none",
+            synonyms={
+                "present": "strong",
+                "visible": "strong",
+                "partial": "moderate",
+                "maybe": "weak",
+                "absent": "none",
+                "target": "none",
+            },
+        )
+        support_location = _class_analysis_qwen_review_coerce_choice(
+            item.get("support_location") if item.get("support_location") is not None else item.get("location"),
+            ("target", "background", "overlap", "mixed", "absent"),
+            "mixed" if target_support != "none" and background_support != "none" else "target" if target_support != "none" else "background" if background_support != "none" else "absent",
+            synonyms={
+                "target_pixels": "target",
+                "object": "target",
+                "inside_bbox": "target",
+                "context": "background",
+                "neighbor": "overlap",
+                "nearby": "overlap",
+                "both": "mixed",
+                "none": "absent",
+            },
+        )
+        ids = _class_analysis_qwen_review_normalize_evidence_id_list(
+            item.get("supporting_clean_evidence_ids")
+            if item.get("supporting_clean_evidence_ids") is not None
+            else item.get("evidence_ids")
+            if item.get("evidence_ids") is not None
+            else item.get("clean_evidence_ids"),
+            allowed_ids=evidence_ids,
+            limit=4,
+        )
+        normalized.append(
+            {
+                "class_name": class_name,
+                "subdescription": subdescription[:240],
+                "target_support": target_support,
+                "background_or_overlap_support": background_support,
+                "support_location": support_location,
+                "supporting_clean_evidence_ids": ids,
+                "note": str(item.get("note") or item.get("rationale") or item.get("reason") or "")[:360],
+            }
+        )
+        if len(normalized) >= max(1, limit):
+            break
+    return normalized
+
+
+def _class_analysis_qwen_review_specificity_probe_instruction(
+    *,
+    point: Dict[str, Any],
+    evidence_ledger: Dict[str, Any],
+    visual_quality: Dict[str, Any],
+    labelmap: Sequence[str],
+    labelmap_glossary: str = "",
+    review_guidance: str = "",
+    class_concept_brief_text: str = "",
+) -> Dict[str, Any]:
+    clean_ids = [
+        str(item or "").strip()
+        for item in (evidence_ledger.get("clean_target_source_evidence_ids") or [])
+        if str(item or "").strip()
+    ]
+    reference_ids = [
+        str(item or "").strip()
+        for item in (evidence_ledger.get("clean_visual_reference_evidence_ids") or [])
+        if str(item or "").strip()
+    ]
+    concept_text = str(class_concept_brief_text or "").strip()
+    current_class = str(point.get("class_name") or "").strip()
+    suggested_class = str(point.get("suggested_neighbor_class") or "").strip()
+    current_glossary = _class_analysis_qwen_review_glossary_entry_for_class(labelmap_glossary, current_class)
+    suggested_glossary = _class_analysis_qwen_review_glossary_entry_for_class(labelmap_glossary, suggested_class)
+    probe_skeleton = {
+        "target_identity_summary": "class-neutral visible description of the reviewed target",
+        "target_identity_uncertainty": "low|moderate|high",
+        "specificity_alignment": "supports_current|supports_suggested|supports_other|mixed|insufficient|not_applicable",
+        "target_background_contrast": "target_specific|background_dominated|overlap_dominated|mixed|insufficient|not_applicable",
+        "best_supported_class": "",
+        "target_specific_cues": ["positive cue visible on the target itself"],
+        "background_or_overlap_cues": [],
+        "subdescription_assessments": [
+            {
+                "class_name": "one dataset class or empty",
+                "subdescription": "short discriminative class attribute, part, material, or target-touching policy",
+                "target_support": "strong|moderate|weak|none|not_applicable",
+                "background_or_overlap_support": "strong|moderate|weak|none|not_applicable",
+                "support_location": "target|background|overlap|mixed|absent",
+                "supporting_clean_evidence_ids": [],
+                "note": "short visible-fact note",
+            }
+        ],
+        "specificity_margin": "current_target_favored|suggested_target_favored|other_target_favored|background_or_overlap_favored|low_contrast|insufficient|not_applicable",
+        "margin_rationale": "under 25 words",
+        "current_class_cues": [],
+        "suggested_class_cues": [],
+        "whole_target_extent_supported": False,
+        "supporting_clean_evidence_ids": [],
+        "confidence": 0.0,
+        "rationale_short": "under 25 words",
+    }
+    lines = [
+        "Specificity probe state.",
+        "Return only the probe_specificity JSON arguments object. No markdown, no prose, no chain-of-thought.",
+        "This is a pre-final VLM evidence pass inspired by SDDF target/background separation.",
+        "V3 adds explicit region-contrast evidence: make compact sub-descriptions for the relevant class hypotheses, then compare target-only pixels against target-removed background/context and overlap-only pixels.",
+        "Question: which visible cues belong to the reviewed target itself, and which come from background, overlap, nearby objects, labels, or neighbor statistics?",
+        f"Current class: {current_class}",
+        f"Suggested class: {suggested_class or '(none)'}",
+        f"Dataset classes: {', '.join(str(item) for item in labelmap) or '(none)'}",
+        _class_analysis_qwen_review_quality_summary(visual_quality),
+        f"Clean target/source evidence ids allowed for supporting_clean_evidence_ids: {', '.join(clean_ids) or '(none)'}",
+        f"Clean reference evidence ids are context only: {', '.join(reference_ids) or '(none)'}",
+        "Use clean target/detail/zoom pixels for target_specific_cues.",
+        "When specificity_region_contrast evidence is available, use panel B for target-only support, panel C for target-removed background/context support, and panel D for overlap-only support.",
+        "Use overlays, dot maps, overlap reports, neighbor labels, and class names only as context, not as target cues.",
+        "If the apparent suggested-class evidence is mostly a nearby object, overlap pixels, background texture, or scene context, set target_background_contrast accordingly and do not mark it target_specific.",
+        "Pairwise Switch blockers / hard negatives, when present, are traps against class changes. Treat them as negative evidence for switching, not as positive evidence for the suggested class.",
+        "Scene, location, medium, surface, lighting, and nearby-object cues are context, not class evidence, unless the active glossary or review guidance explicitly defines the class by that target-touching context.",
+        "Do not place scene/location/context cues in current_class_cues or suggested_class_cues unless the cue is visibly part of the reviewed target under the active class policy.",
+        "For subdescription_assessments, include at least one current-class and one suggested-class entry when both classes exist. If the suggested-class sub-description is supported mainly by background/overlap, say that explicitly.",
+        "Do not invent dataset rules. Derive sub-descriptions from visible pixels, class names, glossary/guidance, and trusted exemplar briefs only.",
+        "Set specificity_margin from the sub-description assessments: target-favored only when target_support exceeds background_or_overlap_support on discriminative cues; background_or_overlap_favored when context wins.",
+        "target_background_contrast must be one literal string from the schema, never a numeric score; put numeric certainty only in confidence.",
+        "specificity_alignment must be one literal string from the schema, never high/medium/low.",
+        "If neither current nor suggested is supported by target-contained cues, set specificity_alignment=insufficient or mixed and best_supported_class=\"\".",
+        "Set whole_target_extent_supported=false if the best-supported class explains only a subpart of the reviewed bbox/object.",
+        "Every key below is required exactly once. Use [] for empty lists and \"\" only for best_supported_class when unresolved.",
+        "target_identity_summary is mandatory: describe the visible target in class-neutral terms before deciding which class it supports.",
+        "When target_background_contrast=target_specific, supporting_clean_evidence_ids must contain at least one allowed clean target/source evidence id.",
+        "When subdescription target_support is strong or moderate, its supporting_clean_evidence_ids should cite clean target/source ids whenever available.",
+        "Required JSON skeleton and key order:",
+        json.dumps(probe_skeleton, ensure_ascii=False, separators=(",", ":")),
+        "Keep rationale_short under 25 words.",
+    ]
+    if current_glossary or suggested_glossary or str(review_guidance or "").strip():
+        lines.append("Relevant class policy for deriving sub-descriptions:")
+        if current_glossary:
+            lines.append(f"- Current class {current_class}: {_class_analysis_qwen_review_compact_line(current_glossary, 480)}")
+        if suggested_class and suggested_glossary:
+            lines.append(f"- Suggested class {suggested_class}: {_class_analysis_qwen_review_compact_line(suggested_glossary, 480)}")
+        if str(review_guidance or "").strip():
+            lines.append(f"- Additional review guidance: {_class_analysis_qwen_review_compact_line(str(review_guidance), 700)}")
+    if concept_text:
+        lines.extend(
+            [
+                "Advisory class concept and pairwise contrast briefs are available as compressed exemplar memory.",
+                _class_analysis_qwen_review_compact_line(concept_text, 1400),
+                "Use briefs only to interpret visible target pixels; they cannot override fresh target evidence.",
+                "Pairwise 'Switch blockers / hard negatives' are traps against class changes. Treat them as negative evidence for switching, not as positive evidence for the suggested class.",
+            ]
+        )
+    return {"role": "user", "content": [{"type": "text", "text": "\n".join(lines)}]}
+
+
+def _class_analysis_qwen_review_derive_specificity_from_subdescriptions(
+    subdescription_assessments: Sequence[Dict[str, Any]],
+    *,
+    current_class: str,
+    suggested_class: str,
+) -> Dict[str, Any]:
+    current_norm = _class_analysis_qwen_review_normalize_label(current_class)
+    suggested_norm = _class_analysis_qwen_review_normalize_label(suggested_class)
+    class_scores: Dict[str, Dict[str, Any]] = {}
+    background_wins = 0
+    target_wins = 0
+    for assessment in subdescription_assessments:
+        if not isinstance(assessment, dict):
+            continue
+        class_name = str(assessment.get("class_name") or "").strip()
+        class_norm = _class_analysis_qwen_review_normalize_label(class_name)
+        if not class_norm:
+            continue
+        target_rank = _class_analysis_qwen_review_rank_evidence(str(assessment.get("target_support") or "none"))
+        background_rank = _class_analysis_qwen_review_rank_evidence(
+            str(assessment.get("background_or_overlap_support") or "none")
+        )
+        score = class_scores.setdefault(
+            class_norm,
+            {
+                "class_name": class_name,
+                "target_score": 0,
+                "background_score": 0,
+                "net_score": 0,
+                "target_wins": 0,
+                "background_wins": 0,
+            },
+        )
+        score["target_score"] += int(target_rank)
+        score["background_score"] += int(background_rank)
+        score["net_score"] += int(target_rank - background_rank)
+        if target_rank > background_rank and target_rank >= 2:
+            score["target_wins"] += 1
+            target_wins += 1
+        elif background_rank > target_rank and background_rank >= 2:
+            score["background_wins"] += 1
+            background_wins += 1
+
+    if not class_scores:
+        return {}
+    ranked = sorted(
+        class_scores.values(),
+        key=lambda item: (
+            int(item.get("net_score") or 0),
+            int(item.get("target_score") or 0),
+            -int(item.get("background_score") or 0),
+        ),
+        reverse=True,
+    )
+    best = ranked[0]
+    second = ranked[1] if len(ranked) > 1 else None
+    best_norm = _class_analysis_qwen_review_normalize_label(best.get("class_name"))
+    best_net = int(best.get("net_score") or 0)
+    best_target = int(best.get("target_score") or 0)
+    best_background = int(best.get("background_score") or 0)
+    if isinstance(second, dict):
+        second_net = int(second.get("net_score") or 0)
+        second_target = int(second.get("target_score") or 0)
+        second_background = int(second.get("background_score") or 0)
+        if best_net == second_net and best_target == second_target:
+            if background_wins >= max(1, target_wins) or best_background > best_target or second_background > second_target:
+                return {
+                    "specificity_alignment": "insufficient",
+                    "specificity_margin": "background_or_overlap_favored",
+                    "target_background_contrast": "background_dominated",
+                    "best_supported_class": "",
+                    "support_scores": class_scores,
+                }
+            return {
+                "specificity_alignment": "mixed",
+                "specificity_margin": "low_contrast",
+                "target_background_contrast": "mixed",
+                "best_supported_class": "",
+                "support_scores": class_scores,
+            }
+    if best_net <= 0 or best_target < 2:
+        if background_wins >= max(1, target_wins):
+            return {
+                "specificity_alignment": "insufficient",
+                "specificity_margin": "background_or_overlap_favored",
+                "target_background_contrast": "background_dominated",
+                "best_supported_class": "",
+                "support_scores": class_scores,
+            }
+        return {
+            "specificity_alignment": "mixed",
+            "specificity_margin": "low_contrast",
+            "target_background_contrast": "mixed",
+            "best_supported_class": "",
+            "support_scores": class_scores,
+        }
+    if best_norm == current_norm:
+        alignment = "supports_current"
+        margin = "current_target_favored"
+    elif suggested_norm and best_norm == suggested_norm:
+        alignment = "supports_suggested"
+        margin = "suggested_target_favored"
+    else:
+        alignment = "supports_other"
+        margin = "other_target_favored"
+    contrast = "target_specific" if best_target > best_background else "mixed"
+    return {
+        "specificity_alignment": alignment,
+        "specificity_margin": margin,
+        "target_background_contrast": contrast,
+        "best_supported_class": str(best.get("class_name") or ""),
+        "support_scores": class_scores,
+    }
+
+
+def _class_analysis_qwen_review_parse_specificity_probe_payload(
+    raw_text: str,
+    *,
+    current_class: str,
+    suggested_class: str,
+    labelmap: Sequence[str],
+    evidence_ids: Set[str],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    payload, error = _class_analysis_qwen_review_parse_specificity_probe_raw(raw_text)
+    if not isinstance(payload, dict):
+        return None, error or "specificity_probe_parse_error"
+    try:
+        args = _class_analysis_qwen_review_tool_arguments(
+            payload,
+            expected_name="probe_specificity",
+            aliases={"specificity_probe", "specificity", "target_specificity_probe"},
+        )
+    except Exception:
+        if any(key in payload for key in ("specificity_alignment", "target_background_contrast", "target_specific_cues")):
+            args = payload
+        else:
+            return None, error or "specificity_probe_missing_arguments"
+    current_class = str(current_class or "").strip()
+    suggested_class = str(suggested_class or "").strip()
+    label_names = [str(item or "").strip() for item in labelmap if str(item or "").strip()]
+    label_by_norm = {
+        _class_analysis_qwen_review_normalize_label(name): name
+        for name in label_names
+        if _class_analysis_qwen_review_normalize_label(name)
+    }
+    best_supported_raw = str(
+        args.get("best_supported_class")
+        or args.get("target_class")
+        or args.get("supported_class")
+        or ""
+    ).strip()
+    best_supported = label_by_norm.get(_class_analysis_qwen_review_normalize_label(best_supported_raw), "")
+    specificity_alignment = _class_analysis_qwen_review_coerce_choice(
+        args.get("specificity_alignment")
+        if args.get("specificity_alignment") is not None
+        else args.get("target_specificity_alignment"),
+        CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_ALIGNMENT_LEVELS,
+        "insufficient",
+        synonyms={
+            "current": "supports_current",
+            "current_class": "supports_current",
+            "suggested": "supports_suggested",
+            "suggested_class": "supports_suggested",
+            "other": "supports_other",
+            "third_class": "supports_other",
+            "ambiguous": "mixed",
+            "none": "insufficient",
+            "target": "supports_suggested",
+            "n/a": "not_applicable",
+        },
+    )
+    if specificity_alignment in {"insufficient", "not_applicable"} and best_supported:
+        best_norm = _class_analysis_qwen_review_normalize_label(best_supported)
+        if best_norm == _class_analysis_qwen_review_normalize_label(current_class):
+            specificity_alignment = "supports_current"
+        elif best_norm == _class_analysis_qwen_review_normalize_label(suggested_class):
+            specificity_alignment = "supports_suggested"
+        else:
+            specificity_alignment = "supports_other"
+    target_background_contrast = _class_analysis_qwen_review_coerce_choice(
+        args.get("target_background_contrast")
+        if args.get("target_background_contrast") is not None
+        else args.get("target_vs_background_contrast"),
+        CLASS_ANALYSIS_QWEN_REVIEW_TARGET_BACKGROUND_CONTRAST_LEVELS,
+        "insufficient",
+        synonyms={
+            "target": "target_specific",
+            "high": "target_specific",
+            "strong": "target_specific",
+            "clear": "target_specific",
+            "object_specific": "target_specific",
+            "object-specific": "target_specific",
+            "background": "background_dominated",
+            "context": "background_dominated",
+            "context_dominated": "background_dominated",
+            "overlap": "overlap_dominated",
+            "medium": "mixed",
+            "moderate": "mixed",
+            "low": "insufficient",
+            "weak": "insufficient",
+            "ambiguous": "mixed",
+            "none": "insufficient",
+            "n/a": "not_applicable",
+        },
+    )
+    target_identity_uncertainty = _class_analysis_qwen_review_coerce_choice(
+        args.get("target_identity_uncertainty") if args.get("target_identity_uncertainty") is not None else args.get("identity_uncertainty"),
+        CLASS_ANALYSIS_QWEN_REVIEW_TARGET_IDENTITY_UNCERTAINTY_LEVELS,
+        "high",
+        synonyms={
+            "clear": "low",
+            "certain": "low",
+            "medium": "moderate",
+            "uncertain": "high",
+            "ambiguous": "high",
+        },
+    )
+    target_specific_cues = _class_analysis_qwen_review_normalize_visible_cues(
+        args.get("target_specific_cues")
+        if args.get("target_specific_cues") is not None
+        else args.get("positive_visible_target_cues"),
+        current_class=current_class,
+        suggested_class=suggested_class,
+        target_class=best_supported or suggested_class,
+    )[:6]
+    current_class_cues = _class_analysis_qwen_review_normalize_visible_cues(
+        args.get("current_class_cues"),
+        current_class=current_class,
+        suggested_class=suggested_class,
+        target_class=current_class,
+    )[:6]
+    suggested_class_cues = _class_analysis_qwen_review_normalize_visible_cues(
+        args.get("suggested_class_cues"),
+        current_class=current_class,
+        suggested_class=suggested_class,
+        target_class=suggested_class,
+    )[:6]
+    background_or_overlap_cues = [
+        str(item or "").strip()[:240]
+        for item in (
+            args.get("background_or_overlap_cues")
+            or args.get("target_background_cues")
+            or args.get("background_cues")
+            or args.get("context_cues")
+            or []
+        )
+        if str(item or "").strip()
+    ][:6]
+    subdescription_assessments = _class_analysis_qwen_review_normalize_subdescription_assessments(
+        args.get("subdescription_assessments")
+        if args.get("subdescription_assessments") is not None
+        else args.get("contrastive_subdescriptions")
+        if args.get("contrastive_subdescriptions") is not None
+        else args.get("sddf_assessments")
+        if args.get("sddf_assessments") is not None
+        else args.get("focus_assessments"),
+        labelmap=labelmap,
+        evidence_ids=evidence_ids,
+        limit=8,
+    )
+    specificity_margin = _class_analysis_qwen_review_coerce_choice(
+        args.get("specificity_margin")
+        if args.get("specificity_margin") is not None
+        else args.get("target_background_margin")
+        if args.get("target_background_margin") is not None
+        else args.get("sddf_margin"),
+        CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_MARGIN_LEVELS,
+        "insufficient",
+        synonyms={
+            "current": "current_target_favored",
+            "current_class": "current_target_favored",
+            "supports_current": "current_target_favored",
+            "suggested": "suggested_target_favored",
+            "suggested_class": "suggested_target_favored",
+            "supports_suggested": "suggested_target_favored",
+            "other": "other_target_favored",
+            "third_class": "other_target_favored",
+            "background": "background_or_overlap_favored",
+            "context": "background_or_overlap_favored",
+            "overlap": "background_or_overlap_favored",
+            "low": "low_contrast",
+            "mixed": "low_contrast",
+            "weak": "insufficient",
+            "none": "insufficient",
+            "n/a": "not_applicable",
+        },
+    )
+    derived_specificity = _class_analysis_qwen_review_derive_specificity_from_subdescriptions(
+        subdescription_assessments,
+        current_class=current_class,
+        suggested_class=suggested_class,
+    )
+    reconciled_from_subdescriptions: List[str] = []
+    if derived_specificity:
+        derived_margin = str(derived_specificity.get("specificity_margin") or "").strip()
+        derived_alignment = str(derived_specificity.get("specificity_alignment") or "").strip()
+        derived_contrast = str(derived_specificity.get("target_background_contrast") or "").strip()
+        derived_best_class = str(derived_specificity.get("best_supported_class") or "").strip()
+        if specificity_margin in {"insufficient", "not_applicable"} and derived_margin:
+            specificity_margin = derived_margin
+            reconciled_from_subdescriptions.append("specificity_margin_missing")
+        elif derived_margin and derived_margin != specificity_margin:
+            raw_margin_target_favored = specificity_margin in {
+                "current_target_favored",
+                "suggested_target_favored",
+                "other_target_favored",
+            }
+            derived_target_favored = derived_margin in {
+                "current_target_favored",
+                "suggested_target_favored",
+                "other_target_favored",
+            }
+            if (
+                derived_margin == "background_or_overlap_favored"
+                or specificity_margin == "background_or_overlap_favored"
+                or (raw_margin_target_favored and derived_target_favored)
+            ):
+                specificity_margin = derived_margin
+                reconciled_from_subdescriptions.append("specificity_margin_contradicted_assessments")
+        if derived_alignment and derived_alignment != specificity_alignment:
+            if derived_margin in {
+                "current_target_favored",
+                "suggested_target_favored",
+                "other_target_favored",
+                "background_or_overlap_favored",
+            }:
+                specificity_alignment = derived_alignment
+                reconciled_from_subdescriptions.append("specificity_alignment_contradicted_assessments")
+        if derived_contrast and derived_contrast != target_background_contrast:
+            if derived_contrast in {"target_specific", "background_dominated", "mixed"}:
+                target_background_contrast = derived_contrast
+                reconciled_from_subdescriptions.append("target_background_contrast_contradicted_assessments")
+        if derived_best_class and derived_best_class != best_supported and derived_margin in {
+            "current_target_favored",
+            "suggested_target_favored",
+            "other_target_favored",
+        }:
+            best_supported = derived_best_class
+            reconciled_from_subdescriptions.append("best_supported_class_contradicted_assessments")
+    if target_background_contrast == "insufficient":
+        try:
+            contrast_score = float(
+                args.get("target_background_contrast")
+                if args.get("target_background_contrast") is not None
+                else args.get("target_vs_background_contrast")
+                if args.get("target_vs_background_contrast") is not None
+                else args.get("target_specificity_score")
+            )
+        except Exception:
+            contrast_score = float("nan")
+        if math.isfinite(contrast_score):
+            if contrast_score >= 0.70 and (target_specific_cues or current_class_cues or suggested_class_cues or best_supported):
+                target_background_contrast = "target_specific"
+            elif contrast_score >= 0.35:
+                target_background_contrast = "mixed"
+    supporting_ids = _class_analysis_qwen_review_normalize_evidence_id_list(
+        args.get("supporting_clean_evidence_ids")
+        if args.get("supporting_clean_evidence_ids") is not None
+        else args.get("clean_evidence_ids"),
+        allowed_ids=evidence_ids,
+        limit=6,
+    )
+    try:
+        confidence = float(
+            args.get("confidence")
+            if args.get("confidence") is not None
+            else args.get("target_specificity_score")
+            if args.get("target_specificity_score") is not None
+            else args.get("target_background_contrast")
+            if isinstance(args.get("target_background_contrast"), (int, float))
+            else 0.0
+        )
+    except Exception:
+        confidence = 0.0
+    if not math.isfinite(confidence):
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    return {
+        "enabled": True,
+        "status": "completed",
+        "version": CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_PROBE_VERSION,
+        "target_identity_summary": str(args.get("target_identity_summary") or "")[:1200],
+        "target_identity_uncertainty": target_identity_uncertainty,
+        "specificity_alignment": specificity_alignment,
+        "target_background_contrast": target_background_contrast,
+        "best_supported_class": best_supported,
+        "target_specific_cues": target_specific_cues,
+        "background_or_overlap_cues": background_or_overlap_cues,
+        "subdescription_assessments": subdescription_assessments,
+        "specificity_margin": specificity_margin,
+        "margin_rationale": str(args.get("margin_rationale") or args.get("specificity_margin_rationale") or "")[:1200],
+        "subdescription_derived_specificity": json_sanitize(derived_specificity) if derived_specificity else {},
+        "reconciled_from_subdescription_assessments": list(dict.fromkeys(reconciled_from_subdescriptions)),
+        "current_class_cues": current_class_cues,
+        "suggested_class_cues": suggested_class_cues,
+        "whole_target_extent_supported": _class_analysis_qwen_review_coerce_bool(
+            args.get("whole_target_extent_supported"),
+            default=False,
+        ),
+        "supporting_clean_evidence_ids": supporting_ids,
+        "confidence": confidence,
+        "rationale_short": str(args.get("rationale_short") or args.get("reason") or "")[:1200],
+        "raw_arguments": args,
+    }, None
+
+
+def _class_analysis_qwen_review_specificity_probe_validation_errors(
+    probe: Dict[str, Any],
+    *,
+    evidence_ids: Set[str],
+) -> List[str]:
+    if not isinstance(probe, dict) or probe.get("status") != "completed":
+        return ["specificity probe did not complete"]
+    errors: List[str] = []
+    if not str(probe.get("target_identity_summary") or "").strip():
+        errors.append("target_identity_summary is required")
+    try:
+        confidence = float(probe.get("confidence") or 0.0)
+    except Exception:
+        confidence = 0.0
+    if not math.isfinite(confidence):
+        confidence = 0.0
+    if str(probe.get("target_identity_uncertainty") or "").strip().lower() == "high" and confidence >= 0.75:
+        errors.append("high-confidence probe cannot leave target_identity_uncertainty=high")
+    target_contrast = str(probe.get("target_background_contrast") or "").strip().lower()
+    alignment = str(probe.get("specificity_alignment") or "").strip().lower()
+    if target_contrast == "target_specific" and not probe.get("target_specific_cues"):
+        errors.append("target_specific probe requires target_specific_cues")
+    if alignment in {"supports_current", "supports_suggested", "supports_other"} and not str(probe.get("best_supported_class") or "").strip():
+        errors.append("class-supporting probe requires best_supported_class")
+    if target_contrast == "target_specific" and evidence_ids and not probe.get("supporting_clean_evidence_ids"):
+        errors.append("target_specific probe requires supporting_clean_evidence_ids")
+    if confidence >= 0.75 and not probe.get("subdescription_assessments"):
+        errors.append("high-confidence probe requires subdescription_assessments")
+    margin = str(probe.get("specificity_margin") or "").strip().lower()
+    if probe.get("subdescription_assessments") and margin in {"", "insufficient", "not_applicable"} and confidence >= 0.75:
+        errors.append("high-confidence subdescription probe requires specificity_margin")
+    return errors
+
+
+def _class_analysis_qwen_review_specificity_probe_repair_instruction(
+    *,
+    raw_probe: str,
+    validation_errors: Sequence[str],
+    evidence_ids: Set[str],
+) -> Dict[str, Any]:
+    lines = [
+        "Your previous specificity probe output was incomplete.",
+        "Return one complete probe_specificity JSON arguments object now. No markdown, no prose, no code fence.",
+        "Fix these validation errors:",
+        *[f"- {str(error)[:220]}" for error in validation_errors],
+        "Do not change the target object or invent evidence. Use only the clean target/source images already attached above.",
+        "Required fields: target_identity_summary, target_identity_uncertainty, specificity_alignment, target_background_contrast, best_supported_class, target_specific_cues, background_or_overlap_cues, subdescription_assessments, specificity_margin, margin_rationale, current_class_cues, suggested_class_cues, whole_target_extent_supported, supporting_clean_evidence_ids, confidence, rationale_short.",
+        f"Allowed clean evidence ids: {', '.join(sorted(evidence_ids)) or '(none)'}",
+        "Use literal schema strings, not high/medium/low, for specificity_alignment and target_background_contrast.",
+        "For subdescription_assessments, score compact class sub-descriptions against target pixels versus background/overlap/context.",
+        "If confidence is high, target_identity_summary must describe the visible object in class-neutral terms.",
+        "Previous incomplete output:",
+        str(raw_probe or "")[:2200],
+    ]
+    return {"role": "user", "content": [{"type": "text", "text": "\n".join(lines)}]}
+
+
+def _class_analysis_qwen_review_specificity_probe_message(probe: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(probe, dict) or probe.get("status") != "completed":
+        text = "Specificity probe result: unavailable. Final review must rely on rendered evidence directly."
+    else:
+        text = "\n".join(
+            [
+                "Specificity probe result.",
+                f"Version: {probe.get('version') or CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_PROBE_VERSION}.",
+                f"Target identity: {probe.get('target_identity_summary') or '(none)'}",
+                f"Identity uncertainty: {probe.get('target_identity_uncertainty') or 'high'}.",
+                f"Specificity alignment: {probe.get('specificity_alignment') or 'insufficient'}.",
+                f"Target/background contrast: {probe.get('target_background_contrast') or 'insufficient'}.",
+                f"Best supported class: {probe.get('best_supported_class') or '(unresolved)'}.",
+                f"Target-specific cues: {json.dumps(probe.get('target_specific_cues') or [], ensure_ascii=False)}",
+                f"Background/overlap/context cues: {json.dumps(probe.get('background_or_overlap_cues') or [], ensure_ascii=False)}",
+                f"Sub-description assessments: {json.dumps(probe.get('subdescription_assessments') or [], ensure_ascii=False)}",
+                f"Specificity margin: {probe.get('specificity_margin') or 'insufficient'}; {probe.get('margin_rationale') or ''}",
+                f"Controller reconciliation from sub-descriptions: {json.dumps(probe.get('reconciled_from_subdescription_assessments') or [], ensure_ascii=False)}",
+                f"Supporting clean evidence ids: {', '.join(probe.get('supporting_clean_evidence_ids') or []) or '(none)'}.",
+                f"Confidence: {float(probe.get('confidence') or 0.0):.2f}.",
+                f"Probe rationale: {probe.get('rationale_short') or '(none)'}",
+                "Use this as a VLM self-critique. If final review contradicts it, cite stronger clean target/source evidence.",
+            ]
+        )
+    return {"role": "user", "content": [{"type": "text", "text": text}]}
+
+
+def _class_analysis_qwen_review_run_specificity_probe(
+    job: ClassAnalysisQwenReviewJob,
+    *,
+    final_base_messages: Sequence[Dict[str, Any]],
+    point: Dict[str, Any],
+    visual_quality: Dict[str, Any],
+    evidence_ledger: Dict[str, Any],
+    evidence_ids: Set[str],
+    labelmap: Sequence[str],
+    labelmap_glossary: str = "",
+    review_guidance: str = "",
+    class_concept_brief_text: str = "",
+    model_id: Optional[str],
+) -> Dict[str, Any]:
+    probe_messages = copy.deepcopy(list(final_base_messages))
+    probe_messages.append(
+        _class_analysis_qwen_review_specificity_probe_instruction(
+            point=point,
+            evidence_ledger=evidence_ledger,
+                visual_quality=visual_quality,
+                labelmap=labelmap,
+                labelmap_glossary=labelmap_glossary,
+                review_guidance=review_guidance,
+                class_concept_brief_text=class_concept_brief_text,
+            )
+    )
+    raw_probe = _class_analysis_qwen_review_model_call(
+        job,
+        probe_messages,
+        phase="specificity_probe",
+        model_id=model_id,
+        tool_specs=_class_analysis_qwen_review_tool_specs_for_template(
+            _class_analysis_qwen_review_specificity_probe_tool_spec(labelmap)
+        ),
+        max_new_tokens=800,
+        progress=0.28,
+        event_extra={
+            "version": CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_PROBE_VERSION,
+            "assistant_prefix_strategy": "plain_json_arguments",
+        },
+        assistant_prefix=None,
+    )
+    probe, error = _class_analysis_qwen_review_parse_specificity_probe_payload(
+        raw_probe,
+        current_class=str(point.get("class_name") or ""),
+        suggested_class=str(point.get("suggested_neighbor_class") or ""),
+        labelmap=labelmap,
+        evidence_ids=evidence_ids,
+    )
+    validation_errors = (
+        _class_analysis_qwen_review_specificity_probe_validation_errors(probe, evidence_ids=evidence_ids)
+        if isinstance(probe, dict)
+        else [error or "specificity_probe_parse_error"]
+    )
+    if validation_errors:
+        repair_messages = copy.deepcopy(probe_messages)
+        repair_messages.append(
+            _class_analysis_qwen_review_specificity_probe_repair_instruction(
+                raw_probe=raw_probe,
+                validation_errors=validation_errors,
+                evidence_ids=evidence_ids,
+            )
+        )
+        raw_repair = _class_analysis_qwen_review_model_call(
+            job,
+            repair_messages,
+            phase="specificity_probe",
+            model_id=model_id,
+            tool_specs=_class_analysis_qwen_review_tool_specs_for_template(
+                _class_analysis_qwen_review_specificity_probe_tool_spec(labelmap)
+            ),
+            max_new_tokens=1000,
+            progress=0.30,
+            event_extra={
+                "version": CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_PROBE_VERSION,
+                "assistant_prefix_strategy": "plain_json_arguments",
+                "repair_attempt": 1,
+                "validation_errors": list(validation_errors),
+            },
+            assistant_prefix=None,
+        )
+        repaired_probe, repaired_error = _class_analysis_qwen_review_parse_specificity_probe_payload(
+            raw_repair,
+            current_class=str(point.get("class_name") or ""),
+            suggested_class=str(point.get("suggested_neighbor_class") or ""),
+            labelmap=labelmap,
+            evidence_ids=evidence_ids,
+        )
+        repaired_errors = (
+            _class_analysis_qwen_review_specificity_probe_validation_errors(repaired_probe, evidence_ids=evidence_ids)
+            if isinstance(repaired_probe, dict)
+            else [repaired_error or "specificity_probe_repair_parse_error"]
+        )
+        if isinstance(repaired_probe, dict) and len(repaired_errors) <= len(validation_errors):
+            probe = repaired_probe
+            raw_probe = raw_repair
+            validation_errors = repaired_errors
+        if isinstance(probe, dict) and validation_errors:
+            probe["validation_errors"] = list(validation_errors)
+    if not isinstance(probe, dict):
+        probe = {
+            "enabled": True,
+            "status": "failed",
+            "version": CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_PROBE_VERSION,
+            "error": error or "specificity_probe_parse_error",
+            "raw_output_preview": str(raw_probe or "")[:800],
+        }
+    _class_analysis_qwen_review_append_event(
+        job,
+        {
+            "type": "specificity_probe_result",
+            "status": str(probe.get("status") or ""),
+            "specificity_probe": copy.deepcopy(probe),
+        },
+    )
+    return probe
+
+
 def _class_analysis_qwen_review_text_is_degenerate(raw_text: str) -> bool:
     text = str(raw_text or "").strip()
     if len(text) < 80:
@@ -28522,6 +29895,9 @@ def _class_analysis_qwen_review_validate_final(
         _default_target_background_contrast(),
         synonyms={
             "target": "target_specific",
+            "high": "target_specific",
+            "strong": "target_specific",
+            "clear": "target_specific",
             "target-specific": "target_specific",
             "clear_target_cues": "target_specific",
             "object_specific": "target_specific",
@@ -28532,6 +29908,10 @@ def _class_analysis_qwen_review_validate_final(
             "context_dominated": "background_dominated",
             "overlap": "overlap_dominated",
             "overlap-dominated": "overlap_dominated",
+            "medium": "mixed",
+            "moderate": "mixed",
+            "low": "insufficient",
+            "weak": "insufficient",
             "ambiguous": "mixed",
             "none": "insufficient",
             "not applicable": "not_applicable",
@@ -28784,6 +30164,60 @@ def _class_analysis_qwen_review_validate_final(
             _hard(
                 f"{decision} requires target_background_contrast=target_specific, got {target_background_contrast}"
             )
+        specificity_probe = (
+            evidence_ledger.get("specificity_probe")
+            if isinstance(evidence_ledger, dict) and isinstance(evidence_ledger.get("specificity_probe"), dict)
+            else None
+        )
+        if specificity_probe and specificity_probe.get("status") == "completed":
+            try:
+                probe_confidence = float(specificity_probe.get("confidence") or 0.0)
+            except Exception:
+                probe_confidence = 0.0
+            if not math.isfinite(probe_confidence):
+                probe_confidence = 0.0
+            probe_confidence = max(0.0, min(1.0, probe_confidence))
+            probe_alignment = str(specificity_probe.get("specificity_alignment") or "insufficient").strip().lower()
+            probe_contrast = str(specificity_probe.get("target_background_contrast") or "insufficient").strip().lower()
+            probe_margin = str(specificity_probe.get("specificity_margin") or "insufficient").strip().lower()
+            probe_best_class = str(specificity_probe.get("best_supported_class") or "").strip()
+            probe_target_norm = _class_analysis_qwen_review_normalize_label(probe_best_class)
+            final_target_norm = _class_analysis_qwen_review_normalize_label(target_class)
+            if probe_confidence >= 0.75:
+                if probe_alignment == "supports_current":
+                    _hard(
+                        "class change contradicts Qwen specificity probe: target-contained cues support current class"
+                    )
+                elif probe_contrast in {"background_dominated", "overlap_dominated"}:
+                    _hard(
+                        f"class change contradicts Qwen specificity probe: target/background contrast is {probe_contrast}"
+                    )
+                elif probe_margin == "background_or_overlap_favored":
+                    _hard(
+                        "class change contradicts Qwen specificity probe: sub-description margin favors background/overlap"
+                    )
+                elif probe_margin == "current_target_favored":
+                    _hard(
+                        "class change contradicts Qwen specificity probe: sub-description margin favors the current target class"
+                    )
+                elif decision == "accept_suggested" and probe_margin in {"other_target_favored", "low_contrast", "insufficient"}:
+                    _advise(
+                        f"Qwen specificity probe sub-description margin is {probe_margin}",
+                        0.72,
+                    )
+                elif decision == "change_to_other" and probe_margin in {"suggested_target_favored", "current_target_favored", "low_contrast", "insufficient"}:
+                    _advise(
+                        f"Qwen specificity probe sub-description margin is {probe_margin}",
+                        0.72,
+                    )
+                elif probe_target_norm and probe_target_norm != final_target_norm and probe_alignment in {"supports_suggested", "supports_other"}:
+                    _hard(
+                        f"class change contradicts Qwen specificity probe best-supported class {probe_best_class}"
+                    )
+                elif probe_alignment == "mixed" or probe_contrast == "mixed":
+                    _advise("Qwen specificity probe found mixed target/background evidence", 0.72)
+            elif probe_alignment in {"supports_current", "mixed"} or probe_contrast in {"background_dominated", "overlap_dominated", "mixed"}:
+                _advise("Qwen specificity probe is uncertain or conflicts with the class-change path", 0.72)
         if expanded_by_controller and not target_identity_summary:
             _hard(f"{decision} requires a class-neutral target_identity_summary")
         if expanded_by_controller and target_identity_uncertainty == "high":
@@ -28927,6 +30361,63 @@ def _class_analysis_qwen_review_validate_final(
         and overlap_explains_candidate_similarity
         and overlap_assessment in {"partial_contamination", "near_context", "other_contains_target"}
     )
+    confirm_probe = (
+        evidence_ledger.get("specificity_probe")
+        if isinstance(evidence_ledger, dict) and isinstance(evidence_ledger.get("specificity_probe"), dict)
+        else None
+    )
+    try:
+        confirm_probe_confidence = float(confirm_probe.get("confidence") or 0.0) if confirm_probe else 0.0
+    except Exception:
+        confirm_probe_confidence = 0.0
+    if not math.isfinite(confirm_probe_confidence):
+        confirm_probe_confidence = 0.0
+    confirm_probe_alignment = str(confirm_probe.get("specificity_alignment") or "").strip().lower() if confirm_probe else ""
+    confirm_probe_contrast = str(confirm_probe.get("target_background_contrast") or "").strip().lower() if confirm_probe else ""
+    confirm_probe_margin = str(confirm_probe.get("specificity_margin") or "").strip().lower() if confirm_probe else ""
+    confirm_probe_class_norm = _class_analysis_qwen_review_normalize_label(
+        confirm_probe.get("best_supported_class") if confirm_probe else ""
+    )
+    confirm_current_specificity_rebuttal_path = (
+        decision == "confirm_current"
+        and backend_tier == "clear"
+        and visual_quality_value == "clear"
+        and object_visibility == "clear"
+        and current_evidence == "strong"
+        and target_evidence == "strong"
+        and specificity_alignment == "supports_current"
+        and target_background_contrast == "target_specific"
+        and current_class
+        and confirm_probe_confidence >= 0.75
+        and confirm_probe_alignment == "supports_current"
+        and confirm_probe_contrast == "target_specific"
+        and confirm_probe_class_norm == _class_analysis_qwen_review_normalize_label(current_class)
+    )
+    confirm_current_specificity_conflict = (
+        decision == "confirm_current"
+        and bool(confirm_probe)
+        and confirm_probe.get("status") == "completed"
+        and confirm_probe_confidence >= 0.6
+        and (
+            confirm_probe_alignment in {"supports_suggested", "supports_other"}
+            or confirm_probe_contrast in {"background_dominated", "overlap_dominated"}
+            or confirm_probe_margin in {"suggested_target_favored", "other_target_favored", "background_or_overlap_favored"}
+        )
+    )
+    if (
+        confirm_current_specificity_conflict
+        and not confirm_current_overlap_rebuttal_path
+        and not confirm_current_specificity_rebuttal_path
+    ):
+        conflict_bits = [
+            f"alignment={confirm_probe_alignment or 'insufficient'}",
+            f"contrast={confirm_probe_contrast or 'insufficient'}",
+            f"margin={confirm_probe_margin or 'insufficient'}",
+        ]
+        _hard(
+            "confirm_current conflicts with Qwen specificity probe: "
+            + ", ".join(conflict_bits)
+        )
     if decision in {"accept_suggested", "change_to_other"} and len(visible_target_cues) < 2:
         if single_cue_supported_relabel_path:
             _advise(
@@ -29026,6 +30517,11 @@ def _class_analysis_qwen_review_validate_final(
                 f"confirm_current rebuts suggested_evidence={suggested_evidence} using target-visible current cues and overlap/near-context explanation",
                 0.82,
             )
+        elif confirm_current_specificity_rebuttal_path:
+            _advise(
+                f"confirm_current rebuts suggested_evidence={suggested_evidence} using high-confidence Qwen specificity-probe support for the current class",
+                0.82,
+            )
         elif suggested_evidence == "strong":
             _hard("confirm_current cannot override target-contained suggested_evidence=strong without overlap/near-context rebuttal")
         else:
@@ -29041,6 +30537,8 @@ def _class_analysis_qwen_review_validate_final(
     if decision == "confirm_current" and local_consensus_evidence == "supports_suggested" and suggested_evidence == "strong":
         if confirm_current_overlap_rebuttal_path:
             _advise("local consensus supports the suggested class, but overlap/near-context explains that signal", 0.78)
+        elif confirm_current_specificity_rebuttal_path:
+            _advise("local consensus supports the suggested class, but the specificity probe supports the current target", 0.78)
         else:
             _hard("confirm_current conflicts with local_consensus_evidence=supports_suggested")
     if decision == "change_to_other" and (
@@ -29331,8 +30829,9 @@ def _class_analysis_qwen_review_disposition(final_result: Dict[str, Any]) -> Dic
         advisory_target_class: str = "",
         human_action: str = "",
         primary_reason: str = "",
+        signal_strength: str = "",
     ) -> Dict[str, Any]:
-        return {
+        payload = {
             "disposition": disposition,
             "signal": signal,
             "label": label,
@@ -29342,6 +30841,61 @@ def _class_analysis_qwen_review_disposition(final_result: Dict[str, Any]) -> Dic
             "human_action": human_action,
             "primary_reason": primary_reason,
         }
+        if signal_strength:
+            payload["signal_strength"] = signal_strength
+        return payload
+
+    def _guarded_signal_strength(guarded_result: Dict[str, Any]) -> str:
+        guarded_decision = str(guarded_result.get("decision") or "").strip()
+        try:
+            guarded_confidence = float(guarded_result.get("confidence") or 0.0)
+        except Exception:
+            guarded_confidence = 0.0
+        if not math.isfinite(guarded_confidence):
+            guarded_confidence = 0.0
+        guarded_target_evidence = str(guarded_result.get("target_evidence") or "").strip().lower()
+        guarded_current_evidence = str(guarded_result.get("current_evidence") or "").strip().lower()
+        probe = result.get("specificity_probe") if isinstance(result.get("specificity_probe"), dict) else {}
+        probe_alignment = str(probe.get("specificity_alignment") or "").strip().lower()
+        probe_contrast = str(probe.get("target_background_contrast") or "").strip().lower()
+        probe_margin = str(probe.get("specificity_margin") or "").strip().lower()
+        probe_uncertainty = str(probe.get("target_identity_uncertainty") or "").strip().lower()
+        if guarded_decision == "confirm_current":
+            expected_alignment = "supports_current"
+            expected_margins = {"current_target_favored"}
+        elif guarded_decision == "accept_suggested":
+            expected_alignment = "supports_suggested"
+            expected_margins = {"suggested_target_favored"}
+        elif guarded_decision == "change_to_other":
+            expected_alignment = "supports_other"
+            expected_margins = {"other_target_favored"}
+        else:
+            expected_alignment = ""
+            expected_margins = set()
+        specificity_supports_target = (
+            bool(expected_alignment)
+            and probe_alignment == expected_alignment
+            and probe_contrast == "target_specific"
+            and (not expected_margins or probe_margin in expected_margins)
+            and probe_uncertainty in {"", "low", "moderate"}
+        )
+        class_change_blocked_by_current = (
+            guarded_decision in {"accept_suggested", "change_to_other"}
+            and guarded_current_evidence in {"strong", "moderate"}
+        )
+        if (
+            guarded_confidence >= 0.8
+            and guarded_target_evidence == "strong"
+            and specificity_supports_target
+            and probe_uncertainty == "low"
+            and not class_change_blocked_by_current
+        ):
+            return "strong"
+        if guarded_target_evidence in {"strong", "moderate"} and (
+            specificity_supports_target or guarded_confidence >= 0.75
+        ):
+            return "moderate"
+        return "weak"
 
     if dual_bbox_conflict and dual_other_class and dual_bbox_resolution == "overlap_box_class" and decision in {"accept_suggested", "change_to_other"}:
         return _base(
@@ -29439,26 +30993,40 @@ def _class_analysis_qwen_review_disposition(final_result: Dict[str, Any]) -> Dic
                 primary_reason=(guarded_reasons[0] if guarded_reasons else "Current-class material dominates the target bbox."),
             )
         if guarded_backend not in {"", "clear"} or guarded_quality not in {"", "clear"} or guarded_visibility not in {"", "clear"}:
+            signal_strength = _guarded_signal_strength(guarded)
             disposition = "guarded_visual_quality"
-            label = f"Guarded: possible {guarded_target or 'class change'} from limited crop"
-            priority = "normal" if guarded_target_evidence == "strong" else "low"
-            human_action = "Inspect manually; the crop quality was not safe for automatic relabeling."
+            if signal_strength == "strong":
+                label = f"Strong guarded signal: possible {guarded_target or 'class change'} from limited crop"
+                priority = "high"
+                human_action = "Inspect this one early; Qwen and the specificity probe agree, but crop quality still blocks automatic recommendation."
+            elif signal_strength == "moderate":
+                label = f"Guarded: possible {guarded_target or 'class change'} from limited crop"
+                priority = "normal"
+                human_action = "Inspect manually; Qwen found some visual signal, but crop quality was not safe for automatic relabeling."
+            else:
+                label = f"Guarded: weak {guarded_target or 'class-change'} signal from limited crop"
+                priority = "low"
+                human_action = "Inspect manually only if this vignette still looks suspicious."
         elif "overlap" in reason_text or "contamination" in reason_text or "duplicate_like" in reason_text:
+            signal_strength = _guarded_signal_strength(guarded)
             disposition = "guarded_overlap_risk"
             label = f"Guarded: {guarded_target or 'class change'} may be overlap-driven"
             priority = "high" if guarded_target_evidence == "strong" and guarded_current_evidence in {"weak", "none"} else "normal"
             human_action = "Inspect source context and overlap before applying any class change."
         elif "visible target cues" in reason_text:
+            signal_strength = _guarded_signal_strength(guarded)
             disposition = "guarded_missing_visible_cues"
             label = f"Guarded: insufficient target cues for {guarded_target or 'class change'}"
             priority = "normal"
             human_action = "Use as a triage hint, but require visible object-internal cues before relabeling."
         elif "anchor" in reason_text:
+            signal_strength = _guarded_signal_strength(guarded)
             disposition = "guarded_anchor_support"
             label = f"Guarded: weak exemplar support for {guarded_target or 'class change'}"
             priority = "normal"
             human_action = "Compare against trusted examples before applying the class change."
         else:
+            signal_strength = _guarded_signal_strength(guarded)
             disposition = "guarded_policy_block"
             label = f"Guarded suggestion: {guarded_target or 'review class'}"
             priority = "normal"
@@ -29472,6 +31040,7 @@ def _class_analysis_qwen_review_disposition(final_result: Dict[str, Any]) -> Dic
             advisory_target_class=guarded_target,
             human_action=human_action,
             primary_reason=(guarded_reasons[0] if guarded_reasons else "Controller guardrail blocked automatic recommendation."),
+            signal_strength=signal_strength,
         )
 
     if cue_verifier and not cue_verifier.get("verified"):
@@ -29554,6 +31123,11 @@ def _class_analysis_qwen_review_source_manifest() -> Dict[str, Any]:
                 "use": "Evidence-gathering visual agent framing with heterogeneous visual context before a decision.",
             },
             {
+                "name": "Specificity-Driven Dynamic Focusing",
+                "url": "https://arxiv.org/html/2603.26109v1",
+                "use": "Target/background region contrast and fine-grained sub-description checks for specificity probing.",
+            },
+            {
                 "name": "Flamingo visual in-context learning",
                 "url": "https://arxiv.org/abs/2204.14198",
                 "use": "Few-shot multimodal exemplars motivate clean trusted class examples as advisory context.",
@@ -29604,7 +31178,8 @@ Tool protocol:
 	1. Required evidence is rendered before the model can finalize:
 	   inspect_target_context, inspect_target_detail, inspect_source_overlay,
 	   inspect_overlap_decomposition, inspect_class_context_pack,
-	   inspect_same_image_scale_report, inspect_same_image_embedding_report, and
+	   inspect_specificity_region_contrast, inspect_same_image_scale_report,
+	   inspect_same_image_embedding_report, and
 	   one clean zoom_source_region with draw_bbox=false.
 2. A narrow route_review state may decide whether the required evidence is enough
    or whether the controller should render one local-consensus context.
@@ -29633,10 +31208,17 @@ Decision policy:
 - If advisory class concept or pairwise contrast briefs are provided, use them
   only as compressed memory from trusted exemplars. They cannot override fresh
   target pixels, overlap evidence, or backend guardrails.
+- Pairwise switch blockers / hard negatives are traps against class changes,
+  not positive evidence for the suggested class. Use them to avoid context-only
+  switches.
 - Use an SDDF-style target/background separation: target-specific object cues
   must be distinguished from background texture, nearby objects, overlap pixels,
   scene context, class labels, and neighbor statistics before any class-change
   recommendation.
+- Use the specificity region-contrast panel for that separation: panel B
+  isolates target-bbox pixels; panel C removes the target so context/background
+  support is visible; panel D isolates the strongest overlap bbox when present.
+  Panel labels are evidence routing aids, not class evidence.
 - If local consensus is rendered, the clean crop is visual evidence. The dot map
   is annotation-distribution context only and cannot override unclear target
   pixels.
@@ -29751,6 +31333,7 @@ def _class_analysis_qwen_review_final_instruction(
     class_concept_brief_text: str = "",
     dual_bbox_conflict: Optional[Dict[str, Any]] = None,
     allow_poor_advisory: bool = False,
+    specificity_probe: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     evidence_list = ", ".join(sorted(evidence_ids)) or "(none)"
     required_list = ", ".join(
@@ -29790,11 +31373,40 @@ def _class_analysis_qwen_review_final_instruction(
             "Advisory class concept and pairwise contrast briefs built from trusted exemplars are available:",
             concept_brief_text,
             "Treat concept/contrast briefs as compressed exemplar memory only. Fresh target pixels, clean source context, overlap logic, and backend guardrails override the brief.",
+            "Pairwise 'Switch blockers / hard negatives' are negative traps for class changes, not positive evidence for the suggested class.",
             "Dataset-specific pair contrast beats generic word meanings.",
         ]
         if concept_brief_text
         else ["No class concept or pairwise contrast brief is available; rely on the rendered evidence and glossary/guidance."]
     )
+    probe_lines: List[str] = []
+    if isinstance(specificity_probe, dict) and specificity_probe.get("status") == "completed":
+        probe_lines = [
+            "A separate Qwen specificity probe has already inspected target-vs-background evidence.",
+            (
+                f"Probe alignment={specificity_probe.get('specificity_alignment') or 'insufficient'}, "
+                f"contrast={specificity_probe.get('target_background_contrast') or 'insufficient'}, "
+                f"best_class={specificity_probe.get('best_supported_class') or '(unresolved)'}, "
+                f"confidence={float(specificity_probe.get('confidence') or 0.0):.2f}."
+            ),
+            f"Probe target identity: {specificity_probe.get('target_identity_summary') or '(none)'}",
+            f"Probe target-specific cues: {json.dumps(specificity_probe.get('target_specific_cues') or [], ensure_ascii=False)}",
+            f"Probe background/overlap cues: {json.dumps(specificity_probe.get('background_or_overlap_cues') or [], ensure_ascii=False)}",
+            f"Probe sub-description assessments: {json.dumps(specificity_probe.get('subdescription_assessments') or [], ensure_ascii=False)}",
+            f"Probe specificity margin: {specificity_probe.get('specificity_margin') or 'insufficient'}; {specificity_probe.get('margin_rationale') or ''}",
+            f"Probe reconciliation from sub-descriptions: {json.dumps(specificity_probe.get('reconciled_from_subdescription_assessments') or [], ensure_ascii=False)}",
+            (
+                "Use the probe as VLM self-critique. You may disagree only if the clean target/source pixels "
+                "show stronger target-contained cues, which you must list and cite."
+            ),
+        ]
+    elif isinstance(specificity_probe, dict) and specificity_probe.get("enabled"):
+        probe_lines = [
+            "The separate Qwen specificity probe was attempted but unavailable; rely on rendered evidence directly.",
+            f"Probe error: {str(specificity_probe.get('error') or 'unknown')[:200]}",
+        ]
+    else:
+        probe_lines = ["No separate specificity probe is available; perform target/background separation in the final JSON fields."]
     dual_conflict_lines: List[str] = []
     if isinstance(dual_bbox_conflict, dict) and dual_bbox_conflict.get("enabled"):
         dual_other_class = _class_analysis_qwen_review_dual_bbox_other_class(dual_bbox_conflict)
@@ -29842,11 +31454,16 @@ def _class_analysis_qwen_review_final_instruction(
         quality_summary,
         quality_policy,
         "Use clean target/source/zoom pixels for visible_target_cues. Do not use overlay boxes, dot maps, neighbor labels, deterministic reports, or class names as visible cues.",
+        "Use the specificity_region_contrast panel to compare target-only pixels against target-removed background/context and overlap-only pixels before trusting suggested-class cues.",
         "Before choosing a class, write target_identity_summary as a class-neutral description of the whole reviewed target from clean pixels. Prefer shape, parts, material, extent, and target-touching context over class names.",
         "Set target_identity_uncertainty=high if you cannot describe the whole target without guessing; class changes with high target identity uncertainty will be guarded.",
         "Use target_identity_evidence_ids to cite clean target/source evidence ids for the target_identity_summary.",
         "Use specificity_alignment to state which hypothesis is supported by target-contained object-specific cues: supports_current, supports_suggested, supports_other, mixed, insufficient, or not_applicable.",
         "Use target_background_contrast to separate target-object evidence from context: target_specific, background_dominated, overlap_dominated, mixed, insufficient, or not_applicable.",
+        "If the specificity probe includes sub-description assessments, use its margin as a target-vs-context audit. Do not accept a class change when the margin is background_or_overlap_favored unless clean target/source pixels clearly contradict that probe.",
+        "Pairwise Switch blockers / hard negatives, when present, are negative traps for class changes, not positive evidence for the suggested class.",
+        "Scene, location, medium, surface, lighting, and nearby-object cues are context, not class evidence, unless the active glossary or review guidance explicitly defines the class by that target-touching context.",
+        "Do not accept a class change when the target_identity_summary and target-specific cues support the current class while suggested-class support comes from scene context, switch blockers, background, or overlap.",
         "Set whole_target_extent_supported=true only when your recommended final class explains the whole reviewed bbox/object extent.",
         "Set whole_target_extent_supported=false when your recommendation explains only a subcomponent or ignores a large attached/continuous structure inside the bbox.",
         "For accept_suggested/change_to_other, include at least two concrete positive target cues and cite clean target/source evidence ids in supporting_clean_evidence_ids.",
@@ -29864,7 +31481,7 @@ def _class_analysis_qwen_review_final_instruction(
         "content": [
             {
                 "type": "text",
-                "text": "\n".join(policy_lines + dual_conflict_lines + concept_lines + [local_consensus_policy]),
+                "text": "\n".join(policy_lines + dual_conflict_lines + probe_lines + concept_lines + [local_consensus_policy]),
             }
         ],
     }
@@ -30195,6 +31812,7 @@ def _class_analysis_qwen_review_compact_ledger_text(text: str) -> str:
         "- target_detail_",
         "- source_clean_",
         "- zoom_region_",
+        "- specificity_region_contrast_",
         "- overlap_decomposition_",
         "- same_image_scale_report_",
         "- same_image_embedding_report_",
@@ -30231,6 +31849,7 @@ def _class_analysis_qwen_review_final_context_messages(
         "inspect_target_detail",
         "zoom_source_region",
         "inspect_class_context_pack",
+        "inspect_specificity_region_contrast",
     }
     text_only_tools = {
         "inspect_source_overlay",
@@ -30314,19 +31933,20 @@ def _class_analysis_qwen_review_final_context_messages(
         },
         {
             "role": "user",
-            "content": [{"type": "text", "text": _class_analysis_qwen_review_compact_line(summary_text, 4200)}]
-            + kept_images[:4],
+            "content": [{"type": "text", "text": _class_analysis_qwen_review_compact_line(summary_text, 6000)}]
+            + kept_images[:5],
         },
     ]
 
     return final_messages, {
         "input_image_count": input_images,
-        "output_image_count": len(kept_images[:4]),
+        "output_image_count": len(kept_images[:5]),
         "text_only_observations": sorted(set(text_only_observations)),
         "image_observations": sorted(set(image_observations)),
         "trimmed_text_messages": trimmed_text_messages,
         "policy": (
-            "Final review keeps clean target/detail/zoom images plus the clean class-context pack for VLM reasoning; "
+            "Final review keeps clean target/detail/zoom images, the clean class-context pack, and the "
+            "target/background region-contrast panel for VLM reasoning; "
             "source overlay, overlap decomposition, local consensus, and deterministic reports remain compact text/ledger context."
         ),
     }
@@ -30399,6 +32019,18 @@ def _class_analysis_qwen_review_should_run_cue_verifier(
         return True
     plausibility_guarded = "current-class plausibility verification" in reason_text
     if plausibility_guarded:
+        if str(guarded.get("specificity_alignment") or "").strip().lower() not in {"supports_suggested", "supports_other"}:
+            return False
+        if str(guarded.get("target_background_contrast") or "").strip().lower() != "target_specific":
+            return False
+        return len(_class_analysis_qwen_review_normalize_visible_cues(
+            guarded.get("visible_target_cues"),
+            current_class=str(guarded.get("current_class") or ""),
+            suggested_class=str(guarded.get("suggested_neighbor_class") or ""),
+            target_class=str(guarded.get("target_class") or ""),
+        )) >= 2
+    specificity_probe_guarded = "specificity probe" in reason_text
+    if specificity_probe_guarded:
         if str(guarded.get("specificity_alignment") or "").strip().lower() not in {"supports_suggested", "supports_other"}:
             return False
         if str(guarded.get("target_background_contrast") or "").strip().lower() != "target_specific":
@@ -31130,7 +32762,7 @@ def _class_analysis_qwen_review_evidence_use(kind: str, metadata: Optional[Dict[
 
     kind_norm = str(kind or "").strip().lower()
     metadata = metadata if isinstance(metadata, dict) else {}
-    if kind_norm in {"target_context", "target_detail", "source_clean", "class_context_pack"}:
+    if kind_norm in {"target_context", "target_detail", "source_clean", "class_context_pack", "specificity_region_contrast"}:
         return "clean_visual"
     if kind_norm == "zoom_region":
         return "clean_visual" if not bool(metadata.get("bbox_overlay")) else "geometry_overlay"
@@ -31488,9 +33120,19 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
             if isinstance(raw_cue_verifier, bool)
             else _parse_bool(str(raw_cue_verifier)) if raw_cue_verifier is not None else True
         )
+        raw_specificity_probe = job.request.get("enable_specificity_probe")
+        specificity_probe_enabled = (
+            bool(raw_specificity_probe)
+            if isinstance(raw_specificity_probe, bool)
+            else _parse_bool(str(raw_specificity_probe)) if raw_specificity_probe is not None else True
+        )
         mlx_reset_every = _class_analysis_qwen_review_mlx_reset_every(job)
         reset_after_review = _class_analysis_qwen_review_request_bool(job, "reset_qwen_runtime_after_review", False)
         backend_quality_tier = str(visual_quality.get("tier") or "unknown").strip().lower()
+        non_clear_final_review_allowed = (
+            (backend_quality_tier == "limited" and limited_final_review_enabled)
+            or (backend_quality_tier == "poor" and poor_final_review_enabled)
+        )
         _class_analysis_qwen_review_write_json(
             job,
             "review_context.json",
@@ -31502,6 +33144,7 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                 "allow_limited_final_review": limited_final_review_enabled,
                 "allow_poor_final_review": poor_final_review_enabled,
                 "enable_cue_verifier": cue_verifier_enabled,
+                "enable_specificity_probe": specificity_probe_enabled,
                 "mlx_reset_every": mlx_reset_every,
                 "reset_qwen_runtime_after_review": reset_after_review,
                 "point_id": point.get("point_id"),
@@ -31518,6 +33161,7 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
             "inspect_source_overlay",
             "inspect_overlap_decomposition",
             "inspect_class_context_pack",
+            "inspect_specificity_region_contrast",
             "zoom_source_region_clean",
         }
         messages: List[Dict[str, Any]] = [
@@ -31609,7 +33253,7 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
             "pair_contrasts": [],
             "prompt_text": "",
         }
-        if concept_briefs_enabled and backend_quality_tier == "clear":
+        if concept_briefs_enabled and (backend_quality_tier == "clear" or non_clear_final_review_allowed):
             try:
                 concept_briefs_packet = _class_analysis_qwen_review_build_concept_briefs(
                     job,
@@ -31651,14 +33295,14 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                 "artifacts": [],
                 "pair_contrasts": [],
                 "prompt_text": "",
-                "skipped_reason": f"target_quality_{backend_quality_tier or 'unknown'}",
+                    "skipped_reason": f"qwen_final_review_not_available_for_target_quality_{backend_quality_tier or 'unknown'}",
             }
             _class_analysis_qwen_review_write_json(job, "concept_briefs.json", concept_briefs_packet)
             _class_analysis_qwen_review_append_event(
                 job,
                 {
                     "type": "concept_briefs_skipped",
-                    "reason": "target_quality_not_clear",
+                    "reason": "final_review_not_available_for_target_quality",
                     "backend_tier": backend_quality_tier,
                     "version": CLASS_ANALYSIS_QWEN_REVIEW_CONCEPT_BRIEF_VERSION,
                 },
@@ -31771,10 +33415,6 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
 
         final_tool_spec = _class_analysis_qwen_review_final_tool_spec(labelmap)
         final_result = None
-        non_clear_final_review_allowed = (
-            (backend_quality_tier == "limited" and limited_final_review_enabled)
-            or (backend_quality_tier == "poor" and poor_final_review_enabled)
-        )
         if backend_quality_tier != "clear" and not non_clear_final_review_allowed:
             reason = f"Controller skipped Qwen final decision because backend visual-quality tier is {backend_quality_tier or 'unknown'}."
             final_result = _class_analysis_qwen_review_skip_result(point, reason)
@@ -31861,6 +33501,32 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                 **copy.deepcopy(final_context_policy),
             },
         )
+        specificity_probe: Dict[str, Any] = {
+            "enabled": bool(specificity_probe_enabled),
+            "status": "not_run",
+            "version": CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_PROBE_VERSION,
+            "reason": "disabled" if not specificity_probe_enabled else "final_review_not_available",
+        }
+        if final_result is None and specificity_probe_enabled:
+            specificity_probe = _class_analysis_qwen_review_run_specificity_probe(
+                job,
+                final_base_messages=final_base_messages,
+                point=point,
+                visual_quality=visual_quality,
+                evidence_ledger=evidence_ledger,
+                evidence_ids=evidence_ids,
+                labelmap=labelmap,
+                labelmap_glossary=labelmap_glossary,
+                review_guidance=review_guidance,
+                class_concept_brief_text=str(concept_briefs_packet.get("prompt_text") or ""),
+                model_id=model_id,
+            )
+            evidence_ledger["specificity_probe"] = copy.deepcopy(specificity_probe)
+            _class_analysis_qwen_review_write_json(job, "specificity_probe.json", specificity_probe)
+            _class_analysis_qwen_review_write_json(job, "evidence_ledger.json", evidence_ledger)
+            final_base_messages.append(_class_analysis_qwen_review_specificity_probe_message(specificity_probe))
+        elif specificity_probe_enabled:
+            _class_analysis_qwen_review_write_json(job, "specificity_probe.json", specificity_probe)
         for attempt_idx in range(final_attempts) if final_result is None else range(0):
             if job.cancel_event.is_set():
                 raise RuntimeError("cancelled")
@@ -31875,6 +33541,7 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                         class_concept_brief_text=str(concept_briefs_packet.get("prompt_text") or ""),
                         dual_bbox_conflict=dual_bbox_conflict,
                         allow_poor_advisory=poor_final_review_enabled,
+                        specificity_probe=specificity_probe,
                     )
                 )
             if attempt_idx > 0:
@@ -32022,6 +33689,7 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
             else None,
             "dual_bbox_resolution": str(final_result.get("dual_bbox_resolution") or "not_applicable"),
             "deterministic_context": deterministic_context,
+            "specificity_probe": copy.deepcopy(specificity_probe),
             "class_concept_briefs": {
                 "enabled": bool(concept_briefs_packet.get("enabled")),
                 "version": concept_briefs_packet.get("version") or CLASS_ANALYSIS_QWEN_REVIEW_CONCEPT_BRIEF_VERSION,
@@ -32065,6 +33733,9 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                 "local_consensus_evidence_ids": list(evidence_ledger.get("local_consensus_evidence_ids") or []),
                 "clean_visual_reference_evidence_ids": list(evidence_ledger.get("clean_visual_reference_evidence_ids") or []),
                 "deterministic_context_evidence_ids": list(evidence_ledger.get("deterministic_context_evidence_ids") or []),
+                "specificity_probe": copy.deepcopy(evidence_ledger.get("specificity_probe"))
+                if isinstance(evidence_ledger.get("specificity_probe"), dict)
+                else None,
                 "policy": str(evidence_ledger.get("policy") or ""),
             },
             "required_tools": sorted(_class_analysis_qwen_review_required_tool_label(tool_key) for tool_key in required_tools),
@@ -32116,6 +33787,7 @@ def create_class_analysis_qwen_review(job_id: str, point_id: str, payload: Dict[
     request_payload.setdefault("allow_limited_final_review", True)
     request_payload.setdefault("allow_poor_final_review", False)
     request_payload.setdefault("enable_cue_verifier", True)
+    request_payload.setdefault("enable_specificity_probe", True)
     request_payload["parent_job_id"] = parent_job.job_id
     request_payload["point_id"] = safe_point_id
     job = ClassAnalysisQwenReviewJob(

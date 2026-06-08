@@ -49984,6 +49984,306 @@ async function cancelRfDetrTrainingJobRequest() {
         const imageList = document.getElementById("imageList");
         const classList = document.getElementById("classList");
         let modeSnapshot = null;
+        let shortcutCaptureActionId = null;
+        const SHORTCUT_STORAGE_KEY = "tator.annotation.shortcuts.v1";
+        const SHORTCUT_CLASS_ID_COUNT = 20;
+        const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "OS"]);
+
+        const makeBinding = (code, key, modifiers = {}) => ({
+            code,
+            key,
+            ctrl: !!modifiers.ctrl,
+            meta: !!modifiers.meta,
+            alt: !!modifiers.alt,
+            shift: !!modifiers.shift,
+        });
+
+        const shortcutActions = [
+            {
+                id: "image_next",
+                group: "Images",
+                label: "Next image",
+                description: "Switch to the next image.",
+                defaultBindings: [makeBinding("Space", "Space"), makeBinding("ArrowRight", "ArrowRight")],
+                run: () => navigateImage(1),
+            },
+            {
+                id: "image_previous",
+                group: "Images",
+                label: "Previous image",
+                description: "Switch to the previous image.",
+                defaultBindings: [makeBinding("Tab", "Tab"), makeBinding("ArrowLeft", "ArrowLeft")],
+                run: () => navigateImage(-1),
+            },
+            {
+                id: "class_next",
+                group: "Classes",
+                label: "Next class",
+                description: "Move the class carousel down.",
+                defaultBindings: [makeBinding("KeyR", "R"), makeBinding("ArrowDown", "ArrowDown")],
+                allowRepeat: true,
+                run: () => cycleClassSelection(1),
+            },
+            {
+                id: "class_previous",
+                group: "Classes",
+                label: "Previous class",
+                description: "Move the class carousel up.",
+                defaultBindings: [makeBinding("KeyE", "E"), makeBinding("ArrowUp", "ArrowUp")],
+                allowRepeat: true,
+                run: () => cycleClassSelection(-1),
+            },
+            {
+                id: "drawing_start",
+                group: "Drawing",
+                label: "Start drawing",
+                description: "Enable drawing. In segmentation mode this starts or resumes polygon drawing.",
+                defaultBindings: [],
+                run: () => startAnnotationDrawing(),
+            },
+            {
+                id: "drawing_finish",
+                group: "Drawing",
+                label: "End drawing",
+                description: "Finish a polygon draft when possible, otherwise pause drawing.",
+                defaultBindings: [],
+                run: () => finishAnnotationDrawing(),
+            },
+            {
+                id: "drawing_toggle",
+                group: "Drawing",
+                label: "Toggle polygon drawing",
+                description: "Switch to segmentation mode or pause/resume polygon drawing.",
+                defaultBindings: [makeBinding("KeyP", "P")],
+                run: () => togglePolygonDrawingShortcut(),
+            },
+            {
+                id: "drawing_cancel",
+                group: "Drawing",
+                label: "Cancel drawing / exit focus",
+                description: "Exit focus mode, clear a polygon draft, or clear the selected object.",
+                defaultBindings: [makeBinding("Escape", "Escape")],
+                run: () => cancelAnnotationDrawingOrFocus(),
+            },
+            {
+                id: "focus_toggle",
+                group: "View",
+                label: "Toggle image focus",
+                description: "Enter or leave image-only focus mode.",
+                defaultBindings: [makeBinding("KeyV", "V")],
+                run: () => {
+                    toggleAnnotationFocusMode();
+                    return true;
+                },
+            },
+            {
+                id: "temporary_mode_pause",
+                group: "Modes",
+                label: "Hold to pause Auto/SAM",
+                description: "Temporarily pause Auto Class and SAM while held.",
+                defaultBindings: [makeBinding("KeyZ", "Z")],
+                hold: true,
+                run: () => beginTemporaryModePause(),
+                release: () => endTemporaryModePause(),
+            },
+            {
+                id: "auto_toggle",
+                group: "Modes",
+                label: "Toggle auto-class",
+                description: "Turn auto-class on or off.",
+                defaultBindings: [makeBinding("KeyA", "A")],
+                disabledWhenPaused: true,
+                run: () => {
+                    updateAutoModeState(!autoMode);
+                    showShortcutToast("auto_toggle", `Auto-class: ${autoMode ? "ON" : "OFF"}.`);
+                    showAnnotationFocusHud();
+                    return true;
+                },
+            },
+            {
+                id: "sam_toggle",
+                group: "SAM",
+                label: "Toggle SAM",
+                description: "Turn SAM mode on or off.",
+                defaultBindings: [makeBinding("KeyS", "S")],
+                disabledWhenPaused: true,
+                run: () => {
+                    updateSamModeState(!samMode);
+                    showShortcutToast("sam_toggle", `SAM mode: ${samMode ? "ON" : "OFF"}.`);
+                    showAnnotationFocusHud();
+                    return true;
+                },
+            },
+            {
+                id: "sam_point_toggle",
+                group: "SAM",
+                label: "Toggle point mode",
+                description: "Enable or disable SAM point mode.",
+                defaultBindings: [makeBinding("KeyD", "D")],
+                disabledWhenPaused: true,
+                run: () => {
+                    if (!pointMode) {
+                        if (!samMode) {
+                            updateSamModeState(true);
+                        }
+                        updatePointModeState(true);
+                    } else {
+                        updatePointModeState(false);
+                    }
+                    showShortcutToast("sam_point_toggle", `SAM point: ${pointMode ? "ON" : "OFF"}.`);
+                    showAnnotationFocusHud();
+                    return true;
+                },
+            },
+            {
+                id: "sam_multi_toggle",
+                group: "SAM",
+                label: "Toggle multi-point",
+                description: "Enable or disable SAM multi-point mode.",
+                defaultBindings: [makeBinding("KeyM", "M")],
+                disabledWhenPaused: true,
+                run: () => {
+                    if (!multiPointMode) {
+                        if (!samMode) {
+                            updateSamModeState(true);
+                        }
+                        updateMultiPointState(true);
+                    } else {
+                        updateMultiPointState(false);
+                    }
+                    showShortcutToast("sam_multi_toggle", `SAM multi-point: ${multiPointMode ? "ON" : "OFF"}.`);
+                    showAnnotationFocusHud();
+                    return true;
+                },
+            },
+            {
+                id: "multi_point_positive",
+                group: "SAM",
+                label: "Add positive point",
+                description: "Add a positive point at the cursor in multi-point mode.",
+                defaultBindings: [makeBinding("KeyF", "F")],
+                disabledWhenPaused: true,
+                requires: () => multiPointMode,
+                run: () => {
+                    addMultiPointAnnotation(1);
+                    showShortcutToast("multi_point_pos", "Multi-point: +positive.", { cooldownMs: 600 });
+                    return true;
+                },
+            },
+            {
+                id: "multi_point_negative",
+                group: "SAM",
+                label: "Add negative point",
+                description: "Add a negative point at the cursor in multi-point mode.",
+                defaultBindings: [makeBinding("KeyG", "G")],
+                disabledWhenPaused: true,
+                requires: () => multiPointMode,
+                run: () => {
+                    addMultiPointAnnotation(0);
+                    showShortcutToast("multi_point_neg", "Multi-point: +negative.", { cooldownMs: 600 });
+                    return true;
+                },
+            },
+            {
+                id: "multi_point_submit",
+                group: "SAM",
+                label: "Submit multi-point mask",
+                description: "Submit the current multi-point prompt.",
+                defaultBindings: [makeBinding("Enter", "Enter")],
+                disabledWhenPaused: true,
+                requires: () => multiPointMode,
+                run: () => {
+                    submitMultiPointSelection().catch((error) => {
+                        console.error("Failed to submit multi-point selection", error);
+                    });
+                    showShortcutToast("multi_point_submit", "Multi-point submitted.");
+                    return true;
+                },
+            },
+            {
+                id: "magic_tweak",
+                group: "Box edits",
+                label: "Magic tweak",
+                description: "Run magic tweak on selected boxes or the current class.",
+                defaultBindings: [makeBinding("KeyW", "W")],
+                run: () => {
+                    handleMagicTweakTapHotkey();
+                    showShortcutToast("magic_tweak", "Magic tweak requested.");
+                    return true;
+                },
+            },
+            {
+                id: "delete_selected_current",
+                group: "Box edits",
+                label: "Delete selected/current boxes",
+                description: "Delete selected boxes, otherwise delete the current box.",
+                defaultBindings: [makeBinding("Backspace", "Backspace"), makeBinding("Delete", "Delete"), makeBinding("KeyX", "X")],
+                run: () => deleteSelectedOrCurrentBboxShortcut(),
+            },
+            {
+                id: "delete_latest",
+                group: "Box edits",
+                label: "Delete latest box",
+                description: "Delete the most recently created box on the current image.",
+                defaultBindings: [makeBinding("KeyQ", "Q")],
+                run: () => deleteLatestBboxShortcut(),
+            },
+            {
+                id: "region_detect_hold",
+                group: "Detection/export",
+                label: "Hold for region detect",
+                description: "Hold, then drag a region for YOLO/RF-DETR detection.",
+                defaultBindings: [makeBinding("KeyR", "R", { shift: true })],
+                hold: true,
+                run: () => beginRegionDetectHold(),
+                release: () => {
+                    mouse.yoloKeyActive = false;
+                    return true;
+                },
+            },
+            {
+                id: "sam3_similarity",
+                group: "Detection/export",
+                label: "Run SAM3 similarity",
+                description: "Run SAM3 similarity from the selected/current bbox.",
+                defaultBindings: [makeBinding("Digit1", "1")],
+                disabledWhenPaused: true,
+                run: () => {
+                    triggerSam3SimilarityHotkey().catch((error) => {
+                        console.error("SAM3 similarity hotkey action failed", error);
+                    });
+                    showShortcutToast("sam3_similarity", "SAM3 similarity requested.");
+                    return true;
+                },
+            },
+            {
+                id: "yolo_captions_export",
+                group: "Detection/export",
+                label: "Save YOLO + captions",
+                description: "Request YOLO labels plus captions export.",
+                defaultBindings: [makeBinding("KeyY", "Y", { shift: true })],
+                run: () => {
+                    runYoloCaptionsExport({ preferDirectory: true }).catch((error) => {
+                        console.error("YOLO + captions hotkey export failed", error);
+                    });
+                    showShortcutToast("yolo_captions_export", "YOLO + captions export requested.");
+                    return true;
+                },
+            },
+        ];
+        for (let idx = 0; idx < SHORTCUT_CLASS_ID_COUNT; idx++) {
+            shortcutActions.push({
+                id: `class_id_${idx}`,
+                group: "Class IDs",
+                label: `Select class ID ${idx}`,
+                description: `Select label index ${idx}.`,
+                defaultBindings: [],
+                run: () => selectClassByIndex(idx),
+            });
+        }
+        const shortcutActionById = new Map(shortcutActions.map((action) => [action.id, action]));
+        let shortcutState = loadShortcutState();
+
         const cycleClassSelection = (delta) => {
             if (!classList || classList.length <= 1) {
                 return false;
@@ -49993,88 +50293,755 @@ async function cancelRfDetrTrainingJobRequest() {
                 ? classList.selectedIndex
                 : Math.min(Math.max(0, classListIndex || 0), total - 1);
             const nextIndex = (currentIndex + delta + total) % total;
-            if (classList.selectedOptions && classList.selectedOptions.length > 1) {
-                Array.from(classList.selectedOptions).forEach((option) => {
-                    option.selected = false;
-                });
-            } else if (currentIndex >= 0 && currentIndex < total) {
-                classList.options[currentIndex].selected = false;
-            }
-            classListIndex = nextIndex;
-            classList.options[classListIndex].selected = true;
-            classList.selectedIndex = classListIndex;
-            setCurrentClass();
-            showClassScrollIndicatorForList(classList, classListIndex, {
+            return selectClassByIndex(nextIndex, {
                 direction: delta > 0 ? 1 : -1,
+                wrapIndex: currentIndex,
+                quiet: true,
             });
-            return true;
         };
-        const isLabelingTabActive = () => {
+
+        function isLabelingTabActive() {
             const labelingPanel = document.getElementById("tabLabeling");
             return activeTab === TAB_LABELING || !!labelingPanel?.classList.contains("active");
-        };
-        const imageNavigationKey = (event) => {
-            const eventKey = event.keyCode || event.charCode;
-            if (eventKey === 32 || event.key === " " || event.key === "Spacebar" || event.code === "Space") {
-                return 1;
-            }
-            if (eventKey === 9 || event.key === "Tab" || event.code === "Tab") {
-                return -1;
-            }
-            return null;
-        };
-        const isTextEditingTarget = (target) => {
+        }
+
+        function isTextEditingTarget(target) {
             const targetElement = target instanceof Element ? target : null;
             if (!targetElement) {
                 return false;
+            }
+            if (targetElement.closest && targetElement.closest(".shortcut-settings-panel")) {
+                return true;
             }
             const targetTag = (targetElement.tagName || "").toLowerCase();
             const inputType = targetElement.getAttribute("type")
                 ? targetElement.getAttribute("type").toLowerCase()
                 : "";
             return targetTag === "textarea"
-                || (targetTag === "input" && !["checkbox", "radio", "button", "range", "color"].includes(inputType))
+                || (targetTag === "input" && !["checkbox", "radio", "button", "range", "color", "file"].includes(inputType))
                 || !!targetElement.isContentEditable;
-        };
-        const shouldHandleKeyboardImageNavigation = (event) => {
-            if (
-                !isLabelingTabActive()
-                || event.repeat
-                || event.ctrlKey
-                || event.metaKey
-                || event.altKey
-                || !imageNavigationKey(event)
-            ) {
+        }
+
+        function normalizeShortcutKey(key) {
+            const raw = String(key || "").trim();
+            if (!raw) {
+                return "";
+            }
+            if (raw === " ") {
+                return "Space";
+            }
+            if (raw.length === 1) {
+                return raw.toLowerCase();
+            }
+            return raw.toLowerCase();
+        }
+
+        function normalizeBinding(binding) {
+            if (!binding || typeof binding !== "object") {
+                return null;
+            }
+            const code = String(binding.code || "").trim();
+            const rawKey = String(binding.key || "").trim() || code;
+            if (!code && !rawKey) {
+                return null;
+            }
+            return {
+                code,
+                key: rawKey === " " ? "Space" : rawKey,
+                ctrl: !!binding.ctrl,
+                meta: !!binding.meta,
+                alt: !!binding.alt,
+                shift: !!binding.shift,
+            };
+        }
+
+        function bindingSignature(binding) {
+            const normalized = normalizeBinding(binding);
+            if (!normalized) {
+                return "";
+            }
+            return [
+                normalized.ctrl ? "Ctrl" : "",
+                normalized.meta ? "Meta" : "",
+                normalized.alt ? "Alt" : "",
+                normalized.shift ? "Shift" : "",
+                normalized.code || normalizeShortcutKey(normalized.key),
+            ].filter(Boolean).join("+");
+        }
+
+        function eventToBinding(event) {
+            if (!event || MODIFIER_KEYS.has(event.key)) {
+                return null;
+            }
+            const code = String(event.code || "").trim();
+            const key = event.key === " " ? "Space" : String(event.key || code || "").trim();
+            if (!code && !key) {
+                return null;
+            }
+            return normalizeBinding({
+                code,
+                key,
+                ctrl: event.ctrlKey,
+                meta: event.metaKey,
+                alt: event.altKey,
+                shift: event.shiftKey,
+            });
+        }
+
+        function eventMatchesBinding(event, binding) {
+            const normalized = normalizeBinding(binding);
+            if (!event || !normalized) {
                 return false;
             }
-            if (annotationFocusMode) {
-                return true;
-            }
-            if (isTextEditingTarget(event.target)) {
+            if (!!event.ctrlKey !== normalized.ctrl || !!event.metaKey !== normalized.meta || !!event.altKey !== normalized.alt || !!event.shiftKey !== normalized.shift) {
                 return false;
             }
-            return true;
-        };
-        const handleKeyboardImageNavigation = (event) => {
-            if (event.__tatorImageNavigationHandled) {
-                return false;
+            if (normalized.code) {
+                return event.code === normalized.code;
             }
-            const direction = imageNavigationKey(event);
-            if (!shouldHandleKeyboardImageNavigation(event) || !direction) {
-                return false;
+            return normalizeShortcutKey(event.key) === normalizeShortcutKey(normalized.key);
+        }
+
+        function bindingLabel(binding) {
+            const normalized = normalizeBinding(binding);
+            if (!normalized) {
+                return "Unassigned";
             }
-            event.__tatorImageNavigationHandled = true;
-            navigateImage(direction);
+            const parts = [];
+            if (normalized.ctrl) parts.push("Ctrl");
+            if (normalized.meta) parts.push("Cmd");
+            if (normalized.alt) parts.push("Alt");
+            if (normalized.shift) parts.push("Shift");
+            const codeLabel = {
+                Space: "Space",
+                Tab: "Tab",
+                Escape: "Esc",
+                Enter: "Enter",
+                Backspace: "Backspace",
+                Delete: "Delete",
+                ArrowLeft: "←",
+                ArrowRight: "→",
+                ArrowUp: "↑",
+                ArrowDown: "↓",
+            }[normalized.code];
+            if (codeLabel) {
+                parts.push(codeLabel);
+            } else if (/^Key[A-Z]$/.test(normalized.code)) {
+                parts.push(normalized.code.slice(3));
+            } else if (/^Digit[0-9]$/.test(normalized.code)) {
+                parts.push(normalized.code.slice(5));
+            } else {
+                parts.push(normalized.key || normalized.code);
+            }
+            return parts.join(" + ");
+        }
+
+        function defaultShortcutBindings(action) {
+            return (action.defaultBindings || []).map(normalizeBinding).filter(Boolean);
+        }
+
+        function getShortcutBindings(actionId) {
+            const action = shortcutActionById.get(actionId);
+            if (!action) {
+                return [];
+            }
+            if (Object.prototype.hasOwnProperty.call(shortcutState.bindings, actionId)) {
+                return (shortcutState.bindings[actionId] || []).map(normalizeBinding).filter(Boolean);
+            }
+            return defaultShortcutBindings(action);
+        }
+
+        function shortcutActionMatches(event, actionId) {
+            return getShortcutBindings(actionId).some((binding) => eventMatchesBinding(event, binding));
+        }
+
+        function findShortcutActionForEvent(event, { includeHold = true } = {}) {
+            for (const action of shortcutActions) {
+                if (!includeHold && action.hold) {
+                    continue;
+                }
+                if (shortcutActionMatches(event, action.id)) {
+                    return action;
+                }
+            }
+            return null;
+        }
+
+        function loadShortcutState() {
+            const state = { version: 1, bindings: {} };
+            try {
+                const raw = window.localStorage.getItem(SHORTCUT_STORAGE_KEY);
+                if (!raw) {
+                    return state;
+                }
+                const parsed = JSON.parse(raw);
+                const bindings = parsed && typeof parsed === "object" && parsed.bindings && typeof parsed.bindings === "object"
+                    ? parsed.bindings
+                    : {};
+                Object.keys(bindings).forEach((actionId) => {
+                    if (!shortcutActionById.has(actionId) && !/^class_id_(?:[0-9]|1[0-9])$/.test(actionId)) {
+                        return;
+                    }
+                    const rows = Array.isArray(bindings[actionId]) ? bindings[actionId] : [];
+                    state.bindings[actionId] = rows.map(normalizeBinding).filter(Boolean);
+                });
+            } catch (error) {
+                console.warn("Failed to load shortcut settings", error);
+            }
+            return state;
+        }
+
+        function saveShortcutState(message = "") {
+            try {
+                window.localStorage.setItem(SHORTCUT_STORAGE_KEY, JSON.stringify(shortcutState));
+            } catch (error) {
+                console.warn("Failed to save shortcut settings", error);
+                setShortcutSettingsMessage("Could not save shortcuts in this browser.", "error");
+            }
+            renderShortcutHelp();
+            renderShortcutSettings();
+            if (message) {
+                setShortcutSettingsMessage(message, "success");
+            }
+        }
+
+        function setShortcutSettingsMessage(text, variant = "") {
+            const el = document.getElementById("shortcutSettingsMessage");
+            if (!el) {
+                return;
+            }
+            el.textContent = text || "";
+            el.classList.remove("warn", "error", "success");
+            if (variant) {
+                el.classList.add(variant);
+            }
+        }
+
+        function removeShortcutBindingConflicts(actionId, bindings) {
+            const signatures = new Set(
+                (bindings || []).map(bindingSignature).filter(Boolean)
+            );
+            const movedFrom = [];
+            if (!signatures.size) {
+                return movedFrom;
+            }
+            shortcutActions.forEach((candidate) => {
+                if (candidate.id === actionId) {
+                    return;
+                }
+                const bindings = getShortcutBindings(candidate.id);
+                const filtered = bindings.filter((row) => !signatures.has(bindingSignature(row)));
+                if (filtered.length !== bindings.length) {
+                    shortcutState.bindings[candidate.id] = filtered;
+                    movedFrom.push(candidate.label);
+                }
+            });
+            return movedFrom;
+        }
+
+        function assignShortcutBinding(actionId, binding) {
+            const normalized = normalizeBinding(binding);
+            const action = shortcutActionById.get(actionId);
+            if (!action || !normalized) {
+                return;
+            }
+            const signature = bindingSignature(normalized);
+            const movedFrom = removeShortcutBindingConflicts(actionId, [normalized]);
+            const current = getShortcutBindings(actionId);
+            if (!current.some((row) => bindingSignature(row) === signature)) {
+                current.push(normalized);
+            }
+            shortcutState.bindings[actionId] = current;
+            const moveText = movedFrom.length ? ` Moved from ${movedFrom.join(", ")}.` : "";
+            saveShortcutState(`${bindingLabel(normalized)} assigned to ${action.label}.${moveText}`);
+        }
+
+        function clearShortcutBindings(actionId) {
+            const action = shortcutActionById.get(actionId);
+            if (!action) {
+                return;
+            }
+            shortcutState.bindings[actionId] = [];
+            if (shortcutCaptureActionId === actionId) {
+                shortcutCaptureActionId = null;
+            }
+            saveShortcutState(`${action.label} is now unassigned.`);
+        }
+
+        function resetShortcutBindings(actionId) {
+            const action = shortcutActionById.get(actionId);
+            if (!action) {
+                return;
+            }
+            const movedFrom = removeShortcutBindingConflicts(actionId, defaultShortcutBindings(action));
+            delete shortcutState.bindings[actionId];
+            if (shortcutCaptureActionId === actionId) {
+                shortcutCaptureActionId = null;
+            }
+            const moveText = movedFrom.length ? ` Removed conflicting defaults from ${movedFrom.join(", ")}.` : "";
+            saveShortcutState(`${action.label} reset to default.${moveText}`);
+        }
+
+        function resetAllShortcutBindings() {
+            shortcutState = { version: 1, bindings: {} };
+            shortcutCaptureActionId = null;
+            saveShortcutState("All shortcuts reset to defaults.");
+        }
+
+        function stopShortcutEvent(event) {
             event.preventDefault();
             if (typeof event.stopImmediatePropagation === "function") {
                 event.stopImmediatePropagation();
             } else {
                 event.stopPropagation();
             }
+        }
+
+        function captureShortcutBindingEvent(event) {
+            if (!shortcutCaptureActionId) {
+                return false;
+            }
+            const binding = eventToBinding(event);
+            if (!binding) {
+                stopShortcutEvent(event);
+                return true;
+            }
+            const actionId = shortcutCaptureActionId;
+            shortcutCaptureActionId = null;
+            assignShortcutBinding(actionId, binding);
+            stopShortcutEvent(event);
+            return true;
+        }
+
+        function renderKeyList(container, bindings) {
+            if (!container) {
+                return;
+            }
+            container.innerHTML = "";
+            const rows = (bindings || []).map(normalizeBinding).filter(Boolean);
+            if (!rows.length) {
+                const empty = document.createElement("span");
+                empty.className = "shortcut-key shortcut-key--empty";
+                empty.textContent = "Unassigned";
+                container.appendChild(empty);
+                return;
+            }
+            rows.forEach((binding) => {
+                const chip = document.createElement("kbd");
+                chip.className = "shortcut-key";
+                chip.textContent = bindingLabel(binding);
+                container.appendChild(chip);
+            });
+        }
+
+        function shortcutKeyListHtml(actionId) {
+            const bindings = getShortcutBindings(actionId);
+            if (!bindings.length) {
+                return '<span class="shortcut-key shortcut-key--empty">Unassigned</span>';
+            }
+            return bindings.map((binding) => `<kbd class="shortcut-key">${escapeHtml(bindingLabel(binding))}</kbd>`).join(" ");
+        }
+
+        function renderShortcutHelp() {
+            const list = document.getElementById("shortcutHelpList");
+            if (!list) {
+                return;
+            }
+            const groupRows = [
+                ["Images", `Next ${shortcutKeyListHtml("image_next")}; previous ${shortcutKeyListHtml("image_previous")}.`],
+                ["Drawing", `Start ${shortcutKeyListHtml("drawing_start")}; end ${shortcutKeyListHtml("drawing_finish")}; toggle polygon draw ${shortcutKeyListHtml("drawing_toggle")}; cancel/exit ${shortcutKeyListHtml("drawing_cancel")}.`],
+                ["Classes", `Next ${shortcutKeyListHtml("class_next")}; previous ${shortcutKeyListHtml("class_previous")}; direct class IDs 0-19 can be assigned below.`],
+                ["Selection", "Shift + click adds/removes positive selections; Shift + drag draws a positive selection box; Shift + Alt + click/drag marks SAM3 similarity negatives."],
+                ["Box edits", `Delete selected/current ${shortcutKeyListHtml("delete_selected_current")}; delete latest ${shortcutKeyListHtml("delete_latest")}; magic tweak ${shortcutKeyListHtml("magic_tweak")}.`],
+                ["SAM", `Toggle SAM ${shortcutKeyListHtml("sam_toggle")}; point mode ${shortcutKeyListHtml("sam_point_toggle")}; multi-point ${shortcutKeyListHtml("sam_multi_toggle")}; positive ${shortcutKeyListHtml("multi_point_positive")}; negative ${shortcutKeyListHtml("multi_point_negative")}; submit ${shortcutKeyListHtml("multi_point_submit")}.`],
+                ["Detection/export", `Hold region detect ${shortcutKeyListHtml("region_detect_hold")}; SAM3 similarity ${shortcutKeyListHtml("sam3_similarity")}; Save YOLO + captions ${shortcutKeyListHtml("yolo_captions_export")}.`],
+                ["Canvas", "Mouse wheel zooms; Shift + wheel pans; right-click drag pans."],
+                ["Modes", `Auto-class ${shortcutKeyListHtml("auto_toggle")}; image focus ${shortcutKeyListHtml("focus_toggle")}; hold pause ${shortcutKeyListHtml("temporary_mode_pause")}.`],
+            ];
+            list.innerHTML = groupRows.map(([group, html]) => `<li><strong>${escapeHtml(group)}:</strong> ${html}</li>`).join("");
+        }
+
+        function renderShortcutSettings() {
+            const root = document.getElementById("shortcutSettingsList");
+            if (!root) {
+                return;
+            }
+            root.innerHTML = "";
+            const groups = new Map();
+            shortcutActions.forEach((action) => {
+                if (!groups.has(action.group)) {
+                    groups.set(action.group, []);
+                }
+                groups.get(action.group).push(action);
+            });
+            groups.forEach((actions, groupName) => {
+                const section = document.createElement("section");
+                section.className = "shortcut-settings-group";
+                const title = document.createElement("div");
+                title.className = "shortcut-settings-group__title";
+                title.textContent = groupName;
+                section.appendChild(title);
+                actions.forEach((action) => {
+                    const row = document.createElement("div");
+                    row.className = "shortcut-settings-row";
+                    row.dataset.shortcutAction = action.id;
+                    if (shortcutCaptureActionId === action.id) {
+                        row.classList.add("is-capturing");
+                    }
+                    const label = document.createElement("div");
+                    label.className = "shortcut-settings-row__label";
+                    const strong = document.createElement("strong");
+                    strong.textContent = action.label;
+                    const desc = document.createElement("span");
+                    desc.textContent = shortcutCaptureActionId === action.id
+                        ? "Press the key combination to assign now."
+                        : action.description;
+                    label.append(strong, desc);
+                    const keys = document.createElement("div");
+                    keys.className = "shortcut-settings-row__keys";
+                    renderKeyList(keys, getShortcutBindings(action.id));
+                    const buttons = document.createElement("div");
+                    buttons.className = "shortcut-settings-row__actions";
+                    const addBtn = document.createElement("button");
+                    addBtn.type = "button";
+                    addBtn.className = "training-button secondary";
+                    addBtn.textContent = shortcutCaptureActionId === action.id ? "Cancel" : "Add key";
+                    addBtn.addEventListener("click", () => {
+                        shortcutCaptureActionId = shortcutCaptureActionId === action.id ? null : action.id;
+                        renderShortcutSettings();
+                        setShortcutSettingsMessage(
+                            shortcutCaptureActionId ? `Press a key for ${action.label}.` : "",
+                            shortcutCaptureActionId ? "warn" : ""
+                        );
+                    });
+                    const clearBtn = document.createElement("button");
+                    clearBtn.type = "button";
+                    clearBtn.className = "training-button secondary";
+                    clearBtn.textContent = "Clear";
+                    clearBtn.addEventListener("click", () => clearShortcutBindings(action.id));
+                    const resetBtn = document.createElement("button");
+                    resetBtn.type = "button";
+                    resetBtn.className = "training-button secondary";
+                    resetBtn.textContent = "Reset";
+                    resetBtn.addEventListener("click", () => resetShortcutBindings(action.id));
+                    buttons.append(addBtn, clearBtn, resetBtn);
+                    row.append(label, keys, buttons);
+                    section.appendChild(row);
+                });
+                root.appendChild(section);
+            });
+        }
+
+        function initShortcutSettingsUi() {
+            renderShortcutHelp();
+            renderShortcutSettings();
+            const resetAll = document.getElementById("shortcutResetAll");
+            const exportButton = document.getElementById("shortcutExportConfig");
+            const importButton = document.getElementById("shortcutImportConfigButton");
+            const importInput = document.getElementById("shortcutImportConfig");
+            if (resetAll) {
+                resetAll.addEventListener("click", resetAllShortcutBindings);
+            }
+            if (exportButton) {
+                exportButton.addEventListener("click", () => {
+                    const payload = {
+                        version: 1,
+                        exported_at: new Date().toISOString(),
+                        bindings: shortcutState.bindings,
+                    };
+                    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+                    saveBlobToDisk(blob, "tator-shortcuts.json");
+                    setShortcutSettingsMessage("Shortcut configuration exported.", "success");
+                });
+            }
+            if (importButton && importInput) {
+                importButton.addEventListener("click", () => importInput.click());
+                importInput.addEventListener("change", async () => {
+                    const file = importInput.files && importInput.files[0];
+                    if (!file) {
+                        return;
+                    }
+                    try {
+                        const text = await readFileAsTextPromise(file);
+                        const parsed = JSON.parse(text);
+                        const nextState = { version: 1, bindings: {} };
+                        const bindings = parsed && typeof parsed === "object" && parsed.bindings && typeof parsed.bindings === "object"
+                            ? parsed.bindings
+                            : {};
+                        Object.keys(bindings).forEach((actionId) => {
+                            if (!shortcutActionById.has(actionId)) {
+                                return;
+                            }
+                            const rows = Array.isArray(bindings[actionId]) ? bindings[actionId] : [];
+                            nextState.bindings[actionId] = rows.map(normalizeBinding).filter(Boolean);
+                        });
+                        shortcutState = nextState;
+                        saveShortcutState("Shortcut configuration imported.");
+                    } catch (error) {
+                        console.error("Shortcut import failed", error);
+                        setShortcutSettingsMessage(`Import failed: ${error.message || error}`, "error");
+                    } finally {
+                        importInput.value = "";
+                    }
+                });
+            }
+        }
+
+        function selectClassByIndex(index, options = {}) {
+            if (!classList || !classList.options.length) {
+                return false;
+            }
+            const targetIndex = Number(index);
+            if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= classList.options.length) {
+                if (!options.quiet) {
+                    showShortcutToast("class_select", `Class ID ${index} is not available in this dataset.`);
+                }
+                return false;
+            }
+            if (classList.selectedOptions && classList.selectedOptions.length > 1) {
+                Array.from(classList.selectedOptions).forEach((option) => {
+                    option.selected = false;
+                });
+            }
+            classListIndex = targetIndex;
+            Array.from(classList.options).forEach((option, idx) => {
+                option.selected = idx === targetIndex;
+            });
+            classList.selectedIndex = targetIndex;
+            setCurrentClass();
+            showClassScrollIndicatorForList(classList, classListIndex, {
+                direction: Number(options.direction) || 0,
+            });
+            if (!options.quiet) {
+                showShortcutToast("class_select", `Class ${targetIndex}: ${classList.options[targetIndex].text}`);
+            }
+            return true;
+        }
+
+        function startAnnotationDrawing() {
+            if (datasetType === "seg") {
+                setPolygonDrawEnabled(true);
+                if (!polygonDraft && currentClass) {
+                    polygonDraft = { className: currentClass, points: [] };
+                }
+                showShortcutToast("drawing_start", "Polygon drawing started.");
+            } else {
+                setGlobalCursor("crosshair");
+                showShortcutToast("drawing_start", "Box drawing is ready; drag on the image to draw.");
+            }
+            showAnnotationFocusHud();
+            return true;
+        }
+
+        function finishAnnotationDrawing() {
+            if (datasetType === "seg") {
+                if (polygonDraft && Array.isArray(polygonDraft.points) && polygonDraft.points.length >= 3) {
+                    finalizePolygonDraft();
+                    showShortcutToast("drawing_finish", "Polygon finished.");
+                } else {
+                    polygonDraft = null;
+                    polygonDrag = null;
+                    setPolygonDrawEnabled(false);
+                    showShortcutToast("drawing_finish", "Polygon drawing paused.");
+                }
+            } else {
+                setGlobalCursor("default");
+                currentBbox = null;
+                showShortcutToast("drawing_finish", "Box drawing ends on mouse release.");
+            }
+            showAnnotationFocusHud();
+            return true;
+        }
+
+        function togglePolygonDrawingShortcut() {
+            if (datasetType !== "seg") {
+                setDatasetType("seg");
+                setPolygonDrawEnabled(true);
+                showShortcutToast("polygon_toggle", "Polygon draw: ON (seg mode).");
+                showAnnotationFocusHud();
+                return true;
+            }
+            setPolygonDrawEnabled(!polygonDrawEnabled);
+            showShortcutToast("polygon_toggle", `Polygon draw: ${polygonDrawEnabled ? "ON" : "OFF"}.`);
+            showAnnotationFocusHud();
+            return true;
+        }
+
+        function cancelAnnotationDrawingOrFocus() {
+            if (annotationFocusMode) {
+                exitAnnotationFocusMode();
+                return true;
+            }
+            if (datasetType === "seg") {
+                polygonDraft = null;
+                polygonDrag = null;
+                currentBbox = null;
+                showShortcutToast("drawing_cancel", "Polygon draft cleared.");
+                return true;
+            }
+            currentBbox = null;
+            setGlobalCursor("default");
+            return true;
+        }
+
+        function beginTemporaryModePause() {
+            if (!modeSnapshot) {
+                modeSnapshot = {
+                    auto: autoMode,
+                    sam: samMode,
+                    point: pointMode,
+                    multi: multiPointMode,
+                };
+                updateSamModeState(false, { preservePoints: true });
+                updateAutoModeState(false);
+                showShortcutToast("hold_z", "SAM/Auto paused while held.");
+                showAnnotationFocusHud();
+            }
+            return true;
+        }
+
+        function endTemporaryModePause() {
+            if (!modeSnapshot) {
+                return false;
+            }
+            const snapshot = modeSnapshot;
+            modeSnapshot = null;
+            updateSamModeState(snapshot.sam);
+            updateAutoModeState(snapshot.auto);
+            updatePointModeState(snapshot.point);
+            updateMultiPointState(snapshot.multi);
+            showShortcutToast("hold_z", "Modes restored.", { cooldownMs: 800 });
+            showAnnotationFocusHud();
+            return true;
+        }
+
+        function beginRegionDetectHold() {
+            mouse.yoloKeyActive = true;
+            const regionModeLabel = getRegionDetectorMode() === "rfdetr" ? "RF-DETR" : "YOLO";
+            showShortcutToast(
+                "yolo_region",
+                `${regionModeLabel} region mode: drag a box to scan (zoom in for more detail).`,
+                { durationMs: 4000, cooldownMs: 2000 }
+            );
+            return true;
+        }
+
+        function deleteSelectedOrCurrentBboxShortcut() {
+            if (!annotationEditableGuard("Delete")) {
+                return true;
+            }
+            if (selectedBboxes.size) {
+                const removed = deleteSelectedBboxes();
+                if (removed > 0) {
+                    showShortcutToast("delete_bbox", `Deleted ${removed} selection${removed === 1 ? "" : "s"}.`);
+                    return true;
+                }
+            }
+            if (currentBbox !== null) {
+                const imageBuckets = currentImage ? bboxes[currentImage.name] : null;
+                const className = currentBbox.bbox?.class;
+                const bucket = imageBuckets && className ? imageBuckets[className] : null;
+                let removed = false;
+                if (Array.isArray(bucket) && currentBbox.index >= 0 && currentBbox.index < bucket.length) {
+                    const spliceResult = bucket.splice(currentBbox.index, 1);
+                    if (bucket.length === 0 && className) {
+                        delete imageBuckets[className];
+                    }
+                    removed = spliceResult.length > 0;
+                }
+                currentBbox = null;
+                setGlobalCursor("default");
+                if (removed) {
+                    showShortcutToast("delete_bbox", "Deleted 1 bbox.");
+                    scheduleAnnotationDiversityMetricRefresh();
+                }
+            }
+            return true;
+        }
+
+        function deleteLatestBboxShortcut() {
+            if (!annotationEditableGuard("Delete")) {
+                return true;
+            }
+            let removed = false;
+            if (currentImage && bboxes[currentImage.name]) {
+                const latest = findLatestCreatedBbox(currentImage.name);
+                if (latest) {
+                    const bucket = bboxes[currentImage.name][latest.className];
+                    if (Array.isArray(bucket)) {
+                        const spliceResult = bucket.splice(latest.index, 1);
+                        if (bucket.length === 0) {
+                            delete bboxes[currentImage.name][latest.className];
+                        }
+                        if (spliceResult.length > 0) {
+                            removed = true;
+                            if (currentBbox && currentBbox.bbox === spliceResult[0]) {
+                                currentBbox = null;
+                                setGlobalCursor("default");
+                            }
+                        }
+                    }
+                }
+            }
+            if (removed) {
+                showShortcutToast("delete_latest", "Deleted latest bbox.");
+                scheduleAnnotationDiversityMetricRefresh();
+            }
+            return true;
+        }
+
+        function shouldHandleShortcut(event, action) {
+            if (!action || !isLabelingTabActive()) {
+                return false;
+            }
+            if (event.repeat && !action.allowRepeat && !action.hold) {
+                return false;
+            }
+            if (action.disabledWhenPaused && modeSnapshot) {
+                return false;
+            }
+            if (typeof action.requires === "function" && !action.requires()) {
+                return false;
+            }
+            if (annotationFocusMode) {
+                return true;
+            }
+            return !isTextEditingTarget(event.target);
+        }
+
+        function runShortcutAction(event, action) {
+            if (!shouldHandleShortcut(event, action)) {
+                return false;
+            }
+            const handled = action.run(event) !== false;
+            if (handled) {
+                stopShortcutEvent(event);
+            }
+            return handled;
+        }
+
+        const handleKeyboardImageNavigation = (event) => {
+            if (event.__tatorImageNavigationHandled) {
+                return false;
+            }
+            const action = shortcutActionMatches(event, "image_next")
+                ? shortcutActionById.get("image_next")
+                : shortcutActionMatches(event, "image_previous")
+                    ? shortcutActionById.get("image_previous")
+                    : null;
+            if (!action || !shouldHandleShortcut(event, action)) {
+                return false;
+            }
+            event.__tatorImageNavigationHandled = true;
+            action.run(event);
+            stopShortcutEvent(event);
             return true;
         };
 
+        initShortcutSettingsUi();
         keyboardListenersBound = true;
+        window.addEventListener("keydown", captureShortcutBindingEvent, true);
+        document.addEventListener("keydown", captureShortcutBindingEvent, true);
         window.addEventListener("keydown", (event) => {
             handleKeyboardImageNavigation(event);
         }, true);
@@ -50082,291 +51049,22 @@ async function cancelRfDetrTrainingJobRequest() {
             handleKeyboardImageNavigation(event);
         }, true);
         document.addEventListener("keydown", (event) => {
-            if (!isLabelingTabActive()) {
+            if (captureShortcutBindingEvent(event) || handleKeyboardImageNavigation(event)) {
                 return;
             }
-            if (isTextEditingTarget(event.target)) {
-                return;
-            }
-            const key = event.keyCode || event.charCode;
-            if (handleKeyboardImageNavigation(event)) {
-                return;
-            }
-
-            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 86 || event.key === "v" || event.key === "V")) {
-                toggleAnnotationFocusMode();
-                event.preventDefault();
-                return;
-            }
-
-            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && event.shiftKey && (key === 89 || event.key === "Y")) {
-                runYoloCaptionsExport({ preferDirectory: true }).catch((error) => {
-                    console.error("YOLO + captions hotkey export failed", error);
-                });
-                showShortcutToast("yolo_captions_export", "YOLO + captions export requested.");
-                event.preventDefault();
-                return;
-            }
-
-            if (annotationFocusMode && (key === 27 || event.key === "Escape")) {
-                exitAnnotationFocusMode();
-                event.preventDefault();
-                return;
-            }
-
-            if (datasetType === "seg" && (key === 27 || event.key === "Escape")) {
-                polygonDraft = null;
-                polygonDrag = null;
-                currentBbox = null;
-                event.preventDefault();
-                return;
-            }
-
-            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 80 || event.key === "p" || event.key === "P")) {
-                if (datasetType !== "seg") {
-                    setDatasetType("seg");
-                    setPolygonDrawEnabled(true);
-                    showShortcutToast("polygon_toggle", "Polygon draw: ON (seg mode).");
-                    showAnnotationFocusHud();
-                    event.preventDefault();
-                    return;
-                }
-                setPolygonDrawEnabled(!polygonDrawEnabled);
-                showShortcutToast(
-                    "polygon_toggle",
-                    `Polygon draw: ${polygonDrawEnabled ? "ON" : "OFF"}.`
-                );
-                showAnnotationFocusHud();
-                event.preventDefault();
-                return;
-            }
-
-            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 90 || event.key === "z" || event.key === "Z")) {
-                if (!modeSnapshot) {
-                    modeSnapshot = {
-                        auto: autoMode,
-                        sam: samMode,
-                        point: pointMode,
-                        multi: multiPointMode,
-                    };
-                    updateSamModeState(false, { preservePoints: true });
-                    updateAutoModeState(false);
-                    showShortcutToast("hold_z", "Hold Z: SAM/Auto paused.");
-                    showAnnotationFocusHud();
-                }
-                event.preventDefault();
-                return;
-            }
-
-            if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && (key === 69 || event.key === "e" || event.key === "E")) {
-                if (cycleClassSelection(-1)) {
-                    event.preventDefault();
-                    return;
-                }
-            }
-
-            if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && (key === 82 || event.key === "r" || event.key === "R")) {
-                if (cycleClassSelection(1)) {
-                    event.preventDefault();
-                    return;
-                }
-            }
-
-            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && event.shiftKey && (key === 82 || event.key === "R")) {
-                mouse.yoloKeyActive = true;
-                const regionModeLabel = getRegionDetectorMode() === "rfdetr" ? "RF-DETR" : "YOLO";
-                showShortcutToast(
-                    "yolo_region",
-                    `${regionModeLabel} region mode: drag a box to scan (zoom in for more detail).`,
-                    { durationMs: 4000, cooldownMs: 2000 }
-                );
-                event.preventDefault();
-                return;
-            }
-
-            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 87 || event.key === "w" || event.key === "W")) {
-                event.preventDefault();
-                handleMagicTweakTapHotkey();
-                showShortcutToast("magic_tweak", "Magic tweak requested.");
-                return;
-            }
-
-            const plainDeleteHotkey = !event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey
-                && (key === 88 || event.key === "x" || event.key === "X");
-            if (key === 8 || (key === 46 && event.metaKey === true) || plainDeleteHotkey) {
-                if (!annotationEditableGuard("Delete")) {
-                    event.preventDefault();
-                    return;
-                }
-                if (selectedBboxes.size) {
-                    const removed = deleteSelectedBboxes();
-                    if (removed > 0) {
-                        showShortcutToast("delete_bbox", `Deleted ${removed} selection${removed === 1 ? "" : "s"}.`);
-                        event.preventDefault();
-                        return;
-                    }
-                }
-                if (currentBbox !== null) {
-                    const imageBuckets = currentImage ? bboxes[currentImage.name] : null;
-                    const className = currentBbox.bbox?.class;
-                    const bucket = imageBuckets && className ? imageBuckets[className] : null;
-                    let removed = false;
-                    // Guard against stale currentBbox pointers after imports/resets.
-                    if (Array.isArray(bucket) && currentBbox.index >= 0 && currentBbox.index < bucket.length) {
-                        const spliceResult = bucket.splice(currentBbox.index, 1);
-                        if (bucket.length === 0 && className) {
-                            delete imageBuckets[className];
-                        }
-                        removed = spliceResult.length > 0;
-                    }
-                    currentBbox = null;
-                    setGlobalCursor("default");
-                    if (removed) {
-                        showShortcutToast("delete_bbox", "Deleted 1 bbox.");
-                        scheduleAnnotationDiversityMetricRefresh();
-                    }
-                }
-                event.preventDefault();
-            }
-            if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (key === 81 || event.key === "q" || event.key === "Q")) {
-                if (!annotationEditableGuard("Delete")) {
-                    event.preventDefault();
-                    return;
-                }
-                let removed = false;
-                if (currentImage && bboxes[currentImage.name]) {
-                    const latest = findLatestCreatedBbox(currentImage.name);
-                    if (latest) {
-                        const bucket = bboxes[currentImage.name][latest.className];
-                        if (Array.isArray(bucket)) {
-                            const spliceResult = bucket.splice(latest.index, 1);
-                            if (bucket.length === 0) {
-                                delete bboxes[currentImage.name][latest.className];
-                            }
-                            if (spliceResult.length > 0) {
-                                removed = true;
-                                if (currentBbox && currentBbox.bbox === spliceResult[0]) {
-                                    currentBbox = null;
-                                    setGlobalCursor("default");
-                                }
-                            }
-                        }
-                    }
-                }
-                if (removed) {
-                    showShortcutToast("delete_latest", "Deleted latest bbox.");
-                    scheduleAnnotationDiversityMetricRefresh();
-                    event.preventDefault();
-                }
-            }
-            // 'a' => toggle auto class
-            if (key === 65 && !modeSnapshot) {
-                updateAutoModeState(!autoMode);
-                showShortcutToast("auto_toggle", `Auto-class: ${autoMode ? "ON" : "OFF"}.`);
-                showAnnotationFocusHud();
-                event.preventDefault();
-            }
-            // 's' => toggle SAM
-            if (key === 83 && !modeSnapshot) {
-                updateSamModeState(!samMode);
-                showShortcutToast("sam_toggle", `SAM mode: ${samMode ? "ON" : "OFF"}.`);
-                showAnnotationFocusHud();
-                event.preventDefault();
-            }
-            // 'd' => toggle SAM point mode
-            if (key === 68 && !modeSnapshot) {
-                if (!pointMode) {
-                    if (!samMode) {
-                        updateSamModeState(true);
-                    }
-                    updatePointModeState(true);
-                } else {
-                    updatePointModeState(false);
-                }
-                showShortcutToast("sam_point_toggle", `SAM point: ${pointMode ? "ON" : "OFF"}.`);
-                showAnnotationFocusHud();
-                event.preventDefault();
-            }
-            // 'm' => toggle SAM multi-point mode
-            if (key === 77 && !modeSnapshot) {
-                if (!multiPointMode) {
-                    if (!samMode) {
-                        updateSamModeState(true);
-                    }
-                    updateMultiPointState(true);
-                } else {
-                    updateMultiPointState(false);
-                }
-                showShortcutToast("sam_multi_toggle", `SAM multi-point: ${multiPointMode ? "ON" : "OFF"}.`);
-                showAnnotationFocusHud();
-                event.preventDefault();
-            }
-            // '1' => SAM3 similarity (requires SAM3 predictor loaded for current image)
-            if (!event.repeat && (key === 49 || event.key === "1") && !modeSnapshot) {
-                triggerSam3SimilarityHotkey().catch((error) => {
-                    console.error("SAM3 similarity hotkey action failed", error);
-                });
-                showShortcutToast("sam3_similarity", "SAM3 similarity requested.");
-                event.preventDefault();
-                return;
-            }
-            // 'f' => add positive point
-            if (!event.repeat && key === 70 && multiPointMode && !modeSnapshot) {
-                addMultiPointAnnotation(1);
-                showShortcutToast("multi_point_pos", "Multi-point: +positive.", { cooldownMs: 600 });
-                event.preventDefault();
-            }
-            // 'g' => add negative point
-            if (!event.repeat && key === 71 && multiPointMode && !modeSnapshot) {
-                addMultiPointAnnotation(0);
-                showShortcutToast("multi_point_neg", "Multi-point: +negative.", { cooldownMs: 600 });
-                event.preventDefault();
-            }
-            // Enter => submit multi-point selection
-            if (!event.repeat && key === 13 && multiPointMode && !modeSnapshot) {
-                submitMultiPointSelection().catch((error) => {
-                    console.error("Failed to submit multi-point selection", error);
-                });
-                showShortcutToast("multi_point_submit", "Multi-point submitted.");
-                event.preventDefault();
-                return;
-            }
-            if (key === 37) {
-                navigateImage(-1);
-                event.preventDefault();
-            }
-            if (key === 39) {
-                navigateImage(1);
-                event.preventDefault();
-            }
-            if (key === 38) {
-                cycleClassSelection(-1);
-                event.preventDefault();
-            }
-            if (key === 40) {
-                cycleClassSelection(1);
-                event.preventDefault();
+            const action = findShortcutActionForEvent(event);
+            if (action) {
+                runShortcutAction(event, action);
             }
         });
 
         document.addEventListener("keyup", (event) => {
-            const key = event.keyCode || event.charCode;
-            if (key === 82 || event.key === "r" || event.key === "R") {
-                mouse.yoloKeyActive = false;
-            }
-            if (activeTab !== TAB_LABELING) {
+            const action = findShortcutActionForEvent(event);
+            if (!action || !action.hold || !isLabelingTabActive()) {
                 return;
             }
-            if (modeSnapshot && (key === 90 || event.key === "z" || event.key === "Z")) {
-                const snapshot = modeSnapshot;
-                modeSnapshot = null;
-                updateSamModeState(snapshot.sam);
-                updateAutoModeState(snapshot.auto);
-                updatePointModeState(snapshot.point);
-                updateMultiPointState(snapshot.multi);
-                showShortcutToast("hold_z", "Z released: modes restored.", { cooldownMs: 800 });
-                showAnnotationFocusHud();
-                event.preventDefault();
+            if (action.release(event) !== false) {
+                stopShortcutEvent(event);
             }
         });
     };

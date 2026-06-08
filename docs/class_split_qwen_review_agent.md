@@ -49,6 +49,8 @@ Each review writes artifacts under the parent Class Split job:
 - `qwen_reviews/{review_id}/events.jsonl`
 - `qwen_reviews/{review_id}/prompt_sources.json`
 - `qwen_reviews/{review_id}/concept_briefs.json` when concept briefs are enabled
+- `qwen_reviews/{review_id}/specificity_probe.json` when the Qwen specificity
+  probe is enabled
 - `qwen_reviews/{review_id}/final.json`
 - `qwen_reviews/{review_id}/evidence/*.jpg`
 - `qwen_reviews/class_concept_briefs/*.json` and `*_examples.jpg` cached per
@@ -116,10 +118,11 @@ The final result schema is:
   "counter_evidence": "what could make this wrong",
   "human_review_needed": true,
   "review_disposition": {
-    "disposition": "actionable_class_change | dual_bbox_switch_overlap_class | dual_bbox_confirm_current | dual_bbox_both_valid_overlap | dual_bbox_unresolved | guarded_visual_quality | guarded_overlap_risk | guarded_missing_visible_cues | verified_no_class_change | no_actionable_opinion",
+    "disposition": "actionable_class_change | dual_bbox_switch_overlap_class | dual_bbox_confirm_current | dual_bbox_both_valid_overlap | dual_bbox_unresolved | guarded_visual_quality | guarded_overlap_risk | guarded_missing_visible_cues | guarded_anchor_support | guarded_policy_block | verified_no_class_change | no_actionable_opinion",
     "signal": "actionable | guarded_human_triage | useful_negative | no_signal",
     "label": "human-readable result label",
     "priority": "high | normal | low",
+    "signal_strength": "strong | moderate | weak",
     "advisory_target_class": "class to inspect or apply",
     "primary_reason": "main controller reason"
   },
@@ -165,6 +168,20 @@ The final result schema is:
     },
     "policy": "visible_target_cues must come from clean visual evidence..."
   },
+  "specificity_probe": {
+    "enabled": true,
+    "status": "completed | failed | not_run",
+    "version": "qwen_specificity_probe_v3_region_contrast",
+    "specificity_alignment": "supports_current | supports_suggested | supports_other | mixed | insufficient | not_applicable",
+    "target_background_contrast": "target_specific | background_dominated | overlap_dominated | mixed | insufficient | not_applicable",
+    "specificity_margin": "current_target_favored | suggested_target_favored | other_target_favored | background_or_overlap_favored | low_contrast | insufficient | not_applicable",
+    "best_supported_class": "dataset class name or empty",
+    "target_specific_cues": ["visible cue on the reviewed target"],
+    "background_or_overlap_cues": ["cue coming from context rather than the target"],
+    "subdescription_assessments": [],
+    "reconciled_from_subdescription_assessments": [],
+    "confidence": 0.0
+  },
   "applied": false
 }
 ```
@@ -192,7 +209,8 @@ State sequence:
    `inspect_overlap_decomposition`, `inspect_class_context_pack`,
    `inspect_same_image_scale_report`, `inspect_same_image_embedding_report`, and
    one clean `zoom_source_region` with `draw_bbox=false`.
-2. `concept_briefs`: when `enable_class_concept_briefs` is true, the controller
+2. `concept_briefs`: when `enable_class_concept_briefs` is true and the review
+   is going to reach a Qwen final/advisory pass, the controller
    builds cached advisory visual concept briefs for the current class, suggested
    class, and at most one extra high-frequency neighbor class. It also builds one
    cached advisory pairwise contrast brief for the current-vs-suggested class
@@ -208,7 +226,11 @@ State sequence:
    shared ambiguity cues, and skip conditions.
    Cache keys include the model id, class name or pair names, glossary entries,
    review guidance, implementation version, and exemplar point ids. The UI
-   enables this path for `Review with Qwen`.
+   enables this path for `Review with Qwen`. The backend does not suppress this
+   memory layer merely because the reviewed target is `limited` or `poor` when
+   non-clear advisory review is explicitly allowed; hard cases need the extra
+   class context. It still skips concept brief generation when controller policy
+   will skip Qwen entirely for target quality.
 3. `router`: local consensus is enabled by the UI/API default, but backend
    policy must still allow it before the model sees any consensus evidence. The
    only possible actions are `finalize_now` and
@@ -228,7 +250,27 @@ State sequence:
    label-changing recommendations, Qwen must also emit
    `supporting_clean_evidence_ids` that point to the clean target/source evidence
    IDs supporting those cues.
-6. `final`: the model receives a compact `finalize_review` schema and must
+6. `specificity_probe`: when `enable_specificity_probe` is true, which is the
+   API default, Qwen receives the compacted final-review context plus one
+   `probe_specificity` schema before the final decision. V3 also renders
+   `inspect_specificity_region_contrast`: panel A is clean context, panel B is
+   target pixels only, panel C is target-removed background/context, and panel D
+   is the strongest overlap region only when one exists. This is the first
+   executable SDDF-style step in the stack: Qwen must separate cues belonging to
+   the reviewed target itself from cues coming from background, overlap, nearby
+   objects, dot maps, class labels, or neighbor statistics. The controller writes
+   `specificity_probe.json`, emits a `specificity_probe_result` event, adds the
+   probe to `evidence_ledger.json`, and injects the result into the final prompt
+   as an auditable VLM self-critique. A probe that supports the current class, or
+   marks the evidence as background/overlap dominated, can guard a later
+   class-change or current-class confirmation; the raw final recommendation is
+   still preserved as `guarded_recommendation`, and the strict cue verifier may
+   recover a blocked class change if clean target/source evidence supports the
+   change. The probe has its own schema repair step: if Qwen returns loose JSON
+   or omits required identity/evidence fields, the controller asks once for a
+   complete `probe_specificity` arguments object before the final decision prompt
+   is assembled.
+7. `final`: the model receives a compact `finalize_review` schema and must
    return one plain JSON arguments object, not an outer tool envelope. Earlier
    MLX Qwen3.6 runs used an assistant prefix that pre-filled the outer
    `finalize_review` wrapper; benchmark logs showed this induced malformed
@@ -244,10 +286,9 @@ State sequence:
    `target_identity_uncertainty`. This prompt-chaining step is deliberately
    separate from the final class label: it makes the VLM commit to what it sees
    before choosing a label, which gives the validator an auditable hook for
-   class-change contradictions.
-   target-contained pixels stay central without hiding trusted examples. The backend
-   expands that compact object into the full audit payload and applies
-   guardrails. The compact schema includes an SDDF-inspired specificity audit:
+   class-change contradictions. The backend expands the compact final object
+   into the full audit payload and applies guardrails. The compact schema still
+   includes an SDDF-inspired specificity audit:
    `specificity_alignment` states which class hypothesis is supported by
    target-contained object cues, and `target_background_contrast` states whether
    those cues are target-specific or dominated by background, overlap, or context.
@@ -256,7 +297,7 @@ State sequence:
    becomes `skip_uncertain`. Degenerate repeated-token outputs are detected
    before JSON parsing and fail closed immediately as `skip_uncertain` so bad
    assistant text is never replayed into the next final attempt.
-7. `cue_verifier`: when Qwen made a guarded class-change recommendation that
+8. `cue_verifier`: when Qwen made a guarded class-change recommendation that
    failed a deterministic rail but still contains potentially useful visual
    signal, the controller can ask one stricter verifier pass to check positive
    target cues against clean target/source evidence. If that pass verifies the
@@ -401,13 +442,49 @@ toward discriminative target regions. The public
 and notes that training/inference code is coming later, so there is no code to
 vendor directly.
 
-Our first integration is therefore conceptual and audit-oriented rather than a
-direct detector port. Qwen final review now emits:
+The first version was conceptual and audit-oriented rather than a direct
+detector port: Qwen final review emitted:
 
 - `specificity_alignment`: which class hypothesis is supported by
   target-contained object cues.
 - `target_background_contrast`: whether the evidence is `target_specific`,
   `background_dominated`, `overlap_dominated`, mixed, or insufficient.
+
+The current implementation adds an executable Qwen specificity probe before the
+final decision. This uses Qwen as the text-aligned VLM we already have: it sees
+the clean target/source evidence, class context, and deterministic reports, then
+returns a structured `probe_specificity` object that separates target-contained
+cues from background/overlap/context cues. The probe is stored in
+`specificity_probe.json`, logged in `events.jsonl`, inserted into
+`evidence_ledger.json`, and quoted back to the final Qwen pass as a self-critique
+that can be accepted or contradicted only with stronger clean target/source
+evidence. The probe is validated independently from final review; incomplete
+probe outputs trigger one repair turn that names the missing identity, cue, or
+clean-evidence-id fields and asks Qwen to return only the corrected JSON
+arguments object.
+
+V3 makes that probe visual rather than purely textual by adding
+`inspect_specificity_region_contrast`. The four-panel image is deliberately
+class-agnostic: target pixels, target-removed background/context, and
+overlap-only pixels are separated by geometry, not by any dataset-specific
+vocabulary. This gives Qwen a text-aligned region-comparison task close to the
+SDDF failure mode without pretending that we have implemented SDDF's learned
+dense focusing module.
+
+The controller also reconciles contradictory probe scalars against Qwen's own
+`subdescription_assessments`. If the scalar fields say the suggested class is
+supported but the per-subdescription table shows that support is coming mostly
+from background or overlap, the normalized probe becomes
+`background_or_overlap_favored` or `insufficient`, and the reconciliation reasons
+are saved in `reconciled_from_subdescription_assessments`. This is another
+generic rail: it uses Qwen's structured evidence table, not class-specific regexes
+or benchmark labels.
+
+The probe also treats pairwise `Switch blockers / hard negatives` as blockers,
+not as positive suggested-class evidence, and keeps scene/location/context cues
+out of class-supporting cue lists unless that context is part of the active
+glossary or review guidance. This is a generic SDDF-style target/background
+rule, not a dataset-specific label heuristic.
 
 This keeps the VLM final judgment central while making the SDDF question
 explicit: are we recommending a class change because the target itself has
@@ -415,14 +492,30 @@ discriminative features, or because background/overlap/context made the embeddin
 neighborhood look plausible? Class-change recommendations require the
 target-specific path. Background-dominated or overlap-dominated recommendations
 are preserved as guarded human-triage signals, not silently applied.
+`confirm_current` is also guarded when the independent probe says the visible
+support is background/overlap-favored, unless Qwen provides a strong
+target-visible current-class rebuttal through overlap/near-context evidence or a
+completed high-confidence probe that supports the current target.
 
-The deeper integration path is a learned or CLIP-aligned specificity evidence
-module: generate per-class or per-instance sub-descriptions, decorrelate them,
-score target-vs-background regions with a text-image aligned model, and feed that
-score as another evidence tool before final Qwen review. DINOv3 crop embeddings
-alone are not text-aligned enough for direct SDDF contrastive text-region scoring,
-so that should be treated as a future model experiment rather than a small prompt
-patch.
+This is still not a learned SDDF dense-region scorer. The deeper integration path
+remains a learned or CLIP/Qwen-aligned specificity evidence module: generate
+per-class or per-instance sub-descriptions, decorrelate them, score target-vs-
+background regions with a text-image aligned model, and feed that score as
+another evidence tool before final Qwen review. DINOv3 crop embeddings alone are
+not text-aligned enough for direct SDDF contrastive text-region scoring.
+
+The practical Qwen-aligned path is now clearer than at first implementation
+time. The local MLX-VLM Qwen3-VL model code projects visual features from
+`vision_tower` into language-model embedding space before inserting them into
+image-token positions, and its `VisionFeatureCache` describes those cached values
+as projected image features in language-model space. That means a future
+experimental scorer can try to extract projected features for the same
+target-only, target-removed, and overlap-only regions rendered by
+`inspect_specificity_region_contrast`. It must be benchmark-gated before it
+affects review: numeric Qwen-aligned region scores are only useful if they
+correlate with manual visual audit and improve actionability without reintroducing
+background/overlap false positives. Until then, the current Qwen specificity
+probe remains the active SDDF-style mechanism.
 
 ## Evidence Tools
 
@@ -459,6 +552,16 @@ and a short interpretation. A common case is a target box crossing another
 object's box: the target may contain texture from the other object, but that
 contamination must not become the reason to relabel the target.
 
+`inspect_specificity_region_contrast` renders the SDDF-style visual contrast
+panel used by the Qwen specificity probe. Panel A is clean context, panel B masks
+out everything except the target pixels, panel C removes the target from the
+same context, and panel D isolates the strongest material-overlap region when it
+exists. Qwen is prompted to use B for target-specific support, C for
+background/context support, and D for overlap-only contamination. The tool is
+required before finalization when the specificity probe is enabled and its image
+is treated as clean visual evidence in the ledger because it contains unboxed
+source pixels separated by deterministic geometry.
+
 Near-identical cross-class boxes are handled as a separate `dual_bbox_conflict`
 mode, not as generic contamination. The class-analysis result marks a conflict
 when the target and another same-image box have different classes, IoU at least
@@ -489,7 +592,8 @@ context-pack image; the final decision receives it as text/reference context
 only.
 
 `class_concept_briefs` are not evidence tools in the final state. They are a
-controller-managed memory layer built before finalization when requested. For
+controller-managed memory layer built before finalization when requested and
+when the controller will actually run a Qwen final/advisory pass. For
 each relevant class, the backend selects high-confidence non-suspicious examples
 using the same class-neighborhood purity, crop geometry, outlier score, and
 overlap-risk scoring used for trusted anchors. It then applies
@@ -522,10 +626,19 @@ contrast brief:
   "choose_class_a_when": ["visible cues for class A"],
   "choose_class_b_when": ["visible cues for class B"],
   "shared_or_ambiguous_cues": ["cues that are not decisive"],
-  "hard_negative_cues": ["cues not allowed for switching"],
+  "hard_negative_cues": ["switch blockers; cues not allowed for switching"],
   "must_skip_when": ["pair distinction is not visible"]
 }
 ```
+
+In the prompt text these become `Switch blockers / hard negatives`. They are
+negative traps for class changes, not supporting evidence for the suggested
+class. This matters because Qwen can otherwise correctly describe the target but
+still over-weight scene placement, nearby objects, or other context listed in a
+contrast brief. The probe and final prompts now say that scene, location,
+medium, surface, lighting, and nearby-object cues are context unless the active
+glossary or review guidance explicitly defines the class by target-touching
+context.
 
 The pair normalizer drops obvious-class bullets from `must_skip_when` when Qwen
 misplaces them there, for example "object is clearly a car on a road". Skip
@@ -602,6 +715,11 @@ Backend guardrails are stricter than the prompt:
   skip Qwen by default because benchmark review showed mostly low-value/noisy
   advisory opinions; pass `allow_poor_final_review=true` or use the benchmark
   flag below only for explicit experiments.
+- guarded recommendations include `signal_strength` when Qwen produced a blocked
+  opinion. This is a triage rank, not an override. `strong` means the guarded
+  target has strong model evidence, high confidence, and target-specific Qwen
+  specificity-probe support. The result remains guarded if quality, overlap,
+  anchor, or policy rails block it.
 - class-change recommendations (`accept_suggested` or `change_to_other`) require
   a clear backend visual-quality tier before they can become actionable
 - final results include model self-check fields for quality, visibility,
@@ -660,7 +778,15 @@ Backend guardrails are stricter than the prompt:
   or none
 - `confirm_current` requires at least moderate current-class anchor evidence
 - `confirm_current` is forced to `skip_uncertain` if Qwen also reports
-  `suggested_evidence=strong`
+  `suggested_evidence=strong`, unless the model gives a visible target-current
+  rebuttal through overlap/near-context evidence or a completed high-confidence
+  Qwen specificity probe that supports the current class, marks the target
+  evidence as target-specific, and names the current class as the best-supported
+  class
+- `confirm_current` is also forced to `skip_uncertain` when the independent Qwen
+  specificity probe says the support is background/overlap-favored, background
+  dominated, overlap dominated, or target-favored for another class, unless the
+  same narrow overlap/probe-backed current-class rebuttal path applies
 - `confirm_current` is also forced to `skip_uncertain` when local consensus
   supports the suggested class and Qwen reports strong suggested evidence
 - if overlap contamination explains why the target looks similar to the
@@ -959,6 +1085,9 @@ Use `review_disposition_signal_counts` and `effective_human_signal_count` to
 measure whether the agent produced useful triage work. Raw `skip_uncertain`
 counts are intentionally conservative and include guarded model suggestions
 that are displayed for human review but blocked from automatic relabel advice.
+Use `review_disposition_signal_strength_counts` to separate strong, moderate,
+and weak guarded opinions. Strong guarded opinions should be shown early to the
+human reviewer, but they remain blocked from automatic relabeling.
 
 For an existing run, the lightweight analyzer can use system Python:
 
@@ -983,7 +1112,8 @@ The audit script checks the safety invariants that should not regress:
   is confidence-capped, all other target/source evidence is strong, and Qwen has
   explicitly checked `current_class_plausible=false`
 - no `confirm_current` decision when Qwen reports strong suggested-class
-  evidence
+  evidence, except the narrow probe-backed or overlap-backed rebuttal paths where
+  clean target pixels still strongly support the current class
 - no class-changing recommendation without at least two concrete target-visible
   cues and clean target/source evidence ids supporting those cues
 - no class-changing recommendation for duplicate-like, contained, or unclear
@@ -1018,6 +1148,127 @@ They are not implementation rules; the runtime controller relies on the active
 labelmap, glossary, review guidance, generated concept briefs, generated pairwise
 contrast briefs, evidence fields, and overlap state.
 
+- Qwen SDDF-region-contrast V3 reviewable-30 gate:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/qwen_region_contrast_v3_guarded30_30_1780934528.json`
+  replayed the same 30 reviewable rows with
+  `qwen_specificity_probe_v3_region_contrast` and
+  `vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit`. The required tool
+  sequence rendered `inspect_specificity_region_contrast` on every row, and the
+  live model sequences stayed VLM-centered:
+  `probe_specificity->finalize_review` on 25 rows,
+  `probe_specificity->finalize_review->verify_visible_cues` on 3 rows, and
+  `probe_specificity->probe_specificity->finalize_review` on 2 repair rows.
+  Result: 30/30 completed, 0 backend failures, 0 final validation errors, 0
+  unsafe audit issues, 9 actionable recommendations, 21 guarded human-triage
+  signals, and 30 effective human signals in 748.7 seconds. There were 2
+  actionable class-change recommendations and 7 actionable current-class
+  confirmations. A later analyzer pass over the same artifact, using the
+  signal-strength disposition classifier, separated the guarded opinions into 7
+  strong, 11 moderate, and 3 weak guarded signals. The probe completed on all 30 rows with 8 controller
+  reconciliations from Qwen's own subdescription table. One earlier V3 row
+  (`Truck->Building`) had allowed `confirm_current` even though the probe said
+  the support was background/overlap-favored; the validator now guards that case
+  back to `skip_uncertain` while preserving the raw Qwen recommendation. Manual
+  visual spot-check of
+  `qwen_region_contrast_v3_guarded30_30_1780934528_visual_non_skip.jpg` found the
+  two class-change candidates plausible: `#22 Gastank->Building` looked like a
+  rectangular roof/building object rather than a tank, and `#28
+  LightVehicle->UPole` looked like a pole/utility structure rather than a
+  vehicle.
+- Qwen SDDF-region-contrast V3 tie-fix reviewable-30 gate:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/qwen_sddf_tiefix_v1_reviewable30_30_1780941008.json`
+  reran the same 30 rows after fixing subdescription-derived specificity ties.
+  Equal target support for current and suggested classes now normalizes to
+  `mixed`/`low_contrast` rather than silently choosing whichever class sorted
+  first. The run stayed VLM-centered:
+  `probe_specificity->finalize_review` on 27 rows and
+  `probe_specificity->finalize_review->verify_visible_cues` on 3 rows. Result:
+  30/30 completed, 0 failures, 0 final validation errors, 0 unsafe audit issues,
+  9 actionable recommendations, 19 guarded human-triage signals, and 28 effective
+  human signals in 732.7 seconds. The specificity probe completed on all 30 rows
+  with 6 reconciliations from Qwen's subdescription table, including 1
+  `mixed`/`low_contrast` case. The visual non-skip sheet
+  `qwen_sddf_tiefix_v1_reviewable30_30_1780941008_visual_non_skip.jpg` still
+  showed coherent target-contained evidence for the 2 actionable class changes
+  and 7 current-class confirmations. Compared with the immediately previous
+  concept-brief run, decisions, targets, and confidences were unchanged; compared
+  with the earlier V3 gate, only one confidence value changed. This is a
+  correctness fix, not an action-rate improvement.
+- Qwen specificity probe V1 smoke:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/qwen_specificity_probe_smoke3_fixed2_3_1780919329.json`
+  replayed three reviewable rows with `qwen_specificity_probe_v1` enabled before
+  final review. The live model-call sequence was
+  `probe_specificity->finalize_review` for all three rows, with
+  `specificity_probe_model_calls=3` and `specificity_probe_result_events=3`.
+  The parser/validator normalized loose Qwen outputs such as `high` specificity
+  contrast into the categorical audit fields, producing
+  `specificity_probe_alignment_counts={"supports_current": 3}` and
+  `specificity_probe_contrast_counts={"target_specific": 3}`. The audit file
+  `qwen_specificity_probe_smoke3_fixed2_3_1780919329_audit.json` reported 3/3
+  completed, 0 backend failures, 0 final validation errors, 0 unsafe issues, one
+  actionable `confirm_current`, two guarded visual-quality results, and three
+  effective human signals. This is a smoke check only; it proves the probe is
+  executable and benchmark-visible, not that SDDF-style reasoning is solved.
+- Qwen specificity probe V1 reviewable-30 gate:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/qwen_specificity_probe_reviewable30_v1_30_1780919811.json`
+  replayed 30 reviewable rows with `vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit`.
+  The live model-call sequences were `probe_specificity->finalize_review` on 27
+  rows and `probe_specificity->finalize_review->verify_visible_cues` on 3 rows.
+  Every row completed the specificity probe (`specificity_probe_model_calls=30`,
+  `specificity_probe_result_events=30`), with probe alignments split between
+  `supports_current=18` and `supports_suggested=12`, and all probe contrasts
+  normalized to `target_specific`. The regenerated audit file
+  `qwen_specificity_probe_reviewable30_v1_30_1780919811_audit.json` reported
+  30/30 completed, 0 backend failures, 0 final validation errors, 0 unsafe audit
+  issues, 9 actionable recommendations, 21 guarded human-triage signals, and 30
+  effective human signals. The standalone audit now mirrors the validator's
+  high-confidence specificity-probe `confirm_current` rebuttal path, so a strong
+  suggested-class field is not treated as unsafe when Qwen separately identifies
+  the target pixels as the current class with target-specific evidence.
+- Qwen specificity-probe repair smoke:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/qwen_specificity_probe_repair_smoke3_3_1780922246.json`
+  reran three reviewable rows after adding probe validation and one repair turn.
+  All three rows used
+  `probe_specificity->probe_specificity->finalize_review`, so the repair prompt
+  was exercised live. The repaired probes all completed with class-neutral
+  `target_identity_summary`, `target_identity_uncertainty=low`,
+  `target_background_contrast=target_specific`, clean `supporting_clean_evidence_ids`,
+  and no probe `validation_errors`. The audit reported 3/3 completed, 0 backend
+  failures, 0 final validation errors, 0 unsafe audit issues, one actionable
+  `confirm_current`, two guarded visual-quality results, and three effective
+  human signals.
+- Qwen specificity blocker-rule smoke:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/qwen_specificity_probe_blockers_smoke3_3_1780924509.json`
+  reran the three-row probe smoke after making pairwise `Switch blockers / hard
+  negatives` explicit negative evidence rather than suggested-class evidence.
+  The previously degraded context-drift row recovered from guarded
+  `accept_suggested` back to actionable `confirm_current`: the target was
+  described as a boat, the probe supported the current class with
+  `target_background_contrast=target_specific`, and the final rationale said
+  nearby cars explained the LightVehicle neighbor consensus. The audit reported
+  3/3 completed, 0 unsafe issues, one actionable `confirm_current`, two guarded
+  visual-quality results, and three effective human signals.
+- Qwen specificity blocker-rule reviewable-30 gate:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/qwen_specificity_probe_blockers_reviewable30_30_1780924658.json`
+  replayed 30 reviewable rows with the blocker-rule prompts. It completed 30/30
+  in 518.8 seconds with 0 backend failures, 0 final validation errors, 0 unsafe
+  audit issues, 11 actionable recommendations, 19 guarded human-triage signals,
+  and 30 effective human signals. The VLM remained active on every row:
+  `specificity_probe_model_calls=31`, `specificity_probe_result_events=30`,
+  `finalize_review` ran on all rows, and the strict cue verifier promoted three
+  class-change recommendations after checking target-contained cues. One row hit
+  the MLX repeated-output detector during the specificity probe and fell back to
+  final review with a failed probe, which motivated the malformed-probe salvage
+  parser below.
+- Qwen malformed specificity-probe salvage smoke:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/qwen_specificity_probe_salvage_row24_smoke_1_1780925614.json`
+  reran the row that previously produced malformed probe JSON after a repeated
+  generation. The scoped probe parser salvaged complete leading VLM fields from
+  the malformed object, so the run reported
+  `specificity_probe_status_counts={"completed": 1}` and
+  `specificity_probe_alignment_counts={"supports_suggested": 1}` instead of a
+  missing probe. The final decision remained guarded because the backend quality
+  tier was limited, with 0 unsafe audit issues.
 - Genericity V4 100-crop gate:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/genericity_v4_wide100_100_1780875777.json`
   reran the same 100-row benchmark after removing benchmark-specific cue
@@ -1713,6 +1964,9 @@ review:
 - Qwen3-VL Think with Images cookbook: demonstrates iterative visual inspection
   with an `image_zoom_in_tool`; see
   https://github.com/QwenLM/Qwen3-VL/blob/main/cookbooks/think_with_images.ipynb.
+- MLX-VLM Qwen3-VL model and vision-cache implementation: exposes projected
+  visual features before language-token insertion and documents cached projected
+  image features; see https://github.com/Blaizzy/mlx-vlm.
 - Hermes Function Calling prompt assets: one-function-at-a-time JSON tool calls;
   see https://github.com/NousResearch/Hermes-Function-Calling.
 - OpenAI practical agent guidance: keep tools, guardrails, and human oversight

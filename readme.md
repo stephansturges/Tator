@@ -226,6 +226,10 @@ The Label Images tab is the everyday workspace.
 - Apply saved SAM3 recipes, cascades, prepass recipes, or EDR packages to the
   active image.
 - Use Qwen captions as visual context while keeping final labels editable.
+- Customize Label Images keyboard shortcuts from the shortcut panel in the
+  annotation sidebar. Defaults can be replaced or removed, browser-local shortcut
+  maps can be imported/exported, and direct class-ID bindings `0`-`19` can be
+  assigned for programmable keyboards.
 - Use Class Split Explorer to embed one class or all classes in the current
   annotation dataset, filter the plot to likely wrong-class objects, preview
   crops on hover, and jump suspicious points back to the source bbox for

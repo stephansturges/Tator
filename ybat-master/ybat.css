@@ -873,7 +873,15 @@ body.annotation-focus-mode .class-scroll-indicator {
     max-width: 100%;
 }
 
-#description ul {
+#description .shortcut-header {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+#description ul,
+.shortcut-help-list {
     list-style: none;
     padding-left: 0;
     margin: 8px 0 0;
@@ -889,6 +897,147 @@ body.annotation-focus-mode .class-scroll-indicator {
 
 #description li::before {
     content: "• ";
+}
+
+.shortcut-key-list {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    vertical-align: baseline;
+}
+
+.shortcut-key {
+    display: inline-flex;
+    align-items: center;
+    min-height: 18px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid rgba(37, 99, 235, 0.35);
+    background: rgba(37, 99, 235, 0.08);
+    color: #0f172a;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
+.shortcut-key--empty {
+    border-color: rgba(100, 116, 139, 0.3);
+    background: rgba(100, 116, 139, 0.08);
+    color: #64748b;
+    font-style: italic;
+}
+
+.shortcut-settings-panel {
+    margin-top: 10px;
+    border: 1px solid rgba(37, 99, 235, 0.18);
+    border-radius: 8px;
+    background: rgba(248, 250, 252, 0.72);
+    overflow: hidden;
+}
+
+.shortcut-settings-panel > summary {
+    cursor: pointer;
+    padding: 8px 10px;
+    font-weight: 700;
+    color: #1e3a8a;
+}
+
+.shortcut-settings-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 10px 10px;
+}
+
+.shortcut-settings-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.shortcut-settings-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-height: 380px;
+    overflow: auto;
+    padding-right: 4px;
+}
+
+.shortcut-settings-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.shortcut-settings-group__title {
+    font-size: 12px;
+    font-weight: 800;
+    color: #334155;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.shortcut-settings-row {
+    display: grid;
+    grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+    padding: 7px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.75);
+}
+
+.shortcut-settings-row__label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.shortcut-settings-row__label strong {
+    color: #0f172a;
+    font-size: 12px;
+}
+
+.shortcut-settings-row__label span {
+    color: #64748b;
+    font-size: 11px;
+}
+
+.shortcut-settings-row__keys {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.shortcut-settings-row__actions {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.shortcut-settings-row__actions .training-button {
+    padding: 5px 8px;
+}
+
+.shortcut-settings-row.is-capturing {
+    border-color: rgba(37, 99, 235, 0.7);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
+}
+
+@media (max-width: 720px) {
+    .shortcut-settings-row {
+        grid-template-columns: 1fr;
+    }
+
+    .shortcut-settings-row__actions {
+        justify-content: flex-start;
+    }
 }
 
 #saveClasses, #saveBboxes, #saveVocBboxes, #saveCocoBboxes, #cropImages {
@@ -5380,6 +5529,41 @@ html.theme-dark .class-split-wrong-item__body span {
     color: #fed7aa;
 }
 
+html.theme-dark .shortcut-key {
+    background: rgba(96, 165, 250, 0.14);
+    border-color: rgba(96, 165, 250, 0.45);
+    color: #dbeafe;
+}
+
+html.theme-dark .shortcut-key--empty {
+    background: rgba(100, 116, 139, 0.16);
+    border-color: rgba(148, 163, 184, 0.32);
+    color: #94a3b8;
+}
+
+html.theme-dark .shortcut-settings-panel {
+    background: rgba(15, 23, 42, 0.78);
+    border-color: rgba(96, 165, 250, 0.28);
+}
+
+html.theme-dark .shortcut-settings-panel > summary {
+    color: #bfdbfe;
+}
+
+html.theme-dark .shortcut-settings-group__title,
+html.theme-dark .shortcut-settings-row__label strong {
+    color: #e2e8f0;
+}
+
+html.theme-dark .shortcut-settings-row {
+    background: rgba(15, 23, 42, 0.76);
+    border-color: rgba(100, 116, 139, 0.45);
+}
+
+html.theme-dark .shortcut-settings-row__label span {
+    color: #94a3b8;
+}
+
 html.theme-dark .qwen-caption-workflow__title,
 html.theme-dark .qwen-caption-workflow__path-item strong,
 html.theme-dark .qwen-caption-workflow__setting strong {
@@ -5961,6 +6145,7 @@ html.theme-pipboy .per-class-metrics,
 html.theme-pipboy .metric-chart,
 html.theme-pipboy .metric-glossary,
 html.theme-pipboy .active-controls,
+html.theme-pipboy .shortcut-settings-panel,
 html.theme-pipboy .storage-item {
     background: var(--pip-surface-bg);
     border-color: var(--pip-border);
@@ -5987,9 +6172,16 @@ html.theme-pipboy .qwen-model-card,
 html.theme-pipboy .qwen-train-callouts,
 html.theme-pipboy .qwen-radio-group,
 html.theme-pipboy .training-summary,
+html.theme-pipboy .shortcut-settings-row,
 html.theme-pipboy .qwen-sample-canvas {
     background: var(--pip-subsurface-bg);
     border-color: color-mix(in srgb, var(--pip-green) 34%, transparent);
+    color: var(--pip-green);
+}
+
+html.theme-pipboy .shortcut-key {
+    background: color-mix(in srgb, var(--pip-green) 15%, transparent);
+    border-color: color-mix(in srgb, var(--pip-green) 42%, transparent);
     color: var(--pip-green);
 }
 
@@ -6043,6 +6235,9 @@ html.theme-pipboy .class-split-wrong-panel > summary,
 html.theme-pipboy .class-split-cluster-panel > summary,
 html.theme-pipboy .class-split-report__note,
 html.theme-pipboy .class-split-bulk-panel strong,
+html.theme-pipboy .shortcut-settings-panel > summary,
+html.theme-pipboy .shortcut-settings-group__title,
+html.theme-pipboy .shortcut-settings-row__label strong,
 html.theme-pipboy .class-split-inspector__meta {
     color: var(--pip-green-muted);
 }
@@ -6289,6 +6484,8 @@ html.theme-pipboy .training-field-double label,
 html.theme-pipboy .training-advanced-grid label,
 html.theme-pipboy .training-active-block label,
 html.theme-pipboy .training-grid label,
+html.theme-pipboy .shortcut-settings-row__label span,
+html.theme-pipboy .shortcut-key--empty,
 html.theme-pipboy .training-epoch-detail,
 html.theme-pipboy .chart-smoothing,
 html.theme-pipboy .training-chart-legend,

@@ -164,6 +164,7 @@ def _event_counts(events: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     router_events = [event for event in events if event.get("type") == "router_decision"]
     final_errors = [event for event in events if event.get("type") == "final_validation_error"]
     cue_verifier_errors = [event for event in events if event.get("type") == "cue_verifier_parse_error"]
+    specificity_probe_results = [event for event in events if event.get("type") == "specificity_probe_result"]
 
     def _schema_label(event: Dict[str, Any]) -> str:
         schema = event.get("tool_schema") if isinstance(event.get("tool_schema"), list) else []
@@ -192,6 +193,8 @@ def _event_counts(events: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "router_decisions": len(router_events),
         "final_validation_errors": len(final_errors),
         "cue_verifier_parse_errors": len(cue_verifier_errors),
+        "specificity_probe_model_calls": int(phase_counts.get("specificity_probe") or 0),
+        "specificity_probe_result_events": len(specificity_probe_results),
         "local_consensus_controller_calls": sum(
             1 for event in controller_calls if event.get("tool") == "inspect_local_consensus_context"
         ),
@@ -214,6 +217,7 @@ def _record_from_review(
     scale_context = deterministic_context.get("scale") if isinstance(deterministic_context.get("scale"), dict) else {}
     embedding_context = deterministic_context.get("embedding") if isinstance(deterministic_context.get("embedding"), dict) else {}
     cue_verifier = final.get("cue_verifier") if isinstance(final.get("cue_verifier"), dict) else {}
+    specificity_probe = final.get("specificity_probe") if isinstance(final.get("specificity_probe"), dict) else {}
     final_current_plausible = _coerce_bool(final.get("current_class_plausible"))
     cue_current_plausible = _coerce_bool(cue_verifier.get("current_class_plausible"))
     current_plausible = final_current_plausible or cue_current_plausible
@@ -254,6 +258,21 @@ def _record_from_review(
         "target_identity_summary": final.get("target_identity_summary") or "",
         "target_identity_uncertainty": final.get("target_identity_uncertainty") or "",
         "target_identity_evidence_ids": final.get("target_identity_evidence_ids") or [],
+        "specificity_probe": specificity_probe,
+        "specificity_probe_status": specificity_probe.get("status") if specificity_probe else "missing",
+        "specificity_probe_alignment": specificity_probe.get("specificity_alignment") if specificity_probe else "missing",
+        "specificity_probe_contrast": specificity_probe.get("target_background_contrast") if specificity_probe else "missing",
+        "specificity_probe_margin": specificity_probe.get("specificity_margin") if specificity_probe else "missing",
+        "specificity_probe_subdescription_count": len(specificity_probe.get("subdescription_assessments") or [])
+        if specificity_probe
+        else 0,
+        "specificity_probe_reconciliations": (
+            specificity_probe.get("reconciled_from_subdescription_assessments") or []
+            if specificity_probe
+            else []
+        ),
+        "specificity_probe_best_supported_class": specificity_probe.get("best_supported_class") if specificity_probe else "",
+        "specificity_probe_confidence": specificity_probe.get("confidence") if specificity_probe else None,
         "whole_target_extent_supported": final.get("whole_target_extent_supported"),
         "whole_target_extent_reason": final.get("whole_target_extent_reason") or "",
         "visible_target_cues": final.get("visible_target_cues") or [],
@@ -308,6 +327,25 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
     same_image_embedding_report = Counter(str(record.get("same_image_embedding_report_signal") or "missing") for record in records)
     specificity_alignment = Counter(str(record.get("specificity_alignment") or "missing") for record in records)
     target_background_contrast = Counter(str(record.get("target_background_contrast") or "missing") for record in records)
+    specificity_probe_status = Counter(str(record.get("specificity_probe_status") or "missing") for record in records)
+    specificity_probe_alignment = Counter(str(record.get("specificity_probe_alignment") or "missing") for record in records)
+    specificity_probe_contrast = Counter(str(record.get("specificity_probe_contrast") or "missing") for record in records)
+    specificity_probe_margin = Counter(str(record.get("specificity_probe_margin") or "missing") for record in records)
+    specificity_probe_subdescription_rows = sum(
+        1 for record in records if int(record.get("specificity_probe_subdescription_count") or 0) > 0
+    )
+    specificity_probe_subdescription_total = sum(
+        int(record.get("specificity_probe_subdescription_count") or 0) for record in records
+    )
+    specificity_probe_reconciled = sum(
+        1 for record in records if record.get("specificity_probe_reconciliations")
+    )
+    specificity_probe_reconciliation_reasons = Counter(
+        str(reason)
+        for record in records
+        for reason in (record.get("specificity_probe_reconciliations") or [])
+        if str(reason or "").strip()
+    )
     target_identity_uncertainty = Counter(str(record.get("target_identity_uncertainty") or "missing") for record in records)
     whole_target_extent = Counter(
         "supported" if record.get("whole_target_extent_supported") is True
@@ -350,6 +388,11 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
         str((record.get("review_disposition") or {}).get("signal") or "missing")
         for record in records
     )
+    disposition_strength_counts = Counter(
+        str((record.get("review_disposition") or {}).get("signal_strength") or "missing")
+        for record in records
+        if (record.get("review_disposition") or {}).get("signal_strength")
+    )
     return {
         "run_id": run_id,
         "job_id": job_id,
@@ -369,6 +412,14 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
         "same_image_embedding_report_signal_counts": dict(same_image_embedding_report),
         "specificity_alignment_counts": dict(specificity_alignment),
         "target_background_contrast_counts": dict(target_background_contrast),
+        "specificity_probe_status_counts": dict(specificity_probe_status),
+        "specificity_probe_alignment_counts": dict(specificity_probe_alignment),
+        "specificity_probe_contrast_counts": dict(specificity_probe_contrast),
+        "specificity_probe_margin_counts": dict(specificity_probe_margin),
+        "specificity_probe_subdescription_rows": specificity_probe_subdescription_rows,
+        "specificity_probe_subdescription_total": specificity_probe_subdescription_total,
+        "specificity_probe_reconciled_count": specificity_probe_reconciled,
+        "specificity_probe_reconciliation_reason_counts": dict(specificity_probe_reconciliation_reasons),
         "target_identity_uncertainty_counts": dict(target_identity_uncertainty),
         "whole_target_extent_counts": dict(whole_target_extent),
         "dual_bbox_resolution_counts": dict(dual_bbox_resolution),
@@ -381,6 +432,7 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
         "current_class_plausible_count": current_class_plausible,
         "review_disposition_counts": dict(disposition_counts),
         "review_disposition_signal_counts": dict(disposition_signal_counts),
+        "review_disposition_signal_strength_counts": dict(disposition_strength_counts),
         "effective_human_signal_count": sum(
             1
             for record in records
@@ -404,6 +456,8 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
         ),
         "concept_brief_model_calls": sum(int(record.get("concept_brief_model_calls") or 0) for record in records),
         "pair_contrast_model_calls": sum(int(record.get("pair_contrast_model_calls") or 0) for record in records),
+        "specificity_probe_model_calls": sum(int(record.get("specificity_probe_model_calls") or 0) for record in records),
+        "specificity_probe_result_events": sum(int(record.get("specificity_probe_result_events") or 0) for record in records),
         "concept_brief_enabled_count": sum(
             1
             for record in records
@@ -634,6 +688,8 @@ def _run_subprocess_review(
         cmd.append("--skip-poor-final-review")
     if args.skip_cue_verifier:
         cmd.append("--skip-cue-verifier")
+    if args.skip_specificity_probe:
+        cmd.append("--skip-specificity-probe")
     if int(args.mlx_reset_every) >= 0:
         cmd.extend(["--mlx-reset-every", str(max(0, int(args.mlx_reset_every)))])
     if args.reset_qwen_after_review:
@@ -773,6 +829,11 @@ def main() -> int:
         help="Disable the bounded second-pass verifier for guarded clear-target class changes missing positive cues.",
     )
     parser.add_argument(
+        "--skip-specificity-probe",
+        action="store_true",
+        help="Disable the pre-final Qwen specificity probe for target-vs-background evidence.",
+    )
+    parser.add_argument(
         "--mlx-reset-every",
         type=int,
         default=-1,
@@ -871,6 +932,7 @@ def main() -> int:
                 "allow_limited_final_review": not bool(args.skip_limited_final_review),
                 "allow_poor_final_review": bool(args.allow_poor_final_review) and not bool(args.skip_poor_final_review),
                 "enable_cue_verifier": not bool(args.skip_cue_verifier),
+                "enable_specificity_probe": not bool(args.skip_specificity_probe),
                 "reset_qwen_runtime_after_review": bool(args.reset_qwen_after_review),
                 "benchmark_run_id": run_id,
             },

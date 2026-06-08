@@ -218,21 +218,35 @@ def test_keyboard_image_navigation_shortcuts_are_documented_and_guarded():
     html = _html()
     js = _js()
 
-    assert "<strong>Images:</strong> Space = next image; Tab = previous image" in html
-    assert "<strong>Focus:</strong> V toggles image-only focus mode" in html
-    assert "<strong>Classes:</strong> ↓ / R = next class; ↑ / E = previous class" in html
-    assert "Delete / Backspace / X removes selected or current bboxes" in html
-    assert "S toggles SAM; W runs magic tweak; double W tweaks selected boxes first, otherwise the carousel class" in html
-    assert "<strong>Point prompts:</strong> D toggles SAM point mode; M toggles multi-point" in html
-    assert "Shift + R + drag runs YOLO/RF-DETR region detect" in html
-    assert "Shift + Y requests Save YOLO + captions" in html
-    assert "const imageNavigationKey = (event) =>" in js
-    assert "eventKey === 32" in js
-    assert "eventKey === 9" in js
-    assert 'event.key === "Tab"' in js
-    assert "return 1;" in js
-    assert "return -1;" in js
-    assert "navigateImage(direction)" in js
+    assert 'id="shortcutHelpList"' in html
+    assert 'id="shortcutSettingsPanel"' in html
+    assert "Customize keyboard shortcuts" in html
+    assert 'id="shortcutResetAll"' in html
+    assert 'id="shortcutExportConfig"' in html
+    assert 'id="shortcutImportConfigButton"' in html
+    assert 'id="shortcutImportConfig"' in html
+    assert 'accept=".json,application/json"' in html
+    assert 'id="shortcutSettingsList"' in html
+    assert 'class="shortcut-help-list"' in html
+    assert "SHORTCUT_STORAGE_KEY" in js
+    assert '"tator.annotation.shortcuts.v1"' in js
+    assert "SHORTCUT_CLASS_ID_COUNT = 20" in js
+    assert 'id: "image_next"' in js
+    assert 'id: "image_previous"' in js
+    assert 'id: "drawing_start"' in js
+    assert 'id: "drawing_finish"' in js
+    assert 'id: "delete_selected_current"' in js
+    assert '`class_id_${idx}`' in js
+    assert "renderShortcutHelp()" in js
+    assert "renderShortcutSettings()" in js
+    assert "assignShortcutBinding(actionId, binding)" in js
+    assert "removeShortcutBindingConflicts(actionId, bindings)" in js
+    assert "eventToBinding(event)" in js
+    assert "readFileAsTextPromise(file)" in js
+    assert 'saveBlobToDisk(blob, "tator-shortcuts.json")' in js
+    assert "run: () => navigateImage(1)" in js
+    assert "run: () => navigateImage(-1)" in js
+    assert "action.run(event)" in js
     assert 'window.addEventListener("keydown"' in js
     assert '}, true);' in js
     assert "annotationWorkspaceHotkeysActive" in js
@@ -272,7 +286,8 @@ def test_local_salad_is_data_ingestion_only_in_ui():
     assert "Aggregation: ${escapeHtml(art.embedding_aggregation" not in js
     assert "startLocalSaladTraining" in js
     assert "canvas.element.focus();" in js
-    assert "const isTextEditingTarget = (target) =>" in js
+    assert "function isTextEditingTarget(target)" in js
+    assert 'targetElement.closest(".shortcut-settings-panel")' in js
     assert 'targetTag === "textarea"' in js
 
 
@@ -608,8 +623,10 @@ def test_class_scroll_contrast_and_double_w_selected_scope_contract():
     assert "async function runBatchTweakForClass" in js
     assert "function handleMagicTweakTapHotkey" in js
     assert "let magicTweakHotkeyTimeoutId = null" in js
-    assert '(key === 87 || event.key === "w" || event.key === "W")' in js
-    assert '(key === 88 || event.key === "x" || event.key === "X")' in js
+    assert 'id: "magic_tweak"' in js
+    assert 'defaultBindings: [makeBinding("KeyW", "W")]' in js
+    assert 'id: "delete_selected_current"' in js
+    assert 'makeBinding("KeyX", "X")' in js
 
 
 def test_sam3_text_panel_has_dark_theme_coverage():

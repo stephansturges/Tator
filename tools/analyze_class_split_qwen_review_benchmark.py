@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from collections import Counter, defaultdict
@@ -695,6 +696,47 @@ def _record_uses_confirm_current_overlap_rebuttal_path(record: Dict[str, Any]) -
     )
 
 
+def _record_uses_confirm_current_specificity_probe_rebuttal_path(record: Dict[str, Any]) -> bool:
+    """Mirror the validator's confirm-current path for specificity-probe false alarms."""
+
+    payload = record.get("model_compact_arguments") if isinstance(record.get("model_compact_arguments"), dict) else {}
+    ledger = record.get("evidence_ledger") if isinstance(record.get("evidence_ledger"), dict) else {}
+    probe = record.get("specificity_probe") if isinstance(record.get("specificity_probe"), dict) else None
+    if not probe and isinstance(ledger.get("specificity_probe"), dict):
+        probe = ledger.get("specificity_probe")
+
+    def _field(name: str) -> str:
+        return str(record.get(name) or payload.get(name) or "").strip().lower()
+
+    try:
+        probe_confidence = float(probe.get("confidence") or 0.0) if probe else 0.0
+    except Exception:
+        probe_confidence = 0.0
+    if not math.isfinite(probe_confidence):
+        probe_confidence = 0.0
+    current_class = str(record.get("current_class") or payload.get("current_class") or "").strip()
+    best_supported = str(probe.get("best_supported_class") or "") if probe else ""
+
+    return (
+        str(record.get("decision") or "") == "confirm_current"
+        and _field("backend_tier") == "clear"
+        and _field("visual_quality") == "clear"
+        and _field("object_visibility") == "clear"
+        and _field("current_evidence") == "strong"
+        and _field("target_evidence") == "strong"
+        and _field("specificity_alignment") == "supports_current"
+        and _field("target_background_contrast") == "target_specific"
+        and current_class
+        and bool(_explicit_visible_cues_from_record(record))
+        and isinstance(probe, dict)
+        and str(probe.get("status") or "").strip().lower() == "completed"
+        and probe_confidence >= 0.75
+        and str(probe.get("specificity_alignment") or "").strip().lower() == "supports_current"
+        and str(probe.get("target_background_contrast") or "").strip().lower() == "target_specific"
+        and _normalize_label(best_supported) == _normalize_label(current_class)
+    )
+
+
 def _target_source_clean_ids_from_record(record: Dict[str, Any]) -> List[str]:
     ledger = record.get("evidence_ledger") if isinstance(record.get("evidence_ledger"), dict) else {}
     rows = [row for row in (ledger.get("rows") or []) if isinstance(row, dict)]
@@ -757,7 +799,9 @@ def _record_key(record: Dict[str, Any], fallback_index: int) -> str:
 def _record_review_disposition(record: Dict[str, Any]) -> Dict[str, Any]:
     existing = record.get("review_disposition")
     if isinstance(existing, dict) and existing.get("signal"):
-        return existing
+        existing_signal = str(existing.get("signal") or "").strip()
+        if existing_signal != "guarded_human_triage" or existing.get("signal_strength"):
+            return existing
     decision = str(record.get("decision") or "").strip()
     target_class = str(record.get("target_class") or "").strip()
     current_class = str(record.get("current_class") or "").strip()
@@ -777,8 +821,9 @@ def _record_review_disposition(record: Dict[str, Any]) -> Dict[str, Any]:
         reason: str = "",
         priority: str = "normal",
         advisory_decision: str = "",
+        signal_strength: str = "",
     ) -> Dict[str, Any]:
-        return {
+        payload = {
             "disposition": disposition,
             "signal": signal,
             "label": label,
@@ -787,6 +832,61 @@ def _record_review_disposition(record: Dict[str, Any]) -> Dict[str, Any]:
             "advisory_target_class": target,
             "primary_reason": reason,
         }
+        if signal_strength:
+            payload["signal_strength"] = signal_strength
+        return payload
+
+    def _guarded_signal_strength(guarded_result: Dict[str, Any]) -> str:
+        guarded_decision = str(guarded_result.get("decision") or "").strip()
+        try:
+            guarded_confidence = float(guarded_result.get("confidence") or 0.0)
+        except Exception:
+            guarded_confidence = 0.0
+        if not math.isfinite(guarded_confidence):
+            guarded_confidence = 0.0
+        guarded_target_evidence = str(guarded_result.get("target_evidence") or "").strip().lower()
+        guarded_current_evidence = str(guarded_result.get("current_evidence") or "").strip().lower()
+        probe = record.get("specificity_probe") if isinstance(record.get("specificity_probe"), dict) else {}
+        probe_alignment = str(probe.get("specificity_alignment") or "").strip().lower()
+        probe_contrast = str(probe.get("target_background_contrast") or "").strip().lower()
+        probe_margin = str(probe.get("specificity_margin") or "").strip().lower()
+        probe_uncertainty = str(probe.get("target_identity_uncertainty") or "").strip().lower()
+        if guarded_decision == "confirm_current":
+            expected_alignment = "supports_current"
+            expected_margins = {"current_target_favored"}
+        elif guarded_decision == "accept_suggested":
+            expected_alignment = "supports_suggested"
+            expected_margins = {"suggested_target_favored"}
+        elif guarded_decision == "change_to_other":
+            expected_alignment = "supports_other"
+            expected_margins = {"other_target_favored"}
+        else:
+            expected_alignment = ""
+            expected_margins = set()
+        specificity_supports_target = (
+            bool(expected_alignment)
+            and probe_alignment == expected_alignment
+            and probe_contrast == "target_specific"
+            and (not expected_margins or probe_margin in expected_margins)
+            and probe_uncertainty in {"", "low", "moderate"}
+        )
+        class_change_blocked_by_current = (
+            guarded_decision in CLASS_CHANGE_DECISIONS
+            and guarded_current_evidence in {"strong", "moderate"}
+        )
+        if (
+            guarded_confidence >= 0.8
+            and guarded_target_evidence == "strong"
+            and specificity_supports_target
+            and probe_uncertainty == "low"
+            and not class_change_blocked_by_current
+        ):
+            return "strong"
+        if guarded_target_evidence in {"strong", "moderate"} and (
+            specificity_supports_target or guarded_confidence >= 0.75
+        ):
+            return "moderate"
+        return "weak"
 
     if decision in CLASS_CHANGE_DECISIONS:
         return _make("actionable_class_change", "actionable", f"Switch class to {target_class}", target=target_class, priority="high")
@@ -805,6 +905,7 @@ def _record_review_disposition(record: Dict[str, Any]) -> Dict[str, Any]:
         guarded_visibility = str(guarded.get("object_visibility") or object_visibility or "").strip().lower()
         current_dominates_target = "current class" in reason_text and "dominates the target bbox" in reason_text
         guarded_decision = str(guarded.get("decision") or "").strip()
+        signal_strength = _guarded_signal_strength(guarded)
         if guarded_decision in CLASS_CHANGE_DECISIONS and current_dominates_target:
             return _make(
                 "verified_current_class_overlap",
@@ -813,24 +914,43 @@ def _record_review_disposition(record: Dict[str, Any]) -> Dict[str, Any]:
                 target=current_class or target_class,
                 reason=reasons[0] if reasons else "Current-class material dominates the target bbox.",
                 advisory_decision="confirm_current",
+                signal_strength=signal_strength,
             )
         if guarded_backend not in {"", "clear"} or guarded_quality not in {"", "clear"} or guarded_visibility not in {"", "clear"}:
             disposition = "guarded_visual_quality"
+            label = f"Guarded suggestion: {guarded_target or 'review class'}"
+            priority = "normal"
+            if signal_strength == "strong":
+                label = f"Strong guarded signal: possible {guarded_target or 'class change'} from limited crop"
+                priority = "high"
+            elif signal_strength == "weak":
+                label = f"Guarded: weak {guarded_target or 'class-change'} signal from limited crop"
+                priority = "low"
         elif "overlap" in reason_text or "contamination" in reason_text or "duplicate_like" in reason_text:
             disposition = "guarded_overlap_risk"
+            label = f"Guarded suggestion: {guarded_target or 'review class'}"
+            priority = "normal"
         elif "visible target cues" in reason_text:
             disposition = "guarded_missing_visible_cues"
+            label = f"Guarded suggestion: {guarded_target or 'review class'}"
+            priority = "normal"
         elif "anchor" in reason_text:
             disposition = "guarded_anchor_support"
+            label = f"Guarded suggestion: {guarded_target or 'review class'}"
+            priority = "normal"
         else:
             disposition = "guarded_policy_block"
+            label = f"Guarded suggestion: {guarded_target or 'review class'}"
+            priority = "normal"
         return _make(
             disposition,
             "guarded_human_triage",
-            f"Guarded suggestion: {guarded_target or 'review class'}",
+            label,
             target=guarded_target,
             reason=reasons[0] if reasons else "Controller guardrail blocked automatic recommendation.",
             advisory_decision=guarded_decision,
+            priority=priority,
+            signal_strength=signal_strength,
         )
     if cue_verifier and not cue_verifier.get("verified"):
         return _make(
@@ -915,8 +1035,11 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     actionables: List[Dict[str, Any]] = []
     review_disposition_counts: Counter[str] = Counter()
     review_disposition_signal_counts: Counter[str] = Counter()
+    review_disposition_strength_counts: Counter[str] = Counter()
     specificity_alignment_counts: Counter[str] = Counter()
     target_background_contrast_counts: Counter[str] = Counter()
+    specificity_probe_margin_counts: Counter[str] = Counter()
+    specificity_probe_status_counts: Counter[str] = Counter()
     target_identity_uncertainty_counts: Counter[str] = Counter()
     dual_bbox_resolution_counts: Counter[str] = Counter()
     overlap_adjudication_verified_count = 0
@@ -926,11 +1049,16 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     cue_verifier_contrastive_support_count = 0
     cue_verifier_missing_current_cue_count = 0
     current_class_plausible_count = 0
+    high_confidence_probe_missing_sddf_lite_count = 0
+    specificity_probe_reconciled_count = 0
+    specificity_probe_reconciliation_reason_counts: Counter[str] = Counter()
 
     for record in records:
         disposition = _record_review_disposition(record)
         review_disposition_counts[str(disposition.get("disposition") or "missing")] += 1
         review_disposition_signal_counts[str(disposition.get("signal") or "missing")] += 1
+        if disposition.get("signal_strength"):
+            review_disposition_strength_counts[str(disposition.get("signal_strength") or "missing")] += 1
         decision = str(record.get("decision") or "").strip()
         backend_tier = str(record.get("backend_tier") or "").strip().lower()
         visual_quality = str(record.get("visual_quality") or "").strip().lower()
@@ -953,6 +1081,34 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         ).strip().lower()
         specificity_alignment_counts[specificity_alignment or "missing"] += 1
         target_background_contrast_counts[target_background_contrast or "missing"] += 1
+        specificity_probe = record.get("specificity_probe") if isinstance(record.get("specificity_probe"), dict) else {}
+        specificity_probe_status_counts[str(specificity_probe.get("status") or record.get("specificity_probe_status") or "missing")] += 1
+        specificity_probe_margin_counts[str(specificity_probe.get("specificity_margin") or record.get("specificity_probe_margin") or "missing")] += 1
+        reconciliation_reasons = (
+            specificity_probe.get("reconciled_from_subdescription_assessments")
+            if isinstance(specificity_probe.get("reconciled_from_subdescription_assessments"), list)
+            else record.get("specificity_probe_reconciliations")
+            if isinstance(record.get("specificity_probe_reconciliations"), list)
+            else []
+        )
+        if reconciliation_reasons:
+            specificity_probe_reconciled_count += 1
+            specificity_probe_reconciliation_reason_counts.update(
+                str(reason)
+                for reason in reconciliation_reasons
+                if str(reason or "").strip()
+            )
+        try:
+            specificity_probe_confidence = float(specificity_probe.get("confidence") or record.get("specificity_probe_confidence") or 0.0)
+        except Exception:
+            specificity_probe_confidence = 0.0
+        if (
+            specificity_probe_confidence >= 0.75
+            and str(specificity_probe.get("status") or record.get("specificity_probe_status") or "") == "completed"
+            and not (specificity_probe.get("subdescription_assessments") or [])
+            and not int(record.get("specificity_probe_subdescription_count") or 0)
+        ):
+            high_confidence_probe_missing_sddf_lite_count += 1
         target_identity_uncertainty_counts[target_identity_uncertainty or "missing"] += 1
         dual_bbox_resolution_counts[dual_bbox_resolution or "missing"] += 1
         if bool(record.get("overlap_adjudication_verified")):
@@ -1148,6 +1304,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             decision == "confirm_current"
             and suggested_evidence == "strong"
             and not _record_uses_confirm_current_overlap_rebuttal_path(record)
+            and not _record_uses_confirm_current_specificity_probe_rebuttal_path(record)
         ):
             _add_issue(issues, "confirm_overrides_strong_suggested", record, "suggested_evidence=strong")
 
@@ -1175,8 +1332,13 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "guarded_recommendation_count": len(guarded_recommendations),
         "review_disposition_counts": dict(review_disposition_counts),
         "review_disposition_signal_counts": dict(review_disposition_signal_counts),
+        "review_disposition_signal_strength_counts": dict(review_disposition_strength_counts),
         "specificity_alignment_counts": dict(specificity_alignment_counts),
         "target_background_contrast_counts": dict(target_background_contrast_counts),
+        "specificity_probe_status_counts": dict(specificity_probe_status_counts),
+        "specificity_probe_margin_counts": dict(specificity_probe_margin_counts),
+        "specificity_probe_reconciled_count": specificity_probe_reconciled_count,
+        "specificity_probe_reconciliation_reason_counts": dict(specificity_probe_reconciliation_reason_counts),
         "target_identity_uncertainty_counts": dict(target_identity_uncertainty_counts),
         "dual_bbox_resolution_counts": dict(dual_bbox_resolution_counts),
         "overlap_adjudication_verified_count": overlap_adjudication_verified_count,
@@ -1186,6 +1348,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "cue_verifier_contrastive_support_count": cue_verifier_contrastive_support_count,
         "cue_verifier_missing_current_cue_count": cue_verifier_missing_current_cue_count,
         "current_class_plausible_count": current_class_plausible_count,
+        "high_confidence_probe_missing_sddf_lite_count": high_confidence_probe_missing_sddf_lite_count,
         "effective_human_signal_count": sum(
             count
             for signal, count in review_disposition_signal_counts.items()
@@ -1279,8 +1442,14 @@ def print_report(audit: Dict[str, Any], comparison: Optional[Dict[str, Any]] = N
     print(f"Effective human signals: {audit.get('effective_human_signal_count', 0)}")
     print(f"Disposition signals: {json.dumps(audit.get('review_disposition_signal_counts', {}), sort_keys=True)}")
     print(f"Disposition counts: {json.dumps(audit.get('review_disposition_counts', {}), sort_keys=True)}")
+    print(f"Guarded signal strength: {json.dumps(audit.get('review_disposition_signal_strength_counts', {}), sort_keys=True)}")
     print(f"Specificity alignment: {json.dumps(audit.get('specificity_alignment_counts', {}), sort_keys=True)}")
     print(f"Target/background contrast: {json.dumps(audit.get('target_background_contrast_counts', {}), sort_keys=True)}")
+    print(f"Specificity probe status: {json.dumps(audit.get('specificity_probe_status_counts', {}), sort_keys=True)}")
+    print(f"Specificity probe margin: {json.dumps(audit.get('specificity_probe_margin_counts', {}), sort_keys=True)}")
+    print(f"Specificity probe reconciled: {audit.get('specificity_probe_reconciled_count', 0)}")
+    print(f"Specificity probe reconciliation reasons: {json.dumps(audit.get('specificity_probe_reconciliation_reason_counts', {}), sort_keys=True)}")
+    print(f"High-confidence probes missing SDDF-lite assessments: {audit.get('high_confidence_probe_missing_sddf_lite_count', 0)}")
     print(f"Target identity uncertainty: {json.dumps(audit.get('target_identity_uncertainty_counts', {}), sort_keys=True)}")
     print(f"Dual-bbox resolution: {json.dumps(audit.get('dual_bbox_resolution_counts', {}), sort_keys=True)}")
     print(f"Overlap adjudication verified: {audit.get('overlap_adjudication_verified_count', 0)}")

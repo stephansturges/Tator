@@ -1022,8 +1022,17 @@ def test_qwen_review_benchmark_audit_lists_guarded_recommendations():
             "decision": "accept_suggested",
             "target_class": "LightVehicle",
             "confidence": 0.82,
+            "target_evidence": "strong",
+            "current_evidence": "weak",
             "guardrail_reasons": ["accept_suggested requires clear backend visual-quality tier, got limited"],
             "rationale_short": "target looks like a pickup",
+        },
+        specificity_probe={
+            "status": "completed",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "specificity_margin": "suggested_target_favored",
+            "target_identity_uncertainty": "low",
         },
     )
 
@@ -1038,6 +1047,8 @@ def test_qwen_review_benchmark_audit_lists_guarded_recommendations():
     assert guarded["point_id"] == "p1"
     assert guarded["guarded_recommendation"]["target_class"] == "LightVehicle"
     assert guarded["review_disposition"]["disposition"] == "guarded_visual_quality"
+    assert guarded["review_disposition"]["signal_strength"] == "strong"
+    assert guarded["review_disposition"]["priority"] == "high"
 
 
 def test_qwen_review_benchmark_audit_counts_current_overlap_false_alarm_as_useful_negative():
@@ -1235,6 +1246,90 @@ def test_qwen_review_benchmark_audit_allows_overlap_rebutted_confirm_current():
     audit = audit_records([record])
 
     assert audit["unsafe_issue_count"] == 0
+
+
+def test_qwen_review_benchmark_audit_allows_specificity_probe_rebutted_confirm_current():
+    record = _record(
+        decision="confirm_current",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_class="Truck",
+        suggested_neighbor_class="LightVehicle",
+        current_evidence="strong",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        anchor_evidence_current="moderate",
+        overlap_assessment="unclear",
+        overlap_explains_candidate_similarity=False,
+        visible_target_cues=["white cab", "rectangular cargo bed", "white tank in bed"],
+        rationale_short="Distinct truck features confirm the current class despite strong neighbor signal.",
+        specificity_alignment="supports_current",
+        target_background_contrast="target_specific",
+        specificity_probe={
+            "status": "completed",
+            "confidence": 0.92,
+            "specificity_alignment": "supports_current",
+            "target_background_contrast": "target_specific",
+            "best_supported_class": "Truck",
+            "target_specific_cues": ["white cab", "rectangular cargo bed", "white tank in bed"],
+        },
+        model_compact_arguments={
+            "current_evidence": "strong",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_current": "moderate",
+            "overlap_assessment": "unclear",
+            "overlap_explains_candidate_similarity": False,
+            "specificity_alignment": "supports_current",
+            "target_background_contrast": "target_specific",
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["unsafe_issue_count"] == 0
+
+
+def test_qwen_review_benchmark_audit_blocks_weak_probe_rebutted_confirm_current():
+    record = _record(
+        decision="confirm_current",
+        backend_tier="clear",
+        visual_quality="clear",
+        object_visibility="clear",
+        current_class="Truck",
+        suggested_neighbor_class="LightVehicle",
+        current_evidence="strong",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        anchor_evidence_current="moderate",
+        overlap_assessment="unclear",
+        overlap_explains_candidate_similarity=False,
+        visible_target_cues=["white cab", "rectangular cargo bed"],
+        specificity_alignment="supports_current",
+        target_background_contrast="target_specific",
+        specificity_probe={
+            "status": "completed",
+            "confidence": 0.55,
+            "specificity_alignment": "supports_current",
+            "target_background_contrast": "target_specific",
+            "best_supported_class": "Truck",
+        },
+        model_compact_arguments={
+            "current_evidence": "strong",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_current": "moderate",
+            "overlap_assessment": "unclear",
+            "overlap_explains_candidate_similarity": False,
+            "specificity_alignment": "supports_current",
+            "target_background_contrast": "target_specific",
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["issue_counts"]["confirm_overrides_strong_suggested"] == 1
 
 
 def test_qwen_review_benchmark_audit_blocks_unrebutted_strong_suggestion_confirm_current():

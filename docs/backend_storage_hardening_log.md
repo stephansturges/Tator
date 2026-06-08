@@ -2282,3 +2282,32 @@ preserving the exact validation story for storage and artifact-write fixes.
   ybat-master/ybat.js`, `git diff --check`, focused route/layout/calibration UI
   contracts, focused class-analysis coverage, live backend checks for `/`,
   `/tator.html`, `/ybat.html`, `/ybat.js`, and `/system/health_summary`.
+
+## 2026-06-08: Shortcut Remapping And Qwen Specificity Probe Closeout
+
+- Replaced the static Label Images shortcut explainer with a registry-backed
+  shortcut panel that lists the active bindings, stores browser-local
+  customizations, and supports reset, clear, import, and export actions.
+- Added remappable actions for next/previous image, next/previous class, start
+  drawing, end drawing, cancel drawing/focus, box deletion, latest-box deletion,
+  SAM point and multi-point controls, region-detect hold, Auto/SAM mode toggles,
+  YOLO-caption export, SAM3 similarity, and direct class ID slots `0` through
+  `19`.
+- Kept the shortcut editor inside the Label Images sidebar instead of adding
+  another top-level tab, and updated light, dark, and Pip-Boy theme styling so
+  key chips and remap rows remain readable.
+- Added the Class Split Qwen specificity probe and region-contrast evidence
+  path: the review loop can render clean context, target-only pixels,
+  target-removed context, and strongest-overlap pixels, then ask Qwen to
+  separate target-specific evidence from background/overlap cues before final
+  review.
+- Extended benchmark audit output with specificity-probe status, margin,
+  reconciliation, guarded signal strength, and confirm-current rebuttal checks.
+- Validation: `node --check ybat-master/ybat.js`, `py_compile` for
+  `localinferenceapi.py`, the Qwen benchmark tools, and the focused tests;
+  `tests/test_labeling_panel_layout_contract.py` (`23 passed`),
+  `tests/test_tator_ui_routes.py` (`1 passed`), and combined
+  `tests/test_class_analysis.py tests/test_qwen_review_benchmark_audit.py`
+  (`251 passed`). `git diff --check` passed. The in-app browser surface was not
+  available in this Codex session, so browser verification was limited to route
+  and static contract tests.

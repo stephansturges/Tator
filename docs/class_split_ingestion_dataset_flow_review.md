@@ -310,10 +310,13 @@ Fix from this pass:
   between-class PCA, within-filter PCA, and UMAP. UMAP exposes neighbor and
   minimum-distance controls for subclass-island work, while explicit subclass
   search exposes its own UMAP island or strict embedding proposal settings.
-- The Label Images shortcut explainer now lists `D` as SAM point mode
-  explicitly. The class carousel used by `E/R` is lighter: it renders a bounded
-  nearby class window, updates Qwen/SAM3 target selects without rebuilding full
-  option lists, and debounces Class Split control refreshes.
+- The Label Images shortcut explainer is now generated from the active shortcut
+  registry, and the same sidebar has a collapsible shortcut editor for
+  replacing/removing defaults, assigning direct class-ID keys, and
+  importing/exporting browser-local shortcut maps. The class carousel used by
+  `E/R` is lighter: it renders a bounded nearby class window, updates Qwen/SAM3
+  target selects without rebuilding full option lists, and debounces Class Split
+  control refreshes.
 
 ## Journey 7: Optional Class Split Dataset Analysis
 

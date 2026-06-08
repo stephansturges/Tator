@@ -25811,6 +25811,8 @@ CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_REQUIRED_FIELDS: Tuple[str, ...] = (
     "current_class_plausibility_basis",
     "current_class_plausible",
     "current_class_plausibility_reason",
+    "whole_target_extent_supported",
+    "whole_target_extent_reason",
     "overlap_rebutted",
     "overlap_risk",
     "overlap_rebuttal",
@@ -25939,6 +25941,19 @@ def _class_analysis_qwen_review_final_tool_spec(labelmap: Sequence[str]) -> Dict
                         "Whether the visible evidence is target-object specific or dominated by background/overlap/context."
                     ),
                 },
+                "whole_target_extent_supported": {
+                    "type": "boolean",
+                    "description": (
+                        "True only when the recommended final class explains the whole reviewed bbox/object extent. "
+                        "For class changes, set false if the clean target contains a large attached extension, "
+                        "compartment, appendage, support, tool, cargo body, roof, trailer-like segment, or continuous "
+                        "structure that the proposed class does not explain."
+                    ),
+                },
+                "whole_target_extent_reason": {
+                    "type": "string",
+                    "description": "Under 25 words; visible-fact reason for whether the final class explains the full target extent.",
+                },
                 "dual_bbox_resolution": {
                     "type": "string",
                     "enum": list(CLASS_ANALYSIS_QWEN_REVIEW_DUAL_BBOX_RESOLUTIONS),
@@ -25986,6 +26001,8 @@ def _class_analysis_qwen_review_final_tool_spec(labelmap: Sequence[str]) -> Dict
                 "overlap_explains_candidate_similarity",
                 "specificity_alignment",
                 "target_background_contrast",
+                "whole_target_extent_supported",
+                "whole_target_extent_reason",
                 "visible_target_cues",
                 "rationale_short",
             ],
@@ -26022,7 +26039,10 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                     "items": {"type": "string"},
                     "minItems": 0,
                     "maxItems": 6,
-                    "description": "Positive object-internal or target-touching cues for the target class.",
+                    "description": (
+                        "Positive object-internal or target-touching cues for the target class. "
+                        "The cues must describe the reviewed target bbox/object, not only a smaller visible subpart."
+                    ),
                 },
                 "current_class_positive_cues": {
                     "type": "array",
@@ -26054,6 +26074,22 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                 "current_class_plausibility_reason": {
                     "type": "string",
                     "description": "Short visible-fact reason for why the current class is or is not still plausible.",
+                },
+                "whole_target_extent_supported": {
+                    "type": "boolean",
+                    "description": (
+                        "True only when the proposed target class explains the whole reviewed bbox/object extent. "
+                        "Set false if the clean target contains a large attached extension, compartment, appendage, "
+                        "support, tool, cargo body, trailer-like segment, roof, or other continuous structure that "
+                        "the proposed class does not explain."
+                    ),
+                },
+                "whole_target_extent_reason": {
+                    "type": "string",
+                    "description": (
+                        "Short visible-fact reason for whether the proposed class explains the full target extent, "
+                        "including attached or continuous structures inside the bbox."
+                    ),
                 },
                 "overlap_rebutted": {
                     "type": "boolean",
@@ -26111,6 +26147,8 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                 "current_class_plausibility_basis",
                 "current_class_plausible",
                 "current_class_plausibility_reason",
+                "whole_target_extent_supported",
+                "whole_target_extent_reason",
                 "overlap_rebutted",
                 "overlap_risk",
                 "overlap_rebuttal",
@@ -27160,6 +27198,15 @@ def _class_analysis_qwen_review_text_conflicts_with_accept_suggested(
         for pattern in suggested_patterns:
             if re.search(pattern, text_lower):
                 return f"accept_suggested conflicts with model text rejecting suggested class {suggested_class}"
+    explicit_current_support_patterns = [
+        rf"\b(?:could|may|might|would)\s+(?:justify|support|fit|explain)\s+(?:the\s+)?{re.escape(str(current_class).strip().lower())}\s+(?:label|class)\b",
+        rf"\b{re.escape(str(current_class).strip().lower())}\s+(?:label|class)\s+(?:is|remains|could\s+be|may\s+be|might\s+be)\s+(?:valid|plausible|supported|justified)\b",
+        rf"\bcurrent\s+(?:class|label)\s+{re.escape(str(current_class).strip().lower())}\b[^.?!]{{0,120}}\b(?:is|remains|could\s+be|may\s+be|might\s+be)\s+(?:valid|plausible|supported|justified)\b",
+        rf"\bcurrent\s+(?:class|label)\b[^.?!]{{0,80}}\b{re.escape(str(current_class).strip().lower())}\b[^.?!]{{0,80}}\b(?:valid|plausible|supported|justified)\b",
+    ]
+    for pattern in explicit_current_support_patterns:
+        if re.search(pattern, text_lower):
+            return f"accept_suggested conflicts with model text supporting current class {current_class}"
     if _class_analysis_qwen_review_text_allows_adjacent_accept(
         current_class=current_class,
         suggested_class=suggested_class,
@@ -27168,13 +27215,11 @@ def _class_analysis_qwen_review_text_conflicts_with_accept_suggested(
         return None
     if _class_analysis_qwen_review_text_rejects_label_for_target(label=current_class, payload=payload):
         return None
-    current_patterns = [
-        rf"\b(?:target|object|crop|target\s+crop)\b[^.?!]{{0,80}}\b(?:clearly|visibly|obviously|unambiguously)\b[^.?!]{{0,80}}\b(?:shows|is|appears|looks)\b[^.,?!]{{0,80}}\b{re.escape(str(current_class).strip().lower())}\b",
-        rf"\b(?:target|object|crop|target\s+crop)\b[^.?!]{{0,80}}\b(?:shows|is|appears|looks)\b[^.?!]{{0,80}}\b(?:clearly|visibly|obviously|unambiguously)\b[^.,?!]{{0,80}}\b{re.escape(str(current_class).strip().lower())}\b",
-        rf"\b(?:could|may|might|would)\s+(?:justify|support|fit|explain)\s+(?:the\s+)?{re.escape(str(current_class).strip().lower())}\s+(?:label|class)\b",
-        rf"\b{re.escape(str(current_class).strip().lower())}\s+(?:label|class)\s+(?:is|remains|could\s+be|may\s+be|might\s+be)\s+(?:valid|plausible|supported|justified)\b",
+    target_current_support_patterns = [
+        rf"\b(?:target|object|crop|target\s+crop)\b[^.;?!]{{0,80}}\b(?:clearly|visibly|obviously|unambiguously)\b[^.;?!]{{0,80}}\b(?:shows|is|appears|looks)\b[^.;,?!]{{0,80}}\b{re.escape(str(current_class).strip().lower())}\b",
+        rf"\b(?:target|object|crop|target\s+crop)\b[^.;?!]{{0,80}}\b(?:shows|is|appears|looks)\b[^.;?!]{{0,80}}\b(?:clearly|visibly|obviously|unambiguously)\b[^.;,?!]{{0,80}}\b{re.escape(str(current_class).strip().lower())}\b",
     ]
-    for pattern in current_patterns:
+    for pattern in target_current_support_patterns:
         if re.search(pattern, text_lower):
             return f"accept_suggested conflicts with model text supporting current class {current_class}"
     if _class_analysis_qwen_review_text_directly_supports_label(label=current_class, payload=payload):
@@ -27999,6 +28044,11 @@ def _class_analysis_qwen_review_expand_compact_final(
             "n/a": "not_applicable",
         },
     )
+    whole_target_extent_supported = _class_analysis_qwen_review_coerce_bool(
+        args.get("whole_target_extent_supported"),
+        default=decision not in {"accept_suggested", "change_to_other"},
+    )
+    whole_target_extent_reason = str(args.get("whole_target_extent_reason") or "")[:1200]
     rationale = (
         str(
             args.get("rationale_short")
@@ -28076,6 +28126,8 @@ def _class_analysis_qwen_review_expand_compact_final(
         "overlap_explains_candidate_similarity": overlap_explains,
         "specificity_alignment": specificity_alignment,
         "target_background_contrast": target_background_contrast,
+        "whole_target_extent_supported": whole_target_extent_supported,
+        "whole_target_extent_reason": whole_target_extent_reason,
         "dual_bbox_resolution": dual_bbox_resolution,
         "dual_bbox_conflict": copy.deepcopy(dual_bbox_conflict) if dual_bbox_conflict else None,
         "anchor_evidence_current": anchor_evidence_current,
@@ -28337,6 +28389,10 @@ def _class_analysis_qwen_review_validate_final(
     current_class_plausible = _coerce_payload_bool(payload.get("current_class_plausible"))
     current_class_plausibility_checked = "current_class_plausible" in payload
     current_class_plausibility_reason = str(payload.get("current_class_plausibility_reason") or "")[:1200]
+    whole_target_extent_supported = _coerce_payload_bool(payload.get("whole_target_extent_supported"))
+    whole_target_extent_reason = str(payload.get("whole_target_extent_reason") or "")[:1200]
+    if payload.get("whole_target_extent_supported") is None and not expanded_by_controller:
+        whole_target_extent_supported = True
     glossary_or_guidance_used = _coerce_payload_bool(payload.get("glossary_or_guidance_used"))
     visible_target_cues = _class_analysis_qwen_review_visible_cues_from_payload(
         payload,
@@ -28658,6 +28714,11 @@ def _class_analysis_qwen_review_validate_final(
             _hard(f"{decision} requires at least two concrete visible target cues, got {len(visible_target_cues)}")
     elif decision == "confirm_current" and not visible_target_cues:
         _advise("confirm_current has no visible target cue ledger", 0.72)
+    if decision in {"accept_suggested", "change_to_other"} and not whole_target_extent_supported:
+        _hard(
+            f"{decision} requires the recommended class to explain the whole target extent"
+            + (f": {whole_target_extent_reason}" if whole_target_extent_reason else "")
+        )
     if decision in {"accept_suggested", "change_to_other"} and isinstance(evidence_ledger, dict):
         ledger_rows = [row for row in (evidence_ledger.get("rows") or []) if isinstance(row, dict)]
         clean_visual_ids = {
@@ -28864,6 +28925,8 @@ def _class_analysis_qwen_review_validate_final(
             "same_image_embedding_evidence": same_image_embedding_evidence,
             "specificity_alignment": specificity_alignment,
             "target_background_contrast": target_background_contrast,
+            "whole_target_extent_supported": whole_target_extent_supported,
+            "whole_target_extent_reason": whole_target_extent_reason,
             "overlap_assessment": overlap_assessment,
             "dual_bbox_resolution": dual_bbox_resolution,
             "dual_bbox_conflict": copy.deepcopy(dual_bbox_conflict) if dual_bbox_conflict else None,
@@ -28933,6 +28996,8 @@ def _class_analysis_qwen_review_validate_final(
         "same_image_embedding_evidence": same_image_embedding_evidence,
         "specificity_alignment": specificity_alignment,
         "target_background_contrast": target_background_contrast,
+        "whole_target_extent_supported": whole_target_extent_supported,
+        "whole_target_extent_reason": whole_target_extent_reason,
         "glossary_or_guidance_used": glossary_or_guidance_used,
         "backend_visual_quality": backend_quality,
         "guardrail_reasons": guardrail_reasons,
@@ -28966,6 +29031,8 @@ def _class_analysis_qwen_review_skip_result(
         "anchor_adjudication_reason": "",
         "specificity_alignment": "insufficient",
         "target_background_contrast": "insufficient",
+        "whole_target_extent_supported": False,
+        "whole_target_extent_reason": str(reason or "Qwen review did not reach a class-change decision.")[:1200],
         "dual_bbox_resolution": "not_applicable",
         "dual_bbox_conflict": None,
         "visible_target_cues": [],
@@ -29521,11 +29588,11 @@ def _class_analysis_qwen_review_final_instruction(
         dual_conflict_lines = ["No near-identical cross-class dual-bbox conflict is active. Set dual_bbox_resolution=not_applicable."]
     policy_lines = [
         "Return only JSON. No markdown, prose, chain-of-thought, tool names, or outer wrapper.",
-        'Required keys: decision, final_class, confidence, visual_quality, object_visibility, current_evidence, suggested_evidence, target_evidence, overlap_assessment, overlap_explains_candidate_similarity, specificity_alignment, target_background_contrast, dual_bbox_resolution, visible_target_cues, rationale_short.',
+        'Required keys: decision, final_class, confidence, visual_quality, object_visibility, current_evidence, suggested_evidence, target_evidence, overlap_assessment, overlap_explains_candidate_similarity, specificity_alignment, target_background_contrast, whole_target_extent_supported, whole_target_extent_reason, dual_bbox_resolution, visible_target_cues, rationale_short.',
         "Optional but preferred: supporting_clean_evidence_ids, local_consensus_evidence, counter_evidence, human_review_needed.",
         'Minimal valid example: {"decision":"skip_uncertain","final_class":"'
         + str(point.get("class_name") or "")
-        + '","confidence":0.2,"visual_quality":"limited","object_visibility":"partial","current_evidence":"weak","suggested_evidence":"weak","target_evidence":"weak","overlap_assessment":"unclear","overlap_explains_candidate_similarity":false,"specificity_alignment":"insufficient","target_background_contrast":"insufficient","dual_bbox_resolution":"not_applicable","visible_target_cues":[],"supporting_clean_evidence_ids":[],"rationale_short":"target is not clear enough"}',
+        + '","confidence":0.2,"visual_quality":"limited","object_visibility":"partial","current_evidence":"weak","suggested_evidence":"weak","target_evidence":"weak","overlap_assessment":"unclear","overlap_explains_candidate_similarity":false,"specificity_alignment":"insufficient","target_background_contrast":"insufficient","whole_target_extent_supported":false,"whole_target_extent_reason":"target extent is not clear","dual_bbox_resolution":"not_applicable","visible_target_cues":[],"supporting_clean_evidence_ids":[],"rationale_short":"target is not clear enough"}',
         f"Required tools already inspected: {required_list}.",
         f"Available evidence ids: {evidence_list}.",
         f"Current class: {point.get('class_name')}",
@@ -29537,8 +29604,11 @@ def _class_analysis_qwen_review_final_instruction(
         "Use clean target/source/zoom pixels for visible_target_cues. Do not use overlay boxes, dot maps, neighbor labels, deterministic reports, or class names as visible cues.",
         "Use specificity_alignment to state which hypothesis is supported by target-contained object-specific cues: supports_current, supports_suggested, supports_other, mixed, insufficient, or not_applicable.",
         "Use target_background_contrast to separate target-object evidence from context: target_specific, background_dominated, overlap_dominated, mixed, insufficient, or not_applicable.",
+        "Set whole_target_extent_supported=true only when your recommended final class explains the whole reviewed bbox/object extent.",
+        "Set whole_target_extent_supported=false when your recommendation explains only a subcomponent or ignores a large attached/continuous structure inside the bbox.",
         "For accept_suggested/change_to_other, include at least two concrete positive target cues and cite clean target/source evidence ids in supporting_clean_evidence_ids.",
         "Class changes require target-contained evidence: suggested_evidence=strong, target_evidence=strong, current_evidence weak/none, target_background_contrast=target_specific, the matching specificity_alignment, and no overlap explanation for the suggested class.",
+        "Class changes also require the proposed final class to explain the whole reviewed bbox/object extent. Do not accept a change by focusing on a cab, corner, small object, texture patch, or other subcomponent while ignoring a large attached or continuous extension, compartment, appendage, support, roof, cargo body, tool, or trailer-like segment inside the same bbox.",
         "confirm_current is valid when the clean target supports the current class. If suggested evidence is moderate/strong, explain why overlap or near context accounts for that signal.",
         "Use same-image scale and embedding reports to guide visual attention, but do not output scale/embedding fields; the controller records those reports separately.",
         "Local consensus is not ground truth; use its clean crop as context and its dot map only as annotation-distribution context.",
@@ -29584,6 +29654,8 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
         "current_class_plausibility_basis": "none",
         "current_class_plausible": False,
         "current_class_plausibility_reason": "",
+        "whole_target_extent_supported": False,
+        "whole_target_extent_reason": "",
         "overlap_rebutted": False,
         "overlap_risk": "not_applicable",
         "overlap_rebuttal": "",
@@ -29620,6 +29692,10 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
                         "Use the current and target class concept briefs in the compact context, especially valid_variations, exclude_when, common_confusions, and uncertainty_triggers.",
                         "Do not count class names, `matches class`, local-consensus dots, neighbor labels, overlay boxes, negative claims, absence claims, color-only claims, or generic overhead/parked/context claims.",
                         "Each positive_visible_target_cue must be a concrete visible property such as shape, parts, material, structure, texture, edges, posture, or target-touching context.",
+                        "Judge the whole reviewed bbox/object extent, not just the most recognizable subpart. A class change is not verified if the proposed class explains only a cab, corner, small object, texture patch, or other subcomponent while ignoring a large attached or continuous structure inside the same bbox.",
+                        "Set whole_target_extent_supported=true only when the proposed target class explains the full visible target extent.",
+                        "Set whole_target_extent_supported=false when the clean target contains a large attached extension, compartment, appendage, support, tool, cargo body, trailer-like segment, roof, or continuous structure that the proposed target class does not explain.",
+                        "When whole_target_extent_supported=false, explain the issue in whole_target_extent_reason and leave verified=false.",
                         "Use current_class_positive_cues only for concrete, direct current-class evidence visible in clean target/source pixels.",
                         "Do not copy proposed-target cues into current_class_positive_cues just because they are generic shared shape, color, texture, or context cues.",
                         "Set current_class_plausibility_basis=direct_positive_cues only when current_class_positive_cues contain independent current-class evidence.",
@@ -29637,7 +29713,7 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
                         "Set anchor_support_basis=conflicting_anchors when trusted anchors/examples support the current class or a third class more strongly than the proposed target class.",
                         "Set anchor_support_basis=insufficient when the anchors/examples are too weak, too sparse, or not visible enough to judge.",
                         "Set anchor_support_verified=true only for target_specific_anchors; otherwise leave it false and explain the uncertainty in anchor_support_reason.",
-                        "Set verified=true only when at least two positive target-class cues are visible, target evidence is not just scene context, overlap_rebutted is true or overlap is not applicable, current_class_positive_cues is empty or clearly irrelevant, and current_class_plausible=false.",
+                        "Set verified=true only when at least two positive target-class cues are visible, the proposed target class explains the whole target extent, target evidence is not just scene context, overlap_rebutted is true or overlap is not applicable, current_class_positive_cues is empty or clearly irrelevant, and current_class_plausible=false.",
                         "Set verified=false when the evidence is context-only, negative-only, color-only, target pixels are ambiguous, or the clean crop still plausibly supports the current class.",
                         "Set cue_confidence above 0.85 only for visually obvious positive target-object evidence.",
                         "The controller will re-run the normal validator; this verifier cannot bypass overlap, quality, anchor, or clean-evidence guardrails.",
@@ -29677,6 +29753,7 @@ def _class_analysis_qwen_review_cue_verifier_repair_instruction(
                         f"Allowed supporting_clean_evidence_ids: {', '.join(clean_target_ids) or '(none)'}",
                         f"Required keys: {required_fields}.",
                         "If you cannot verify two concrete target-positive cues, still return the full schema with verified=false, empty arrays where appropriate, cue_confidence no higher than 0.84, and a short rejection_reason.",
+                        "If the proposed class explains only a subcomponent rather than the whole reviewed bbox/object extent, set whole_target_extent_supported=false and verified=false.",
                         "Do not return a partial object. Do not omit target_class. Do not include extra legacy keys, markdown, or prose outside JSON.",
                     ]
                 ),
@@ -30148,6 +30225,8 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
         for field_name in (
             "current_class_plausible",
             "current_class_plausibility_reason",
+            "whole_target_extent_supported",
+            "whole_target_extent_reason",
         )
         if field_name not in args
     ]
@@ -30218,6 +30297,11 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
         current_class_plausible and current_class_plausibility_basis == "direct_positive_cues"
     ) or bool(independent_current_cues)
     current_class_plausibility_reason = str(args.get("current_class_plausibility_reason") or "")[:1200]
+    whole_target_extent_supported = _class_analysis_qwen_review_coerce_bool(
+        args.get("whole_target_extent_supported"),
+        default=False,
+    )
+    whole_target_extent_reason = str(args.get("whole_target_extent_reason") or "")[:1200]
     overlap_risk = _class_analysis_qwen_review_coerce_choice(
         args.get("overlap_risk"),
         ("target_specific", "overlap_explains", "uncertain", "not_applicable"),
@@ -30311,6 +30395,8 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
         "raw_current_class_plausible": bool(current_class_plausible),
         "current_class_plausibility_basis": current_class_plausibility_basis,
         "current_class_plausibility_reason": current_class_plausibility_reason,
+        "whole_target_extent_supported": bool(whole_target_extent_supported),
+        "whole_target_extent_reason": whole_target_extent_reason,
         "overlap_rebutted": bool(overlap_rebutted),
         "overlap_risk": overlap_risk,
         "overlap_risk_reconciled": overlap_risk_reconciled,
@@ -30327,6 +30413,12 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
     if len(independent_target_cues) < 2:
         normalized["verified"] = False
         normalized["rejection_reason"] = "Verifier did not provide two independent positive target cues."
+    elif not whole_target_extent_supported:
+        normalized["verified"] = False
+        normalized["rejection_reason"] = (
+            whole_target_extent_reason
+            or "Verifier did not confirm that the proposed class explains the whole target extent."
+        )
     elif independent_current_cues:
         normalized["verified"] = False
         normalized["rejection_reason"] = (
@@ -30443,6 +30535,8 @@ def _class_analysis_qwen_review_try_cue_verifier(
         "current_class_positive_cues": [],
         "current_class_plausible": False,
         "current_class_plausibility_reason": "",
+        "whole_target_extent_supported": False,
+        "whole_target_extent_reason": "",
         "overlap_rebutted": False,
         "overlap_risk": "uncertain",
         "overlap_rebuttal": "",

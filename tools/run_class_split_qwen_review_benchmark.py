@@ -251,6 +251,8 @@ def _record_from_review(
         "dual_bbox_conflict": final.get("dual_bbox_conflict"),
         "specificity_alignment": final.get("specificity_alignment"),
         "target_background_contrast": final.get("target_background_contrast"),
+        "whole_target_extent_supported": final.get("whole_target_extent_supported"),
+        "whole_target_extent_reason": final.get("whole_target_extent_reason") or "",
         "visible_target_cues": final.get("visible_target_cues") or [],
         "supporting_clean_evidence_ids": final.get("supporting_clean_evidence_ids") or [],
         "anchor_evidence_current": final.get("anchor_evidence_current"),
@@ -303,6 +305,12 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
     same_image_embedding_report = Counter(str(record.get("same_image_embedding_report_signal") or "missing") for record in records)
     specificity_alignment = Counter(str(record.get("specificity_alignment") or "missing") for record in records)
     target_background_contrast = Counter(str(record.get("target_background_contrast") or "missing") for record in records)
+    whole_target_extent = Counter(
+        "supported" if record.get("whole_target_extent_supported") is True
+        else "unsupported" if record.get("whole_target_extent_supported") is False
+        else "missing"
+        for record in records
+    )
     dual_bbox_resolution = Counter(str(record.get("dual_bbox_resolution") or "missing") for record in records)
     overlap_adjudication_verified = sum(1 for record in records if bool(record.get("overlap_adjudication_verified")))
     anchor_adjudication_verified = sum(1 for record in records if bool(record.get("anchor_adjudication_verified")))
@@ -345,6 +353,7 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
         "same_image_embedding_report_signal_counts": dict(same_image_embedding_report),
         "specificity_alignment_counts": dict(specificity_alignment),
         "target_background_contrast_counts": dict(target_background_contrast),
+        "whole_target_extent_counts": dict(whole_target_extent),
         "dual_bbox_resolution_counts": dict(dual_bbox_resolution),
         "overlap_adjudication_verified_count": overlap_adjudication_verified,
         "anchor_adjudication_verified_count": anchor_adjudication_verified,

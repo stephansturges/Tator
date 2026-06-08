@@ -792,13 +792,24 @@ Targeted verifier probe after adding anchor-support adjudication:
   The cue verifier ran on 9 rows, promoted 4 rows, and now used the direct
   `finalize_review->verify_visible_cues` sequence instead of requiring a second
   verifier repair turn.
-- Visual audit note: the actionable sheet
+- Visual audit note and follow-up hardening: the actionable sheet
   `cueverifier_promptfix_clear_guarded14_14_1780888993_visual_non_skip.jpg`
-  showed no obvious automatic-mutation hazard in the advisory output, but one
-  `Truck -> LightVehicle` case remains visually arguable at crop scale because
-  the vehicle is attached to a box/trailer-like structure. That is acceptable for
-  this patch because Class Split Qwen review remains advisory and human-applied;
-  it is not evidence that the VLM review problem is solved end-to-end.
+  showed one visually arguable `Truck -> LightVehicle` case at crop scale. The
+  issue was not a dataset-specific label rule; it was a generic visual-reasoning
+  failure mode where Qwen accepted a class change while its own text still said
+  the current class was plausible, and while the proposed class explanation
+  focused on a recognizable subpart rather than forcing a whole-bbox/object
+  extent check. The final `finalize_review` schema and the cue verifier now
+  require `whole_target_extent_supported` and `whole_target_extent_reason`, and
+  the validator blocks `accept_suggested`/`change_to_other` when the model's own
+  visible-fact text supports the current class. Focused rerun:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/textconflict_narrowed_suspect1_1_1780895831.json`
+  converted the exact row from actionable `accept_suggested` to
+  `skip_uncertain` with a preserved guarded recommendation, 0 unsafe audit
+  issues, 1 effective human-triage signal, and
+  `whole_target_extent_counts={"supported": 1}`. This preserves the VLM's
+  recommendation for the reviewer while preventing a self-contradictory VLM
+  class-change signal from becoming actionable.
 
 Latest Mac probe after restoring VLM finalization and the `final_class` schema:
 

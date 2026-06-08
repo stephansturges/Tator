@@ -462,6 +462,8 @@ def test_class_analysis_qwen_review_compact_final_schema_expands_to_full_audit_p
         "suggested_evidence",
         "specificity_alignment",
         "target_background_contrast",
+        "whole_target_extent_supported",
+        "whole_target_extent_reason",
     } <= required
 
     expanded = api._class_analysis_qwen_review_expand_compact_final(
@@ -482,6 +484,8 @@ def test_class_analysis_qwen_review_compact_final_schema_expands_to_full_audit_p
             "overlap_explains_candidate_similarity": False,
             "specificity_alignment": "supports_suggested",
             "target_background_contrast": "target_specific",
+            "whole_target_extent_supported": True,
+            "whole_target_extent_reason": "The suggested class explains the full target extent.",
             "visible_target_cues": ["compact road-vehicle body", "visible cargo bed"],
             "rationale_short": "clean pickup-like light vehicle",
         },
@@ -560,6 +564,66 @@ def test_class_analysis_qwen_review_preserves_compact_skip_without_class_name_pr
     assert final["target_class"] == "CurrentClass"
     assert final["human_review_needed"] is True
     assert "model object visibility is partial" in final["advisory_reasons"]
+
+
+def test_class_analysis_qwen_review_blocks_class_change_without_whole_extent_support():
+    result = {"summary": {"labelmap": ["CurrentClass", "SuggestedClass"]}}
+    point = {
+        "point_id": "p0",
+        "class_name": "CurrentClass",
+        "suggested_neighbor_class": "SuggestedClass",
+    }
+    clear_quality = {
+        "tier": "clear",
+        "bbox_width": 124.0,
+        "bbox_height": 70.0,
+        "bbox_min_dim": 70.0,
+        "bbox_area": 8680.0,
+        "crop_contrast": 63.8,
+        "crop_dynamic_range": 197.0,
+        "crop_sharpness": 10.4,
+        "edge_clipped": False,
+        "reasons": ["usable"],
+    }
+
+    final = api._class_analysis_qwen_review_validate_final(
+        {
+            "decision": "accept_suggested",
+            "target_class": "SuggestedClass",
+            "confidence": 0.92,
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "none",
+            "overlap_explains_candidate_similarity": False,
+            "anchor_evidence_current": "weak",
+            "anchor_evidence_suggested": "strong",
+            "local_context_evidence": "strong",
+            "global_context_evidence": "strong",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "whole_target_extent_supported": False,
+            "whole_target_extent_reason": (
+                "SuggestedClass explains only a smaller subcomponent, not the attached structure."
+            ),
+            "visible_target_cues": ["compact front section", "distinct edge line"],
+            "supporting_clean_evidence_ids": ["target_context_1", "zoom_region_6"],
+            "rationale_short": "Target front section matches SuggestedClass.",
+            "counter_evidence": "Large attached structure remains unexplained.",
+            "human_review_needed": True,
+            "glossary_or_guidance_used": False,
+        },
+        result,
+        point,
+        {"target_context_1", "zoom_region_6"},
+        clear_quality,
+    )
+
+    assert final["decision"] == "skip_uncertain"
+    assert final["guarded_recommendation"]["decision"] == "accept_suggested"
+    assert any("whole target extent" in reason for reason in final["guardrail_reasons"])
 
 
 def test_class_analysis_qwen_review_reconciles_self_contradictory_accept_to_confirm_current():
@@ -757,6 +821,8 @@ def test_class_analysis_qwen_review_compact_uncertain_class_alias_maps_to_sugges
             "overlap_explains_candidate": False,
             "specificity_alignment": "supports_suggested",
             "target_background_contrast": "target_specific",
+            "whole_target_extent_supported": True,
+            "whole_target_extent_reason": "The suggested class explains the full target extent.",
             "visible_target_cues": ["rectangular panel surface", "grid-like panel texture"],
             "rationale": "target shows a solar panel",
         },
@@ -1230,6 +1296,8 @@ def test_class_analysis_qwen_review_overlap_guarded_suggestion_runs_cue_verifier
                 "current_class_positive_cues": [],
                 "current_class_plausible": False,
                 "current_class_plausibility_reason": "No truck-valid shape or parts are visible in the clean target pixels.",
+                "whole_target_extent_supported": True,
+                "whole_target_extent_reason": "The proposed class explains the entire clean target extent.",
                 "overlap_rebutted": True,
                 "overlap_risk": "target_specific",
                 "overlap_rebuttal": "Overlap does not explain the roof texture inside the target.",
@@ -1257,6 +1325,8 @@ def test_class_analysis_qwen_review_overlap_guarded_suggestion_runs_cue_verifier
                 "current_class_positive_cues": [],
                 "current_class_plausible": False,
                 "current_class_plausibility_reason": "Clean target pixels show a fixed rectangular roof, not a truck-valid body.",
+                "whole_target_extent_supported": True,
+                "whole_target_extent_reason": "The proposed class explains the full rectangular target extent.",
                 "overlap_rebutted": True,
                 "overlap_risk": "overlap_explains",
                 "overlap_rebuttal": (
@@ -1393,6 +1463,8 @@ def test_class_analysis_qwen_review_cue_verifier_refuses_current_class_plausibil
                     "The clean target still plausibly fits Truck because it is an isolated long "
                     "rectangular trailer-like body."
                 ),
+                "whole_target_extent_supported": True,
+                "whole_target_extent_reason": "The proposed class covers the full visible target.",
                 "overlap_rebutted": True,
                 "overlap_risk": "target_specific",
                 "overlap_rebuttal": "Overlap does not explain the arched canopy and panel seam.",
@@ -1429,6 +1501,8 @@ def test_class_analysis_qwen_review_cue_verifier_reconciles_hypothetical_plausib
                     "The current class is only imaginable as an edge case, with no direct "
                     "current-class pixels visible."
                 ),
+                "whole_target_extent_supported": True,
+                "whole_target_extent_reason": "The proposed class explains the full clean target extent.",
                 "overlap_rebutted": True,
                 "overlap_risk": "target_specific",
                 "overlap_rebuttal": "Overlap does not explain the membrane and clasp features.",
@@ -1467,6 +1541,8 @@ def test_class_analysis_qwen_review_cue_verifier_reconciles_overlap_risk_contrad
                 "current_class_plausibility_basis": "none",
                 "current_class_plausible": False,
                 "current_class_plausibility_reason": "No direct current-class cue is visible.",
+                "whole_target_extent_supported": True,
+                "whole_target_extent_reason": "The proposed class explains the full clean target extent.",
                 "overlap_rebutted": True,
                 "overlap_risk": "overlap_explains",
                 "overlap_rebuttal": (
@@ -1507,6 +1583,8 @@ def test_class_analysis_qwen_review_cue_verifier_rejects_shared_target_current_c
                 "current_class_plausibility_basis": "shared_generic_cues",
                 "current_class_plausible": False,
                 "current_class_plausibility_reason": "Only shared generic cues are visible.",
+                "whole_target_extent_supported": True,
+                "whole_target_extent_reason": "The proposed class explains the full clean target extent.",
                 "overlap_rebutted": True,
                 "overlap_risk": "target_specific",
                 "overlap_rebuttal": "Overlap does not explain the shared surface details.",
@@ -1613,6 +1691,8 @@ def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class
             "glossary_or_guidance_used": True,
             "specificity_alignment": "supports_suggested",
             "target_background_contrast": "target_specific",
+            "whole_target_extent_supported": True,
+            "whole_target_extent_reason": "The overlapping class explains the full target extent.",
             "visible_target_cues": ["compact vehicle body", "visible windshield"],
             "supporting_clean_evidence_ids": ["target_detail_2", "zoom_region_8"],
             "rationale_short": "target pixels match the overlapping LightVehicle box",
@@ -1695,6 +1775,8 @@ def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class
             "glossary_or_guidance_used": True,
             "specificity_alignment": "supports_suggested",
             "target_background_contrast": "target_specific",
+            "whole_target_extent_supported": True,
+            "whole_target_extent_reason": "The overlapping class explains the full target extent.",
             "visible_target_cues": ["compact vehicle body", "visible windshield"],
             "supporting_clean_evidence_ids": ["target_detail_2", "zoom_region_8"],
             "rationale_short": "target pixels match the near-identical LightVehicle box, not Truck.",
@@ -1974,6 +2056,8 @@ def test_class_analysis_qwen_review_cue_verifier_promotes_guarded_clear_target(t
                 "current_class_positive_cues": [],
                 "current_class_plausible": False,
                 "current_class_plausibility_reason": "Clean target pixels do not match the current class concept.",
+                "whole_target_extent_supported": True,
+                "whole_target_extent_reason": "The proposed class explains the whole target extent.",
                 "overlap_rebutted": False,
                 "overlap_risk": "not_applicable",
                 "overlap_rebuttal": "",
@@ -2103,6 +2187,8 @@ def test_class_analysis_qwen_review_cue_verifier_promotes_verified_moderate_anch
                 "current_class_plausibility_basis": "none",
                 "current_class_plausible": False,
                 "current_class_plausibility_reason": "No current-class-specific target pixels are visible.",
+                "whole_target_extent_supported": True,
+                "whole_target_extent_reason": "The proposed class explains the whole target extent.",
                 "overlap_rebutted": True,
                 "overlap_risk": "target_specific",
                 "overlap_rebuttal": "Overlap does not explain the target-contained membrane and clasp cues.",
@@ -2230,6 +2316,8 @@ def test_class_analysis_qwen_review_cue_verifier_blocks_moderate_shared_anchors(
                 "current_class_plausibility_basis": "shared_generic_cues",
                 "current_class_plausible": False,
                 "current_class_plausibility_reason": "The visible cues are broad and shared.",
+                "whole_target_extent_supported": True,
+                "whole_target_extent_reason": "The proposed class explains the whole target extent.",
                 "overlap_rebutted": True,
                 "overlap_risk": "target_specific",
                 "overlap_rebuttal": "Overlap does not explain the visible broad shape.",
@@ -2350,6 +2438,8 @@ def test_class_analysis_qwen_review_cue_verifier_blocks_shared_generic_without_s
                 "current_class_plausibility_basis": "shared_generic_cues",
                 "current_class_plausible": False,
                 "current_class_plausibility_reason": "The cues are generic and shared rather than current-class-specific.",
+                "whole_target_extent_supported": True,
+                "whole_target_extent_reason": "The proposed class explains the whole target extent.",
                 "overlap_rebutted": False,
                 "overlap_risk": "not_applicable",
                 "overlap_rebuttal": "",
@@ -2408,6 +2498,49 @@ def test_class_analysis_qwen_review_cue_verifier_instruction_names_strict_schema
     assert "Do not include legacy or diagnostic keys" in text
     assert "current_class, proposed_target_class, verified_evidence_ids" in text
     assert "Use supporting_clean_evidence_ids, not verified_evidence_ids." in text
+    assert "whole reviewed bbox/object extent" in text
+    assert "subcomponent" in text
+
+
+def test_class_analysis_qwen_review_cue_verifier_refuses_partial_subcomponent_extent():
+    parsed, error = api._class_analysis_qwen_review_parse_cue_verifier_payload(
+        json.dumps(
+            {
+                "verified": True,
+                "target_class": "SuggestedClass",
+                "cue_confidence": 0.93,
+                "positive_visible_target_cues": [
+                    "compact front cabin",
+                    "distinct hood boundary",
+                ],
+                "current_class_positive_cues": [],
+                "current_class_plausibility_basis": "none",
+                "current_class_plausible": False,
+                "current_class_plausibility_reason": "No direct current-class cue is visible.",
+                "whole_target_extent_supported": False,
+                "whole_target_extent_reason": (
+                    "The proposed class explains only the front subcomponent, not the large attached body "
+                    "inside the same bbox."
+                ),
+                "overlap_rebutted": True,
+                "overlap_risk": "target_specific",
+                "overlap_rebuttal": "Overlap does not explain the front cabin cues.",
+                "anchor_support_verified": True,
+                "anchor_support_basis": "target_specific_anchors",
+                "anchor_support_reason": "Anchors share the front-cabin appearance.",
+                "supporting_clean_evidence_ids": ["target_detail_2", "source_clean_3"],
+                "rejection_reason": "",
+            }
+        ),
+        current_class="CurrentClass",
+        target_class="SuggestedClass",
+        evidence_ids={"target_detail_2", "source_clean_3"},
+    )
+
+    assert error is None
+    assert parsed["verified"] is False
+    assert parsed["whole_target_extent_supported"] is False
+    assert "front subcomponent" in parsed["rejection_reason"]
 
 
 def test_class_analysis_qwen_review_cue_verifier_repairs_partial_schema(tmp_path, monkeypatch):
@@ -2487,6 +2620,8 @@ def test_class_analysis_qwen_review_cue_verifier_repairs_partial_schema(tmp_path
                 "current_class_positive_cues": [],
                 "current_class_plausible": False,
                 "current_class_plausibility_reason": "Clean target pixels do not match the current class concept.",
+                "whole_target_extent_supported": True,
+                "whole_target_extent_reason": "The proposed class explains the whole target extent.",
                 "overlap_rebutted": False,
                 "overlap_risk": "not_applicable",
                 "overlap_rebuttal": "",
@@ -2653,8 +2788,11 @@ def test_class_analysis_qwen_review_cue_verifier_refuses_current_class_cues():
                     "ribbed surface texture",
                 ],
                 "current_class_positive_cues": ["round current-class wheel"],
+                "current_class_plausibility_basis": "direct_positive_cues",
                 "current_class_plausible": True,
                 "current_class_plausibility_reason": "A current-class wheel is visible in the clean target pixels.",
+                "whole_target_extent_supported": True,
+                "whole_target_extent_reason": "The proposed class explains the whole target extent.",
                 "overlap_rebutted": False,
                 "overlap_risk": "not_applicable",
                 "overlap_rebuttal": "",
@@ -4184,6 +4322,72 @@ def test_class_analysis_qwen_review_blocks_accept_when_counter_evidence_supports
     assert accepted["decision"] == "skip_uncertain"
     assert any("model text supporting current class UPole" in reason for reason in accepted["guardrail_reasons"])
 
+    plausible_current = api._class_analysis_qwen_review_validate_final(
+        {
+            "decision": "accept_suggested",
+            "target_class": "LightVehicle",
+            "confidence": 0.85,
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "none",
+            "overlap_explains_candidate_similarity": False,
+            "anchor_evidence_current": "weak",
+            "anchor_evidence_suggested": "strong",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "not_applicable",
+            "global_context_evidence": "strong",
+            "glossary_or_guidance_used": True,
+            "evidence_ids": ["ctx_1"],
+            "visible_target_cues": ["compact object body", "visible surface detail"],
+            "rationale_short": "Target resembles the suggested class.",
+            "counter_evidence": "Current class Truck is plausible from visible target structure.",
+            "human_review_needed": False,
+        },
+        {"summary": {"labelmap": ["Truck", "LightVehicle"]}},
+        {"point_id": "p1", "class_name": "Truck", "suggested_neighbor_class": "LightVehicle"},
+        {"ctx_1"},
+        clear_quality,
+    )
+
+    assert plausible_current["decision"] == "skip_uncertain"
+    assert any("model text supporting current class Truck" in reason for reason in plausible_current["guardrail_reasons"])
+
+    mixed_reject_and_support = api._class_analysis_qwen_review_validate_final(
+        {
+            "decision": "accept_suggested",
+            "target_class": "LightVehicle",
+            "confidence": 0.85,
+            "visual_quality": "clear",
+            "object_visibility": "clear",
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "overlap_assessment": "none",
+            "overlap_explains_candidate_similarity": False,
+            "anchor_evidence_current": "weak",
+            "anchor_evidence_suggested": "strong",
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "not_applicable",
+            "global_context_evidence": "strong",
+            "glossary_or_guidance_used": True,
+            "evidence_ids": ["ctx_1"],
+            "visible_target_cues": ["compact object body", "single unit"],
+            "rationale_short": "Target is a compact white object, not a large Truck.",
+            "counter_evidence": "Current class Truck is plausible due to visible target structure.",
+            "human_review_needed": False,
+        },
+        {"summary": {"labelmap": ["Truck", "LightVehicle"]}},
+        {"point_id": "p2", "class_name": "Truck", "suggested_neighbor_class": "LightVehicle"},
+        {"ctx_1"},
+        clear_quality,
+    )
+
+    assert mixed_reject_and_support["decision"] == "skip_uncertain"
+    assert any("model text supporting current class Truck" in reason for reason in mixed_reject_and_support["guardrail_reasons"])
+
 
 @pytest.mark.parametrize(
     ("current_class", "suggested_class", "rationale"),
@@ -4947,7 +5151,7 @@ def test_class_analysis_qwen_review_loop_enforces_evidence_and_writes_artifacts(
         [
             '<tool_call>{"name":"route_review","arguments":{"action":"inspect_local_consensus_context","reason_code":"needs_same_image_consensus","confidence":0.78,"rationale_short":"same-image consensus may resolve this"}}</tool_call>',
             "{}}",
-            '{"decision":"accept_suggested","target_class":"boat","confidence":0.82,"visual_quality":"clear","object_visibility":"clear","current_evidence":"weak","suggested_evidence":"strong","target_evidence":"strong","anchor_evidence_current":"weak","anchor_evidence_suggested":"strong","local_context_evidence":"strong","global_context_evidence":"strong","same_image_scale_evidence":"insufficient","same_image_embedding_evidence":"insufficient","overlap_assessment":"none","overlap_explains_candidate_similarity":false,"specificity_alignment":"supports_suggested","target_background_contrast":"target_specific","local_consensus_evidence":"mixed","visible_target_cues":["elongated bright target shape","visible grid texture"],"supporting_clean_evidence_ids":["target_detail_2","zoom_region_9"],"rationale_short":"target evidence and anchors fit better","counter_evidence":"synthetic fixture","human_review_needed":false}',
+            '{"decision":"accept_suggested","target_class":"boat","confidence":0.82,"visual_quality":"clear","object_visibility":"clear","current_evidence":"weak","suggested_evidence":"strong","target_evidence":"strong","anchor_evidence_current":"weak","anchor_evidence_suggested":"strong","local_context_evidence":"strong","global_context_evidence":"strong","same_image_scale_evidence":"insufficient","same_image_embedding_evidence":"insufficient","overlap_assessment":"none","overlap_explains_candidate_similarity":false,"specificity_alignment":"supports_suggested","target_background_contrast":"target_specific","whole_target_extent_supported":true,"whole_target_extent_reason":"the suggested class explains the full target extent","local_consensus_evidence":"mixed","visible_target_cues":["elongated bright target shape","visible grid texture"],"supporting_clean_evidence_ids":["target_detail_2","zoom_region_9"],"rationale_short":"target evidence and anchors fit better","counter_evidence":"synthetic fixture","human_review_needed":false}',
         ]
     )
     calls = []

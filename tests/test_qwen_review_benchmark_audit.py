@@ -1123,6 +1123,25 @@ def test_qwen_review_benchmark_audit_counts_nested_cue_verifier_current_plausibi
     assert summary["current_class_plausible_count"] == 1
 
 
+def test_qwen_review_benchmark_audit_counts_cue_verifier_contrastive_support():
+    record = _record(
+        cue_verifier={
+            "contrastively_supported_target": True,
+            "current_class_missing_or_inconsistent_cues": [
+                "missing expected target part",
+            ],
+        },
+    )
+
+    audit = audit_records([record])
+    summary = _summarize([record], run_id="r", job_id="j", model_id="m", started_at=0.0)
+
+    assert audit["cue_verifier_contrastive_support_count"] == 1
+    assert audit["cue_verifier_missing_current_cue_count"] == 1
+    assert summary["cue_verifier_contrastive_support_count"] == 1
+    assert summary["cue_verifier_missing_current_cue_count"] == 1
+
+
 def test_qwen_review_benchmark_audit_counts_cue_verifier_parse_errors():
     record = _record(cue_verifier_parse_errors=2)
 

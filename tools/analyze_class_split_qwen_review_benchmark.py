@@ -923,6 +923,8 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     anchor_adjudication_verified_count = 0
     anchor_support_basis_counts: Counter[str] = Counter()
     anchor_support_verified_count = 0
+    cue_verifier_contrastive_support_count = 0
+    cue_verifier_missing_current_cue_count = 0
     current_class_plausible_count = 0
 
     for record in records:
@@ -962,6 +964,10 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             anchor_support_basis_counts[str(cue_verifier.get("anchor_support_basis") or "missing")] += 1
             if _coerce_bool(cue_verifier.get("anchor_support_verified")):
                 anchor_support_verified_count += 1
+            if _coerce_bool(cue_verifier.get("contrastively_supported_target")):
+                cue_verifier_contrastive_support_count += 1
+            if cue_verifier.get("current_class_missing_or_inconsistent_cues"):
+                cue_verifier_missing_current_cue_count += 1
         current_class_plausible = _record_current_class_plausible(record, payload)
         if current_class_plausible:
             current_class_plausible_count += 1
@@ -1176,6 +1182,8 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "anchor_adjudication_verified_count": anchor_adjudication_verified_count,
         "anchor_support_basis_counts": dict(anchor_support_basis_counts),
         "anchor_support_verified_count": anchor_support_verified_count,
+        "cue_verifier_contrastive_support_count": cue_verifier_contrastive_support_count,
+        "cue_verifier_missing_current_cue_count": cue_verifier_missing_current_cue_count,
         "current_class_plausible_count": current_class_plausible_count,
         "effective_human_signal_count": sum(
             count
@@ -1278,6 +1286,8 @@ def print_report(audit: Dict[str, Any], comparison: Optional[Dict[str, Any]] = N
     print(f"Anchor adjudication verified: {audit.get('anchor_adjudication_verified_count', 0)}")
     print(f"Anchor support verified: {audit.get('anchor_support_verified_count', 0)}")
     print(f"Anchor support basis: {json.dumps(audit.get('anchor_support_basis_counts', {}), sort_keys=True)}")
+    print(f"Cue verifier contrastive support: {audit.get('cue_verifier_contrastive_support_count', 0)}")
+    print(f"Cue verifier missing-current cues: {audit.get('cue_verifier_missing_current_cue_count', 0)}")
     print(f"Current class plausible: {audit.get('current_class_plausible_count', 0)}")
     print(f"Cue verifier calls: {audit.get('cue_verifier_count', 0)}")
     print(f"Cue verifier promotions: {audit.get('cue_verifier_promoted_count', 0)}")

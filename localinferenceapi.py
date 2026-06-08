@@ -25807,7 +25807,9 @@ CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_REQUIRED_FIELDS: Tuple[str, ...] = (
     "target_class",
     "cue_confidence",
     "positive_visible_target_cues",
+    "target_class_defining_cues",
     "current_class_positive_cues",
+    "current_class_missing_or_inconsistent_cues",
     "current_class_plausibility_basis",
     "current_class_plausible",
     "current_class_plausibility_reason",
@@ -26069,12 +26071,33 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                         "The cues must describe the reviewed target bbox/object, not only a smaller visible subpart."
                     ),
                 },
+                "target_class_defining_cues": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 0,
+                    "maxItems": 6,
+                    "description": (
+                        "Target-class-defining visible cues in the clean target/source pixels. "
+                        "Use only object-specific traits that distinguish the target class from the current class."
+                    ),
+                },
                 "current_class_positive_cues": {
                     "type": "array",
                     "items": {"type": "string"},
                     "minItems": 0,
                     "maxItems": 6,
                     "description": "Positive cues that still support the current class, if visible.",
+                },
+                "current_class_missing_or_inconsistent_cues": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 0,
+                    "maxItems": 6,
+                    "description": (
+                        "Visible absences or contradictions that weaken the current class hypothesis. "
+                        "Examples should be generic and dataset-derived, such as missing expected parts or visible "
+                        "structure inconsistent with the current class."
+                    ),
                 },
                 "current_class_plausibility_basis": {
                     "type": "string",
@@ -26168,7 +26191,9 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                 "target_class",
                 "cue_confidence",
                 "positive_visible_target_cues",
+                "target_class_defining_cues",
                 "current_class_positive_cues",
+                "current_class_missing_or_inconsistent_cues",
                 "current_class_plausibility_basis",
                 "current_class_plausible",
                 "current_class_plausibility_reason",
@@ -27461,7 +27486,7 @@ def _class_analysis_qwen_review_normalize_visible_cues(
         if re.search(r"\b(?:no|not|without|lacks?|missing|absent|does\s+not|doesn't)\b", lowered):
             return True
         if (
-            re.search(r"\b(?:adjacent|beside|nearby|surrounding)\b", lowered)
+            re.search(r"\b(?:adjacent|beside|between|nearby|next\s+to|surrounding|surrounded\s+by)\b", lowered)
             and not re.search(r"\b(?:attached|connected|touching|mounted|joined|linked)\b", lowered)
         ):
             return True
@@ -27580,6 +27605,92 @@ def _class_analysis_qwen_review_visible_cues_from_payload(
         suggested_class=suggested_class,
         target_class=target_class,
     )
+
+
+def _class_analysis_qwen_review_normalize_contrast_cues(
+    value: Any,
+    *,
+    current_class: str = "",
+    target_class: str = "",
+    limit: int = 6,
+) -> List[str]:
+    """Normalize verifier-emitted missing/inconsistent current-class cues.
+
+    These are allowed to be negative statements, unlike visible positive cues.
+    The filter is deliberately dataset-agnostic: class meaning comes from the
+    labelmap, glossary, and concept briefs, while this code only rejects empty
+    or boilerplate text.
+    """
+
+    if isinstance(value, (list, tuple)):
+        raw_items = list(value)
+    elif value is None:
+        raw_items = []
+    else:
+        raw_text = str(value or "").strip()
+        raw_items = re.split(r"[;\n|]+", raw_text) if raw_text else []
+    class_terms = {
+        _class_analysis_qwen_review_normalize_label(item)
+        for item in (current_class, target_class)
+        if str(item or "").strip()
+    }
+    boilerplate_norms = {
+        _class_analysis_qwen_review_normalize_label(item)
+        for item in (
+            "not current class",
+            "does not match current class",
+            "missing current class cues",
+            "no current class cues",
+            "current class absent",
+            "not plausible",
+            "weak evidence",
+            "target class cues",
+            "matches target class",
+        )
+    }
+    cues: List[str] = []
+    seen: Set[str] = set()
+    for raw_item in raw_items:
+        text = re.sub(r"\s+", " ", str(raw_item or "")).strip(" .,:;-")
+        if not text:
+            continue
+        text = text[:160]
+        norm = _class_analysis_qwen_review_normalize_label(text)
+        if not norm or norm in seen or norm in boilerplate_norms:
+            continue
+        if norm in class_terms:
+            continue
+        if not re.search(r"[a-zA-Z]", text):
+            continue
+        lowered = text.lower()
+        if re.search(
+            r"\b(?:absence|absent|lack|lacking|lacks|missing|no|not|without)\b"
+            r"[^.?!]{0,80}\b(?:background|context|environment|ground|marine|nearby|pavement|road|scene|surroundings?|water)\b",
+            lowered,
+        ):
+            continue
+        if re.search(
+            r"\b(?:background|context|environment|ground|nearby|pavement|road|scene|surroundings?|water)\b"
+            r"[^.?!]{0,80}\b(?:absent|missing|not|without)\b",
+            lowered,
+        ):
+            continue
+        stripped_norm = norm
+        for class_term in class_terms:
+            if class_term:
+                stripped_norm = stripped_norm.replace(class_term, "")
+        stripped_norm = re.sub(
+            r"\b(?:current|target|class|cue|cues|missing|absent|none|no|not|without|lacks?|weak|evidence|object|visible)\b",
+            "",
+            stripped_norm,
+        )
+        if len(stripped_norm.strip()) < 3:
+            continue
+        cues.append(text)
+        seen.add(norm)
+        if len(cues) >= max(1, limit):
+            break
+    return cues
 
 
 def _class_analysis_qwen_review_split_independent_current_cues(
@@ -29781,7 +29892,9 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
         "target_class": target_class,
         "cue_confidence": 0.0,
         "positive_visible_target_cues": [],
+        "target_class_defining_cues": [],
         "current_class_positive_cues": [],
+        "current_class_missing_or_inconsistent_cues": [],
         "current_class_plausibility_basis": "none",
         "current_class_plausible": False,
         "current_class_plausibility_reason": "",
@@ -29823,6 +29936,9 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
                         "Use the current and target class concept briefs in the compact context, especially valid_variations, exclude_when, common_confusions, and uncertainty_triggers.",
                         "Do not count class names, `matches class`, local-consensus dots, neighbor labels, overlay boxes, negative claims, absence claims, color-only claims, or generic overhead/parked/context claims.",
                         "Each positive_visible_target_cue must be a concrete visible property such as shape, parts, material, structure, texture, edges, posture, or target-touching context.",
+                        "Use target_class_defining_cues for the subset of target cues that distinguish the proposed target class from the current class; do not include generic shared shape/color/context.",
+                        "Use current_class_missing_or_inconsistent_cues for visible absences or contradictions that weaken the current class hypothesis. Examples must come from the current class concept brief, glossary, or clean pixels, not from a hardcoded dataset rule.",
+                        "Absence or contradiction cues never verify a class change by themselves. They only support the decision when positive target-class cues, whole extent, overlap, anchors, and clean evidence IDs also support it.",
                         "Judge the whole reviewed bbox/object extent, not just the most recognizable subpart. A class change is not verified if the proposed class explains only a cab, corner, small object, texture patch, or other subcomponent while ignoring a large attached or continuous structure inside the same bbox.",
                         "Set whole_target_extent_supported=true only when the proposed target class explains the full visible target extent.",
                         "Set whole_target_extent_supported=false when the clean target contains a large attached extension, compartment, appendage, support, tool, cargo body, trailer-like segment, roof, or continuous structure that the proposed target class does not explain.",
@@ -29845,6 +29961,7 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
                         "Set anchor_support_basis=insufficient when the anchors/examples are too weak, too sparse, or not visible enough to judge.",
                         "Set anchor_support_verified=true only for target_specific_anchors; otherwise leave it false and explain the uncertainty in anchor_support_reason.",
                         "Set verified=true only when at least two positive target-class cues are visible, the proposed target class explains the whole target extent, target evidence is not just scene context, overlap_rebutted is true or overlap is not applicable, current_class_positive_cues is empty or clearly irrelevant, and current_class_plausible=false.",
+                        "If only one positive cue is independent and another cue is shared, verified=true is allowed only when target_class_defining_cues cite at least two target-specific traits, current_class_missing_or_inconsistent_cues cites at least one visible contradiction or absence for the current class, and anchor_support_basis=target_specific_anchors.",
                         "Set verified=false when the evidence is context-only, negative-only, color-only, target pixels are ambiguous, or the clean crop still plausibly supports the current class.",
                         "Set cue_confidence above 0.85 only for visually obvious positive target-object evidence.",
                         "The controller will re-run the normal validator; this verifier cannot bypass overlap, quality, anchor, or clean-evidence guardrails.",
@@ -29884,6 +30001,7 @@ def _class_analysis_qwen_review_cue_verifier_repair_instruction(
                         f"Allowed supporting_clean_evidence_ids: {', '.join(clean_target_ids) or '(none)'}",
                         f"Required keys: {required_fields}.",
                         "If you cannot verify two concrete target-positive cues, still return the full schema with verified=false, empty arrays where appropriate, cue_confidence no higher than 0.84, and a short rejection_reason.",
+                        "If one target cue is shared but clean pixels and concept briefs show target-specific defining cues plus a missing/inconsistent current-class cue, include those fields explicitly instead of omitting them.",
                         "If the proposed class explains only a subcomponent rather than the whole reviewed bbox/object extent, set whole_target_extent_supported=false and verified=false.",
                         "Do not return a partial object. Do not omit target_class. Do not include extra legacy keys, markdown, or prose outside JSON.",
                     ]
@@ -30372,11 +30490,26 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
         suggested_class=target_class,
         target_class=target_class,
     )
+    target_defining_cues = _class_analysis_qwen_review_normalize_visible_cues(
+        args.get("target_class_defining_cues")
+        if args.get("target_class_defining_cues") is not None
+        else args.get("target_defining_cues"),
+        current_class=current_class,
+        suggested_class=target_class,
+        target_class=target_class,
+    )
     current_cues = _class_analysis_qwen_review_normalize_visible_cues(
         args.get("current_class_positive_cues"),
         current_class=current_class,
         suggested_class=target_class,
         target_class=current_class,
+    )
+    current_missing_or_inconsistent_cues = _class_analysis_qwen_review_normalize_contrast_cues(
+        args.get("current_class_missing_or_inconsistent_cues")
+        if args.get("current_class_missing_or_inconsistent_cues") is not None
+        else args.get("current_class_missing_cues"),
+        current_class=current_class,
+        target_class=target_class,
     )
     independent_current_cues, shared_current_cues = _class_analysis_qwen_review_split_independent_current_cues(
         target_cues=target_cues,
@@ -30499,9 +30632,27 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
     original_verified = bool(verified)
     original_rejection_reason = str(args.get("rejection_reason") or "")[:1200]
     verifier_reconciled_to_verified = False
+    target_specific_cue_count = len(independent_target_cues)
+    target_defining_cue_count = len(
+        {
+            _class_analysis_qwen_review_normalize_label(cue)
+            for cue in list(independent_target_cues) + list(target_defining_cues)
+            if str(cue or "").strip()
+        }
+    )
+    contrastively_supported_target = (
+        target_specific_cue_count >= 2
+        or (
+            target_specific_cue_count >= 1
+            and target_defining_cue_count >= 2
+            and len(current_missing_or_inconsistent_cues) >= 1
+            and anchor_support_verified
+            and anchor_support_basis == "target_specific_anchors"
+        )
+    )
     if (
         not verified
-        and len(independent_target_cues) >= 2
+        and contrastively_supported_target
         and not effective_current_class_plausible
         and bool(overlap_rebutted)
         and overlap_risk in {"target_specific", "not_applicable"}
@@ -30517,9 +30668,14 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
         "target_class": normalized_target or target_class,
         "cue_confidence": max(0.0, min(1.0, cue_confidence)),
         "positive_visible_target_cues": target_cues,
+        "target_class_defining_cues": target_defining_cues,
         "current_class_positive_cues": current_cues,
+        "current_class_missing_or_inconsistent_cues": current_missing_or_inconsistent_cues,
         "independent_positive_visible_target_cues": independent_target_cues,
         "shared_positive_visible_target_cues": shared_target_cues,
+        "target_specific_cue_count": target_specific_cue_count,
+        "target_defining_cue_count": target_defining_cue_count,
+        "contrastively_supported_target": contrastively_supported_target,
         "independent_current_class_positive_cues": independent_current_cues,
         "shared_current_class_positive_cues": shared_current_cues,
         "current_class_plausible": bool(effective_current_class_plausible),
@@ -30541,9 +30697,13 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
     }
     if not verified:
         return normalized, None
-    if len(independent_target_cues) < 2:
+    if not contrastively_supported_target:
         normalized["verified"] = False
-        normalized["rejection_reason"] = "Verifier did not provide two independent positive target cues."
+        normalized["rejection_reason"] = (
+            "Verifier did not provide either two independent positive target cues, "
+            "or one independent cue plus target-defining cues, target-specific anchors, "
+            "and missing/inconsistent current-class cues."
+        )
     elif not whole_target_extent_supported:
         normalized["verified"] = False
         normalized["rejection_reason"] = (
@@ -30574,7 +30734,7 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
     elif verifier_reconciled_to_verified:
         normalized["rejection_reason"] = (
             "Reconciled verifier contradiction: raw verified=false, but the same output provided "
-            "high-confidence independent target cues, clean evidence IDs, and an overlap rebuttal."
+            "high-confidence target-defining cues, clean evidence IDs, and an overlap rebuttal."
         )
     return normalized, None
 
@@ -30728,11 +30888,20 @@ def _class_analysis_qwen_review_try_cue_verifier(
         return final_result
     if verifier_basis == "shared_generic_cues" and not has_independent_current_questioning:
         target_cues = list(verifier_record.get("independent_positive_visible_target_cues") or [])
-        current_cues = list(verifier_record.get("current_class_positive_cues") or [])
+        target_defining_cues = list(verifier_record.get("target_class_defining_cues") or [])
+        current_missing_cues = list(verifier_record.get("current_class_missing_or_inconsistent_cues") or [])
+        current_cues = list(verifier_record.get("independent_current_class_positive_cues") or [])
         anchor_rescues_inconsistent_shared_basis = bool(
             needs_moderate_anchor_verification
             and anchor_support_verified
-            and len(target_cues) >= 2
+            and (
+                len(target_cues) >= 2
+                or (
+                    len(target_cues) >= 1
+                    and len(target_defining_cues) >= 2
+                    and len(current_missing_cues) >= 1
+                )
+            )
             and not current_cues
             and not verifier_record.get("current_class_plausible")
         )
@@ -30756,6 +30925,26 @@ def _class_analysis_qwen_review_try_cue_verifier(
         for item in (verifier_record.get("positive_visible_target_cues") or [])
         if str(item or "").strip()
     ]
+    verifier_target_defining_cues = [
+        str(item or "").strip()
+        for item in (verifier_record.get("target_class_defining_cues") or [])
+        if str(item or "").strip()
+    ]
+    verifier_current_missing_cues = [
+        str(item or "").strip()
+        for item in (verifier_record.get("current_class_missing_or_inconsistent_cues") or [])
+        if str(item or "").strip()
+    ]
+    combined_positive_cues: List[str] = []
+    combined_seen: Set[str] = set()
+    for cue in list(verifier_positive_cues) + list(verifier_target_defining_cues):
+        cue_norm = _class_analysis_qwen_review_normalize_label(cue)
+        if not cue_norm or cue_norm in combined_seen:
+            continue
+        combined_positive_cues.append(cue)
+        combined_seen.add(cue_norm)
+        if len(combined_positive_cues) >= 6:
+            break
     verifier_supporting_ids = list(verifier_record.get("supporting_clean_evidence_ids") or [])
     target_identity_summary = str(guarded.get("target_identity_summary") or "").strip()
     if not target_identity_summary and verifier_positive_cues:
@@ -30781,7 +30970,7 @@ def _class_analysis_qwen_review_try_cue_verifier(
             "decision": guarded.get("decision"),
             "target_class": guarded.get("target_class"),
             "confidence": min(float(guarded.get("confidence") or 0.0), float(verifier_record.get("cue_confidence") or 0.0)),
-            "visible_target_cues": verifier_positive_cues,
+            "visible_target_cues": combined_positive_cues,
             "supporting_clean_evidence_ids": verifier_supporting_ids,
             "target_identity_summary": target_identity_summary,
             "target_identity_uncertainty": target_identity_uncertainty or "moderate",
@@ -30791,7 +30980,10 @@ def _class_analysis_qwen_review_try_cue_verifier(
                 if overlap_rebuttal
                 else guarded_rationale
             )[:800],
-            "counter_evidence": str(guarded.get("counter_evidence") or "Cue verifier found no positive current-class cues.")[:800],
+            "counter_evidence": (
+                "; ".join(verifier_current_missing_cues[:3])
+                or str(guarded.get("counter_evidence") or "Cue verifier found no positive current-class cues.")
+            )[:800],
             "overlap_explains_candidate_similarity": False
             if verifier_record.get("overlap_rebutted")
             else guarded.get("overlap_explains_candidate_similarity", False),

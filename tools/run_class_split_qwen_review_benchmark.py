@@ -329,6 +329,18 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
         if isinstance(record.get("cue_verifier"), dict)
         and bool(record["cue_verifier"].get("anchor_support_verified"))
     )
+    cue_verifier_contrastive_support = sum(
+        1
+        for record in records
+        if isinstance(record.get("cue_verifier"), dict)
+        and bool(record["cue_verifier"].get("contrastively_supported_target"))
+    )
+    cue_verifier_missing_current_cues = sum(
+        1
+        for record in records
+        if isinstance(record.get("cue_verifier"), dict)
+        and bool(record["cue_verifier"].get("current_class_missing_or_inconsistent_cues"))
+    )
     current_class_plausible = sum(1 for record in records if _record_current_class_plausible(record))
     disposition_counts = Counter(
         str((record.get("review_disposition") or {}).get("disposition") or "missing")
@@ -364,6 +376,8 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
         "anchor_adjudication_verified_count": anchor_adjudication_verified,
         "anchor_support_basis_counts": dict(anchor_support_basis),
         "anchor_support_verified_count": anchor_support_verified,
+        "cue_verifier_contrastive_support_count": cue_verifier_contrastive_support,
+        "cue_verifier_missing_current_cue_count": cue_verifier_missing_current_cues,
         "current_class_plausible_count": current_class_plausible,
         "review_disposition_counts": dict(disposition_counts),
         "review_disposition_signal_counts": dict(disposition_signal_counts),

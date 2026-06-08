@@ -756,6 +756,28 @@ promotion path VLM-centered: the controller validates quality, overlap, clean
 evidence ids, and mutation safety, but Qwen owns the visual anchor sufficiency
 judgment.
 
+The verifier also has a contrastive evidence channel for the recurring case
+where one visible cue is target-specific while another cue is shared by both
+classes. Qwen must fill `target_class_defining_cues` with object-specific
+target traits and `current_class_missing_or_inconsistent_cues` with visible
+absences or contradictions for the current class. This is generic and
+dataset-derived: the cue names come from the labelmap, glossary, concept briefs,
+and clean pixels, not from committed class regexes. These negative/contrastive
+cues cannot verify a class change by themselves. They only help a guarded
+recommendation reach the normal validator when Qwen also verifies
+target-specific anchors, whole-object extent support, clean evidence IDs, and
+overlap rebuttal where overlap is present. Benchmark summaries report
+`cue_verifier_contrastive_support_count` and
+`cue_verifier_missing_current_cue_count` so future runs can show whether this
+channel is being used.
+
+The normalizer also rejects context-only verifier cues, such as a target being
+near another object or a current class being implausible only because a broad
+scene/environment feature is absent. Those filters are intentionally generic:
+they block relational/background wording, not project-specific class names.
+Object-internal positive cues and object-internal missing/inconsistent cues
+remain eligible for VLM reasoning and later validator checks.
+
 The cue-verifier pass may not promote a class change from shared generic cues
 alone. If Qwen reports `current_class_plausibility_basis=shared_generic_cues`,
 the promotion needs an independent same-image scale, same-image embedding, or
@@ -763,9 +785,10 @@ local-consensus signal questioning the current class. This prevents top-down
 shape, color, position, or flat-surface language from turning into a class
 change when the same target pixels could still plausibly fit the current label.
 If the verifier reports shared generic current-class plausibility while also
-reporting no current-class positive cues and verified target-specific anchors,
-the backend treats that as an inconsistent wording issue and lets the normal
-validator decide from the explicit cue and anchor fields.
+reporting no independent current-class positive cues and verified
+target-specific anchors, the backend treats that as an inconsistent wording
+issue and lets the normal validator decide from the explicit cue, contrast, and
+anchor fields.
 
 Targeted verifier probe after adding anchor-support adjudication:
 
@@ -1587,6 +1610,20 @@ briefs. Regression tests cover:
   filtering must remain dataset-agnostic and rely on the labelmap, glossary,
   generated concept briefs, and actual model evidence rather than committed
   project vocabulary.
+- contrastive verifier context-filter focused benchmark:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/contrastive_contextfilter_clear_guarded10_10_1780904650.json`
+  replayed the 10 clear guarded rows affected by the contrastive cue verifier
+  after adding the context-only cue filter. The run completed 10/10 reviews
+  with 0 failures, 0 final validation errors, and 0 unsafe audit issues. It
+  produced 3 actionable class-change recommendations, 6 guarded human-triage
+  signals, and 1 useful negative. The cue verifier ran on 8 rows, emitted
+  contrastive support on 8 rows, promoted 3 rows, and recorded 1 parse/repair
+  path. Decision output matched the previous contrastive-verifier run, while
+  manual visual inspection of the non-skip sheet found the actionable rows
+  plausible enough for advisory human review. One row remains visually
+  ambiguous, which is acceptable for this workflow because the recommendation is
+  not applied automatically and is preserved as a human-facing signal rather
+  than a backend mutation.
 
 A larger labeled real-model benchmark should be run before treating v2
 recommendations as more than advisory.

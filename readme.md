@@ -52,6 +52,10 @@ Then open `http://127.0.0.1:8080/tator.html`.
 
 ## What Tator Helps With
 
+The README uses sparse workflow sketches in the relevant sections below rather
+than one large architecture diagram. They are meant to give new operators a
+quick mental model before they reach the detailed docs.
+
 - Start a dataset from raw images with a browser labeling UI.
 - Extend an existing YOLO/YOLO-seg dataset without redrawing everything.
 - Keep source datasets in place through linked-dataset records when copying data is undesirable.

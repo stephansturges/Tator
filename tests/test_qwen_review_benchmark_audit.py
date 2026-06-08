@@ -1,8 +1,14 @@
 import inspect
+import json
 
 import tools.analyze_class_split_qwen_review_benchmark as audit_mod
 from tools.analyze_class_split_qwen_review_benchmark import audit_records, compare_runs
-from tools.run_class_split_qwen_review_benchmark import _make_visual_sheet, _summarize
+from tools.run_class_split_qwen_review_benchmark import (
+    _make_visual_sheet,
+    _normalize_filter_values,
+    _source_point_ids,
+    _summarize,
+)
 
 
 def _record(**overrides):
@@ -1187,3 +1193,55 @@ def test_qwen_review_benchmark_compare_runs_tracks_decision_drift():
         "previous": "accept_suggested",
         "current": "skip_uncertain",
     }
+
+
+def test_qwen_review_benchmark_source_run_filters_before_slicing(tmp_path):
+    source = tmp_path / "source.json"
+    records = [
+        {
+            "point_id": "p1",
+            "backend_tier": "limited",
+            "decision": "skip_uncertain",
+            "review_disposition": {"disposition": "guarded_visual_quality", "signal": "guarded_human_triage"},
+            "guarded_recommendation": {"blocked": True},
+        },
+        {
+            "point_id": "p2",
+            "backend_tier": "clear",
+            "decision": "skip_uncertain",
+            "review_disposition": {"disposition": "guarded_overlap_risk", "signal": "guarded_human_triage"},
+            "guarded_recommendation": {"blocked": True},
+        },
+        {
+            "point_id": "p3",
+            "backend_tier": "clear",
+            "decision": "accept_suggested",
+            "review_disposition": {"disposition": "actionable_class_change", "signal": "actionable"},
+        },
+        {
+            "point_id": "p4",
+            "backend_tier": "clear",
+            "decision": "skip_uncertain",
+            "review_disposition": {"disposition": "target_not_reviewable", "signal": "none"},
+            "guarded_recommendation": {"blocked": True},
+        },
+        {"point_id": "p5", "backend_tier": "clear", "decision": "skip_uncertain"},
+    ]
+    source.write_text(json.dumps({"records": records}), encoding="utf-8")
+
+    assert _normalize_filter_values([" clear, LIMITED ", ""]) == {"clear", "limited"}
+    assert _source_point_ids(
+        source,
+        count=2,
+        start=0,
+        backend_tiers={"clear"},
+        guarded_only=True,
+        reviewable_only=True,
+    ) == ["p2"]
+    assert _source_point_ids(
+        source,
+        count=1,
+        start=1,
+        backend_tiers={"clear"},
+        disposition_signals={"guarded_human_triage", "actionable"},
+    ) == ["p3"]

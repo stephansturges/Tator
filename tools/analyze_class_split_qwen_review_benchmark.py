@@ -762,7 +762,7 @@ def _record_review_disposition(record: Dict[str, Any]) -> Dict[str, Any]:
     target_class = str(record.get("target_class") or "").strip()
     current_class = str(record.get("current_class") or "").strip()
     guarded = record.get("guarded_recommendation") if isinstance(record.get("guarded_recommendation"), dict) else None
-    cue_verifier = record.get("cue_verifier") if isinstance(record.get("cue_verifier"), dict) else None
+    cue_verifier = record.get("cue_verifier") if isinstance(record.get("cue_verifier"), dict) and record.get("cue_verifier") else None
     backend_tier = str(record.get("backend_tier") or "").strip().lower()
     visual_quality = str(record.get("visual_quality") or "").strip().lower()
     object_visibility = str(record.get("object_visibility") or "").strip().lower()
@@ -952,7 +952,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             overlap_adjudication_verified_count += 1
         if bool(record.get("anchor_adjudication_verified")):
             anchor_adjudication_verified_count += 1
-        cue_verifier = record.get("cue_verifier") if isinstance(record.get("cue_verifier"), dict) else None
+        cue_verifier = record.get("cue_verifier") if isinstance(record.get("cue_verifier"), dict) and record.get("cue_verifier") else None
         if cue_verifier:
             anchor_support_basis_counts[str(cue_verifier.get("anchor_support_basis") or "missing")] += 1
             if _coerce_bool(cue_verifier.get("anchor_support_verified")):
@@ -1177,11 +1177,16 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             if signal in {"actionable", "guarded_human_triage", "useful_negative"}
         ),
         "guarded_human_triage_count": review_disposition_signal_counts.get("guarded_human_triage", 0),
-        "cue_verifier_count": sum(1 for record in records if isinstance(record.get("cue_verifier"), dict)),
+        "cue_verifier_count": sum(
+            1
+            for record in records
+            if isinstance(record.get("cue_verifier"), dict) and record["cue_verifier"]
+        ),
         "cue_verifier_promoted_count": sum(
             1
             for record in records
             if isinstance(record.get("cue_verifier"), dict)
+            and record["cue_verifier"]
             and record["cue_verifier"].get("promoted_from_guarded_recommendation")
         ),
         "guarded_recommendations": guarded_recommendations,

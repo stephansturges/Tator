@@ -756,6 +756,23 @@ Targeted verifier probe after adding anchor-support adjudication:
 - This is not a replacement for the 100-row benchmark. It proves the new
   moderate-anchor verifier path is live, auditable, and capable of increasing
   useful action rate on the exact failure mode it targets.
+- Focused clear-tier guarded validation:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/anchor_verifier_clear_guarded14_14_1780886770.json`
+  used `--source-backend-tier clear --source-guarded-only --count 14` against
+  the prior 100-row source run, with the same 35B abliterated MLX reviewer,
+  local consensus, class concept briefs, and per-review subprocess isolation.
+  Result: 14/14 completed, 0 unsafe audit issues, 4 actionable
+  `accept_suggested` recommendations, 10 guarded recommendations, and 14
+  effective human signals. The cue verifier ran on 9 rows, verified
+  target-specific anchors on those 9 rows, and promoted 4 previously guarded
+  model opinions. The visual sheets are
+  `anchor_verifier_clear_guarded14_14_1780886770_visual_non_skip.jpg`,
+  `anchor_verifier_clear_guarded14_14_1780886770_visual_guarded.jpg`, and
+  `anchor_verifier_clear_guarded14_14_1780886770_visual_all.jpg`.
+- Interpretation: the anchor verifier increases action rate on clear
+  target-specific anchor cases without replacing Qwen's final judgment. The 10
+  remaining guarded rows are still useful human-triage signals, mostly blocked
+  by overlap risk, missing visible cues, or current-class overlap evidence.
 
 Latest Mac probe after restoring VLM finalization and the `final_class` schema:
 
@@ -817,6 +834,19 @@ intentionally reproducing the older controller behavior that skipped final Qwen
 review for limited targets. Add `--allow-poor-final-review` only for explicit
 poor-evidence experiments; poor targets otherwise skip Qwen because the visual
 audit found little useful signal there.
+
+When a change targets a narrow failure mode, filter a prior source run before
+sampling instead of taking the first `N` rows. The runner supports
+`--source-backend-tier`, `--source-decision`, `--source-disposition`,
+`--source-disposition-signal`, `--source-guarded-only`, and
+`--source-reviewable-only`; repeat an option or pass comma-separated values.
+Filtering happens before `--start` and `--count`, so a command such as
+`--source-backend-tier clear --source-guarded-only --count 14` evaluates clear,
+reviewable disagreement rows rather than measuring mostly poor or limited
+targets. This matters for usefulness work: broad 100-row gates catch safety and
+runtime failures, while focused filtered runs show whether a specific VLM rail
+actually turns guarded model opinions into better advisory actions.
+
 Each run writes three visual audit sheets when matching rows exist:
 `*_visual_non_skip.jpg` for actionable recommendations, `*_visual_guarded.jpg`
 for blocked model opinions, and `*_visual_all.jpg` for the sampled review set.

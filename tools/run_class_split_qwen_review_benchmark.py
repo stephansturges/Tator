@@ -67,16 +67,56 @@ def _safe_read_events(path: Path) -> List[Dict[str, Any]]:
     return events
 
 
-def _source_point_ids(source_run: Optional[Path], count: int, start: int) -> List[str]:
+def _normalize_filter_values(values: Sequence[str]) -> set[str]:
+    normalized: set[str] = set()
+    for value in values or []:
+        for part in str(value or "").split(","):
+            item = part.strip().lower()
+            if item:
+                normalized.add(item)
+    return normalized
+
+
+def _source_point_ids(
+    source_run: Optional[Path],
+    count: int,
+    start: int,
+    *,
+    backend_tiers: Optional[set[str]] = None,
+    decisions: Optional[set[str]] = None,
+    dispositions: Optional[set[str]] = None,
+    disposition_signals: Optional[set[str]] = None,
+    guarded_only: bool = False,
+    reviewable_only: bool = False,
+) -> List[str]:
     if not source_run:
         return []
     data = _load_json(source_run)
     records = data.get("records") if isinstance(data.get("records"), list) else []
-    point_ids = [
-        str(record.get("point_id") or "").strip()
-        for record in records
-        if isinstance(record, dict) and str(record.get("point_id") or "").strip()
-    ]
+    point_ids: List[str] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        point_id = str(record.get("point_id") or "").strip()
+        if not point_id:
+            continue
+        disposition = record.get("review_disposition") if isinstance(record.get("review_disposition"), dict) else {}
+        guarded = record.get("guarded_recommendation") if isinstance(record.get("guarded_recommendation"), dict) else None
+        if backend_tiers and str(record.get("backend_tier") or "").strip().lower() not in backend_tiers:
+            continue
+        if decisions and str(record.get("decision") or "").strip().lower() not in decisions:
+            continue
+        if dispositions and str(disposition.get("disposition") or "").strip().lower() not in dispositions:
+            continue
+        if disposition_signals and str(disposition.get("signal") or "").strip().lower() not in disposition_signals:
+            continue
+        if guarded_only and not (guarded and guarded.get("blocked")):
+            continue
+        if reviewable_only:
+            signal = str(disposition.get("signal") or "").strip().lower()
+            if signal not in {"actionable", "guarded_human_triage", "useful_negative"}:
+                continue
+        point_ids.append(point_id)
     start_idx = max(0, int(start or 0))
     return point_ids[start_idx : start_idx + max(0, int(count or 0))]
 
@@ -265,9 +305,9 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
     overlap_adjudication_verified = sum(1 for record in records if bool(record.get("overlap_adjudication_verified")))
     anchor_adjudication_verified = sum(1 for record in records if bool(record.get("anchor_adjudication_verified")))
     anchor_support_basis = Counter(
-        str((record.get("cue_verifier") or {}).get("anchor_support_basis") or "missing")
+        str(record["cue_verifier"].get("anchor_support_basis") or "missing")
         for record in records
-        if isinstance(record.get("cue_verifier"), dict)
+        if isinstance(record.get("cue_verifier"), dict) and record["cue_verifier"]
     )
     anchor_support_verified = sum(
         1
@@ -366,11 +406,16 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
             if isinstance(record.get("guarded_recommendation"), dict)
             and record["guarded_recommendation"].get("blocked")
         ),
-        "cue_verifier_count": sum(1 for record in records if isinstance(record.get("cue_verifier"), dict)),
+        "cue_verifier_count": sum(
+            1
+            for record in records
+            if isinstance(record.get("cue_verifier"), dict) and record["cue_verifier"]
+        ),
         "cue_verifier_promoted_count": sum(
             1
             for record in records
             if isinstance(record.get("cue_verifier"), dict)
+            and record["cue_verifier"]
             and record["cue_verifier"].get("promoted_from_guarded_recommendation")
         ),
         "records_written": len(records),
@@ -562,6 +607,18 @@ def _run_subprocess_review(
         cmd.extend(["--mlx-reset-every", str(max(0, int(args.mlx_reset_every)))])
     if args.reset_qwen_after_review:
         cmd.append("--reset-qwen-after-review")
+    for value in args.source_backend_tier or []:
+        cmd.extend(["--source-backend-tier", str(value)])
+    for value in args.source_decision or []:
+        cmd.extend(["--source-decision", str(value)])
+    for value in args.source_disposition or []:
+        cmd.extend(["--source-disposition", str(value)])
+    for value in args.source_disposition_signal or []:
+        cmd.extend(["--source-disposition-signal", str(value)])
+    if args.source_guarded_only:
+        cmd.append("--source-guarded-only")
+    if args.source_reviewable_only:
+        cmd.append("--source-reviewable-only")
     started = time.time()
     print(f"[{ordinal}/{total}] {point_id} -> subprocess {child_run_id}")
     timeout_seconds = max(1, int(args.review_timeout_seconds or 1))
@@ -622,6 +679,40 @@ def main() -> int:
     )
     parser.add_argument("--count", type=int, default=5)
     parser.add_argument("--start", type=int, default=0)
+    parser.add_argument(
+        "--source-backend-tier",
+        action="append",
+        default=[],
+        help="Filter --source-run records by backend_tier before start/count slicing. Repeat or comma-separate values.",
+    )
+    parser.add_argument(
+        "--source-decision",
+        action="append",
+        default=[],
+        help="Filter --source-run records by final decision before start/count slicing. Repeat or comma-separate values.",
+    )
+    parser.add_argument(
+        "--source-disposition",
+        action="append",
+        default=[],
+        help="Filter --source-run records by review_disposition.disposition before start/count slicing.",
+    )
+    parser.add_argument(
+        "--source-disposition-signal",
+        action="append",
+        default=[],
+        help="Filter --source-run records by review_disposition.signal before start/count slicing.",
+    )
+    parser.add_argument(
+        "--source-guarded-only",
+        action="store_true",
+        help="Filter --source-run records to rows with a blocked guarded_recommendation.",
+    )
+    parser.add_argument(
+        "--source-reviewable-only",
+        action="store_true",
+        help="Filter --source-run records to actionable, guarded_human_triage, or useful_negative rows.",
+    )
     parser.add_argument("--run-label", default="state_machine")
     parser.add_argument("--run-id", default="", help="Exact run id to write; bypasses timestamped run-label construction.")
     parser.add_argument("--point-id", action="append", default=[], help="Run exact point id; may be repeated.")
@@ -690,7 +781,17 @@ def main() -> int:
 
     requested_point_ids = [str(item or "").strip() for item in (args.point_id or []) if str(item or "").strip()]
     source_run = Path(args.source_run) if args.source_run else None
-    point_ids = requested_point_ids or _source_point_ids(source_run, args.count, args.start)
+    point_ids = requested_point_ids or _source_point_ids(
+        source_run,
+        args.count,
+        args.start,
+        backend_tiers=_normalize_filter_values(args.source_backend_tier),
+        decisions=_normalize_filter_values(args.source_decision),
+        dispositions=_normalize_filter_values(args.source_disposition),
+        disposition_signals=_normalize_filter_values(args.source_disposition_signal),
+        guarded_only=bool(args.source_guarded_only),
+        reviewable_only=bool(args.source_reviewable_only),
+    )
     if not point_ids and not requested_point_ids:
         point_ids = _fallback_point_ids(result, args.count, args.start)
     if not point_ids:

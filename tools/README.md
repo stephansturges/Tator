@@ -10,6 +10,11 @@ Tools
 - Qwen prepass smoke test (10-image baseline)
   - Run: `bash tools/run_qwen_prepass_smoke.sh --count 10 --seed 42 --dataset qwen_dataset`
 
+- Class Split Qwen review benchmark
+  - Run: `python tools/run_class_split_qwen_review_benchmark.py --job-id ... --source-run ... --count 100 --run-label ... --audit`
+  - Use `--source-backend-tier`, `--source-decision`, `--source-disposition`, `--source-disposition-signal`, `--source-guarded-only`, and `--source-reviewable-only` to filter a prior source run before `--start/--count` slicing.
+  - Analyze saved runs with `python tools/analyze_class_split_qwen_review_benchmark.py <run.json> --fail-on-unsafe`.
+
 - Refactor validation (py_compile + Tier-0/Tier-1 fuzz)
   - Run: `BASE_URL=http://127.0.0.1:8000 SKIP_GPU=1 tools/run_refactor_validation.sh`
   - Add `RUN_UNUSED_SCAN=1` to include the unused-def scan.

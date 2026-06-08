@@ -412,6 +412,7 @@ def test_default_caption_glossary_matches_camelcase_labelmap_names():
     assert '"LightVehicle": [\n    "Light Vehicle"' in glossary
     assert '"UPole": [\n    "UPole"' in glossary
     assert '"GasTank": [\n    "Gas Tank"' in glossary
+    assert '"storage tank"' in glossary
 
 
 def test_window_caption_prompt_applies_max_boxes_after_window_clipping():

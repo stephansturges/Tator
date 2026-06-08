@@ -75,7 +75,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--html",
-        default="ybat-master/ybat.html",
+        default="ybat-master/tator.html",
         help="Path to UI html",
     )
     parser.add_argument(
@@ -89,6 +89,10 @@ def main() -> int:
     tests_root = Path(args.tests_root)
     html_path = Path(args.html)
     js_path = Path(args.js)
+    if not html_path.exists() and html_path.name == "tator.html":
+        legacy_html_path = html_path.with_name("ybat.html")
+        if legacy_html_path.exists():
+            html_path = legacy_html_path
 
     manifest = _load_manifest(manifest_path)
     controls = manifest.get("controls") if isinstance(manifest, dict) else None

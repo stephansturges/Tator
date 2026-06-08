@@ -157,6 +157,10 @@ Dataset records also carry:
 - annotation lock state so concurrent writes fail loudly instead of silently
   clobbering labels
 
+When no glossary has been written yet, Tator derives starter glossary terms from
+the label names and adds conservative broad variants for common object-name
+patterns so Qwen and SAM3 prompts are useful before the operator edits them.
+
 This is why Tator is useful for extension work. Once a dataset has a glossary,
 active helpers, and one or more saved recipes, new image batches can start from
 dataset-specific suggestions rather than generic detector output.

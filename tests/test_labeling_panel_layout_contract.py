@@ -230,13 +230,19 @@ def test_keyboard_image_navigation_shortcuts_are_documented_and_guarded():
     assert 'class="shortcut-help-list"' in html
     assert "SHORTCUT_STORAGE_KEY" in js
     assert '"tator.annotation.shortcuts.v1"' in js
-    assert "SHORTCUT_CLASS_ID_COUNT = 20" in js
+    assert "SHORTCUT_CLASS_ID_COUNT" not in js
+    assert "CLASS_SHORTCUT_ID_PATTERN" in js
+    assert "function getShortcutClassNames()" in js
+    assert "function makeClassShortcutAction(index, className)" in js
+    assert 'id: `class_id_${index}`' in js
+    assert "load a labelmap or dataset first to configure direct class shortcuts" in js
+    assert "direct class IDs 0-19" not in js
+    assert "shortcutClassListObserver.observe(classList, { childList: true });" in js
     assert 'id: "image_next"' in js
     assert 'id: "image_previous"' in js
     assert 'id: "drawing_start"' in js
     assert 'id: "drawing_finish"' in js
     assert 'id: "delete_selected_current"' in js
-    assert '`class_id_${idx}`' in js
     assert "renderShortcutHelp()" in js
     assert "renderShortcutSettings()" in js
     assert "assignShortcutBinding(actionId, binding)" in js

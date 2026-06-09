@@ -49986,7 +49986,7 @@ async function cancelRfDetrTrainingJobRequest() {
         let modeSnapshot = null;
         let shortcutCaptureActionId = null;
         const SHORTCUT_STORAGE_KEY = "tator.annotation.shortcuts.v1";
-        const SHORTCUT_CLASS_ID_COUNT = 20;
+        const CLASS_SHORTCUT_ID_PATTERN = /^class_id_(\d+)$/;
         const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta", "OS"]);
 
         const makeBinding = (code, key, modifiers = {}) => ({
@@ -49998,7 +49998,7 @@ async function cancelRfDetrTrainingJobRequest() {
             shift: !!modifiers.shift,
         });
 
-        const shortcutActions = [
+        const baseShortcutActions = [
             {
                 id: "image_next",
                 group: "Images",
@@ -50271,17 +50271,61 @@ async function cancelRfDetrTrainingJobRequest() {
                 },
             },
         ];
-        for (let idx = 0; idx < SHORTCUT_CLASS_ID_COUNT; idx++) {
-            shortcutActions.push({
-                id: `class_id_${idx}`,
-                group: "Class IDs",
-                label: `Select class ID ${idx}`,
-                description: `Select label index ${idx}.`,
-                defaultBindings: [],
-                run: () => selectClassByIndex(idx),
-            });
+        let shortcutActions = [];
+        let shortcutActionById = new Map();
+        let shortcutClassListSignature = "";
+        let shortcutClassRefreshFrame = null;
+        let shortcutClassListObserver = null;
+
+        function getShortcutClassNames() {
+            if (!classList || !classList.options || !classList.options.length) {
+                return [];
+            }
+            return Array.from(classList.options)
+                .map((option) => String(option.text || option.textContent || option.value || "").trim())
+                .filter(Boolean);
         }
-        const shortcutActionById = new Map(shortcutActions.map((action) => [action.id, action]));
+
+        function makeClassShortcutAction(index, className) {
+            const label = className || `Class ${index}`;
+            return {
+                id: `class_id_${index}`,
+                group: "Class IDs",
+                label: `Select ${label} (#${index})`,
+                description: `Select labelmap class ${index}: ${label}.`,
+                defaultBindings: [],
+                run: () => selectClassByIndex(index),
+            };
+        }
+
+        function refreshShortcutActions() {
+            const classNames = getShortcutClassNames();
+            shortcutClassListSignature = classNames.join("\u001f");
+            shortcutActions = baseShortcutActions.concat(
+                classNames.map((className, index) => makeClassShortcutAction(index, className))
+            );
+            shortcutActionById = new Map(shortcutActions.map((action) => [action.id, action]));
+            if (shortcutCaptureActionId && !shortcutActionById.has(shortcutCaptureActionId)) {
+                shortcutCaptureActionId = null;
+            }
+            return classNames;
+        }
+
+        function refreshShortcutActionsIfNeeded() {
+            const classNames = getShortcutClassNames();
+            const signature = classNames.join("\u001f");
+            if (!shortcutActions.length || signature !== shortcutClassListSignature) {
+                return refreshShortcutActions();
+            }
+            return classNames;
+        }
+
+        function isKnownOrDeferredShortcutAction(actionId) {
+            const normalized = String(actionId || "");
+            return shortcutActionById.has(normalized) || CLASS_SHORTCUT_ID_PATTERN.test(normalized);
+        }
+
+        refreshShortcutActions();
         let shortcutState = loadShortcutState();
 
         const cycleClassSelection = (delta) => {
@@ -50441,6 +50485,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
 
         function getShortcutBindings(actionId) {
+            refreshShortcutActionsIfNeeded();
             const action = shortcutActionById.get(actionId);
             if (!action) {
                 return [];
@@ -50456,6 +50501,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
 
         function findShortcutActionForEvent(event, { includeHold = true } = {}) {
+            refreshShortcutActionsIfNeeded();
             for (const action of shortcutActions) {
                 if (!includeHold && action.hold) {
                     continue;
@@ -50479,7 +50525,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     ? parsed.bindings
                     : {};
                 Object.keys(bindings).forEach((actionId) => {
-                    if (!shortcutActionById.has(actionId) && !/^class_id_(?:[0-9]|1[0-9])$/.test(actionId)) {
+                    if (!isKnownOrDeferredShortcutAction(actionId)) {
                         return;
                     }
                     const rows = Array.isArray(bindings[actionId]) ? bindings[actionId] : [];
@@ -50518,6 +50564,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
 
         function removeShortcutBindingConflicts(actionId, bindings) {
+            refreshShortcutActionsIfNeeded();
             const signatures = new Set(
                 (bindings || []).map(bindingSignature).filter(Boolean)
             );
@@ -50647,10 +50694,14 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!list) {
                 return;
             }
+            const classNames = refreshShortcutActionsIfNeeded();
+            const classShortcutText = classNames.length
+                ? `Next ${shortcutKeyListHtml("class_next")}; previous ${shortcutKeyListHtml("class_previous")}; direct shortcuts are available for ${classNames.length} loaded labelmap class${classNames.length === 1 ? "" : "es"} in Customize keyboard shortcuts.`
+                : `Next ${shortcutKeyListHtml("class_next")}; previous ${shortcutKeyListHtml("class_previous")}; load a labelmap or dataset first to configure direct class shortcuts.`;
             const groupRows = [
                 ["Images", `Next ${shortcutKeyListHtml("image_next")}; previous ${shortcutKeyListHtml("image_previous")}.`],
                 ["Drawing", `Start ${shortcutKeyListHtml("drawing_start")}; end ${shortcutKeyListHtml("drawing_finish")}; toggle polygon draw ${shortcutKeyListHtml("drawing_toggle")}; cancel/exit ${shortcutKeyListHtml("drawing_cancel")}.`],
-                ["Classes", `Next ${shortcutKeyListHtml("class_next")}; previous ${shortcutKeyListHtml("class_previous")}; direct class IDs 0-19 can be assigned below.`],
+                ["Classes", classShortcutText],
                 ["Selection", "Shift + click adds/removes positive selections; Shift + drag draws a positive selection box; Shift + Alt + click/drag marks SAM3 similarity negatives."],
                 ["Box edits", `Delete selected/current ${shortcutKeyListHtml("delete_selected_current")}; delete latest ${shortcutKeyListHtml("delete_latest")}; magic tweak ${shortcutKeyListHtml("magic_tweak")}.`],
                 ["SAM", `Toggle SAM ${shortcutKeyListHtml("sam_toggle")}; point mode ${shortcutKeyListHtml("sam_point_toggle")}; multi-point ${shortcutKeyListHtml("sam_multi_toggle")}; positive ${shortcutKeyListHtml("multi_point_positive")}; negative ${shortcutKeyListHtml("multi_point_negative")}; submit ${shortcutKeyListHtml("multi_point_submit")}.`],
@@ -50666,6 +50717,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (!root) {
                 return;
             }
+            const classNames = refreshShortcutActionsIfNeeded();
             root.innerHTML = "";
             const groups = new Map();
             shortcutActions.forEach((action) => {
@@ -50730,11 +50782,45 @@ async function cancelRfDetrTrainingJobRequest() {
                 });
                 root.appendChild(section);
             });
+            if (!classNames.length) {
+                const section = document.createElement("section");
+                section.className = "shortcut-settings-group";
+                const title = document.createElement("div");
+                title.className = "shortcut-settings-group__title";
+                title.textContent = "Class IDs";
+                const row = document.createElement("div");
+                row.className = "shortcut-settings-row shortcut-settings-row--notice";
+                const label = document.createElement("div");
+                label.className = "shortcut-settings-row__label";
+                const strong = document.createElement("strong");
+                strong.textContent = "Load a labelmap first";
+                const desc = document.createElement("span");
+                desc.textContent = "Direct class shortcuts are created from the active labelmap, so Tator can expose every real class and avoid stale fixed IDs.";
+                label.append(strong, desc);
+                row.appendChild(label);
+                section.append(title, row);
+                root.appendChild(section);
+            }
         }
 
         function initShortcutSettingsUi() {
             renderShortcutHelp();
             renderShortcutSettings();
+            if (classList && "MutationObserver" in window && !shortcutClassListObserver) {
+                const refreshShortcutClassUi = () => {
+                    if (shortcutClassRefreshFrame !== null) {
+                        return;
+                    }
+                    shortcutClassRefreshFrame = window.requestAnimationFrame(() => {
+                        shortcutClassRefreshFrame = null;
+                        refreshShortcutActions();
+                        renderShortcutHelp();
+                        renderShortcutSettings();
+                    });
+                };
+                shortcutClassListObserver = new MutationObserver(refreshShortcutClassUi);
+                shortcutClassListObserver.observe(classList, { childList: true });
+            }
             const resetAll = document.getElementById("shortcutResetAll");
             const exportButton = document.getElementById("shortcutExportConfig");
             const importButton = document.getElementById("shortcutImportConfigButton");
@@ -50769,7 +50855,7 @@ async function cancelRfDetrTrainingJobRequest() {
                             ? parsed.bindings
                             : {};
                         Object.keys(bindings).forEach((actionId) => {
-                            if (!shortcutActionById.has(actionId)) {
+                            if (!isKnownOrDeferredShortcutAction(actionId)) {
                                 return;
                             }
                             const rows = Array.isArray(bindings[actionId]) ? bindings[actionId] : [];

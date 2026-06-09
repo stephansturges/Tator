@@ -94,7 +94,7 @@ tools/run_macos_backend.sh
 From another directory, `cd` to your clone first:
 
 ```bash
-cd /path/to/Tator && tools/run_macos_backend.sh
+cd <your Tator checkout> && tools/run_macos_backend.sh
 ```
 
 Equivalent direct wrapper, for machines without Poetry:

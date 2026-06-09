@@ -1030,6 +1030,10 @@ body.annotation-focus-mode .class-scroll-indicator {
     box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.12);
 }
 
+.shortcut-settings-row--notice {
+    grid-template-columns: 1fr;
+}
+
 @media (max-width: 720px) {
     .shortcut-settings-row {
         grid-template-columns: 1fr;

@@ -14,21 +14,6 @@ annotation changes become trusted labels.
 
 ## Start Here
 
-Daily backend start command:
-
-```bash
-tools/run_macos_backend.sh
-```
-
-Then open:
-
-```text
-http://127.0.0.1:8000/
-```
-
-Run that command from the repository root. If you are somewhere else first run
-`cd /path/to/Tator`, then start the backend.
-
 Install the local environment once:
 
 ```bash
@@ -36,13 +21,19 @@ poetry install --only-root
 poetry run tator-setup macos
 ```
 
-Start the backend from the repository root:
+Daily backend start command, from the repository root:
 
 ```bash
 tools/run_macos_backend.sh
 ```
 
-Open the browser UI:
+From another directory:
+
+```bash
+cd <your Tator checkout> && tools/run_macos_backend.sh
+```
+
+Then open the browser UI:
 
 ```text
 http://127.0.0.1:8000/
@@ -55,12 +46,6 @@ If port `8000` is already in use:
 
 ```bash
 PORT=8080 tools/run_macos_backend.sh
-```
-
-From another directory:
-
-```bash
-cd /path/to/Tator && tools/run_macos_backend.sh
 ```
 
 For setup details, see [Environment Setup](docs/environment_setup.md) and
@@ -371,7 +356,8 @@ Broader validation references:
 - Class Split likely-wrong review is centered on the live annotation workspace;
   mobile review sessions sync to that current workspace state.
 - Keyboard shortcuts are configurable and the on-screen shortcut explainer reads
-  from the active shortcut map.
+  from the active shortcut map; direct class shortcuts are generated from the
+  loaded labelmap instead of a fixed ID range.
 - Class Split Qwen review preserves raw VLM inputs, outputs, and deterministic
   guardrail evidence for auditability.
 - Data Ingestion ranks each current upload batch as one pooled set, including

@@ -14,6 +14,21 @@ annotation changes become trusted labels.
 
 ## Start Here
 
+Daily backend start command:
+
+```bash
+tools/run_macos_backend.sh
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8000/
+```
+
+Run that command from the repository root. If you are somewhere else first run
+`cd /path/to/Tator`, then start the backend.
+
 Install the local environment once:
 
 ```bash

@@ -646,6 +646,83 @@ def _record_uses_limited_dual_bbox_switch_path(record: Dict[str, Any]) -> bool:
         )
         if value == "supports_current"
     )
+    probe_status = str(probe.get("status") or "").strip().lower() if isinstance(probe, dict) else ""
+    probe_alignment = (
+        str(probe.get("specificity_alignment") or "").strip().lower()
+        if isinstance(probe, dict)
+        else ""
+    )
+    probe_contrast = (
+        str(probe.get("target_background_contrast") or "").strip().lower()
+        if isinstance(probe, dict)
+        else ""
+    )
+    probe_margin = (
+        str(probe.get("specificity_margin") or "").strip().lower()
+        if isinstance(probe, dict)
+        else ""
+    )
+    raw_probe_errors = probe.get("validation_errors") if isinstance(probe, dict) else []
+    if raw_probe_errors is None:
+        raw_probe_errors = []
+    if isinstance(raw_probe_errors, str):
+        raw_probe_errors = [raw_probe_errors]
+    if not isinstance(raw_probe_errors, (list, tuple)):
+        raw_probe_errors = []
+    probe_validation_errors = [str(item or "").strip() for item in raw_probe_errors if str(item or "").strip()]
+    current_class_plausible = _record_current_class_plausible(record, payload)
+    verifier_verified = isinstance(verifier, dict) and _coerce_bool(verifier.get("verified"))
+    verifier_overlap_rebutted = isinstance(verifier, dict) and _coerce_bool(verifier.get("overlap_rebutted"))
+    verifier_target_specific_overlap = (
+        str(verifier.get("overlap_risk") or "").strip().lower()
+        in {"target_specific", "not_applicable"}
+        if isinstance(verifier, dict)
+        else False
+    )
+    verifier_whole_extent_supported = (
+        isinstance(verifier, dict)
+        and _coerce_bool(verifier.get("whole_target_extent_supported"))
+    )
+    verifier_current_class_plausible = (
+        isinstance(verifier, dict)
+        and _coerce_bool(verifier.get("current_class_plausible"))
+    )
+    probe_margin_ok = probe_margin not in {
+        "current_target_favored",
+        "background_or_overlap_favored",
+        "low_contrast",
+        "insufficient",
+    }
+    probe_supports_target = (
+        probe_status == "completed"
+        and probe_confidence >= 0.75
+        and probe_alignment == "supports_suggested"
+        and probe_contrast == "target_specific"
+        and probe_margin_ok
+        and best_supported_norm == target_norm
+    )
+    probe_target_favored_but_incomplete = (
+        probe_status == "completed"
+        and bool(probe_validation_errors)
+        and probe_confidence >= 0.75
+        and probe_alignment == "supports_suggested"
+        and probe_margin_ok
+        and best_supported_norm == target_norm
+    )
+    cue_verified_probe_ok = probe_supports_target or (
+        probe_target_favored_but_incomplete
+        and verifier_verified
+        and verifier_confidence >= 0.9
+        and verifier_target_specific_overlap
+        and not current_class_plausible
+    )
+    cue_verified_reviewable_partial_path = (
+        _field("object_visibility") == "partial"
+        and verifier_confidence >= 0.9
+        and deterministic_current_support_count <= 1
+        and verifier_overlap_rebutted
+        and verifier_target_specific_overlap
+    )
 
     return (
         str(record.get("decision") or "") == "accept_suggested"
@@ -658,7 +735,10 @@ def _record_uses_limited_dual_bbox_switch_path(record: Dict[str, Any]) -> bool:
         and _field("backend_tier") == "limited"
         and not _coerce_bool(record.get("backend_edge_clipped") or payload.get("backend_edge_clipped"))
         and _field("visual_quality") in {"clear", "limited"}
-        and _field("object_visibility") == "clear"
+        and (
+            _field("object_visibility") == "clear"
+            or cue_verified_reviewable_partial_path
+        )
         and _field("current_evidence") in {"weak", "none"}
         and _field("suggested_evidence") == "strong"
         and _field("target_evidence") == "strong"
@@ -669,24 +749,16 @@ def _record_uses_limited_dual_bbox_switch_path(record: Dict[str, Any]) -> bool:
             _field("anchor_evidence_suggested") == "strong"
             or _coerce_bool(record.get("anchor_adjudication_verified") or payload.get("anchor_adjudication_verified"))
         )
-        and not _record_current_class_plausible(record, payload)
+        and not current_class_plausible
         and _field("specificity_alignment") == "supports_suggested"
         and _field("target_background_contrast") == "target_specific"
-        and isinstance(probe, dict)
-        and str(probe.get("status") or "").strip().lower() == "completed"
-        and probe_confidence >= 0.75
-        and str(probe.get("specificity_alignment") or "").strip().lower() == "supports_suggested"
-        and str(probe.get("target_background_contrast") or "").strip().lower() == "target_specific"
-        and str(probe.get("specificity_margin") or "").strip().lower()
-        not in {"current_target_favored", "background_or_overlap_favored", "low_contrast", "insufficient"}
-        and best_supported_norm == target_norm
-        and isinstance(verifier, dict)
-        and _coerce_bool(verifier.get("verified"))
+        and cue_verified_probe_ok
+        and verifier_verified
         and verifier_confidence >= 0.9
-        and _coerce_bool(verifier.get("overlap_rebutted"))
-        and str(verifier.get("overlap_risk") or "").strip().lower() in {"target_specific", "not_applicable"}
-        and _coerce_bool(verifier.get("whole_target_extent_supported"))
-        and not _coerce_bool(verifier.get("current_class_plausible"))
+        and verifier_overlap_rebutted
+        and verifier_target_specific_overlap
+        and verifier_whole_extent_supported
+        and not verifier_current_class_plausible
         and len(_explicit_visible_cues_from_record(record)) >= 2
         and bool(_supporting_clean_evidence_ids_from_record(record))
         and deterministic_current_support_count == 0

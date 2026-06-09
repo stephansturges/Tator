@@ -242,7 +242,7 @@ State sequence:
 5. `evidence_ledger`: the controller writes `evidence_ledger.json`, appends an
    `evidence_ledger` event, and injects one compact ledger message before final
    review. The ledger separates clean visual evidence from geometry overlays,
-   local-consensus dot maps, and reference-only context. This follows the
+   routed local-consensus panels, and reference-only context. This follows the
    running-summary pattern used in agent/tool systems while keeping the summary
    backend-owned and auditable. Qwen must draw `visible_target_cues` from clean
    target/source pixels; overlay boxes, dot colors, labels, and neighbor counts
@@ -275,10 +275,11 @@ State sequence:
    MLX Qwen3.6 runs used an assistant prefix that pre-filled the outer
    `finalize_review` wrapper; benchmark logs showed this induced malformed
    `{}}` completions, so finalization now runs in no-prefix JSON mode. The
-   final message keeps the clean target-detail, clean zoom, and class-context
-   pack images; local-consensus views, deterministic reports, source overlays,
-   and overlap-decomposition views remain compact text/ledger context so
-   evidence stays visible without overwhelming the MLX context path. Before any
+   final message keeps the clean target-detail, clean source image, clean zoom,
+   class-context pack, specificity region-contrast, and, when routed,
+   local-consensus panel images; deterministic reports, source-overlay geometry,
+   and overlap-decomposition views remain compact text/ledger context so evidence
+   stays visible without overwhelming the MLX context path. Before any
    class decision, Qwen must write `target_identity_summary`: a short,
    class-neutral description of the reviewed target's visible shape, parts,
    material, extent, and target-touching context. It must also cite clean
@@ -313,7 +314,7 @@ Required route schema:
   "name": "route_review",
   "arguments": {
     "action": "finalize_now | inspect_local_consensus_context",
-    "reason_code": "evidence_complete | needs_same_image_consensus | target_quality_not_clear | no_suggested_class | local_consensus_disabled | policy_blocked",
+    "reason_code": "evidence_complete | needs_same_image_consensus | target_quality_not_reviewable | target_quality_not_clear | no_suggested_class | local_consensus_disabled | policy_blocked",
     "confidence": 0.0,
     "rationale_short": "short route reason"
   }
@@ -396,8 +397,11 @@ Controller controls:
   chat-template `tools` argument because benchmark logs showed that path can
   produce bare `:` or prose instead of the JSON function call
 - local consensus is enabled by the Class Split UI and Qwen review endpoint by
-  default; backend policy still requires clear target quality, a suggested
-  class, and no prior consensus evidence before the router can request it
+  default; backend policy allows it for reviewable `clear` and `limited` target
+  crops with a suggested class and no prior consensus evidence. It remains
+  blocked for `poor` or unknown-quality targets. This keeps the evidence loop
+  VLM-centered for hard-but-readable rows without turning same-image consensus
+  into an automatic mutation signal.
 - router requests that violate policy are coerced to `finalize_now` and logged
 - overlap decomposition is always available and can return an empty/no-overlap
   section, so the model must actively reason about contamination instead of
@@ -406,11 +410,13 @@ Controller controls:
   generated from trusted examples and can improve class semantics, but the final
   prompt explicitly says fresh target pixels, clean source context, overlap
   evidence, and backend guardrails override them.
-- final visual context is intentionally target-dominant: target-context and
-  clean zoom/source images remain visible, while class context packs, consensus
-  views, and overlays are retained as text/reference context only. This prevents
-  clear anchor examples from pulling Qwen toward a class that is merely nearby
-  or scene-compatible with the target.
+- final visual context is intentionally target-dominant but not crop-only:
+  target-context summaries plus target-detail, clean source, clean zoom,
+  class-context, specificity region-contrast, and routed local-consensus images
+  remain visible. Overlay geometry and deterministic reports are retained as
+  text/reference context only. This keeps tool-produced visual evidence
+  available to Qwen while still preventing dot colors, labels, neighbor counts,
+  or clear anchor examples from replacing target-pixel recognition.
 - final-state schema or guardrail failures get one retry; a second failure
   returns `skip_uncertain`
 - if Qwen emits a compact result that contradicts its own target class and
@@ -533,7 +539,8 @@ whole/source image with no boxes, used for scene layout and wider visual
 context. The second is an annotated overlay that draws the target box plus
 materially overlapping same-image boxes. Qwen should use the clean image for
 class recognition and the overlay only for bbox geometry, overlap, and source
-position.
+position. The final context pack keeps the clean source image visible; overlay
+geometry stays in text/ledger context.
 
 `inspect_local_consensus_context` is opt-in optional second-stage evidence. It
 returns one side-by-side local source view
@@ -544,7 +551,10 @@ objects. This tool is designed to show local annotation consensus without
 adding bbox graphics that become visual features. The dot map is not ground
 truth; it can support or question a class hypothesis but cannot override unclear
 target pixels. If this tool is not enabled or not inspected, the final result
-uses `local_consensus_evidence=not_applicable`.
+uses `local_consensus_evidence=not_applicable`. If the router inspects it, the
+final context pack keeps the side-by-side local-consensus image visible to Qwen
+rather than reducing it to text, so the model can compare the clean local panel
+against the dot-map consensus before it emits its final visual judgment.
 
 `inspect_overlap_decomposition` returns structured overlap metrics for
 same-image boxes: IoU, target-area coverage, other-box coverage, relation label,
@@ -707,21 +717,36 @@ Backend guardrails are stricter than the prompt:
 - target crops are measured for bbox pixel size, edge clipping, contrast,
   dynamic range, and a simple sharpness score
 - poor target evidence is forced to persisted `skip_uncertain`
-- any non-skip recommendation on a non-clear backend visual-quality tier is
-  forced back to `skip_uncertain` and preserved as `guarded_recommendation`;
-  limited-quality targets still get a final Qwen turn by default so humans can
-  see Qwen's best advisory opinion without enabling automatic label
-  recommendations when final model generation is enabled. Poor-quality targets
+- class-changing recommendations on a limited backend visual-quality tier stay
+  VLM-authored advisory opinions. The controller may preserve them as
+  `guarded_recommendation`, run the independent cue verifier, or, for the narrow
+  verifier-backed path below, surface them as actionable human review signals.
+  Limited-quality targets still get a final Qwen turn by
+  default so humans can see Qwen's best advisory opinion. Poor-quality targets
   skip Qwen by default because benchmark review showed mostly low-value/noisy
   advisory opinions; pass `allow_poor_final_review=true` or use the benchmark
   flag below only for explicit experiments.
+- `confirm_current` is allowed to remain actionable on a limited backend tier
+  because it does not mutate the class label. If Qwen also reports strong
+  suggested-class evidence, this path still requires explicit target-pixel
+  rebuttal through the overlap rail or the Qwen specificity probe: strong current
+  evidence, target-specific contrast, visible target cues, and a completed
+  specificity probe whose best-supported class is the current class.
 - guarded recommendations include `signal_strength` when Qwen produced a blocked
   opinion. This is a triage rank, not an override. `strong` means the guarded
   target has strong model evidence, high confidence, and target-specific Qwen
   specificity-probe support. The result remains guarded if quality, overlap,
   anchor, or policy rails block it.
 - class-change recommendations (`accept_suggested` or `change_to_other`) require
-  a clear backend visual-quality tier before they can become actionable
+  either a clear backend visual-quality tier or the narrow verifier-backed
+  limited-quality path that agrees across the final VLM pass, specificity probe,
+  cue verifier, clean evidence ids, target-contained cues, and geometry rails.
+  Source-edge-clipped limited targets are still guarded by default; they can
+  surface as actionable only when the cue verifier explicitly says the edge
+  clipping is recoverable, the object visibility is clear, the visible target
+  extent is sufficient for the class, the current class is not plausible, and
+  the clean evidence ids support the target class. All other limited-quality
+  class changes remain guarded triage.
 - final results include model self-check fields for quality, visibility,
   overlap, and class evidence strength; trusted-anchor, local-context,
   global-context, glossary, and evidence-id bookkeeping is added by the backend
@@ -1100,8 +1125,14 @@ python3 tools/analyze_class_split_qwen_review_benchmark.py \
 
 The audit script checks the safety invariants that should not regress:
 
-- no actionable non-skip recommendation on limited or poor target evidence
-- no class-changing recommendation on non-clear backend visual quality
+- no actionable class-changing recommendation on poor target evidence
+- no actionable class-changing recommendation on limited target evidence unless
+  the narrow verifier-backed non-edge-clipped path agreed across Qwen final
+  review, specificity probe, cue verifier, clean evidence ids, visible
+  target-contained cues, and current-class counterevidence checks
+- no limited-quality `confirm_current` action unless the target remains
+  reviewable, Qwen reports strong current/target evidence, and any strong
+  suggested-class evidence is rebutted by overlap or specificity-probe support
 - no `accept_suggested` decision when Qwen reports strong evidence for the
   current class
 - no class-changing recommendation when either the final schema or the
@@ -1721,6 +1752,57 @@ contrast briefs, evidence fields, and overlap state.
   makes the 44 guarded opinions visible for manual audit. The limited-tier
   suggestions remain useful for human triage but too visually weak for automatic
   relabeling.
+- Limited-target local-consensus routing update: the initial VLM-centered
+  policy only rendered `inspect_local_consensus_context` for backend-`clear`
+  targets. In the `compact_verifier_reviewable70_v1` benchmark, 51/70 rows were
+  backend-`limited`, and 24 rows became `guarded_visual_quality`; representative
+  rows showed Qwen/probe/cue-verifier agreement on visible target cues while the
+  model lacked same-image consensus context. The policy now renders local
+  consensus for `limited` targets as additional evidence, while `poor` or
+  unknown-quality targets remain blocked and class-changing mutation guardrails
+  remain unchanged. This follows the same controller-owned context-assembly
+  pattern already documented above: richer observations first, final VLM
+  judgment second, mutation safety last.
+  - Verification run:
+    `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/limited_consensus_probe_v1_12_1780983998.json`
+    replayed 12 prior backend-`limited` guarded-visual-quality rows. Result:
+    12/12 completed, 0 final validation errors, 0 unsafe audit issues,
+    `router_action_counts={"inspect_local_consensus_context": 12}`, 2
+    actionable `confirm_current` results, 7 `guarded_visual_quality`, 3
+    `guarded_specificity_conflict`, and 12 effective human signals. The matching
+    audit artifact is
+    `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/limited_consensus_probe_v1_12_1780983998_audit.json`.
+    This proved the evidence path runs for limited targets; it did not justify
+    loosening limited-quality automatic class-change mutation rules.
+  - Final-context visual retention smoke:
+    `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/visible_consensus_context_smoke_v1_3_1780986307.json`
+    replayed 3 backend-`limited` guarded-visual-quality rows after the final
+    context packer was changed to keep routed local-consensus panels as images.
+    Result: 3/3 completed, 0 final validation errors, 0 cue-verifier parse
+    errors, 0 unsafe audit issues, `router_action_counts={"inspect_local_consensus_context": 3}`,
+    1 actionable `confirm_current`, 2 guarded human-triage signals, and 3
+    effective human signals. The saved `model_input` events for each
+    `final_attempt_1` include five images:
+    `target_detail`, `class_context_pack`, `specificity_region_contrast`,
+    `zoom_region`, and `local_consensus_context`. This closes the earlier gap
+    where local consensus could be rendered but then demoted to text before the
+    final Qwen visual judgment.
+  - Final-context visual retention 12-row comparison:
+    `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/visible_consensus_context_v1_12_1780986783.json`
+    reran the same 12 backend-`limited` guarded-visual-quality rows and compared
+    against `limited_consensus_probe_v1_12_1780983998.json`. Result: 12/12
+    completed, 0 backend failures, 0 final validation errors, 0 cue-verifier
+    parse errors, 0 unsafe audit issues, and
+    `router_action_counts={"inspect_local_consensus_context": 12}`. All 12
+    saved `final_attempt_1` `model_input` events include a
+    `local_consensus_context` image. The run produced 3 actionable
+    `confirm_current` results, 9 guarded human-triage signals, and 12 effective
+    human signals. The comparison found one changed record:
+    `Truck -> Building` moved from guarded `skip_uncertain` to actionable
+    `confirm_current` with rationale that the target pixels show truck structure
+    while building cues are background context. No class-change guardrail was
+    loosened; the gain came from preserving routed visual evidence in the VLM
+    final context.
 - Moderate-anchor clear-target experiment:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/moderate_anchor_clear_relabel_deep100_100_1780791467.json`
   tested a narrow recall increase for clear targets whose suggested anchors were
@@ -1947,6 +2029,168 @@ briefs. Regression tests cover:
   remains VLM-centered: deterministic reports constrain only high-risk
   moderate-overlap promotion; they do not replace Qwen's final visual judgment
   or erase the raw model evidence from artifacts.
+- Limited-quality confirm-current gate:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/limited_confirm_allowed_reviewable30_30_1780950859.json`
+  reran the same 30 reviewable rows after removing the over-broad rule that
+  forced every non-skip limited-tier result back to `skip_uncertain`. The new
+  generic rule still blocks ordinary limited-tier class changes, but lets
+  `confirm_current` survive as a human-review action when Qwen's final judgment
+  is backed by strong current/target evidence and, for strong suggested-class
+  cases, by target-specific overlap or specificity-probe rebuttal. The run
+  completed 30/30 with 0 backend failures, 0 final validation errors, 0 cue
+  verifier parse errors, and 0 unsafe audit issues. It produced 17 actionable
+  recommendations (`15` `confirm_current`, `2` `accept_suggested`), 11 guarded
+  human-triage signals, and 2 no-signal skips. Compared with
+  `qwen_sddf_tiefix_v1_reviewable30_30_1780941008.json`, eight rows changed
+  from guarded `skip_uncertain` to actionable `confirm_current`; all eight were
+  limited-quality current-class confirmations whose specificity probe supported
+  the current target class. The paired 9-row probe
+  `limited_confirm_allowed_probe_9_1780950470.json` exercised those limited
+  confirmations plus one intentionally conflicting row and produced 8
+  `confirm_current`, 1 guarded skip, and 0 unsafe audit issues. This fixes the
+  "safe but too quiet" benchmark failure without using deterministic controller
+  outputs as a replacement for Qwen's final visual judgment.
+- Verifier-backed limited class-change and edge-clipped guard:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/limited_class_change_verifier_reviewable30_30_1780958425.json`
+  reran the same 30 reviewable rows with a second Qwen cue-verifier path for
+  high-confidence limited-quality `accept_suggested` opinions. The verifier may
+  promote a limited class change only when the first final pass, specificity
+  probe, and cue verifier all agree on target-contained suggested-class cues,
+  the current class is explicitly implausible, same-image scale/embedding/local
+  consensus do not support the current class, and the target is not source-edge
+  clipped. The 30-row run completed 30/30 with 0 backend failures, 0 final
+  validation errors, 0 cue-verifier parse errors, and 0 unsafe audit issues. It
+  produced 18 actionable recommendations (`15` `confirm_current`, `3`
+  `accept_suggested`), 10 guarded human-triage signals, and 2 no-signal skips;
+  every row used Qwen final/specificity model calls, and the cue verifier ran on
+  6 rows. Manual visual audit then found one promoted limited row where the
+  target bbox touched the source image edge and the crop was dominated by
+  building/roof context with a partial vehicle at the edge. That was a real
+  target/background failure, not a controller-success story.
+
+  The follow-up patch made edge-clipped limited class changes guarded-only and
+  persisted `backend_edge_clipped` into benchmark records. The focused rerun
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/edge_clipped_limited_guard_probe_3_1780962731.json`
+  reran the three promoted rows. Result: 3/3 completed, 0 unsafe audit issues,
+  the edge-clipped `Building -> LightVehicle` row became guarded human triage,
+  and the two clear non-edge rows remained actionable class changes. This keeps
+  the workflow VLM-centered while applying an SDDF-style target/background
+  constraint: when the target extent is cut by the image edge, the model's
+  class-change opinion is preserved for human triage but not surfaced as an
+  actionable class-change recommendation.
+
+  The prompt-alignment smoke
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/promptalign_limited_smoke3_3_1780966596.json`
+  reran two non-edge limited rows and one edge-clipped limited row after aligning
+  the system prompt with the final instruction. Result: 3/3 completed, 0 final
+  validation errors, 0 cue-verifier parse errors, 0 unsafe audit issues, and 3
+  guarded human-triage class-change opinions. All three rows reached Qwen final
+  review and the specificity probe. This confirms the limited-quality prompt no
+  longer suppresses Qwen's advisory class-change reasoning before the backend
+  guardrails can preserve or verify it.
+- Verifier broadening and compact transport smoke:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/verifier_broaden_smoke3_3_1780970961.json`
+  first broadened the cue-verifier trigger so limited-quality guarded
+  target-specific class-change opinions could receive an independent verifier
+  pass. It completed 3/3 reviews with 0 unsafe audit issues and moved the
+  verifier from 0/3 to 2/3 relevant rows. The next probe,
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/verifier_broaden_smoke3b_3_1780971343.json`,
+  reached the verifier on all 3 rows but exposed a transport problem: Qwen's
+  valid-looking verifier JSON was cut off after repeated long cue strings,
+  leaving 2 cue-verifier parse errors. That was a schema/prompt failure, not a
+  visual-reasoning failure.
+
+  The follow-up patch made the verifier contract compact: core validation fields
+  stay required, but duplicate cue arrays and long explanatory strings are
+  optional and must be non-duplicative when present. The verification rerun
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/verifier_broaden_smoke3c_3_1780972463.json`
+  completed 3/3 reviews with 0 backend failures, 0 final validation errors, 0
+  cue-verifier parse errors, and 0 unsafe audit issues. Every row reached the
+  VLM sequence `probe_specificity->finalize_review->verify_visible_cues`.
+  Qwen verified all three guarded target-class opinions with clean evidence IDs,
+  while the controller kept them as guarded human triage because the selected
+  rows were limited-quality, source-edge clipped, or had same-image
+  deterministic support for the current class. This is the intended division of
+  labor: VLM advisory judgment is preserved and made inspectable, while
+  mutation/actionability rails still enforce visual-quality and geometry
+  constraints.
+- Refined guarded-disposition audit:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/compact_verifier_reviewable30_v2_28_1780973340.json`
+  replayed 28 reviewable rows from the previous 30-row source run after the
+  compact verifier fix. It completed 28/28 with 0 backend failures, 0 final
+  validation errors, 0 cue-verifier parse errors, 0 unsafe audit issues, and
+  the VLM sequence `probe_specificity->finalize_review` or
+  `probe_specificity->finalize_review->verify_visible_cues` on every row. The
+  run produced 18 actionable recommendations (`15` confirmations and `3`
+  class-change recommendations), 10 guarded human-triage signals, and no
+  no-signal skips. Manual visual review of the three actionable class changes
+  found them visually plausible.
+
+  The offline audit now recomputes guarded dispositions from the full record
+  instead of blindly trusting older stored `review_disposition` payloads. The
+  refined audit
+  `compact_verifier_reviewable30_v2_28_1780973340_audit_refined.json` splits
+  the 10 guarded rows into 8 visual-quality/edge-clip guarded signals and 2
+  specificity-probe conflicts. It also labels cue-verifier-backed limited-crop
+  signals as `Verified guarded signal` when Qwen final review, the specificity
+  probe, and the cue verifier all agree but visual-quality rails still block an
+  actionable class change. This keeps the benchmark aligned with the product
+  goal: useful VLM opinions stay visible, while the audit still states exactly
+  which rail blocked automatic actionability.
+- Limited-partial cue-verifier promotion smoke and replay:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/limited_partial_promotion_smoke_v1_3_1780991251.json`
+  first confirmed the narrow new path on three limited-quality rows: 3/3
+  completed, 0 unsafe audit issues, 1 verifier-backed `accept_suggested`, and 2
+  guarded human-triage signals. The promoted row was a non-edge-clipped partial
+  target where Qwen final review, specificity probing, and the strict visible
+  cue verifier all supplied target-contained suggested-class evidence while at
+  most one deterministic same-image report still supported the current class.
+
+  The follow-up replay
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/limited_partial_promotion_v1_12_1780991526.json`
+  ran 12 limited-quality guarded rows with source-clean context, local-consensus
+  context, specificity probing, and the compact cue verifier. It completed
+  12/12 rows with 0 unsafe audit issues, 0 cue-verifier parse errors, 2
+  actionable recommendations (`1` class change and `1` confirm-current), and 10
+  guarded human-triage signals. The cue verifier ran on 8 rows and promoted 1.
+  Eight rows stayed guarded because the source image clipped the target bbox,
+  and additional rows stayed guarded on specificity conflict or multiple
+  deterministic current-class supports. This is intentionally narrow: limited
+  partial crops can become actionable only when the VLM, the specificity probe,
+  and the independent cue verifier agree on clean target-contained cues and the
+  geometry/context rails do not indicate a high-risk target/background failure.
+
+- Edge-recoverable limited-quality verifier replay:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/edge_recoverable_limited_v1_7_1780998059.json`
+  first replayed the seven `guarded_visual_quality` rows from
+  `limited_partial_promotion_v1_12_1780991526.json` after adding
+  `edge_clip_recoverable` to the Qwen cue-verifier contract. It completed 7/7
+  rows with 0 unsafe audit issues, 0 cue-verifier parse errors, 1
+  verifier-backed `accept_suggested`, and 6 guarded human-triage signals. The
+  promoted `Digger -> Boat` row was source-edge clipped, but the visible hull,
+  deck, water, and wake were sufficient for the target class without relying on
+  pixels outside the image edge. Manual inspection of
+  `edge_recoverable_limited_v1_7_1780998059_visual_non_skip.jpg` found that
+  promotion useful.
+
+  The broader replay
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/edge_recoverable_limited70slice_v1_24_1780998638.json`
+  ran 24 limited-quality guarded rows from
+  `compact_verifier_reviewable70_v1_70_1780978425.json` with the same
+  VLM-centered path. It completed 24/24 rows in about 20.8 minutes with 0
+  backend failures, 0 final-validation errors, 0 cue-verifier parse errors, and
+  0 unsafe audit issues. Every row reached Qwen final review; all rows used the
+  specificity probe, and 16 rows reached the independent cue verifier. Results:
+  3 actionable class changes, 1 actionable `confirm_current`, and 20 guarded
+  human-triage signals. The cue verifier promoted 3 rows, including one
+  source-edge-clipped `Digger -> Boat` case where Qwen explicitly marked the
+  edge clipping recoverable. Manual inspection of
+  `edge_recoverable_limited70slice_v1_24_1780998638_visual_non_skip.jpg` found
+  the Boat and LightVehicle promotions clearly useful, the Bike confirmation
+  harmless/advisory, and the UPole promotion low-resolution but consistent with
+  the visible pole/crossarm evidence. The guarded contact sheet showed many
+  plausible advisory opinions, but most remained too clipped, partial, or
+  background-contaminated for automatic actionability.
 
 A larger labeled real-model benchmark should be run before treating v2
 recommendations as more than advisory.

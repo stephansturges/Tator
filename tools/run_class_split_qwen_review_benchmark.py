@@ -290,6 +290,7 @@ def _record_from_review(
         "same_image_embedding_anchor_count": embedding_context.get("same_image_anchor_count"),
         "deterministic_context": deterministic_context,
         "backend_tier": backend_quality.get("tier"),
+        "backend_edge_clipped": _coerce_bool(backend_quality.get("edge_clipped")),
         "guardrail_reasons": final.get("guardrail_reasons") or [],
         "advisory_reasons": final.get("advisory_reasons") or [],
         "guarded_recommendation": final.get("guarded_recommendation"),
@@ -313,6 +314,7 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
     decision_counts = Counter(str(record.get("decision") or "missing") for record in records)
     status_counts = Counter(str(record.get("status") or "missing") for record in records)
     backend_tiers = Counter(str(record.get("backend_tier") or "unknown") for record in records)
+    backend_edge_clipped = sum(1 for record in records if _coerce_bool(record.get("backend_edge_clipped")))
     schema_sequences = Counter(
         "->".join(str(item or "") for item in record.get("active_tool_schemas") or [])
         for record in records
@@ -404,6 +406,7 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
         "decision_counts": dict(decision_counts),
         "status_counts": dict(status_counts),
         "backend_tier_counts": dict(backend_tiers),
+        "backend_edge_clipped_count": backend_edge_clipped,
         "schema_sequence_counts": dict(schema_sequences),
         "router_action_counts": dict(router_actions),
         "same_image_scale_evidence_counts": dict(same_image_scale),

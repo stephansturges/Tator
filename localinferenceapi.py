@@ -25988,6 +25988,7 @@ CLASS_ANALYSIS_QWEN_REVIEW_ROUTER_REASON_CODES: Tuple[str, ...] = (
     "evidence_complete",
     "needs_same_image_consensus",
     "target_quality_not_clear",
+    "target_quality_not_reviewable",
     "no_suggested_class",
     "local_consensus_disabled",
     "policy_blocked",
@@ -25998,9 +25999,6 @@ CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_REQUIRED_FIELDS: Tuple[str, ...] = (
     "target_class",
     "cue_confidence",
     "positive_visible_target_cues",
-    "target_class_defining_cues",
-    "current_class_positive_cues",
-    "current_class_missing_or_inconsistent_cues",
     "current_class_plausibility_basis",
     "current_class_plausible",
     "current_class_plausibility_reason",
@@ -26008,17 +26006,29 @@ CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_REQUIRED_FIELDS: Tuple[str, ...] = (
     "whole_target_extent_reason",
     "overlap_rebutted",
     "overlap_risk",
-    "overlap_rebuttal",
     "anchor_support_verified",
     "anchor_support_basis",
-    "anchor_support_reason",
     "supporting_clean_evidence_ids",
     "rejection_reason",
+)
+
+CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_OPTIONAL_FIELDS: Tuple[str, ...] = (
+    "target_class_defining_cues",
+    "current_class_positive_cues",
+    "current_class_missing_or_inconsistent_cues",
+    "edge_clip_recoverable",
+    "edge_clip_recoverability_reason",
+    "overlap_rebuttal",
+    "anchor_support_reason",
 )
 
 
 def _class_analysis_qwen_review_cue_verifier_required_fields_text() -> str:
     return ", ".join(CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_REQUIRED_FIELDS)
+
+
+def _class_analysis_qwen_review_cue_verifier_optional_fields_text() -> str:
+    return ", ".join(CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_OPTIONAL_FIELDS)
 
 
 def _class_analysis_qwen_review_router_tool_spec(
@@ -26254,38 +26264,39 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                 "cue_confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                 "positive_visible_target_cues": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {"type": "string", "maxLength": 90},
                     "minItems": 0,
                     "maxItems": 6,
                     "description": (
                         "Positive object-internal or target-touching cues for the target class. "
-                        "The cues must describe the reviewed target bbox/object, not only a smaller visible subpart."
+                        "The cues must describe the reviewed target bbox/object, not only a smaller visible subpart. "
+                        "Use short phrases and do not repeat identical cue text in any other cue array."
                     ),
                 },
                 "target_class_defining_cues": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {"type": "string", "maxLength": 90},
                     "minItems": 0,
                     "maxItems": 6,
                     "description": (
-                        "Target-class-defining visible cues in the clean target/source pixels. "
-                        "Use only object-specific traits that distinguish the target class from the current class."
+                        "Optional, only when a one-cue target still needs contrastive support. "
+                        "Use target-class-defining cues that are not exact repeats of positive_visible_target_cues."
                     ),
                 },
                 "current_class_positive_cues": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {"type": "string", "maxLength": 90},
                     "minItems": 0,
                     "maxItems": 6,
-                    "description": "Positive cues that still support the current class, if visible.",
+                    "description": "Optional positive cues that still support the current class, if visible.",
                 },
                 "current_class_missing_or_inconsistent_cues": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {"type": "string", "maxLength": 90},
                     "minItems": 0,
                     "maxItems": 6,
                     "description": (
-                        "Visible absences or contradictions that weaken the current class hypothesis. "
+                        "Optional visible absences or contradictions that weaken the current class hypothesis. "
                         "Examples should be generic and dataset-derived, such as missing expected parts or visible "
                         "structure inconsistent with the current class."
                     ),
@@ -26312,6 +26323,7 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                 },
                 "current_class_plausibility_reason": {
                     "type": "string",
+                    "maxLength": 160,
                     "description": "Short visible-fact reason for why the current class is or is not still plausible.",
                 },
                 "whole_target_extent_supported": {
@@ -26325,9 +26337,26 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                 },
                 "whole_target_extent_reason": {
                     "type": "string",
+                    "maxLength": 160,
                     "description": (
                         "Short visible-fact reason for whether the proposed class explains the full target extent, "
                         "including attached or continuous structures inside the bbox."
+                    ),
+                },
+                "edge_clip_recoverable": {
+                    "type": "boolean",
+                    "description": (
+                        "Optional. True only when the bbox touches the image edge but visible target pixels still "
+                        "show enough class-defining structure that missing outside-image pixels are not necessary "
+                        "for class identity. False or omit for non-edge cases or when edge clipping hides decisive parts."
+                    ),
+                },
+                "edge_clip_recoverability_reason": {
+                    "type": "string",
+                    "maxLength": 160,
+                    "description": (
+                        "Optional short visible-fact reason explaining why image-edge clipping does or does not hide "
+                        "class-critical target parts."
                     ),
                 },
                 "overlap_rebutted": {
@@ -26344,7 +26373,11 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                 },
                 "overlap_rebuttal": {
                     "type": "string",
-                    "description": "Short visible-fact explanation of why overlap does or does not explain the target-class evidence.",
+                    "maxLength": 160,
+                    "description": (
+                        "Optional short visible-fact explanation of why overlap does or does not explain "
+                        "the target-class evidence."
+                    ),
                 },
                 "anchor_support_verified": {
                     "type": "boolean",
@@ -26363,7 +26396,8 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                 },
                 "anchor_support_reason": {
                     "type": "string",
-                    "description": "Short visible-fact reason explaining the anchor-support judgment.",
+                    "maxLength": 160,
+                    "description": "Optional short visible-fact reason explaining the anchor-support judgment.",
                 },
                 "supporting_clean_evidence_ids": {
                     "type": "array",
@@ -26374,31 +26408,11 @@ def _class_analysis_qwen_review_cue_verifier_tool_spec(labelmap: Sequence[str]) 
                 },
                 "rejection_reason": {
                     "type": "string",
+                    "maxLength": 160,
                     "description": "Short reason when verified=false, or the main remaining uncertainty.",
                 },
             },
-            "required": [
-                "verified",
-                "target_class",
-                "cue_confidence",
-                "positive_visible_target_cues",
-                "target_class_defining_cues",
-                "current_class_positive_cues",
-                "current_class_missing_or_inconsistent_cues",
-                "current_class_plausibility_basis",
-                "current_class_plausible",
-                "current_class_plausibility_reason",
-                "whole_target_extent_supported",
-                "whole_target_extent_reason",
-                "overlap_rebutted",
-                "overlap_risk",
-                "overlap_rebuttal",
-                "anchor_support_verified",
-                "anchor_support_basis",
-                "anchor_support_reason",
-                "supporting_clean_evidence_ids",
-                "rejection_reason",
-            ],
+            "required": list(CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_REQUIRED_FIELDS),
         },
     }
 
@@ -26600,12 +26614,13 @@ def _class_analysis_qwen_review_local_consensus_policy(
     executed_tools: Set[str],
 ) -> Dict[str, Any]:
     reasons: List[str] = []
+    tier = str(visual_quality.get("tier") or "").strip().lower()
     if not local_consensus_enabled:
         reasons.append("local_consensus_disabled")
     if "inspect_local_consensus_context" in executed_tools:
         reasons.append("already_inspected")
-    if str(visual_quality.get("tier") or "").strip().lower() != "clear":
-        reasons.append("target_quality_not_clear")
+    if tier in {"poor", "unknown", ""}:
+        reasons.append("target_quality_not_reviewable")
     if not str(point.get("suggested_neighbor_class") or "").strip():
         reasons.append("no_suggested_class")
     return {
@@ -29949,6 +29964,17 @@ def _class_analysis_qwen_review_validate_final(
             return bool(value)
         return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
+    cue_verifier_class_change_verified = _coerce_payload_bool(
+        payload.get("_cue_verifier_class_change_verified")
+    )
+    try:
+        cue_verifier_confidence = float(payload.get("_cue_verifier_confidence") or 0.0)
+    except Exception:
+        cue_verifier_confidence = 0.0
+    if not math.isfinite(cue_verifier_confidence):
+        cue_verifier_confidence = 0.0
+    cue_verifier_confidence = max(0.0, min(1.0, cue_verifier_confidence))
+
     overlap_explains_candidate_similarity = _coerce_payload_bool(payload.get("overlap_explains_candidate_similarity"))
     overlap_adjudication_verified = _coerce_payload_bool(
         payload.get("overlap_adjudication_verified")
@@ -30079,6 +30105,7 @@ def _class_analysis_qwen_review_validate_final(
     ]
     backend_quality = dict(visual_quality or {})
     backend_tier = str(backend_quality.get("tier") or "unknown").strip().lower()
+    backend_edge_clipped = _coerce_payload_bool(backend_quality.get("edge_clipped"))
     guardrail_reasons: List[str] = []
     advisory_reasons: List[str] = []
     confidence_cap: Optional[float] = None
@@ -30108,6 +30135,150 @@ def _class_analysis_qwen_review_validate_final(
         and target_evidence == "strong"
         and local_context_evidence == "strong"
         and global_context_evidence == "strong"
+    )
+    class_change_specificity_probe = (
+        evidence_ledger.get("specificity_probe")
+        if isinstance(evidence_ledger, dict) and isinstance(evidence_ledger.get("specificity_probe"), dict)
+        else None
+    )
+    try:
+        class_change_probe_confidence = (
+            float(class_change_specificity_probe.get("confidence") or 0.0)
+            if class_change_specificity_probe
+            else 0.0
+        )
+    except Exception:
+        class_change_probe_confidence = 0.0
+    if not math.isfinite(class_change_probe_confidence):
+        class_change_probe_confidence = 0.0
+    class_change_probe_alignment = (
+        str(class_change_specificity_probe.get("specificity_alignment") or "").strip().lower()
+        if class_change_specificity_probe
+        else ""
+    )
+    class_change_probe_contrast = (
+        str(class_change_specificity_probe.get("target_background_contrast") or "").strip().lower()
+        if class_change_specificity_probe
+        else ""
+    )
+    class_change_probe_margin = (
+        str(class_change_specificity_probe.get("specificity_margin") or "").strip().lower()
+        if class_change_specificity_probe
+        else ""
+    )
+    class_change_probe_best_norm = _class_analysis_qwen_review_normalize_label(
+        class_change_specificity_probe.get("best_supported_class") if class_change_specificity_probe else ""
+    )
+    class_change_target_norm = _class_analysis_qwen_review_normalize_label(target_class)
+    class_change_probe_supports_target = (
+        isinstance(class_change_specificity_probe, dict)
+        and str(class_change_specificity_probe.get("status") or "").strip().lower() == "completed"
+        and class_change_probe_confidence >= 0.75
+        and class_change_probe_alignment == "supports_suggested"
+        and class_change_probe_contrast == "target_specific"
+        and class_change_probe_margin
+        not in {"current_target_favored", "background_or_overlap_favored", "low_contrast", "insufficient"}
+        and bool(class_change_probe_best_norm)
+        and class_change_probe_best_norm == class_change_target_norm
+    )
+    deterministic_current_support_count = sum(
+        1
+        for value in (
+            same_image_scale_evidence,
+            same_image_embedding_evidence,
+            local_consensus_evidence,
+        )
+        if str(value or "").strip().lower() == "supports_current"
+    )
+    cue_verified_overlap_rebuttal = _coerce_payload_bool(
+        payload.get("_cue_verifier_overlap_rebutted")
+    )
+    cue_verified_target_specific_overlap = (
+        str(payload.get("_cue_verifier_overlap_risk") or "").strip().lower()
+        in {"target_specific", "not_applicable"}
+    )
+    cue_verified_edge_clip_recoverable = _coerce_payload_bool(
+        payload.get("_cue_verifier_edge_clip_recoverable")
+    )
+    cue_verified_edge_clip_ok = (
+        not backend_edge_clipped
+        or (
+            backend_edge_clipped
+            and object_visibility == "clear"
+            and cue_verifier_confidence >= 0.92
+            and cue_verified_edge_clip_recoverable
+            and whole_target_extent_supported
+            and not current_class_plausible
+        )
+    )
+    cue_verified_reviewable_partial_path = (
+        object_visibility == "partial"
+        and cue_verifier_confidence >= 0.9
+        and deterministic_current_support_count <= 1
+        and cue_verified_overlap_rebuttal
+        and cue_verified_target_specific_overlap
+    )
+    cue_verified_deterministic_context_ok = (
+        deterministic_current_support_count == 0
+        or (
+            deterministic_current_support_count == 1
+            and cue_verifier_confidence >= 0.9
+            and not current_class_plausible
+            and cue_verified_overlap_rebuttal
+            and cue_verified_target_specific_overlap
+        )
+    )
+    cue_verified_overlap_ok = (
+        overlap_assessment in {"none", "near_context"}
+        or (
+            overlap_assessment == "partial_contamination"
+            and overlap_adjudication_verified
+            and cue_verified_overlap_rebuttal
+            and cue_verified_target_specific_overlap
+        )
+        or (
+            overlap_assessment == "unclear"
+            and cue_verified_overlap_rebuttal
+            and cue_verified_target_specific_overlap
+            and deterministic_current_support_count <= 1
+        )
+    )
+    cue_verified_limited_class_change_path = (
+        decision == "accept_suggested"
+        and expanded_by_controller
+        and cue_verifier_class_change_verified
+        and cue_verifier_confidence >= 0.9
+        and backend_tier == "limited"
+        and cue_verified_edge_clip_ok
+        and visual_quality_value in {"clear", "limited"}
+        and (
+            object_visibility == "clear"
+            or cue_verified_reviewable_partial_path
+        )
+        and current_evidence in {"weak", "none"}
+        and suggested_evidence == "strong"
+        and target_evidence == "strong"
+        and local_context_evidence == "strong"
+        and global_context_evidence == "strong"
+        and anchor_evidence_suggested in {"strong", "moderate"}
+        and (
+            anchor_evidence_suggested == "strong"
+            or anchor_adjudication_verified
+        )
+        and current_class_plausibility_checked
+        and not current_class_plausible
+        and specificity_alignment == "supports_suggested"
+        and target_background_contrast == "target_specific"
+        and class_change_probe_supports_target
+        and len(visible_target_cues) >= 2
+        and bool(supporting_clean_evidence_ids)
+        and whole_target_extent_supported
+        and (
+            not overlap_explains_candidate_similarity
+            or (cue_verified_overlap_rebuttal and cue_verified_target_specific_overlap)
+        )
+        and cue_verified_deterministic_context_ok
+        and cue_verified_overlap_ok
     )
     if dual_bbox_active:
         _advise(
@@ -30139,7 +30310,13 @@ def _class_analysis_qwen_review_validate_final(
         _hard("backend visual-quality tier is poor")
     elif backend_tier and backend_tier != "clear":
         _advise(f"backend visual-quality tier is {backend_tier}", 0.65)
-        if decision != "skip_uncertain":
+        if (
+            decision in {"accept_suggested", "change_to_other"}
+            and backend_edge_clipped
+            and not cue_verified_limited_class_change_path
+        ):
+            _hard(f"{decision} is advisory-only because the target bbox is clipped by the source image edge")
+        if decision in {"accept_suggested", "change_to_other"} and not cue_verified_limited_class_change_path:
             _hard(f"{decision} is advisory-only because backend visual-quality tier is {backend_tier}")
     if visual_quality_value == "poor":
         _hard("model visual-quality self-check is poor")
@@ -30151,7 +30328,11 @@ def _class_analysis_qwen_review_validate_final(
         _advise(f"model object visibility is {object_visibility}", 0.65)
     if decision != "skip_uncertain" and target_evidence not in {"strong", "moderate"}:
         _hard(f"target class evidence is only {target_evidence}")
-    if decision in {"accept_suggested", "change_to_other"} and backend_tier != "clear":
+    if (
+        decision in {"accept_suggested", "change_to_other"}
+        and backend_tier != "clear"
+        and not cue_verified_limited_class_change_path
+    ):
         _hard(f"{decision} requires clear backend visual-quality tier, got {backend_tier or 'unknown'}")
     if decision in {"accept_suggested", "change_to_other"}:
         required_specificity = "supports_suggested" if decision == "accept_suggested" else "supports_other"
@@ -30349,11 +30530,24 @@ def _class_analysis_qwen_review_validate_final(
         and same_image_scale_evidence in {"insufficient", "neutral", "not_applicable"}
         and same_image_embedding_evidence in {"insufficient", "neutral", "not_applicable"}
     )
+    confirm_current_reviewable_quality_path = (
+        decision == "confirm_current"
+        and (
+            (
+                backend_tier == "clear"
+                and visual_quality_value == "clear"
+                and object_visibility == "clear"
+            )
+            or (
+                backend_tier == "limited"
+                and visual_quality_value in {"clear", "limited"}
+                and object_visibility in {"clear", "partial"}
+            )
+        )
+    )
     confirm_current_overlap_rebuttal_path = (
         decision == "confirm_current"
-        and backend_tier == "clear"
-        and visual_quality_value == "clear"
-        and object_visibility == "clear"
+        and confirm_current_reviewable_quality_path
         and current_evidence == "strong"
         and target_evidence == "strong"
         and anchor_evidence_current in {"strong", "moderate"}
@@ -30380,14 +30574,13 @@ def _class_analysis_qwen_review_validate_final(
     )
     confirm_current_specificity_rebuttal_path = (
         decision == "confirm_current"
-        and backend_tier == "clear"
-        and visual_quality_value == "clear"
-        and object_visibility == "clear"
+        and confirm_current_reviewable_quality_path
         and current_evidence == "strong"
         and target_evidence == "strong"
         and specificity_alignment == "supports_current"
         and target_background_contrast == "target_specific"
         and current_class
+        and bool(visible_target_cues)
         and confirm_probe_confidence >= 0.75
         and confirm_probe_alignment == "supports_current"
         and confirm_probe_contrast == "target_specific"
@@ -30501,6 +30694,7 @@ def _class_analysis_qwen_review_validate_final(
             or dual_bbox_target_switch_path
             or verified_overlap_rebuttal_relabel_path
             or verified_moderate_anchor_relabel_path
+            or cue_verified_limited_class_change_path
         ):
             _advise("accept_suggested has only moderate suggested-anchor agreement", 0.72)
         else:
@@ -30546,7 +30740,9 @@ def _class_analysis_qwen_review_validate_final(
     ):
         _hard("change_to_other requires weak/none evidence for both current and suggested classes")
     if decision in {"accept_suggested", "change_to_other"} and overlap_explains_candidate_similarity:
-        if backend_tier == "clear" and visual_quality_value == "clear" and object_visibility == "clear" and target_evidence == "strong":
+        if cue_verified_limited_class_change_path:
+            _advise("cue verifier rebuts overlap as the source of target-specific class evidence", 0.68)
+        elif backend_tier == "clear" and visual_quality_value == "clear" and object_visibility == "clear" and target_evidence == "strong":
             _advise("overlap decomposition may explain candidate-class similarity", 0.68)
         else:
             _hard("overlap decomposition says overlapping-object pixels explain candidate-class similarity")
@@ -30573,11 +30769,13 @@ def _class_analysis_qwen_review_validate_final(
             overlap_rebuttal_text_supported
             or verified_overlap_rebuttal_relabel_path
             or verified_moderate_anchor_relabel_path
+            or cue_verified_limited_class_change_path
         )
         and (
             anchor_evidence_suggested == "strong"
             or verified_overlap_rebuttal_relabel_path
             or verified_moderate_anchor_relabel_path
+            or cue_verified_limited_class_change_path
         )
     )
     target_class_material_overlap = _class_analysis_qwen_review_target_class_material_overlap(
@@ -30617,6 +30815,7 @@ def _class_analysis_qwen_review_validate_final(
         "unclear",
         }
         and not (dual_bbox_target_switch_path and overlap_assessment == "duplicate_like")
+        and not cue_verified_limited_class_change_path
     ):
         _hard(f"overlap assessment {overlap_assessment} is too entangled for relabel recommendation")
     if decision == "accept_suggested":
@@ -30645,6 +30844,7 @@ def _class_analysis_qwen_review_validate_final(
             "visual_quality": visual_quality_value,
             "object_visibility": object_visibility,
             "backend_tier": backend_tier,
+            "backend_edge_clipped": backend_edge_clipped,
             "current_evidence": current_evidence,
             "suggested_evidence": suggested_evidence,
             "target_evidence": target_evidence,
@@ -30981,6 +31181,12 @@ def _class_analysis_qwen_review_disposition(final_result: Dict[str, Any]) -> Dic
         guarded_current_evidence = str(guarded.get("current_evidence") or "").strip().lower()
         guarded_target_evidence = str(guarded.get("target_evidence") or "").strip().lower()
         current_dominates_target = "current class" in reason_text and "dominates the target bbox" in reason_text
+        specificity_probe_conflict = (
+            "specificity probe" in reason_text
+            or "background/overlap" in reason_text
+            or "background_dominated" in reason_text
+            or "overlap_dominated" in reason_text
+        )
         if guarded_decision in {"accept_suggested", "change_to_other"} and current_dominates_target:
             return _base(
                 "verified_current_class_overlap",
@@ -30992,13 +31198,48 @@ def _class_analysis_qwen_review_disposition(final_result: Dict[str, Any]) -> Dic
                 human_action="Confirm the current class or skip after checking the source context.",
                 primary_reason=(guarded_reasons[0] if guarded_reasons else "Current-class material dominates the target bbox."),
             )
+        if specificity_probe_conflict:
+            signal_strength = _guarded_signal_strength(guarded)
+            if guarded_decision in {"accept_suggested", "change_to_other"}:
+                label = f"Guarded: specificity probe questions {guarded_target or 'class change'}"
+                human_action = (
+                    "Inspect manually; Qwen's final class-change opinion conflicts with its target/background specificity probe."
+                )
+            elif guarded_decision == "confirm_current":
+                label = "Guarded: specificity probe questions confirmation"
+                human_action = (
+                    "Inspect manually; Qwen's confirmation opinion conflicts with its target/background specificity probe."
+                )
+            else:
+                label = f"Guarded: specificity probe conflict for {guarded_target or 'review class'}"
+                human_action = "Inspect manually; the specificity probe and final opinion disagree."
+            return _base(
+                "guarded_specificity_conflict",
+                signal="guarded_human_triage",
+                label=label,
+                priority="high" if signal_strength in {"strong", "moderate"} else "normal",
+                advisory_decision=guarded_decision,
+                advisory_target_class=guarded_target,
+                human_action=human_action,
+                primary_reason=(guarded_reasons[0] if guarded_reasons else "Specificity probe contradicted the guarded recommendation."),
+                signal_strength=signal_strength,
+            )
         if guarded_backend not in {"", "clear"} or guarded_quality not in {"", "clear"} or guarded_visibility not in {"", "clear"}:
             signal_strength = _guarded_signal_strength(guarded)
             disposition = "guarded_visual_quality"
+            cue_verified_signal = (
+                cue_verifier
+                and guarded_decision in {"accept_suggested", "change_to_other"}
+                and cue_verifier.get("verified")
+            )
             if signal_strength == "strong":
                 label = f"Strong guarded signal: possible {guarded_target or 'class change'} from limited crop"
                 priority = "high"
                 human_action = "Inspect this one early; Qwen and the specificity probe agree, but crop quality still blocks automatic recommendation."
+            elif cue_verified_signal and signal_strength == "moderate":
+                label = f"Verified guarded signal: possible {guarded_target or 'class change'} from limited crop"
+                priority = "normal"
+                human_action = "Inspect manually; Qwen, cue verification, and target-specific evidence agree, but quality rails block automatic relabeling."
             elif signal_strength == "moderate":
                 label = f"Guarded: possible {guarded_target or 'class change'} from limited crop"
                 priority = "normal"
@@ -31189,13 +31430,15 @@ Tool protocol:
 
 Decision policy:
 - First decide inspectability from the target crop itself. If the backend
-  visual-quality tier is poor, or the object is tiny, blurry, clipped, not
-  visible, or not directly identifiable, choose skip_uncertain. If the backend
-	  tier is limited, you may only return an advisory confirm_current when the
-	  target itself visibly supports the current class and any suggested-class
-	  signal is explained by overlap, near context, or weak target evidence;
-	  otherwise choose skip_uncertain. Class-changing decisions require clear
-	  backend quality.
+  visual-quality tier is poor, or the object is not visible or not directly
+  identifiable, choose skip_uncertain. If the target is tiny, blurry, clipped,
+  or context-contaminated but still shows concrete class evidence in clean
+  target/source pixels, give your best advisory human-triage opinion instead
+  of suppressing it. For limited-quality or edge-clipped targets, class-changing
+  opinions are advisory only: the controller may keep them guarded, run an
+  extra verifier, or block mutation. Your job is still to state the VLM's best
+  evidence-based decision and confidence, then explain the visible target cues
+  and quality limits.
 - The suggested class is only a hypothesis from embedding-neighbor disagreement,
   not ground truth. Do not accept it just because it is suggested.
 - The glossary defines class meaning. Review guidance is dataset/session policy
@@ -31293,7 +31536,7 @@ def _class_analysis_qwen_review_router_instruction(
     allowed = bool(local_consensus_policy.get("allowed"))
     reasons = ", ".join(str(item) for item in (local_consensus_policy.get("reasons") or [])) or "none"
     action_policy = (
-        "Allowed actions: finalize_now or inspect_local_consensus_context. Choose local consensus only if required evidence is clear but same-image annotation consensus is genuinely the missing context."
+        "Allowed actions: finalize_now or inspect_local_consensus_context. Choose local consensus only when same-image annotation consensus is genuinely the missing context."
         if allowed
         else f"Allowed action: finalize_now only. Local consensus is blocked by backend policy: {reasons}."
     )
@@ -31346,8 +31589,9 @@ def _class_analysis_qwen_review_final_instruction(
     elif tier == "limited":
         quality_policy = (
             "Because the backend visual-quality tier is limited, your output is advisory-only: "
-            "the backend will not allow an automatic label recommendation. Still give your best "
-            "human-triage opinion when target/source pixels show concrete evidence. Choose "
+            "the backend may preserve class-changing opinions as guarded human-triage, run an "
+            "extra verifier, or block automatic mutation. Still give your best human-triage "
+            "opinion when target/source pixels show concrete evidence. Choose "
             "accept_suggested, change_to_other, or confirm_current if the visible target evidence "
             "supports that opinion; choose skip_uncertain only when the target itself is genuinely "
             "not interpretable or multiple classes remain equally plausible."
@@ -31505,25 +31749,23 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
     ]
     target_class = str(guarded_recommendation.get("target_class") or "").strip()
     required_fields = _class_analysis_qwen_review_cue_verifier_required_fields_text()
+    optional_fields = _class_analysis_qwen_review_cue_verifier_optional_fields_text()
     skeleton = {
         "verified": False,
         "target_class": target_class,
         "cue_confidence": 0.0,
         "positive_visible_target_cues": [],
-        "target_class_defining_cues": [],
-        "current_class_positive_cues": [],
-        "current_class_missing_or_inconsistent_cues": [],
         "current_class_plausibility_basis": "none",
         "current_class_plausible": False,
         "current_class_plausibility_reason": "",
         "whole_target_extent_supported": False,
         "whole_target_extent_reason": "",
+        "edge_clip_recoverable": False,
+        "edge_clip_recoverability_reason": "",
         "overlap_rebutted": False,
         "overlap_risk": "not_applicable",
-        "overlap_rebuttal": "",
         "anchor_support_verified": False,
         "anchor_support_basis": "not_applicable",
-        "anchor_support_reason": "",
         "supporting_clean_evidence_ids": [],
         "rejection_reason": "",
     }
@@ -31537,17 +31779,18 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
                         "Cue-verifier state.",
                         "A previous finalize_review tried to change this class, but the controller blocked it because the visible-cue, anchor, or overlap guardrails were not strong enough.",
                         "Your job is not to re-argue the whole label decision. Verify only whether clean target/source pixels show enough positive target-object cues for the proposed target class, and whether overlap/background actually explains those cues.",
-                        "Return one complete verify_visible_cues JSON arguments object with exactly the required keys and no extra keys.",
+                        "Return one complete verify_visible_cues JSON arguments object with every required key.",
                         "Return only the arguments object, not an outer name/tool wrapper, markdown, prose, comments, or partial object.",
                         "Output compact JSON. Do not put newlines inside string values, and do not continue any reason field into a second sentence.",
                         "Use numeric JSON values with no spaces inside numbers, for example 0.92 not 0. 92.",
                         "Keep current_class_plausibility_reason, whole_target_extent_reason, overlap_rebuttal, anchor_support_reason, and rejection_reason under 18 words each.",
-                        "If the evidence is ambiguous, return verified=false with the full schema and short reasons instead of a long explanation.",
+                        "If the evidence is ambiguous, return verified=false with the compact required schema and short reasons instead of a long explanation.",
                         f"Required keys: {required_fields}.",
-                        f"JSON shape to fill: {json.dumps(skeleton, ensure_ascii=False)}",
+                        f"Optional keys, use only when they add non-duplicative validation evidence: {optional_fields}.",
+                        f"Minimal JSON shape to fill: {json.dumps(skeleton, ensure_ascii=False)}",
                         "Do not include legacy or diagnostic keys such as current_class, proposed_target_class, verified_evidence_ids, cue_counts, specificity scores, overlap ratios, or any *_confidence field other than cue_confidence.",
                         "Use supporting_clean_evidence_ids, not verified_evidence_ids.",
-                        "current_class_plausibility_reason, overlap_rebuttal, anchor_support_reason, and rejection_reason must always be strings. Use an empty string when no reason applies.",
+                        "current_class_plausibility_reason and rejection_reason must always be strings. If optional reason fields are present, they must also be strings.",
                         f"Current class: {point.get('class_name')}",
                         f"Proposed target class: {target_class or '(none)'}",
                         f"Original model rationale: {str(guarded_recommendation.get('rationale_short') or '')[:300]}",
@@ -31558,14 +31801,19 @@ def _class_analysis_qwen_review_cue_verifier_instruction(
                         "Use the current and target class concept briefs in the compact context, especially valid_variations, exclude_when, common_confusions, and uncertainty_triggers.",
                         "Do not count class names, `matches class`, local-consensus dots, neighbor labels, overlay boxes, negative claims, absence claims, color-only claims, or generic overhead/parked/context claims.",
                         "Each positive_visible_target_cue must be a concrete visible property such as shape, parts, material, structure, texture, edges, posture, or target-touching context.",
-                        "Use target_class_defining_cues for the subset of target cues that distinguish the proposed target class from the current class; do not include generic shared shape/color/context.",
-                        "Use current_class_missing_or_inconsistent_cues for visible absences or contradictions that weaken the current class hypothesis. Examples must come from the current class concept brief, glossary, or clean pixels, not from a hardcoded dataset rule.",
+                        "Keep each cue short, preferably under 8 words. Do not copy the same cue string into multiple arrays.",
+                        "Use target_class_defining_cues only when a one-cue target needs contrastive support; do not repeat positive_visible_target_cues.",
+                        "Use current_class_missing_or_inconsistent_cues only for visible absences or contradictions that weaken the current class hypothesis. Examples must come from the current class concept brief, glossary, or clean pixels, not from a hardcoded dataset rule.",
                         "Absence or contradiction cues never verify a class change by themselves. They only support the decision when positive target-class cues, whole extent, overlap, anchors, and clean evidence IDs also support it.",
                         "Judge the whole reviewed bbox/object extent, not just the most recognizable subpart. A class change is not verified if the proposed class explains only a cab, corner, small object, texture patch, or other subcomponent while ignoring a large attached or continuous structure inside the same bbox.",
                         "Set whole_target_extent_supported=true only when the proposed target class explains the full visible target extent.",
                         "Set whole_target_extent_supported=false when the clean target contains a large attached extension, compartment, appendage, support, tool, cargo body, trailer-like segment, roof, or continuous structure that the proposed target class does not explain.",
                         "When whole_target_extent_supported=false, explain the issue in whole_target_extent_reason and leave verified=false.",
-                        "Use current_class_positive_cues only for concrete, direct current-class evidence visible in clean target/source pixels.",
+                        "If the guardrails mention the source image edge, decide edge_clip_recoverable explicitly.",
+                        "Set edge_clip_recoverable=true only when the visible target still shows enough class-defining structure and the missing outside-image pixels are not necessary for class identity.",
+                        "Set edge_clip_recoverable=false when edge clipping hides class-critical parts, makes the target a partial fragment, or leaves whole-object identity ambiguous.",
+                        "For non-edge cases, omit edge_clip_recoverable or leave it false.",
+                        "Use current_class_positive_cues only when concrete, direct current-class evidence is visible in clean target/source pixels.",
                         "Do not copy proposed-target cues into current_class_positive_cues just because they are generic shared shape, color, texture, or context cues.",
                         "Set current_class_plausibility_basis=direct_positive_cues only when current_class_positive_cues contain independent current-class evidence.",
                         "Set current_class_plausibility_basis=shared_generic_cues when the target pixels have generic cues that could fit both classes but are not independently current-class-specific.",
@@ -31610,6 +31858,7 @@ def _class_analysis_qwen_review_cue_verifier_repair_instruction(
     ]
     target_class = str(guarded_recommendation.get("target_class") or "").strip()
     required_fields = _class_analysis_qwen_review_cue_verifier_required_fields_text()
+    optional_fields = _class_analysis_qwen_review_cue_verifier_optional_fields_text()
     return {
         "role": "user",
         "content": [
@@ -31620,16 +31869,19 @@ def _class_analysis_qwen_review_cue_verifier_repair_instruction(
                         "Cue-verifier schema repair.",
                         f"The previous verifier response failed controller parsing: {str(parse_error or 'parse_error')[:300]}",
                         f"Previous response preview: {str(previous_output or '')[:500]}",
-                        "Return one full JSON arguments object with every required key.",
+                        "Return one compact JSON arguments object with every required key.",
                         "Use compact JSON, no markdown, no prose outside JSON, no newlines inside string values.",
                         "Use numeric JSON values with no spaces inside numbers, for example 0.92 not 0. 92.",
-                        "Keep every reason field under 18 words and one sentence.",
+                        "Keep every reason field under 18 words and one sentence. Keep cue strings under 8 words when possible.",
+                        "Do not copy the same cue string into multiple arrays. Optional cue arrays may be omitted or empty.",
                         f"target_class must be exactly: {target_class or '(none)'}",
                         f"Allowed supporting_clean_evidence_ids: {', '.join(clean_target_ids) or '(none)'}",
                         f"Required keys: {required_fields}.",
-                        "If you cannot verify two concrete target-positive cues, still return the full schema with verified=false, empty arrays where appropriate, cue_confidence no higher than 0.84, and a short rejection_reason.",
+                        f"Optional keys, use only when they add non-duplicative validation evidence: {optional_fields}.",
+                        "If you cannot verify two concrete target-positive cues, still return the required compact schema with verified=false, empty arrays where appropriate, cue_confidence no higher than 0.84, and a short rejection_reason.",
                         "If one target cue is shared but clean pixels and concept briefs show target-specific defining cues plus a missing/inconsistent current-class cue, include those fields explicitly instead of omitting them.",
                         "If the proposed class explains only a subcomponent rather than the whole reviewed bbox/object extent, set whole_target_extent_supported=false and verified=false.",
+                        "If source-edge clipping is one of the blocking reasons, include edge_clip_recoverable and edge_clip_recoverability_reason.",
                         "Do not return a partial object. Do not omit target_class. Do not include extra legacy keys, markdown, or prose outside JSON.",
                     ]
                 ),
@@ -31847,14 +32099,14 @@ def _class_analysis_qwen_review_final_context_messages(
     keep_image_tools = {
         "inspect_target_context",
         "inspect_target_detail",
+        "inspect_source_overlay",
         "zoom_source_region",
         "inspect_class_context_pack",
         "inspect_specificity_region_contrast",
+        "inspect_local_consensus_context",
     }
     text_only_tools = {
-        "inspect_source_overlay",
         "inspect_overlap_decomposition",
-        "inspect_local_consensus_context",
         "inspect_same_image_scale_report",
         "inspect_same_image_embedding_report",
     }
@@ -31915,6 +32167,7 @@ def _class_analysis_qwen_review_final_context_messages(
     if ledger_text:
         summary_lines.append(ledger_text)
     summary_text = "\n\n".join(line for line in summary_lines if line).strip()
+    final_image_budget = 7 if any(item == "inspect_local_consensus_context" for item in image_observations) else 6
     final_messages = [
         {
             "role": "system",
@@ -31934,20 +32187,21 @@ def _class_analysis_qwen_review_final_context_messages(
         {
             "role": "user",
             "content": [{"type": "text", "text": _class_analysis_qwen_review_compact_line(summary_text, 6000)}]
-            + kept_images[:5],
+            + kept_images[:final_image_budget],
         },
     ]
 
     return final_messages, {
         "input_image_count": input_images,
-        "output_image_count": len(kept_images[:5]),
+        "output_image_count": len(kept_images[:final_image_budget]),
         "text_only_observations": sorted(set(text_only_observations)),
         "image_observations": sorted(set(image_observations)),
         "trimmed_text_messages": trimmed_text_messages,
         "policy": (
             "Final review keeps clean target/detail/zoom images, the clean class-context pack, and the "
-            "target/background region-contrast panel for VLM reasoning; "
-            "source overlay, overlap decomposition, local consensus, and deterministic reports remain compact text/ledger context."
+            "clean source image plus target/background region-contrast panel for VLM reasoning. If routed, the "
+            "local-consensus clean/dot panel is also kept as visual evidence; source overlay geometry, overlap "
+            "decomposition, and deterministic reports remain compact text/ledger context."
         ),
     }
 
@@ -31991,11 +32245,21 @@ def _class_analysis_qwen_review_should_run_cue_verifier(
         return False
     if str(guarded.get("decision") or "").strip() not in {"accept_suggested", "change_to_other"}:
         return False
-    if str(guarded.get("backend_tier") or "").strip().lower() != "clear":
-        return False
-    if str(guarded.get("visual_quality") or "").strip().lower() != "clear":
-        return False
-    if str(guarded.get("object_visibility") or "").strip().lower() != "clear":
+    backend_tier = str(guarded.get("backend_tier") or "").strip().lower()
+    visual_quality = str(guarded.get("visual_quality") or "").strip().lower()
+    object_visibility = str(guarded.get("object_visibility") or "").strip().lower()
+    clear_candidate = (
+        backend_tier == "clear"
+        and visual_quality == "clear"
+        and object_visibility == "clear"
+    )
+    limited_candidate = (
+        str(guarded.get("decision") or "").strip() == "accept_suggested"
+        and backend_tier == "limited"
+        and visual_quality in {"clear", "limited"}
+        and object_visibility in {"clear", "partial"}
+    )
+    if not clear_candidate and not limited_candidate:
         return False
     if str(guarded.get("current_evidence") or "").strip().lower() not in {"weak", "none"}:
         return False
@@ -32011,6 +32275,24 @@ def _class_analysis_qwen_review_should_run_cue_verifier(
         return False
     if "visible target text supporting current class" in reason_text:
         return False
+    target_specific_guarded_opinion = (
+        str(guarded.get("specificity_alignment") or "").strip().lower()
+        in {"supports_suggested", "supports_other"}
+        and str(guarded.get("target_background_contrast") or "").strip().lower() == "target_specific"
+        and len(_class_analysis_qwen_review_normalize_visible_cues(
+            guarded.get("visible_target_cues"),
+            current_class=str(guarded.get("current_class") or ""),
+            suggested_class=str(guarded.get("suggested_neighbor_class") or ""),
+            target_class=str(guarded.get("target_class") or ""),
+        )) >= 2
+    )
+    if limited_candidate and target_specific_guarded_opinion:
+        # For limited target quality, cue verification is both a possible
+        # narrow promotion path and an evidence-enrichment path. Validation
+        # still owns mutation/actionability safety: edge-clipped targets and
+        # same-image-current-supported cases remain guarded unless the stricter
+        # non-edge, non-current-supported validator path passes.
+        return True
     cue_guardrails = [
         item for item in guardrails
         if "requires at least two concrete visible target cues" in item
@@ -32208,6 +32490,11 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
         default=False,
     )
     whole_target_extent_reason = str(args.get("whole_target_extent_reason") or "")[:1200]
+    edge_clip_recoverable = _class_analysis_qwen_review_coerce_bool(
+        args.get("edge_clip_recoverable"),
+        default=False,
+    )
+    edge_clip_recoverability_reason = str(args.get("edge_clip_recoverability_reason") or "")[:1200]
     overlap_risk = _class_analysis_qwen_review_coerce_choice(
         args.get("overlap_risk"),
         ("target_specific", "overlap_explains", "uncertain", "not_applicable"),
@@ -32326,6 +32613,8 @@ def _class_analysis_qwen_review_parse_cue_verifier_payload(
         "current_class_plausibility_reason": current_class_plausibility_reason,
         "whole_target_extent_supported": bool(whole_target_extent_supported),
         "whole_target_extent_reason": whole_target_extent_reason,
+        "edge_clip_recoverable": bool(edge_clip_recoverable),
+        "edge_clip_recoverability_reason": edge_clip_recoverability_reason,
         "overlap_rebutted": bool(overlap_rebutted),
         "overlap_risk": overlap_risk,
         "overlap_risk_reconciled": overlap_risk_reconciled,
@@ -32674,6 +32963,14 @@ def _class_analysis_qwen_review_try_cue_verifier(
             "current_class_plausibility_reason": str(
                 verifier_record.get("current_class_plausibility_reason") or ""
             )[:1200],
+            "_cue_verifier_class_change_verified": True,
+            "_cue_verifier_confidence": float(verifier_record.get("cue_confidence") or 0.0),
+            "_cue_verifier_overlap_rebutted": bool(verifier_record.get("overlap_rebutted")),
+            "_cue_verifier_overlap_risk": str(verifier_record.get("overlap_risk") or "")[:120],
+            "_cue_verifier_edge_clip_recoverable": bool(verifier_record.get("edge_clip_recoverable")),
+            "_cue_verifier_edge_clip_recoverability_reason": str(
+                verifier_record.get("edge_clip_recoverability_reason") or ""
+            )[:1200],
             "human_review_needed": True,
             "specificity_alignment": "supports_suggested"
             if str(guarded.get("decision") or "") == "accept_suggested"
@@ -32706,6 +33003,12 @@ def _class_analysis_qwen_review_try_cue_verifier(
         "anchor_adjudication_reason",
         "current_class_plausible",
         "current_class_plausibility_reason",
+        "_cue_verifier_class_change_verified",
+        "_cue_verifier_confidence",
+        "_cue_verifier_overlap_rebutted",
+        "_cue_verifier_overlap_risk",
+        "_cue_verifier_edge_clip_recoverable",
+        "_cue_verifier_edge_clip_recoverability_reason",
     ):
         if verifier_key in augmented_args:
             expanded_args[verifier_key] = copy.deepcopy(augmented_args[verifier_key])
@@ -33331,7 +33634,7 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                 "action": "inspect_local_consensus_context",
                 "reason_code": "needs_same_image_consensus",
                 "confidence": 1.0,
-                "rationale_short": "Controller renders local consensus for clear candidate with a suggested class.",
+                "rationale_short": "Controller renders local consensus for reviewable candidate with a suggested class.",
                 "policy_allowed_local_consensus": True,
                 "policy_reasons": [],
                 "controller_forced": True,

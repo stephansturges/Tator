@@ -1128,6 +1128,191 @@ def test_qwen_review_benchmark_audit_accepts_dual_bbox_overlap_switch_path():
     assert audit["unsafe_issue_count"] == 0
 
 
+def test_qwen_review_benchmark_audit_accepts_verifier_backed_limited_dual_bbox_switch_path():
+    record = _record(
+        decision="accept_suggested",
+        current_class="CurrentClass",
+        suggested_neighbor_class="SuggestedClass",
+        target_class="SuggestedClass",
+        backend_tier="limited",
+        backend_edge_clipped=False,
+        visual_quality="limited",
+        object_visibility="clear",
+        current_evidence="weak",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        anchor_evidence_suggested="moderate",
+        anchor_adjudication_verified=True,
+        local_context_evidence="strong",
+        local_consensus_evidence="mixed",
+        global_context_evidence="strong",
+        same_image_scale_evidence="questions_current",
+        same_image_embedding_evidence="neutral",
+        specificity_alignment="supports_suggested",
+        target_background_contrast="target_specific",
+        overlap_assessment="duplicate_like",
+        dual_bbox_resolution="overlap_box_class",
+        current_class_plausible=False,
+        visible_target_cues=["target-specific body shape", "target-specific front detail"],
+        supporting_clean_evidence_ids=["target_context_1", "source_clean_2"],
+        dual_bbox_conflict={
+            "enabled": True,
+            "kind": "near_identical_cross_class_bbox",
+            "current_class": "CurrentClass",
+            "other_class_name": "SuggestedClass",
+            "class_name": "SuggestedClass",
+            "iou": 1.0,
+            "relation": "duplicate_like",
+        },
+        cue_verifier={
+            "verified": True,
+            "cue_confidence": 0.93,
+            "overlap_rebutted": True,
+            "overlap_risk": "target_specific",
+            "whole_target_extent_supported": True,
+            "current_class_plausible": False,
+        },
+        specificity_probe={
+            "status": "completed",
+            "confidence": 0.9,
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "specificity_margin": "suggested_target_favored",
+            "best_supported_class": "SuggestedClass",
+        },
+        evidence_ledger={
+            "rows": [
+                {"evidence_id": "target_context_1", "kind": "target_context", "use": "clean_visual"},
+                {"evidence_id": "source_clean_2", "kind": "source_clean", "use": "clean_visual"},
+                {"evidence_id": "zoom_region_6", "kind": "zoom_region", "use": "clean_visual"},
+                {"evidence_id": "source_overlay_3", "kind": "source_overlay", "use": "geometry_overlay"},
+                {"evidence_id": "class_context_pack_5", "kind": "class_context_pack", "use": "clean_visual"},
+            ],
+            "clean_visual_evidence_ids": ["target_context_1", "source_clean_2", "zoom_region_6"],
+            "clean_target_source_evidence_ids": ["target_context_1", "source_clean_2", "zoom_region_6"],
+            "clean_visual_reference_evidence_ids": ["class_context_pack_5"],
+            "specificity_probe": {
+                "status": "completed",
+                "confidence": 0.9,
+                "specificity_alignment": "supports_suggested",
+                "target_background_contrast": "target_specific",
+                "specificity_margin": "suggested_target_favored",
+                "best_supported_class": "SuggestedClass",
+            },
+        },
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_suggested": "moderate",
+            "anchor_adjudication_verified": True,
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "mixed",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "questions_current",
+            "same_image_embedding_evidence": "neutral",
+            "overlap_assessment": "duplicate_like",
+            "dual_bbox_resolution": "overlap_box_class",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "current_class_plausible": False,
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["unsafe_issue_count"] == 0
+    assert "non_skip_low_quality" not in audit["issue_counts"]
+    assert "class_change_low_backend_quality" not in audit["issue_counts"]
+    assert "class_change_bad_overlap" not in audit["issue_counts"]
+
+
+def test_qwen_review_benchmark_audit_blocks_edge_clipped_limited_dual_bbox_switch_path():
+    record = _record(
+        decision="accept_suggested",
+        current_class="CurrentClass",
+        suggested_neighbor_class="SuggestedClass",
+        target_class="SuggestedClass",
+        backend_tier="limited",
+        backend_edge_clipped=True,
+        visual_quality="limited",
+        object_visibility="clear",
+        current_evidence="weak",
+        suggested_evidence="strong",
+        target_evidence="strong",
+        anchor_evidence_suggested="moderate",
+        anchor_adjudication_verified=True,
+        local_context_evidence="strong",
+        local_consensus_evidence="mixed",
+        global_context_evidence="strong",
+        same_image_scale_evidence="questions_current",
+        same_image_embedding_evidence="neutral",
+        specificity_alignment="supports_suggested",
+        target_background_contrast="target_specific",
+        overlap_assessment="duplicate_like",
+        dual_bbox_resolution="overlap_box_class",
+        current_class_plausible=False,
+        visible_target_cues=["target-specific body shape", "target-specific front detail"],
+        supporting_clean_evidence_ids=["target_context_1", "source_clean_2"],
+        dual_bbox_conflict={
+            "enabled": True,
+            "kind": "near_identical_cross_class_bbox",
+            "current_class": "CurrentClass",
+            "other_class_name": "SuggestedClass",
+            "class_name": "SuggestedClass",
+            "iou": 1.0,
+            "relation": "duplicate_like",
+        },
+        cue_verifier={
+            "verified": True,
+            "cue_confidence": 0.93,
+            "overlap_rebutted": True,
+            "overlap_risk": "target_specific",
+            "whole_target_extent_supported": True,
+            "current_class_plausible": False,
+        },
+        specificity_probe={
+            "status": "completed",
+            "confidence": 0.9,
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "specificity_margin": "suggested_target_favored",
+            "best_supported_class": "SuggestedClass",
+        },
+        evidence_ledger={
+            "rows": [
+                {"evidence_id": "target_context_1", "kind": "target_context", "use": "clean_visual"},
+                {"evidence_id": "source_clean_2", "kind": "source_clean", "use": "clean_visual"},
+                {"evidence_id": "zoom_region_6", "kind": "zoom_region", "use": "clean_visual"},
+            ],
+            "clean_visual_evidence_ids": ["target_context_1", "source_clean_2", "zoom_region_6"],
+            "clean_target_source_evidence_ids": ["target_context_1", "source_clean_2", "zoom_region_6"],
+        },
+        model_compact_arguments={
+            "current_evidence": "weak",
+            "suggested_evidence": "strong",
+            "target_evidence": "strong",
+            "anchor_evidence_suggested": "moderate",
+            "anchor_adjudication_verified": True,
+            "local_context_evidence": "strong",
+            "local_consensus_evidence": "mixed",
+            "global_context_evidence": "strong",
+            "same_image_scale_evidence": "questions_current",
+            "same_image_embedding_evidence": "neutral",
+            "overlap_assessment": "duplicate_like",
+            "dual_bbox_resolution": "overlap_box_class",
+            "specificity_alignment": "supports_suggested",
+            "target_background_contrast": "target_specific",
+            "current_class_plausible": False,
+        },
+    )
+
+    audit = audit_records([record])
+
+    assert audit["unsafe_issue_count"] >= 1
+    assert audit["issue_counts"]["class_change_edge_clipped_target"] == 1
+
+
 def test_qwen_review_benchmark_audit_lists_guarded_clear_target_candidates():
     record = _record(
         decision="skip_uncertain",

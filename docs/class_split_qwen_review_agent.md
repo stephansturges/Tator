@@ -847,10 +847,13 @@ Backend guardrails are stricter than the prompt:
   pixel fidelity, while the clean `target_detail` crop uses deterministic
   Lanczos enlargement for model readability. The prompt explicitly says this is
   interpolation, not generated super-resolution.
-- images sent to the VLM are bounded to the backend
-  `CLASS_ANALYSIS_QWEN_REVIEW_MODEL_IMAGE_MAX_SIDE` limit, while saved evidence
-  artifacts remain full-size. This protects MLX/Metal runs from oversized visual
-  prompts without hiding the audit evidence from humans.
+- images sent to final/advisory reasoning calls use a compact visual core:
+  clean target/detail, clean source/zoom context, and specificity contrast are
+  preferred before overlay-heavy images. They are capped by
+  `CLASS_ANALYSIS_QWEN_REVIEW_REASONING_IMAGE_MAX_SIDE` and
+  `CLASS_ANALYSIS_QWEN_REVIEW_FINAL_MAX_IMAGES`, while saved evidence artifacts
+  remain full-size. The `model_input` trace records an `image_policy` summary so
+  audits can verify what the VLM actually saw.
 - clean source/context evidence is provided separately from annotated overlays
   so the model can reason about visual class features without bbox graphics
   interfering
@@ -2191,6 +2194,44 @@ briefs. Regression tests cover:
   the visible pole/crossarm evidence. The guarded contact sheet showed many
   plausible advisory opinions, but most remained too clipped, partial, or
   background-contaminated for automatic actionability.
+
+  A follow-up validator/auditor patch adds one narrow generic exception for
+  near-identical dual-bbox conflicts on limited-quality but non-edge-clipped
+  targets. If Qwen final review recommends the overlapping box class, the
+  specificity probe independently supports that class with target-specific
+  contrast, the cue verifier confirms target-contained cues, the current class
+  is explicitly implausible, the duplicate geometry is clean, and no same-image
+  deterministic report supports the current class, the recommendation may remain
+  actionable instead of being forced into `guarded_visual_quality`. This is not a
+  label-specific heuristic; it is a dual-box resolution rule grounded in the
+  same Qwen/target/source/evidence ledger used by the rest of the agent.
+  Regression coverage:
+  `tests/test_class_analysis.py::test_class_analysis_qwen_review_allows_verifier_backed_limited_dual_bbox_switch`
+  and
+  `tests/test_qwen_review_benchmark_audit.py::test_qwen_review_benchmark_audit_accepts_verifier_backed_limited_dual_bbox_switch_path`.
+  The known motivating row in
+  `edge_recoverable_limited70slice_v1_24_1780998638.json` was
+  `5bb58955e121f9e675ee`: Qwen, the specificity probe, the cue verifier, and
+  the dual-bbox decomposition all supported the overlapping class while the old
+  validator still blocked it on limited crop quality alone. Initial live replay
+  of that point exposed an MLX Metal page-fault during the
+  specificity-probe/final sequence, even under per-review subprocess isolation.
+
+  The follow-up compact-reasoning transport fix sends each model reasoning turn
+  a smaller, ordered visual core instead of the full evidence image set. The
+  current default policy uses 384px reasoning images and three final-review
+  images, while keeping full-size evidence on disk for human audit. The replay
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/compact_reasoning_384_v1_12.json`
+  completed 12/12 rows with 0 backend failures and 0 unsafe audit issues. It
+  produced 2 actionable `confirm_current` recommendations, 7 guarded
+  human-triage class-change opinions, and 3 no-signal skips. Compared with the
+  earlier 512px replay, the previously missing `Person -> Bike` row completed
+  as `confirm_current`; compared with the pre-fix baseline, the run moved from
+  7/12 completed and 5 failures to 12/12 completed. This is a real stability and
+  usefulness gain, but not evidence that prompt micro-tuning alone will unlock a
+  much higher action rate. Remaining skips are dominated by partial, clipped, or
+  background-contaminated targets where the rails correctly keep Qwen's opinion
+  advisory.
 
 A larger labeled real-model benchmark should be run before treating v2
 recommendations as more than advisory.

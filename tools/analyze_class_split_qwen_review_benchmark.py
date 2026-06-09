@@ -598,6 +598,101 @@ def _record_uses_dual_bbox_switch_path(record: Dict[str, Any]) -> bool:
     )
 
 
+def _record_uses_limited_dual_bbox_switch_path(record: Dict[str, Any]) -> bool:
+    """Mirror the validator's verifier-backed limited dual-bbox switch path."""
+
+    payload = record.get("model_compact_arguments") if isinstance(record.get("model_compact_arguments"), dict) else {}
+    ledger = record.get("evidence_ledger") if isinstance(record.get("evidence_ledger"), dict) else {}
+    probe = record.get("specificity_probe") if isinstance(record.get("specificity_probe"), dict) else None
+    if not probe and isinstance(ledger.get("specificity_probe"), dict):
+        probe = ledger.get("specificity_probe")
+    verifier = record.get("cue_verifier") if isinstance(record.get("cue_verifier"), dict) else {}
+    dual_conflict = record.get("dual_bbox_conflict")
+    if not isinstance(dual_conflict, dict):
+        dual_conflict = payload.get("dual_bbox_conflict") if isinstance(payload.get("dual_bbox_conflict"), dict) else {}
+
+    def _field(name: str) -> str:
+        return str(record.get(name) or payload.get(name) or "").strip().lower()
+
+    try:
+        verifier_confidence = float(verifier.get("cue_confidence") or 0.0)
+    except Exception:
+        verifier_confidence = 0.0
+    if not math.isfinite(verifier_confidence):
+        verifier_confidence = 0.0
+    try:
+        probe_confidence = float(probe.get("confidence") or 0.0) if probe else 0.0
+    except Exception:
+        probe_confidence = 0.0
+    if not math.isfinite(probe_confidence):
+        probe_confidence = 0.0
+
+    target_norm = _normalize_label(str(record.get("target_class") or payload.get("target_class") or ""))
+    dual_other_norm = _normalize_label(
+        str(
+            dual_conflict.get("other_class_name")
+            or dual_conflict.get("class_name")
+            or dual_conflict.get("other_class")
+            or ""
+        )
+    )
+    best_supported_norm = _normalize_label(str(probe.get("best_supported_class") or "") if probe else "")
+    deterministic_current_support_count = sum(
+        1
+        for value in (
+            _field("same_image_scale_evidence"),
+            _field("same_image_embedding_evidence"),
+            _field("local_consensus_evidence"),
+        )
+        if value == "supports_current"
+    )
+
+    return (
+        str(record.get("decision") or "") == "accept_suggested"
+        and isinstance(dual_conflict, dict)
+        and _coerce_bool(dual_conflict.get("enabled") if "enabled" in dual_conflict else True)
+        and _field("dual_bbox_resolution") == "overlap_box_class"
+        and _field("overlap_assessment") == "duplicate_like"
+        and bool(target_norm)
+        and target_norm == dual_other_norm
+        and _field("backend_tier") == "limited"
+        and not _coerce_bool(record.get("backend_edge_clipped") or payload.get("backend_edge_clipped"))
+        and _field("visual_quality") in {"clear", "limited"}
+        and _field("object_visibility") == "clear"
+        and _field("current_evidence") in {"weak", "none"}
+        and _field("suggested_evidence") == "strong"
+        and _field("target_evidence") == "strong"
+        and _field("local_context_evidence") == "strong"
+        and _field("global_context_evidence") == "strong"
+        and _field("anchor_evidence_suggested") in {"strong", "moderate"}
+        and (
+            _field("anchor_evidence_suggested") == "strong"
+            or _coerce_bool(record.get("anchor_adjudication_verified") or payload.get("anchor_adjudication_verified"))
+        )
+        and not _record_current_class_plausible(record, payload)
+        and _field("specificity_alignment") == "supports_suggested"
+        and _field("target_background_contrast") == "target_specific"
+        and isinstance(probe, dict)
+        and str(probe.get("status") or "").strip().lower() == "completed"
+        and probe_confidence >= 0.75
+        and str(probe.get("specificity_alignment") or "").strip().lower() == "supports_suggested"
+        and str(probe.get("target_background_contrast") or "").strip().lower() == "target_specific"
+        and str(probe.get("specificity_margin") or "").strip().lower()
+        not in {"current_target_favored", "background_or_overlap_favored", "low_contrast", "insufficient"}
+        and best_supported_norm == target_norm
+        and isinstance(verifier, dict)
+        and _coerce_bool(verifier.get("verified"))
+        and verifier_confidence >= 0.9
+        and _coerce_bool(verifier.get("overlap_rebutted"))
+        and str(verifier.get("overlap_risk") or "").strip().lower() in {"target_specific", "not_applicable"}
+        and _coerce_bool(verifier.get("whole_target_extent_supported"))
+        and not _coerce_bool(verifier.get("current_class_plausible"))
+        and len(_explicit_visible_cues_from_record(record)) >= 2
+        and bool(_supporting_clean_evidence_ids_from_record(record))
+        and deterministic_current_support_count == 0
+    )
+
+
 def _record_uses_verified_overlap_rebuttal_path(record: Dict[str, Any]) -> bool:
     """Mirror the validator's verifier-backed partial-overlap relabel path."""
 
@@ -1365,6 +1460,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                 if (
                     not _record_uses_limited_confirm_current_reviewable_path(record)
                     and not _record_uses_verified_limited_class_change_path(record)
+                    and not _record_uses_limited_dual_bbox_switch_path(record)
                 ):
                     _add_issue(
                         issues,
@@ -1377,6 +1473,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
         if decision in CLASS_CHANGE_DECISIONS:
             dual_bbox_switch_path = _record_uses_dual_bbox_switch_path(record)
+            limited_dual_bbox_switch_path = _record_uses_limited_dual_bbox_switch_path(record)
             verified_overlap_rebuttal_path = _record_uses_verified_overlap_rebuttal_path(record)
             verified_moderate_anchor_path = _record_uses_verified_moderate_anchor_path(record)
             verified_limited_class_change_path = _record_uses_verified_limited_class_change_path(record)
@@ -1436,7 +1533,11 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                     record,
                     "supporting_clean_evidence_ids cite only reference context, not target/source clean evidence",
                 )
-            if backend_tier != "clear" and not verified_limited_class_change_path:
+            if (
+                backend_tier != "clear"
+                and not verified_limited_class_change_path
+                and not limited_dual_bbox_switch_path
+            ):
                 _add_issue(issues, "class_change_low_backend_quality", record, f"backend_tier={backend_tier}")
             if current_evidence == "strong":
                 _add_issue(issues, "class_change_overrides_strong_current", record, "current_evidence=strong")
@@ -1481,6 +1582,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
                     and (
                         _record_uses_clear_target_relabel_path(record)
                         or dual_bbox_switch_path
+                        or limited_dual_bbox_switch_path
                         or verified_overlap_rebuttal_path
                         or verified_moderate_anchor_path
                         or verified_limited_class_change_path
@@ -1496,6 +1598,7 @@ def audit_records(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             if (
                 overlap_assessment in BAD_CLASS_CHANGE_OVERLAPS
                 and not dual_bbox_switch_path
+                and not limited_dual_bbox_switch_path
                 and not verified_overlap_rebuttal_path
                 and not verified_moderate_anchor_path
                 and not verified_limited_class_change_path

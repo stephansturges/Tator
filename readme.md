@@ -1,26 +1,18 @@
 # Tator
 
 Tator is a local annotation-assistance workbench for object-detection datasets.
-Its main job is to help you **extend an existing trusted dataset** with new
-images or videos while doing less manual drawing, less blind review, and fewer
-repetitive cleanup passes.
+Its main job is to help you **extend an existing trusted dataset with new images
+or videos while doing less manual drawing, less blind review, and less repeated
+cleanup**.
 
-The product loop is deliberately human-controlled:
-
-1. Start from a dataset you already trust.
-2. Pick only the new media worth annotating.
-3. Let local models draft boxes, classes, captions, and review evidence.
-4. Correct labels in the annotation view.
-5. Audit the expanded dataset for likely mistakes and hidden subclasses.
-6. Train or reuse helpers so the next batch is faster.
-
-Models help with ranking, proposals, visual reasoning, and repeatable recipes.
-Final annotation changes stay under the user's control unless an explicit
-automation mode is enabled.
+The product is not a one-click label factory. Tator uses local models to rank
+new media, draft boxes, suggest classes, inspect suspicious labels, and train
+reusable helpers. The human still decides what enters the dataset and which
+annotation changes become trusted labels.
 
 ![Dataset extension loop](docs/assets/readme-overview/01-dataset-extension-loop.png)
 
-## Quick Start
+## Start Here
 
 Install the local environment once:
 
@@ -41,7 +33,7 @@ Open the browser UI:
 http://127.0.0.1:8000/
 ```
 
-The backend serves the UI at `/` and `/tator.html`. The old `/ybat.html` URL
+The backend serves the app at `/` and `/tator.html`. The old `/ybat.html` URL
 redirects to `/tator.html`.
 
 If port `8000` is already in use:
@@ -61,170 +53,166 @@ For setup details, see [Environment Setup](docs/environment_setup.md) and
 
 ## What Tator Is For
 
-Use Tator when you have an annotation project where a fully manual workflow is
-too slow, but blind automation is too risky.
+Use Tator when a manual annotation loop is too slow, but blind automation is too
+risky.
 
 The strongest use case is dataset extension:
 
-| Problem | Tator's role |
+| You have... | Tator helps you... |
 | --- | --- |
-| You have a good accepted dataset and new media to add. | Score the new media before labeling so effort goes to the useful subset. |
-| New videos contain many similar frames. | Sample frames, rank the whole upload together, and skip repeats. |
-| Drawing every object from scratch is slow. | Use detectors, SAM/SAM3, class predictors, and Qwen as draft helpers. |
-| Existing labels may contain mistakes. | Use Class Split Explorer to surface outliers, overlaps, likely wrong classes, and subclass islands. |
-| The next batch should get easier. | Train reusable helpers from reviewed labels and keep project-specific recipes. |
+| A trusted accepted dataset | Keep its label map, glossary, storage state, and exports explicit. |
+| New images or videos | Score the whole upload batch and keep the media most worth annotating. |
+| Lots of boxes to draw | Use detectors, SAM/SAM3, class heads, and Qwen as draft assistants. |
+| Existing labels that may be wrong | Find likely-wrong classes, overlap conflicts, outliers, and subclass islands. |
+| A project you will repeat | Train reusable helpers and recipes from reviewed labels. |
 
-Tator is not a one-click dataset factory. It is a local review loop that makes
-the human's work smaller, better structured, and easier to audit.
+Everything is organized around reducing human effort while preserving human
+control.
 
-## The Main Workflow
+## The Dataset-Extension Loop
 
-For a first dataset-extension run, use the UI in this order:
+For a normal project pass, work through the UI in this order:
 
-| Step | UI area | Result |
+| Step | Goal | Main UI area |
 | --- | --- | --- |
-| 1 | Dataset Management | The accepted dataset, labels, label map, glossary, and storage state are explicit. |
-| 2 | Data Ingestion | New images and sampled video frames are ranked; low-value media can be skipped. |
-| 3 | Label Images | Model suggestions are reviewed and corrected in the live annotation workspace. |
-| 4 | Class Split Explorer | Likely wrong labels, overlapping boxes, outliers, and subclass structure are inspected. |
-| 5 | Training and Recipes | Reviewed labels become reusable detectors, class helpers, SAM/SAM3 assets, or recipes. |
-| 6 | Runtime and Model Controls | Local models, devices, and inference/training paths are selected and debugged. |
+| 1 | Define the trusted dataset, labels, glossary, storage mode, and export state. | Dataset Management |
+| 2 | Decide which new media is worth labeling before drawing boxes. | Data Ingestion |
+| 3 | Draft, edit, reclassify, delete, and confirm boxes in the live workspace. | Label Images |
+| 4 | Audit the expanded dataset for likely mistakes and hidden subclasses. | Class Split Explorer |
+| 5 | Train helpers so the next batch starts with better proposals. | Training and recipe tabs |
+| 6 | Select local models, devices, and runtime paths. | Model/runtime settings tabs |
 
-The tabs are numerous because the app covers the whole local annotation loop.
-Think of them as six tool groups rather than unrelated features.
+The top navigation has many tabs because Tator covers the whole local annotation
+assist loop. Think of the tabs as five core tool groups plus runtime controls,
+not as unrelated features.
 
-## 1. Dataset Foundation
+## Core Tool Groups
 
-Dataset Management is where an annotation project becomes concrete. A useful
-dataset record is not just a folder of images; it also needs labels, class
-order, class definitions, storage state, and export rules.
+### 1. Dataset Foundation
 
-![Dataset foundation](docs/assets/readme-overview/02-dataset-foundation.png)
+Dataset Management is the project control point. Use it before and after the
+model-assisted work so the dataset's identity and safety state are explicit.
 
-Use Dataset Management to:
+It handles:
 
-- open or upload a dataset,
-- register local source files without copying them,
-- name backend-managed datasets so temporary records can be recognized later,
-- inspect label maps and class order,
-- maintain class glossary text for ambiguous cases,
-- export reviewed data.
+- opening, uploading, linking, naming, and deleting dataset records,
+- label-map order and class names,
+- class glossary text for ambiguous labels,
+- backend-managed dataset records,
+- reviewed-data exports,
+- cleanup of temporary backend records.
 
 Two storage modes matter:
 
-| Mode | Meaning | Use it when |
+| Mode | Meaning | Best for |
 | --- | --- | --- |
-| Linked dataset | Tator stores metadata and overlays while source files stay where they are. | You want to keep the original image folder in place. |
-| Managed dataset | Tator owns a backend copy of images and labels. | You want the backend to reopen, train on, export, or delete that dataset record independently. |
+| Linked dataset | Tator stores metadata and overlays while source files stay where they are. | Working from an existing local image folder without copying it. |
+| Managed dataset | Tator owns a backend copy of images and labels. | Reopening, training on, exporting, or deleting a named backend record. |
 
-Deleting a linked dataset record does not delete original source images.
+Deleting a linked dataset record does not delete the original source images.
 Deleting a managed dataset acts on the backend-managed record, so important
-datasets and artifacts should still be backed up outside the workbench.
+datasets should still be backed up outside Tator.
 
-## 2. Data Ingestion
+### 2. Data Ingestion
 
-Data Ingestion answers the question: **which new media is worth adding before
-anyone spends time labeling it?**
+Data Ingestion answers the first dataset-extension question:
+**which new media is worth adding to the trusted dataset?**
 
-![Data ingestion](docs/assets/readme-overview/03-data-ingestion.png)
+![Data ingestion triage](docs/assets/readme-overview/02-ingestion-triage.png)
 
 The flow is:
 
-1. Choose the trusted reference dataset.
-2. Build, select, upload, or download its reference profile.
+1. Choose the accepted reference dataset.
+2. Build or select its reference profile.
 3. Upload candidate images and videos.
 4. Let Tator pool the whole current upload together.
 5. Rank candidates by reference novelty, within-upload coverage, and optional
    Local Vendi patch diversity.
 6. Keep or discard candidates from previews.
-7. Export the accepted candidate set as a ZIP for annotation or dataset
-   extension.
+7. Export the accepted candidate set as a ZIP or continue into annotation.
 
 Important behavior:
 
-- Multiple images and videos are scored as one upload batch.
-- "Keep the top 20%" means the top 20% of the whole current upload, not 20% of
-  each video.
+- Multiple images and multiple videos are scored as one current upload batch.
+- "Keep the top 20%" means the top 20% of that pooled batch, not 20% of each
+  file.
 - Videos are sampled into frames before scoring.
-- Reference profiles can be downloaded and reused later.
-- Ingestion decides what is worth labeling. It does not decide whether labels
-  are correct.
+- Reference profiles can be downloaded, uploaded, and reused for later batches.
+- Ingestion ranks media value. It does not certify annotation correctness.
 
-## 3. Assisted Annotation
+### 3. Assisted Annotation
 
-Label Images is the live annotation workspace. This is where labels are drawn,
-edited, reviewed, and saved.
+Label Images is the live annotation workspace. This is where boxes are drawn,
+edited, reclassified, deleted, and saved.
 
-![Assisted annotation](docs/assets/readme-overview/04-assisted-annotation.png)
+![Assisted annotation](docs/assets/readme-overview/03-assisted-annotation.png)
 
-Inside the annotation view you can:
+Tator can help with:
 
-- draw, move, resize, reclassify, and delete boxes,
-- switch images and classes,
-- customize keyboard shortcuts for normal keyboards or programmable keypads,
-- run detector proposals for first-pass boxes,
-- use SAM/SAM3 prompts for interactive object help,
-- use class predictors for class hints,
-- use Qwen for captions, context, and visual reasoning support,
-- export reviewed labels.
+- detector proposals for first-pass boxes,
+- SAM/SAM3 prompts for interactive object help,
+- class predictors for class suggestions,
+- Qwen captions and visual context,
+- configurable keyboard shortcuts for normal keyboards and programmable
+  keypads,
+- reviewed-label exports.
 
-The important rule is simple: models suggest, the user reviews, and only
-reviewed labels become trusted labels.
+The rule is intentionally simple: **models propose, the user reviews, and only
+reviewed labels become trusted labels**.
 
-## 4. Class Quality Audit
+### 4. Quality Audit And Repair
 
-Class Split Explorer answers the question: **which labels in this dataset look
-suspicious or internally inconsistent?**
+Class Split Explorer audits labels that already exist. It embeds object crops,
+projects them into 2D plots, and finds objects that are outliers, overlap
+suspiciously, or appear to belong to a hidden subclass.
 
-![Class quality and Qwen review](docs/assets/readme-overview/05-class-quality-qwen.png)
+![Quality audit and Qwen review](docs/assets/readme-overview/04-quality-audit-qwen.png)
 
-It embeds object crops, projects them into a graph, and helps review objects
-that do not fit cleanly with their assigned class.
+Use it to:
 
-Use it for:
+- inspect all-class structure,
+- inspect one class for possible subclasses,
+- switch between projection modes for different review goals,
+- review likely-wrong vignettes,
+- confirm the current class, skip a case, reassign a class, or jump back to the
+  source image,
+- ask Qwen to review a suspicious object with crop, source-context, overlap,
+  similar-example, glossary, scale, embedding, and cue evidence.
 
-- all-class sanity checks,
-- selected-class subclass exploration,
-- PCA and UMAP projections for different inspection goals,
-- likely-wrong vignettes with confirm, skip, reassign, and see-instance actions,
-- source-image jumps so a box can be fixed in context,
-- optional Qwen review using crop evidence, source-image context, overlap
-  evidence, similar examples, same-image context, glossary text, and
-  deterministic audit checks.
+For Qwen review, the local VLM's final judgment is the core product behavior.
+Deterministic checks such as overlap, edge clipping, scale, embedding distance,
+and cue verification are guardrails and audit evidence. They may block automatic
+mutation, but they do not replace visual reasoning.
 
-For Qwen review, the local VLM is the core reviewer. Overlap, scale, embedding,
-quality, and cue checks are rails and evidence; they are not a replacement for
-visual reasoning. The human applies the final annotation change.
-
-Detailed design and benchmark notes are in
+Detailed design and benchmark notes live in
 [Class Split Qwen Review Agent](docs/class_split_qwen_review_agent.md) and
 [Class Split Qwen Review V1 Benchmark](docs/class_split_qwen_review_v1_benchmark.md).
 
-## 5. Training And Reusable Helpers
+### 5. Reusable Helpers And Training
 
-Training is optional for manual annotation. It becomes valuable once labels have
-been reviewed well enough to teach project-specific helpers.
+Training is optional during early manual review. It becomes useful once a
+project has enough reviewed labels to teach repeatable helpers.
 
-![Training and reusable helpers](docs/assets/readme-overview/06-training-reuse.png)
+![Reusable helpers](docs/assets/readme-overview/05-reusable-helpers.png)
 
-Common paths:
+Common helper paths:
 
-| UI area | Use it for |
+| UI area | What it helps with |
 | --- | --- |
-| Train Class Predictor | Train CLIP/DINOv3-style class heads for faster class suggestions. |
-| Train YOLO / Train RF-DETR | Train detectors for box proposals and future prelabeling. |
-| Train SAM3 | Build SAM3 datasets and promptable segmentation helpers. |
-| Train Qwen 3 | Manage local VLM models and adapter-training paths. |
-| EDR Builder / SAM3 Recipe Mining | Package repeatable prelabeling behavior. |
-| SAM3 Vocabulary Explorer | Inspect and refine prompt vocabulary for reusable SAM3 workflows. |
+| Train Class Predictor | Faster class suggestions from project-specific class heads. |
+| Train YOLO / Train RF-DETR | Detector proposals and future prelabeling. |
+| Train SAM3 | Promptable segmentation helpers and SAM3 datasets. |
+| Train Qwen 3 | Local VLM model management and adapter-training paths. |
+| EDR Builder / SAM3 Recipe Mining | Repeatable prelabeling recipes. |
+| SAM3 Vocabulary Explorer | Prompt vocabulary and class-language inspection. |
 
-Train the helper that removes the next real bottleneck. Do not train every
-helper just because the tab exists.
+Train the helper that removes the next real bottleneck. You do not need to use
+every training tab on every project.
 
-## 6. Runtime And Model Controls
+## Runtime And Model Controls
 
-Tator supports multiple local runtimes because Apple Silicon inference, Linux
-training, and pinned CUDA stacks have different dependency constraints.
+Tator supports multiple local runtimes because macOS inference, Linux training,
+and CUDA training have different dependency constraints.
 
 Recommended setup commands:
 
@@ -262,20 +250,17 @@ MLX-SAM, Qwen MLX-VLM, and Apple Silicon fallback behavior.
 
 ## Data Safety Model
 
-Tator is designed around local, human-controlled dataset work.
+Tator is designed around local, human-controlled dataset work:
 
-Safety principles:
-
+- The currently open annotation workspace is the live review state.
 - Label changes are advisory until the user accepts or applies them.
-- The currently open annotation workspace is preserved as the live review state.
 - Data Ingestion workspace uploads require names so temporary backend records
-  can be identified and cleaned later.
+  can be recognized and cleaned later.
 - Linked dataset deletion does not delete original source images.
-- Managed dataset deletion acts on the backend record, so important data should
-  have external backups.
-- Long-running uploads and jobs use sidecar metadata so failed or cancelled jobs
-  are observable instead of disappearing silently.
-- Qwen and Class Split review artifacts preserve raw model inputs, outputs, and
+- Managed dataset deletion acts on the backend-managed record.
+- Long-running uploads and jobs use observable metadata rather than disappearing
+  silently.
+- Class Split and Qwen review artifacts preserve raw model inputs, outputs, and
   guardrail evidence for auditability.
 
 Related docs:
@@ -296,6 +281,7 @@ Use these docs when the README is not enough:
 - [Ensemble Detection Recipe Explainer](docs/ensemble_detection_recipe_explainer.md)
 - [Dataset/Data Ingestion Safety Audit](docs/dataset_data_ingestion_safety_audit.md)
 - [Flow Audit Matrix](docs/flow_audit_matrix.md)
+- [Tools Command Index](tools/README.md)
 
 <details>
 <summary>Developer And API Map</summary>
@@ -341,11 +327,10 @@ Useful local tools:
 - validation helpers: `tools/check_storage_health.py`,
   `tools/validate_dataset_uploads.py`
 
-See [tools/README.md](tools/README.md) for a shorter command index.
-
 </details>
 
-## Validation
+<details>
+<summary>Validation</summary>
 
 Focused smoke tests:
 
@@ -360,8 +345,10 @@ Broader validation references:
 - [GPU Validation Closure Report](docs/gpu_validation_closure_report.md)
 - [Class Split Qwen Review V1 Benchmark](docs/class_split_qwen_review_v1_benchmark.md)
 
+</details>
+
 <details>
-<summary>Recent Hardening Highlights</summary>
+<summary>Update Tracking</summary>
 
 - Backend serves `/tator.html`; legacy `/ybat.html` redirects there.
 - Data Ingestion workspace uploads require explicit dataset names before

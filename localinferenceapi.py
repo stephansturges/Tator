@@ -14603,6 +14603,25 @@ CLASS_ANALYSIS_QWEN_REVIEW_MODEL_IMAGE_MAX_SIDE = max(
     320,
     min(1280, _env_int("CLASS_ANALYSIS_QWEN_REVIEW_MODEL_IMAGE_MAX_SIDE", 768)),
 )
+CLASS_ANALYSIS_QWEN_REVIEW_REASONING_IMAGE_MAX_SIDE = max(
+    320,
+    min(
+        CLASS_ANALYSIS_QWEN_REVIEW_MODEL_IMAGE_MAX_SIDE,
+        _env_int("CLASS_ANALYSIS_QWEN_REVIEW_REASONING_IMAGE_MAX_SIDE", 384),
+    ),
+)
+CLASS_ANALYSIS_QWEN_REVIEW_FINAL_MAX_IMAGES = max(
+    1,
+    min(4, _env_int("CLASS_ANALYSIS_QWEN_REVIEW_FINAL_MAX_IMAGES", 3)),
+)
+CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_MAX_IMAGES = max(
+    1,
+    min(4, _env_int("CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_MAX_IMAGES", 3)),
+)
+CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_MAX_IMAGES = max(
+    1,
+    min(4, _env_int("CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_MAX_IMAGES", 3)),
+)
 CLASS_ANALYSIS_QWEN_REVIEW_MLX_RESET_EVERY = max(
     0,
     min(1000, _env_int("CLASS_ANALYSIS_QWEN_REVIEW_MLX_RESET_EVERY", 8)),
@@ -28869,11 +28888,11 @@ def _class_analysis_qwen_review_parse_specificity_probe_raw(raw_text: str) -> Tu
     for candidate in candidates:
         if any(key in candidate for key in probe_keys):
             return candidate, None
-    if candidates:
-        return candidates[0], None
     salvaged = _class_analysis_qwen_review_salvage_specificity_probe_args(repaired_text)
     if salvaged:
         return salvaged, "salvaged_malformed_specificity_probe_json"
+    if candidates:
+        return candidates[0], None
     return None, error or "specificity_probe_parse_error"
 
 
@@ -28935,6 +28954,67 @@ def _class_analysis_qwen_review_salvage_specificity_probe_args(raw_text: str) ->
             decoded = [_decode_json_string(item).strip() for item in decoded]
         if isinstance(decoded, list):
             recovered[key] = decoded
+
+    def _extract_json_array_from(start: int) -> str:
+        if start < 0:
+            return ""
+        depth = 0
+        in_string = False
+        escape = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    return text[start : idx + 1]
+        return ""
+
+    def _extract_json_arrays_after_key(key: str) -> List[str]:
+        arrays: List[str] = []
+        for key_match in re.finditer(rf'"{re.escape(key)}"\s*:', text):
+            start = text.find("[", key_match.end())
+            extracted = _extract_json_array_from(start)
+            if extracted:
+                arrays.append(extracted)
+        return arrays
+
+    def _extract_json_array_after_key(key: str) -> str:
+        arrays = _extract_json_arrays_after_key(key)
+        if not arrays:
+            return ""
+        return arrays[0]
+
+    for key in ("supporting_clean_evidence_ids", "clean_evidence_ids"):
+        for array_text in reversed(_extract_json_arrays_after_key(key)):
+            try:
+                decoded = json.loads(array_text)
+            except Exception:
+                decoded = []
+            if isinstance(decoded, list):
+                recovered[key] = decoded
+                break
+
+    subdescription_text = _extract_json_array_after_key("subdescription_assessments")
+    if subdescription_text:
+        try:
+            subdescription_assessments = json.loads(subdescription_text)
+        except Exception:
+            subdescription_assessments = []
+        if isinstance(subdescription_assessments, list):
+            recovered["subdescription_assessments"] = subdescription_assessments
 
     match = re.search(r'"confidence"\s*:\s*(-?\d+(?:\.\d+)?)', text)
     if match:
@@ -29148,6 +29228,9 @@ def _class_analysis_qwen_review_specificity_probe_instruction(
         "Use clean target/detail/zoom pixels for target_specific_cues.",
         "When specificity_region_contrast evidence is available, use panel B for target-only support, panel C for target-removed background/context support, and panel D for overlap-only support.",
         "Use overlays, dot maps, overlap reports, neighbor labels, and class names only as context, not as target cues.",
+        "Do not set target_background_contrast=background_dominated merely because the target touches a road, water, ground, wall, or other scene context. Use background_dominated only when the class support would mostly remain after target pixels are removed.",
+        "If target pixels contain the discriminative object cues and scene/context only explains placement, set target_background_contrast=target_specific or mixed, not background_dominated.",
+        "Keep target_specific_cues and background_or_overlap_cues separate. Do not combine target cues with context in one cue string.",
         "If the apparent suggested-class evidence is mostly a nearby object, overlap pixels, background texture, or scene context, set target_background_contrast accordingly and do not mark it target_specific.",
         "Pairwise Switch blockers / hard negatives, when present, are traps against class changes. Treat them as negative evidence for switching, not as positive evidence for the suggested class.",
         "Scene, location, medium, surface, lighting, and nearby-object cues are context, not class evidence, unless the active glossary or review guidance explicitly defines the class by that target-touching context.",
@@ -29716,8 +29799,11 @@ def _class_analysis_qwen_review_run_specificity_probe(
         event_extra={
             "version": CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_PROBE_VERSION,
             "assistant_prefix_strategy": "plain_json_arguments",
+            "reasoning_visual_policy": "compact_probe_core",
         },
         assistant_prefix=None,
+        image_max_side=CLASS_ANALYSIS_QWEN_REVIEW_REASONING_IMAGE_MAX_SIDE,
+        image_limit=CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_MAX_IMAGES,
     )
     probe, error = _class_analysis_qwen_review_parse_specificity_probe_payload(
         raw_probe,
@@ -29755,8 +29841,11 @@ def _class_analysis_qwen_review_run_specificity_probe(
                 "assistant_prefix_strategy": "plain_json_arguments",
                 "repair_attempt": 1,
                 "validation_errors": list(validation_errors),
+                "reasoning_visual_policy": "compact_probe_core_repair",
             },
             assistant_prefix=None,
+            image_max_side=CLASS_ANALYSIS_QWEN_REVIEW_REASONING_IMAGE_MAX_SIDE,
+            image_limit=CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_MAX_IMAGES,
         )
         repaired_probe, repaired_error = _class_analysis_qwen_review_parse_specificity_probe_payload(
             raw_repair,
@@ -30170,12 +30259,41 @@ def _class_analysis_qwen_review_validate_final(
         class_change_specificity_probe.get("best_supported_class") if class_change_specificity_probe else ""
     )
     class_change_target_norm = _class_analysis_qwen_review_normalize_label(target_class)
-    class_change_probe_supports_target = (
+    raw_class_change_probe_validation_errors = (
+        class_change_specificity_probe.get("validation_errors")
+        if isinstance(class_change_specificity_probe, dict)
+        else []
+    )
+    if raw_class_change_probe_validation_errors is None:
+        raw_class_change_probe_validation_errors = []
+    if isinstance(raw_class_change_probe_validation_errors, str):
+        raw_class_change_probe_validation_errors = [raw_class_change_probe_validation_errors]
+    if not isinstance(raw_class_change_probe_validation_errors, (list, tuple)):
+        raw_class_change_probe_validation_errors = []
+    class_change_probe_validation_errors = [
+        str(item or "").strip()
+        for item in raw_class_change_probe_validation_errors
+        if str(item or "").strip()
+    ]
+    class_change_probe_completed = (
         isinstance(class_change_specificity_probe, dict)
         and str(class_change_specificity_probe.get("status") or "").strip().lower() == "completed"
+    )
+    class_change_probe_supports_target = (
+        class_change_probe_completed
         and class_change_probe_confidence >= 0.75
         and class_change_probe_alignment == "supports_suggested"
         and class_change_probe_contrast == "target_specific"
+        and class_change_probe_margin
+        not in {"current_target_favored", "background_or_overlap_favored", "low_contrast", "insufficient"}
+        and bool(class_change_probe_best_norm)
+        and class_change_probe_best_norm == class_change_target_norm
+    )
+    class_change_probe_target_favored_but_incomplete = (
+        class_change_probe_completed
+        and bool(class_change_probe_validation_errors)
+        and class_change_probe_confidence >= 0.75
+        and class_change_probe_alignment == "supports_suggested"
         and class_change_probe_margin
         not in {"current_target_favored", "background_or_overlap_favored", "low_contrast", "insufficient"}
         and bool(class_change_probe_best_norm)
@@ -30243,6 +30361,13 @@ def _class_analysis_qwen_review_validate_final(
             and deterministic_current_support_count <= 1
         )
     )
+    cue_verified_probe_ok = class_change_probe_supports_target or (
+        class_change_probe_target_favored_but_incomplete
+        and cue_verifier_class_change_verified
+        and cue_verifier_confidence >= 0.9
+        and cue_verified_target_specific_overlap
+        and not current_class_plausible
+    )
     cue_verified_limited_class_change_path = (
         decision == "accept_suggested"
         and expanded_by_controller
@@ -30269,7 +30394,7 @@ def _class_analysis_qwen_review_validate_final(
         and not current_class_plausible
         and specificity_alignment == "supports_suggested"
         and target_background_contrast == "target_specific"
-        and class_change_probe_supports_target
+        and cue_verified_probe_ok
         and len(visible_target_cues) >= 2
         and bool(supporting_clean_evidence_ids)
         and whole_target_extent_supported
@@ -30279,6 +30404,44 @@ def _class_analysis_qwen_review_validate_final(
         )
         and cue_verified_deterministic_context_ok
         and cue_verified_overlap_ok
+    )
+    cue_verified_limited_dual_bbox_switch_path = (
+        decision == "accept_suggested"
+        and expanded_by_controller
+        and dual_bbox_active
+        and dual_bbox_resolution == "overlap_box_class"
+        and dual_target_norm == dual_other_norm
+        and overlap_assessment == "duplicate_like"
+        and not backend_edge_clipped
+        and cue_verifier_class_change_verified
+        and cue_verifier_confidence >= 0.9
+        and cue_verified_overlap_rebuttal
+        and cue_verified_target_specific_overlap
+        and backend_tier == "limited"
+        and visual_quality_value in {"clear", "limited"}
+        and (
+            object_visibility == "clear"
+            or cue_verified_reviewable_partial_path
+        )
+        and current_evidence in {"weak", "none"}
+        and suggested_evidence == "strong"
+        and target_evidence == "strong"
+        and local_context_evidence == "strong"
+        and global_context_evidence == "strong"
+        and anchor_evidence_suggested in {"strong", "moderate"}
+        and (
+            anchor_evidence_suggested == "strong"
+            or anchor_adjudication_verified
+        )
+        and current_class_plausibility_checked
+        and not current_class_plausible
+        and specificity_alignment == "supports_suggested"
+        and target_background_contrast == "target_specific"
+        and cue_verified_probe_ok
+        and len(visible_target_cues) >= 2
+        and bool(supporting_clean_evidence_ids)
+        and whole_target_extent_supported
+        and deterministic_current_support_count == 0
     )
     if dual_bbox_active:
         _advise(
@@ -30314,9 +30477,14 @@ def _class_analysis_qwen_review_validate_final(
             decision in {"accept_suggested", "change_to_other"}
             and backend_edge_clipped
             and not cue_verified_limited_class_change_path
+            and not cue_verified_limited_dual_bbox_switch_path
         ):
             _hard(f"{decision} is advisory-only because the target bbox is clipped by the source image edge")
-        if decision in {"accept_suggested", "change_to_other"} and not cue_verified_limited_class_change_path:
+        if (
+            decision in {"accept_suggested", "change_to_other"}
+            and not cue_verified_limited_class_change_path
+            and not cue_verified_limited_dual_bbox_switch_path
+        ):
             _hard(f"{decision} is advisory-only because backend visual-quality tier is {backend_tier}")
     if visual_quality_value == "poor":
         _hard("model visual-quality self-check is poor")
@@ -30332,6 +30500,7 @@ def _class_analysis_qwen_review_validate_final(
         decision in {"accept_suggested", "change_to_other"}
         and backend_tier != "clear"
         and not cue_verified_limited_class_change_path
+        and not cue_verified_limited_dual_bbox_switch_path
     ):
         _hard(f"{decision} requires clear backend visual-quality tier, got {backend_tier or 'unknown'}")
     if decision in {"accept_suggested", "change_to_other"}:
@@ -30370,9 +30539,18 @@ def _class_analysis_qwen_review_validate_final(
                         "class change contradicts Qwen specificity probe: target-contained cues support current class"
                     )
                 elif probe_contrast in {"background_dominated", "overlap_dominated"}:
-                    _hard(
-                        f"class change contradicts Qwen specificity probe: target/background contrast is {probe_contrast}"
-                    )
+                    if cue_verified_probe_ok and class_change_probe_validation_errors:
+                        _advise(
+                            (
+                                "Qwen specificity probe contrast was incomplete or context-mixed, "
+                                "but cue verifier supplied target-specific support"
+                            ),
+                            0.72,
+                        )
+                    else:
+                        _hard(
+                            f"class change contradicts Qwen specificity probe: target/background contrast is {probe_contrast}"
+                        )
                 elif probe_margin == "background_or_overlap_favored":
                     _hard(
                         "class change contradicts Qwen specificity probe: sub-description margin favors background/overlap"
@@ -30523,6 +30701,7 @@ def _class_analysis_qwen_review_validate_final(
         decision in {"accept_suggested", "change_to_other"}
         and anchor_evidence_suggested == "moderate"
         and not dual_bbox_target_switch_path
+        and not cue_verified_limited_dual_bbox_switch_path
         and not verified_overlap_rebuttal_relabel_path
         and not verified_moderate_anchor_relabel_path
         and current_evidence in {"weak", "none"}
@@ -30692,6 +30871,7 @@ def _class_analysis_qwen_review_validate_final(
         if anchor_evidence_suggested == "moderate" and (
             clear_target_relabel_path
             or dual_bbox_target_switch_path
+            or cue_verified_limited_dual_bbox_switch_path
             or verified_overlap_rebuttal_relabel_path
             or verified_moderate_anchor_relabel_path
             or cue_verified_limited_class_change_path
@@ -30742,6 +30922,8 @@ def _class_analysis_qwen_review_validate_final(
     if decision in {"accept_suggested", "change_to_other"} and overlap_explains_candidate_similarity:
         if cue_verified_limited_class_change_path:
             _advise("cue verifier rebuts overlap as the source of target-specific class evidence", 0.68)
+        elif cue_verified_limited_dual_bbox_switch_path:
+            _advise("cue verifier supports resolving the near-identical dual bbox to the overlapping class", 0.72)
         elif backend_tier == "clear" and visual_quality_value == "clear" and object_visibility == "clear" and target_evidence == "strong":
             _advise("overlap decomposition may explain candidate-class similarity", 0.68)
         else:
@@ -30816,6 +30998,10 @@ def _class_analysis_qwen_review_validate_final(
         }
         and not (dual_bbox_target_switch_path and overlap_assessment == "duplicate_like")
         and not cue_verified_limited_class_change_path
+        and not (
+            cue_verified_limited_dual_bbox_switch_path
+            and overlap_assessment == "duplicate_like"
+        )
     ):
         _hard(f"overlap assessment {overlap_assessment} is too entangled for relabel recommendation")
     if decision == "accept_suggested":
@@ -31679,6 +31865,11 @@ def _class_analysis_qwen_review_final_instruction(
                 "both_valid_overlapping_objects, or uncertain_or_neither. For overlap_box_class, final_class must be the "
                 f"overlapping class {dual_other_class or '(unknown)'} and the target pixels must visibly support it."
             ),
+            (
+                "For a near-identical duplicate-like dual-bbox conflict, set overlap_assessment=duplicate_like. "
+                "Then use overlap_explains_candidate_similarity to state whether the duplicate geometry is merely why "
+                "the embedding was suspicious, or whether a separate overlapping object's pixels actually explain the class evidence."
+            ),
         ]
     else:
         dual_conflict_lines = ["No near-identical cross-class dual-bbox conflict is active. Set dual_bbox_resolution=not_applicable."]
@@ -31704,6 +31895,9 @@ def _class_analysis_qwen_review_final_instruction(
         "Use target_identity_evidence_ids to cite clean target/source evidence ids for the target_identity_summary.",
         "Use specificity_alignment to state which hypothesis is supported by target-contained object-specific cues: supports_current, supports_suggested, supports_other, mixed, insufficient, or not_applicable.",
         "Use target_background_contrast to separate target-object evidence from context: target_specific, background_dominated, overlap_dominated, mixed, insufficient, or not_applicable.",
+        "Do not set target_background_contrast=background_dominated merely because the target touches a road, water, ground, wall, or other scene context. Use background_dominated only when the class support would mostly remain after target pixels are removed.",
+        "If target pixels contain the discriminative object cues and scene/context only explains placement, set target_background_contrast=target_specific or mixed, not background_dominated.",
+        "Keep visible_target_cues target-contained. Do not combine target features and scene context into one cue string.",
         "If the specificity probe includes sub-description assessments, use its margin as a target-vs-context audit. Do not accept a class change when the margin is background_or_overlap_favored unless clean target/source pixels clearly contradict that probe.",
         "Pairwise Switch blockers / hard negatives, when present, are negative traps for class changes, not positive evidence for the suggested class.",
         "Scene, location, medium, surface, lighting, and nearby-object cues are context, not class evidence, unless the active glossary or review guidance explicitly defines the class by that target-touching context.",
@@ -32096,16 +32290,18 @@ def _class_analysis_qwen_review_final_context_messages(
     prompt with clean target/source images plus short evidence summaries.
     """
 
-    keep_image_tools = {
-        "inspect_target_context",
+    final_visual_tools = {
         "inspect_target_detail",
         "inspect_source_overlay",
         "zoom_source_region",
-        "inspect_class_context_pack",
         "inspect_specificity_region_contrast",
-        "inspect_local_consensus_context",
+    }
+    fallback_visual_tools = {
+        "inspect_target_context",
     }
     text_only_tools = {
+        "inspect_class_context_pack",
+        "inspect_local_consensus_context",
         "inspect_overlap_decomposition",
         "inspect_same_image_scale_report",
         "inspect_same_image_embedding_report",
@@ -32113,8 +32309,7 @@ def _class_analysis_qwen_review_final_context_messages(
     input_images = 0
     text_only_observations: List[str] = []
     trimmed_text_messages = 0
-    image_observations: List[str] = []
-    kept_images: List[Dict[str, Any]] = []
+    image_candidates: Dict[str, Dict[str, Any]] = {}
     summary_lines: List[str] = ["Rendered evidence summary for final review."]
     ledger_text = ""
 
@@ -32146,19 +32341,18 @@ def _class_analysis_qwen_review_final_context_messages(
                 summary_lines.append(compact_text)
             text_only_observations.append(tool_name)
             trimmed_text_messages += 1
-        elif tool_name and tool_name not in keep_image_tools:
+        elif tool_name and tool_name not in final_visual_tools and tool_name not in fallback_visual_tools:
             compact_text = _class_analysis_qwen_review_compact_tool_result_text(first_text, tool_name)
             if compact_text:
                 summary_lines.append(compact_text)
             text_only_observations.append(tool_name)
             trimmed_text_messages += 1
-        elif tool_name in keep_image_tools:
+        elif tool_name in final_visual_tools or tool_name in fallback_visual_tools:
             compact_text = _class_analysis_qwen_review_compact_tool_result_text(first_text, tool_name)
             if compact_text:
                 summary_lines.append(compact_text)
             if image_items:
-                kept_images.extend(copy.deepcopy(image_items[:1]))
-                image_observations.append(tool_name)
+                image_candidates.setdefault(tool_name, copy.deepcopy(image_items[0]))
             trimmed_text_messages += 1
         elif first_text and not first_text.startswith("You are reviewing one object flagged"):
             summary_lines.append(_class_analysis_qwen_review_compact_line(first_text, 420))
@@ -32167,7 +32361,23 @@ def _class_analysis_qwen_review_final_context_messages(
     if ledger_text:
         summary_lines.append(ledger_text)
     summary_text = "\n\n".join(line for line in summary_lines if line).strip()
-    final_image_budget = 7 if any(item == "inspect_local_consensus_context" for item in image_observations) else 6
+    selected_tool_images: List[Tuple[str, Dict[str, Any]]] = []
+    for tool_name in (
+        "inspect_target_detail",
+        "zoom_source_region",
+        "inspect_specificity_region_contrast",
+        "inspect_source_overlay",
+    ):
+        image_item = image_candidates.get(tool_name)
+        if image_item:
+            selected_tool_images.append((tool_name, image_item))
+    if "inspect_target_detail" not in {tool_name for tool_name, _image in selected_tool_images}:
+        image_item = image_candidates.get("inspect_target_context")
+        if image_item:
+            selected_tool_images.insert(0, ("inspect_target_context", image_item))
+    selected_tool_images = selected_tool_images[:CLASS_ANALYSIS_QWEN_REVIEW_FINAL_MAX_IMAGES]
+    selected_image_tools = [tool_name for tool_name, _image in selected_tool_images]
+    selected_images = [image_item for _tool_name, image_item in selected_tool_images]
     final_messages = [
         {
             "role": "system",
@@ -32187,26 +32397,28 @@ def _class_analysis_qwen_review_final_context_messages(
         {
             "role": "user",
             "content": [{"type": "text", "text": _class_analysis_qwen_review_compact_line(summary_text, 6000)}]
-            + kept_images[:final_image_budget],
+            + selected_images,
         },
     ]
 
     return final_messages, {
         "input_image_count": input_images,
-        "output_image_count": len(kept_images[:final_image_budget]),
+        "output_image_count": len(selected_images),
         "text_only_observations": sorted(set(text_only_observations)),
-        "image_observations": sorted(set(image_observations)),
+        "image_observations": sorted(set(selected_image_tools)),
         "trimmed_text_messages": trimmed_text_messages,
         "policy": (
-            "Final review keeps clean target/detail/zoom images, the clean class-context pack, and the "
-            "clean source image plus target/background region-contrast panel for VLM reasoning. If routed, the "
-            "local-consensus clean/dot panel is also kept as visual evidence; source overlay geometry, overlap "
+            "Final review keeps a compact visual core: clean target detail, clean zoom/source context, "
+            "and the target/background region-contrast panel before overlay-heavy source geometry. Composite class-context and local-consensus "
+            "panels remain rendered, logged, and summarized as text/ledger evidence, but are not attached "
+            "to the final MLX VLM call by default because earlier benchmark replays showed final-generation "
+            "Metal instability when those large composites were included. Overlay geometry, overlap "
             "decomposition, and deterministic reports remain compact text/ledger context."
         ),
     }
 
 
-def _class_analysis_qwen_review_model_image_path(path: str) -> str:
+def _class_analysis_qwen_review_model_image_path(path: str, *, max_side: Optional[int] = None) -> str:
     """Return a VLM-safe image path while keeping original evidence untouched."""
 
     raw_path = str(path or "").strip()
@@ -32215,24 +32427,85 @@ def _class_analysis_qwen_review_model_image_path(path: str) -> str:
     source_path = Path(raw_path)
     if not source_path.is_file():
         return raw_path
-    max_side = int(CLASS_ANALYSIS_QWEN_REVIEW_MODEL_IMAGE_MAX_SIDE)
+    try:
+        resolved_max_side = int(max_side if max_side is not None else CLASS_ANALYSIS_QWEN_REVIEW_MODEL_IMAGE_MAX_SIDE)
+    except Exception:
+        resolved_max_side = int(CLASS_ANALYSIS_QWEN_REVIEW_MODEL_IMAGE_MAX_SIDE)
+    resolved_max_side = max(320, min(int(CLASS_ANALYSIS_QWEN_REVIEW_MODEL_IMAGE_MAX_SIDE), resolved_max_side))
     try:
         with Image.open(source_path) as image:
             width, height = image.size
-            if max(width, height) <= max_side:
+            if max(width, height) <= resolved_max_side:
                 return raw_path
             output_dir = source_path.parent / "model_inputs"
             output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = output_dir / f"{source_path.stem}_max{max_side}.jpg"
+            output_path = output_dir / f"{source_path.stem}_max{resolved_max_side}.jpg"
             if output_path.is_file() and output_path.stat().st_mtime >= source_path.stat().st_mtime:
                 return str(output_path)
             resized = image.convert("RGB")
-            resized.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            resized.thumbnail((resolved_max_side, resolved_max_side), Image.Resampling.LANCZOS)
             resized.save(output_path, quality=88, optimize=True)
             return str(output_path)
     except Exception as exc:
         logger.debug("Failed to prepare class-analysis Qwen model image %s: %s", raw_path, exc)
     return raw_path
+
+
+def _class_analysis_qwen_review_cap_message_images(
+    messages: Sequence[Dict[str, Any]],
+    *,
+    max_images: Optional[int] = None,
+    max_side: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Downsample and optionally cap VLM images for fragile reasoning phases.
+
+    The original evidence artifacts remain written to disk and referenced in the
+    ledger. This only rewrites the image paths attached to a specific model call.
+    Keeping the VLM visual core small follows the agent-loop principle of giving
+    a model the minimal decisive observations for a step, while preserving full
+    traceability through the controller artifacts.
+    """
+
+    capped = copy.deepcopy(list(messages))
+    limit = max(0, int(max_images)) if max_images is not None else 0
+    image_count = 0
+    kept = 0
+    dropped = 0
+    rewritten = 0
+    selected_max_side = max_side if max_side is not None else CLASS_ANALYSIS_QWEN_REVIEW_MODEL_IMAGE_MAX_SIDE
+    try:
+        selected_max_side = max(320, min(int(CLASS_ANALYSIS_QWEN_REVIEW_MODEL_IMAGE_MAX_SIDE), int(selected_max_side)))
+    except Exception:
+        selected_max_side = int(CLASS_ANALYSIS_QWEN_REVIEW_MODEL_IMAGE_MAX_SIDE)
+    for message in capped:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        new_content: List[Dict[str, Any]] = []
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "image":
+                new_content.append(item)
+                continue
+            image_count += 1
+            if limit and kept >= limit:
+                dropped += 1
+                continue
+            original = str(item.get("image") or "")
+            prepared = _class_analysis_qwen_review_model_image_path(original, max_side=selected_max_side)
+            rewritten += int(prepared != original)
+            next_item = dict(item)
+            next_item["image"] = prepared
+            new_content.append(next_item)
+            kept += 1
+        message["content"] = new_content
+    return capped, {
+        "input_image_count": image_count,
+        "output_image_count": kept,
+        "dropped_image_count": dropped,
+        "rewritten_image_count": rewritten,
+        "max_side": selected_max_side,
+        "max_images": limit or None,
+    }
 
 
 def _class_analysis_qwen_review_should_run_cue_verifier(
@@ -32275,6 +32548,20 @@ def _class_analysis_qwen_review_should_run_cue_verifier(
         return False
     if "visible target text supporting current class" in reason_text:
         return False
+    dual_bbox = guarded.get("dual_bbox_conflict") if isinstance(guarded.get("dual_bbox_conflict"), dict) else {}
+    dual_bbox_switch_guarded_opinion = (
+        limited_candidate
+        and bool(dual_bbox.get("enabled"))
+        and str(guarded.get("dual_bbox_resolution") or "").strip().lower() == "overlap_box_class"
+    )
+    if dual_bbox_switch_guarded_opinion:
+        # Near-identical dual-bbox cases are exactly where a second VLM cue
+        # check is useful: the first final pass may correctly resolve the class
+        # but still mark the evidence as limited, partial, or context-mixed.
+        # The verifier cannot mutate labels by itself; it only supplies
+        # target-specific cue, overlap, extent, and current-class plausibility
+        # evidence for the normal validator.
+        return True
     target_specific_guarded_opinion = (
         str(guarded.get("specificity_alignment") or "").strip().lower()
         in {"supports_suggested", "supports_other"}
@@ -32729,8 +33016,11 @@ def _class_analysis_qwen_review_try_cue_verifier(
                 "attempt": attempt_idx + 1,
                 "guarded_recommendation": copy.deepcopy(guarded),
                 "assistant_prefix_strategy": "plain_json_arguments",
+                "reasoning_visual_policy": "compact_cue_verifier_core",
             },
             assistant_prefix=None,
+            image_max_side=CLASS_ANALYSIS_QWEN_REVIEW_REASONING_IMAGE_MAX_SIDE,
+            image_limit=CLASS_ANALYSIS_QWEN_REVIEW_CUE_VERIFIER_MAX_IMAGES,
         )
         verifier_payload, verifier_error = _class_analysis_qwen_review_parse_cue_verifier_payload(
             raw_verifier,
@@ -32884,6 +33174,34 @@ def _class_analysis_qwen_review_try_cue_verifier(
             final_result["cue_verifier"] = verifier_record
             return final_result
     augmented_args = dict(guarded)
+    guarded_dual_bbox = (
+        guarded.get("dual_bbox_conflict")
+        if isinstance(guarded.get("dual_bbox_conflict"), dict)
+        else point.get("dual_bbox_conflict")
+        if isinstance(point.get("dual_bbox_conflict"), dict)
+        else evidence_ledger.get("dual_bbox_conflict")
+        if isinstance(evidence_ledger, dict) and isinstance(evidence_ledger.get("dual_bbox_conflict"), dict)
+        else None
+    )
+    guarded_dual_other_class = _class_analysis_qwen_review_dual_bbox_other_class(guarded_dual_bbox or {})
+    guarded_dual_target_norm = _class_analysis_qwen_review_normalize_label(guarded.get("target_class"))
+    guarded_dual_other_norm = _class_analysis_qwen_review_normalize_label(guarded_dual_other_class)
+    try:
+        guarded_dual_iou = float((guarded_dual_bbox or {}).get("iou") or 0.0)
+    except Exception:
+        guarded_dual_iou = 0.0
+    if not math.isfinite(guarded_dual_iou):
+        guarded_dual_iou = 0.0
+    guarded_duplicate_like_dual_switch = (
+        bool((guarded_dual_bbox or {}).get("enabled"))
+        and str(guarded.get("dual_bbox_resolution") or "").strip().lower() == "overlap_box_class"
+        and bool(guarded_dual_other_norm)
+        and guarded_dual_target_norm == guarded_dual_other_norm
+        and (
+            str((guarded_dual_bbox or {}).get("relation") or "").strip().lower() == "duplicate_like"
+            or guarded_dual_iou >= 0.90
+        )
+    )
     overlap_rebuttal = str(verifier_record.get("overlap_rebuttal") or "").strip()
     guarded_rationale = str(guarded.get("rationale_short") or "").strip()
     verifier_positive_cues = [
@@ -32931,6 +33249,15 @@ def _class_analysis_qwen_review_try_cue_verifier(
             overlap_rebuttal
             or "Overlap does not explain the target-contained visible class features."
         )
+    if guarded_duplicate_like_dual_switch and verifier_record.get("overlap_rebutted"):
+        # The final VLM sometimes correctly chooses the overlapping class in a
+        # near-identical duplicate-bbox conflict while leaving overlap_assessment
+        # as unclear/context-mixed. Preserve the controller-rendered geometry
+        # fact for validation after the separate cue verifier confirms that the
+        # proposed class evidence is target-contained rather than background or
+        # overlap leakage.
+        augmented_args["overlap_assessment"] = "duplicate_like"
+        augmented_args["dual_bbox_resolution"] = "overlap_box_class"
     augmented_args.update(
         {
             "decision": guarded.get("decision"),
@@ -33333,6 +33660,8 @@ def _class_analysis_qwen_review_model_call(
     progress: float,
     event_extra: Optional[Dict[str, Any]] = None,
     assistant_prefix: Optional[str] = "<tool_call>",
+    image_max_side: Optional[int] = None,
+    image_limit: Optional[int] = None,
 ) -> str:
     qwen_kwargs = {
         "max_new_tokens": int(max_new_tokens),
@@ -33341,7 +33670,11 @@ def _class_analysis_qwen_review_model_call(
         "chat_template_kwargs": {"enable_thinking": False},
         "assistant_prefix": assistant_prefix,
     }
-    effective_messages = copy.deepcopy(messages)
+    effective_messages, image_policy = _class_analysis_qwen_review_cap_message_images(
+        messages,
+        max_images=image_limit,
+        max_side=image_max_side,
+    )
     with CLASS_ANALYSIS_QWEN_REVIEW_JOBS_LOCK:
         _class_analysis_qwen_review_update(
             job,
@@ -33358,6 +33691,7 @@ def _class_analysis_qwen_review_model_call(
             "kwargs": copy.deepcopy(qwen_kwargs),
             "tool_schema": copy.deepcopy(tool_specs),
             "tool_schema_chat_template_disabled": True,
+            "image_policy": copy.deepcopy(image_policy),
             **(event_extra or {}),
         },
     )
@@ -33830,6 +34164,7 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
             final_base_messages.append(_class_analysis_qwen_review_specificity_probe_message(specificity_probe))
         elif specificity_probe_enabled:
             _class_analysis_qwen_review_write_json(job, "specificity_probe.json", specificity_probe)
+        previous_final_error = ""
         for attempt_idx in range(final_attempts) if final_result is None else range(0):
             if job.cancel_event.is_set():
                 raise RuntimeError("cancelled")
@@ -33848,13 +34183,18 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                     )
                 )
             if attempt_idx > 0:
+                repair_reason = previous_final_error or "final_validation_error"
                 final_messages.append(
                     {
                         "role": "user",
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Your previous final response failed validation. Return only the compact arguments object. Start with `{`; no analysis, no markdown, no prose.",
+                                "text": (
+                                    "Your previous final response failed controller validation: "
+                                    f"{repair_reason[:320]}. Return only one complete compact JSON arguments "
+                                    "object. Start with `{`; no analysis, no markdown, no prose."
+                                ),
                             }
                         ],
                     }
@@ -33874,12 +34214,16 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                     ),
                     "executed_tools": sorted(executed_tools),
                     "assistant_prefix_strategy": "plain_json_arguments",
+                    "reasoning_visual_policy": "compact_final_core",
                 },
                 assistant_prefix=final_assistant_prefix,
+                image_max_side=CLASS_ANALYSIS_QWEN_REVIEW_REASONING_IMAGE_MAX_SIDE,
+                image_limit=CLASS_ANALYSIS_QWEN_REVIEW_FINAL_MAX_IMAGES,
             )
             if _class_analysis_qwen_review_text_is_degenerate(raw_final):
-                reason = "Qwen final decision produced degenerate repeated text; controller skipped without retrying."
+                reason = "Qwen final decision produced degenerate repeated text."
                 invalid_outputs += 1
+                previous_final_error = reason
                 _class_analysis_qwen_review_append_event(
                     job,
                     {
@@ -33889,9 +34233,13 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                         "output_preview": str(raw_final or "")[:240],
                     },
                 )
-                final_result = _class_analysis_qwen_review_skip_result(point, reason)
-                final_result["backend_visual_quality"] = visual_quality
-                break
+                if attempt_idx + 1 >= final_attempts:
+                    final_result = _class_analysis_qwen_review_skip_result(
+                        point,
+                        "Qwen final decision produced degenerate repeated text after all final retries.",
+                    )
+                    final_result["backend_visual_quality"] = visual_quality
+                continue
             payload, parse_error = _class_analysis_qwen_review_parse_payload(raw_final)
             try:
                 if not isinstance(payload, dict):
@@ -33940,6 +34288,7 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                 break
             except Exception as exc:
                 invalid_outputs += 1
+                previous_final_error = str(exc)
                 _class_analysis_qwen_review_append_event(
                     job,
                     {

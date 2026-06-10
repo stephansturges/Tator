@@ -624,6 +624,17 @@ class brief:
 }
 ```
 
+Final review repair turns preserve the same schema discipline. When a model
+response fails controller validation, the repair prompt asks for one complete
+compact arguments object encoded as JSON, starting with `{` and containing no
+analysis, markdown, or prose outside the object.
+
+The default final VLM image cap is four images because the compact visual core
+has four distinct roles: clean target detail, clean zoom/source-region context,
+SDDF-style specificity region contrast, and the clean wider source image. Lower
+`CLASS_ANALYSIS_QWEN_REVIEW_FINAL_MAX_IMAGES` only for a deliberate runtime
+experiment, because setting it to three drops the clean wider source context.
+
 When a current/suggested class pair is available, the backend also renders
 side-by-side trusted-diverse exemplars for the pair and asks Qwen for a compact
 contrast brief:

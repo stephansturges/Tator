@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <title>🥔 Tator Annotation Tool</title>
-    <link href="ybat.css?v=20260603d" rel="stylesheet">
+    <link href="ybat.css?v=20260610a" rel="stylesheet">
 
     <!-- 1) Keep scripts in an order that ensures ybat.js is available  
          before we call listenImageCrop().
@@ -13,7 +13,7 @@
     <script src="filesaver.min.js?v=20260409a"></script>
     <script src="plotly-2.35.2.min.js?v=20260520a"></script>
     <script src="annotation_diversity.js?v=20260530a"></script>
-    <script src="ybat.js?v=20260609a"></script>
+    <script src="ybat.js?v=20260610a"></script>
 </head>
 <body>
     <div id="ingestProgress" class="ingest-progress" aria-live="polite" aria-atomic="true">
@@ -50,26 +50,26 @@
         Heavy backend jobs are running (training/prepass/calibration). GPU-heavy actions are paused until they finish or are cancelled.
     </div>
     <div class="tab-shell">
-		        <div class="tab-bar">
-	            <button class="tab-button active" data-tab="labeling" data-testid="tab.labeling.open" id="tabLabelingButton" type="button">Label Images</button>
-            <button class="tab-button" data-tab="data-ingestion" data-testid="tab.data_ingestion.open" id="tabDataIngestionButton" type="button">Data Ingestion</button>
-            <button class="tab-button" data-tab="class-split" data-testid="tab.class_split.open" id="tabClassSplitButton" type="button">Class Split Explorer</button>
-            <button class="tab-button" data-tab="prepass-builder" data-testid="tab.prepass_builder.open" id="tabPrepassBuilderButton" type="button">EDR Builder [wip]</button>
-            <button class="tab-button" data-tab="training" data-testid="tab.training.open" id="tabTrainingButton" type="button">Train Class Predictor</button>
-            <button class="tab-button" data-tab="qwen-train" data-testid="tab.qwen_train.open" id="tabQwenTrainButton" type="button">Train Qwen 3</button>
-            <button class="tab-button" data-tab="sam3-train" data-testid="tab.sam3_train.open" id="tabSam3TrainButton" type="button">Train SAM3</button>
-            <button class="tab-button" data-tab="yolo-train" data-testid="tab.yolo_train.open" id="tabYoloTrainButton" type="button">Train YOLO</button>
-            <button class="tab-button" data-tab="rfdetr-train" data-testid="tab.rfdetr_train.open" id="tabRfDetrTrainButton" type="button">Train RF-DETR</button>
-            <button class="tab-button" data-tab="agent-mining" data-testid="tab.agent_mining.open" id="tabAgentMiningButton" type="button">SAM3 Recipe Mining</button>
-            <button class="tab-button" data-tab="prompt-helper" data-testid="tab.prompt_helper.open" id="tabPromptHelperButton" type="button">SAM3 Vocabulary Explorer</button>
-            <button class="tab-button" data-tab="datasets" data-testid="tab.datasets.open" id="tabDatasetsButton" type="button">Dataset Management</button>
-            <button class="tab-button" data-tab="sam3-prompt-models" data-testid="tab.sam3_prompt_models.open" id="tabSam3PromptModelsButton" type="button">SAM Model Selection</button>
-            <button class="tab-button" data-tab="detectors" data-testid="tab.detectors.open" id="tabDetectorsButton" type="button">Detector Selection</button>
-            <button class="tab-button" data-tab="active" data-testid="tab.active_classifier.open" id="tabActiveButton" type="button">Class Predictor Settings</button>
-            <button class="tab-button" data-tab="qwen" data-testid="tab.qwen_models.open" id="tabQwenButton" type="button">Qwen Models</button>
-            <button class="tab-button" data-tab="predictors" data-testid="tab.sam_predictors.open" id="tabPredictorsButton" type="button">SAM Predictors</button>
+        <div class="tab-bar">
+            <button class="tab-button active" data-tab="labeling" data-testid="tab.labeling.open" id="tabLabelingButton" type="button" title="Open the main annotation workspace for images, boxes, masks, detectors, SAM, and Qwen-assisted labeling.">Label Images</button>
+            <button class="tab-button" data-tab="data-ingestion" data-testid="tab.data_ingestion.open" id="tabDataIngestionButton" type="button" title="Score new images and videos against a reference dataset before deciding what to keep.">Data Ingestion</button>
+            <button class="tab-button" data-tab="class-split" data-testid="tab.class_split.open" id="tabClassSplitButton" type="button" title="Embed labeled objects, inspect likely wrong classes, and review subclass structure.">Class Split Explorer</button>
+            <button class="tab-button" data-tab="prepass-builder" data-testid="tab.prepass_builder.open" id="tabPrepassBuilderButton" type="button" title="Build and test Ensemble Detection Recipes for repeatable detector/SAM/classifier workflows.">EDR Builder [wip]</button>
+            <button class="tab-button" data-tab="training" data-testid="tab.training.open" id="tabTrainingButton" type="button" title="Train and manage local class prediction heads from labeled datasets.">Train Class Predictor</button>
+            <button class="tab-button" data-tab="qwen-train" data-testid="tab.qwen_train.open" id="tabQwenTrainButton" type="button" title="Prepare and run Qwen fine-tuning jobs from annotated image datasets.">Train Qwen 3</button>
+            <button class="tab-button" data-tab="sam3-train" data-testid="tab.sam3_train.open" id="tabSam3TrainButton" type="button" title="Prepare SAM3 training datasets and launch SAM3 training workflows.">Train SAM3</button>
+            <button class="tab-button" data-tab="yolo-train" data-testid="tab.yolo_train.open" id="tabYoloTrainButton" type="button" title="Configure and launch YOLO detector training from managed datasets.">Train YOLO</button>
+            <button class="tab-button" data-tab="rfdetr-train" data-testid="tab.rfdetr_train.open" id="tabRfDetrTrainButton" type="button" title="Configure and launch RF-DETR detector training from managed datasets.">Train RF-DETR</button>
+            <button class="tab-button" data-tab="agent-mining" data-testid="tab.agent_mining.open" id="tabAgentMiningButton" type="button" title="Mine candidate SAM3/EDR recipes from images and evaluate their detector behavior.">SAM3 Recipe Mining</button>
+            <button class="tab-button" data-tab="prompt-helper" data-testid="tab.prompt_helper.open" id="tabPromptHelperButton" type="button" title="Explore and organize SAM3 text prompts and vocabulary for a dataset.">SAM3 Vocabulary Explorer</button>
+            <button class="tab-button" data-tab="datasets" data-testid="tab.datasets.open" id="tabDatasetsButton" type="button" title="Upload, download, restore, delete, and inspect backend-managed datasets.">Dataset Management</button>
+            <button class="tab-button" data-tab="sam3-prompt-models" data-testid="tab.sam3_prompt_models.open" id="tabSam3PromptModelsButton" type="button" title="Select and configure available SAM/SAM3 predictor backends.">SAM Model Selection</button>
+            <button class="tab-button" data-tab="detectors" data-testid="tab.detectors.open" id="tabDetectorsButton" type="button" title="Select, activate, download, or delete trained detector runs.">Detector Selection</button>
+            <button class="tab-button" data-tab="active" data-testid="tab.active_classifier.open" id="tabActiveButton" type="button" title="Select the active class predictor, labelmap, and inference settings.">Class Predictor Settings</button>
+            <button class="tab-button" data-tab="qwen" data-testid="tab.qwen_models.open" id="tabQwenButton" type="button" title="Manage local Qwen model registry, downloads, variants, and runtime settings.">Qwen Models</button>
+            <button class="tab-button" data-tab="predictors" data-testid="tab.sam_predictors.open" id="tabPredictorsButton" type="button" title="Inspect and manage loaded SAM predictor slots.">SAM Predictors</button>
             <div class="tab-bar__utility" role="presentation">
-                <button class="tab-button" data-tab="settings" data-testid="tab.settings.open" id="tabSettingsButton" type="button">Backend Config</button>
+                <button class="tab-button" data-tab="settings" data-testid="tab.settings.open" id="tabSettingsButton" type="button" title="Configure backend API URL, runtime status, and local backend controls.">Backend Config</button>
                 <button class="theme-toggle-button" data-testid="theme.dark.toggle" id="themeToggleButton" type="button" aria-pressed="false" title="Switch to dark mode">Dark</button>
             </div>
         </div>

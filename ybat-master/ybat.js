@@ -16,21 +16,10 @@
     const THEME_CLICK_DELAY_MS = 320;
     const QWEN_CAPTION_REGION_PULSE_MS = 1200;
     const SAM3_TEXT_WINDOW_PULSE_MS = 950;
-    const TOP_TAB_BASE_METRICS = Object.freeze({
-        fontSize: 12,
-        paddingX: 14,
-        paddingY: 6,
-        gap: 6,
-        minHeight: 30,
-        themeMinWidth: 96,
-    });
     let themeToggleButton = null;
     let themeToggleClickTimer = null;
     let previousClassicThemeMode = THEME_LIGHT;
     let pipboyAccentMode = PIPBOY_GREEN;
-    let adaptiveTopTabsRaf = 0;
-    let adaptiveTopTabsResizeObserver = null;
-    let adaptiveTopTabsMutationObserver = null;
 
     function normalizeThemeMode(value) {
         if (value === THEME_DARK || value === THEME_PIPBOY) {
@@ -129,82 +118,6 @@
         return THEME_LIGHT;
     }
 
-    function setAdaptiveTopTabsScale(bar, scale) {
-        const nextScale = Number.isFinite(scale) ? Math.max(0.08, Math.min(1, scale)) : 1;
-        const metrics = TOP_TAB_BASE_METRICS;
-        bar.style.setProperty("--top-tab-font-size", `${Math.max(1, metrics.fontSize * nextScale).toFixed(2)}px`);
-        bar.style.setProperty("--top-tab-padding-x", `${Math.max(1, metrics.paddingX * nextScale).toFixed(2)}px`);
-        bar.style.setProperty("--top-tab-padding-y", `${Math.max(1, metrics.paddingY * nextScale).toFixed(2)}px`);
-        bar.style.setProperty("--top-tab-gap", `${Math.max(1, metrics.gap * nextScale).toFixed(2)}px`);
-        bar.style.setProperty("--top-tab-min-height", `${Math.max(14, metrics.minHeight * nextScale).toFixed(2)}px`);
-        bar.style.setProperty("--top-theme-min-width", `${Math.max(0, metrics.themeMinWidth * nextScale).toFixed(2)}px`);
-    }
-
-    function measureAdaptiveTopTabsWidth(bar) {
-        const children = Array.from(bar.children).filter((element) => element && element.nodeType === 1);
-        if (!children.length) {
-            return 0;
-        }
-        const style = window.getComputedStyle(bar);
-        const gap = parseFloat(style.columnGap || style.gap) || 0;
-        const childWidth = children.reduce((total, element) => total + element.getBoundingClientRect().width, 0);
-        return childWidth + gap * Math.max(0, children.length - 1);
-    }
-
-    function updateAdaptiveTopTabs() {
-        adaptiveTopTabsRaf = 0;
-        const bar = document.querySelector(".tab-bar");
-        if (!bar) {
-            return;
-        }
-        setAdaptiveTopTabsScale(bar, 1);
-        const style = window.getComputedStyle(bar);
-        const paddingX = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
-        const availableWidth = Math.max(1, bar.clientWidth - paddingX - 1);
-        const naturalWidth = measureAdaptiveTopTabsWidth(bar);
-        if (!naturalWidth || naturalWidth <= availableWidth) {
-            return;
-        }
-        let scale = availableWidth / naturalWidth;
-        setAdaptiveTopTabsScale(bar, scale);
-        const scaledWidth = measureAdaptiveTopTabsWidth(bar);
-        if (scaledWidth > availableWidth) {
-            scale *= (availableWidth / scaledWidth) * 0.995;
-            setAdaptiveTopTabsScale(bar, scale);
-        }
-    }
-
-    function scheduleAdaptiveTopTabsUpdate() {
-        if (adaptiveTopTabsRaf) {
-            return;
-        }
-        adaptiveTopTabsRaf = window.requestAnimationFrame(updateAdaptiveTopTabs);
-    }
-
-    function initializeAdaptiveTopTabs() {
-        const bar = document.querySelector(".tab-bar");
-        if (!bar) {
-            return;
-        }
-        if (!adaptiveTopTabsResizeObserver && "ResizeObserver" in window) {
-            adaptiveTopTabsResizeObserver = new ResizeObserver(scheduleAdaptiveTopTabsUpdate);
-            adaptiveTopTabsResizeObserver.observe(bar);
-        }
-        if (!adaptiveTopTabsMutationObserver && "MutationObserver" in window) {
-            adaptiveTopTabsMutationObserver = new MutationObserver(scheduleAdaptiveTopTabsUpdate);
-            adaptiveTopTabsMutationObserver.observe(bar, {
-                childList: true,
-                characterData: true,
-                subtree: true,
-            });
-        }
-        window.addEventListener("resize", scheduleAdaptiveTopTabsUpdate, { passive: true });
-        if (document.fonts?.ready) {
-            document.fonts.ready.then(scheduleAdaptiveTopTabsUpdate).catch(() => {});
-        }
-        scheduleAdaptiveTopTabsUpdate();
-    }
-
     function updateThemeToggleButton(mode) {
         if (!themeToggleButton) {
             return;
@@ -215,14 +128,12 @@
             themeToggleButton.textContent = `Pip ${labelAccent}`;
             themeToggleButton.setAttribute("aria-pressed", "true");
             themeToggleButton.title = `Switch Pip-Boy color to ${nextAccent}; double-click to exit Pip-Boy`;
-            scheduleAdaptiveTopTabsUpdate();
             return;
         }
         const enabled = mode === THEME_DARK;
         themeToggleButton.textContent = enabled ? "Light" : "Dark";
         themeToggleButton.setAttribute("aria-pressed", enabled ? "true" : "false");
         themeToggleButton.title = enabled ? "Switch to light mode" : "Switch to dark mode";
-        scheduleAdaptiveTopTabsUpdate();
     }
 
     function setPipboyAccent(accent, options = {}) {
@@ -1137,13 +1048,310 @@
         await loadRfDetrRunList(false);
     }
 
-    function initHelpTooltips() {
-        document.querySelectorAll(".help-icon[title]").forEach((el) => {
-            const title = el.getAttribute("title");
-            if (!title) return;
-            el.dataset.tooltip = title;
-            el.removeAttribute("title");
+    const CONTROL_TOOLTIP_OVERRIDES = Object.freeze({
+        cropImages: "Export object crops from the currently loaded labels.",
+        imageSearch: "Filter the image list by filename.",
+        imageList: "Select the active image or multi-select images for batch operations.",
+        saveBboxes: "Export the current annotations as YOLO labels, captions, and labelmap files.",
+        annotationTakeoverBtn: "Take over the active dataset edit lock when you intentionally want this browser to become the writer.",
+        annotationSaveNowBtn: "Write current annotation edits to the active dataset immediately.",
+        annotationReloadBtn: "Reload the active dataset manifest and annotation state from the backend.",
+        annotationCloseBtn: "Close the active backend dataset and return to local-file labeling mode.",
+        polygonDrawToggle: "Toggle polygon drawing in segmentation mode without changing the selected class.",
+        classList: "Choose the active class for new annotations and class reassignment.",
+        detectorRunButton: "Run the selected detector on the current image using the configured mode.",
+        detectorBatchRunButton: "Run the selected detector over the next batch of images.",
+        detectorBatchStopButton: "Stop the active detector batch job.",
+        detectorBatchAllButton: "Run the selected detector over all loaded images.",
+        qwenRunButton: "Ask the selected Qwen model to propose detections for the current image.",
+        qwenCaptionRunButton: "Generate or refresh the caption for the current image.",
+        qwenCaptionCancelButton: "Cancel the active Qwen captioning job.",
+        qwenCaptionBatchRun: "Generate captions for the next batch of images.",
+        qwenCaptionBatchRunAll: "Generate captions for all loaded images.",
+        qwenCaptionBatchCancel: "Cancel the active caption batch job.",
+        qwenCaptionDownloadJsonl: "Download generated captions as Qwen-ready JSONL.",
+        qwenCaptionGlossary: "Edit the caption glossary that maps label names to broad visual meanings.",
+        qwenCaptionPromptUser: "Edit the user request layer used by the active caption recipe.",
+        qwenCaptionSystemPrompt: "Edit the system prompt layer for captioning calls.",
+        qwenCaptionPromptContext: "Edit the context prompt layer that describes dataset and label semantics.",
+        qwenCaptionPromptWindow: "Edit the prompt layer used for local crop/window captioning.",
+        qwenCaptionPromptDraftRefine: "Edit the prompt layer used to refine draft captions.",
+        qwenCaptionPromptMerge: "Edit the prompt layer used to merge crop and full-image observations.",
+        qwenCaptionPromptCleanup: "Edit the prompt layer used to clean up final caption wording.",
+        sam3RunButton: "Run SAM3 text prompting for the current image.",
+        sam3TextCascadeRun: "Run the configured SAM3 text-prompt cascade.",
+        sam3TextCascadeStop: "Stop the active SAM3 cascade job.",
+        sam3BatchRunButton: "Run the selected SAM3 mode over the configured image batch.",
+        sam3BatchStopButton: "Stop the active SAM3 batch job.",
+        shortcutResetAll: "Restore all keyboard shortcuts to their default bindings.",
+        shortcutExportConfig: "Download this browser's shortcut map as JSON.",
+        shortcutImportConfigButton: "Load a previously exported shortcut JSON file.",
+        shortcutImportConfig: "Choose a shortcut JSON file to import.",
+        dataIngestionProfileDownload: "Download the selected reference profile archive.",
+        dataIngestionProfileUploadButton: "Upload a previously saved reference profile archive.",
+        dataIngestionBuildProfileButton: "Build a reference profile from the selected accepted dataset.",
+        dataIngestionRefreshButton: "Refresh backend datasets and available reference profiles.",
+        dataIngestionAnalyzeButton: "Score the selected candidate images and video frames against the reference profile.",
+        dataIngestionCancelButton: "Cancel the active data-ingestion job.",
+        dataIngestionDistributionButton: "Show the distribution map for the latest candidate analysis.",
+        dataIngestionOpenDatasetAnalysisButton: "Jump to Class Split dataset analysis for the active reference dataset.",
+        dataIngestionPreviewAcceptedButton: "Preview the currently accepted candidate output set.",
+        dataIngestionDownloadAcceptedButton: "Download the accepted ingestion output as a ZIP archive.",
+        classSplitRunButton: "Run the embedding cluster audit for the selected scope.",
+        classSplitCancelButton: "Cancel the active class-split analysis job.",
+        classSplitRerunButton: "Repeat the class-split analysis with the current settings.",
+        classSplitBulkClass: "Choose the class assigned when applying a lasso-selected bulk change.",
+        classSplitBulkApply: "Apply the selected class to all lasso-selected graph objects.",
+        classSplitBulkClear: "Clear the current lasso/bulk graph selection.",
+        classSplitClusterRun: "Compute subclass cluster proposals for the current class-focused graph.",
+        classSplitQwenReviewGlossaryReset: "Reset the Qwen review glossary editor from the current labelmap defaults.",
+        classSplitQwenReviewGlossarySave: "Save the edited Qwen review glossary for reuse.",
+        classSplitWrongDiscardFirst: "Skip the configured number of likely-wrong vignettes from the front of the review queue.",
+        classSplitWrongShuffle: "Show a different random page of likely-wrong vignettes.",
+        classSplitMobilePush: "Create or refresh a mobile review session for the current likely-wrong queue.",
+        classSplitMobileSync: "Sync mobile review decisions back into the current browser workspace.",
+        classSplitQwenReviewRefresh: "Refresh the list of local Qwen reviewer models.",
+        classSplitDatasetAnalysisRun: "Run dataset-level value scoring after all-class class-split analysis is available.",
+        qwenAgentRecipeImportFile: "Choose a Qwen review recipe JSON file to import.",
+        datasetUploadCurrentBtn: "Upload the currently open Label Images workspace as a backend-managed dataset.",
+        datasetUploadBtn: "Upload the selected dataset ZIP as a backend-managed dataset.",
+        datasetListRefresh: "Refresh the backend dataset list.",
+        datasetPathOpenBtn: "Open the local dataset path in Label Images without copying it into backend storage.",
+        datasetPathSaveBtn: "Save changes to this local-path dataset entry.",
+        datasetPathRegisterBtn: "Register the local path as a reusable dataset entry.",
+        datasetPathAnnotateBtn: "Open the registered dataset path in the annotation workspace.",
+        datasetListRefreshTop: "Refresh active, deleted, and staged dataset lists.",
+        datasetUploadSessionsRefresh: "Refresh resumable or cancellable staged upload sessions.",
+        datasetTrashRefresh: "Refresh deleted datasets that can be restored or permanently removed.",
+        datasetGlossaryRefresh: "Refresh glossary data for the selected dataset.",
+        datasetGlossaryLoad: "Load the selected dataset glossary into the editor.",
+        datasetGlossarySave: "Save glossary edits back to the selected dataset.",
+        datasetGlossarySaveAs: "Save the edited glossary under a reusable library name.",
+        glossaryLibraryRefresh: "Refresh saved glossary library entries.",
+        glossaryLibraryNew: "Start a new empty glossary library entry.",
+        glossaryLibrarySave: "Save the current glossary library entry.",
+        glossaryLibraryDelete: "Delete the selected glossary library entry.",
+        trainDatasetSelect: "Choose the backend YOLO-format dataset used for class-predictor training.",
+        trainDatasetRefresh: "Refresh cached datasets available to the class-predictor trainer.",
+        trainUploadCurrentDatasetBtn: "Upload the currently open annotation workspace before training a class predictor.",
+        trainOpenDatasetManagerBtn: "Open Dataset Management to inspect, upload, or clean training datasets.",
+        trainMlpHiddenSizesAuto: "Fill a recommended MLP hidden-layer shape for the current setup.",
+        startTrainingBtn: "Start class-predictor training with the current dataset and model settings.",
+        cancelTrainingBtn: "Cancel the active class-predictor training job.",
+        trainClassifierManageSelect: "Choose a saved class-predictor artifact to inspect or manage.",
+        qwenDatasetSelect: "Choose the dataset used to build Qwen training examples.",
+        qwenDatasetRefresh: "Refresh datasets available for Qwen training.",
+        qwenTrainStartBtn: "Start the Qwen fine-tuning job with the current dataset and LoRA settings.",
+        qwenTrainCancelBtn: "Cancel the active Qwen training job.",
+        qwenSampleBtn: "Generate a sample from the selected Qwen training run for inspection.",
+        qwenTrainChartSmoothing: "Smooth the displayed Qwen training curves without changing training data.",
+        sam3DatasetSelect: "Choose the dataset used for SAM3 training.",
+        sam3DatasetRefresh: "Refresh datasets available for SAM3 training.",
+        sam3DatasetConvert: "Convert the selected dataset into SAM3 training format.",
+        sam3CachePurge: "Clear generated SAM3 cache artifacts for the selected dataset/run.",
+        sam3StartBtn: "Start SAM3 training with the current dataset and schedule settings.",
+        sam3CancelBtn: "Cancel the active SAM3 training job.",
+        sam3ActivateBtn: "Activate the selected SAM3 trained model for annotation workflows.",
+        sam3StorageRefresh: "Refresh SAM3 training runs and storage state.",
+        sam3TrendSmooth: "Smooth the displayed SAM3 training trend chart without changing training data.",
+        yoloDatasetSelect: "Choose the dataset used for YOLO training.",
+        yoloDatasetRefresh: "Refresh datasets available for YOLO training.",
+        yoloTrainStartBtn: "Start YOLO training with the current dataset, model, and augmentation settings.",
+        yoloTrainCancelBtn: "Cancel the active YOLO training job.",
+        yoloTrainRefreshBtn: "Refresh YOLO training job status.",
+        yoloRunsRefresh: "Refresh saved YOLO runs.",
+        yoloRunActivate: "Activate the selected YOLO run for detector inference.",
+        yoloRunDownload: "Download the selected YOLO run artifacts.",
+        yoloRunDelete: "Delete the selected YOLO run after confirmation.",
+        yoloHeadGraftBaseRefresh: "Refresh available YOLO base runs for head grafting.",
+        rfdetrDatasetSelect: "Choose the dataset used for RF-DETR training.",
+        rfdetrDatasetRefresh: "Refresh datasets available for RF-DETR training.",
+        rfdetrTrainStartBtn: "Start RF-DETR training with the current dataset and model settings.",
+        rfdetrTrainCancelBtn: "Cancel the active RF-DETR training job.",
+        rfdetrTrainRefreshBtn: "Refresh RF-DETR training job status.",
+        rfdetrRunsRefresh: "Refresh saved RF-DETR runs.",
+        rfdetrRunActivate: "Activate the selected RF-DETR run for detector inference.",
+        rfdetrRunDownload: "Download the selected RF-DETR run artifacts.",
+        rfdetrRunDelete: "Delete the selected RF-DETR run after confirmation.",
+        detectorDefaultSave: "Set the selected detector as the default for annotation inference.",
+        detectorDefaultRefresh: "Refresh detector availability and active detector status.",
+        detectorYoloRunRefresh: "Refresh saved YOLO detector runs.",
+        detectorYoloRunActivate: "Activate the selected YOLO run for detector inference.",
+        detectorYoloRunDownload: "Download the selected YOLO detector run.",
+        detectorYoloRunDelete: "Delete the selected YOLO detector run after confirmation.",
+        detectorRfDetrRunRefresh: "Refresh saved RF-DETR detector runs.",
+        detectorRfDetrRunActivate: "Activate the selected RF-DETR run for detector inference.",
+        detectorRfDetrRunDownload: "Download the selected RF-DETR detector run.",
+        detectorRfDetrRunDelete: "Delete the selected RF-DETR detector run after confirmation.",
+        activeClassifierRefresh: "Refresh saved class-predictor artifacts.",
+        activeClassifierUse: "Use the selected class predictor for annotation and auto-class workflows.",
+        activeClassifierDownload: "Download the selected class-predictor artifact bundle.",
+        activeClassifierRename: "Rename the selected class-predictor artifact.",
+        activeClassifierDelete: "Delete the selected class-predictor artifact after confirmation.",
+        activeClassifierBrowse: "Upload a class-predictor pickle artifact from disk.",
+        activeClassifierUpload: "Choose a class-predictor pickle artifact to upload.",
+        activeLabelmapUpload: "Choose a labelmap file to upload for the active class predictor.",
+        qwenModelRefreshBtn: "Refresh local and downloadable Qwen model entries.",
+        sam3PromptRefresh: "Refresh available SAM/SAM3 predictor models.",
+        sam3PromptActivate: "Activate the selected SAM/SAM3 predictor model.",
+        settingsApply: "Apply the backend API base URL for this browser.",
+        settingsTest: "Test the configured backend API connection.",
+        runInstallCheck: "Run the backend installation and environment check.",
+        runBackendFuzzer: "Run backend endpoint fuzz checks against the configured API.",
+    });
+    const CONTROL_FIELD_LABEL_SELECTOR = [
+        ".training-field",
+        ".sam3-text-field",
+        ".data-ingestion-field",
+        ".class-split-field",
+        ".class-split-cluster-controls__field",
+        ".qwen-caption-row",
+        ".shortcut-settings-row",
+    ].join(", ");
+    let uiTooltipRefreshFrame = null;
+    let uiTooltipMutationObserver = null;
+    const uiTooltipRefreshRoots = new Set();
+
+    function tooltipElements(root, selector) {
+        if (!root) return [];
+        const elements = [];
+        if (root.nodeType === 1 && typeof root.matches === "function" && root.matches(selector)) {
+            elements.push(root);
+        }
+        if (typeof root.querySelectorAll === "function") {
+            root.querySelectorAll(selector).forEach((el) => elements.push(el));
+        }
+        return elements;
+    }
+
+    function initHelpTooltips(root = document) {
+        tooltipElements(root, ".help-icon").forEach((el) => {
+            const tooltip = String(el.getAttribute("title") || el.dataset.tooltip || "").trim();
+            if (!tooltip) return;
+            el.dataset.tooltip = tooltip;
+            if (el.hasAttribute("title")) {
+                el.removeAttribute("title");
+            }
+            if (!el.hasAttribute("tabindex")) {
+                el.tabIndex = 0;
+            }
+            if (!el.hasAttribute("aria-label")) {
+                el.setAttribute("aria-label", `Help: ${tooltip}`);
+            }
         });
+    }
+
+    function cssEscapeIdentifier(value) {
+        const raw = String(value || "");
+        if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+            return CSS.escape(raw);
+        }
+        return raw.replace(/[^A-Za-z0-9_-]/g, "\\$&");
+    }
+
+    function normalizeTooltipLabelText(text) {
+        return String(text || "").replace(/\?/g, " ").replace(/\s+/g, " ").trim();
+    }
+
+    function labelTextFromElement(label) {
+        return normalizeTooltipLabelText(label?.textContent || "");
+    }
+
+    function associatedControlLabelText(el) {
+        if (!el) return "";
+        const id = el.id ? String(el.id) : "";
+        if (id) {
+            const label = document.querySelector(`label[for="${cssEscapeIdentifier(id)}"]`);
+            const text = labelTextFromElement(label);
+            if (text) return text;
+        }
+        const wrappingLabel = el.closest ? el.closest("label") : null;
+        const wrappedText = labelTextFromElement(wrappingLabel);
+        if (wrappedText) return wrappedText;
+        const field = el.closest ? el.closest(CONTROL_FIELD_LABEL_SELECTOR) : null;
+        const fieldLabel = field ? Array.from(field.children || []).find((child) => child?.tagName?.toLowerCase() === "label") : null;
+        const fieldLabelText = labelTextFromElement(fieldLabel || field?.querySelector?.("label"));
+        if (fieldLabelText) return fieldLabelText;
+        const details = el.closest ? el.closest("details") : null;
+        const summaryText = normalizeTooltipLabelText(details?.querySelector("summary")?.textContent || "");
+        return summaryText;
+    }
+
+    function deriveControlTooltip(el) {
+        if (!el) return "";
+        const tag = String(el.tagName || "").toLowerCase();
+        const explicit = CONTROL_TOOLTIP_OVERRIDES[el.id || ""];
+        if (explicit) return explicit;
+        if (tag === "button") {
+            const text = String(el.textContent || "").replace(/\s+/g, " ").trim();
+            const lower = text.toLowerCase();
+            if (lower === "refresh") return "Refresh this list or status panel.";
+            if (lower === "activate") return "Activate the selected item for the relevant workflow.";
+            if (lower === "download") return "Download the selected item.";
+            if (lower === "delete") return "Delete the selected item after confirmation.";
+            if (lower === "cancel") return "Cancel the active job or close this dialog.";
+            return text ? `${text}.` : "";
+        }
+        const label = associatedControlLabelText(el);
+        if (!label) return "";
+        if (tag === "select") return `Choose ${label}.`;
+        if (tag === "textarea") return `Edit ${label}.`;
+        return `Set ${label}.`;
+    }
+
+    function initControlTooltips(root = document) {
+        tooltipElements(root, "button, input, select, textarea").forEach((el) => {
+            const inputType = String(el.getAttribute("type") || "").toLowerCase();
+            if (inputType === "hidden") return;
+            const existingTitle = String(el.getAttribute("title") || "").trim();
+            const tooltip = existingTitle || String(deriveControlTooltip(el) || "").trim();
+            if (!tooltip) return;
+            if (!existingTitle) {
+                el.setAttribute("title", tooltip);
+            }
+            if (!el.hasAttribute("aria-label") && !associatedControlLabelText(el) && String(el.textContent || "").trim() === "") {
+                el.setAttribute("aria-label", tooltip);
+            }
+        });
+    }
+
+    function refreshUiTooltips(root = document) {
+        initHelpTooltips(root);
+        initControlTooltips(root);
+    }
+
+    function scheduleUiTooltipRefresh(root = document) {
+        if (root) {
+            uiTooltipRefreshRoots.add(root);
+        }
+        if (uiTooltipRefreshFrame !== null) {
+            return;
+        }
+        uiTooltipRefreshFrame = window.requestAnimationFrame(() => {
+            uiTooltipRefreshFrame = null;
+            const roots = uiTooltipRefreshRoots.size ? Array.from(uiTooltipRefreshRoots) : [document];
+            uiTooltipRefreshRoots.clear();
+            roots.forEach((scope) => {
+                if (!scope) return;
+                refreshUiTooltips(scope);
+            });
+        });
+    }
+
+    function initializeUiTooltipObserver() {
+        if (uiTooltipMutationObserver || !document.body || !("MutationObserver" in window)) {
+            return;
+        }
+        uiTooltipMutationObserver = new MutationObserver((mutations) => {
+            mutations.forEach((mutation) => {
+                Array.from(mutation.addedNodes || []).forEach((node) => {
+                    if (node && node.nodeType === 1) {
+                        scheduleUiTooltipRefresh(node);
+                    }
+                });
+            });
+        });
+        uiTooltipMutationObserver.observe(document.body, { childList: true, subtree: true });
     }
 
     function loadStoredApiRoot() {
@@ -9402,6 +9610,7 @@ function updateRfDetrTrainStartAvailability(entry) {
                 viewBtn.type = "button";
                 viewBtn.className = "training-button";
                 viewBtn.textContent = "View";
+                viewBtn.title = "Show this head-graft job's status, logs, and result metadata.";
                 viewBtn.addEventListener("click", () => {
                     yoloHeadGraftState.activeJobId = job.job_id;
                     pollYoloHeadGraftJob(job.job_id, { force: true }).catch((err) => console.error("Head graft poll failed", err));
@@ -9412,6 +9621,7 @@ function updateRfDetrTrainStartAvailability(entry) {
                     downloadBtn.type = "button";
                     downloadBtn.className = "training-button secondary";
                     downloadBtn.textContent = "Download bundle";
+                    downloadBtn.title = "Download the completed head-graft bundle.";
                     downloadBtn.addEventListener("click", () => {
                         downloadYoloHeadGraftBundle(job).catch((err) => console.error("Head graft bundle download failed", err));
                     });
@@ -9727,13 +9937,25 @@ function updateAutomationLockTabs() {
         const tabKey = button.getAttribute("data-tab");
         const shouldLock = automationLockState.active && AUTOMATION_LOCKED_TABS.has(tabKey || "");
         if (shouldLock) {
+            if (!button.dataset.automationUnlockedTitle) {
+                button.dataset.automationUnlockedTitle = button.getAttribute("title") || "";
+            }
             button.classList.add("tab-button--locked");
             button.disabled = true;
             button.title = "Unavailable while training, prepass encoding, or calibration is running.";
         } else {
             button.classList.remove("tab-button--locked");
             button.disabled = false;
-            button.title = "";
+            if (Object.prototype.hasOwnProperty.call(button.dataset, "automationUnlockedTitle")) {
+                const restoredTitle = button.dataset.automationUnlockedTitle || "";
+                if (restoredTitle) {
+                    button.title = restoredTitle;
+                } else {
+                    button.removeAttribute("title");
+                    refreshUiTooltips(button);
+                }
+                delete button.dataset.automationUnlockedTitle;
+            }
         }
     });
     const panels = document.querySelectorAll(".tab-panel[data-tab-panel]");
@@ -10675,7 +10897,8 @@ function ensureAutomationAvailable(actionLabel) {
                 activeElements.clipSelect.title = "Disabled for non-CLIP classifiers.";
             } else {
                 activeElements.clipSelect.disabled = false;
-                activeElements.clipSelect.title = "";
+                activeElements.clipSelect.removeAttribute("title");
+                refreshUiTooltips(activeElements.clipSelect);
                 if (entry.clip_model) {
                     activeElements.clipSelect.value = entry.clip_model;
                 }
@@ -10869,6 +11092,7 @@ function renderTrainingHistoryItem(container, job) {
     const viewBtn = document.createElement("button");
     viewBtn.type = "button";
     viewBtn.textContent = "View";
+    viewBtn.title = "Open this Qwen training job and refresh its status when it is still active.";
     viewBtn.addEventListener("click", () => {
         loadTrainingJob(job.job_id, { forcePoll: job.status === "running" || job.status === "queued" }).catch((error) => {
             console.error("Failed to load training job", error);
@@ -15968,6 +16192,7 @@ function renderQwenTrainingHistoryItem(container, job) {
     viewBtn.type = "button";
     viewBtn.className = "training-button";
     viewBtn.textContent = "View";
+    viewBtn.title = "Show this Qwen training job's status, logs, and result metadata.";
     viewBtn.addEventListener("click", () => {
         qwenTrainState.activeJobId = job.job_id;
         pollQwenTrainingJob(job.job_id, { force: true }).catch((error) => console.error("Poll Qwen job failed", error));
@@ -16200,6 +16425,7 @@ function initQwenTrainingTab() {
         viewBtn.type = "button";
         viewBtn.className = "training-button";
         viewBtn.textContent = "View";
+        viewBtn.title = "Show this YOLO training job's status, logs, and result metadata.";
         viewBtn.addEventListener("click", () => {
             yoloTrainState.activeJobId = job.job_id;
             pollYoloTrainingJob(job.job_id, { force: true }).catch((error) => console.error("Poll YOLO job failed", error));
@@ -16751,6 +16977,7 @@ async function cancelYoloTrainingJobRequest() {
         viewBtn.type = "button";
         viewBtn.className = "training-button";
         viewBtn.textContent = "View";
+        viewBtn.title = "Show this RF-DETR training job's status, logs, and result metadata.";
         viewBtn.addEventListener("click", () => {
             rfdetrTrainState.activeJobId = job.job_id;
             pollRfDetrTrainingJob(job.job_id, { force: true }).catch((error) => console.error("Poll RF-DETR job failed", error));
@@ -23276,22 +23503,22 @@ async function cancelRfDetrTrainingJobRequest() {
 	            if (sam3RecipeElements.cascadeFileInput) sam3RecipeElements.cascadeFileInput.value = "";
 	            sam3CascadeState.cascadePresetImportInFlight = false;
 	            refreshSam3CascadeControls();
-	        }
+		        }
 		    }
 
 		    async function runSam3CascadeOnImage() {
 	        if (sam3RecipeElements.status) {
-	            sam3RecipeElements.status.title = "";
+	            sam3RecipeElements.status.removeAttribute("title");
 	        } else if (sam3TextElements.status) {
-	            sam3TextElements.status.title = "";
+	            sam3TextElements.status.removeAttribute("title");
 	        }
 	        if (sam3AgentApplyActive || sam3TextRequestActive || sam3SimilarityRequestActive || sam3TextBatchActive || sam3TextCascadeActive) {
 	            setSam3RecipeStatus("SAM3 is busy; wait for the current job to finish.", "warn");
 	            return;
 	        }
-	        if (!ensureAutomationAvailable("SAM3 cascade")) {
-	            return;
-	        }
+		        if (!ensureAutomationAvailable("SAM3 cascade")) {
+		            return;
+		        }
 		        if (!currentImage) {
 		            setSam3RecipeStatus("Open an image first.", "warn");
 		            return;
@@ -23778,7 +24005,7 @@ async function cancelRfDetrTrainingJobRequest() {
         annotationDiversityMetricEl.hidden = Boolean(hidden);
         if (hidden) {
             annotationDiversityMetricEl.textContent = "";
-            annotationDiversityMetricEl.title = "";
+            annotationDiversityMetricEl.removeAttribute("title");
             annotationDiversityMetricEl.classList.remove("is-low", "is-mid", "is-high");
         }
     }
@@ -31366,7 +31593,7 @@ async function cancelRfDetrTrainingJobRequest() {
         step.innerHTML = `
             <div class="sam3-text-cascade__step-header">
                 <span class="sam3-text-cascade__step-title">Step</span>
-                <button type="button" class="training-button secondary sam3-text-cascade__remove">Remove</button>
+                <button type="button" class="training-button secondary sam3-text-cascade__remove" title="Remove this SAM3 text cascade step.">Remove</button>
             </div>
             <div class="sam3-text-field sam3-text-field--wide">
                 <label>Prompt</label>
@@ -34877,7 +35104,8 @@ async function cancelRfDetrTrainingJobRequest() {
                 agentElements.stepsPromptPrefilter.title =
                     "Disabled because the selected head uses DINOv3 (prefilter requires CLIP embeddings).";
             } else {
-                agentElements.stepsPromptPrefilter.title = "";
+                agentElements.stepsPromptPrefilter.removeAttribute("title");
+                refreshUiTooltips(agentElements.stepsPromptPrefilter);
             }
         }
         if (agentElements.stepsPromptPrefilterMode) {
@@ -40686,7 +40914,7 @@ async function cancelRfDetrTrainingJobRequest() {
             ? "Strict embedding KMeans proposals"
             : "UMAP island proposals";
         listEl.innerHTML = [
-            `<div class="training-help">${escapeHtml(sourceText)} for ${escapeHtml(classSplitClusterContextClass() || "selected class")}. Review crop context and graph position before relabeling; proposals are not ground truth.</div>`,
+            `<div class="training-help">Subclass clusters: ${escapeHtml(sourceText)} for ${escapeHtml(classSplitClusterContextClass() || "selected class")}. Review crop context and graph position before relabeling; proposals are not ground truth.</div>`,
             summaries.map((summary) => {
                 const medoid = summary.medoidPoint;
                 const thumbUrl = medoid ? getClassSplitThumbnailUrl(medoid) : "";
@@ -40704,7 +40932,7 @@ async function cancelRfDetrTrainingJobRequest() {
                         ? `<img class="class-split-cluster-item__thumb" src="${escapeHtml(thumbUrl)}" alt="Cluster representative crop">`
                         : `<div class="class-split-cluster-item__thumb" aria-hidden="true"></div>`,
                     `<div class="class-split-cluster-item__body">`,
-                    `<strong>Cluster ${escapeHtml(summary.clusterKey)} • ${escapeHtml(summary.size)} object${summary.size === 1 ? "" : "s"}${escapeHtml(totalSuffix)}</strong>`,
+                    `<strong>Subclass cluster ${escapeHtml(summary.clusterKey)} • ${escapeHtml(summary.size)} object${summary.size === 1 ? "" : "s"}${escapeHtml(totalSuffix)}</strong>`,
                     `<span>${escapeHtml(mix)} • purity ${purityPct}% • mean outlier ${summary.meanOutlierScore.toFixed(2)}${escapeHtml(scoreText)}</span>`,
                     `<div class="class-split-cluster-item__actions">`,
                     `<button type="button" class="training-button secondary" data-action="select-cluster" data-cluster-id="${escapeHtml(summary.clusterKey)}">Select cluster</button>`,
@@ -44225,11 +44453,14 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitClusterDebugState() {
                 const summaries = getClassSplitVisibleClusterSummaries();
                 const scope = getClassSplitResultScope();
+                const classFilteredPoints = getClassSplitFilteredPoints();
+                const graphFilteredPoints = getClassSplitGraphPoints();
                 return {
                     scope,
                     analysisScope: scope,
                     filterClass: String(classSplitElements.filterClass?.value || ""),
-                    filteredCount: getClassSplitFilteredPoints().length,
+                    classFilteredCount: classFilteredPoints.length,
+                    filteredCount: graphFilteredPoints.length,
                     proposalsAllowed: classSplitClusterProposalsAllowed(),
                     hullsAllowed: classSplitClusterHullsAllowed(),
                     overlayDisabled: classSplitElements.clusterOverlay ? !!classSplitElements.clusterOverlay.disabled : true,
@@ -44258,9 +44489,9 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     document.addEventListener("DOMContentLoaded", () => {
-        initHelpTooltips();
+        refreshUiTooltips();
+        initializeUiTooltipObserver();
         initializeThemeToggle();
-        initializeAdaptiveTopTabs();
         setupTabNavigation();
         applyPlaywrightTestIds();
         autoModeCheckbox = document.getElementById("autoMode");

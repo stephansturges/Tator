@@ -14612,7 +14612,7 @@ CLASS_ANALYSIS_QWEN_REVIEW_REASONING_IMAGE_MAX_SIDE = max(
 )
 CLASS_ANALYSIS_QWEN_REVIEW_FINAL_MAX_IMAGES = max(
     1,
-    min(4, _env_int("CLASS_ANALYSIS_QWEN_REVIEW_FINAL_MAX_IMAGES", 3)),
+    min(4, _env_int("CLASS_ANALYSIS_QWEN_REVIEW_FINAL_MAX_IMAGES", 4)),
 )
 CLASS_ANALYSIS_QWEN_REVIEW_SPECIFICITY_MAX_IMAGES = max(
     1,
@@ -34191,9 +34191,9 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                             {
                                 "type": "text",
                                 "text": (
-                                    "Your previous final response failed controller validation: "
-                                    f"{repair_reason[:320]}. Return only one complete compact JSON arguments "
-                                    "object. Start with `{`; no analysis, no markdown, no prose."
+                                    "Your previous final response failed validation in controller checks: "
+                                    f"{repair_reason[:320]}. Return only one complete compact arguments "
+                                    "object encoded as JSON. Start with `{`; no analysis, no markdown, no prose."
                                 ),
                             }
                         ],

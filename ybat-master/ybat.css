@@ -456,7 +456,9 @@ body {
     flex-wrap: nowrap;
     gap: var(--top-tab-gap);
     row-gap: 0;
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-gutter: stable;
     padding: 10px 16px 6px;
     background: #ffffff;
     border-bottom: 1px solid #d8dee9;
@@ -498,7 +500,6 @@ body {
     flex: 0 0 auto;
     flex-wrap: nowrap;
     gap: var(--top-tab-gap);
-    margin-left: auto;
 }
 
 .theme-toggle-button {
@@ -4123,6 +4124,11 @@ details.training-card > summary::marker {
     position: relative;
 }
 
+.help-icon[data-tooltip]:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+}
+
 .help-icon[data-tooltip]::before,
 .help-icon[data-tooltip]::after {
     content: none;
@@ -4164,7 +4170,9 @@ details.training-card > summary::marker {
 }
 
 .help-icon[data-tooltip]:hover::before,
-.help-icon[data-tooltip]:hover::after {
+.help-icon[data-tooltip]:hover::after,
+.help-icon[data-tooltip]:focus-visible::before,
+.help-icon[data-tooltip]:focus-visible::after {
     content: "";
     opacity: 1;
     visibility: visible;
@@ -4172,7 +4180,8 @@ details.training-card > summary::marker {
     transition-delay: 0ms;
 }
 
-.help-icon[data-tooltip]:hover::after {
+.help-icon[data-tooltip]:hover::after,
+.help-icon[data-tooltip]:focus-visible::after {
     content: attr(data-tooltip);
 }
 

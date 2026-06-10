@@ -21,19 +21,19 @@ poetry install --only-root
 poetry run tator-setup macos
 ```
 
-Daily backend start command, from the repository root:
+Start the backend from the repository root with this single command:
 
 ```bash
 tools/run_macos_backend.sh
 ```
 
-From another directory:
+If you are not already in the repo, use:
 
 ```bash
 cd <your Tator checkout> && tools/run_macos_backend.sh
 ```
 
-Then open the browser UI:
+Leave that terminal running. When the backend is up, open:
 
 ```text
 http://127.0.0.1:8000/
@@ -46,6 +46,12 @@ If port `8000` is already in use:
 
 ```bash
 PORT=8080 tools/run_macos_backend.sh
+```
+
+Quick health check from a second terminal:
+
+```bash
+curl http://127.0.0.1:8000/system/health_summary
 ```
 
 For setup details, see [Environment Setup](docs/environment_setup.md) and

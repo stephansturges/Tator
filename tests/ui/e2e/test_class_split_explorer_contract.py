@@ -505,7 +505,7 @@ def test_class_split_all_class_subclusters_require_class_filter(playwright_page)
     assert page.locator("#classSplitClusterOverlay").count() == 0
     assert page.locator("#classSplitColorMode option[value='cluster']").count() == 0
     assert page.eval_on_selector("#classSplitClusterRun", "el => el.disabled") is True
-    assert "disabled in all-class graphs" in (page.text_content("#classSplitClusterList") or "")
+    assert "disabled for all-class graphs" in (page.text_content("#classSplitClusterList") or "")
 
     page.evaluate(
         """async (result) => window.__TATOR_TEST_HOOKS__.classSplitApplyResult(result, 'pw_class_split_subcluster_job')""",
@@ -554,7 +554,7 @@ def test_class_split_all_class_subclusters_require_class_filter(playwright_page)
     assert wrong_only_cluster_state["filteredCount"] == 0, wrong_only_cluster_state
     assert wrong_only_cluster_state["hullsAllowed"] is False, wrong_only_cluster_state
     assert wrong_only_cluster_state["overlayDisabled"] is True, wrong_only_cluster_state
-    assert "No points match" in page.evaluate("() => window.__TATOR_TEST_HOOKS__.classSplitPlotSnapshot().graphText")
+    assert "No likely wrong-class points match" in page.evaluate("() => window.__TATOR_TEST_HOOKS__.classSplitPlotSnapshot().graphText")
 
 
 def test_class_split_wrong_candidate_queue_shows_twelve_and_refills(playwright_page):
@@ -574,7 +574,7 @@ def test_class_split_wrong_candidate_queue_shows_twelve_and_refills(playwright_p
     page.click(f'.class-split-wrong-item[data-point-id="{first_id}"] [data-action="skip-wrong"]')
     page.wait_for_function(
         """(pointId) => !document.querySelector(`.class-split-wrong-item[data-point-id="${pointId}"]`)""",
-        first_id,
+        arg=first_id,
         timeout=15000,
     )
     assert page.locator(".class-split-wrong-item").count() == 12

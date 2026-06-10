@@ -85,13 +85,14 @@ cp .env.macos.example .env.macos
 tools/run_macos_backend.sh
 ```
 
-After setup, the daily backend start command is:
+After setup, start the backend from the repository root with this single
+command:
 
 ```bash
 tools/run_macos_backend.sh
 ```
 
-From another directory, `cd` to your clone first:
+Leave that terminal running. From another directory, `cd` to your clone first:
 
 ```bash
 cd <your Tator checkout> && tools/run_macos_backend.sh

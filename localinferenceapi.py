@@ -17481,7 +17481,34 @@ def get_dataset_upload_session(session_id: str) -> Dict[str, Any]:
 
 def init_dataset_upload_session(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(payload, dict):
-        payload = {}
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="dataset_upload_session_payload_invalid",
+        )
+    run_name = str(payload.get("dataset_id") or payload.get("run_name") or "").strip()
+    if not run_name:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="dataset_upload_session_dataset_id_required",
+        )
+    dataset_type = str(payload.get("dataset_type") or "bbox").strip().lower()
+    if dataset_type not in {"bbox", "seg"}:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="dataset_upload_session_dataset_type_invalid",
+        )
+    try:
+        total_images = int(payload.get("total_images") or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="dataset_upload_session_total_images_invalid",
+        ) from exc
+    if total_images <= 0:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail="dataset_upload_session_total_images_required",
+        )
     job_id = uuid.uuid4().hex
     root_dir = _dataset_upload_session_job_dir(job_id, create=True)
     for rel in ("train/images", "train/labels", "val/images", "val/labels"):
@@ -17490,21 +17517,14 @@ def init_dataset_upload_session(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(raw_classes, list):
         raw_classes = []
     classes = [str(name).strip() for name in raw_classes if str(name).strip()]
-    dataset_type = str(payload.get("dataset_type") or "bbox").strip().lower()
-    if dataset_type not in {"bbox", "seg"}:
-        dataset_type = "bbox"
-    try:
-        total_images = max(0, int(payload.get("total_images") or 0))
-    except (TypeError, ValueError):
-        total_images = 0
     job = DatasetUploadSessionJob(
         job_id=job_id,
         root_dir=root_dir,
-        run_name=str(payload.get("dataset_id") or payload.get("run_name") or "").strip() or None,
+        run_name=run_name,
         dataset_type=dataset_type,
         context=str(payload.get("context") or ""),
         classes=classes,
-        total_images=total_images,
+        total_images=max(0, total_images),
     )
     _persist_dataset_upload_session(job)
     with DATASET_UPLOAD_SESSIONS_LOCK:

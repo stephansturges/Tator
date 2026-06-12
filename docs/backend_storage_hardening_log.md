@@ -2311,3 +2311,26 @@ preserving the exact validation story for storage and artifact-write fixes.
   (`251 passed`). `git diff --check` passed. The in-app browser surface was not
   available in this Codex session, so browser verification was limited to route
   and static contract tests.
+
+## 2026-06-12: Dataset Upload Session Start Validation
+
+- Re-audited the backend and UI route sanity checks after the broad platform
+  hardening pass. `tools/run_ui_openapi_sanity.py` found that
+  `POST /datasets/upload_session/start` accepted an empty JSON body and created
+  a persistent staged-upload session.
+- Hardened staged dataset uploads so session creation now rejects malformed
+  payloads before creating any session directory. A start request must include a
+  non-empty dataset id or run name, a supported dataset type (`bbox` or `seg`),
+  and a positive expected image count.
+- Added a regression that proves an empty start payload returns a client error
+  and leaves both the upload-session root and in-memory session registry
+  untouched.
+- Validation: `git diff --check`, `py_compile localinferenceapi.py`,
+  `tests/test_dataset_zip_upload_security.py` (`18 passed`), full
+  `pytest -q` (`1536 passed`, `39 skipped`), `tools/run_refactor_validation.sh`
+  with fuzz skipped, `tools/check_ui_endpoints.py http://127.0.0.1:8000`,
+  `tools/run_ui_openapi_sanity.py http://127.0.0.1:8000`,
+  `tools/run_openapi_missing_query_sanity.py http://127.0.0.1:8000`,
+  `tools/run_ui_smoke.py --base-url http://127.0.0.1:8000`, rendered
+  Playwright control coverage, and full `RUN_UI_E2E=1` browser E2E
+  (`41 passed`) against the restarted backend.

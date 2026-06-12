@@ -331,6 +331,22 @@ def test_dataset_upload_session_chunks_finalize_yolo_dataset(
     assert (dataset_root / api.DATASET_META_NAME).exists()
 
 
+def test_dataset_upload_session_start_rejects_empty_payload_without_creating_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_root = tmp_path / "upload_sessions"
+    monkeypatch.setattr(api, "YOLO_DATASET_UPLOAD_SESSION_ROOT", session_root)
+    api.DATASET_UPLOAD_SESSIONS.clear()
+
+    with pytest.raises(HTTPException) as exc_info:
+        api.init_dataset_upload_session({})
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "dataset_upload_session_dataset_id_required"
+    assert not session_root.exists()
+    assert not api.DATASET_UPLOAD_SESSIONS
+
+
 def test_dataset_upload_session_finalize_recovers_after_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

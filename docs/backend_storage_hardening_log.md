@@ -2443,6 +2443,31 @@ preserving the exact validation story for storage and artifact-write fixes.
   negative-path, and parameter-sweep checks against `http://127.0.0.1:8000`,
   browser E2E (`41 passed`), and full pytest (`1544 passed`, `39 skipped`).
 
+## 2026-06-12: GPU Validation Interrupt Cleanup
+
+- Re-ran the GPU validation suite as part of the backend hardening sweep and
+  found a bad failure mode: if the suite was interrupted during bootstrap or a
+  long job poll, the generated validation dataset could remain registered and
+  the event log did not clearly show the in-flight request.
+- Added request-start/request-end events around every suite HTTP call, so a
+  timeout or hang leaves the method, path, timeout, payload shape, status, and
+  duration in `events.jsonl`.
+- Wrote the cleanup manifest immediately after the generated dataset upload,
+  then refreshed it whenever bootstrap completed, a job started, or a derived
+  segmentation dataset was registered. An interrupted run now has enough
+  provenance to clean its own generated data instead of relying on memory of
+  what had already happened.
+- Added API-level cancellation for known run-started jobs during cleanup before
+  deleting their source datasets. This covers calibration, agent mining, YOLO,
+  YOLO head-graft, RF-DETR, SAM3, and Qwen training jobs.
+- Added SIGTERM/KeyboardInterrupt handling so normal terminal interrupts still
+  write reports and run cleanup instead of leaving the suite half-finished.
+- Validation: focused cleanup-tool tests (`14 passed`), `py_compile` for the
+  touched suite/tests, `git diff --check`, live SIGTERM probe against
+  `http://127.0.0.1:8000` (`exit_code=130`, reports written, no active
+  `codex_sigterm_probe_20260612` dataset remained), and backend
+  `/system/health_summary` (`ok: true`, dataset count `10`).
+
 ## 2026-06-12: README Tool Reference Drift Check
 
 - Audited the README developer/tooling section after the extended validation

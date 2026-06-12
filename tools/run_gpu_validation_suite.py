@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sys
 import time
 import traceback
@@ -29,6 +30,15 @@ import requests
 
 
 TERMINAL_JOB_STATES = {"completed", "succeeded", "failed", "cancelled", "canceled"}
+JOB_CANCEL_PATHS = {
+    "/calibration/jobs": "/calibration/jobs/{job_id}/cancel",
+    "/agent_mining/jobs": "/agent_mining/jobs/{job_id}/cancel",
+    "/yolo/train/jobs": "/yolo/train/jobs/{job_id}/cancel",
+    "/yolo/head_graft/jobs": "/yolo/head_graft/jobs/{job_id}/cancel",
+    "/rfdetr/train/jobs": "/rfdetr/train/jobs/{job_id}/cancel",
+    "/sam3/train/jobs": "/sam3/train/jobs/{job_id}/cancel",
+    "/qwen/train/jobs": "/qwen/train/jobs/{job_id}/cancel",
+}
 
 
 @dataclass
@@ -114,6 +124,21 @@ class GpuValidationSuite:
             return text[: max_len - 3] + "..."
         return text
 
+    def _write_cleanup_manifest_seed(self, manifest: Dict[str, Any], *, status: str) -> None:
+        payload = dict(manifest)
+        payload.update(
+            {
+                "status": status,
+                "cleanup_enabled": self.cleanup_enabled,
+                "updated_at": self._now(),
+            }
+        )
+        self.cleanup_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        self.cleanup_manifest_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+
     def _request(
         self,
         method: str,
@@ -126,6 +151,18 @@ class GpuValidationSuite:
     ) -> Tuple[Optional[int], Any, float, Optional[str]]:
         url = f"{self.base_url}{path}"
         started = time.time()
+        effective_timeout = timeout or self.timeout_s
+        self._emit_event(
+            {
+                "type": "request_start",
+                "method": method,
+                "path": path,
+                "timeout_s": effective_timeout,
+                "has_json_payload": json_payload is not None,
+                "has_form_payload": form_payload is not None,
+                "file_fields": sorted((files or {}).keys()),
+            }
+        )
         try:
             resp = self.session.request(
                 method=method,
@@ -133,7 +170,7 @@ class GpuValidationSuite:
                 json=json_payload,
                 data=form_payload,
                 files=files,
-                timeout=timeout or self.timeout_s,
+                timeout=effective_timeout,
             )
             elapsed = time.time() - started
             body: Any
@@ -141,10 +178,30 @@ class GpuValidationSuite:
                 body = resp.json()
             except Exception:
                 body = resp.text
+            self._emit_event(
+                {
+                    "type": "request_end",
+                    "method": method,
+                    "path": path,
+                    "status_code": resp.status_code,
+                    "duration_s": elapsed,
+                }
+            )
             return resp.status_code, body, elapsed, None
         except Exception as exc:  # noqa: BLE001
             elapsed = time.time() - started
-            return None, None, elapsed, f"request_failed:{exc}"
+            error = f"request_failed:{exc}"
+            self._emit_event(
+                {
+                    "type": "request_end",
+                    "method": method,
+                    "path": path,
+                    "status_code": None,
+                    "duration_s": elapsed,
+                    "error": error,
+                }
+            )
+            return None, None, elapsed, error
 
     def _classify_failure(self, *, status_code: Optional[int], detail: str) -> str:
         text = (detail or "").lower()
@@ -377,6 +434,37 @@ class GpuValidationSuite:
 
         zip_path = self._create_test_dataset_zip(image_path=sample_path)
         dataset_id = self._upload_test_dataset(zip_path)
+        cleanup_manifest = {
+            "run_id": self.run_id,
+            "created_at": self._now(),
+            "artifact_root": str(self.artifact_root),
+            "upload_ns_root": str(self.upload_ns_root),
+            "dataset_ids": [dataset_id],
+            "job_ids": {},
+            "paths": [],
+        }
+        self.ctx = RunContext(
+            run_id=self.run_id,
+            repo_root=self.repo_root,
+            base_url=self.base_url,
+            artifact_root=self.artifact_root,
+            upload_ns_root=self.upload_ns_root,
+            sample_image_path=sample_path,
+            sample_image_b64=sample_b64,
+            labelmap=labelmap,
+            glossary=glossary,
+            dataset_id=dataset_id,
+            dataset_classes=[],
+            classifier_path=None,
+            clip_active_payload={},
+            yolo_active_payload={},
+            rfdetr_active_payload={},
+            first_recipe=None,
+            created_dataset_ids=[dataset_id],
+            started_jobs={},
+            cleanup_manifest=cleanup_manifest,
+        )
+        self._write_cleanup_manifest_seed(cleanup_manifest, status="bootstrap_dataset_uploaded")
         dataset_classes = self._fetch_dataset_categories(dataset_id)
         classifier_path = self._fetch_first_classifier_path()
         first_recipe = self._fetch_first_recipe()
@@ -407,37 +495,15 @@ class GpuValidationSuite:
         if isinstance(active_classifier, str) and active_classifier.strip():
             classifier_path = active_classifier
 
-        cleanup_manifest = {
-            "run_id": self.run_id,
-            "created_at": self._now(),
-            "artifact_root": str(self.artifact_root),
-            "upload_ns_root": str(self.upload_ns_root),
-            "dataset_ids": [dataset_id],
-            "job_ids": {},
-            "paths": [],
-        }
-
-        self.ctx = RunContext(
-            run_id=self.run_id,
-            repo_root=self.repo_root,
-            base_url=self.base_url,
-            artifact_root=self.artifact_root,
-            upload_ns_root=self.upload_ns_root,
-            sample_image_path=sample_path,
-            sample_image_b64=sample_b64,
-            labelmap=labelmap,
-            glossary=glossary,
-            dataset_id=dataset_id,
-            dataset_classes=dataset_classes,
-            classifier_path=classifier_path,
-            clip_active_payload=clip_active,
-            yolo_active_payload=yolo_active,
-            rfdetr_active_payload=rfdetr_active,
-            first_recipe=first_recipe,
-            created_dataset_ids=[dataset_id],
-            started_jobs={},
-            cleanup_manifest=cleanup_manifest,
-        )
+        assert self.ctx is not None
+        self.ctx.dataset_classes = dataset_classes
+        self.ctx.classifier_path = classifier_path
+        self.ctx.clip_active_payload = clip_active
+        self.ctx.yolo_active_payload = yolo_active
+        self.ctx.rfdetr_active_payload = rfdetr_active
+        self.ctx.first_recipe = first_recipe
+        self.ctx.cleanup_manifest = cleanup_manifest
+        self._write_cleanup_manifest_seed(cleanup_manifest, status="bootstrap_complete")
         self._emit_event({"type": "bootstrap_complete", "dataset_id": dataset_id, "classifier_path": classifier_path})
         return self.ctx
 
@@ -515,6 +581,12 @@ class GpuValidationSuite:
         if self.ctx is not None:
             self.ctx.started_jobs.setdefault(start_path, []).append(job_id)
             self.ctx.cleanup_manifest.setdefault("job_ids", {}).setdefault(start_path, []).append(job_id)
+            if cancel_path_tmpl:
+                self.ctx.cleanup_manifest.setdefault("job_cancel_paths", {})[start_path] = cancel_path_tmpl
+            self._write_cleanup_manifest_seed(
+                self.ctx.cleanup_manifest,
+                status=f"job_started:{check_id}",
+            )
         self._emit_event({"type": "job_started", "check_id": check_id, "start_path": start_path, "job_id": job_id})
 
         # Optional cancel path check.
@@ -1084,6 +1156,7 @@ class GpuValidationSuite:
             if isinstance(out_dataset, str) and out_dataset:
                 ctx.created_dataset_ids.append(out_dataset)
                 ctx.cleanup_manifest.setdefault("dataset_ids", []).append(out_dataset)
+                self._write_cleanup_manifest_seed(ctx.cleanup_manifest, status="segmentation_dataset_created")
         except Exception:
             pass
 
@@ -1355,7 +1428,48 @@ class GpuValidationSuite:
         removed: List[str] = []
         skipped: List[str] = []
 
-        # 1) Delete run-created datasets (API-level, safest for registry).
+        # 1) Cancel run-started jobs before deleting their input datasets.
+        job_cancel_paths = {
+            **JOB_CANCEL_PATHS,
+            **{
+                str(path): str(tmpl)
+                for path, tmpl in (ctx.cleanup_manifest.get("job_cancel_paths") or {}).items()
+                if path and tmpl
+            },
+        }
+        for start_path, raw_job_ids in (ctx.cleanup_manifest.get("job_ids") or {}).items():
+            cancel_tmpl = job_cancel_paths.get(str(start_path))
+            for job_id in list(dict.fromkeys(raw_job_ids or [])):
+                if not cancel_tmpl:
+                    self._emit_event(
+                        {
+                            "type": "cleanup_job_cancel",
+                            "start_path": start_path,
+                            "job_id": job_id,
+                            "ok": False,
+                            "error": "no_cancel_endpoint",
+                        }
+                    )
+                    continue
+                status, body, _elapsed, err = self._request(
+                    "POST",
+                    cancel_tmpl.format(job_id=job_id),
+                    json_payload={},
+                )
+                ok = err is None and status in {200, 404, 409}
+                self._emit_event(
+                    {
+                        "type": "cleanup_job_cancel",
+                        "start_path": start_path,
+                        "job_id": job_id,
+                        "ok": ok,
+                        "status_code": status,
+                        "error": err,
+                        "body": self._json_excerpt(body),
+                    }
+                )
+
+        # 2) Delete run-created datasets (API-level, safest for registry).
         for dataset_id in list(dict.fromkeys(ctx.created_dataset_ids)):
             status, body, _elapsed, err = self._request("DELETE", f"/datasets/{dataset_id}")
             ok = err is None and status == 200
@@ -1383,7 +1497,7 @@ class GpuValidationSuite:
                     if err is None and status == 200:
                         self._cleanup_dataset_trash_payload(body, dataset_id, removed, skipped)
 
-        # 2) Delete run-scoped run artifacts by name prefix where APIs exist.
+        # 3) Delete run-scoped run artifacts by name prefix where APIs exist.
         # YOLO runs
         status, body, _elapsed, _err = self._request("GET", "/yolo/runs")
         if status == 200 and isinstance(body, list):
@@ -1417,7 +1531,7 @@ class GpuValidationSuite:
                 if self.run_id in text and run_id:
                     self._request("DELETE", f"/sam3/storage/runs/{run_id}")
 
-        # 3) Remove run-tagged files/dirs directly under uploads/tmp for tools that lack delete APIs.
+        # 4) Remove run-tagged files/dirs directly under uploads/tmp for tools that lack delete APIs.
         search_roots = [
             self.repo_root / "uploads" / "qwen_runs" / "runs",
             self.repo_root / "uploads" / "calibration_jobs",
@@ -1551,6 +1665,9 @@ class GpuValidationSuite:
             self.run_inference()
             self.run_jobs()
             self._rerun_contention_failures()
+        except KeyboardInterrupt:
+            exit_code = 130
+            self._emit_event({"type": "interrupted", "signal": "keyboard_interrupt"})
         except Exception as exc:  # noqa: BLE001
             exit_code = 2
             self._emit_event(
@@ -1561,7 +1678,7 @@ class GpuValidationSuite:
                 }
             )
         finally:
-            if self.cleanup_enabled:
+            if self.cleanup_enabled and self.ctx is not None:
                 try:
                     cleanup_summary = self.cleanup()
                 except Exception as exc:  # noqa: BLE001
@@ -1574,6 +1691,8 @@ class GpuValidationSuite:
                     )
                     if exit_code == 0:
                         exit_code = 3
+            elif self.cleanup_enabled:
+                self._emit_event({"type": "cleanup_skipped", "reason": "no_run_context"})
             data = self._write_reports(cleanup_summary)
             data["duration_s"] = round(time.time() - start, 3)
             self.results_path.write_text(json.dumps(data, indent=2, ensure_ascii=True), encoding="utf-8")
@@ -1612,7 +1731,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run_id=args.run_id,
         cleanup=not args.no_cleanup,
     )
-    return suite.run(fixture_image=args.fixture_image)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _raise_keyboard_interrupt(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+    try:
+        return suite.run(fixture_image=args.fixture_image)
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":

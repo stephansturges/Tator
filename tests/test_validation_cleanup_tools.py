@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -137,6 +138,230 @@ def test_gpu_validation_safe_remove_rejects_allowed_root_prefix_sibling(
     assert (sibling / "payload.bin").read_bytes() == b"outside"
     assert removed == []
     assert skipped == [str(sibling.resolve())]
+
+
+def test_gpu_validation_request_events_include_inflight_request(tmp_path: Path) -> None:
+    tool = _load_tool_module("run_gpu_validation_suite_request_events", "tools/run_gpu_validation_suite.py")
+    suite = tool.GpuValidationSuite(
+        repo_root=tmp_path,
+        base_url="http://127.0.0.1:8000",
+        timeout_s=5,
+        run_id="unit",
+        cleanup=True,
+    )
+
+    class FakeSession:
+        headers: dict[str, str] = {}
+
+        def request(self, **_kwargs):
+            raise TimeoutError("unit timeout")
+
+    suite.session = FakeSession()
+
+    status, body, elapsed, error = suite._request("GET", "/unit/hang", timeout=7)
+
+    assert status is None
+    assert body is None
+    assert elapsed >= 0
+    assert "unit timeout" in str(error)
+    events = [
+        json.loads(line)
+        for line in suite.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[0]["type"] == "request_start"
+    assert events[0]["path"] == "/unit/hang"
+    assert events[0]["timeout_s"] == 7
+    assert events[-1]["type"] == "request_end"
+    assert events[-1]["error"].startswith("request_failed:")
+
+
+def test_gpu_validation_bootstrap_writes_cleanup_manifest_after_upload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    tool = _load_tool_module("run_gpu_validation_suite_bootstrap_seed", "tools/run_gpu_validation_suite.py")
+    suite = tool.GpuValidationSuite(
+        repo_root=tmp_path,
+        base_url="http://127.0.0.1:8000",
+        timeout_s=5,
+        run_id="unit",
+        cleanup=True,
+    )
+    image_path = tmp_path / "fixture.png"
+    image_path.write_bytes(b"unit image")
+    dataset_id = f"{suite.run_id}_ds"
+
+    monkeypatch.setattr(suite, "_load_fixture_image", lambda _explicit: image_path)
+    monkeypatch.setattr(suite, "_read_labelmap", lambda: ["object"])
+    monkeypatch.setattr(suite, "_load_glossary", lambda: "{}")
+    monkeypatch.setattr(suite, "_create_test_dataset_zip", lambda image_path: tmp_path / "dataset.zip")
+    monkeypatch.setattr(suite, "_upload_test_dataset", lambda _zip_path: dataset_id)
+    monkeypatch.setattr(suite, "_fetch_first_classifier_path", lambda: None)
+    monkeypatch.setattr(suite, "_fetch_first_recipe", lambda: None)
+
+    def fake_fetch_categories(_dataset_id: str):
+        seed = json.loads(suite.cleanup_manifest_path.read_text(encoding="utf-8"))
+        assert seed["status"] == "bootstrap_dataset_uploaded"
+        assert seed["dataset_ids"] == [dataset_id]
+        return [{"id": 1, "name": "object"}]
+
+    monkeypatch.setattr(suite, "_fetch_dataset_categories", fake_fetch_categories)
+
+    def fake_request(_method, path, **_kwargs):
+        assert path in {"/clip/active_model", "/yolo/active", "/rfdetr/active"}
+        return 200, {}, 0.0, None
+
+    monkeypatch.setattr(suite, "_request", fake_request)
+
+    ctx = suite.bootstrap(fixture_image=None)
+
+    assert ctx.dataset_id == dataset_id
+    assert ctx.created_dataset_ids == [dataset_id]
+    final_manifest = json.loads(suite.cleanup_manifest_path.read_text(encoding="utf-8"))
+    assert final_manifest["status"] == "bootstrap_complete"
+    assert final_manifest["dataset_ids"] == [dataset_id]
+
+
+def test_gpu_validation_job_start_persists_cleanup_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    tool = _load_tool_module("run_gpu_validation_suite_job_manifest", "tools/run_gpu_validation_suite.py")
+    suite = tool.GpuValidationSuite(
+        repo_root=tmp_path,
+        base_url="http://127.0.0.1:8000",
+        timeout_s=5,
+        run_id="unit",
+        cleanup=True,
+    )
+    dataset_id = f"{suite.run_id}_ds"
+    manifest = {
+        "run_id": suite.run_id,
+        "artifact_root": str(suite.artifact_root),
+        "upload_ns_root": str(suite.upload_ns_root),
+        "dataset_ids": [dataset_id],
+        "job_ids": {},
+        "paths": [],
+    }
+    suite.ctx = tool.RunContext(
+        run_id=suite.run_id,
+        repo_root=tmp_path,
+        base_url=suite.base_url,
+        artifact_root=suite.artifact_root,
+        upload_ns_root=suite.upload_ns_root,
+        sample_image_path=tmp_path / "fixture.png",
+        sample_image_b64="",
+        labelmap=["object"],
+        glossary="{}",
+        dataset_id=dataset_id,
+        dataset_classes=[{"id": 1, "name": "object"}],
+        classifier_path=None,
+        clip_active_payload={},
+        yolo_active_payload={},
+        rfdetr_active_payload={},
+        cleanup_manifest=manifest,
+    )
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(method: str, path: str, **_kwargs):
+        calls.append((method, path))
+        if method == "POST":
+            return 200, {"job_id": "job_123"}, 0.0, None
+        return 200, {"status": "completed"}, 0.0, None
+
+    monkeypatch.setattr(suite, "_request", fake_request)
+
+    result = suite._start_job_and_validate(
+        check_id="JOB-UNIT",
+        phase="jobs",
+        start_path="/calibration/jobs",
+        start_payload={"dataset_id": dataset_id},
+        get_path_tmpl="/calibration/jobs/{job_id}",
+        cancel_path_tmpl="/calibration/jobs/{job_id}/cancel",
+        timeout_s=10,
+        poll_s=0.25,
+    )
+
+    assert result.ok
+    assert calls[0] == ("POST", "/calibration/jobs")
+    persisted = json.loads(suite.cleanup_manifest_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "job_started:JOB-UNIT"
+    assert persisted["job_ids"] == {"/calibration/jobs": ["job_123"]}
+    assert persisted["job_cancel_paths"] == {
+        "/calibration/jobs": "/calibration/jobs/{job_id}/cancel"
+    }
+
+
+def test_gpu_validation_cleanup_cancels_jobs_before_dataset_delete(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    tool = _load_tool_module("run_gpu_validation_suite_cleanup_cancel", "tools/run_gpu_validation_suite.py")
+    suite = tool.GpuValidationSuite(
+        repo_root=tmp_path,
+        base_url="http://127.0.0.1:8000",
+        timeout_s=5,
+        run_id="unit",
+        cleanup=True,
+    )
+    dataset_id = f"{suite.run_id}_ds"
+    manifest = {
+        "run_id": suite.run_id,
+        "artifact_root": str(suite.artifact_root),
+        "upload_ns_root": str(suite.upload_ns_root),
+        "dataset_ids": [dataset_id],
+        "job_ids": {"/calibration/jobs": ["job_123"]},
+        "paths": [],
+    }
+    suite.ctx = tool.RunContext(
+        run_id=suite.run_id,
+        repo_root=tmp_path,
+        base_url=suite.base_url,
+        artifact_root=suite.artifact_root,
+        upload_ns_root=suite.upload_ns_root,
+        sample_image_path=tmp_path / "fixture.png",
+        sample_image_b64="",
+        labelmap=["object"],
+        glossary="{}",
+        dataset_id=dataset_id,
+        dataset_classes=[{"id": 1, "name": "object"}],
+        classifier_path=None,
+        clip_active_payload={},
+        yolo_active_payload={},
+        rfdetr_active_payload={},
+        created_dataset_ids=[dataset_id],
+        cleanup_manifest=manifest,
+    )
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(method: str, path: str, **_kwargs):
+        calls.append((method, path))
+        if path == "/calibration/jobs/job_123/cancel":
+            return 200, {"status": "cancelled"}, 0.0, None
+        if path == f"/datasets/{dataset_id}":
+            return 200, {"status": "deleted"}, 0.0, None
+        if path == "/datasets":
+            return 200, [], 0.0, None
+        return 200, [], 0.0, None
+
+    monkeypatch.setattr(suite, "_request", fake_request)
+
+    summary = suite.cleanup()
+
+    assert summary["cleanup_enabled"] is True
+    assert calls.index(("POST", "/calibration/jobs/job_123/cancel")) < calls.index(
+        ("DELETE", f"/datasets/{dataset_id}")
+    )
+    events = [
+        json.loads(line)
+        for line in suite.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        event.get("type") == "cleanup_job_cancel"
+        and event.get("job_id") == "job_123"
+        and event.get("ok") is True
+        for event in events
+    )
 
 
 def test_ui_param_sweep_import_is_side_effect_free(monkeypatch) -> None:

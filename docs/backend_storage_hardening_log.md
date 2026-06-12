@@ -2334,3 +2334,25 @@ preserving the exact validation story for storage and artifact-write fixes.
   `tools/run_ui_smoke.py --base-url http://127.0.0.1:8000`, rendered
   Playwright control coverage, and full `RUN_UI_E2E=1` browser E2E
   (`41 passed`) against the restarted backend.
+
+## 2026-06-12: UI Parameter Sweep Preconditions
+
+- Re-ran the live UI concurrency, endpoint, contract, fuzz, and parameter-sweep
+  checks against the running backend. The parameter sweep was incorrectly
+  classifying detector `412 Precondition Failed` responses as regressions when
+  no active YOLO or RF-DETR model was configured.
+- Made `tools/run_ui_param_sweep.py` import-safe and gave it the same explicit
+  negative-path contract used by the other UI validation tools. Optional
+  detector routes may return `412` when their active model precondition is not
+  satisfied; that is a clean validation result, not a product failure.
+- Added regression coverage proving the sweep no longer performs backend calls
+  during import and that detector precondition responses remain accepted.
+- Validation: `py_compile tools/run_ui_param_sweep.py`,
+  `tests/test_validation_cleanup_tools.py` (`7 passed`), and
+  `tools/run_ui_param_sweep.py http://127.0.0.1:8000` (`failures: []`).
+  Broader validation also passed: `git diff --check`, `node --check
+  ybat-master/ybat.js`, UI endpoint method check (`276` fetches, no failures),
+  UI contract tests (`82` checks, no failures), UI concurrency smoke, OpenAPI
+  sanity (`167` tested, no failures), missing-query sanity (`5` tested, no
+  failures), backend health summary (`ok: true`), and full `pytest -q`
+  (`1538 passed`, `39 skipped`).

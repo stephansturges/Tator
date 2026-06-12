@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import urllib.request
 from pathlib import Path
 
 
@@ -134,3 +135,21 @@ def test_gpu_validation_safe_remove_rejects_allowed_root_prefix_sibling(
     assert (sibling / "payload.bin").read_bytes() == b"outside"
     assert removed == []
     assert skipped == [str(sibling.resolve())]
+
+
+def test_ui_param_sweep_import_is_side_effect_free(monkeypatch) -> None:
+    def fail_urlopen(*_args, **_kwargs):
+        raise AssertionError("run_ui_param_sweep must not call the backend during import")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+
+    tool = _load_tool_module("run_ui_param_sweep", "tools/run_ui_param_sweep.py")
+
+    assert callable(tool.run_sweep)
+    assert callable(tool.main)
+
+
+def test_ui_param_sweep_accepts_detector_precondition_statuses() -> None:
+    tool = _load_tool_module("run_ui_param_sweep_status", "tools/run_ui_param_sweep.py")
+
+    assert 412 in tool.OK_STATUS

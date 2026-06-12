@@ -2397,6 +2397,22 @@ preserving the exact validation story for storage and artifact-write fixes.
   contract tests (`82` checks, no failures), backend health summary
   (`ok: true`), and full `pytest -q` (`1540 passed`, `39 skipped`).
 
+## 2026-06-12: README Tool Reference Drift Check
+
+- Audited the README developer/tooling section after the extended validation
+  pass and found several historical utility names that no longer exist in the
+  current `tools/` tree.
+- Replaced those stale entries with the live setup, dataset-inspection,
+  Class Split/Qwen benchmark, and validation command entry points. Updated the
+  tools index with the backend launcher and UI validation commands that the
+  README now points users toward.
+- Expanded the README validation section with the actual local hardening ladder
+  used for recent backend/UI work: diff whitespace checks, focused validation
+  tests, refactor/fuzz validation, UI endpoint checks, contract checks,
+  Playwright control coverage, and browser E2E.
+- Added a README reference regression so future changes fail if first-layer
+  README `tools/` or `tests/` references point to missing files.
+
 ## 2026-06-12: Browser E2E Default Harness
 
 - Rechecked the browser E2E command used in the hardening ladder and found that

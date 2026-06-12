@@ -1,5 +1,9 @@
 Tools
 
+- macOS backend launcher
+  - Run: `tools/run_macos_backend.sh`
+  - Optional port override: `PORT=8080 tools/run_macos_backend.sh`
+
 - Labelmap reorder via Hungarian assignment
   - Run: `python tools/reorder_labelmap.py --help`
 
@@ -21,6 +25,11 @@ Tools
 
 - Fuzz smoke + lite (Tier-0/Tier-1)
   - Run: `BASE_URL=http://127.0.0.1:8000 SKIP_GPU=1 tools/run_fuzz_fast.sh`
+
+- UI endpoint and contract checks
+  - Endpoint method map: `python tools/run_ui_endpoint_method_check.py http://127.0.0.1:8000`
+  - UI contract checks: `python tools/run_ui_contract_tests.py http://127.0.0.1:8000`
+  - Playwright control coverage: `python tools/check_playwright_control_coverage.py`
 
 - Unused-def scanner (heuristic, module-level only)
   - Run: `python tools/scan_unused_defs.py`

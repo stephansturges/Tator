@@ -327,11 +327,16 @@ Useful local tools:
 - setup: `tools/setup_venv_macos_inference.sh`,
   `tools/setup_venv_falcon_cu118.sh`
 - dataset utilities: `tools/reorder_labelmap.py`,
-  `tools/reorder_dataset_by_labelmap.py`, `tools/subset_dataset.py`
-- segmentation utilities: `tools/convert_yolo_to_yolo_seg.py`,
-  `tools/build_sam3_dataset.py`
-- validation helpers: `tools/check_storage_health.py`,
-  `tools/validate_dataset_uploads.py`
+  `tools/detect_missclassifications.py`, `tools/label_candidates_iou90.py`
+- Class Split/Qwen benchmarks:
+  `tools/run_class_split_qwen_review_benchmark.py`,
+  `tools/analyze_class_split_qwen_review_benchmark.py`
+- validation helpers: `tools/run_refactor_validation.sh`,
+  `tools/run_fuzz_fast.sh`, `tools/check_ui_endpoints.py`,
+  `tools/run_ui_endpoint_method_check.py`, `tools/run_ui_contract_tests.py`,
+  `tools/check_playwright_control_coverage.py`
+
+See the [Tools Command Index](tools/README.md) for command examples.
 
 </details>
 
@@ -343,6 +348,18 @@ Focused smoke tests:
 ```bash
 .venv-macos/bin/python -m pytest tests/test_api_route_uniqueness.py tests/test_dataset_zip_upload_security.py -q
 .venv-macos/bin/python -m pytest tests/test_labeling_panel_layout_contract.py tests/test_class_analysis.py -q
+```
+
+Hardening ladder for broader changes:
+
+```bash
+git diff --check
+.venv-macos/bin/python -m pytest tests/test_validation_cleanup_tools.py -q
+SKIP_GPU=1 BASE_URL=http://127.0.0.1:8000 tools/run_refactor_validation.sh
+.venv-macos/bin/python tools/run_ui_endpoint_method_check.py http://127.0.0.1:8000
+.venv-macos/bin/python tools/run_ui_contract_tests.py http://127.0.0.1:8000
+.venv-macos/bin/python tools/check_playwright_control_coverage.py
+RUN_UI_E2E=1 .venv-macos/bin/python -m pytest tests/ui/e2e -q
 ```
 
 Broader validation references:

@@ -2415,4 +2415,7 @@ preserving the exact validation story for storage and artifact-write fixes.
   env helper, focused validation-tool tests (`11 passed`), `node --check
   ybat-master/ybat.js`, UI endpoint method check (`276` fetches, no failures),
   UI contract tests (`82` checks, no failures), backend health summary
-  (`ok: true`), and full `pytest -q` (`1542 passed`, `39 skipped`).
+  (`ok: true`), OpenAPI missing-param sanity (`76` tested, no failures), UI
+  negative tests (`18` tested, no failures), UI smoke, UI data-ops
+  create/get/delete and dataset-glossary restore checks, and full `pytest -q`
+  (`1542 passed`, `39 skipped`).

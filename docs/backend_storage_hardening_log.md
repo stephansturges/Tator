@@ -2372,3 +2372,27 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `SKIP_GPU=1 BASE_URL=http://127.0.0.1:8000
   tools/run_refactor_validation.sh` completed pycompile and Tier-0/Tier-1 fuzz,
   and a direct `tools/run_fuzz_fast.sh` run completed with `skip_gpu: true`.
+
+## 2026-06-12: Qwen Benchmark Script Portability
+
+- Extended the script audit to the Qwen benchmark tooling and MLP automation.
+  Both Qwen prepass shell wrappers lacked execute bits and failed through
+  `bash` with `python: command not found`; `tools/auto_mlp_run.sh` also carried
+  an old host-specific `/home/steph/Tator` checkout path.
+- Made the Qwen prepass smoke and benchmark wrappers executable, repo-root
+  anchored, and Python-resolving using the same explicit `PYTHON` override /
+  repo venv / `python3` fallback policy as the validation scripts.
+- Made `tools/auto_mlp_run.sh` derive its root from the script location unless
+  `ROOT_DIR` is explicitly supplied, create its log directory, select
+  `.venv`/`.venv-macos` when available, and run all Python steps through the
+  resolved interpreter.
+- Added regression coverage that the Qwen wrappers are executable and
+  interpreter-resolving, and that the MLP runner has no host-specific root or
+  bare Python invocations.
+- Validation: shell syntax for all `*.sh` files, direct `--help` execution for
+  `tools/run_qwen_prepass_smoke.sh` and `tools/run_qwen_prepass_benchmark.sh`,
+  and `tests/test_validation_cleanup_tools.py` (`9 passed`). Broader validation
+  also passed: `git diff --check`, `tools/run_refactor_validation.sh` with
+  `SKIP_GPU=1`, UI endpoint method check (`276` fetches, no failures), UI
+  contract tests (`82` checks, no failures), backend health summary
+  (`ok: true`), and full `pytest -q` (`1540 passed`, `39 skipped`).

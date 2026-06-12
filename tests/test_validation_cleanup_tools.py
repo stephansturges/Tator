@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import urllib.request
 from pathlib import Path
@@ -153,3 +154,27 @@ def test_ui_param_sweep_accepts_detector_precondition_statuses() -> None:
     tool = _load_tool_module("run_ui_param_sweep_status", "tools/run_ui_param_sweep.py")
 
     assert 412 in tool.OK_STATUS
+
+
+def test_qwen_prepass_wrappers_are_executable_and_resolve_repo_python() -> None:
+    for rel_path in [
+        "tools/run_qwen_prepass_smoke.sh",
+        "tools/run_qwen_prepass_benchmark.sh",
+    ]:
+        path = REPO_ROOT / rel_path
+        text = path.read_text(encoding="utf-8")
+
+        assert os.access(path, os.X_OK)
+        assert 'PYTHON_BIN="$(resolve_python)"' in text
+        assert '"${PYTHON_BIN}"' in text
+        assert "\npython " not in text
+
+
+def test_auto_mlp_runner_has_no_host_specific_root_or_bare_python_calls() -> None:
+    text = (REPO_ROOT / "tools/auto_mlp_run.sh").read_text(encoding="utf-8")
+
+    assert "/home/steph/Tator" not in text
+    assert "ROOT_DIR=\"${ROOT_DIR:-$DEFAULT_ROOT_DIR}\"" in text
+    assert 'PYTHON_BIN="$(resolve_python)"' in text
+    assert "\n  python " not in text
+    assert "\n          python " not in text

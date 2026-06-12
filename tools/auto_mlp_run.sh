@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="/home/steph/Tator"
-LOG_PATH="$ROOT_DIR/logs/auto_mlp_run.log"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+ROOT_DIR="${ROOT_DIR:-$DEFAULT_ROOT_DIR}"
+LOG_PATH="${LOG_PATH:-$ROOT_DIR/logs/auto_mlp_run.log}"
 PREPASS_JSONL="${PREPASS_JSONL:-$ROOT_DIR/qwen_prepass_benchmark_2000img_prepass_full_v3.jsonl}"
 SUMMARY_JSON="${SUMMARY_JSON:-$ROOT_DIR/qwen_prepass_benchmark_2000img_prepass_full_v3.summary.json}"
 FEATURES="${FEATURES:-$ROOT_DIR/uploads/ensemble_features_2000img_v4.npz}"
 LABELED="${LABELED:-$ROOT_DIR/uploads/ensemble_features_2000img_v4_iou05.npz}"
-MODEL_DIR="$ROOT_DIR/uploads/ensemble_mlp_runs"
+MODEL_DIR="${MODEL_DIR:-$ROOT_DIR/uploads/ensemble_mlp_runs}"
 TARGET_FP_RATIO="${TARGET_FP_RATIO:-0.1}"
 RELAX_FP_RATIO="${RELAX_FP_RATIO:-0.2}"
 CALIBRATE_OPTIMIZE="${CALIBRATE_OPTIMIZE:-f1}"
@@ -20,7 +22,41 @@ SKIP_FEATURES="${SKIP_FEATURES:-0}"
 SKIP_LABELING="${SKIP_LABELING:-0}"
 SELECT_METRIC="${SELECT_METRIC:-f1}"
 
-mkdir -p "$MODEL_DIR"
+resolve_python() {
+  if [[ -n "${PYTHON:-}" ]]; then
+    if [[ -x "${PYTHON}" ]]; then
+      printf '%s\n' "${PYTHON}"
+      return
+    fi
+    if command -v "${PYTHON}" >/dev/null 2>&1; then
+      command -v "${PYTHON}"
+      return
+    fi
+    echo "Configured PYTHON is not executable: ${PYTHON}" >&2
+    exit 127
+  fi
+
+  for candidate in \
+    "${ROOT_DIR}/.venv/bin/python" \
+    "${ROOT_DIR}/.venv-macos/bin/python" \
+    python3 \
+    python
+  do
+    if [[ -x "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return
+    fi
+    if command -v "${candidate}" >/dev/null 2>&1; then
+      command -v "${candidate}"
+      return
+    fi
+  done
+
+  echo "No Python interpreter found. Set PYTHON=/path/to/python." >&2
+  exit 127
+}
+
+mkdir -p "$MODEL_DIR" "$(dirname -- "$LOG_PATH")"
 
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG_PATH"
@@ -48,12 +84,26 @@ while true; do
   sleep 600
 done
 
-source "$ROOT_DIR/.venv/bin/activate"
+if [[ -z "${VENV_DIR:-}" ]]; then
+  if [[ -f "$ROOT_DIR/.venv/bin/activate" ]]; then
+    VENV_DIR="$ROOT_DIR/.venv"
+  elif [[ -f "$ROOT_DIR/.venv-macos/bin/activate" ]]; then
+    VENV_DIR="$ROOT_DIR/.venv-macos"
+  fi
+fi
+if [[ -n "${VENV_DIR:-}" && -f "$VENV_DIR/bin/activate" ]]; then
+  # Keep CUDA benchmark runs reproducible while still allowing PYTHON override.
+  # shellcheck disable=SC1091
+  source "$VENV_DIR/bin/activate"
+fi
+PYTHON_BIN="$(resolve_python)"
+cd "$ROOT_DIR"
+
 if [[ "$SKIP_FEATURES" -eq 1 && -f "$FEATURES" ]]; then
   log "auto_mlp_run: skipping feature build (existing $FEATURES)"
 else
   log "auto_mlp_run: building ensemble features"
-  python "$ROOT_DIR/tools/build_ensemble_features.py" \
+  "${PYTHON_BIN}" "$ROOT_DIR/tools/build_ensemble_features.py" \
     --input "$PREPASS_JSONL" \
     --dataset qwen_dataset \
     --output "$FEATURES" \
@@ -67,7 +117,7 @@ if [[ "$SKIP_LABELING" -eq 1 && -f "$LABELED" ]]; then
   log "auto_mlp_run: skipping labeling (existing $LABELED)"
 else
   log "auto_mlp_run: labeling candidates (IoU >= ${LABEL_IOU})"
-  python "$ROOT_DIR/tools/label_candidates_iou90.py" \
+  "${PYTHON_BIN}" "$ROOT_DIR/tools/label_candidates_iou90.py" \
     --input "$FEATURES" \
     --dataset qwen_dataset \
     --output "$LABELED" \
@@ -146,7 +196,7 @@ for mode in "${TARGET_MODE_LIST[@]}"; do
   fi
 done
 if [[ "$needs_iou" -eq 1 && -f "$LABELED" ]]; then
-  has_iou=$(python - <<PY
+  has_iou=$("${PYTHON_BIN}" - <<PY
 import numpy as np
 data = np.load("$LABELED", allow_pickle=True)
 print(1 if "y_iou" in data else 0)
@@ -207,7 +257,7 @@ for hidden in "${HIDDEN_LIST[@]}"; do
           tm_tag="${target_mode}"
           prefix="$MODEL_DIR/ensemble_mlp_${stamp}_h${hidden//,/-}_d${dropout_tag}_lr${lr_tag}_wd${wd_tag}_e${epochs}_s${seed}_${sched_tag}_minlr${minlr_tag}_${loss_tag}_ta${ta_tag}_tb${tb_tag}_ftg${ftg_tag}_cb${cb_tag}_smpl${sampler_tag}_bb${bb_tag}_pf${pf_tag}_pt${pt_tag}_tm${tm_tag}_bs${batch_size}_ga${grad_accum}_es${early_stop}"
           log "auto_mlp_run: train hidden=$hidden dropout=$dropout lr=$lr wd=$weight_decay epochs=$epochs seed=$seed scheduler=$scheduler loss=$loss class_balance=$class_balance sampler=$sampler batch_balance=$batch_balance pos_fraction=$pos_fraction pos_threshold=$pos_threshold target_mode=$target_mode batch=$batch_size output=$prefix"
-          python "$ROOT_DIR/tools/train_ensemble_mlp.py" \
+          "${PYTHON_BIN}" "$ROOT_DIR/tools/train_ensemble_mlp.py" \
             --input "$LABELED" \
             --output "$prefix" \
             --hidden "$hidden" \
@@ -248,7 +298,7 @@ for hidden in "${HIDDEN_LIST[@]}"; do
           fi
 
           log "auto_mlp_run: calibrating per-class thresholds for $prefix"
-          python "$ROOT_DIR/tools/calibrate_ensemble_threshold.py" \
+          "${PYTHON_BIN}" "$ROOT_DIR/tools/calibrate_ensemble_threshold.py" \
             --model "$model_path" \
             --data "$LABELED" \
             --meta "$meta_path" \
@@ -257,14 +307,14 @@ for hidden in "${HIDDEN_LIST[@]}"; do
             --per-class \
             --optimize "$CALIBRATE_OPTIMIZE" | tee -a "$LOG_PATH"
           log "auto_mlp_run: relaxing thresholds (fp_ratio_cap=$RELAX_FP_RATIO) for $prefix"
-          python "$ROOT_DIR/tools/relax_ensemble_thresholds.py" \
+          "${PYTHON_BIN}" "$ROOT_DIR/tools/relax_ensemble_thresholds.py" \
             --model "$model_path" \
             --data "$LABELED" \
             --meta "$meta_path" \
             --fp-ratio-cap "$RELAX_FP_RATIO" | tee -a "$LOG_PATH"
 
           eval_out="${prefix}.eval.json"
-          python "$ROOT_DIR/tools/eval_ensemble_mlp_dedupe.py" \
+          "${PYTHON_BIN}" "$ROOT_DIR/tools/eval_ensemble_mlp_dedupe.py" \
             --model "$model_path" \
             --meta "$meta_path" \
             --data "$LABELED" \
@@ -276,35 +326,35 @@ for hidden in "${HIDDEN_LIST[@]}"; do
           metrics=$(cat "$eval_out")
           echo "$metrics" | tee -a "$LOG_PATH"
 
-          f1=$(python - <<PY
+          f1=$("${PYTHON_BIN}" - <<PY
 import json
 with open("$eval_out", "r", encoding="utf-8") as handle:
     m=json.load(handle)
 print(m.get("f1", 0.0))
 PY
 )
-          recall=$(python - <<PY
+          recall=$("${PYTHON_BIN}" - <<PY
 import json
 with open("$eval_out", "r", encoding="utf-8") as handle:
     m=json.load(handle)
 print(m.get("recall", 0.0))
 PY
 )
-          fp=$(python - <<PY
+          fp=$("${PYTHON_BIN}" - <<PY
 import json
 with open("$eval_out", "r", encoding="utf-8") as handle:
     m=json.load(handle)
 print(m.get("fp", 0.0))
 PY
 )
-          tp=$(python - <<PY
+          tp=$("${PYTHON_BIN}" - <<PY
 import json
 with open("$eval_out", "r", encoding="utf-8") as handle:
     m=json.load(handle)
 print(m.get("tp", 0.0))
 PY
 )
-          fp_ratio=$(python - "$fp" "$tp" <<PY
+          fp_ratio=$("${PYTHON_BIN}" - "$fp" "$tp" <<PY
 import sys
 fp=float(sys.argv[1])
 tp=float(sys.argv[2])
@@ -312,7 +362,7 @@ print(fp / tp if tp else 999.0)
 PY
 )
 
-          best_ok=$(python - "$fp_ratio" "$TARGET_FP_RATIO" <<PY
+          best_ok=$("${PYTHON_BIN}" - "$fp_ratio" "$TARGET_FP_RATIO" <<PY
 import sys
 fp_ratio=float(sys.argv[1])
 target=float(sys.argv[2])
@@ -320,7 +370,7 @@ print(1 if fp_ratio <= target else 0)
 PY
 )
 
-          candidate_score=$(python - "$SELECT_METRIC" "$f1" "$recall" <<PY
+          candidate_score=$("${PYTHON_BIN}" - "$SELECT_METRIC" "$f1" "$recall" <<PY
 import sys
 metric=sys.argv[1]
 f1=float(sys.argv[2])
@@ -334,7 +384,7 @@ PY
           best_score="$BEST_SCORE"
 
           if [[ "$best_ok" -eq 1 ]]; then
-            better=$(python - "$candidate_score" "$best_score" <<PY
+            better=$("${PYTHON_BIN}" - "$candidate_score" "$best_score" <<PY
 import sys
 print(1 if float(sys.argv[1]) > float(sys.argv[2]) else 0)
 PY

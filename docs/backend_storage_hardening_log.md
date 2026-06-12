@@ -2506,3 +2506,25 @@ preserving the exact validation story for storage and artifact-write fixes.
   negative tests (`18` tested, no failures), UI smoke, UI data-ops
   create/get/delete and dataset-glossary restore checks, and full `pytest -q`
   (`1542 passed`, `39 skipped`).
+
+## 2026-06-13: Qwen Prepass Progress Lifecycle
+
+- Investigated an abandoned GPU-validation Qwen prepass that left
+  `/qwen/progress` stuck at `active: true` after the request stopped
+  heartbeating. The browser could keep presenting Qwen/prepass work as active
+  even though no new progress was possible from that request.
+- Added a generic `/qwen/cancel` endpoint for active Qwen work. Caption cancel
+  remains available at `/qwen/caption/cancel`, while prepass/inference can now
+  use the same backend cancellation event instead of only aborting the browser
+  fetch.
+- Added stale-progress expiry on `/qwen/progress` reads. Active Qwen progress
+  that has not updated for `TATOR_QWEN_PROGRESS_STALE_SECONDS` is marked
+  terminal and the UI is released. The default is 1800 seconds. If the
+  underlying ML runtime is still blocked inside a non-interruptible Metal/CUDA
+  call, the message tells the user to restart the backend.
+- Added detector-step progress heartbeats and cooperative cancel checks to the
+  deep prepass detector/SAM3 loops, so the trace and progress UI name the
+  current detector mode before long YOLO/RF-DETR/SAM3 calls.
+- Validation: Python compile for touched backend modules, `node --check
+  ybat-master/ybat.js`, focused Qwen progress tests (`25 passed`), and focused
+  prepass detector/source-score tests (`20 passed`).

@@ -1,9 +1,9 @@
 """APIRouter for Qwen status and settings endpoints."""
 
 
-from typing import Any, Callable, Type
+from typing import Any, Callable, Optional, Type
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 
 def build_qwen_status_router(
@@ -15,6 +15,7 @@ def build_qwen_status_router(
     unload_fn: Callable[[], Any],
     settings_cls: Type[Any],
     update_cls: Type[Any],
+    cancel_fn: Optional[Callable[..., Any]] = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -37,5 +38,11 @@ def build_qwen_status_router(
     @router.post("/qwen/unload")
     def qwen_unload():
         return unload_fn()
+
+    @router.post("/qwen/cancel")
+    def qwen_cancel(force: bool = Query(False)):
+        if cancel_fn is None:
+            return {"cancelled": False, "message": "Qwen cancellation is unavailable."}
+        return cancel_fn(force=force)
 
     return router

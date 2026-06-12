@@ -515,6 +515,8 @@ def _agent_run_deep_prepass_part_a_impl(
     active_sam3_score_thr: Optional[float] = None,
     active_sam3_mask_thr: Optional[float] = None,
     grid_overlap_ratio_default: float = 0.0,
+    progress_update_fn: Optional[Any] = None,
+    cancel_check_fn: Optional[Any] = None,
 ) -> Dict[str, Any]:
     img_w, img_h = pil_img.size
     detections: List[Dict[str, Any]] = []
@@ -550,6 +552,12 @@ def _agent_run_deep_prepass_part_a_impl(
     detector_iou = getattr(payload, "detector_iou", None)
     detector_merge_iou = getattr(payload, "detector_merge_iou", None)
     max_det = None
+    detector_total = 0
+    if getattr(payload, "enable_yolo", True) is not False:
+        detector_total += 2
+    if getattr(payload, "enable_rfdetr", True) is not False:
+        detector_total += 2
+    detector_step = 0
 
     for mode in ("yolo", "rfdetr"):
         if mode == "yolo" and getattr(payload, "enable_yolo", True) is False:
@@ -581,6 +589,22 @@ def _agent_run_deep_prepass_part_a_impl(
                     )
                 else:
                     trace_readable(f"deep_prepass detector:{mode} start full")
+            if cancel_check_fn:
+                cancel_check_fn()
+            detector_step += 1
+            if progress_update_fn:
+                detector_label = f"{str(mode).upper()} {run_name} detector"
+                progress_update_fn(
+                    phase="detector",
+                    phase_label="Running Detector",
+                    progress=0.08 + (0.20 * (detector_step / max(1, detector_total))),
+                    message=f"Running {detector_label}",
+                    step_id=f"detector_{mode}_{run_name}",
+                    step_index=detector_step,
+                    step_total=max(1, detector_total),
+                    step_label=detector_label,
+                    step_detail="Deep prepass is running object detectors before visual reasoning.",
+                )
             _log_step("deep_prepass_tool_call", {"tool": "run_detector", "args": args})
             try:
                 result = run_detector_fn(
@@ -728,6 +752,8 @@ def _agent_run_deep_prepass_part_a_impl(
                     args["window_bbox_2d"] = ctx.get("window_bbox_2d")
                 if ctx.get("grid_cell"):
                     args["grid_cell"] = ctx.get("grid_cell")
+                if cancel_check_fn:
+                    cancel_check_fn()
                 _log_step("deep_prepass_tool_call", {"tool": "sam3_text", "args": args})
                 try:
                     dets, assigned_label, _ = sam3_text_payloads_fn(
@@ -1215,6 +1241,8 @@ def _build_deep_prepass_runners_impl(
     caption_window_hook: Any,
     http_exception_cls: Any,
     http_503_code: int,
+    progress_update_fn: Optional[Any] = None,
+    cancel_check_fn: Optional[Any] = None,
 ) -> Tuple[
     Callable[..., Dict[str, Any]],
     Callable[..., Dict[str, Any]],
@@ -1256,6 +1284,8 @@ def _build_deep_prepass_runners_impl(
             active_sam3_score_thr=active_sam3_score_thr,
             active_sam3_mask_thr=active_sam3_mask_thr,
             grid_overlap_ratio_default=grid_overlap_ratio_default,
+            progress_update_fn=progress_update_fn,
+            cancel_check_fn=cancel_check_fn,
         )
 
     def cleanup(

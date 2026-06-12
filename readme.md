@@ -248,11 +248,15 @@ Optional macOS overrides can go in `.env.macos`:
 QWEN_DEVICE=auto
 QWEN_INFERENCE_PLATFORM=auto
 QWEN_MLX_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
+TATOR_QWEN_PROGRESS_STALE_SECONDS=1800
 DINOV3_BACKEND=auto
 ```
 
 See [macOS Inference Setup](docs/macos_inference_setup.md) for MLX-DINOv3,
 MLX-SAM, Qwen MLX-VLM, and Apple Silicon fallback behavior.
+`TATOR_QWEN_PROGRESS_STALE_SECONDS` controls how long an active Qwen/prepass
+progress record may sit without a heartbeat before the backend releases the UI
+state and reports it as stale. The default is 30 minutes.
 
 ## Data Safety Model
 
@@ -313,7 +317,7 @@ Primary API groups:
 - `/class_analysis/*`: embedding jobs, plot data, likely-wrong review, mobile
   review, and Qwen evidence review
 - `/qwen/*`: Qwen status, settings, model activation, captions, inference,
-  prepass, dataset upload, and training
+  prepass, cancellation/progress lifecycle, dataset upload, and training
 - `/sam3/*`, `/sam_point*`, `/sam_bbox*`: SAM/SAM3 prompts, datasets, models,
   training, and prompt helpers
 - `/yolo/*`, `/rfdetr/*`: detector inference, activation, training, and registry

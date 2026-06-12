@@ -1209,6 +1209,12 @@ qwen_llm_call_id_var: ContextVar[Optional[str]] = ContextVar(
     default=None,
 )
 QWEN_CANCEL_RESTART_EXIT_CODE = int(os.environ.get("TATOR_QWEN_CANCEL_RESTART_EXIT_CODE", "75"))
+try:
+    QWEN_PROGRESS_STALE_SECONDS = float(os.environ.get("TATOR_QWEN_PROGRESS_STALE_SECONDS", "1800"))
+except (TypeError, ValueError):
+    QWEN_PROGRESS_STALE_SECONDS = 1800.0
+if not math.isfinite(QWEN_PROGRESS_STALE_SECONDS) or QWEN_PROGRESS_STALE_SECONDS <= 0:
+    QWEN_PROGRESS_STALE_SECONDS = 1800.0
 qwen_progress_state: Dict[str, Any] = {
     "run_id": None,
     "active": False,
@@ -2117,24 +2123,31 @@ def _qwen_progress_cancelled(message: str) -> None:
         )
 
 
-def cancel_qwen_caption(*, force: bool = False) -> Dict[str, Any]:
+def _cancel_qwen_active_request(
+    *,
+    force: bool = False,
+    allowed_kinds: Optional[Set[str]] = None,
+    request_label: str = "Qwen",
+) -> Dict[str, Any]:
     now = time.time()
     with qwen_progress_lock:
         active = bool(qwen_progress_state.get("active"))
         kind = qwen_progress_state.get("kind")
         run_id = qwen_progress_state.get("run_id")
-        if not active or kind != "caption":
+        if not active or (allowed_kinds is not None and kind not in allowed_kinds):
             return {
                 "cancelled": False,
                 "active": active,
                 "kind": kind,
-                "message": "No active Qwen caption request.",
+                "message": f"No active {request_label} request.",
             }
         qwen_cancel_event.set()
+        kind_label = str(kind or request_label or "Qwen").replace("_", " ").strip() or "Qwen"
+        kind_label = kind_label[:1].upper() + kind_label[1:]
         message = (
-            "Caption cancellation requested; restarting backend to stop the active Qwen process"
+            f"{kind_label} cancellation requested; restarting backend to stop the active Qwen process"
             if force
-            else "Caption cancellation requested"
+            else f"{kind_label} cancellation requested"
         )
         qwen_progress_state.update(
             {
@@ -2161,6 +2174,18 @@ def cancel_qwen_caption(*, force: bool = False) -> Dict[str, Any]:
         "force": bool(force),
         "message": message,
     }
+
+
+def cancel_qwen_caption(*, force: bool = False) -> Dict[str, Any]:
+    return _cancel_qwen_active_request(
+        force=force,
+        allowed_kinds={"caption"},
+        request_label="Qwen caption",
+    )
+
+
+def cancel_qwen_request(*, force: bool = False) -> Dict[str, Any]:
+    return _cancel_qwen_active_request(force=force, request_label="Qwen")
 
 
 def _qwen_progress_log(message: str) -> None:
@@ -2945,6 +2970,63 @@ def _qwen_progress_error(message: str) -> None:
         )
 
 
+def _qwen_progress_expire_stale_locked(now: Optional[float] = None) -> bool:
+    """Release stale active Qwen UI state when a worker dies inside a runtime call.
+
+    The underlying ML runtime may still need a backend restart if it is blocked
+    in a non-interruptible Metal/CUDA call, but the UI should never stay locked
+    forever because a progress record stopped heartbeating.
+    """
+
+    if not qwen_progress_state.get("active"):
+        return False
+    timestamp = qwen_progress_state.get("updated_at") or qwen_progress_state.get("started_at")
+    try:
+        last_update = float(timestamp)
+    except (TypeError, ValueError):
+        last_update = 0.0
+    if last_update <= 0.0:
+        return False
+    current_time = time.time() if now is None else float(now)
+    age = current_time - last_update
+    if age < QWEN_PROGRESS_STALE_SECONDS:
+        return False
+    qwen_cancel_event.set()
+    kind = str(qwen_progress_state.get("kind") or "qwen").replace("_", " ")
+    if qwen_progress_state.get("cancel_requested"):
+        phase = "cancelled"
+        phase_label = "Cancelled"
+        error = "cancelled"
+        message = f"Qwen {kind} cancellation was finalized after {int(age)}s without progress updates."
+    else:
+        phase = "error"
+        phase_label = "Stale"
+        error = "stale_progress"
+        message = (
+            f"Qwen {kind} progress became stale after {int(age)}s without an update. "
+            "The UI was released; restart the backend if the runtime is still consuming resources."
+        )
+    lines = qwen_progress_state.get("log_lines")
+    if not isinstance(lines, list):
+        lines = []
+    lines.append(f"{time.strftime('%H:%M:%S')} {message}")
+    qwen_progress_state.update(
+        {
+            "active": False,
+            "phase": phase,
+            "phase_label": phase_label,
+            "progress": 1.0,
+            "message": message,
+            "updated_at": current_time,
+            "completed_at": current_time,
+            "error": error,
+            "cancel_requested": bool(qwen_progress_state.get("cancel_requested")),
+            "log_lines": lines[-80:],
+        }
+    )
+    return True
+
+
 def _http_exception_detail_text(exc: HTTPException) -> str:
     detail = getattr(exc, "detail", None)
     if isinstance(detail, str):
@@ -2959,6 +3041,7 @@ def _http_exception_detail_text(exc: HTTPException) -> str:
 
 def qwen_progress() -> Dict[str, Any]:
     with qwen_progress_lock:
+        _qwen_progress_expire_stale_locked()
         snapshot = dict(qwen_progress_state)
     snapshot["memory"] = _qwen_memory_snapshot()
     snapshot["vram"] = snapshot["memory"]
@@ -13266,6 +13349,8 @@ _agent_readable_write = lambda line: _agent_readable_write_impl(  # noqa: E731
     caption_window_hook=_CAPTION_WINDOW_HOOK,
     http_exception_cls=HTTPException,
     http_503_code=HTTP_503_SERVICE_UNAVAILABLE,
+    progress_update_fn=_qwen_progress_update,
+    cancel_check_fn=_raise_if_qwen_cancelled,
 )
 
 
@@ -52845,6 +52930,7 @@ app.include_router(
         unload_fn=lambda: (_unload_qwen_runtime() or {"status": "unloaded"}),
         settings_cls=QwenRuntimeSettings,
         update_cls=QwenRuntimeSettingsUpdate,
+        cancel_fn=cancel_qwen_request,
     )
 )
 
@@ -54677,6 +54763,9 @@ def qwen_prepass(payload: QwenPrepassRequest):
         result = _run_prepass_annotation(payload)
         _qwen_progress_finish("EDR prepass complete")
         return result
+    except QwenCancellationRequested as exc:
+        _qwen_progress_cancelled("Qwen prepass cancelled")
+        raise HTTPException(status_code=499, detail="qwen_prepass_cancelled") from exc
     except HTTPException as exc:
         detail = _http_exception_detail_text(exc)
         _qwen_progress_error(

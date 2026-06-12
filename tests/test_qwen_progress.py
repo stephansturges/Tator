@@ -192,6 +192,95 @@ def test_qwen_caption_cancel_marks_progress_and_new_run_clears_event():
     assert api.qwen_progress()["cancel_requested"] is False
 
 
+def test_qwen_cancel_request_handles_active_prepass():
+    _reset_qwen_progress()
+    run_id = api._qwen_progress_start(
+        kind="prepass",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    result = api.cancel_qwen_request(force=False)
+
+    assert result["cancelled"] is True
+    assert result["kind"] == "prepass"
+    assert result["run_id"] == run_id
+    assert api.qwen_cancel_event.is_set()
+    progress = api.qwen_progress()
+    assert progress["active"] is True
+    assert progress["phase"] == "cancelling"
+    assert progress["cancel_requested"] is True
+
+
+def test_qwen_caption_cancel_does_not_cancel_active_prepass():
+    _reset_qwen_progress()
+    api._qwen_progress_start(
+        kind="prepass",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    result = api.cancel_qwen_caption(force=False)
+
+    assert result["cancelled"] is False
+    assert result["active"] is True
+    assert result["kind"] == "prepass"
+    assert not api.qwen_cancel_event.is_set()
+    assert api.qwen_progress()["phase"] == "prepare"
+
+
+def test_qwen_progress_expires_stale_active_request(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "QWEN_PROGRESS_STALE_SECONDS", 5.0)
+    api._qwen_progress_start(
+        kind="prepass",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+    with api.qwen_progress_lock:
+        api.qwen_progress_state["updated_at"] = 100.0
+        api.qwen_progress_state["started_at"] = 100.0
+    monkeypatch.setattr(api.time, "time", lambda: 110.25)
+
+    progress = api.qwen_progress()
+
+    assert progress["active"] is False
+    assert progress["phase"] == "error"
+    assert progress["phase_label"] == "Stale"
+    assert progress["error"] == "stale_progress"
+    assert "became stale" in progress["message"]
+    assert api.qwen_cancel_event.is_set()
+
+
+def test_qwen_progress_keeps_fresh_active_request_active(monkeypatch):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "QWEN_PROGRESS_STALE_SECONDS", 5.0)
+    api._qwen_progress_start(
+        kind="prepass",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+    with api.qwen_progress_lock:
+        api.qwen_progress_state["updated_at"] = 100.0
+        api.qwen_progress_state["started_at"] = 100.0
+    monkeypatch.setattr(api.time, "time", lambda: 103.0)
+
+    progress = api.qwen_progress()
+
+    assert progress["active"] is True
+    assert progress["phase"] == "prepare"
+    assert progress["error"] is None
+    assert not api.qwen_cancel_event.is_set()
+
+
 def test_qwen_prepass_progress_uses_caption_token_budget(monkeypatch):
     _reset_qwen_progress()
     monkeypatch.setattr(
@@ -231,6 +320,25 @@ def test_qwen_prepass_progress_uses_caption_profile_default(monkeypatch):
     )
 
     assert api.qwen_progress()["max_new_tokens"] == 512
+
+
+def test_qwen_prepass_cancellation_marks_progress_cancelled(monkeypatch):
+    _reset_qwen_progress()
+
+    def fake_prepass(_payload):
+        raise api.QwenCancellationRequested("qwen_cancelled")
+
+    monkeypatch.setattr(api, "_run_prepass_annotation", fake_prepass)
+
+    with pytest.raises(HTTPException) as exc_info:
+        api.qwen_prepass(api.QwenPrepassRequest(image_base64="stub"))
+
+    assert exc_info.value.status_code == 499
+    assert exc_info.value.detail == "qwen_prepass_cancelled"
+    progress = api.qwen_progress()
+    assert progress["active"] is False
+    assert progress["phase"] == "cancelled"
+    assert progress["error"] == "cancelled"
 
 
 def test_qwen_caption_io_input_does_not_fail_on_bad_token_count(monkeypatch, tmp_path):

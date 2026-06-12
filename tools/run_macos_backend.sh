@@ -33,7 +33,7 @@ while true; do
   status=$?
   set -e
   if [[ "${status}" == "${TATOR_QWEN_CANCEL_RESTART_EXIT_CODE:-75}" ]]; then
-    echo "Backend exited after Qwen caption cancellation; restarting..." >&2
+    echo "Backend exited after Qwen cancellation; restarting..." >&2
     sleep "${TATOR_BACKEND_RESTART_DELAY:-1}"
     continue
   fi

@@ -31239,6 +31239,14 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const hadActive = qwenAgentActive || qwenAgentBatchActive;
         qwenAgentRunToken += 1;
+        if (hadActive) {
+            fetch(`${API_ROOT}/qwen/cancel?force=false`, {
+                method: "POST",
+                keepalive: true,
+            }).catch((error) => {
+                console.warn("Backend Qwen prepass cancel endpoint did not respond", error);
+            });
+        }
         if (qwenAgentAbortController) {
             try {
                 qwenAgentAbortController.abort();

@@ -15,6 +15,10 @@ from typing import Any
 
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from tools.context_feature_variants import (
     CANONICAL_BASE_VARIANT,
     COMBINED_VARIANT,
@@ -29,7 +33,6 @@ from tools.context_feature_variants import (
     subset_payload_by_images,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 NOISE_BAND = 0.001
 BASELINE_METHODS = {"noimg", "imgraw", "legacy_imgraw_plus_probs"}
 REQUIRED_SCHEMA_KEYS = {

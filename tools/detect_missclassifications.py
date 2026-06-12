@@ -2,6 +2,30 @@ import os
 import sys
 import argparse
 
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="YOLO bounding-box checks with CLIP. Full-screen class remap, scaled bounding boxes up to 1024x1024, forced/auto class remap, skip-log, undo, pastel UI."
+    )
+    parser.add_argument("--images_path", type=str, required=True)
+    parser.add_argument("--labels_path", type=str, required=True)
+    parser.add_argument("--model_path", type=str, default="./my_logreg_model.pkl")
+    parser.add_argument("--labelmap_path", type=str, default="./my_label_list.pkl")
+    parser.add_argument("--corrected_labels_path", type=str, default="./corrected_labels")
+    parser.add_argument("--interactive", action="store_true")
+    parser.add_argument("--clip_auto", type=float, default=0.0,
+                        help="If CLIP conf >= this => auto fix mismatch.")
+    parser.add_argument("--class_remap_ratio", type=float, default=0.8,
+                        help="If >= ratio => auto-suggest class remap for that YOLO-labeled class.")
+    return parser
+
+
+if __name__ == "__main__" and (
+    not sys.argv[1:] or any(arg in {"-h", "--help"} for arg in sys.argv[1:])
+):
+    build_parser().parse_args()
+    raise SystemExit(0)
+
 import numpy as np      #  <-- MOVE UP
 
 import cv2
@@ -43,20 +67,7 @@ PASTEL_COLORS = [
 # 1) Arg Parsing
 ###############################################################################
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="YOLO bounding-box checks with CLIP. Full-screen class remap, scaled bounding boxes up to 1024×1024, forced/auto class remap, skip-log, undo, pastel UI."
-    )
-    parser.add_argument("--images_path", type=str, required=True)
-    parser.add_argument("--labels_path", type=str, required=True)
-    parser.add_argument("--model_path", type=str, default="./my_logreg_model.pkl")
-    parser.add_argument("--labelmap_path", type=str, default="./my_label_list.pkl")
-    parser.add_argument("--corrected_labels_path", type=str, default="./corrected_labels")
-    parser.add_argument("--interactive", action="store_true")
-    parser.add_argument("--clip_auto", type=float, default=0.0,
-                        help="If CLIP conf >= this => auto fix mismatch.")
-    parser.add_argument("--class_remap_ratio", type=float, default=0.8,
-                        help="If >= ratio => auto-suggest class remap for that YOLO-labeled class.")
-    return parser.parse_args()
+    return build_parser().parse_args()
 
 ###############################################################################
 # 2) YOLO I/O

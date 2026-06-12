@@ -2,9 +2,14 @@
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Dict, List, Sequence
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from tools.context_feature_variants import copy_schema_metadata
 

@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import localinferenceapi as api
+api: Any | None = None
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
@@ -862,6 +862,11 @@ def main() -> int:
     parser.add_argument("--compare-run", default="", help="Optional previous benchmark JSON for audit comparison.")
     parser.add_argument("--fail-on-unsafe", action="store_true", help="Exit non-zero if the audit finds unsafe recommendations.")
     args = parser.parse_args()
+
+    global api
+    import localinferenceapi as api_module
+
+    api = api_module
 
     job_id = str(args.job_id or "").strip()
     if not job_id:

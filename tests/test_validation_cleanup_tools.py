@@ -184,9 +184,16 @@ def test_auto_mlp_runner_has_no_host_specific_root_or_bare_python_calls() -> Non
 def test_ui_validation_tools_help_exits_cleanly_without_backend() -> None:
     for rel_path in [
         "tools/check_ui_endpoints.py",
+        "tools/derive_context_feature_variants.py",
+        "tools/detect_missclassifications.py",
+        "tools/fuzz_tier0.py",
+        "tools/label_candidates_iou90.py",
+        "tools/run_class_split_qwen_review_benchmark.py",
+        "tools/run_context_feature_ablation.py",
         "tools/run_ui_contract_tests.py",
         "tools/run_ui_negative_tests.py",
         "tools/run_ui_param_sweep.py",
+        "tools/watch_yolo_train_and_activate.py",
     ]:
         result = subprocess.run(
             [str(REPO_ROOT / ".venv-macos" / "bin" / "python"), str(REPO_ROOT / rel_path), "--help"],
@@ -200,3 +207,5 @@ def test_ui_validation_tools_help_exits_cleanly_without_backend() -> None:
         assert "usage:" in result.stdout
         assert "Traceback" not in result.stderr
         assert "Backend not reachable" not in result.stdout
+        assert "Loading CLIP model" not in result.stdout
+        assert "Loading CLIP model" not in result.stderr

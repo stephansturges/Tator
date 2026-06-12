@@ -2397,6 +2397,32 @@ preserving the exact validation story for storage and artifact-write fixes.
   contract tests (`82` checks, no failures), backend health summary
   (`ok: true`), and full `pytest -q` (`1540 passed`, `39 skipped`).
 
+## 2026-06-12: Documented Tool Entry-Point Hardening
+
+- Continued the validation-tool hardening pass by scanning Python tools for
+  raw `sys.argv` handling and running a full `--help` smoke over `tools/*.py`.
+- Fixed the remaining non-argparse Python entry points used by the local fuzz
+  and training workflows: `tools/fuzz_tier0.py` and
+  `tools/watch_yolo_train_and_activate.py`.
+- Fixed direct-script execution for documented/context-feature tools that
+  import the `tools` package by inserting the repository root into `sys.path`
+  before package imports: `tools/derive_context_feature_variants.py`,
+  `tools/label_candidates_iou90.py`, and
+  `tools/run_context_feature_ablation.py`.
+- Made `tools/detect_missclassifications.py --help` and missing-argument usage
+  work before optional PyQt/CLIP/OpenCV dependencies are imported, so the tools
+  index remains useful on machines without the interactive inspector stack.
+- Made `tools/run_class_split_qwen_review_benchmark.py --help` avoid importing
+  `localinferenceapi` and loading CLIP before printing usage.
+- Added regression coverage for the documented/local workflow entry points so
+  `--help` stays clean, exits zero where appropriate, and does not load CLIP as
+  a side effect.
+- Validation: direct help checks for the repaired scripts, focused
+  validation-tool tests, py-compile for touched scripts/tests, direct fuzz
+  wrapper execution, UI endpoint map check, OpenAPI missing-query sanity,
+  UI/OpenAPI endpoint comparison, `tools/run_refactor_validation.sh`, browser
+  E2E (`41 passed`), and full pytest (`1544 passed`, `39 skipped`).
+
 ## 2026-06-12: UI Validation Tool Help Hygiene
 
 - Continued the platform validation pass after the README/tool reference drift

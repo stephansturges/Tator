@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
+import argparse
 import json
-import sys
 import time
 from urllib import request
 
@@ -21,12 +21,24 @@ def post(url: str, payload: dict) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def main() -> int:
-    if len(sys.argv) < 2:
-        print("Usage: watch_yolo_train_and_activate.py <job_id> [api_root]")
-        return 2
-    job_id = sys.argv[1]
-    api_root = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:8000"
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Watch a YOLO training job and activate it when it completes."
+    )
+    parser.add_argument("job_id", help="YOLO training job id to watch.")
+    parser.add_argument(
+        "api_root",
+        nargs="?",
+        default="http://127.0.0.1:8000",
+        help="Backend API root. Defaults to http://127.0.0.1:8000.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    job_id = args.job_id
+    api_root = args.api_root.rstrip("/")
     job_url = f"{api_root}/yolo/train/jobs/{job_id}"
     active_url = f"{api_root}/yolo/active"
 

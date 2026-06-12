@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
+import argparse
 import json
-import sys
 import urllib.request
 from urllib.error import URLError, HTTPError
 
@@ -17,8 +17,22 @@ def _get(url: str, timeout: int = 15) -> dict:
     return json.loads(data)
 
 
-def main() -> int:
-    base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run Tier-0 backend smoke checks against a Tator backend."
+    )
+    parser.add_argument(
+        "base_url",
+        nargs="?",
+        default="http://127.0.0.1:8000",
+        help="Backend base URL. Defaults to http://127.0.0.1:8000.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    base = args.base_url.rstrip("/")
     results = {}
     timeouts = {
         "/system/health_summary": 30,

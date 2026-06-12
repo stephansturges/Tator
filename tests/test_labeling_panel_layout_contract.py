@@ -211,7 +211,8 @@ def test_labeling_tool_panels_default_closed_and_ordered():
         positions.append(html.index(f'id="{panel_id}"'))
 
     assert positions == sorted(positions)
-    assert "Qwen 3 detection engine (not great)" in html
+    assert "Qwen 3 object detection" in html
+    assert "not great" not in html.lower()
     assert "Detection Recipe" in html
     assert "Ensemble Detection Recipe" in html
     assert "[wip]" not in html.lower()

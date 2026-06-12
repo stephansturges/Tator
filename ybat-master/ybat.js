@@ -4586,6 +4586,44 @@ const sam3TrainState = {
         return rows;
     }
 
+    function normalizeAnnotationLabelLines(lines) {
+        return (Array.isArray(lines) ? lines : [])
+            .map((line) => String(line || "").trim())
+            .filter(Boolean);
+    }
+
+    function getAnnotationRecordLabelLines(imageKey) {
+        if (annotationSourceState.hydratedKeys.has(imageKey)) {
+            return serializeDatasetBboxesForImage(imageKey);
+        }
+        const rawLines = annotationSourceState.rawLabelLinesByKey.get(imageKey);
+        if (Array.isArray(rawLines)) {
+            return normalizeAnnotationLabelLines(rawLines);
+        }
+        const row = annotationSourceState.imageRowsByKey.get(imageKey);
+        if (row && Array.isArray(row.label_lines)) {
+            return normalizeAnnotationLabelLines(row.label_lines);
+        }
+        return serializeDatasetBboxesForImage(imageKey);
+    }
+
+    function buildAnnotationBaselineRecord(imageKey) {
+        const row = annotationSourceState.imageRowsByKey.get(imageKey);
+        if (!row) {
+            return null;
+        }
+        const rawLines = annotationSourceState.rawLabelLinesByKey.get(imageKey);
+        const labelLines = Array.isArray(rawLines)
+            ? rawLines
+            : (Array.isArray(row.label_lines) ? row.label_lines : []);
+        return {
+            split: row.split,
+            image_relpath: row.image_relpath,
+            label_lines: normalizeAnnotationLabelLines(labelLines),
+            text_label: String(row.text_label || ""),
+        };
+    }
+
     function buildAnnotationRecord(imageKey) {
         const row = annotationSourceState.imageRowsByKey.get(imageKey);
         if (!row) {
@@ -4594,7 +4632,7 @@ const sam3TrainState = {
         return {
             split: row.split,
             image_relpath: row.image_relpath,
-            label_lines: serializeDatasetBboxesForImage(imageKey),
+            label_lines: getAnnotationRecordLabelLines(imageKey),
             text_label: String(textLabels[imageKey] || ""),
         };
     }
@@ -4618,19 +4656,16 @@ const sam3TrainState = {
             return;
         }
         const key = imageKey;
-        if (!annotationSourceState.hydratedKeys.has(key)) {
-            return;
-        }
         const record = buildAnnotationRecord(key);
         if (!record) {
             return;
         }
         const serialized = serializeAnnotationRecord(record);
-        const saved = annotationSourceState.savedSnapshotByKey.get(key);
+        let saved = annotationSourceState.savedSnapshotByKey.get(key);
         if (saved === undefined) {
-            annotationSourceState.savedSnapshotByKey.set(key, serialized);
-            annotationSourceState.dirtyRecordsByKey.delete(key);
-            return;
+            const baseline = serializeAnnotationRecord(buildAnnotationBaselineRecord(key) || record);
+            annotationSourceState.savedSnapshotByKey.set(key, baseline);
+            saved = baseline;
         }
         if (serialized !== saved) {
             annotationSourceState.dirtyRecordsByKey.set(key, record);
@@ -5230,16 +5265,25 @@ const sam3TrainState = {
             const rows = Array.isArray(manifest.images) ? manifest.images : [];
             rows.forEach((row, idx) => {
                 const key = annotationRowKey(row);
+                const labelLines = normalizeAnnotationLabelLines(row.label_lines);
+                const textLabel = String(row.text_label || "");
                 annotationSourceState.imageRowsByKey.set(key, {
                     split: row.split || "train",
                     image_relpath: row.image_relpath || row.image_name || "",
                     image_name: row.image_name || row.image_relpath || "",
+                    label_lines: [...labelLines],
+                    text_label: textLabel,
                 });
                 annotationSourceState.rawLabelLinesByKey.set(
                     key,
-                    Array.isArray(row.label_lines)
-                        ? row.label_lines.map((line) => String(line || "").trim()).filter(Boolean)
-                        : []
+                    [...labelLines]
+                );
+                annotationSourceState.savedSnapshotByKey.set(
+                    key,
+                    serializeAnnotationRecord({
+                        label_lines: labelLines,
+                        text_label: textLabel,
+                    })
                 );
                 images[key] = {
                     meta: {
@@ -5258,7 +5302,7 @@ const sam3TrainState = {
                     displayName: row.image_name || row.image_relpath || key,
                 };
                 bboxes[key] = {};
-                textLabels[key] = String(row.text_label || "");
+                textLabels[key] = textLabel;
                 const option = document.createElement("option");
                 option.value = key;
                 option.text = `${row.split || "train"}/${row.image_relpath || row.image_name || key}`;
@@ -29027,7 +29071,7 @@ async function cancelRfDetrTrainingJobRequest() {
             const bundle = await resp.json();
             renderCalibrationReportBundle(bundle);
         } catch (error) {
-            console.debug("EDR report bundle unavailable", error);
+            console.debug("Detection Recipe report bundle unavailable", error);
             setCalibrationReportStatus("No Detection Recipe report bundle available for this build.", { visible: false });
         }
     }

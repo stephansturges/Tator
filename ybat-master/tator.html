@@ -60,7 +60,7 @@
             <button class="tab-button" data-tab="sam3-train" data-testid="tab.sam3_train.open" id="tabSam3TrainButton" type="button" title="Prepare SAM3 training datasets and launch SAM3 training workflows.">Train SAM3</button>
             <button class="tab-button" data-tab="yolo-train" data-testid="tab.yolo_train.open" id="tabYoloTrainButton" type="button" title="Configure and launch YOLO detector training from managed datasets.">Train YOLO</button>
             <button class="tab-button" data-tab="rfdetr-train" data-testid="tab.rfdetr_train.open" id="tabRfDetrTrainButton" type="button" title="Configure and launch RF-DETR detector training from managed datasets.">Train RF-DETR</button>
-            <button class="tab-button" data-tab="agent-mining" data-testid="tab.agent_mining.open" id="tabAgentMiningButton" type="button" title="Mine candidate SAM3/EDR recipes from images and evaluate their detector behavior.">SAM3 Recipe Mining</button>
+            <button class="tab-button" data-tab="agent-mining" data-testid="tab.agent_mining.open" id="tabAgentMiningButton" type="button" title="Mine candidate SAM3 and Detection Recipe workflows from images and evaluate their detector behavior.">SAM3 Recipe Mining</button>
             <button class="tab-button" data-tab="prompt-helper" data-testid="tab.prompt_helper.open" id="tabPromptHelperButton" type="button" title="Explore and organize SAM3 text prompts and vocabulary for a dataset.">SAM3 Vocabulary Explorer</button>
             <button class="tab-button" data-tab="datasets" data-testid="tab.datasets.open" id="tabDatasetsButton" type="button" title="Upload, download, restore, delete, and inspect backend-managed datasets.">Dataset Management</button>
             <button class="tab-button" data-tab="sam3-prompt-models" data-testid="tab.sam3_prompt_models.open" id="tabSam3PromptModelsButton" type="button" title="Select and configure available SAM/SAM3 predictor backends.">SAM Model Selection</button>
@@ -250,10 +250,10 @@
                             </div>
                             <div class="tool-panel-stack">
                             <details class="tool-panel" id="qwenDetectionDetails">
-                                <summary>Qwen 3 detection engine (not great)</summary>
+                                <summary>Qwen 3 object detection</summary>
                             <section class="qwen-panel" aria-labelledby="qwenPanelTitle">
                                 <div class="qwen-panel__header">
-                                    <span id="qwenPanelTitle">Qwen 3 detection engine (not great)</span>
+                                    <span id="qwenPanelTitle">Qwen 3 object detection</span>
                                     <span id="qwenActiveModelLabel" class="qwen-active-model-label"></span>
                                     <span id="qwenStatusLabel" class="qwen-status-label">Checking…</span>
                                 </div>

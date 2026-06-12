@@ -59,10 +59,10 @@ def _stage_ui_dataset_if_needed(dataset_path: str) -> str:
 
 
 def require_ui_env() -> tuple[str, str]:
-    page_url = env("UI_PAGE_URL")
-    dataset_path = env("UI_DATASET_PATH")
+    page_url = env("UI_PAGE_URL", f"{api_root()}/tator.html")
+    dataset_path = env("UI_DATASET_PATH", str((_repo_root() / "tests" / "fixtures" / "fuzz_pack").resolve()))
     if not page_url:
-        raise RuntimeError("Set UI_PAGE_URL to the hosted ybat UI URL.")
+        raise RuntimeError("Set UI_PAGE_URL to the hosted Tator UI URL.")
     if not dataset_path:
         raise RuntimeError("Set UI_DATASET_PATH to a valid server-local dataset path.")
     return page_url, _stage_ui_dataset_if_needed(dataset_path)

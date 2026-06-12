@@ -2396,3 +2396,23 @@ preserving the exact validation story for storage and artifact-write fixes.
   `SKIP_GPU=1`, UI endpoint method check (`276` fetches, no failures), UI
   contract tests (`82` checks, no failures), backend health summary
   (`ok: true`), and full `pytest -q` (`1540 passed`, `39 skipped`).
+
+## 2026-06-12: Browser E2E Default Harness
+
+- Rechecked the browser E2E command used in the hardening ladder and found that
+  `RUN_UI_E2E=1 pytest tests/ui/e2e` still skipped most browser coverage unless
+  `UI_PAGE_URL` and `UI_DATASET_PATH` were set manually.
+- Updated the E2E environment helper to use the backend-served UI at
+  `${UI_API_ROOT:-http://127.0.0.1:8000}/tator.html` by default and the
+  repo-local `tests/fixtures/fuzz_pack` dataset by default. Explicit
+  `UI_PAGE_URL`, `UI_DATASET_PATH`, staging, and API-root overrides are still
+  honored.
+- Added regression coverage for the default URL/dataset behavior and explicit
+  override behavior.
+- Validation: `tests/test_ui_e2e_env_defaults.py` (`2 passed`) and
+  `RUN_UI_E2E=1 tests/ui/e2e` (`41 passed`) against the running backend.
+  Broader validation also passed: `git diff --check`, `py_compile` for the E2E
+  env helper, focused validation-tool tests (`11 passed`), `node --check
+  ybat-master/ybat.js`, UI endpoint method check (`276` fetches, no failures),
+  UI contract tests (`82` checks, no failures), backend health summary
+  (`ok: true`), and full `pytest -q` (`1542 passed`, `39 skipped`).

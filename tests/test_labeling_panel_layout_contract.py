@@ -212,8 +212,9 @@ def test_labeling_tool_panels_default_closed_and_ordered():
 
     assert positions == sorted(positions)
     assert "Qwen 3 detection engine (not great)" in html
-    assert "EDR [wip]" in html
+    assert "Detection Recipe" in html
     assert "Ensemble Detection Recipe" in html
+    assert "[wip]" not in html.lower()
 
 
 def test_top_navigation_tabs_have_tooltips():

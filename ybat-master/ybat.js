@@ -1112,7 +1112,7 @@
         classSplitMobileSync: "Sync mobile review decisions back into the current browser workspace.",
         classSplitQwenReviewRefresh: "Refresh the list of local Qwen reviewer models.",
         classSplitDatasetAnalysisRun: "Run dataset-level value scoring after all-class class-split analysis is available.",
-        qwenAgentRecipeImportFile: "Choose a Qwen review recipe JSON file to import.",
+        qwenAgentRecipeImportFile: "Choose a Detection Recipe ZIP archive to import.",
         datasetUploadCurrentBtn: "Upload the currently open Label Images workspace as a backend-managed dataset.",
         datasetUploadBtn: "Upload the selected dataset ZIP as a backend-managed dataset.",
         datasetListRefresh: "Refresh the backend dataset list.",
@@ -28708,7 +28708,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (substepCurrent > 0 && substepTotal > 0) {
             const suffix = substepLabel ? ` (${substepLabel})` : "";
-            bits.push(`EDR [wip] discovery ${substepCurrent}/${substepTotal}${suffix}`);
+            bits.push(`Detection Recipe discovery ${substepCurrent}/${substepTotal}${suffix}`);
         }
         return bits.join(" • ");
     }
@@ -28765,7 +28765,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.calibrationReportStatus.textContent = message || "";
         if (!visible) {
             clearCalibrationReportUi();
-            qwenElements.calibrationReportSummary.textContent = "EDR [wip] report bundle";
+            qwenElements.calibrationReportSummary.textContent = "Detection Recipe report bundle";
         }
     }
 
@@ -28995,15 +28995,15 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function renderCalibrationReportBundle(bundle) {
         if (!qwenElements.calibrationReportWrap || !bundle || typeof bundle !== "object") {
-            setCalibrationReportStatus("No EDR [wip] report bundle available yet.", { visible: false });
+            setCalibrationReportStatus("No Detection Recipe report bundle available yet.", { visible: false });
             return;
         }
         const selection = bundle.selection_summary || {};
         const overall = bundle.overall_metrics || {};
         const winner = selection.selected_policy_variant || selection.winner || selection.winner_lane || "result";
         qwenElements.calibrationReportWrap.hidden = false;
-        qwenElements.calibrationReportSummary.textContent = `EDR [wip] report bundle • ${winner} • F1 ${formatCalibrationMetric(overall.f1)}`;
-        qwenElements.calibrationReportStatus.textContent = "Loaded from completed EDR [wip] build.";
+        qwenElements.calibrationReportSummary.textContent = `Detection Recipe report bundle • ${winner} • F1 ${formatCalibrationMetric(overall.f1)}`;
+        qwenElements.calibrationReportStatus.textContent = "Loaded from completed Detection Recipe build.";
         renderCalibrationReportOverview(bundle);
         renderCalibrationPerClassTable(bundle.per_class);
         renderCalibrationPerSourceTable(bundle.per_class_per_source);
@@ -29014,10 +29014,10 @@ async function cancelRfDetrTrainingJobRequest() {
 
     async function fetchCalibrationReportBundle(jobId) {
         if (!jobId) {
-            setCalibrationReportStatus("No EDR [wip] report bundle available yet.", { visible: false });
+            setCalibrationReportStatus("No Detection Recipe report bundle available yet.", { visible: false });
             return;
         }
-        setCalibrationReportStatus("Loading EDR [wip] report bundle…", { visible: true });
+        setCalibrationReportStatus("Loading Detection Recipe report bundle…", { visible: true });
         clearCalibrationReportUi();
         try {
             const resp = await fetch(`${API_ROOT}/calibration/jobs/${encodeURIComponent(jobId)}/artifacts/report_bundle`);
@@ -29028,7 +29028,7 @@ async function cancelRfDetrTrainingJobRequest() {
             renderCalibrationReportBundle(bundle);
         } catch (error) {
             console.debug("EDR report bundle unavailable", error);
-            setCalibrationReportStatus("No EDR [wip] report bundle available for this build.", { visible: false });
+            setCalibrationReportStatus("No Detection Recipe report bundle available for this build.", { visible: false });
         }
     }
 
@@ -30156,12 +30156,12 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         setCalibrationStatus("Starting…");
-        setCalibrationRecipeInfo(`EDR [wip] mode: ${String(payload.recipe_mode || "auto").replaceAll("_", " ")} • lane ${String(payload.lane_selection || "window").replaceAll("_", " ")}. Preparing EDR [wip] build…`);
-        setCalibrationReportStatus("No EDR [wip] report bundle available yet.", { visible: false });
+        setCalibrationRecipeInfo(`Detection Recipe mode: ${String(payload.recipe_mode || "auto").replaceAll("_", " ")} • lane ${String(payload.lane_selection || "window").replaceAll("_", " ")}. Preparing Detection Recipe build…`);
+        setCalibrationReportStatus("No Detection Recipe report bundle available yet.", { visible: false });
         updateCalibrationProgressUi({
             progress: 0,
             phase: "queue",
-            message: "Submitting EDR [wip] build",
+            message: "Submitting Detection Recipe build",
             processed: 0,
             total: Number.isFinite(payload.max_images) ? payload.max_images : 0,
         });
@@ -30181,19 +30181,19 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenCalibrationState.jobId = job.job_id;
             qwenCalibrationState.pollRequestId += 1;
             qwenCalibrationState.pollInFlight = false;
-            qwenCalibrationState.overlay = showProgressModal("EDR [wip] build starting…");
+            qwenCalibrationState.overlay = showProgressModal("Detection Recipe build starting…");
             refreshAutomationLockStatus().catch((error) => {
                 console.debug("Automation-lock refresh failed after calibration start", error);
             });
             emitCalibrationProgress({
                 progress: 0,
                 phase: "queue",
-                message: "EDR [wip] build queued",
+                message: "Detection Recipe build queued",
                 processed: 0,
                 total: Number.isFinite(payload.max_images) ? payload.max_images : 0,
             });
             setCalibrationStatus("Running");
-            setCalibrationRecipeInfo(`EDR [wip] mode: ${String(payload.recipe_mode || "auto").replaceAll("_", " ")} • lane ${String(payload.lane_selection || "window").replaceAll("_", " ")}. Build queued.`);
+            setCalibrationRecipeInfo(`Detection Recipe mode: ${String(payload.recipe_mode || "auto").replaceAll("_", " ")} • lane ${String(payload.lane_selection || "window").replaceAll("_", " ")}. Build queued.`);
             updateCalibrationButtons();
             pollCalibrationJob().catch((error) => {
                 console.error("Calibration poll start failed", error);
@@ -30202,7 +30202,7 @@ async function cancelRfDetrTrainingJobRequest() {
             setCalibrationStatus("Error");
             emitCalibrationProgress(null);
             updateCalibrationButtons();
-            setSamStatus(`EDR [wip] build error: ${error.message || error}`, { variant: "error", duration: 5000 });
+            setSamStatus(`Detection Recipe build error: ${error.message || error}`, { variant: "error", duration: 5000 });
         } finally {
             qwenCalibrationState.startInFlight = false;
             updateCalibrationButtons();
@@ -30233,12 +30233,12 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const recipeId = String(qwenElements.canonicalRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            qwenElements.canonicalRecipeSummary.textContent = "No canonical EDR [wip] selected.";
+            qwenElements.canonicalRecipeSummary.textContent = "No canonical recipe selected.";
             return;
         }
         const item = canonicalPrepassRecipes.find((entry) => String(entry?.id || "").trim() === recipeId);
         if (!item) {
-            qwenElements.canonicalRecipeSummary.textContent = "Canonical EDR [wip] metadata unavailable.";
+            qwenElements.canonicalRecipeSummary.textContent = "Canonical recipe metadata unavailable.";
             return;
         }
         const datasetId = String(item?.dataset_id || "").trim();
@@ -30260,7 +30260,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         qwenElements.canonicalRecipeSummary.textContent = parts.length
             ? parts.join(" • ")
-            : "Canonical EDR [wip] selected.";
+            : "Canonical recipe selected.";
     }
 
     function applyLoadedRecipeToBuilder(data, recipeId) {
@@ -30280,19 +30280,19 @@ async function cancelRfDetrTrainingJobRequest() {
     async function loadCanonicalRecipeIntoBuilder() {
         const recipeId = String(qwenElements.canonicalRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select a canonical EDR [wip] to load.", { variant: "warn", duration: 2500 });
+            setSamStatus("Select a canonical recipe to load.", { variant: "warn", duration: 2500 });
             return;
         }
         syncCanonicalRecipeSelect(recipeId);
         const data = await fetchPrepassRecipe(recipeId);
         applyLoadedRecipeToBuilder(data, recipeId);
-        setSamStatus("Canonical EDR [wip] loaded into builder.", { variant: "info", duration: 2500 });
+        setSamStatus("Canonical recipe loaded into builder.", { variant: "info", duration: 2500 });
     }
 
     async function useCanonicalRecipeForInference() {
         const recipeId = String(qwenElements.canonicalRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select a canonical EDR [wip] to use.", { variant: "warn", duration: 2500 });
+            setSamStatus("Select a canonical recipe to use.", { variant: "warn", duration: 2500 });
             return;
         }
         if (qwenElements.prepassRecipeSelect) {
@@ -30303,7 +30303,7 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!loaded) {
             return;
         }
-        setSamStatus("Canonical EDR is now active for Label Images.", { variant: "info", duration: 2500 });
+        setSamStatus("Canonical recipe is now active for Label Images.", { variant: "info", duration: 2500 });
     }
 
     async function refreshPrepassRecipes() {
@@ -30340,7 +30340,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (requestId !== prepassRecipeRefreshRequestId) {
                 return;
             }
-            const populate = (select, previousValue, entries, placeholderText = "Select EDR [wip]") => {
+            const populate = (select, previousValue, entries, placeholderText = "Select recipe") => {
                 if (!select) return;
                 select.innerHTML = "";
                 const placeholder = document.createElement("option");
@@ -30363,14 +30363,14 @@ async function cancelRfDetrTrainingJobRequest() {
                 qwenElements.canonicalRecipeSelect,
                 previousCanonical,
                 canonicalPrepassRecipes,
-                "Select Canonical EDR [wip]",
+                "Select canonical recipe",
             );
             updateCanonicalRecipeSummary();
         } catch (error) {
             if (requestId !== prepassRecipeRefreshRequestId) {
                 return;
             }
-            console.error("Failed to load EDRs", error);
+            console.error("Failed to load Detection Recipes", error);
         } finally {
             if (
                 requestId === prepassRecipeRefreshRequestId
@@ -30388,7 +30388,7 @@ async function cancelRfDetrTrainingJobRequest() {
             if (prepassRecipeRefreshNeedsRefresh) {
                 prepassRecipeRefreshNeedsRefresh = false;
                 refreshPrepassRecipes().catch((error) => {
-                    console.error("Queued EDR refresh failed", error);
+                    console.error("Queued Detection Recipe refresh failed", error);
                 });
             }
         }
@@ -30569,7 +30569,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const name = (qwenElements.agentRecipeName?.value || "").trim();
         if (!name) {
-            setSamStatus("EDR [wip] name required.", { variant: "warn", duration: 3000 });
+            setSamStatus("Recipe name required.", { variant: "warn", duration: 3000 });
             return;
         }
         const description = (qwenElements.agentRecipeDescription?.value || "").trim();
@@ -30588,7 +30588,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 throw new Error(await resp.text());
             }
             await refreshPrepassRecipes();
-            setSamStatus("EDR [wip] saved.", { variant: "info", duration: 2500 });
+            setSamStatus("Recipe saved.", { variant: "info", duration: 2500 });
         } catch (error) {
             setSamStatus(`Save failed: ${error.message || error}`, { variant: "error", duration: 4000 });
         } finally {
@@ -30611,7 +30611,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const recipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select an EDR [wip] to load.", { variant: "warn", duration: 2500 });
+            setSamStatus("Select a recipe to load.", { variant: "warn", duration: 2500 });
             return;
         }
         const requestId = prepassRecipeEditorLoadRequestId + 1;
@@ -30629,7 +30629,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 return;
             }
             applyLoadedRecipeToBuilder(data, recipeId);
-            setSamStatus("EDR [wip] loaded.", { variant: "info", duration: 2500 });
+            setSamStatus("Recipe loaded.", { variant: "info", duration: 2500 });
         } catch (error) {
             if (requestId !== prepassRecipeEditorLoadRequestId) {
                 return;
@@ -30653,7 +30653,7 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenActiveInferenceRecipe = null;
             qwenAgentSelectedEdrPackageId = "";
             if (!suppressMissingWarning) {
-                setSamStatus("Select an EDR [wip] before running inference.", { variant: "warn", duration: 2500 });
+                setSamStatus("Select a recipe before running inference.", { variant: "warn", duration: 2500 });
             }
             return null;
         }
@@ -30684,7 +30684,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             qwenActiveInferenceRecipe = null;
             qwenAgentSelectedEdrPackageId = "";
-            setSamStatus(`EDR [wip] load failed: ${error.message || error}`, { variant: "error", duration: 4000 });
+            setSamStatus(`Detection Recipe load failed: ${error.message || error}`, { variant: "error", duration: 4000 });
             return null;
         }
     }
@@ -30695,10 +30695,10 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const recipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select an EDR [wip] to delete.", { variant: "warn", duration: 2500 });
+            setSamStatus("Select a recipe to delete.", { variant: "warn", duration: 2500 });
             return;
         }
-        if (!confirm("Delete this EDR [wip]? This cannot be undone.")) {
+        if (!confirm("Delete this recipe? This cannot be undone.")) {
             return;
         }
         prepassRecipeDeleteInFlight = true;
@@ -30709,7 +30709,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 throw new Error(await resp.text());
             }
             await refreshPrepassRecipes();
-            setSamStatus("EDR [wip] deleted.", { variant: "info", duration: 2500 });
+            setSamStatus("Recipe deleted.", { variant: "info", duration: 2500 });
         } catch (error) {
             setSamStatus(`Delete failed: ${error.message || error}`, { variant: "error", duration: 4000 });
         } finally {
@@ -30724,7 +30724,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const recipeId = (qwenElements.agentRecipeSelect?.value || "").trim();
         if (!recipeId) {
-            setSamStatus("Select an EDR [wip] to export.", { variant: "warn", duration: 2500 });
+            setSamStatus("Select a recipe to export.", { variant: "warn", duration: 2500 });
             return;
         }
         prepassRecipeExportInFlight = true;
@@ -30748,7 +30748,7 @@ async function cancelRfDetrTrainingJobRequest() {
             link.click();
             link.remove();
             window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
-            setSamStatus("EDR [wip] exported.", { variant: "info", duration: 2500 });
+            setSamStatus("Recipe exported.", { variant: "info", duration: 2500 });
         } catch (error) {
             setSamStatus(`Export failed: ${error.message || error}`, { variant: "error", duration: 4000 });
         } finally {
@@ -30775,7 +30775,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             const payload = await resp.json();
             await refreshPrepassRecipes();
-            const notice = payload?.notice || "EDR [wip] imported.";
+            const notice = payload?.notice || "Recipe imported.";
             setSamStatus(notice, { variant: "info", duration: 4000 });
         } catch (error) {
             setSamStatus(`Import failed: ${error.message || error}`, { variant: "error", duration: 4000 });
@@ -30822,16 +30822,16 @@ async function cancelRfDetrTrainingJobRequest() {
                 const laneSelection = String(job?.result?.lane_selection || job?.request?.lane_selection || qwenElements.calibrationLaneSelection?.value || "window");
                 const recipeFingerprint = String(job?.result?.recipe_fingerprint || job?.request?.recipe_fingerprint || "").trim();
                 const recipeState = job?.result?.recipe_discovered
-                    ? "EDR [wip] discovered"
-                    : (job?.result?.recipe_reused ? "EDR [wip] reused" : "EDR [wip] pending");
+                    ? "Detection Recipe discovered"
+                    : (job?.result?.recipe_reused ? "Detection Recipe reused" : "Detection Recipe pending");
                 const fingerprintSuffix = recipeFingerprint ? ` • ${recipeFingerprint.slice(0, 10)}` : "";
                 setCalibrationRecipeInfo(`${recipeState} • mode ${recipeMode.replaceAll("_", " ")} • lane ${laneSelection.replaceAll("_", " ")}${fingerprintSuffix}`);
                 emitCalibrationProgress(job);
                 if (qwenCalibrationState.overlay) {
                     const stepSummary = formatCalibrationStepSummary(job);
                     const detail = total > 0
-                        ? `${stepSummary ? `${stepSummary} • ` : ""}EDR [wip] build ${phase}: ${message} (${processed}/${total})`
-                        : `${stepSummary ? `${stepSummary} • ` : ""}EDR [wip] build ${phase}: ${message}`;
+                        ? `${stepSummary ? `${stepSummary} • ` : ""}Detection Recipe build ${phase}: ${message} (${processed}/${total})`
+                        : `${stepSummary ? `${stepSummary} • ` : ""}Detection Recipe build ${phase}: ${message}`;
                     qwenCalibrationState.overlay.update(detail, (Number.isFinite(job.progress) ? job.progress : 0));
                 }
                 if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
@@ -30854,11 +30854,11 @@ async function cancelRfDetrTrainingJobRequest() {
                         const selectedPolicy = job?.result?.policy_layer_summary?.selected_variant;
                         const suffix = selectedPolicy ? ` Selected policy: ${selectedPolicy}.` : "";
                         const recipeSummary = job?.result?.recipe_discovered
-                            ? " EDR [wip] discovered and promoted."
-                            : (job?.result?.recipe_reused ? " Promoted EDR [wip] reused." : "");
+                            ? " Detection Recipe discovered and promoted."
+                            : (job?.result?.recipe_reused ? " Promoted Detection Recipe reused." : "");
                         const savedRecipeId = String(job?.result?.saved_prepass_recipe_id || "").trim();
-                        enqueueTaskNotice(`EDR [wip] build completed.${suffix}`, { durationMs: 5000 });
-                        setCalibrationRecipeInfo(`${job?.result?.recipe_discovered ? "EDR [wip] discovered" : (job?.result?.recipe_reused ? "EDR [wip] reused" : "EDR [wip] applied")} • lane ${laneSelection.replaceAll("_", " ")}${recipeFingerprint ? ` • ${recipeFingerprint.slice(0, 10)}` : ""}.${recipeSummary}`.trim());
+                        enqueueTaskNotice(`Detection Recipe build completed.${suffix}`, { durationMs: 5000 });
+                        setCalibrationRecipeInfo(`${job?.result?.recipe_discovered ? "Detection Recipe discovered" : (job?.result?.recipe_reused ? "Detection Recipe reused" : "Detection Recipe applied")} • lane ${laneSelection.replaceAll("_", " ")}${recipeFingerprint ? ` • ${recipeFingerprint.slice(0, 10)}` : ""}.${recipeSummary}`.trim());
                         if (savedRecipeId) {
                             refreshPrepassRecipes().then(() => {
                                 const genericHasSavedRecipe = Array.from(qwenElements.agentRecipeSelect?.options || []).some(
@@ -30875,17 +30875,17 @@ async function cancelRfDetrTrainingJobRequest() {
                                 }
                                 syncCanonicalRecipeSelect(savedRecipeId);
                             }).catch((error) => {
-                                console.debug("Failed to refresh Saved EDR [wip] recipes after calibration completion", error);
+                                console.debug("Failed to refresh saved recipes after calibration completion", error);
                             });
                         }
                         fetchCalibrationReportBundle(job.job_id).catch((error) => {
-                            console.debug("EDR report fetch failed", error);
+                            console.debug("Detection Recipe report fetch failed", error);
                         });
                     } else {
-                        setCalibrationRecipeInfo("EDR [wip] flow did not complete.");
-                        setCalibrationReportStatus("No EDR [wip] report bundle available for this build.", { visible: false });
+                        setCalibrationRecipeInfo("Detection Recipe flow did not complete.");
+                        setCalibrationReportStatus("No Detection Recipe report bundle available for this build.", { visible: false });
                         if (job.error) {
-                            setSamStatus(`EDR [wip] build error: ${job.error}`, { variant: "error", duration: 5000 });
+                            setSamStatus(`Detection Recipe build error: ${job.error}`, { variant: "error", duration: 5000 });
                         }
                     }
                 }
@@ -30896,12 +30896,12 @@ async function cancelRfDetrTrainingJobRequest() {
                 emitCalibrationProgress({
                     progress: 0,
                     phase: "error",
-                    message: `EDR [wip] status error: ${error.message || error}`,
+                    message: `Detection Recipe status error: ${error.message || error}`,
                     processed: 0,
                     total: 0,
                 });
                 if (qwenCalibrationState.overlay) {
-                    qwenCalibrationState.overlay.update(`EDR [wip] status error: ${error.message || error}`, 0);
+                    qwenCalibrationState.overlay.update(`Detection Recipe status error: ${error.message || error}`, 0);
                 }
             } finally {
                 qwenCalibrationState.pollInFlight = false;

@@ -54,7 +54,7 @@
             <button class="tab-button active" data-tab="labeling" data-testid="tab.labeling.open" id="tabLabelingButton" type="button" title="Open the main annotation workspace for images, boxes, masks, detectors, SAM, and Qwen-assisted labeling.">Label Images</button>
             <button class="tab-button" data-tab="data-ingestion" data-testid="tab.data_ingestion.open" id="tabDataIngestionButton" type="button" title="Score new images and videos against a reference dataset before deciding what to keep.">Data Ingestion</button>
             <button class="tab-button" data-tab="class-split" data-testid="tab.class_split.open" id="tabClassSplitButton" type="button" title="Embed labeled objects, inspect likely wrong classes, and review subclass structure.">Class Split Explorer</button>
-            <button class="tab-button" data-tab="prepass-builder" data-testid="tab.prepass_builder.open" id="tabPrepassBuilderButton" type="button" title="Build and test Ensemble Detection Recipes for repeatable detector/SAM/classifier workflows.">EDR Builder [wip]</button>
+            <button class="tab-button" data-tab="prepass-builder" data-testid="tab.prepass_builder.open" id="tabPrepassBuilderButton" type="button" title="Build and test reusable Detection Recipes for detector, SAM3, classifier, and calibration workflows.">Detection Recipes</button>
             <button class="tab-button" data-tab="training" data-testid="tab.training.open" id="tabTrainingButton" type="button" title="Train and manage local class prediction heads from labeled datasets.">Train Class Predictor</button>
             <button class="tab-button" data-tab="qwen-train" data-testid="tab.qwen_train.open" id="tabQwenTrainButton" type="button" title="Prepare and run Qwen fine-tuning jobs from annotated image datasets.">Train Qwen 3</button>
             <button class="tab-button" data-tab="sam3-train" data-testid="tab.sam3_train.open" id="tabSam3TrainButton" type="button" title="Prepare SAM3 training datasets and launch SAM3 training workflows.">Train SAM3</button>
@@ -519,32 +519,32 @@
                                 </div>
                             </details>
                             <details class="tool-panel" id="qwenEdrDetails">
-                                <summary>EDR [wip]<span class="help-icon" title="Ensemble Detection Recipe. Applies a saved multi-step detector/SAM3/classifier recipe to the current image or a batch. This workflow is still marked work in progress.">?</span></summary>
+                                <summary>Detection Recipe<span class="help-icon" title="Ensemble Detection Recipe. Applies a saved multi-step detector/SAM3/classifier recipe to the current image or a batch.">?</span></summary>
                                 <div class="qwen-prepass">
                                     <div class="qwen-caption__header">
-                                        <strong>EDR [wip]</strong>
+                                        <strong>Detection Recipe</strong>
                                         <span id="prepassStatus" class="qwen-caption-status"></span>
                                     </div>
-                                    <div class="training-help">Apply a saved Ensemble Detection Recipe (EDR [wip]) to the current image or the next batch.</div>
+                                    <div class="training-help">Apply a saved Ensemble Detection Recipe (EDR) to the current image or the next batch.</div>
                                     <div class="qwen-caption-row">
-                                        <label for="prepassRecipeSelect">Saved EDR [wip]</label>
+                                        <label for="prepassRecipeSelect">Saved recipe</label>
                                         <select id="prepassRecipeSelect"></select>
                                         <button type="button" id="prepassRecipeRefresh" class="training-button secondary">Refresh</button>
                                     </div>
                                     <div class="qwen-caption-options">
-                                        <label for="prepassBatchCount">Apply EDR [wip] to next N images</label>
+                                        <label for="prepassBatchCount">Apply recipe to next N images</label>
                                         <div class="qwen-caption-row">
                                             <input type="number" id="prepassBatchCount" min="1" value="3" />
-                                            <button type="button" id="prepassBatchRun" class="training-button secondary">Run EDR [wip] on next N</button>
+                                            <button type="button" id="prepassBatchRun" class="training-button secondary">Run recipe on next N</button>
                                         </div>
                                         <label><input type="checkbox" id="prepassBatchIncludeCurrent" checked /> Include current image</label>
                                     </div>
                                     <div class="training-actions">
-                                        <button type="button" id="prepassRun" class="training-button secondary">Run EDR [wip] on image</button>
-                                        <button type="button" id="prepassStop" class="training-button secondary" disabled>Stop EDR [wip]</button>
+                                        <button type="button" id="prepassRun" class="training-button secondary">Run recipe on image</button>
+                                        <button type="button" id="prepassStop" class="training-button secondary" disabled>Stop recipe</button>
                                     </div>
                                     <div class="qwen-agent-trace">
-                                        <div class="training-help">EDR [wip] trace (latest steps)</div>
+                                        <div class="training-help">Recipe trace (latest steps)</div>
                                         <div id="prepassTraceList" class="qwen-agent-trace__list"></div>
                                     </div>
                                 </div>
@@ -1274,37 +1274,37 @@
             <div class="tab-panel" id="tabPrepassBuilder" data-tab-panel="prepass-builder">
                 <div class="container">
                     <div class="left">
-                        <h2>EDR Builder [wip]</h2>
-                        <div class="training-help">Build, calibrate, and export Ensemble Detection Recipes (EDR [wip]). Use the Label Images tab to apply saved EDR [wip] recipes.</div>
+                        <h2>Detection Recipes</h2>
+                        <div class="training-help">Build, calibrate, and export reusable Ensemble Detection Recipes (EDRs). Use the Label Images tab to apply saved recipes.</div>
                         <div class="training-help" style="margin-top:8px; border-left:3px solid #4a5568; padding-left:10px;">
-                            <strong>What EDR [wip] is:</strong> An Ensemble Detection Recipe combines a <strong>prepass</strong> and a <strong>calibration</strong>.
+                            <strong>What a Detection Recipe is:</strong> An Ensemble Detection Recipe combines a <strong>prepass</strong> and a <strong>calibration</strong>.
                             The prepass builds a broad candidate pool from detectors + SAM3. The calibration learns how to filter that pool into cleaner final detections.
                             Defaults favor recall first; the calibrator and policy settings handle precision later. If you are unsure, keep defaults and only change one knob at a time.
                         </div>
 <div class="qwen-prepass">
                                     <div class="qwen-caption__header">
-                                        <strong>EDR [wip] prepass (detectors + SAM3)</strong>
+                                        <strong>Detection Recipe prepass (detectors + SAM3)</strong>
                                         <span id="qwenAgentStatus" class="qwen-caption-status"></span>
                                     </div>
-                                                                        <div class="training-help">Save and reuse EDR [wip] recipes across sessions or share them with teammates.</div>
+                                                                        <div class="training-help">Save and reuse recipes across sessions or share them with teammates.</div>
                                     <div class="qwen-caption-grid">
                                         <div>
-                                            <label for="qwenAgentRecipeName">EDR [wip] name</label>
+                                            <label for="qwenAgentRecipeName">Recipe name</label>
                                             <input type="text" id="qwenAgentRecipeName" placeholder="e.g., qwen_dataset_edr_v1" />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentRecipeSelect">Saved EDR [wip] recipes</label>
+                                            <label for="qwenAgentRecipeSelect">Saved recipes</label>
                                             <select id="qwenAgentRecipeSelect"></select>
                                         </div>
                                         <div>
                                             <label for="qwenAgentRecipeDescription">Description</label>
-                                            <input type="text" id="qwenAgentRecipeDescription" placeholder="Optional notes for this EDR [wip]" />
+                                            <input type="text" id="qwenAgentRecipeDescription" placeholder="Optional notes for this recipe" />
                                         </div>
                                         <div>
                                             <label>&nbsp;</label>
                                             <div class="qwen-caption-row">
-                                                <button type="button" id="qwenAgentRecipeSave" class="training-button secondary">Save EDR [wip]</button>
-                                                <button type="button" id="qwenAgentRecipeLoad" class="training-button secondary">Load EDR [wip]</button>
+                                                <button type="button" id="qwenAgentRecipeSave" class="training-button secondary">Save recipe</button>
+                                                <button type="button" id="qwenAgentRecipeLoad" class="training-button secondary">Load recipe</button>
                                             </div>
                                             <div class="qwen-caption-row" style="margin-top:6px;">
                                                 <button type="button" id="qwenAgentRecipeDelete" class="training-button secondary">Delete</button>
@@ -1315,11 +1315,11 @@
                                         </div>
                                     </div>
                                     <div class="training-help" style="margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc; padding: 10px 12px;">
-                                        <div style="font-weight: 600; color: #0f172a;">Canonical EDRs [wip]</div>
-                                        <div style="margin-top: 4px;">Promoted dataset-specific EDR [wip] recipes live here so they are easy to find, load, and reuse from the WebUI without browsing the filesystem.</div>
+                                        <div style="font-weight: 600; color: #0f172a;">Canonical recipes</div>
+                                        <div style="margin-top: 4px;">Promoted dataset-specific recipes live here so they are easy to find, load, and reuse from the WebUI without browsing the filesystem.</div>
                                         <div class="qwen-caption-grid" style="margin-top: 10px;">
                                             <div>
-                                                <label for="qwenCanonicalRecipeSelect">Canonical EDR [wip]</label>
+                                                <label for="qwenCanonicalRecipeSelect">Canonical recipe</label>
                                                 <select id="qwenCanonicalRecipeSelect"></select>
                                             </div>
                                             <div>
@@ -1331,14 +1331,14 @@
                                                 </div>
                                             </div>
                                         </div>
-                                        <div id="qwenCanonicalRecipeSummary" class="training-help" style="margin-top: 8px;">No canonical EDR [wip] selected.</div>
+                                        <div id="qwenCanonicalRecipeSummary" class="training-help" style="margin-top: 8px;">No canonical recipe selected.</div>
                                     </div>
-<div class="training-help">Runs the EDR [wip] prepass stage (detectors + SAM3 + dedupe + optional calibrator application). Uses the current labelmap or a selected dataset.</div>
+<div class="training-help">Runs the recipe prepass stage (detectors + SAM3 + dedupe + optional calibrator application). Uses the current labelmap or a selected dataset.</div>
                                     <details class="training-help" style="margin-bottom: 10px;">
-                                        <summary><strong>Full EDR [wip] Logic + Knob Map</strong></summary>
+                                        <summary><strong>Recipe Logic + Knob Map</strong></summary>
                                         <div style="margin-top: 6px;">
-                                            <div><strong>How EDR [wip] is split</strong></div>
-                                            <div>EDR [wip] has two parts. The <strong>prepass</strong> generates a high-recall candidate pool. The <strong>calibration</strong> scores those candidates, tunes thresholds, and keeps the settings that survive promotion gates.</div>
+                                            <div><strong>How a recipe is split</strong></div>
+                                            <div>A Detection Recipe has two parts. The <strong>prepass</strong> generates a high-recall candidate pool. The <strong>calibration</strong> scores those candidates, tunes thresholds, and keeps the settings that survive promotion gates.</div>
                                             <div><strong>Deterministic execution order</strong></div>
                                             <ol style="margin: 6px 0 0 18px;">
                                                 <li><strong>Context setup:</strong> load dataset labelmap + glossary, selected model overrides, selected detector runs, and recipe config.</li>
@@ -1438,7 +1438,7 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label for="qwenAgentFusionMode">Fusion mode<span class="help-icon" title="How merged clusters choose final geometry. Primary keeps the highest-score box. WBF blends overlapping boxes by score-weighted averaging. Source-weighted keeps source-aware weighting from the promoted EDR [wip] policy.">?</span></label>
+                                            <label for="qwenAgentFusionMode">Fusion mode<span class="help-icon" title="How merged clusters choose final geometry. Primary keeps the highest-score box. WBF blends overlapping boxes by score-weighted averaging. Source-weighted keeps source-aware weighting from the promoted Detection Recipe policy.">?</span></label>
                                             <select id="qwenAgentFusionMode">
                                                 <option value="primary" selected>Primary winner</option>
                                                 <option value="wbf">Weighted box fusion (WBF)</option>
@@ -1482,7 +1482,7 @@
                                             </select>
                                         </div>
                                         <div>
-                                            <label for="qwenAgentCaptionMaxTokens">Caption max tokens<span class="help-icon" title="Generated-token cap for each Qwen caption call inside the detection-engine/EDR [wip] workflow. This does not limit prompt/input tokens or detector outputs.">?</span></label>
+                                            <label for="qwenAgentCaptionMaxTokens">Caption max tokens<span class="help-icon" title="Generated-token cap for each Qwen caption call inside the detection-engine/Detection Recipe workflow. This does not limit prompt/input tokens or detector outputs.">?</span></label>
                                             <input type="number" id="qwenAgentCaptionMaxTokens" min="32" max="512" value="128" />
                                         </div>
                                     </div>
@@ -1692,7 +1692,7 @@
                                             <input type="number" id="qwenCalibrationImageCount" min="10" max="100000" value="2000" />
                                         </div>
                                         <div>
-                                            <label for="qwenCalibrationRecipeMode">EDR mode [wip]<span class="help-icon" title="Auto reuses a promoted EDR [wip] recipe for this exact dataset/settings fingerprint if available; otherwise it runs discovery, promotes an EDR [wip] recipe, then trains. Reuse only requires an existing promoted EDR [wip] recipe. Force rediscover always reruns discovery first.">?</span></label>
+                                            <label for="qwenCalibrationRecipeMode">Recipe mode<span class="help-icon" title="Auto reuses a promoted recipe for this exact dataset/settings fingerprint if available; otherwise it runs discovery, promotes a new recipe, then trains. Reuse only requires an existing promoted recipe. Force rediscover always reruns discovery first.">?</span></label>
                                             <select id="qwenCalibrationRecipeMode">
                                                 <option value="auto" selected>Auto</option>
                                                 <option value="reuse_only">Reuse only</option>
@@ -1766,13 +1766,13 @@
                                         </div>
                                     </div>
                                     <div class="training-actions">
-                                        <button type="button" id="qwenCalibrationRun" class="training-button secondary">Build EDR [wip]</button>
+                                        <button type="button" id="qwenCalibrationRun" class="training-button secondary">Build Detection Recipe</button>
                                         <button type="button" id="qwenCalibrationCancel" class="training-button secondary" disabled>Cancel</button>
                                     </div>
-                                    <div id="qwenCalibrationRecipeInfo" class="training-help" style="margin-top: 8px;">EDR [wip] mode: Auto. Waiting to start.</div>
+                                    <div id="qwenCalibrationRecipeInfo" class="training-help" style="margin-top: 8px;">Detection Recipe mode: Auto. Waiting to start.</div>
                                     <details id="qwenCalibrationReportWrap" class="training-help" style="margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc; padding: 10px 12px;" hidden>
-                                        <summary id="qwenCalibrationReportSummary" style="cursor: pointer; font-weight: 600; color: #0f172a;">EDR [wip] report bundle</summary>
-                                        <div id="qwenCalibrationReportStatus" class="training-help" style="margin-top: 8px;">No EDR [wip] report bundle available yet.</div>
+                                        <summary id="qwenCalibrationReportSummary" style="cursor: pointer; font-weight: 600; color: #0f172a;">Detection Recipe report bundle</summary>
+                                        <div id="qwenCalibrationReportStatus" class="training-help" style="margin-top: 8px;">No Detection Recipe report bundle available yet.</div>
                                         <div id="qwenCalibrationReportOverview" style="margin-top: 10px;"></div>
                                         <div id="qwenCalibrationReportPerClass" style="margin-top: 10px;"></div>
                                         <div id="qwenCalibrationReportPerSource" style="margin-top: 10px;"></div>

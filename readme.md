@@ -209,7 +209,7 @@ Common helper paths:
 | Train YOLO / Train RF-DETR | Detector proposals and future prelabeling. |
 | Train SAM3 | Promptable segmentation helpers and SAM3 datasets. |
 | Train Qwen 3 | Local VLM model management and adapter-training paths. |
-| EDR Builder / SAM3 Recipe Mining | Repeatable prelabeling recipes. |
+| Detection Recipes / SAM3 Recipe Mining | Repeatable prelabeling recipes. |
 | SAM3 Vocabulary Explorer | Prompt vocabulary and class-language inspection. |
 
 Train the helper that removes the next real bottleneck. You do not need to use

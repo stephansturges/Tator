@@ -16,12 +16,12 @@ def test_calibration_recipe_mode_ui_controls_exist() -> None:
 
     assert "recipe_mode: recipeMode || \"auto\"" in js_text
     assert "lane_selection: laneSelection || \"window\"" in js_text
-    assert "EDR mode" in html_text
-    assert "EDR Builder" in html_text
+    assert "Recipe mode" in html_text
+    assert "Detection Recipes" in html_text
     assert 'id="qwenCanonicalRecipeSelect"' in html_text
     assert 'id="qwenCanonicalRecipeLoad"' in html_text
     assert 'id="qwenCanonicalRecipeUse"' in html_text
-    assert "Canonical EDRs" in html_text
+    assert "Canonical recipes" in html_text
     assert 'id="qwenAutoLabelRun"' not in html_text
     assert 'id="qwenAutoLabelCancel"' not in html_text
     assert 'id="qwenAutoLabelWindowMode"' not in html_text
@@ -60,7 +60,7 @@ def test_calibration_recipe_mode_ui_controls_exist() -> None:
     assert "edr_runtime_mode" in js_text
     assert "getSelectedAgentEnsembleJobId" in js_text
     assert "const genericRecipeItems = recipeItems.filter((item) => !isCanonicalPrepassRecipeItem(item));" in js_text
-    assert 'setSamStatus("Canonical EDR is now active for Label Images."' in js_text
+    assert 'setSamStatus("Canonical recipe is now active for Label Images."' in js_text
     assert "recipe_kind" in js_text
     assert "qwenCalibrationPolicyLayerVariant" not in html_text
     assert "qwenCalibrationPolicyLayerVariant" not in js_text

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import re
-import sys
 from pathlib import Path
 from urllib import request
 
@@ -64,8 +64,22 @@ def load_openapi(base_url: str) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def main() -> int:
-    base_url = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Compare UI fetch endpoints with the backend OpenAPI schema."
+    )
+    parser.add_argument(
+        "base_url",
+        nargs="?",
+        default="http://127.0.0.1:8000",
+        help="Backend base URL. Defaults to http://127.0.0.1:8000.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    base_url = args.base_url.rstrip("/")
     js_path = Path("ybat-master/ybat.js")
     if not js_path.exists():
         print("ybat.js not found")

@@ -2397,6 +2397,26 @@ preserving the exact validation story for storage and artifact-write fixes.
   contract tests (`82` checks, no failures), backend health summary
   (`ok: true`), and full `pytest -q` (`1540 passed`, `39 skipped`).
 
+## 2026-06-12: UI Validation Tool Help Hygiene
+
+- Continued the platform validation pass after the README/tool reference drift
+  fix and audited the validation tools themselves.
+- Found that several live UI validation scripts treated `--help` as a backend
+  URL or raised a traceback instead of printing local command help. This made
+  the documented tools harder to discover and could send confusing requests to
+  fake hosts such as `--help`.
+- Added explicit `argparse` parsing to `tools/check_ui_endpoints.py`,
+  `tools/run_ui_contract_tests.py`, `tools/run_ui_negative_tests.py`, and
+  `tools/run_ui_param_sweep.py` while preserving the existing optional
+  positional `base_url` behavior.
+- Added regression coverage that these validation tools exit cleanly on
+  `--help` without touching the backend or printing a bootstrap failure.
+- Validation: direct `--help` checks for all `tools/run_ui_*.py` scripts plus
+  `tools/check_ui_endpoints.py`, py-compile for touched scripts/tests, focused
+  validation-tool tests, live normal invocations of endpoint, contract,
+  negative-path, and parameter-sweep checks against `http://127.0.0.1:8000`,
+  browser E2E (`41 passed`), and full pytest (`1544 passed`, `39 skipped`).
+
 ## 2026-06-12: README Tool Reference Drift Check
 
 - Audited the README developer/tooling section after the extended validation

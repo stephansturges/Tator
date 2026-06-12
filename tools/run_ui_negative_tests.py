@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
+import argparse
 import json
-import sys
 import urllib.request
 from urllib.error import HTTPError, URLError
 
@@ -32,8 +32,22 @@ def _safe(name, method, url, body=None, ok_statuses=None):
         return {"ok": False, "status": "error", "payload": str(exc)}
 
 
-def main() -> int:
-    base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run negative-path UI/API checks against a Tator backend."
+    )
+    parser.add_argument(
+        "base_url",
+        nargs="?",
+        default="http://127.0.0.1:8000",
+        help="Backend base URL. Defaults to http://127.0.0.1:8000.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    base = args.base_url.rstrip("/")
     missing = "ui_contract_missing"
     tests = [
         ("GET", f"{base}/yolo/runs/{missing}/summary", None, {400, 404}),

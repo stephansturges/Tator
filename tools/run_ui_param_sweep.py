@@ -2,8 +2,8 @@
 """Lightweight negative/param sweep to catch endpoint contract regressions."""
 from __future__ import annotations
 
+import argparse
 import json
-import sys
 import urllib.error
 import urllib.request
 
@@ -66,10 +66,22 @@ def run_sweep(base_url: str = DEFAULT_BASE_URL) -> dict:
     return {"failures": failures}
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run lightweight negative parameter sweeps against a Tator backend."
+    )
+    parser.add_argument(
+        "base_url",
+        nargs="?",
+        default=DEFAULT_BASE_URL,
+        help=f"Backend base URL. Defaults to {DEFAULT_BASE_URL}.",
+    )
+    return parser.parse_args(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    base_url = args[0] if args else DEFAULT_BASE_URL
-    summary = run_sweep(base_url)
+    args = parse_args(argv)
+    summary = run_sweep(args.base_url)
     print(json.dumps(summary, indent=2))
     return 0 if not summary["failures"] else 1
 

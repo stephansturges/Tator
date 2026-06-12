@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
+import argparse
 import json
-import sys
 import time
 import urllib.request
 from urllib.error import HTTPError, URLError
@@ -132,8 +132,22 @@ def _load_fuzz_image() -> tuple[str, int, int, str]:
     return b64, width, height, image_name
 
 
-def main() -> int:
-    base = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run live UI/API contract checks against a Tator backend."
+    )
+    parser.add_argument(
+        "base_url",
+        nargs="?",
+        default="http://127.0.0.1:8000",
+        help="Backend base URL. Defaults to http://127.0.0.1:8000.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    base = args.base_url.rstrip("/")
     # Health probes can be slow when GPU telemetry collection stalls.
     if not _backend_reachable(base, timeout=20):
         payload = {

@@ -2356,3 +2356,19 @@ preserving the exact validation story for storage and artifact-write fixes.
   sanity (`167` tested, no failures), missing-query sanity (`5` tested, no
   failures), backend health summary (`ok: true`), and full `pytest -q`
   (`1538 passed`, `39 skipped`).
+
+## 2026-06-12: Validation Script Python Resolution
+
+- Continued the broad validation pass and found that
+  `tools/run_refactor_validation.sh` failed on the current macOS shell because
+  it called `python` directly. The project validation path should not depend on
+  callers manually prepending `.venv-macos/bin` to `PATH`.
+- Hardened `tools/run_refactor_validation.sh` and `tools/run_fuzz_fast.sh` so
+  they resolve Python in a predictable order: explicit `PYTHON`, repo-local
+  `.venv-macos`, repo-local `.venv`, then `python3`/`python`. Both scripts now
+  anchor to the repository root before invoking project files.
+- The refactor wrapper passes its resolved interpreter into the fuzz wrapper, so
+  nested validation uses the same Python environment.
+- Validation: `SKIP_GPU=1 BASE_URL=http://127.0.0.1:8000
+  tools/run_refactor_validation.sh` completed pycompile and Tier-0/Tier-1 fuzz,
+  and a direct `tools/run_fuzz_fast.sh` run completed with `skip_gpu: true`.

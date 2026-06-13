@@ -2646,3 +2646,19 @@ preserving the exact validation story for storage and artifact-write fixes.
   local mutable-default scan (`0` findings), live UI/OpenAPI endpoint sanity
   checks, OpenAPI missing-query and missing-param sanity checks, live OpenAPI
   operation-id/route-table audit, and backend health (`HTTP 200`, `ok: true`).
+
+## 2026-06-13: Runtime Assert Removal Sweep
+
+- Audited backend runtime code for assertion-based validation that could vanish
+  under optimized Python execution.
+- Replaced remaining `assert` statements in `localinferenceapi.py` with explicit
+  HTTP errors for dataset upload session invariants, local SALAD head loading,
+  and windowed Qwen caption sizing.
+- Added an AST regression that fails if `localinferenceapi.py` reintroduces
+  runtime `assert` statements.
+- Validation: JS syntax, UI endpoint method/map/openapi checks, UI contract and
+  negative checks, UI data-ops smoke, Playwright control coverage, UI parameter
+  sweep, full UI E2E (`41 passed`), startup doc link check, tracked Python
+  pycompile (`369` files), data-safety/path tests (`141 passed`), focused
+  upload/data-ingestion/caption tests (`174 passed, 2 skipped`), UI smoke,
+  and `SKIP_GPU=1` refactor validation.

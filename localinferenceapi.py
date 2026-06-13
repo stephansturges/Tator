@@ -17561,7 +17561,11 @@ def list_dataset_upload_sessions() -> List[Dict[str, Any]]:
 
 def get_dataset_upload_session(session_id: str) -> Dict[str, Any]:
     job = _load_dataset_upload_session_job(session_id, required=True)
-    assert job is not None
+    if job is None:
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail="dataset_upload_session_not_found",
+        )
     return _dataset_upload_session_status(job, source="memory")
 
 
@@ -17655,7 +17659,11 @@ def upload_dataset_session_batch(
                 status_code=HTTP_400_BAD_REQUEST, detail="dataset_upload_batch_mismatch"
             )
         job = _load_dataset_upload_session_job(session_id, required=True)
-        assert job is not None
+        if job is None:
+            raise HTTPException(
+                status_code=HTTP_404_NOT_FOUND,
+                detail="dataset_upload_session_not_found",
+            )
         with job.lock:
             with DATASET_UPLOAD_SESSIONS_LOCK:
                 if DATASET_UPLOAD_SESSIONS.get(str(session_id or "")) is not job:
@@ -17792,7 +17800,11 @@ def upload_dataset_session_batch(
 
 def finalize_dataset_upload_session(session_id: str) -> Dict[str, Any]:
     job = _load_dataset_upload_session_job(session_id, required=True)
-    assert job is not None
+    if job is None:
+        raise HTTPException(
+            status_code=HTTP_404_NOT_FOUND,
+            detail="dataset_upload_session_not_found",
+        )
     with job.lock:
         with DATASET_UPLOAD_SESSIONS_LOCK:
             if DATASET_UPLOAD_SESSIONS.get(str(session_id or "")) is not job:
@@ -36292,6 +36304,11 @@ def _data_ingestion_encode_prepared_images(
         model_obj, processor_obj, resolved_model, device_name = _data_ingestion_get_dinov3(model_name)
         if encoder_norm == "local_salad":
             salad_head, salad_meta = _load_local_salad_head(salad_head_id, device_name=_dinov3_aux_torch_device(device_name))
+    if encoder_norm == "local_salad" and salad_head is None:
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="local_salad_head_missing",
+        )
     resolved_batch = max(1, min(int(batch_size or 16), len(prepared)))
     features: List[np.ndarray] = []
     local_vendi_metrics: List[Dict[str, float]] = []
@@ -36318,7 +36335,6 @@ def _data_ingestion_encode_prepared_images(
                         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="dinov3_global_token_missing")
                     if return_local_vendi:
                         local_vendi_metrics.extend(_data_ingestion_patch_token_local_vendi_metrics(patch_np))
-                    assert salad_head is not None
                     if is_mlx_local_salad_head(salad_head):
                         features.append(_encode_local_salad_head_np(salad_head, patch_np, cls_np))
                     else:
@@ -36354,7 +36370,6 @@ def _data_ingestion_encode_prepared_images(
                             raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail="cradio_spatial_tokens_missing")
                         if return_local_vendi:
                             local_vendi_metrics.extend(_data_ingestion_patch_token_local_vendi_metrics(spatial_tokens))
-                        assert salad_head is not None
                         if is_mlx_local_salad_head(salad_head):
                             features.append(_encode_local_salad_head_np(salad_head, spatial_tokens, summary_tokens))
                         else:
@@ -36392,7 +36407,6 @@ def _data_ingestion_encode_prepared_images(
                                 global_token = last_hidden[:, 0, :]
                             if return_local_vendi:
                                 local_vendi_metrics.extend(_data_ingestion_patch_token_local_vendi_metrics(last_hidden[:, 1:, :]))
-                            assert salad_head is not None
                             features.append(_encode_local_salad_head_np(salad_head, last_hidden[:, 1:, :], global_token))
                         else:
                             feats = getattr(outputs, "pooler_output", None)
@@ -53675,7 +53689,11 @@ def qwen_caption(payload: QwenCaptionRequest):
         resolve_main_runtime()
         _raise_if_qwen_cancelled()
         if caption_mode == "windowed":
-            assert window_size is not None
+            if window_size is None:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="qwen_caption_window_size_invalid",
+                )
             window_index = 0
             window_model_id = desired_model_id
             window_base_model_id = window_model_id

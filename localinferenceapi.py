@@ -48957,18 +48957,21 @@ def delete_clip_classifier(rel_path: str = Query(...)):
     )
     if classifier_path is None:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
+    meta_path = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
+    try:
+        if meta_path.exists() or meta_path.is_symlink():
+            meta_path.unlink()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"classifier_meta_delete_failed:{exc}",
+        ) from exc
     try:
         classifier_path.unlink()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found") from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
-    meta_path = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
-    try:
-        if meta_path.exists() or meta_path.is_symlink():
-            meta_path.unlink()
-    except Exception:
-        pass
     try:
         if (
             active_classifier_path
@@ -49043,26 +49046,38 @@ def rename_clip_classifier(
         else:
             raise HTTPException(status_code=HTTP_409_CONFLICT, detail="classifier_rename_conflict")
 
-    try:
-        classifier_path.rename(target_path)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found") from exc
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
-
     old_meta = Path(os.path.splitext(str(classifier_path))[0] + ".meta.pkl")
     new_meta = Path(os.path.splitext(str(target_path))[0] + ".meta.pkl")
+    meta_moved = False
     try:
         old_meta_safe = _safe_classifier_meta_path_impl(classifier_path)
         if old_meta_safe is not None and old_meta_safe == old_meta.resolve():
             if new_meta.exists() or new_meta.is_symlink():
-                try:
-                    new_meta.unlink()
-                except Exception:
-                    pass
+                new_meta.unlink()
             old_meta.replace(new_meta)
-    except Exception:
-        pass
+            meta_moved = True
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"classifier_meta_rename_failed:{exc}",
+        ) from exc
+
+    try:
+        classifier_path.rename(target_path)
+    except FileNotFoundError as exc:
+        if meta_moved:
+            try:
+                new_meta.replace(old_meta)
+            except Exception:
+                pass
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found") from exc
+    except Exception as exc:  # noqa: BLE001
+        if meta_moved:
+            try:
+                new_meta.replace(old_meta)
+            except Exception:
+                pass
+        raise HTTPException(status_code=HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
     try:
         global active_classifier_path

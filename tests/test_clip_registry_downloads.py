@@ -246,6 +246,36 @@ def test_delete_clip_classifier_unlinks_broken_meta_symlink(tmp_path, monkeypatc
     assert not meta_path.is_symlink()
 
 
+def test_delete_clip_classifier_keeps_model_when_meta_delete_fails(
+    tmp_path, monkeypatch
+) -> None:
+    classifier_path = tmp_path / "head.pkl"
+    meta_path = tmp_path / "head.meta.pkl"
+    classifier_path.write_bytes(b"model")
+    meta_path.write_bytes(b"meta")
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_resolve_agent_clip_classifier_path_impl",
+        lambda *args, **kwargs: classifier_path,
+    )
+    original_unlink = Path.unlink
+
+    def fail_meta_unlink(self: Path, *args, **kwargs):
+        if self == meta_path:
+            raise OSError("forced metadata delete failure")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_meta_unlink)
+
+    with pytest.raises(HTTPException) as exc_info:
+        localinferenceapi.delete_clip_classifier(rel_path="head.pkl")
+
+    assert exc_info.value.status_code == 500
+    assert str(exc_info.value.detail).startswith("classifier_meta_delete_failed:")
+    assert classifier_path.read_bytes() == b"model"
+    assert meta_path.read_bytes() == b"meta"
+
+
 def test_delete_clip_classifier_rejects_symlink_alias_without_target_unlink(
     tmp_path, monkeypatch
 ) -> None:
@@ -334,6 +364,67 @@ def test_rename_clip_classifier_moves_file_meta_and_active_state(tmp_path, monke
     assert not classifier_path.exists()
     assert not meta_path.exists()
     assert localinferenceapi.active_classifier_path == str(renamed_path)
+
+
+def test_rename_clip_classifier_keeps_model_when_meta_move_fails(
+    tmp_path, monkeypatch
+) -> None:
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    classifiers_root.mkdir(parents=True)
+    classifier_path = classifiers_root / "head.pkl"
+    meta_path = classifiers_root / "head.meta.pkl"
+    classifier_path.write_bytes(b"model")
+    meta_path.write_bytes(b"meta")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", upload_root)
+    original_replace = Path.replace
+
+    def fail_meta_replace(self: Path, target):
+        if self == meta_path:
+            raise OSError("forced metadata rename failure")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", fail_meta_replace)
+
+    with pytest.raises(HTTPException) as exc_info:
+        localinferenceapi.rename_clip_classifier(rel_path="head.pkl", new_name="renamed")
+
+    assert exc_info.value.status_code == 500
+    assert str(exc_info.value.detail).startswith("classifier_meta_rename_failed:")
+    assert classifier_path.read_bytes() == b"model"
+    assert meta_path.read_bytes() == b"meta"
+    assert not (classifiers_root / "renamed.pkl").exists()
+    assert not (classifiers_root / "renamed.meta.pkl").exists()
+
+
+def test_rename_clip_classifier_rolls_back_meta_when_model_rename_fails(
+    tmp_path, monkeypatch
+) -> None:
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    classifiers_root.mkdir(parents=True)
+    classifier_path = classifiers_root / "head.pkl"
+    meta_path = classifiers_root / "head.meta.pkl"
+    classifier_path.write_bytes(b"model")
+    meta_path.write_bytes(b"meta")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", upload_root)
+    original_rename = Path.rename
+
+    def fail_model_rename(self: Path, target):
+        if self == classifier_path:
+            raise OSError("forced model rename failure")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", fail_model_rename)
+
+    with pytest.raises(HTTPException) as exc_info:
+        localinferenceapi.rename_clip_classifier(rel_path="head.pkl", new_name="renamed")
+
+    assert exc_info.value.status_code == 500
+    assert classifier_path.read_bytes() == b"model"
+    assert meta_path.read_bytes() == b"meta"
+    assert not (classifiers_root / "renamed.pkl").exists()
+    assert not (classifiers_root / "renamed.meta.pkl").exists()
 
 
 def test_rename_clip_classifier_does_not_follow_existing_target_symlink(

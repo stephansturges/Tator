@@ -2811,3 +2811,34 @@ preserving the exact validation story for storage and artifact-write fixes.
   controls), UI smoke, Tier-0 fuzz, skip-GPU fast fuzz wrapper, backend health
   summary, `node --check ybat-master/ybat.js`, and `git diff --check`. A
   post-E2E dataset list confirmed no generated `pw_*` datasets remained.
+
+## 2026-06-13: CLIP Classifier Sidecar Failure Sweep
+
+- Continued the user-facing storage sweep on CLIP classifier registry actions,
+  where model files and `.meta.pkl` sidecars must remain in sync after rename
+  or delete operations.
+- Found that classifier delete removed the main `.pkl` first and then attempted
+  best-effort metadata cleanup. If sidecar removal failed, the UI could report a
+  successful delete while stale classifier metadata remained on disk.
+- Found that classifier rename moved the main `.pkl` first and then attempted
+  best-effort metadata movement. If sidecar movement failed, the UI could report
+  a successful rename while leaving metadata under the old name.
+- Hardened delete so metadata cleanup is attempted before the classifier file is
+  removed. A metadata cleanup failure now raises
+  `classifier_meta_delete_failed:*` and leaves the classifier file untouched.
+- Hardened rename so safe sidecar metadata is moved before the classifier file,
+  failures raise `classifier_meta_rename_failed:*`, and metadata is rolled back
+  if the final classifier rename fails.
+- Preserved the existing metadata symlink invariant: metadata reads only use
+  resolved regular files within the classifier root, while delete may unlink a
+  metadata symlink itself without following it.
+- Validation: `py_compile localinferenceapi.py` and touched tests, focused CLIP
+  registry and artifact-publish tests (`83 passed`), full pytest (`1574
+  passed, 40 skipped`), full UI E2E (`42 passed`), UI contract runner (`82`
+  checks), UI endpoint method check (`277` fetches), endpoint map (`184`
+  endpoints), Playwright control coverage (`83` controls), UI OpenAPI sanity
+  (`167` tested), OpenAPI missing-param sanity (`76` checks), OpenAPI
+  missing-query sanity (`5` checks), UI negative tests (`18` checks), UI
+  data-ops smoke, UI smoke, Tier-0 fuzz, skip-GPU fast fuzz wrapper, backend
+  health summary, `node --check ybat-master/ybat.js`, and `git diff --check`.
+  A post-E2E dataset list confirmed no generated `pw_*` datasets remained.

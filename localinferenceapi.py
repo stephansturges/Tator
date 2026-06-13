@@ -42079,7 +42079,8 @@ def _persist_qwen_run_metadata(
     result_metadata = getattr(result, "metadata", None)
     if isinstance(result_metadata, dict):
         metadata.update(result_metadata)
-    _write_qwen_run_metadata_file(result_path, metadata)
+    if not _write_qwen_run_metadata_file(result_path, metadata):
+        raise QwenTrainingError("qwen_run_metadata_write_failed")
     return metadata
 
 

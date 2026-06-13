@@ -650,6 +650,40 @@ def test_qwen_training_late_cancel_skips_metadata_publish(tmp_path, monkeypatch)
     assert not (result_path / api.QWEN_METADATA_FILENAME).exists()
 
 
+def test_qwen_training_worker_fails_when_metadata_publish_fails(tmp_path, monkeypatch):
+    if api.QwenTrainingConfig is None or api.QwenTrainingResult is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    result_path = tmp_path / "run"
+    config = api.QwenTrainingConfig(
+        dataset_root=str(tmp_path / "dataset"),
+        result_path=str(result_path),
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        run_name="metadata-failure",
+    )
+    job = api.QwenTrainingJob(job_id="qwen_metadata_failure", config={})
+
+    def fake_train_qwen_model(_config, **_kwargs):
+        return api.QwenTrainingResult(
+            config=config,
+            checkpoints=[str(result_path / "latest")],
+            latest_checkpoint=str(result_path / "latest"),
+            epochs_ran=1,
+        )
+
+    monkeypatch.setattr(api.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(api, "_prepare_for_qwen_training", lambda: None)
+    monkeypatch.setattr(api, "_finalize_qwen_training_environment", lambda: None)
+    monkeypatch.setattr(api, "train_qwen_model", fake_train_qwen_model)
+    monkeypatch.setattr(api, "_write_qwen_run_metadata_file", lambda *_args, **_kwargs: False)
+
+    api._start_qwen_training_worker(job, config)
+
+    assert job.status == "failed"
+    assert job.error == "qwen_run_metadata_write_failed"
+    assert job.result is None
+
+
 def test_qwen_training_config_rejects_symlinked_runs_root(tmp_path, monkeypatch):
     if api.QwenTrainingConfig is None:
         pytest.skip("Qwen training dependencies are not importable in this environment")
@@ -733,7 +767,7 @@ def test_qwen_training_metadata_replaces_symlinked_metadata_file(tmp_path):
     assert persisted["id"] == metadata["id"] == "safe-meta"
 
 
-def test_qwen_training_metadata_skips_symlinked_result_dir_without_target_write(tmp_path):
+def test_qwen_training_metadata_rejects_symlinked_result_dir_without_target_write(tmp_path):
     if api.QwenTrainingConfig is None or api.QwenTrainingResult is None:
         pytest.skip("Qwen training dependencies are not importable in this environment")
 
@@ -757,13 +791,13 @@ def test_qwen_training_metadata_skips_symlinked_result_dir_without_target_write(
         epochs_ran=1,
     )
 
-    metadata = api._persist_qwen_run_metadata(result_path, config, result)
+    with pytest.raises(api.QwenTrainingError, match="qwen_run_metadata_write_failed"):
+        api._persist_qwen_run_metadata(result_path, config, result)
 
-    assert metadata["id"] == "linked-run"
     assert not (outside_run / api.QWEN_METADATA_FILENAME).exists()
 
 
-def test_qwen_training_metadata_skips_symlinked_result_parent_without_target_write(tmp_path):
+def test_qwen_training_metadata_rejects_symlinked_result_parent_without_target_write(tmp_path):
     if api.QwenTrainingConfig is None or api.QwenTrainingResult is None:
         pytest.skip("Qwen training dependencies are not importable in this environment")
 
@@ -788,10 +822,36 @@ def test_qwen_training_metadata_skips_symlinked_result_parent_without_target_wri
         epochs_ran=1,
     )
 
-    metadata = api._persist_qwen_run_metadata(result_path, config, result)
+    with pytest.raises(api.QwenTrainingError, match="qwen_run_metadata_write_failed"):
+        api._persist_qwen_run_metadata(result_path, config, result)
 
-    assert metadata["id"] == "linked-parent-run"
     assert list(outside_run.iterdir()) == []
+
+
+def test_qwen_training_metadata_fails_when_metadata_path_is_directory(tmp_path):
+    if api.QwenTrainingConfig is None or api.QwenTrainingResult is None:
+        pytest.skip("Qwen training dependencies are not importable in this environment")
+
+    result_path = tmp_path / "run"
+    result_path.mkdir()
+    (result_path / api.QWEN_METADATA_FILENAME).mkdir()
+    config = api.QwenTrainingConfig(
+        dataset_root=str(tmp_path / "dataset"),
+        result_path=str(result_path),
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        run_name="metadata-dir",
+    )
+    result = api.QwenTrainingResult(
+        config=config,
+        checkpoints=[str(result_path / "latest")],
+        latest_checkpoint=str(result_path / "latest"),
+        epochs_ran=1,
+    )
+
+    with pytest.raises(api.QwenTrainingError, match="qwen_run_metadata_write_failed"):
+        api._persist_qwen_run_metadata(result_path, config, result)
+
+    assert (result_path / api.QWEN_METADATA_FILENAME).is_dir()
 
 
 def test_qwen_model_registry_skips_transformers_runs_without_adapter_artifacts(tmp_path, monkeypatch):

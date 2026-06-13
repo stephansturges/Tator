@@ -2873,3 +2873,33 @@ preserving the exact validation story for storage and artifact-write fixes.
   storage health summary, `node --check ybat-master/ybat.js`, and `git diff
   --check`. A post-E2E dataset list confirmed no generated `pw_*` datasets
   remained.
+
+## 2026-06-13: Qwen Training Metadata Publish Sweep
+
+- Continued the training-output registry sweep on Qwen training runs. A Qwen
+  run is only useful from the UI if its `metadata.json` is written in the run
+  directory and the model registry can discover it later.
+- Found that `_persist_qwen_run_metadata` ignored the boolean result from
+  `_write_qwen_run_metadata_file`. A symlinked result path, symlinked parent, or
+  unwritable `metadata.json` could skip the metadata write while the worker still
+  marked the job as succeeded and returned a success-looking metadata payload.
+- Hardened the publish path so a failed metadata write raises
+  `qwen_run_metadata_write_failed`. The training worker now reports the job as
+  failed instead of successful when metadata cannot be written.
+- Preserved the existing escape-protection behavior: symlinked result
+  directories or parents still do not write through to outside targets, but they
+  now fail closed instead of silently skipping the registry metadata.
+- Added regressions for worker-level metadata publish failure, symlinked result
+  directory rejection, symlinked result parent rejection, and unwritable
+  metadata path rejection.
+- Validation: `py_compile localinferenceapi.py` and touched tests, focused Qwen
+  runtime/active/registry/job lifecycle tests (`106 passed`), full pytest (`1579
+  passed, 40 skipped`), full UI E2E (`42 passed`), UI contract runner (`82`
+  checks), UI endpoint method check (`277` fetches), endpoint map (`184`
+  endpoints), Playwright control coverage (`83` controls), UI OpenAPI sanity
+  (`167` tested), OpenAPI missing-param sanity (`76` checks), OpenAPI
+  missing-query sanity (`5` checks), UI negative tests (`18` checks), UI
+  data-ops smoke, UI smoke, Tier-0 fuzz, skip-GPU fast fuzz wrapper, backend
+  storage health summary, `node --check ybat-master/ybat.js`, and `git diff
+  --check`. A post-E2E dataset list confirmed no generated `pw_*` datasets
+  remained.

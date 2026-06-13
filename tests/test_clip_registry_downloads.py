@@ -72,6 +72,88 @@ def test_download_clip_classifier_zip_skips_symlink_meta_escape(tmp_path, monkey
     assert payloads["head.pkl"] == b"model"
 
 
+def test_download_clip_classifier_zip_fails_if_resolved_meta_cannot_be_written(tmp_path, monkeypatch) -> None:
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    classifiers_root.mkdir(parents=True, exist_ok=True)
+    classifier_path = classifiers_root / "head.pkl"
+    classifier_path.write_bytes(b"model")
+    meta_path = classifiers_root / "head.meta.pkl"
+    meta_path.write_bytes(b"meta")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", upload_root)
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_resolve_agent_clip_classifier_path_impl",
+        lambda *args, **kwargs: classifier_path,
+    )
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_safe_classifier_meta_path_impl",
+        lambda _path: meta_path,
+    )
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_find_labelmap_for_classifier_impl",
+        lambda *args, **kwargs: None,
+    )
+    real_zip_write = localinferenceapi._zip_write_safe_file
+
+    def fail_meta_write(zf, path, root, arcname):
+        if Path(path) == meta_path:
+            return False
+        return real_zip_write(zf, path, root, arcname)
+
+    monkeypatch.setattr(localinferenceapi, "_zip_write_safe_file", fail_meta_write)
+
+    with pytest.raises(localinferenceapi.HTTPException) as exc_info:
+        localinferenceapi.download_clip_classifier_zip(rel_path="head.pkl")
+
+    assert exc_info.value.status_code == 412
+    assert exc_info.value.detail == "clip_classifier_zip_meta_missing"
+
+
+def test_download_clip_classifier_zip_fails_if_resolved_labelmap_cannot_be_written(tmp_path, monkeypatch) -> None:
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    labelmaps_root = upload_root / "labelmaps"
+    classifiers_root.mkdir(parents=True, exist_ok=True)
+    labelmaps_root.mkdir(parents=True, exist_ok=True)
+    classifier_path = classifiers_root / "head.pkl"
+    classifier_path.write_bytes(b"model")
+    labelmap_path = labelmaps_root / "head.txt"
+    labelmap_path.write_text("target\n", encoding="utf-8")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", upload_root)
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_resolve_agent_clip_classifier_path_impl",
+        lambda *args, **kwargs: classifier_path,
+    )
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_safe_classifier_meta_path_impl",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_find_labelmap_for_classifier_impl",
+        lambda *args, **kwargs: labelmap_path,
+    )
+    real_zip_write = localinferenceapi._zip_write_safe_file
+
+    def fail_labelmap_write(zf, path, root, arcname):
+        if Path(path) == labelmap_path:
+            return False
+        return real_zip_write(zf, path, root, arcname)
+
+    monkeypatch.setattr(localinferenceapi, "_zip_write_safe_file", fail_labelmap_write)
+
+    with pytest.raises(localinferenceapi.HTTPException) as exc_info:
+        localinferenceapi.download_clip_classifier_zip(rel_path="head.pkl")
+
+    assert exc_info.value.status_code == 412
+    assert exc_info.value.detail == "clip_classifier_zip_labelmap_missing"
+
+
 def test_load_clip_head_skips_symlink_meta_escape(tmp_path) -> None:
     classifier_path = tmp_path / "head.pkl"
     classifier_path.write_bytes(b"model")

@@ -49052,9 +49052,17 @@ def download_clip_classifier_zip(rel_path: str = Query(...)):
         if not _zip_write_safe_file(zf, classifier_path, classifiers_root, classifier_path.name):
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
         if meta_path is not None:
-            _zip_write_safe_file(zf, meta_path, classifiers_root, meta_path.name)
+            if not _zip_write_safe_file(zf, meta_path, classifiers_root, meta_path.name):
+                raise HTTPException(
+                    status_code=HTTP_412_PRECONDITION_FAILED,
+                    detail="clip_classifier_zip_meta_missing",
+                )
         if labelmap_path is not None:
-            _zip_write_safe_file(zf, labelmap_path, UPLOAD_ROOT.resolve(), labelmap_path.name)
+            if not _zip_write_safe_file(zf, labelmap_path, UPLOAD_ROOT.resolve(), labelmap_path.name):
+                raise HTTPException(
+                    status_code=HTTP_412_PRECONDITION_FAILED,
+                    detail="clip_classifier_zip_labelmap_missing",
+                )
     buffer.seek(0)
     filename = f"{classifier_path.stem}_clip_head.zip"
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}

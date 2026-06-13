@@ -3003,3 +3003,21 @@ preserving the exact validation story for storage and artifact-write fixes.
   (`tests/test_detector_active_lifecycle.py`, `44 passed`), `py_compile
   localinferenceapi.py tests/test_detector_active_lifecycle.py`, and
   `git diff --check`.
+
+## 2026-06-13: CLIP Classifier Bundle Sidecar Completeness
+
+- Continued the user-downloadable artifact sweep on CLIP classifier bundle ZIPs.
+  The endpoint correctly refused to archive an unsafe classifier file and
+  intentionally ignored symlinked sidecar metadata, but if metadata or a labelmap
+  had already resolved as a bundle sidecar, a later write failure could silently
+  omit it.
+- Made resolved sidecars fail closed: a metadata sidecar that cannot be written
+  returns `clip_classifier_zip_meta_missing`, and a resolved labelmap that cannot
+  be written returns `clip_classifier_zip_labelmap_missing`. Classifier-only
+  legacy bundles and pre-filtered symlink sidecars remain supported.
+- Added regressions for both sidecar write-failure paths while preserving the
+  existing symlink-meta escape behavior.
+- Validation: CLIP registry download suite
+  (`tests/test_clip_registry_downloads.py`, `35 passed`), `py_compile
+  localinferenceapi.py tests/test_clip_registry_downloads.py`, and
+  `git diff --check`.

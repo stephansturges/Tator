@@ -2985,3 +2985,21 @@ preserving the exact validation story for storage and artifact-write fixes.
   (`tests/test_data_ingestion.py -k accepted_export`, `8 passed`), full
   Data Ingestion test module (`90 passed`), `py_compile localinferenceapi.py`,
   and `git diff --check`.
+
+## 2026-06-13: Detector Run Download Completeness
+
+- Continued the detector artifact-lifecycle sweep on user-downloadable YOLO and
+  RF-DETR run ZIPs. The existing export helper safely skipped symlink escapes,
+  but the normal run download endpoints could still serve a ZIP missing the
+  runnable checkpoint, label map, or run metadata.
+- Added explicit required-file gates for detector run downloads. YOLO ZIPs now
+  require `best.pt`, `labelmap.txt`, and `run.json`; RF-DETR ZIPs require a safe
+  best checkpoint plus `labelmap.txt` and `run.json`. Optional logs, metrics, and
+  plots remain best-effort archive entries.
+- Updated symlink-escape regressions so required checkpoint escapes fail closed
+  with `*_run_download_incomplete` instead of producing a broken partial ZIP, and
+  added positive coverage that missing optional files do not block downloads.
+- Validation: detector lifecycle suite
+  (`tests/test_detector_active_lifecycle.py`, `44 passed`), `py_compile
+  localinferenceapi.py tests/test_detector_active_lifecycle.py`, and
+  `git diff --check`.

@@ -14094,6 +14094,7 @@ YOLO_KEEP_FILES = {
     "head_graft_audit.jsonl",
     YOLO_RUN_META_NAME,
 }
+YOLO_DOWNLOAD_REQUIRED_FILES = {"best.pt", "labelmap.txt", YOLO_RUN_META_NAME}
 
 RFDETR_JOB_ROOT = Path(os.environ.get("RFDETR_TRAINING_ROOT", "./uploads/rfdetr_runs"))
 _init_storage_root(RFDETR_JOB_ROOT)
@@ -14126,6 +14127,7 @@ RFDETR_KEEP_FILES = {
     "labelmap.txt",
     RFDETR_RUN_META_NAME,
 }
+RFDETR_DOWNLOAD_REQUIRED_FILES = {"labelmap.txt", RFDETR_RUN_META_NAME}
 
 YOLO_INFER_LOCK = threading.RLock()
 yolo_infer_model: Any = None
@@ -50926,6 +50928,19 @@ def download_rfdetr_run(run_id: str):
     )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
+    best_path_str = _rfdetr_best_checkpoint_impl(run_dir)
+    missing = [
+        name
+        for name in sorted(RFDETR_DOWNLOAD_REQUIRED_FILES)
+        if not _safe_regular_file_within_root(run_dir / name, run_dir)
+    ]
+    if not best_path_str:
+        missing.append("checkpoint_best_total.pth|checkpoint_best_ema.pth|checkpoint_best_regular.pth")
+    if missing:
+        raise HTTPException(
+            status_code=HTTP_412_PRECONDITION_FAILED,
+            detail={"error": "rfdetr_run_download_incomplete", "missing": missing},
+        )
     meta = _rfdetr_load_run_meta_impl(run_dir, meta_name=RFDETR_RUN_META_NAME)
     run_name = meta.get("config", {}).get("run_name") or meta.get("job_id") or run_id
     safe_name = _sanitize_yolo_run_id_impl(run_name)
@@ -51648,6 +51663,16 @@ def download_yolo_run(run_id: str):
     )
     if not run_dir.exists():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
+    missing = [
+        name
+        for name in sorted(YOLO_DOWNLOAD_REQUIRED_FILES)
+        if not _safe_regular_file_within_root(run_dir / name, run_dir)
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=HTTP_412_PRECONDITION_FAILED,
+            detail={"error": "yolo_run_download_incomplete", "missing": missing},
+        )
     meta = _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
     run_name = meta.get("config", {}).get("run_name") or meta.get("job_id") or run_id
     safe_name = _sanitize_yolo_run_id_impl(run_name)

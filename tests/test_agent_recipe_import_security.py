@@ -93,6 +93,20 @@ def test_agent_recipe_import_rejects_symlink_entry(tmp_path: Path) -> None:
     assert exc_info.value.detail == "agent_recipe_import_symlink_unsupported"
 
 
+def test_agent_recipe_import_rejects_duplicate_members(tmp_path: Path) -> None:
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("recipe.json", json.dumps({"id": "r1", "label": "demo"}))
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            zf.writestr("recipe.json", json.dumps({"id": "r2", "label": "shadow"}))
+
+    with pytest.raises(HTTPException) as exc_info:
+        _call_import(buf.getvalue(), tmp_path)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_recipe_import_duplicate_files"
+
+
 def test_agent_recipe_import_rejects_oversize_entry(tmp_path: Path) -> None:
     payload = _make_zip(
         {

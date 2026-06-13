@@ -117,6 +117,21 @@ def test_import_prepass_recipe_rejects_symlink_member(tmp_path: Path) -> None:
     assert exc_info.value.detail == "prepass_recipe_archive_symlink_unsupported"
 
 
+def test_import_prepass_recipe_rejects_duplicate_members(tmp_path: Path) -> None:
+    zip_path = tmp_path / "duplicate_recipe.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"schema_version": 2, "assets": []}))
+        zf.writestr("prepass.meta.json", json.dumps({"name": "ok", "config": {}}))
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            zf.writestr("prepass.meta.json", json.dumps({"name": "shadow", "config": {}}))
+
+    with pytest.raises(HTTPException) as exc_info:
+        _call_import(zip_path, tmp_path)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prepass_recipe_archive_duplicate_files"
+
+
 def test_import_prepass_recipe_rejects_invalid_zip(tmp_path: Path) -> None:
     zip_path = tmp_path / "broken_recipe.zip"
     zip_path.write_bytes(b"not a zip")

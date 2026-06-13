@@ -3287,3 +3287,24 @@ preserving the exact validation story for storage and artifact-write fixes.
   security coverage (`tests/test_agent_cascade_import_security.py`,
   `12 passed`), `py_compile services/agent_cascades.py
   tests/test_agent_cascade_export_safety.py`, and `git diff --check`.
+
+## 2026-06-13: Portable ZIP Duplicate Member Rejection
+
+- Continued the user-supplied archive import sweep. Agent Recipe, Agent
+  Cascade, legacy prepass recipe, and EDR package imports already rejected
+  path traversal, symlinks, and oversized payloads, but duplicate ZIP member
+  names were still accepted.
+- Duplicate ZIP members can make one apparent manifest or recipe shadow
+  another depending on whether the code path reads by name or extracts the full
+  archive, so portable imports now fail closed before parsing or extraction.
+- EDR cached package export validation also rejects duplicate members before
+  serving a package ZIP back to the user.
+- Added duplicate-entry regressions for Agent Recipe import, Agent Cascade
+  import, legacy prepass recipe import, EDR import, and cached EDR export.
+- Validation: portable import/export security coverage
+  (`tests/test_agent_recipe_import_security.py`,
+  `tests/test_agent_cascade_import_security.py`,
+  `tests/test_prepass_recipe_import_security.py`, and
+  `tests/test_edr_packages.py`, `69 passed`), `py_compile
+  services/prepass_recipes.py services/agent_cascades.py
+  services/edr_packages.py` plus affected tests, and `git diff --check`.

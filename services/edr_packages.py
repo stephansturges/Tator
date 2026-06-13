@@ -674,7 +674,10 @@ def _validate_edr_package_zip(zip_path: Path) -> None:
             bad_member = zf.testzip()
             if bad_member is not None:
                 raise RuntimeError("edr_package_zip_corrupt")
-            names = set(zf.namelist())
+            raw_names = zf.namelist()
+            if len(raw_names) != len(set(raw_names)):
+                raise RuntimeError("edr_package_duplicate_files")
+            names = set(raw_names)
             for required_name in EDR_PACKAGE_REQUIRED_FILES:
                 if required_name not in names:
                     if required_name == EDR_PACKAGE_MANIFEST_NAME:
@@ -703,8 +706,12 @@ def _extract_zip_safely(
     root = dest_dir.resolve()
     with zipfile.ZipFile(zip_path) as zf:
         total_uncompressed = 0
+        seen_members: set[str] = set()
         for info in zf.infolist():
             member_name = info.filename or ""
+            if member_name in seen_members:
+                raise RuntimeError("edr_package_duplicate_files")
+            seen_members.add(member_name)
             member_win = PureWindowsPath(member_name)
             target = (dest_dir / member_name).resolve()
             if (

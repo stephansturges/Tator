@@ -101,6 +101,22 @@ def test_agent_cascade_import_rejects_symlink_entries(tmp_path: Path) -> None:
     assert exc_info.value.detail == "agent_cascade_import_symlink_unsupported"
 
 
+def test_agent_cascade_import_rejects_duplicate_members(tmp_path: Path) -> None:
+    cascade = {"label": "demo", "steps": [{"recipe_id": "r1"}], "dedupe": {}}
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("cascade.json", json.dumps(cascade))
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            zf.writestr("cascade.json", json.dumps({"label": "shadow", "steps": []}))
+        zf.writestr("recipes/r1.zip", b"recipe-bytes")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _call_import(buf.getvalue(), tmp_path)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_cascade_import_duplicate_files"
+
+
 @pytest.mark.parametrize("member_name", ["C:/cascade.json", "\\\\server\\share\\cascade.json"])
 def test_agent_cascade_import_rejects_windows_absolute_members(
     tmp_path: Path, member_name: str

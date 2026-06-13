@@ -58,6 +58,13 @@ def _zip_member_path_is_unsafe(name: str) -> bool:
     )
 
 
+def _zip_member_names_or_duplicate_error(zf: zipfile.ZipFile, *, detail: str) -> List[str]:
+    names = zf.namelist()
+    if len(names) != len(set(names)):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    return names
+
+
 def _agent_cascade_storage_root(
     root: Path,
     *,
@@ -446,7 +453,7 @@ def _import_agent_cascade_zip_obj_impl(
     max_recipe_zip_bytes: Optional[int] = None,
     max_total_uncompressed_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
-    names = zf.namelist()
+    names = _zip_member_names_or_duplicate_error(zf, detail="agent_cascade_import_duplicate_files")
     cascade_name = None
     for name in names:
         if _zip_member_path_is_unsafe(name):

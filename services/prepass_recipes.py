@@ -215,6 +215,13 @@ def _zip_write_safe_file(zf: zipfile.ZipFile, path: Path, root: Path, arcname: s
     return True
 
 
+def _zip_member_names_or_duplicate_error(zf: zipfile.ZipFile, *, detail: str) -> List[str]:
+    names = zf.namelist()
+    if len(names) != len(set(names)):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
+    return names
+
+
 def _write_prepass_recipe_meta(recipe_dir: Path, payload: Dict[str, Any]) -> None:
     meta_path = recipe_dir / "prepass.meta.json"
     _write_json_file(meta_path, payload)
@@ -1696,7 +1703,7 @@ def _import_agent_recipe_zip_obj_impl(
     data: Dict[str, Any] = {}
     crops: Dict[str, bytes] = {}
     clip_head_files: Dict[str, bytes] = {}
-    names = zf.namelist()
+    names = _zip_member_names_or_duplicate_error(zf, detail="agent_recipe_import_duplicate_files")
     json_name = None
     for name in names:
         if name.lower().endswith(".json"):
@@ -2256,8 +2263,15 @@ def _import_prepass_recipe_from_zip_impl(
     def _extract_zip_safely(zf: zipfile.ZipFile, dest_dir: Path) -> None:
         root = dest_dir.resolve()
         total_uncompressed = 0
+        seen_members: set[str] = set()
         for info in zf.infolist():
             member_name = info.filename or ""
+            if member_name in seen_members:
+                raise HTTPException(
+                    status_code=HTTP_400_BAD_REQUEST,
+                    detail="prepass_recipe_archive_duplicate_files",
+                )
+            seen_members.add(member_name)
             # Reject absolute paths and parent traversal entries before extraction.
             resolved_member = (dest_dir / member_name).resolve()
             if (

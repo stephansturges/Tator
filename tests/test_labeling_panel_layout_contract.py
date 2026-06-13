@@ -33,6 +33,11 @@ VOID_HTML_TAGS = {
     "track",
     "wbr",
 }
+DYNAMIC_JS_CREATED_IDS = {
+    "dataIngestionHoverPreview",
+    "classSplitGraphHoverPreview",
+    "classSplitDatasetAnalysisHoverPreview",
+}
 
 
 def _html() -> str:
@@ -120,6 +125,16 @@ def _parse_static_html() -> _HtmlNode:
     parser = _StaticHtmlParser()
     parser.feed(_html())
     return parser.root
+
+
+def _static_html_ids(html: str) -> set[str]:
+    matches = re.findall(r"""\bid=(?:"([^"]+)"|'([^']+)')""", html)
+    return {first or second for first, second in matches if first or second}
+
+
+def _static_get_element_by_id_refs(js: str) -> set[str]:
+    matches = re.findall(r"""document\.getElementById\(\s*(?:"([^"]+)"|'([^']+)')\s*\)""", js)
+    return {first or second for first, second in matches if first or second}
 
 
 def _nodes_by_tag(root: _HtmlNode, tag: str) -> list[_HtmlNode]:
@@ -249,6 +264,14 @@ def test_top_navigation_tabs_have_tooltips():
     assert "refreshUiTooltips(agentElements.stepsPromptPrefilter);" in js
     assert 'activeElements.clipSelect.title = "";' not in js
     assert 'agentElements.stepsPromptPrefilter.title = "";' not in js
+
+
+def test_static_get_element_by_id_bindings_exist_in_tator_html():
+    html_ids = _static_html_ids(_html())
+    js_refs = _static_get_element_by_id_refs(_js())
+    missing = sorted(js_refs - html_ids - DYNAMIC_JS_CREATED_IDS)
+
+    assert missing == []
 
 
 def test_yolo_import_and_export_controls_live_in_annotation_source_panel():

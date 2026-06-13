@@ -2618,7 +2618,6 @@ const AUTOMATION_LOCKED_TABS = new Set([
         overlapClassA: null,
         overlapClassB: null,
         dragMode: null,
-        clusterOverlay: null,
         clusterSource: null,
         clusterSensitivity: null,
         clusterMaxClusters: null,
@@ -21691,20 +21690,6 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.calibrationReportBoundary = document.getElementById("qwenCalibrationReportBoundary");
         qwenElements.calibrationReportUncertainty = document.getElementById("qwenCalibrationReportUncertainty");
         qwenElements.calibrationReportDiagnostics = document.getElementById("qwenCalibrationReportDiagnostics");
-        qwenElements.autoLabelStatus = document.getElementById("qwenAutoLabelStatus");
-        qwenElements.autoLabelModeSummary = document.getElementById("qwenAutoLabelModeSummary");
-        qwenElements.autoLabelMaxImages = document.getElementById("qwenAutoLabelMaxImages");
-        qwenElements.autoLabelSplit = document.getElementById("qwenAutoLabelSplit");
-        qwenElements.autoLabelUnlabeledOnly = document.getElementById("qwenAutoLabelUnlabeledOnly");
-        qwenElements.autoLabelClassNames = document.getElementById("qwenAutoLabelClassNames");
-        qwenElements.autoLabelWindowMode = document.getElementById("qwenAutoLabelWindowMode");
-        qwenElements.autoLabelOverlap = document.getElementById("qwenAutoLabelOverlap");
-        qwenElements.autoLabelUsePlannerCaption = document.getElementById("qwenAutoLabelUsePlannerCaption");
-        qwenElements.autoLabelRun = document.getElementById("qwenAutoLabelRun");
-        qwenElements.autoLabelCancel = document.getElementById("qwenAutoLabelCancel");
-        qwenElements.autoLabelProgressWrap = document.getElementById("qwenAutoLabelProgressWrap");
-        qwenElements.autoLabelProgressFill = document.getElementById("qwenAutoLabelProgressFill");
-        qwenElements.autoLabelProgressText = document.getElementById("qwenAutoLabelProgressText");
         onCalibrationProgress((job) => {
             updateCalibrationProgressUi(job);
         });
@@ -22240,20 +22225,6 @@ async function cancelRfDetrTrainingJobRequest() {
             qwenElements.prepassRecipeSelect.addEventListener("change", () => {
                 loadPrepassRecipeForInference({ suppressMissingWarning: true }).catch((error) => {
                     console.error("Prepass recipe load on selection failed", error);
-                });
-            });
-        }
-        if (qwenElements.autoLabelRun) {
-            qwenElements.autoLabelRun.addEventListener("click", () => {
-                startAutoLabelJob().catch((error) => {
-                    console.error("Automatic labeling start failed", error);
-                });
-            });
-        }
-        if (qwenElements.autoLabelCancel) {
-            qwenElements.autoLabelCancel.addEventListener("click", () => {
-                cancelAutoLabelJob().catch((error) => {
-                    console.error("Automatic labeling cancel failed", error);
                 });
             });
         }
@@ -40761,17 +40732,6 @@ async function cancelRfDetrTrainingJobRequest() {
             }
         });
         setButtonDisabled(classSplitElements.clusterRun, disabled);
-        const control = classSplitElements.clusterOverlay;
-        if (!control) {
-            return;
-        }
-        control.checked = false;
-        control.disabled = true;
-        const label = control.closest(".class-split-toggle");
-        if (label) {
-            label.classList.add("class-split-toggle--disabled");
-            label.title = "Cluster hulls are disabled. Use selected-class subclass cluster search below the plot.";
-        }
     }
 
     function getClassSplitBackendClusterById(clusterKey) {
@@ -44205,7 +44165,6 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.overlapClassA = document.getElementById("classSplitOverlapClassA");
         classSplitElements.overlapClassB = document.getElementById("classSplitOverlapClassB");
         classSplitElements.dragMode = document.getElementById("classSplitDragMode");
-        classSplitElements.clusterOverlay = document.getElementById("classSplitClusterOverlay");
         classSplitElements.clusterSource = document.getElementById("classSplitClusterSource");
         classSplitElements.clusterSensitivity = document.getElementById("classSplitClusterSensitivity");
         classSplitElements.clusterMaxClusters = document.getElementById("classSplitClusterMaxClusters");
@@ -44355,9 +44314,6 @@ async function cancelRfDetrTrainingJobRequest() {
         });
         if (classSplitElements.dragMode) {
             classSplitElements.dragMode.addEventListener("change", renderClassSplitPlot);
-        }
-        if (classSplitElements.clusterOverlay) {
-            classSplitElements.clusterOverlay.addEventListener("change", renderClassSplitPlot);
         }
         if (classSplitElements.clusterSource) {
             classSplitElements.clusterSource.addEventListener("change", refreshClassSplitClusterControls);
@@ -44550,8 +44506,6 @@ async function cancelRfDetrTrainingJobRequest() {
                     filteredCount: graphFilteredPoints.length,
                     proposalsAllowed: classSplitClusterProposalsAllowed(),
                     hullsAllowed: classSplitClusterHullsAllowed(),
-                    overlayDisabled: classSplitElements.clusterOverlay ? !!classSplitElements.clusterOverlay.disabled : true,
-                    overlayChecked: classSplitElements.clusterOverlay ? !!classSplitElements.clusterOverlay.checked : false,
                     clusterKeys: summaries.map((summary) => String(summary.clusterKey || "")),
                 };
             },

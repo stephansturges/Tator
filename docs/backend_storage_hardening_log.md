@@ -2662,3 +2662,25 @@ preserving the exact validation story for storage and artifact-write fixes.
   pycompile (`369` files), data-safety/path tests (`141 passed`), focused
   upload/data-ingestion/caption tests (`174 passed, 2 skipped`), UI smoke,
   and `SKIP_GPU=1` refactor validation.
+
+## 2026-06-13: Frontend DOM Binding Drift Sweep
+
+- Audited static `document.getElementById(...)` bindings against shipped
+  `tator.html` ids after the Class Split and Qwen UI reshaping work.
+- Removed stale JavaScript bindings for removed Qwen Auto Label controls while
+  keeping the backend/programmatic auto-label job code intact for automation
+  status and future explicit entry points.
+- Removed the remaining Class Split cluster-overlay ghost binding and test-hook
+  fields. Subclass cluster proposals still run through the selected-class
+  cluster-search controls; hull traces remain disabled.
+- Added a regression that fails if future static DOM id bindings point at
+  missing HTML ids, with only the dynamically created hover-preview ids
+  allowlisted.
+- Validation: `node --check ybat-master/ybat.js`, stale-id scan (`1094`
+  static refs, `0` missing), focused contract tests (`30 passed`), full pytest
+  (`1558 passed, 39 skipped`), focused navigation/auto-label/Class Split UI E2E
+  (`18 passed`), full UI E2E (`41 passed`), UI endpoint method check (`277`
+  fetches), UI contract runner (`82` checks), endpoint map (`170` paths), UI
+  OpenAPI sanity (`167` tested), UI negative tests (`18` checks), UI data-ops
+  smoke, OpenAPI missing-query sanity (`5` checks), OpenAPI missing-param
+  sanity (`76` checks), and `git diff --check`.

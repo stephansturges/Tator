@@ -531,7 +531,6 @@ def test_class_split_all_class_subclusters_require_class_filter(playwright_page)
     )
     cluster_state = page.evaluate("() => window.__TATOR_TEST_HOOKS__.classSplitClusterDebugState()")
     assert cluster_state["hullsAllowed"] is False, cluster_state
-    assert cluster_state["overlayDisabled"] is True, cluster_state
     assert cluster_state["proposalsAllowed"] is True, cluster_state
     assert cluster_state["clusterKeys"] == ["0", "1"], cluster_state
     page.wait_for_function(
@@ -553,7 +552,6 @@ def test_class_split_all_class_subclusters_require_class_filter(playwright_page)
     wrong_only_cluster_state = page.evaluate("() => window.__TATOR_TEST_HOOKS__.classSplitClusterDebugState()")
     assert wrong_only_cluster_state["filteredCount"] == 0, wrong_only_cluster_state
     assert wrong_only_cluster_state["hullsAllowed"] is False, wrong_only_cluster_state
-    assert wrong_only_cluster_state["overlayDisabled"] is True, wrong_only_cluster_state
     assert "No likely wrong-class points match" in page.evaluate("() => window.__TATOR_TEST_HOOKS__.classSplitPlotSnapshot().graphText")
 
 

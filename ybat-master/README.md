@@ -21,8 +21,9 @@ http://127.0.0.1:8000/tator.html
 The UI talks to the backend configured by `API_ROOT`, which defaults to
 `http://localhost:8000`. The old `/ybat.html` URL redirects to `/tator.html`.
 
-For frontend development, you can also serve the directory with a small static
-server:
+For frontend-only development, you can also serve the directory with a small
+static server. This does not start backend APIs; keep the backend running on
+`http://localhost:8000` when using live features:
 
 ```bash
 python3 -m http.server 8080 -d ybat-master

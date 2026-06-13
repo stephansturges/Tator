@@ -115,8 +115,9 @@ http://127.0.0.1:8000/
 The backend listens on `http://127.0.0.1:8000` and serves the browser UI at `/`
 and `/tator.html`. The old `/ybat.html` URL redirects to `/tator.html`.
 
-For frontend development, you can run a separate static UI server from the repo
-root:
+For frontend-only development, you can run a separate static UI server from the
+repo root. This is not the backend; keep `tools/run_macos_backend.sh` running on
+`http://127.0.0.1:8000` for live API calls:
 
 ```bash
 python3 -m http.server 8080 -d ybat-master

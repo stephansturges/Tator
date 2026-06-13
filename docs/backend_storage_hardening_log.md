@@ -2378,7 +2378,7 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Extended the script audit to the Qwen benchmark tooling and MLP automation.
   Both Qwen prepass shell wrappers lacked execute bits and failed through
   `bash` with `python: command not found`; `tools/auto_mlp_run.sh` also carried
-  an old host-specific `/home/steph/Tator` checkout path.
+  an old host-specific checkout path.
 - Made the Qwen prepass smoke and benchmark wrappers executable, repo-root
   anchored, and Python-resolving using the same explicit `PYTHON` override /
   repo venv / `python3` fallback policy as the validation scripts.
@@ -2566,3 +2566,17 @@ preserving the exact validation story for storage and artifact-write fixes.
   focused runs), UI endpoint path/method checks, full pytest suite (`1554
   passed, 39 skipped`), and strict unused-definition scan (`--max-uses 0`, no
   output).
+
+## 2026-06-13: Startup Docs And Tool Entry Audit
+
+- Ran a `--help` entry-point sweep over argparse-style `tools/*.py` scripts
+  under `.venv-macos`; all 80 checked tool commands exited cleanly.
+- Rechecked the UI serving path after the `tator.html` rename. Backend routes
+  still serve `/` and `/tator.html`, while `/ybat.html` remains a legacy
+  redirect.
+- Clarified the frontend-only static server notes in the browser UI and macOS
+  setup docs so port `8080` is not mistaken for the normal backend address.
+- Removed host-specific checkout paths from historical validation docs while
+  preserving the run-scoped artifact provenance.
+- Validation: `git diff --check`, documentation reference checks, and the UI
+  route test (`2 passed` in focused pytest).

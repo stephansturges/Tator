@@ -32,4 +32,4 @@
 ## Cleanup Outcome
 - Removed: 1 run-scoped paths
 - Skipped: 0
-- removed `/home/steph/Tator/uploads/gpu_validation/20260228_130032`
+- removed `<repo>/uploads/gpu_validation/20260228_130032`

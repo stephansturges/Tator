@@ -3177,3 +3177,19 @@ preserving the exact validation story for storage and artifact-write fixes.
   tests/test_yolo_head_graft_flow.py`, `57 passed`),
   `py_compile localinferenceapi.py tests/test_detector_active_lifecycle.py
   tests/test_yolo_head_graft_flow.py`, plus `git diff --check`.
+
+## 2026-06-13: Crop ZIP Duplicate Member Names
+
+- Continued the in-memory ZIP export sweep on annotation crop downloads. Crop
+  archive member names were derived from source image stem, class name, and bbox
+  index, so two source images with the same filename and class could produce
+  duplicate ZIP member names.
+- Duplicate ZIP members are legal, but many unzip tools hide or overwrite one
+  member on extraction. That made this a real data-loss risk for crop exports.
+- Crop ZIP export now preserves the readable base name when unique and appends a
+  deterministic `-dupN` suffix only when a collision occurs.
+- Added a regression that submits two same-named source images with the same
+  class/bbox index and verifies both crops are present under unique archive
+  names.
+- Validation: crop ZIP coverage (`tests/test_crop_zip_safety.py`, `3 passed`)
+  and `py_compile localinferenceapi.py tests/test_crop_zip_safety.py`.

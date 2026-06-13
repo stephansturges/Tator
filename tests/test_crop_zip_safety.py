@@ -51,6 +51,27 @@ def test_crop_zip_sanitizes_archive_member_names() -> None:
     assert member.endswith(".jpg")
 
 
+def test_crop_zip_disambiguates_duplicate_member_names() -> None:
+    init = api.crop_zip_init()
+    job_id = init["jobId"]
+    bbox = BboxModel(className="car", x=0, y=0, width=6, height=6)
+    payload = CropZipRequest(
+        images=[
+            CropImage(image_base64=_png_b64(), originalName="frame.png", bboxes=[bbox]),
+            CropImage(image_base64=_png_b64(), originalName="frame.png", bboxes=[bbox]),
+        ]
+    )
+    api.crop_zip_chunk(payload, jobId=job_id)
+
+    response = api.crop_zip_finalize(job_id)
+    raw_zip = asyncio.run(_stream_body(response))
+
+    with zipfile.ZipFile(io.BytesIO(raw_zip), "r") as zf:
+        names = zf.namelist()
+    assert names == ["frame-car-0.jpg", "frame-car-0-dup2.jpg"]
+    assert len(names) == len(set(names))
+
+
 def test_crop_zip_invalid_base64_raises_400_and_cleans_job() -> None:
     init = api.crop_zip_init()
     job_id = init["jobId"]

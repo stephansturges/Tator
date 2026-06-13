@@ -56527,6 +56527,22 @@ def _safe_crop_zip_component(value: Optional[str], fallback: str) -> str:
     return cleaned or fallback
 
 
+def _unique_crop_zip_member_name(base_name: str, used_names: Set[str]) -> str:
+    candidate = str(base_name or "crop.jpg")
+    if candidate not in used_names:
+        used_names.add(candidate)
+        return candidate
+    stem = Path(candidate).stem or "crop"
+    suffix = Path(candidate).suffix or ".jpg"
+    counter = 2
+    while True:
+        candidate_next = f"{stem}-dup{counter}{suffix}"
+        if candidate_next not in used_names:
+            used_names.add(candidate_next)
+            return candidate_next
+        counter += 1
+
+
 def crop_zip_finalize(jobId: str):
     if jobId not in job_store:
         raise HTTPException(status_code=400, detail="Invalid jobId")
@@ -56543,6 +56559,7 @@ def crop_zip_finalize(jobId: str):
                 headers={"Content-Disposition": "attachment; filename=crops.zip"},
             )
         zip_buffer = io.BytesIO()
+        used_names: Set[str] = set()
         with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
             for img_index, cropImage in enumerate(all_images):
                 pil_img, _ = _decode_image_base64_impl(
@@ -56568,6 +56585,7 @@ def crop_zip_finalize(jobId: str):
                     sub_img = pil_img.crop((left, top, right, bottom))
                     class_name = _safe_crop_zip_component(bbox.className, "class")
                     out_name = f"{stem}-{class_name}-{bindex}.jpg"
+                    out_name = _unique_crop_zip_member_name(out_name, used_names)
                     crop_buffer = io.BytesIO()
                     sub_img.save(crop_buffer, format="JPEG")
                     crop_buffer.seek(0)

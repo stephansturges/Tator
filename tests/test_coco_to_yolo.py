@@ -145,3 +145,25 @@ def test_resolve_coco_image_path_ignores_absolute_escape(tmp_path: Path) -> None
     )
 
     assert resolved is None
+
+
+def test_resolve_coco_image_path_uses_windows_absolute_basename(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset"
+    images_dir = dataset_root / "train" / "images"
+    image_path = images_dir / "escape.jpg"
+    _write_image(image_path, (10, 10))
+
+    for raw_name in (
+        "C:/outside/escape.jpg",
+        r"C:\outside\escape.jpg",
+        r"\\server\share\escape.jpg",
+    ):
+        resolved = _resolve_coco_image_path_impl(
+            raw_name,
+            images_dir,
+            "train",
+            dataset_root,
+        )
+
+        assert resolved == image_path.resolve()
+        assert _label_relpath_for_image_impl(raw_name) == Path("escape.txt")

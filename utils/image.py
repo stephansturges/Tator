@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import base64
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import List, Optional, Tuple
 
 from PIL import Image
@@ -133,9 +133,16 @@ def _resolve_coco_image_path_impl(
 ) -> Optional[Path]:
     if not file_name:
         return None
-    rel_path = Path(file_name)
-    if rel_path.is_absolute() or ".." in rel_path.parts:
-        rel_path = Path(rel_path.name)
+    raw_name = str(file_name)
+    rel_path = Path(raw_name)
+    win_path = PureWindowsPath(raw_name)
+    if (
+        rel_path.is_absolute()
+        or win_path.is_absolute()
+        or win_path.drive
+        or ".." in rel_path.parts
+    ):
+        rel_path = Path(win_path.name or rel_path.name)
     images_root = images_dir.resolve()
     dataset_root_resolved = dataset_root.resolve()
     candidates: List[Path] = []
@@ -155,9 +162,16 @@ def _resolve_coco_image_path_impl(
 
 
 def _label_relpath_for_image_impl(file_name: str) -> Path:
-    rel_path = Path(file_name)
-    if rel_path.is_absolute() or ".." in rel_path.parts:
-        rel_path = Path(rel_path.name)
+    raw_name = str(file_name)
+    rel_path = Path(raw_name)
+    win_path = PureWindowsPath(raw_name)
+    if (
+        rel_path.is_absolute()
+        or win_path.is_absolute()
+        or win_path.drive
+        or ".." in rel_path.parts
+    ):
+        rel_path = Path(win_path.name or rel_path.name)
     if "images" in rel_path.parts:
         idx = rel_path.parts.index("images")
         rel_path = Path(*rel_path.parts[idx + 1 :])

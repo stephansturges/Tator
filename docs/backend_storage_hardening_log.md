@@ -3,6 +3,17 @@
 This log keeps implementation checkpoints out of the README front page while
 preserving the exact validation story for storage and artifact-write fixes.
 
+## 2026-06-13: COCO Windows Path Import Fallback
+
+- Treated Windows absolute, Windows-drive, and UNC-style COCO image names like
+  other absolute/traversal names by falling back to the image basename.
+- Kept existing containment checks for resolved candidate image files under the
+  dataset/image roots.
+- Added regressions for Windows-style COCO image names and matching YOLO label
+  relpath generation.
+- Validation: `118 passed, 8 warnings` for COCO conversion, COCO IO, dataset
+  metadata IO, and linked annotation flow coverage.
+
 ## 2026-06-13: Calibration Image Reference Portability Guard
 
 - Rejected Windows absolute, Windows-drive, and UNC-style image names before

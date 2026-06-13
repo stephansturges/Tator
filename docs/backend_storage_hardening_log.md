@@ -2786,3 +2786,28 @@ preserving the exact validation story for storage and artifact-write fixes.
   data-ops smoke, UI smoke, Tier-0 fuzz, skip-GPU fast fuzz wrapper, backend
   health summary, `node --check ybat-master/ybat.js`, and `git diff --check`.
   A post-E2E dataset list confirmed no generated `pw_*` datasets remained.
+
+## 2026-06-13: Cache Purge Failure Sweep
+
+- Continued the backend storage hardening pass on user-triggered cleanup
+  controls. The next fail-open class was cache purge endpoints that could skip
+  failed removals while still returning a successful purge response.
+- Hardened Agent Mining cache purge so file, symlink, and directory removal
+  failures now raise `agent_cache_purge_failed:*` instead of being ignored.
+- Hardened SAM3 and Qwen training split-cache purge through the shared purge
+  helper. These endpoints now raise `sam3_cache_purge_failed:*` or
+  `qwen_cache_purge_failed:*` when a real cache entry cannot be removed. Internal
+  best-effort cleanup can still call the helper without strict failure reporting.
+- Preserved existing symlink safety behavior: symlinked cache entries are
+  unlinked without following them, and symlinked cache roots still do not purge
+  target directories.
+- Validation: `py_compile localinferenceapi.py` and touched tests, focused
+  Agent Mining/Qwen/SAM3 cache lifecycle tests (`57 passed`), full pytest
+  (`1571 passed, 40 skipped`), full UI E2E (`42 passed`), UI contract runner
+  (`82` checks), UI endpoint method check (`277` fetches), endpoint map (`184`
+  endpoints), UI OpenAPI sanity (`167` tested), OpenAPI missing-param sanity
+  (`76` checks), OpenAPI missing-query sanity (`5` checks), UI negative tests
+  (`18` checks), UI data-ops smoke, Playwright control coverage (`83`
+  controls), UI smoke, Tier-0 fuzz, skip-GPU fast fuzz wrapper, backend health
+  summary, `node --check ybat-master/ybat.js`, and `git diff --check`. A
+  post-E2E dataset list confirmed no generated `pw_*` datasets remained.

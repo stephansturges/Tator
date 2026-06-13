@@ -459,6 +459,32 @@ def test_sam3_train_cache_purge_unlinks_symlink_directory_without_target_delete(
     assert (outside / "payload.bin").read_bytes() == b"external"
 
 
+def test_sam3_train_cache_purge_reports_cleanup_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sam3_root = tmp_path / "sam3_training"
+    split_root = sam3_root / "splits" / "job-cleanup-fail"
+    split_root.mkdir(parents=True, exist_ok=True)
+    (split_root / "payload.bin").write_bytes(b"abcdef")
+    monkeypatch.setattr(api, "SAM3_JOB_ROOT", sam3_root)
+    with api.SAM3_TRAINING_JOBS_LOCK:
+        api.SAM3_TRAINING_JOBS.clear()
+
+    def fail_rmtree(path, *args, **kwargs):
+        if Path(path) == split_root:
+            raise OSError("forced purge failure")
+        raise AssertionError(f"unexpected rmtree path: {path}")
+
+    monkeypatch.setattr(api.shutil, "rmtree", fail_rmtree)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.sam3_train_cache_purge()
+
+    assert excinfo.value.status_code == 500
+    assert str(excinfo.value.detail).startswith("sam3_cache_purge_failed:")
+    assert split_root.exists()
+
+
 def test_sam3_train_cache_size_ignores_symlinked_split_root(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -153,6 +153,34 @@ def test_agent_mining_cache_purge_rejects_symlinked_root_without_target_delete(
     assert (outside / "payload.bin").read_bytes() == b"external"
 
 
+def test_agent_mining_cache_purge_reports_cleanup_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    cache_root = tmp_path / "agent_cache"
+    cache_root.mkdir()
+    payload = cache_root / "payload.bin"
+    payload.write_bytes(b"payload")
+    monkeypatch.setattr(api, "AGENT_MINING_DET_CACHE_ROOT", cache_root)
+    with api.AGENT_MINING_JOBS_LOCK:
+        api.AGENT_MINING_JOBS.clear()
+
+    original_unlink = Path.unlink
+
+    def fail_payload_unlink(self: Path, *args, **kwargs):
+        if self == payload:
+            raise OSError("forced purge failure")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_payload_unlink)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.agent_mining_cache_purge()
+
+    assert exc_info.value.status_code == 500
+    assert str(exc_info.value.detail).startswith("agent_cache_purge_failed:")
+    assert payload.exists()
+
+
 def test_agent_mining_cache_ttl_prune_unlinks_symlink_dir_without_target_delete(
     tmp_path: Path, monkeypatch
 ) -> None:

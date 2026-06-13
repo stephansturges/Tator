@@ -133,6 +133,32 @@ def test_qwen_train_cache_purge_unlinks_symlink_directory_without_target_delete(
     assert (outside / "payload.bin").read_bytes() == b"external"
 
 
+def test_qwen_train_cache_purge_reports_cleanup_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    qwen_root = tmp_path / "qwen_training"
+    split_root = qwen_root / "splits" / "job-cleanup-fail"
+    split_root.mkdir(parents=True, exist_ok=True)
+    (split_root / "payload.bin").write_bytes(b"abcd")
+    monkeypatch.setattr(api, "QWEN_JOB_ROOT", qwen_root)
+    with api.QWEN_TRAINING_JOBS_LOCK:
+        api.QWEN_TRAINING_JOBS.clear()
+
+    def fail_rmtree(path, *args, **kwargs):
+        if Path(path) == split_root:
+            raise OSError("forced purge failure")
+        raise AssertionError(f"unexpected rmtree path: {path}")
+
+    monkeypatch.setattr(api.shutil, "rmtree", fail_rmtree)
+
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.qwen_train_cache_purge()
+
+    assert excinfo.value.status_code == 500
+    assert str(excinfo.value.detail).startswith("qwen_cache_purge_failed:")
+    assert split_root.exists()
+
+
 def test_qwen_train_cache_size_ignores_symlinked_split_root(
     tmp_path: Path, monkeypatch
 ) -> None:

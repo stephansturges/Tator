@@ -14967,8 +14967,13 @@ def _enforce_agent_mining_cache_limits(cache_root: Path, allow_when_running: boo
             continue
 
 
-def _purge_directory(root: Path) -> int:
-    """Delete all entries under a directory and return count removed."""
+def _purge_directory(root: Path, *, fail_detail: Optional[str] = None) -> int:
+    """Delete all entries under a directory and return count removed.
+
+    By default this remains best-effort for internal cleanup callers. User-facing
+    purge endpoints pass ``fail_detail`` so a failed removal is reported instead
+    of being counted as deleted.
+    """
     removed = 0
     try:
         if root.is_symlink():
@@ -14978,15 +14983,27 @@ def _purge_directory(root: Path) -> int:
         for entry in root.iterdir():
             try:
                 if entry.is_symlink():
-                    entry.unlink(missing_ok=True)
+                    entry.unlink()
                 elif entry.is_dir():
-                    shutil.rmtree(entry, ignore_errors=True)
+                    shutil.rmtree(entry)
                 else:
-                    entry.unlink(missing_ok=True)
+                    entry.unlink()
                 removed += 1
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                if fail_detail:
+                    raise HTTPException(
+                        status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"{fail_detail}:{exc}",
+                    ) from exc
                 continue
-    except Exception:
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if fail_detail:
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"{fail_detail}:{exc}",
+            ) from exc
         return removed
     return removed
 
@@ -42258,6 +42275,7 @@ def _training_split_cache_purge(
     *,
     blocked_detail: str,
     invalid_detail: str,
+    purge_failed_detail: str,
 ) -> Dict[str, Any]:
     cache_root_raw = job_root / "splits"
     if _active_jobs_reference_path_root(registry, lock, cache_root_raw):
@@ -42270,7 +42288,7 @@ def _training_split_cache_purge(
     except HTTPException:
         return {"status": "ok", "deleted_bytes": 0, "deleted_entries": 0}
     deleted_bytes = _dir_size_bytes_impl(cache_root)
-    deleted_entries = _purge_directory(cache_root)
+    deleted_entries = _purge_directory(cache_root, fail_detail=purge_failed_detail)
     return {"status": "ok", "deleted_bytes": deleted_bytes, "deleted_entries": deleted_entries}
 
 
@@ -45290,16 +45308,20 @@ def agent_mining_cache_purge():
     for p in paths:
         try:
             if p.is_symlink():
-                p.unlink(missing_ok=True)
+                p.unlink()
                 deleted_files += 1
             elif p.is_file():
-                deleted += p.stat().st_size
-                deleted_files += 1
+                size = p.stat().st_size
                 p.unlink()
+                deleted += size
+                deleted_files += 1
             elif p.is_dir():
                 p.rmdir()
-        except Exception:
-            continue
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"agent_cache_purge_failed:{exc}",
+            ) from exc
     return {"status": "ok", "deleted_bytes": deleted, "deleted_files": deleted_files}
 
 
@@ -50275,6 +50297,7 @@ def sam3_train_cache_purge():
         SAM3_TRAINING_JOBS_LOCK,
         blocked_detail="sam3_cache_purge_blocked_active_jobs",
         invalid_detail="sam3_split_path_invalid",
+        purge_failed_detail="sam3_cache_purge_failed",
     )
 
 
@@ -51908,6 +51931,7 @@ def qwen_train_cache_purge():
         QWEN_TRAINING_JOBS_LOCK,
         blocked_detail="qwen_cache_purge_blocked_active_jobs",
         invalid_detail="qwen_split_path_invalid",
+        purge_failed_detail="qwen_cache_purge_failed",
     )
 
 

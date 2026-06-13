@@ -3,6 +3,18 @@
 This log keeps implementation checkpoints out of the README front page while
 preserving the exact validation story for storage and artifact-write fixes.
 
+## 2026-06-13: Qwen Training Portable Image References
+
+- Rejected Windows absolute and UNC-style image references in Qwen training
+  manifests before resolving image files on macOS/Linux.
+- Kept existing support for relative POSIX and backslash-separated relative
+  image names under the dataset split image roots.
+- Added regressions for `C:/...` and UNC-style image references alongside the
+  existing traversal, absolute-path, directory, and symlink-escape tests.
+- Validation: `13 passed` for `tests/test_qwen_training_backend.py`; `98
+  passed, 8 warnings` for Qwen training, MLX runtime, and dataset upload
+  security coverage.
+
 ## 2026-05-24: SAM3 and Shared Training Split Roots
 
 - Rejected symlink components anywhere in shared Qwen/SAM3 training split roots

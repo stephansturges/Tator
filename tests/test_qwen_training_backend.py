@@ -133,6 +133,8 @@ def test_qwen_training_image_resolver_rejects_traversal(tmp_path):
     assert training._resolve_image_path(dataset_root, "train", "sample.png") == safe_image.resolve()
     assert training._resolve_image_path(dataset_root, "train", "../outside.png") is None
     assert training._resolve_image_path(dataset_root, "train", str(outside_image)) is None
+    assert training._resolve_image_path(dataset_root, "train", "C:/outside.png") is None
+    assert training._resolve_image_path(dataset_root, "train", r"\\server\share\outside.png") is None
 
 
 def test_qwen_training_image_resolver_handles_bad_entries(tmp_path):

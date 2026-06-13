@@ -13,7 +13,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -262,6 +262,9 @@ def _select_eval_strategy_key(cls) -> Optional[str]:
 
 def _resolve_image_path(dataset_root: Path, split: str, image_rel: str) -> Optional[Path]:
     raw = str(image_rel or "").replace("\\", "/").strip()
+    win_path = PureWindowsPath(raw)
+    if win_path.is_absolute() or win_path.drive:
+        return None
     rel_path = Path(raw)
     if rel_path.is_absolute() or not raw:
         return None

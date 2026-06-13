@@ -3,6 +3,17 @@
 This log keeps implementation checkpoints out of the README front page while
 preserving the exact validation story for storage and artifact-write fixes.
 
+## 2026-06-13: Auto-Label Result Job Id Guard
+
+- Rejected path-like, Windows-drive, and UNC-style job ids before writing
+  auto-label result artifacts.
+- Kept normal generated UUID-style auto-label job ids unchanged.
+- Added a regression that invalid portable path ids do not create the
+  auto-label root or any nested result directories.
+- Validation: `19 passed` for `tests/test_auto_labeling_runner.py`; `56
+  passed, 8 warnings` for adjacent backend job-start, auto-labeling, and job
+  helper coverage.
+
 ## 2026-06-13: Qwen Training Portable Image References
 
 - Rejected Windows absolute and UNC-style image references in Qwen training

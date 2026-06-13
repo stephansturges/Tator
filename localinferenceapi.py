@@ -14873,7 +14873,16 @@ def _agent_mining_cache_child_dir(cache_root: Path, child_name: str, *, create: 
 def _write_auto_label_result_json(job_id: str, payload: Dict[str, Any]) -> None:
     job_id_text = str(job_id or "").strip()
     job_id_path = Path(job_id_text)
-    if not job_id_text or job_id_path.is_absolute() or ".." in job_id_path.parts:
+    job_id_win_path = PureWindowsPath(job_id_text)
+    if (
+        not job_id_text
+        or "/" in job_id_text
+        or "\\" in job_id_text
+        or job_id_path.is_absolute()
+        or job_id_win_path.is_absolute()
+        or job_id_win_path.drive
+        or ".." in job_id_path.parts
+    ):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="auto_label_job_path_invalid")
     if _storage_path_has_symlink_component(AUTO_LABEL_ROOT):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="auto_label_job_path_invalid")

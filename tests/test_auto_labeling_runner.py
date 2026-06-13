@@ -489,6 +489,23 @@ def test_auto_label_runner_does_not_write_result_through_symlinked_root(
     assert list(outside.iterdir()) == []
 
 
+@pytest.mark.auto_label_smoke
+def test_auto_label_result_writer_rejects_portable_path_job_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auto_label_root = tmp_path / "auto_label_jobs"
+    monkeypatch.setattr(api, "AUTO_LABEL_ROOT", auto_label_root)
+
+    for job_id in ("nested/bad", r"nested\bad", "C:/bad", r"\\server\share\bad"):
+        with pytest.raises(api.HTTPException) as exc_info:
+            api._write_auto_label_result_json(job_id, {"status": "completed"})
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "auto_label_job_path_invalid"
+
+    assert not auto_label_root.exists()
+
+
 @pytest.mark.auto_label_full
 def test_auto_label_runner_tracks_candidate_and_write_metrics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _build_auto_label_fixture(

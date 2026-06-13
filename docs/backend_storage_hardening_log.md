@@ -2580,3 +2580,24 @@ preserving the exact validation story for storage and artifact-write fixes.
   preserving the run-scoped artifact provenance.
 - Validation: `git diff --check`, documentation reference checks, and the UI
   route test (`2 passed` in focused pytest).
+
+## 2026-06-13: Cross-Platform UI/API Validation Sweep
+
+- Continued the open hardening sweep without narrowing scope to a single
+  feature area. The shipped browser UI has no duplicate static HTML ids, no
+  missing backend routes from fetch calls, and no UI/OpenAPI method mismatches.
+- Confirmed ignored local browser backup files are neither tracked nor served by
+  the backend UI whitelist; no cleanup was performed because they are local
+  non-shipped files.
+- Verified the Qwen auto-label panel remains intentionally absent from the
+  Label Images sidebar while backend job discovery still reports auto-label jobs
+  in the automation overview.
+- Validation: backend health (`HTTP 200`, `ok: true`), `node --check
+  ybat-master/ybat.js`, UI endpoint method check (`277` fetches, no failures),
+  legacy endpoint checker (`184` UI endpoints, no missing paths or method
+  mismatches), UI contract runner (`82` checks, no failures), Playwright control
+  coverage (`83` controls), route/layout focused pytest (`30 passed`), full
+  browser E2E with `RUN_UI_E2E=1` (`41 passed`), full pytest suite (`1554
+  passed, 39 skipped`), UI negative tests (`18` checks), UI data-ops smoke,
+  OpenAPI sanity (`167` tested, no failures), endpoint map check (`170` paths),
+  and `SKIP_GPU=1` refactor/fuzz validation.

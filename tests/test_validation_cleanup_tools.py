@@ -555,6 +555,31 @@ def test_watch_calibration_job_is_self_contained_and_configurable() -> None:
     assert "--base-url URL" in help_result.stdout
 
 
+def test_direct_module_helpers_resolve_repo_imports_without_traceback() -> None:
+    env = os.environ.copy()
+    env.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
+    for rel_path in [
+        "tools/clip_training.py",
+        "tools/policy_runtime.py",
+    ]:
+        result = subprocess.run(
+            [
+                str(REPO_ROOT / ".venv-macos" / "bin" / "python"),
+                str(REPO_ROOT / rel_path),
+                "--help",
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+            env=env,
+        )
+
+        assert result.returncode == 0, rel_path
+        assert "Traceback" not in result.stderr
+
+
 def test_ui_param_sweep_accepts_detector_precondition_statuses() -> None:
     tool = _load_tool_module("run_ui_param_sweep_status", "tools/run_ui_param_sweep.py")
 

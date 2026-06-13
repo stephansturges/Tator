@@ -3,6 +3,19 @@
 This log keeps implementation checkpoints out of the README front page while
 preserving the exact validation story for storage and artifact-write fixes.
 
+## 2026-06-13: Direct Tool Import Hygiene
+
+- Re-ran direct `--help` checks for all top-level Python tools and found two
+  path-invocation failures: `tools/clip_training.py` could not resolve
+  `utils.*`, and `tools/policy_runtime.py` could not resolve `tools.*`.
+- Added the standard repo-root bootstrap to both modules so they work as
+  importable modules and as direct script entrypoints.
+- Added a regression covering direct execution without traceback.
+- Validation: `py_compile` for the touched modules and regression file,
+  direct `--help` for both previously failing tools,
+  `tests/test_validation_cleanup_tools.py` (`28 passed`), and a full top-level
+  Python tool `--help` audit (`88` tools, no failures).
+
 ## 2026-06-13: UI Data-Ops and Calibration Watcher Portability
 
 - Made `tools/run_ui_data_ops_tests.py` honor `BASE_URL`, an optional

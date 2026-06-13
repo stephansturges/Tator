@@ -28,12 +28,11 @@ EXCLUDE_DIRS = {
     "corrected_labels",
     "calib_example",
     "logs",
-    "models",
     "lightning_logs",
     "tests",
     "tools",
 }
-USE_EXCLUDE_DIRS = EXCLUDE_DIRS - {"tools"}
+USE_EXCLUDE_DIRS = EXCLUDE_DIRS - {"tests", "tools"}
 
 
 def iter_py_files(root: Path, *, exclude_dirs: set[str] = EXCLUDE_DIRS) -> Iterable[Path]:

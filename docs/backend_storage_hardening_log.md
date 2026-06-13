@@ -2547,3 +2547,22 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: `node --check ybat-master/ybat.js`, focused browser regression
   (`1 passed`), dataset annotation browser file (`11 passed`), full browser E2E
   (`41 passed`), and `git diff --check`.
+
+## 2026-06-13: Validation Tooling And Schema Cleanup
+
+- Continued the broad post-hardening sweep by running the unused-definition
+  scanner after the full UI/API/Python validation ladder.
+- Fixed `tools/scan_unused_defs.py` so first-party `models/` package references
+  and maintained test/tool references count as uses. This removed false
+  positives for actively used Pydantic compatibility helpers and public
+  compatibility wrappers.
+- Removed the stale `PromptHelperPreset` schema and import. Prompt-helper
+  presets are persisted and returned as service dictionaries; the removed
+  Pydantic class was not attached to any request/response model.
+- Removed an unused data-ingestion media-file helper left behind after the
+  backend upload/reference flow moved to dedicated dataset media-row builders.
+- Validation: `py_compile` for touched modules, focused validation-tool,
+  data-ingestion, prompt-helper, and path-containment coverage (`122 passed` in
+  focused runs), UI endpoint path/method checks, full pytest suite (`1554
+  passed, 39 skipped`), and strict unused-definition scan (`--max-uses 0`, no
+  output).

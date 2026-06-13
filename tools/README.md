@@ -33,6 +33,9 @@ Tools
 
 - Unused-def scanner (heuristic, module-level only)
   - Run: `python tools/scan_unused_defs.py`
+  - Source definitions are reported only from first-party runtime packages;
+    references from tests and tools are still counted so maintained
+    compatibility wrappers do not appear as dead code.
   - Add `--include-underscore` to include private helpers.
   - Increase sensitivity with `--max-uses 1` to include definitions referenced only once.
 

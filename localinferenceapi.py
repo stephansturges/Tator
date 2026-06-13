@@ -159,7 +159,6 @@ from models.schemas import (
     YoloBboxOutput,
     Sam3TextPrompt,
     PromptHelperSuggestRequest,
-    PromptHelperPreset,
     PromptHelperRequest,
     PromptHelperSearchRequest,
     PromptRecipePrompt,

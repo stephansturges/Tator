@@ -434,3 +434,27 @@ def test_ui_validation_tools_help_exits_cleanly_without_backend() -> None:
         assert "Backend not reachable" not in result.stdout
         assert "Loading CLIP model" not in result.stdout
         assert "Loading CLIP model" not in result.stderr
+
+
+def test_unused_def_scanner_counts_first_party_models_package_uses(
+    tmp_path: Path,
+) -> None:
+    tool = _load_tool_module("scan_unused_defs_test", "tools/scan_unused_defs.py")
+    (tmp_path / "utils").mkdir()
+    (tmp_path / "utils" / "compat.py").write_text(
+        "def root_validator_compat(*args, **kwargs):\n"
+        "    return lambda fn: fn\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "schemas.py").write_text(
+        "from utils.compat import root_validator_compat\n\n"
+        "@root_validator_compat(skip_on_failure=True)\n"
+        "def validate_payload(cls, values):\n"
+        "    return values\n",
+        encoding="utf-8",
+    )
+
+    uses = tool.collect_uses(tmp_path)
+
+    assert uses["root_validator_compat"] >= 1

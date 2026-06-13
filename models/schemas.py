@@ -1592,14 +1592,6 @@ class PromptHelperSuggestRequest(BaseModel):
     use_qwen: bool = True
 
 
-class PromptHelperPreset(BaseModel):
-    id: str
-    label: str
-    dataset_id: str
-    created_at: float
-    prompts_by_class: Dict[int, List[str]]
-
-
 class PromptHelperRequest(BaseModel):
     dataset_id: str
     sample_per_class: int = Field(10, ge=1, le=1000)

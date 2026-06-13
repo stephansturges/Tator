@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -320,16 +320,3 @@ def safe_media_name(path_or_name: str, fallback: str = "media", *, max_length: i
     if max_length > 0:
         cleaned = cleaned[:max_length].strip("._-")
     return cleaned or fallback
-
-
-def iter_media_files(paths: Iterable[Path]) -> List[Path]:
-    found: List[Path] = []
-    for path in paths:
-        p = Path(path)
-        if p.is_dir():
-            for child in sorted(p.rglob("*")):
-                if child.is_file() and child.suffix.lower() in IMAGE_EXTS | VIDEO_EXTS:
-                    found.append(child)
-        elif p.is_file() and p.suffix.lower() in IMAGE_EXTS | VIDEO_EXTS:
-            found.append(p)
-    return found

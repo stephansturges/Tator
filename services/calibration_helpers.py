@@ -8,7 +8,7 @@ import os
 import random
 import shutil
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -102,10 +102,14 @@ def _calibration_list_images(
 
 
 def _calibration_resolve_image_path(dataset_root: Path, image_name: str) -> Optional[Path]:
-    rel_path = Path(str(image_name or ""))
+    raw_name = str(image_name or "").strip()
+    win_path = PureWindowsPath(raw_name)
+    rel_path = Path(raw_name)
     if (
-        not str(image_name or "").strip()
+        not raw_name
         or rel_path.is_absolute()
+        or win_path.is_absolute()
+        or win_path.drive
         or any(part in {"", ".", ".."} for part in rel_path.parts)
     ):
         return None

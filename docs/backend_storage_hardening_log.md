@@ -3,6 +3,16 @@
 This log keeps implementation checkpoints out of the README front page while
 preserving the exact validation story for storage and artifact-write fixes.
 
+## 2026-06-13: Calibration Image Reference Portability Guard
+
+- Rejected Windows absolute, Windows-drive, and UNC-style image names before
+  resolving calibration dataset images.
+- Kept existing relative split image lookup behavior unchanged for normal YOLO
+  dataset layouts.
+- Added regressions beside the existing traversal and symlink-escape checks.
+- Validation: `88 passed, 8 warnings` for calibration helper, report bundle,
+  recipe, progress, worker, metrics, and UI contract coverage.
+
 ## 2026-06-13: Auto-Label Result Job Id Guard
 
 - Rejected path-like, Windows-drive, and UNC-style job ids before writing

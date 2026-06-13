@@ -107,6 +107,8 @@ def test_calibration_resolve_image_path_rejects_traversal_and_symlink_escape(
         pytest.skip(f"symlink unsupported: {exc}")
 
     assert _calibration_resolve_image_path(dataset_root, "../outside.jpg") is None
+    assert _calibration_resolve_image_path(dataset_root, "C:/outside.jpg") is None
+    assert _calibration_resolve_image_path(dataset_root, r"\\server\share\outside.jpg") is None
     assert _calibration_resolve_image_path(dataset_root, "escaped.jpg") is None
 
 

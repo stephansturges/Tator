@@ -49138,16 +49138,42 @@ def download_clip_classifier_zip(rel_path: str = Query(...)):
     )
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         classifiers_root = (UPLOAD_ROOT / "classifiers").resolve()
-        if not _zip_write_safe_file(zf, classifier_path, classifiers_root, classifier_path.name):
+        written_arcnames: Set[str] = set()
+
+        def unique_arcname(filename: str, fallback_dir: str) -> str:
+            raw_name = Path(str(filename or "")).name or "artifact"
+            if raw_name not in written_arcnames:
+                written_arcnames.add(raw_name)
+                return raw_name
+            prefixed = str(Path(fallback_dir) / raw_name)
+            if prefixed not in written_arcnames:
+                written_arcnames.add(prefixed)
+                return prefixed
+            stem = Path(raw_name).stem or "artifact"
+            suffix = Path(raw_name).suffix
+            for idx in range(1, 1000):
+                candidate = str(Path(fallback_dir) / f"{stem}_{idx}{suffix}")
+                if candidate not in written_arcnames:
+                    written_arcnames.add(candidate)
+                    return candidate
+            raise HTTPException(
+                status_code=HTTP_409_CONFLICT,
+                detail="clip_classifier_zip_duplicate_names",
+            )
+
+        classifier_arcname = unique_arcname(classifier_path.name, "classifier")
+        if not _zip_write_safe_file(zf, classifier_path, classifiers_root, classifier_arcname):
             raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="classifier_not_found")
         if meta_path is not None:
-            if not _zip_write_safe_file(zf, meta_path, classifiers_root, meta_path.name):
+            meta_arcname = unique_arcname(meta_path.name, "metadata")
+            if not _zip_write_safe_file(zf, meta_path, classifiers_root, meta_arcname):
                 raise HTTPException(
                     status_code=HTTP_412_PRECONDITION_FAILED,
                     detail="clip_classifier_zip_meta_missing",
                 )
         if labelmap_path is not None:
-            if not _zip_write_safe_file(zf, labelmap_path, UPLOAD_ROOT.resolve(), labelmap_path.name):
+            labelmap_arcname = unique_arcname(labelmap_path.name, "labelmaps")
+            if not _zip_write_safe_file(zf, labelmap_path, UPLOAD_ROOT.resolve(), labelmap_arcname):
                 raise HTTPException(
                     status_code=HTTP_412_PRECONDITION_FAILED,
                     detail="clip_classifier_zip_labelmap_missing",

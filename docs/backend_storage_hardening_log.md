@@ -3251,3 +3251,19 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: detector lifecycle coverage
   (`tests/test_detector_active_lifecycle.py`, `48 passed`) and `py_compile
   localinferenceapi.py tests/test_detector_active_lifecycle.py`.
+
+## 2026-06-13: CLIP Classifier Bundle Duplicate Members
+
+- Continued the model/artifact export sweep on CLIP classifier bundles. The
+  classifier ZIP kept artifact names flat, so a classifier and labelmap with
+  the same filename could both be written as the same ZIP member name.
+- Duplicate ZIP members are legal but extraction tools commonly hide or
+  overwrite one copy, making classifier bundles ambiguous to restore.
+- CLIP classifier bundles now preserve the existing flat names when unique and
+  move only colliding members into deterministic subfolders such as
+  `labelmaps/<name>`.
+- Added a regression with `classifiers/head.pkl` and `labelmaps/head.pkl` that
+  verifies the bundle contains both payloads under unique member names.
+- Validation: CLIP registry download coverage
+  (`tests/test_clip_registry_downloads.py`, `36 passed`) and `py_compile
+  localinferenceapi.py tests/test_clip_registry_downloads.py`.

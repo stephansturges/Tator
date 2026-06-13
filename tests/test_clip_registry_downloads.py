@@ -154,6 +154,46 @@ def test_download_clip_classifier_zip_fails_if_resolved_labelmap_cannot_be_writt
     assert exc_info.value.detail == "clip_classifier_zip_labelmap_missing"
 
 
+def test_download_clip_classifier_zip_disambiguates_duplicate_labelmap_name(
+    tmp_path, monkeypatch
+) -> None:
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    labelmaps_root = upload_root / "labelmaps"
+    classifiers_root.mkdir(parents=True, exist_ok=True)
+    labelmaps_root.mkdir(parents=True, exist_ok=True)
+    classifier_path = classifiers_root / "head.pkl"
+    classifier_path.write_bytes(b"model")
+    labelmap_path = labelmaps_root / "head.pkl"
+    labelmap_path.write_bytes(b"labels")
+    monkeypatch.setattr(localinferenceapi, "UPLOAD_ROOT", upload_root)
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_resolve_agent_clip_classifier_path_impl",
+        lambda *args, **kwargs: classifier_path,
+    )
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_safe_classifier_meta_path_impl",
+        lambda _path: None,
+    )
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_find_labelmap_for_classifier_impl",
+        lambda *args, **kwargs: labelmap_path,
+    )
+
+    response = localinferenceapi.download_clip_classifier_zip(rel_path="head.pkl")
+    raw = asyncio.run(_stream_body(response))
+
+    with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
+        names = zf.namelist()
+        payloads = {name: zf.read(name) for name in names}
+    assert names == ["head.pkl", "labelmaps/head.pkl"]
+    assert payloads["head.pkl"] == b"model"
+    assert payloads["labelmaps/head.pkl"] == b"labels"
+
+
 def test_load_clip_head_skips_symlink_meta_escape(tmp_path) -> None:
     classifier_path = tmp_path / "head.pkl"
     classifier_path.write_bytes(b"model")

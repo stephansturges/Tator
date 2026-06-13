@@ -3,6 +3,24 @@
 This log keeps implementation checkpoints out of the README front page while
 preserving the exact validation story for storage and artifact-write fixes.
 
+## 2026-06-13: UI Data-Ops and Calibration Watcher Portability
+
+- Made `tools/run_ui_data_ops_tests.py` honor `BASE_URL`, an optional
+  positional backend URL, and `--base-url` so its glossary, recipe, and
+  dataset-glossary smoke checks follow the documented backend port override
+  flow.
+- Made `tools/watch_calibration_job.sh` self-contained by replacing the
+  undeclared `/tmp/print_job.py` helper with `python3 -m json.tool`, and added
+  `BASE_URL`, `--base-url`, and interval controls.
+- Added regression coverage for import safety, base URL precedence, shell
+  syntax, and watcher help output.
+- Validation: `py_compile` for `tools/run_ui_data_ops_tests.py` and regression
+  coverage, `bash -n tools/watch_calibration_job.sh`,
+  `tests/test_validation_cleanup_tools.py` (`27 passed`), both updated
+  `--help` paths, live `tools/run_ui_data_ops_tests.py --base-url
+  http://127.0.0.1:8000`, `git diff --check`, and `SKIP_GPU=1
+  BASE_URL=http://127.0.0.1:8000 tools/run_refactor_validation.sh`.
+
 ## 2026-06-13: UI Smoke Tool Base URL Support
 
 - Made `tools/run_ui_smoke.py` and `tools/run_ui_concurrency_smoke.py`

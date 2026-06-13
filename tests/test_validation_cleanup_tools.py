@@ -500,6 +500,61 @@ def test_ui_concurrency_smoke_base_url_defaults_to_env(monkeypatch) -> None:
     )
 
 
+def test_ui_data_ops_import_is_side_effect_free(monkeypatch) -> None:
+    def fail_urlopen(*_args, **_kwargs):
+        raise AssertionError("run_ui_data_ops_tests must not call the backend during import")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+
+    tool = _load_tool_module("run_ui_data_ops_import", "tools/run_ui_data_ops_tests.py")
+
+    assert callable(tool.parse_args)
+    assert callable(tool.main)
+
+
+def test_ui_data_ops_base_url_defaults_to_env(monkeypatch) -> None:
+    tool = _load_tool_module("run_ui_data_ops_args", "tools/run_ui_data_ops_tests.py")
+    monkeypatch.setenv("BASE_URL", "http://127.0.0.1:9999")
+
+    assert tool.parse_args([]).base_url == "http://127.0.0.1:9999"
+    assert tool.parse_args(["http://example.test"]).base_url == "http://example.test"
+    assert (
+        tool.parse_args(
+            ["http://example.test", "--base-url", "http://flag.test"]
+        ).base_url
+        == "http://flag.test"
+    )
+
+
+def test_watch_calibration_job_is_self_contained_and_configurable() -> None:
+    path = REPO_ROOT / "tools/watch_calibration_job.sh"
+    text = path.read_text(encoding="utf-8")
+
+    assert "/tmp/print_job.py" not in text
+    assert "python3 -m json.tool" in text
+    assert "--base-url" in text
+    assert 'BASE_URL="${BASE_URL:-http://127.0.0.1:8000}"' in text
+
+    syntax = subprocess.run(
+        ["bash", "-n", str(path)],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert syntax.returncode == 0, syntax.stderr
+
+    help_result = subprocess.run(
+        ["bash", str(path), "--help"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert help_result.returncode == 0
+    assert "--base-url URL" in help_result.stdout
+
+
 def test_ui_param_sweep_accepts_detector_precondition_statuses() -> None:
     tool = _load_tool_module("run_ui_param_sweep_status", "tools/run_ui_param_sweep.py")
 
@@ -645,6 +700,7 @@ def test_ui_validation_tools_help_exits_cleanly_without_backend() -> None:
         "tools/run_context_feature_ablation.py",
         "tools/run_ui_contract_tests.py",
         "tools/run_ui_concurrency_smoke.py",
+        "tools/run_ui_data_ops_tests.py",
         "tools/run_ui_negative_tests.py",
         "tools/run_ui_param_sweep.py",
         "tools/run_ui_smoke.py",

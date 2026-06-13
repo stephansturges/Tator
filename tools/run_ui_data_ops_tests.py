@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
+import argparse
 import json
-import time
+import os
 import uuid
-from pathlib import Path
 from urllib import request, error
 
 
-BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 
 
-def _get(path: str):
-    req = request.Request(f"{BASE_URL}{path}", headers={"Accept": "application/json"})
+def _get(base_url: str, path: str):
+    req = request.Request(f"{base_url}{path}", headers={"Accept": "application/json"})
     with request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _post(path: str, payload: dict):
+def _post(base_url: str, path: str, payload: dict):
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(
-        f"{BASE_URL}{path}",
+        f"{base_url}{path}",
         data=data,
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
@@ -28,14 +28,14 @@ def _post(path: str, payload: dict):
         return json.loads(body) if body else {}
 
 
-def _delete(path: str):
-    req = request.Request(f"{BASE_URL}{path}", method="DELETE")
+def _delete(base_url: str, path: str):
+    req = request.Request(f"{base_url}{path}", method="DELETE")
     with request.urlopen(req, timeout=30) as resp:
         body = resp.read().decode("utf-8")
         return json.loads(body) if body else {}
 
 
-def _safe(label, fn):
+def _safe(_label, fn):
     try:
         return {"ok": True, "result": fn()}
     except error.HTTPError as exc:
@@ -45,7 +45,34 @@ def _safe(label, fn):
         return {"ok": False, "error": str(exc)}
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run UI data-operation smoke checks against a Tator backend."
+    )
+    parser.add_argument(
+        "base_url",
+        nargs="?",
+        default=None,
+        help=f"Backend base URL. Defaults to BASE_URL or {DEFAULT_BASE_URL}.",
+    )
+    parser.add_argument(
+        "--base-url",
+        dest="base_url_flag",
+        default=None,
+        help="Backend base URL. Overrides the positional URL and BASE_URL.",
+    )
+    args = parser.parse_args(argv)
+    args.base_url = (
+        args.base_url_flag
+        or args.base_url
+        or os.environ.get("BASE_URL", DEFAULT_BASE_URL)
+    )
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    base_url = args.base_url.rstrip("/")
     results = {}
 
     # Glossary create/get/delete
@@ -53,10 +80,18 @@ def main() -> int:
     gloss_text = "test_label: item, object\n"
     results["glossary_create"] = _safe(
         "glossary_create",
-        lambda: _post("/glossaries", {"name": gloss_name, "glossary": gloss_text}),
+        lambda: _post(
+            base_url,
+            "/glossaries",
+            {"name": gloss_name, "glossary": gloss_text},
+        ),
     )
-    results["glossary_get"] = _safe("glossary_get", lambda: _get(f"/glossaries/{gloss_name}"))
-    results["glossary_delete"] = _safe("glossary_delete", lambda: _delete(f"/glossaries/{gloss_name}"))
+    results["glossary_get"] = _safe(
+        "glossary_get", lambda: _get(base_url, f"/glossaries/{gloss_name}")
+    )
+    results["glossary_delete"] = _safe(
+        "glossary_delete", lambda: _delete(base_url, f"/glossaries/{gloss_name}")
+    )
 
     # Prepass recipe create/get/delete
     recipe_id = f"test_recipe_{uuid.uuid4().hex[:6]}"
@@ -68,17 +103,18 @@ def main() -> int:
         "glossary": gloss_text,
     }
     results["prepass_recipe_create"] = _safe(
-        "prepass_recipe_create", lambda: _post("/prepass/recipes", recipe_payload)
+        "prepass_recipe_create",
+        lambda: _post(base_url, "/prepass/recipes", recipe_payload),
     )
     results["prepass_recipe_get"] = _safe(
-        "prepass_recipe_get", lambda: _get(f"/prepass/recipes/{recipe_id}")
+        "prepass_recipe_get", lambda: _get(base_url, f"/prepass/recipes/{recipe_id}")
     )
     results["prepass_recipe_delete"] = _safe(
-        "prepass_recipe_delete", lambda: _delete(f"/prepass/recipes/{recipe_id}")
+        "prepass_recipe_delete", lambda: _delete(base_url, f"/prepass/recipes/{recipe_id}")
     )
 
     # Dataset glossary set/restore
-    datasets = _safe("datasets", lambda: _get("/datasets"))
+    datasets = _safe("datasets", lambda: _get(base_url, "/datasets"))
     results["datasets"] = datasets
     dataset_id = None
     if datasets.get("ok"):
@@ -91,12 +127,14 @@ def main() -> int:
                 dataset_id = first
     if dataset_id:
         prev_glossary = _safe(
-            "dataset_glossary_get", lambda: _get(f"/datasets/{dataset_id}/glossary")
+            "dataset_glossary_get",
+            lambda: _get(base_url, f"/datasets/{dataset_id}/glossary"),
         )
         results["dataset_glossary_get"] = prev_glossary
         results["dataset_glossary_set"] = _safe(
             "dataset_glossary_set",
             lambda: _post(
+                base_url,
                 f"/datasets/{dataset_id}/glossary",
                 {"glossary": gloss_text},
             ),
@@ -111,10 +149,14 @@ def main() -> int:
                 restore_text = prev_payload
         results["dataset_glossary_restore"] = _safe(
             "dataset_glossary_restore",
-            lambda: _post(f"/datasets/{dataset_id}/glossary", {"glossary": restore_text}),
+            lambda: _post(
+                base_url,
+                f"/datasets/{dataset_id}/glossary",
+                {"glossary": restore_text},
+            ),
         )
 
-    print(json.dumps(results, indent=2))
+    print(json.dumps({"base_url": base_url, "results": results}, indent=2))
     failures = {k: v for k, v in results.items() if not v.get("ok")}
     if failures:
         print("\nFailures:")

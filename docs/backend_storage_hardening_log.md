@@ -2949,3 +2949,22 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: focused SAM3 lifecycle tests (`35 passed`), adjacent SAM3/start
   validation/storage tests (`35 passed`), `py_compile localinferenceapi.py` and
   touched tests, and `git diff --check`.
+
+## 2026-06-13: Segmentation Build Worker Failure Sweep
+
+- Continued the generated-dataset publication sweep on the segmentation builder.
+  A segmentation build must not publish or report completion after any image
+  conversion worker fails, because that would leave the user with a partial
+  mask dataset that looks complete in the UI.
+- Found that per-image futures caught worker exceptions, logged warnings, and
+  allowed the job to continue into COCO conversion and completion. The worker
+  loop now records all future failures and fails the job with
+  `segmentation_builder_worker_failed:<count>:<first_error>` before conversion
+  or metadata publication.
+- Added a regression that forces a mask worker failure and asserts the job is
+  failed, no result is published, and COCO conversion is not called for the
+  partial output tree.
+- Validation: segmentation-linked dataset subset
+  (`tests/test_dataset_linked_annotation_flows.py -k segmentation`, `6
+  passed`), segmentation thread-start rollback regression (`1 passed`),
+  `py_compile localinferenceapi.py` and touched tests, and `git diff --check`.

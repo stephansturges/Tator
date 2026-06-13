@@ -3333,6 +3333,73 @@ def test_segmentation_output_text_write_is_atomic_over_symlink_leaves(
     assert outside_final.read_text(encoding="utf-8") == "external final"
 
 
+def test_segmentation_build_fails_when_image_worker_fails(tmp_path, monkeypatch) -> None:
+    dataset_root = tmp_path / "source_split"
+    _write_test_image(dataset_root / "train" / "images" / "img.jpg")
+    (dataset_root / "train" / "labels").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "train" / "labels" / "img.txt").write_text(
+        "0 0.5 0.5 0.2 0.2\n", encoding="utf-8"
+    )
+    (dataset_root / "labelmap.txt").write_text("building\n", encoding="utf-8")
+    output_root = tmp_path / "sam3_outputs"
+    output_root.mkdir()
+
+    class FailingMiningPool:
+        def __init__(self, _devices):
+            self.workers = [self]
+
+        def process_image(self, **_kwargs):
+            raise RuntimeError("simulated mask failure")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(api, "SAM3_DATASET_ROOT", output_root)
+    monkeypatch.setattr(
+        api,
+        "_plan_segmentation_build",
+        lambda _request: (
+            {"id": "seg_out", "classes": ["building"]},
+            {"dataset_root": str(output_root / "seg_out")},
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "_resolve_sam3_dataset_meta",
+        lambda _dataset_id: {
+            "id": "source",
+            "dataset_root": str(dataset_root),
+            "classes": ["building"],
+        },
+    )
+    monkeypatch.setattr(api, "_resolve_sam3_mining_devices_impl", lambda *_args, **_kwargs: ["cpu"])
+    monkeypatch.setattr(api, "_Sam3MiningPool", FailingMiningPool)
+
+    def run_job_immediately(*, job, registry, lock, target, args, name=None):
+        with lock:
+            registry[job.job_id] = job
+        target(*args)
+
+    monkeypatch.setattr(api, "_register_job_and_start_thread", run_job_immediately)
+    monkeypatch.setattr(
+        api,
+        "_convert_yolo_dataset_to_coco_impl",
+        lambda _root: (_ for _ in ()).throw(AssertionError("must not publish failed build")),
+    )
+    with api.SEGMENTATION_BUILD_JOBS_LOCK:
+        api.SEGMENTATION_BUILD_JOBS.clear()
+
+    job = api._start_segmentation_build_job(
+        api.SegmentationBuildRequest(source_dataset_id="source", output_name="seg_out")
+    )
+
+    assert job.status == "failed"
+    assert job.error is not None
+    assert job.error.startswith("segmentation_builder_worker_failed:1:")
+    assert "simulated mask failure" in job.error
+    assert job.result is None
+
+
 def test_register_path_dedupes_existing_linked_entry(tmp_path, monkeypatch) -> None:
     dataset_root = tmp_path / "linked_ds"
     (dataset_root / "images").mkdir(parents=True, exist_ok=True)

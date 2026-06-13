@@ -46749,6 +46749,7 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
                 workers_list = mining_pool.workers if mining_pool is not None else sam1_workers
                 if not workers_list:
                     raise RuntimeError("segmentation_builder_no_workers")
+                worker_failures: List[str] = []
                 with ThreadPoolExecutor(max_workers=max(1, len(workers_list))) as executor:
                     futures = []
                     task_idx = 0
@@ -46763,7 +46764,14 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
                         try:
                             fut.result()
                         except Exception as exc:  # noqa: BLE001
+                            detail = str(exc) or exc.__class__.__name__
+                            worker_failures.append(detail)
                             logger.warning("Segmentation build worker failed: %s", exc)
+                    if worker_failures:
+                        first = worker_failures[0]
+                        raise RuntimeError(
+                            f"segmentation_builder_worker_failed:{len(worker_failures)}:{first}"
+                        )
             finally:
                 try:
                     if mining_pool is not None:

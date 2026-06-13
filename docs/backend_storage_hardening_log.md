@@ -3021,3 +3021,27 @@ preserving the exact validation story for storage and artifact-write fixes.
   (`tests/test_clip_registry_downloads.py`, `35 passed`), `py_compile
   localinferenceapi.py tests/test_clip_registry_downloads.py`, and
   `git diff --check`.
+
+## 2026-06-13: Dataset Export Overlay Revalidation
+
+- Continued the dataset-download data-loss sweep on linked-dataset annotation
+  overlays. Export planning correctly filtered unsafe overlay symlinks, but
+  planned override files were only checked with `exists()`/`is_file()` at ZIP
+  write time. If an overlay disappeared after planning, the export could omit
+  the user's edited label/text file; if it was swapped to a symlink, the writer
+  could follow a changed path.
+- Dataset ZIP exports now revalidate every planned overlay or registry labelmap
+  override against the guarded dataset metadata root immediately before writing.
+  A missing, swapped, or unsafe planned override fails the export with
+  `dataset_export_override_unavailable` and removes the transient ZIP staging
+  directory.
+- Added regressions for planned overlay disappearance and planned overlay
+  symlink replacement, while preserving the existing behavior that overlay
+  symlinks present during planning are ignored rather than archived.
+- Validation: linked dataset export regressions
+  (`tests/test_dataset_linked_annotation_flows.py -k "download_dataset_entry or
+  download_linked_dataset"`, `8 passed`), full linked dataset/download cleanup
+  bundle (`tests/test_dataset_linked_annotation_flows.py
+  tests/test_dataset_download_cleanup.py`, `100 passed`), `py_compile
+  localinferenceapi.py tests/test_dataset_linked_annotation_flows.py`, and
+  `git diff --check`.

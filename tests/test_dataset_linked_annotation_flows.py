@@ -845,6 +845,90 @@ def test_download_dataset_entry_applies_overlay_files(tmp_path, monkeypatch) -> 
         assert zf.read(text_name).decode("utf-8").strip() == "new"
 
 
+def test_download_dataset_entry_fails_if_planned_overlay_disappears(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "linked_source"
+    (source_root / "labels").mkdir(parents=True, exist_ok=True)
+    (source_root / "labels" / "img1.txt").write_text("0 0.1 0.1 0.1 0.1\n", encoding="utf-8")
+    record_root = tmp_path / "registry" / "ds_linked"
+    overlay_root = record_root / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    (overlay_root / "labels" / "train").mkdir(parents=True, exist_ok=True)
+    overlay_label = overlay_root / "labels" / "train" / "img1.txt"
+    overlay_label.write_text("0 0.9 0.9 0.2 0.2\n", encoding="utf-8")
+    entry = {
+        "id": "ds_linked",
+        "dataset_root": str(source_root),
+        "registry_root": str(record_root),
+        "storage_mode": "linked",
+        "linked_root": str(source_root),
+        "yolo_layout": "flat",
+    }
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    real_overlay_entries = api._annotation_overlay_archive_entries
+
+    def disappearing_overlay_entries(entry_arg):
+        entries = real_overlay_entries(entry_arg)
+        overlay_label.unlink()
+        return entries
+
+    monkeypatch.setattr(api, "_annotation_overlay_archive_entries", disappearing_overlay_entries)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.download_dataset_entry("ds_linked")
+
+    assert exc.value.status_code == 412
+    assert exc.value.detail == {
+        "error": "dataset_export_override_unavailable",
+        "path": "labels/img1.txt",
+    }
+
+
+def test_download_dataset_entry_fails_if_planned_overlay_becomes_symlink(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "linked_source"
+    (source_root / "labels").mkdir(parents=True, exist_ok=True)
+    (source_root / "labels" / "img1.txt").write_text("0 0.1 0.1 0.1 0.1\n", encoding="utf-8")
+    record_root = tmp_path / "registry" / "ds_linked"
+    overlay_root = record_root / api.DATASET_ANNOTATION_OVERLAY_DIRNAME
+    (overlay_root / "labels" / "train").mkdir(parents=True, exist_ok=True)
+    overlay_label = overlay_root / "labels" / "train" / "img1.txt"
+    overlay_label.write_text("0 0.9 0.9 0.2 0.2\n", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    entry = {
+        "id": "ds_linked",
+        "dataset_root": str(source_root),
+        "registry_root": str(record_root),
+        "storage_mode": "linked",
+        "linked_root": str(source_root),
+        "yolo_layout": "flat",
+    }
+    monkeypatch.setattr(api, "_resolve_dataset_entry", lambda _dataset_id: entry)
+    real_overlay_entries = api._annotation_overlay_archive_entries
+
+    def symlinked_overlay_entries(entry_arg):
+        entries = real_overlay_entries(entry_arg)
+        overlay_label.unlink()
+        try:
+            overlay_label.symlink_to(outside)
+        except OSError as exc:
+            pytest.skip(f"symlink unsupported: {exc}")
+        return entries
+
+    monkeypatch.setattr(api, "_annotation_overlay_archive_entries", symlinked_overlay_entries)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.download_dataset_entry("ds_linked")
+
+    assert exc.value.status_code == 412
+    assert exc.value.detail == {
+        "error": "dataset_export_override_unavailable",
+        "path": "labels/img1.txt",
+    }
+
+
 def test_download_dataset_entry_rejects_not_allowlisted_linked_record(tmp_path, monkeypatch) -> None:
     source_root = tmp_path / "outside_linked_source"
     (source_root / "images").mkdir(parents=True, exist_ok=True)

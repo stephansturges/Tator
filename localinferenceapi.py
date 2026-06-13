@@ -18140,6 +18140,11 @@ def download_dataset_entry(dataset_id: str):
     dataset_root = _dataset_effective_root_from_entry(entry)
     override_entries = _annotation_overlay_archive_entries(entry)
     override_entries.update(_dataset_labelmap_archive_entries(entry, dataset_root))
+    override_storage_root = _dataset_guarded_meta_storage_root_from_entry(
+        entry,
+        ensure=False,
+        detail="dataset_export_override_path_forbidden",
+    ).resolve(strict=False)
     tmp_dir = Path(tempfile.mkdtemp(prefix="dataset_export_"))
     try:
         zip_path = tmp_dir / f"{dataset_id}.zip"
@@ -18157,9 +18162,19 @@ def download_dataset_entry(dataset_id: str):
                     continue
                 zf.write(path, arcname=str(Path(dataset_root.name) / rel))
             for rel_posix, override_path in sorted(override_entries.items()):
-                if not override_path.exists() or not override_path.is_file():
-                    continue
-                zf.write(override_path, arcname=str(Path(dataset_root.name) / Path(rel_posix)))
+                safe_override = _safe_existing_regular_file_within_root_impl(
+                    override_path,
+                    override_storage_root,
+                )
+                if safe_override is None:
+                    raise HTTPException(
+                        status_code=HTTP_412_PRECONDITION_FAILED,
+                        detail={
+                            "error": "dataset_export_override_unavailable",
+                            "path": rel_posix,
+                        },
+                    )
+                zf.write(safe_override, arcname=str(Path(dataset_root.name) / Path(rel_posix)))
         return FileResponse(
             path=str(zip_path),
             media_type="application/zip",
@@ -18167,6 +18182,9 @@ def download_dataset_entry(dataset_id: str):
             # Dataset export archives are transient and should not accumulate on disk.
             background=BackgroundTask(shutil.rmtree, tmp_dir, ignore_errors=True),
         )
+    except HTTPException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
     except Exception as exc:  # noqa: BLE001
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise HTTPException(

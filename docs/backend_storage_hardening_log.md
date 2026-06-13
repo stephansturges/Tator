@@ -3,6 +3,18 @@
 This log keeps implementation checkpoints out of the README front page while
 preserving the exact validation story for storage and artifact-write fixes.
 
+## 2026-06-13: Dataset Registry Labelmap Windows Metadata
+
+- Resolved Windows absolute, Windows-drive, UNC-style, and backslash-relative
+  `yolo_labelmap_path` metadata for registry datasets inside the dataset
+  registry directory.
+- Kept existing source-root read-only behavior and final registry-root
+  containment checks before using any metadata labelmap.
+- Added regressions for linked registry datasets whose metadata was written on
+  Windows or with Windows-style relative paths.
+- Validation: `118 passed, 8 warnings` for linked-root status, dataset
+  metadata IO, and linked annotation flow coverage.
+
 ## 2026-06-13: CLIP Labelmap Windows Metadata Hints
 
 - Resolved Windows absolute, Windows-drive, UNC-style, and backslash-relative

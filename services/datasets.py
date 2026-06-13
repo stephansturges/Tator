@@ -8,7 +8,7 @@ import logging
 import os
 import re
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Optional, Sequence, Tuple, List
 
 from fastapi import HTTPException
@@ -494,7 +494,15 @@ def _list_all_datasets_impl(
             metadata_labelmap_raw = str(meta.get("yolo_labelmap_path") or "").strip()
             if source == "registry" and metadata_labelmap_raw:
                 try:
-                    candidate_labelmap = Path(metadata_labelmap_raw).expanduser()
+                    metadata_win_path = PureWindowsPath(metadata_labelmap_raw)
+                    if metadata_win_path.is_absolute() or metadata_win_path.drive:
+                        candidate_labelmap = path / metadata_win_path.name
+                    else:
+                        candidate_labelmap = Path(
+                            metadata_labelmap_raw.replace("\\", "/")
+                        ).expanduser()
+                        if not candidate_labelmap.is_absolute():
+                            candidate_labelmap = path / candidate_labelmap
                     if (
                         not candidate_labelmap.is_symlink()
                         and candidate_labelmap.exists()

@@ -253,6 +253,54 @@ def test_linked_registry_labelmap_overrides_source_labelmap(tmp_path) -> None:
     assert entry["yolo_ready"] is True
 
 
+def test_linked_registry_labelmap_supports_windows_metadata_path(tmp_path) -> None:
+    registry_root = tmp_path / "registry"
+    registry_root.mkdir(parents=True, exist_ok=True)
+    linked_source = tmp_path / "linked_src"
+    (linked_source / "images").mkdir(parents=True, exist_ok=True)
+    (linked_source / "labels").mkdir(parents=True, exist_ok=True)
+
+    for dataset_id, raw_labelmap_path in (
+        ("linked_windows_abs", r"C:\export\labelmap.txt"),
+        ("linked_windows_rel", r"nested\labelmap.txt"),
+    ):
+        dataset_dir = registry_root / dataset_id
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        if dataset_id.endswith("_abs"):
+            registry_labelmap = dataset_dir / "labelmap.txt"
+        else:
+            registry_labelmap = dataset_dir / "nested" / "labelmap.txt"
+        registry_labelmap.parent.mkdir(parents=True, exist_ok=True)
+        registry_labelmap.write_text("car\ntruck\n", encoding="utf-8")
+        (dataset_dir / "dataset_meta.json").write_text(
+            json.dumps(
+                {
+                    "id": dataset_id,
+                    "label": dataset_id,
+                    "storage_mode": "linked",
+                    "linked_root": str(linked_source),
+                    "source": "registry",
+                    "classes": ["car", "truck"],
+                    "yolo_labelmap_path": raw_labelmap_path,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    entries = {entry["id"]: entry for entry in _list_entries(registry_root)}
+
+    assert entries["linked_windows_abs"]["yolo_labelmap_path"] == str(
+        registry_root / "linked_windows_abs" / "labelmap.txt"
+    )
+    assert entries["linked_windows_abs"]["classes"] == ["car", "truck"]
+    assert entries["linked_windows_abs"]["yolo_ready"] is True
+    assert entries["linked_windows_rel"]["yolo_labelmap_path"] == str(
+        registry_root / "linked_windows_rel" / "nested" / "labelmap.txt"
+    )
+    assert entries["linked_windows_rel"]["classes"] == ["car", "truck"]
+    assert entries["linked_windows_rel"]["yolo_ready"] is True
+
+
 def test_linked_listing_does_not_auto_convert_or_backfill_source(tmp_path) -> None:
     registry_root = tmp_path / "registry"
     registry_root.mkdir(parents=True, exist_ok=True)

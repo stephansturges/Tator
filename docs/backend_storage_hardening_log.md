@@ -3,6 +3,23 @@
 This log keeps implementation checkpoints out of the README front page while
 preserving the exact validation story for storage and artifact-write fixes.
 
+## 2026-06-13: UI Smoke Tool Base URL Support
+
+- Made `tools/run_ui_smoke.py` and `tools/run_ui_concurrency_smoke.py`
+  honor `BASE_URL`, an optional positional backend URL, and the documented
+  `--base-url` flag so validation works after launching the backend on a
+  non-default port.
+- Made `tools/run_ui_concurrency_smoke.py` import-side-effect-free and added
+  clean `--help` handling for both smoke tools.
+- Added regression coverage for import safety and base URL precedence.
+- Validation: `py_compile` for the two smoke tools and their regression tests,
+  `tests/test_validation_cleanup_tools.py` (`24 passed`), both smoke-tool
+  `--help` commands, `git diff --check`, and live
+  `tools/run_ui_concurrency_smoke.py` checks against `http://127.0.0.1:8000`
+  using both `BASE_URL` and `--base-url`; `SKIP_GPU=1
+  BASE_URL=http://127.0.0.1:8000 tools/run_refactor_validation.sh` also
+  passed.
+
 ## 2026-06-13: Dataset Registry Labelmap Windows Metadata
 
 - Resolved Windows absolute, Windows-drive, UNC-style, and backslash-relative

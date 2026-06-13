@@ -439,6 +439,67 @@ def test_ui_param_sweep_import_is_side_effect_free(monkeypatch) -> None:
     assert callable(tool.main)
 
 
+def test_ui_smoke_import_is_side_effect_free(monkeypatch) -> None:
+    def fail_urlopen(*_args, **_kwargs):
+        raise AssertionError("run_ui_smoke must not call the backend during import")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+
+    tool = _load_tool_module("run_ui_smoke_import", "tools/run_ui_smoke.py")
+
+    assert callable(tool.parse_args)
+    assert callable(tool.main)
+
+
+def test_ui_smoke_base_url_defaults_to_env(monkeypatch) -> None:
+    tool = _load_tool_module("run_ui_smoke_args", "tools/run_ui_smoke.py")
+    monkeypatch.setenv("BASE_URL", "http://127.0.0.1:9999")
+
+    assert tool.parse_args([]).base_url == "http://127.0.0.1:9999"
+    assert tool.parse_args(["http://example.test"]).base_url == "http://example.test"
+    assert (
+        tool.parse_args(
+            ["http://example.test", "--base-url", "http://flag.test"]
+        ).base_url
+        == "http://flag.test"
+    )
+
+
+def test_ui_concurrency_smoke_import_is_side_effect_free(monkeypatch) -> None:
+    def fail_urlopen(*_args, **_kwargs):
+        raise AssertionError(
+            "run_ui_concurrency_smoke must not call the backend during import"
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+
+    tool = _load_tool_module(
+        "run_ui_concurrency_smoke_import",
+        "tools/run_ui_concurrency_smoke.py",
+    )
+
+    assert callable(tool.parse_args)
+    assert callable(tool.run_smoke)
+    assert callable(tool.main)
+
+
+def test_ui_concurrency_smoke_base_url_defaults_to_env(monkeypatch) -> None:
+    tool = _load_tool_module(
+        "run_ui_concurrency_smoke_args",
+        "tools/run_ui_concurrency_smoke.py",
+    )
+    monkeypatch.setenv("BASE_URL", "http://127.0.0.1:9999")
+
+    assert tool.parse_args([]).base_url == "http://127.0.0.1:9999"
+    assert tool.parse_args(["http://example.test"]).base_url == "http://example.test"
+    assert (
+        tool.parse_args(
+            ["http://example.test", "--base-url", "http://flag.test"]
+        ).base_url
+        == "http://flag.test"
+    )
+
+
 def test_ui_param_sweep_accepts_detector_precondition_statuses() -> None:
     tool = _load_tool_module("run_ui_param_sweep_status", "tools/run_ui_param_sweep.py")
 
@@ -583,8 +644,10 @@ def test_ui_validation_tools_help_exits_cleanly_without_backend() -> None:
         "tools/run_class_split_qwen_review_benchmark.py",
         "tools/run_context_feature_ablation.py",
         "tools/run_ui_contract_tests.py",
+        "tools/run_ui_concurrency_smoke.py",
         "tools/run_ui_negative_tests.py",
         "tools/run_ui_param_sweep.py",
+        "tools/run_ui_smoke.py",
         "tools/watch_yolo_train_and_activate.py",
     ]:
         result = subprocess.run(

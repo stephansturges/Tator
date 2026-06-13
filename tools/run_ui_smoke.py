@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
+import argparse
 import base64
 import json
-import sys
-import time
+import os
 from pathlib import Path
 from urllib import request, error
 
-BASE_URL = "http://127.0.0.1:8000"
+DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 FUZZ_PACK = Path("tests/fixtures/fuzz_pack")
 
 
-def _post(path: str, payload: dict):
+def _post(base_url: str, path: str, payload: dict):
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(
-        f"{BASE_URL}{path}",
+        f"{base_url}{path}",
         data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -31,8 +31,8 @@ def _post(path: str, payload: dict):
         return None, {"error": str(exc)}
 
 
-def _get(path: str):
-    req = request.Request(f"{BASE_URL}{path}")
+def _get(base_url: str, path: str):
+    req = request.Request(f"{base_url}{path}")
     try:
         with request.urlopen(req, timeout=30) as resp:
             return resp.getcode(), json.loads(resp.read().decode("utf-8"))
@@ -53,7 +53,34 @@ def _load_sample_image() -> str:
     return base64.b64encode(data).decode("utf-8")
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run UI smoke checks against a Tator backend."
+    )
+    parser.add_argument(
+        "base_url",
+        nargs="?",
+        default=None,
+        help=f"Backend base URL. Defaults to BASE_URL or {DEFAULT_BASE_URL}.",
+    )
+    parser.add_argument(
+        "--base-url",
+        dest="base_url_flag",
+        default=None,
+        help="Backend base URL. Overrides the positional URL and BASE_URL.",
+    )
+    args = parser.parse_args(argv)
+    args.base_url = (
+        args.base_url_flag
+        or args.base_url
+        or os.environ.get("BASE_URL", DEFAULT_BASE_URL)
+    )
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    base_url = args.base_url.rstrip("/")
     sample_b64 = _load_sample_image()
 
     checks = []
@@ -73,7 +100,7 @@ def main() -> int:
         "/qwen/datasets",
         "/sam3/datasets",
     ]:
-        code, payload = _get(path)
+        code, payload = _get(base_url, path)
         checks.append((path, "GET", code, payload))
         if path == "/datasets" and code and code < 400:
             if isinstance(payload, list):
@@ -111,7 +138,7 @@ def main() -> int:
     }
 
     for path, payload in post_payloads.items():
-        code, resp = _post(path, payload)
+        code, resp = _post(base_url, path, payload)
         checks.append((path, "POST", code, resp))
 
     if dataset_list:
@@ -122,10 +149,10 @@ def main() -> int:
                 f"/datasets/{dataset_id}/glossary",
                 f"/datasets/{dataset_id}/check",
             ]:
-                code, payload = _get(extra)
+                code, payload = _get(base_url, extra)
                 checks.append((extra, "GET", code, payload))
 
-    print("UI smoke summary:")
+    print(f"UI smoke summary for {base_url}:")
     failures = 0
     for path, method, code, resp in checks:
         status = "ok"

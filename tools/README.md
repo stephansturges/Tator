@@ -33,6 +33,8 @@ Tools
 - UI endpoint and contract checks
   - Endpoint method map: `python tools/run_ui_endpoint_method_check.py http://127.0.0.1:8000`
   - UI contract checks: `python tools/run_ui_contract_tests.py http://127.0.0.1:8000`
+  - UI smoke: `python tools/run_ui_smoke.py --base-url http://127.0.0.1:8000`
+  - UI concurrency smoke: `python tools/run_ui_concurrency_smoke.py --base-url http://127.0.0.1:8000`
   - Playwright control coverage: `python tools/check_playwright_control_coverage.py`
 
 - Unused-def scanner (heuristic, module-level only)

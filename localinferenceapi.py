@@ -47452,6 +47452,8 @@ def _start_yolo_training_worker(job: YoloTrainingJob) -> None:
             best_path = train_dir / "weights" / "best.pt"
             if best_path.exists():
                 _copy2_if_different(best_path, run_dir / "best.pt")
+            if not (run_dir / "best.pt").is_file():
+                raise RuntimeError("yolo_best_checkpoint_missing")
             results_csv = train_dir / "results.csv"
             args_yaml = train_dir / "args.yaml"
             if results_csv.exists():
@@ -48271,19 +48273,20 @@ def _start_rfdetr_training_worker(job: RfDetrTrainingJob) -> None:
                 except Exception:
                     pass
             best_path = _rfdetr_best_checkpoint_impl(run_dir)
+            if not best_path:
+                raise RuntimeError("rfdetr_best_checkpoint_missing")
             optimized_path = None
-            if best_path:
-                try:
-                    export_kwargs = dict(model_kwargs)
-                    export_kwargs["pretrain_weights"] = best_path
-                    export_kwargs["device"] = device_resolution.get("device_arg") or "cpu"
-                    export_model = model_cls(**export_kwargs)
-                    export_model.optimize_for_inference()
-                    optimized_path = run_dir / "checkpoint_best_optimized.pt"
-                    torch.jit.save(export_model.model.inference_model, str(optimized_path))
-                    _rfdetr_job_log(job, f"Optimized export saved: {optimized_path.name}")
-                except Exception as exc:  # noqa: BLE001
-                    _rfdetr_job_log(job, f"Optimized export failed: {exc}")
+            try:
+                export_kwargs = dict(model_kwargs)
+                export_kwargs["pretrain_weights"] = best_path
+                export_kwargs["device"] = device_resolution.get("device_arg") or "cpu"
+                export_model = model_cls(**export_kwargs)
+                export_model.optimize_for_inference()
+                optimized_path = run_dir / "checkpoint_best_optimized.pt"
+                torch.jit.save(export_model.model.inference_model, str(optimized_path))
+                _rfdetr_job_log(job, f"Optimized export saved: {optimized_path.name}")
+            except Exception as exc:  # noqa: BLE001
+                _rfdetr_job_log(job, f"Optimized export failed: {exc}")
             result_payload = {
                 "run_dir": str(run_dir),
                 "best_path": best_path,

@@ -2903,3 +2903,29 @@ preserving the exact validation story for storage and artifact-write fixes.
   storage health summary, `node --check ybat-master/ybat.js`, and `git diff
   --check`. A post-E2E dataset list confirmed no generated `pw_*` datasets
   remained.
+
+## 2026-06-13: Detector Training Missing Checkpoint Sweep
+
+- Continued the training-output publish sweep on detector jobs. A successful
+  detector training run must leave a usable top-level checkpoint in the run
+  directory before the UI can safely present it as a selectable model.
+- Found that YOLO training could finish without copying or producing
+  `best.pt`, then still mark the job as succeeded with a null `best_path`.
+  The worker now fails closed with `yolo_best_checkpoint_missing` when no
+  top-level `best.pt` exists after training.
+- Found the same class of fail-open behavior in RF-DETR training: if no best
+  checkpoint was discovered, the worker could still report success with a null
+  `best_path`. The worker now fails closed with
+  `rfdetr_best_checkpoint_missing` before export/result publication.
+- Added worker-level regressions for both missing-checkpoint paths. The tests
+  assert failed job state, failed metadata, no success result, and no bogus
+  published checkpoint.
+- Validation: `py_compile localinferenceapi.py` and touched tests, focused
+  detector lifecycle/metadata/start-validation tests (`92 passed`), adjacent
+  detector tests (`18 passed`), full pytest before the backend reconnect
+  (`1581 passed, 40 skipped`), UI contract runner (`82` checks), UI endpoint
+  method check (`277` fetches), Playwright control coverage (`83` controls),
+  UI OpenAPI sanity (`167` tested), OpenAPI missing-param sanity (`76`
+  checks), OpenAPI missing-query sanity (`5` checks), UI negative tests (`18`
+  checks), UI data-ops smoke, UI smoke, backend storage health summary,
+  `node --check ybat-master/ybat.js`, and `git diff --check`.

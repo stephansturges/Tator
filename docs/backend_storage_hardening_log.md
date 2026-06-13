@@ -3193,3 +3193,25 @@ preserving the exact validation story for storage and artifact-write fixes.
   names.
 - Validation: crop ZIP coverage (`tests/test_crop_zip_safety.py`, `3 passed`)
   and `py_compile localinferenceapi.py tests/test_crop_zip_safety.py`.
+
+## 2026-06-13: Dataset Upload Finalize Failure Recovery
+
+- Continued the dataset-upload preservation sweep on streamed dataset upload
+  sessions. Finalization removed the upload-session manifest before moving the
+  staged dataset into the managed registry, so a failed move could leave staged
+  images on disk without the manifest needed for restart recovery or cleanup.
+- Finalization now keeps the upload-session manifest in the staging directory
+  until the move succeeds. Normal success still removes the staging-only
+  manifest from the final managed dataset, recomputes the dataset signature, and
+  rewrites `dataset.json`.
+- Post-move metadata cleanup is deliberately best effort: once the dataset has
+  moved into the registry, a cleanup/signature warning must not delete the
+  user's newly uploaded files.
+- Added regressions for move failure recovery, staging-manifest removal on
+  normal success, and successful dataset preservation when post-move metadata
+  cleanup fails.
+- Validation: focused upload finalization coverage
+  (`tests/test_dataset_zip_upload_security.py -k
+  "dataset_upload_session_finalize"`, `3 passed`), full dataset ZIP upload
+  coverage (`tests/test_dataset_zip_upload_security.py`, `21 passed`), and
+  `py_compile localinferenceapi.py tests/test_dataset_zip_upload_security.py`.

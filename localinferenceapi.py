@@ -17871,7 +17871,6 @@ def finalize_dataset_upload_session(session_id: str) -> Dict[str, Any]:
                     status_code=HTTP_409_CONFLICT, detail="dataset_upload_target_exists"
                 )
             try:
-                _dataset_upload_session_meta_path(source_root).unlink(missing_ok=True)
                 if job.classes:
                     _write_text_within_root_atomic(
                         source_root / "labelmap.txt",
@@ -17899,6 +17898,25 @@ def finalize_dataset_upload_session(session_id: str) -> Dict[str, Any]:
                 }
                 _persist_dataset_meta(source_root, meta)
                 shutil.move(str(source_root), target_root)
+                try:
+                    target_session_meta_path = _dataset_upload_session_meta_path(target_root)
+                    if (
+                        target_session_meta_path.exists()
+                        and not target_session_meta_path.is_symlink()
+                        and _path_is_within_root_impl(
+                            target_session_meta_path.resolve(strict=False),
+                            target_root.resolve(strict=False),
+                        )
+                    ):
+                        target_session_meta_path.unlink(missing_ok=True)
+                    meta["signature"] = _compute_dir_signature_impl(target_root)
+                    _persist_dataset_meta(target_root, meta)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Dataset upload finalized but metadata cleanup failed for %s: %s",
+                        dataset_id_final,
+                        exc,
+                    )
             except HTTPException:
                 if target_root.exists():
                     shutil.rmtree(target_root, ignore_errors=True)

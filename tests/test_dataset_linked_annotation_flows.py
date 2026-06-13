@@ -45,6 +45,50 @@ def test_delete_linked_dataset_only_removes_registry_record(tmp_path, monkeypatc
     assert not record_root.exists(), "registry record should be removed"
 
 
+def test_delete_linked_dataset_reports_registry_remove_failure_without_source_delete(
+    tmp_path, monkeypatch
+) -> None:
+    source_root = tmp_path / "linked_source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    (source_root / "keep.txt").write_text("source", encoding="utf-8")
+
+    registry_root = tmp_path / "registry"
+    registry_root.mkdir(parents=True, exist_ok=True)
+    record_root = registry_root / "ds_linked"
+    record_root.mkdir(parents=True, exist_ok=True)
+    (record_root / api.DATASET_META_NAME).write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", registry_root)
+    monkeypatch.setattr(
+        api,
+        "_resolve_dataset_entry",
+        lambda _dataset_id: {
+            "id": "ds_linked",
+            "dataset_root": str(source_root),
+            "registry_root": str(record_root),
+            "storage_mode": "linked",
+            "linked_root": str(source_root),
+        },
+    )
+
+    original_rmtree = api.shutil.rmtree
+
+    def fail_rmtree(path, *args, **kwargs):
+        if Path(path).resolve(strict=False) == record_root.resolve(strict=False):
+            raise OSError("simulated registry remove failure")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(api.shutil, "rmtree", fail_rmtree)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.delete_dataset_entry("ds_linked")
+
+    assert exc.value.status_code == 500
+    assert str(exc.value.detail).startswith("dataset_delete_failed:")
+    assert source_root.exists(), "linked source must never be deleted"
+    assert record_root.exists(), "registry record must remain when deletion fails"
+
+
 def test_delete_linked_dataset_unlinks_registry_symlink_without_target_delete(
     tmp_path, monkeypatch
 ) -> None:

@@ -2706,3 +2706,25 @@ preserving the exact validation story for storage and artifact-write fixes.
   negative tests (`18` checks), UI data-ops smoke, OpenAPI missing-query sanity
   (`5` checks), OpenAPI missing-param sanity (`76` checks), UI smoke, and
   legacy UI endpoint check (`184` endpoints).
+
+## 2026-06-13: Linked Dataset Delete Failure Sweep
+
+- Audited dataset delete/finalize cleanup paths after the UI guard sweep,
+  focusing on places where backend state could report success while filesystem
+  cleanup failed.
+- Changed the linked-dataset registry-record delete primitive to fail closed
+  instead of using `shutil.rmtree(..., ignore_errors=True)`. Linked dataset
+  source roots were already protected from deletion; now the registry record
+  also remains visible if the backend cannot remove it.
+- Added a regression that simulates a registry-record removal failure and
+  proves the API returns `dataset_delete_failed:*` while preserving both the
+  linked source data and the registry record.
+- Validation: focused linked dataset lifecycle tests (`95 passed`), focused
+  dataset/Data Ingestion/Qwen active/UI contract tests (`228 passed`), focused
+  Dataset Management/Data Ingestion/navigation UI E2E (`15 passed`),
+  `py_compile localinferenceapi.py`, `node --check ybat-master/ybat.js`,
+  `git diff --check`, UI endpoint method/map checks (`277` fetches, `170`
+  paths), UI OpenAPI sanity (`167` tested), UI negative tests (`18` checks),
+  UI data-ops smoke, OpenAPI missing-query sanity (`5` checks), and OpenAPI
+  missing-param sanity (`76` checks), full pytest (`1561 passed, 40 skipped`),
+  and full UI E2E (`42 passed`).

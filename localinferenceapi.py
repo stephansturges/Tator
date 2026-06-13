@@ -16799,7 +16799,13 @@ def _delete_dataset_tree_or_link(path: Path, allowed_roots: Sequence[Path]) -> N
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="dataset_root_missing")
     if not any(_path_is_within_root_impl(resolved, root.resolve()) for root in allowed_roots):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="dataset_delete_forbidden")
-    shutil.rmtree(resolved, ignore_errors=True)
+    try:
+        shutil.rmtree(resolved)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"dataset_delete_failed:{exc}",
+        ) from exc
 
 
 def _managed_dataset_roots() -> List[Path]:

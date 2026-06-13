@@ -14971,6 +14971,8 @@ def _purge_directory(root: Path) -> int:
     """Delete all entries under a directory and return count removed."""
     removed = 0
     try:
+        if root.is_symlink():
+            return 0
         if not root.exists():
             return 0
         for entry in root.iterdir():

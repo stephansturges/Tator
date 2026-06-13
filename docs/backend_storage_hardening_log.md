@@ -2601,3 +2601,17 @@ preserving the exact validation story for storage and artifact-write fixes.
   passed, 39 skipped`), UI negative tests (`18` checks), UI data-ops smoke,
   OpenAPI sanity (`167` tested, no failures), endpoint map check (`170` paths),
   and `SKIP_GPU=1` refactor/fuzz validation.
+
+## 2026-06-13: Destructive Path Helper Hardening
+
+- Audited dataset, upload-session, annotation snapshot, detector run,
+  data-ingestion, class-analysis, agent-mining, Qwen, and SAM3 lifecycle tests
+  for destructive path handling and stale-state cleanup.
+- Hardened the generic `_purge_directory` helper so it refuses to purge through
+  a symlinked root. Current callers already validate their cache roots, but the
+  helper is now fail-closed if reused from another cleanup path later.
+- Added a regression proving a symlinked purge root leaves the target directory
+  and files untouched.
+- Validation: direct purge-helper regression and SAM3 purge checks (`4
+  passed`), pycompile for touched files, and the broader data-safety/lifecycle
+  focused suite (`657 passed`).

@@ -500,6 +500,21 @@ def test_sam3_train_cache_purge_unlinks_symlinked_split_root_without_target_dele
     assert (outside / "payload.bin").read_bytes() == b"external"
 
 
+def test_purge_directory_ignores_symlinked_root_without_target_delete(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_purge_root"
+    outside.mkdir()
+    (outside / "payload.bin").write_bytes(b"external")
+    link_root = tmp_path / "purge_root"
+    try:
+        link_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert api._purge_directory(link_root) == 0
+    assert link_root.is_symlink()
+    assert (outside / "payload.bin").read_bytes() == b"external"
+
+
 def test_sam3_training_split_cleanup_unlinks_symlink_without_target_delete(
     tmp_path: Path, monkeypatch
 ) -> None:

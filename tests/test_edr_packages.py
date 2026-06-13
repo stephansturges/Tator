@@ -590,6 +590,38 @@ def test_export_edr_package_rejects_symlinked_zip_escape(tmp_path: Path) -> None
         export_edr_package(packages_root, "pkg1")
 
 
+def test_export_edr_package_rejects_corrupt_cached_zip(tmp_path: Path) -> None:
+    packages_root = tmp_path / "edr_packages"
+    package_root = packages_root / "pkg1"
+    package_root.mkdir(parents=True)
+    (package_root / EDR_PACKAGE_ZIP_NAME).write_bytes(b"not a zip")
+
+    with pytest.raises(RuntimeError, match="edr_package_invalid_zip"):
+        export_edr_package(packages_root, "pkg1")
+
+
+def test_export_edr_package_rejects_manifestless_cached_zip(tmp_path: Path) -> None:
+    packages_root = tmp_path / "edr_packages"
+    package_root = packages_root / "pkg1"
+    package_root.mkdir(parents=True)
+    with zipfile.ZipFile(package_root / EDR_PACKAGE_ZIP_NAME, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("saved_recipe.json", json.dumps({"id": "pkg1"}))
+
+    with pytest.raises(RuntimeError, match="edr_package_manifest_missing"):
+        export_edr_package(packages_root, "pkg1")
+
+
+def test_export_edr_package_rejects_incomplete_cached_zip(tmp_path: Path) -> None:
+    packages_root = tmp_path / "edr_packages"
+    package_root = packages_root / "pkg1"
+    package_root.mkdir(parents=True)
+    with zipfile.ZipFile(package_root / EDR_PACKAGE_ZIP_NAME, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(EDR_PACKAGE_MANIFEST_NAME, json.dumps({"package_id": "pkg1"}))
+
+    with pytest.raises(RuntimeError, match="edr_package_required_file_missing:saved_recipe.json"):
+        export_edr_package(packages_root, "pkg1")
+
+
 def test_import_edr_package_rejects_traversal_manifest_id(tmp_path: Path) -> None:
     zip_path = tmp_path / "bad.edr.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -602,6 +634,17 @@ def test_import_edr_package_rejects_traversal_manifest_id(tmp_path: Path) -> Non
         import_edr_package_from_zip(zip_path=zip_path, packages_root=tmp_path / "edr_packages")
 
     assert not (tmp_path / "edr_packages_evil").exists()
+
+
+def test_import_edr_package_rejects_missing_saved_recipe(tmp_path: Path) -> None:
+    zip_path = tmp_path / "incomplete.edr.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(EDR_PACKAGE_MANIFEST_NAME, json.dumps({"package_id": "pkg1"}))
+
+    with pytest.raises(RuntimeError, match="edr_package_required_file_missing:saved_recipe.json"):
+        import_edr_package_from_zip(zip_path=zip_path, packages_root=tmp_path / "edr_packages")
+
+    assert not (tmp_path / "edr_packages" / "pkg1").exists()
 
 
 @pytest.mark.parametrize("member_name", ["C:/escape.txt", "\\\\server\\share\\escape.txt"])
@@ -660,6 +703,7 @@ def test_import_edr_package_replaces_existing_symlink_children_without_target_wr
             EDR_PACKAGE_MANIFEST_NAME,
             json.dumps({"package_id": "pkg1", "dataset_id": "demo"}),
         )
+        zf.writestr("saved_recipe.json", json.dumps({"id": "pkg1", "config": {}}))
 
     summary = import_edr_package_from_zip(zip_path=zip_path, packages_root=packages_root)
 

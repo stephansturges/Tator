@@ -3062,3 +3062,27 @@ preserving the exact validation story for storage and artifact-write fixes.
   (`tests/test_agent_recipe_zip_export_robustness.py
   tests/test_agent_cascade_export_safety.py`, `33 passed`), `py_compile`
   on touched service/test modules, and `git diff --check`.
+
+## 2026-06-13: EDR Package ZIP Completeness
+
+- Continued the portable artifact sweep on EDR package downloads and imports.
+  The export endpoint previously returned an existing `package.edr.zip` as long
+  as it was a regular file, so a corrupt archive or a valid ZIP missing core EDR
+  files could be served as a usable package.
+- Added explicit EDR package ZIP validation before export: cached package zips
+  must pass `testzip()` and contain both `edr_manifest.json` and
+  `saved_recipe.json`. Invalid cached packages now fail closed instead of being
+  downloaded.
+- Added import-time completeness validation after package-id validation and
+  before registry mutation, so incomplete portable packages cannot create
+  backend package records. Package-id traversal checks still fire before
+  missing-sidecar checks.
+- The EDR export route now maps invalid cached package state to `412` with the
+  service detail, separating broken package state from not-found packages and
+  internal backend errors.
+- Validation: focused EDR package suite (`tests/test_edr_packages.py`,
+  `41 passed`), adjacent prepass recipe import/export coverage
+  (`tests/test_prepass_recipe_config_validation.py
+  tests/test_prepass_recipe_import_security.py`, `47 passed`), and
+  `py_compile localinferenceapi.py services/edr_packages.py
+  tests/test_edr_packages.py`, and `git diff --check`.

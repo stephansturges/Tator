@@ -26,6 +26,7 @@ EDR_PACKAGE_KIND_CANONICAL = "canonical_edr"
 EDR_PACKAGE_KIND_SAVED = "saved_edr"
 EDR_PACKAGE_RUNTIME_MODE = "package"
 EDR_PACKAGE_FEATURE_SCHEMA_VERSION = 1
+EDR_PACKAGE_REQUIRED_FILES = (EDR_PACKAGE_MANIFEST_NAME, "saved_recipe.json")
 _EDR_PACKAGE_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -667,6 +668,32 @@ def _zip_payload(payload_dir: Path, zip_path: Path) -> None:
             tmp_path.unlink(missing_ok=True)
 
 
+def _validate_edr_package_zip(zip_path: Path) -> None:
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            bad_member = zf.testzip()
+            if bad_member is not None:
+                raise RuntimeError("edr_package_zip_corrupt")
+            names = set(zf.namelist())
+            for required_name in EDR_PACKAGE_REQUIRED_FILES:
+                if required_name not in names:
+                    if required_name == EDR_PACKAGE_MANIFEST_NAME:
+                        raise RuntimeError("edr_package_manifest_missing")
+                    raise RuntimeError(f"edr_package_required_file_missing:{required_name}")
+    except zipfile.BadZipFile as exc:
+        raise RuntimeError("edr_package_invalid_zip") from exc
+
+
+def _validate_edr_package_payload(payload_root: Path) -> None:
+    for required_name in EDR_PACKAGE_REQUIRED_FILES:
+        required_path = payload_root / required_name
+        if _safe_regular_file_within_root(required_path, payload_root):
+            continue
+        if required_name == EDR_PACKAGE_MANIFEST_NAME:
+            raise RuntimeError("edr_package_manifest_missing")
+        raise RuntimeError(f"edr_package_required_file_missing:{required_name}")
+
+
 def _extract_zip_safely(
     zip_path: Path,
     dest_dir: Path,
@@ -1143,6 +1170,7 @@ def export_edr_package(packages_root: Path, package_id: str) -> Path:
     zip_path = package_root / EDR_PACKAGE_ZIP_NAME
     if not _safe_regular_file_within_root(zip_path, package_root):
         raise FileNotFoundError(str(zip_path))
+    _validate_edr_package_zip(zip_path)
     return zip_path.resolve(strict=True)
 
 
@@ -1170,6 +1198,8 @@ def import_edr_package_from_zip(
         package_id = str(manifest.get("package_id") or "").strip()
         if not package_id:
             raise RuntimeError("edr_package_id_missing")
+        _validate_edr_package_id(package_id)
+        _validate_edr_package_payload(payload_root)
         package_root = edr_package_dir(packages_root, package_id, create=True)
         final_payload = package_root / EDR_PACKAGE_PAYLOAD_DIRNAME
         _remove_existing_child_path(final_payload, package_root)

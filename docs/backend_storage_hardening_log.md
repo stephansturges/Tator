@@ -2528,3 +2528,22 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: Python compile for touched backend modules, `node --check
   ybat-master/ybat.js`, focused Qwen progress tests (`25 passed`), and focused
   prepass detector/source-score tests (`20 passed`).
+
+## 2026-06-13: Annotation Snapshot Retry Guard
+
+- Found a browser-side retry storm after an annotation snapshot failure: a
+  failed text-caption blur save plus a blocked Close left the unchanged dirty
+  snapshot eligible for the 1.5 s background autosave interval.
+- Added an exact dirty-snapshot failure signature in the annotation workspace.
+  Background autosave skips only that unchanged failed payload, while explicit
+  Save, Close, and workflow preflight retries remain available so the user can
+  recover without data loss.
+- Stopped failed snapshot responses from draining queued follow-up saves, and
+  suppressed stale caption autosave timers
+  for the same image/text value after a failed attempt.
+- Extended the close-block E2E regression to assert that no additional
+  `/annotation/snapshot` requests are fired after the UI reports "close
+  blocked" for the failed payload.
+- Validation: `node --check ybat-master/ybat.js`, focused browser regression
+  (`1 passed`), dataset annotation browser file (`11 passed`), full browser E2E
+  (`41 passed`), and `git diff --check`.

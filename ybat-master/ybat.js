@@ -3097,6 +3097,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         timerId: null,
         pendingImage: null,
         lastSaved: new Map(),
+        lastAttempted: new Map(),
     };
 
     let settingsUiInitialized = false;
@@ -4002,6 +4003,7 @@ const sam3TrainState = {
         heartbeatTimer: null,
         saveInFlight: false,
         saveQueued: false,
+        lastFailedSnapshotSignature: "",
         loadToken: 0,
         statusMessage: "",
     };
@@ -4450,6 +4452,7 @@ const sam3TrainState = {
         annotationSourceState.dirtyRecordsByKey = new Map();
         annotationSourceState.saveInFlight = false;
         annotationSourceState.saveQueued = false;
+        annotationSourceState.lastFailedSnapshotSignature = "";
         annotationSourceState.statusMessage = "";
         updateAnnotationSourceUi();
         syncLabelingSourceControls();
@@ -4745,7 +4748,7 @@ const sam3TrainState = {
         }
     }
 
-    async function flushAnnotationSnapshot({ manual = false } = {}) {
+    async function flushAnnotationSnapshot({ manual = false, background = false } = {}) {
         if (!isAnnotationDatasetModeActive()) {
             return false;
         }
@@ -4777,6 +4780,16 @@ const sam3TrainState = {
             return false;
         }
         const records = Array.from(annotationSourceState.dirtyRecordsByKey.values());
+        const dirtySignature = records
+            .map((record) => {
+                const key = annotationImageKey(record.split, record.image_relpath);
+                return `${key}\u0000${serializeAnnotationRecord(record)}`;
+            })
+            .sort()
+            .join("\u0001");
+        if (background && dirtySignature && annotationSourceState.lastFailedSnapshotSignature === dirtySignature) {
+            return false;
+        }
         const sentSnapshotByKey = new Map();
         records.forEach((record) => {
             const key = annotationImageKey(record.split, record.image_relpath);
@@ -4791,6 +4804,7 @@ const sam3TrainState = {
                 : null;
         annotationSourceState.saveInFlight = true;
         updateAnnotationSourceUi();
+        let saveSucceeded = false;
         try {
             const resp = await fetch(`${base}/snapshot`, {
                 method: "POST",
@@ -4841,9 +4855,12 @@ const sam3TrainState = {
             if (manual) {
                 setSamStatus("Annotation snapshot saved.", { variant: "success", duration: 2500 });
             }
+            annotationSourceState.lastFailedSnapshotSignature = "";
+            saveSucceeded = true;
             return true;
         } catch (error) {
             console.error("Failed to save annotation snapshot", error);
+            annotationSourceState.lastFailedSnapshotSignature = dirtySignature || annotationSourceState.lastFailedSnapshotSignature;
             if (manual) {
                 setSamStatus(`Save failed: ${error.message || error}`, {
                     variant: "error",
@@ -4853,7 +4870,8 @@ const sam3TrainState = {
             return false;
         } finally {
             const shouldFlushQueued =
-                annotationSourceState.saveQueued
+                saveSucceeded
+                && annotationSourceState.saveQueued
                 && annotationSourceState.dirtyRecordsByKey.size
                 && !annotationSourceState.readOnly
                 && !isAnnotationMutationBlocked();
@@ -4911,7 +4929,7 @@ const sam3TrainState = {
             return;
         }
         annotationSourceState.autosaveTimer = setInterval(() => {
-            flushAnnotationSnapshot({ manual: false }).catch((error) => {
+            flushAnnotationSnapshot({ manual: false, background: true }).catch((error) => {
                 console.error("Annotation autosave tick failed", error);
             });
         }, ANNOTATION_AUTOSAVE_INTERVAL_MS);
@@ -27324,6 +27342,7 @@ async function cancelRfDetrTrainingJobRequest() {
         textLabels = {};
         textLabelsDatasetId = key;
         captionAutoSaveState.lastSaved.clear();
+        captionAutoSaveState.lastAttempted.clear();
     }
 
     function getCaptionDatasetEntry() {
@@ -28206,6 +28225,12 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const trimmed = String(caption || "").trim();
+        if (captionAutoSaveState.timerId && captionAutoSaveState.pendingImage === imageName) {
+            clearTimeout(captionAutoSaveState.timerId);
+            captionAutoSaveState.timerId = null;
+            captionAutoSaveState.pendingImage = null;
+        }
+        captionAutoSaveState.lastAttempted.set(imageName, trimmed);
         try {
             const context = resolveCaptionPersistenceContext(options.datasetId || null);
             ensureCaptionLabelStoreForDataset(context.datasetId || "");
@@ -28251,6 +28276,10 @@ async function cancelRfDetrTrainingJobRequest() {
         if (lastSaved === trimmed) {
             return;
         }
+        const lastAttempted = captionAutoSaveState.lastAttempted.get(imageName);
+        if (lastAttempted === trimmed) {
+            return;
+        }
         if (captionAutoSaveState.timerId) {
             clearTimeout(captionAutoSaveState.timerId);
         }
@@ -28258,6 +28287,12 @@ async function cancelRfDetrTrainingJobRequest() {
         captionAutoSaveState.timerId = window.setTimeout(() => {
             captionAutoSaveState.timerId = null;
             captionAutoSaveState.pendingImage = null;
+            if (captionAutoSaveState.lastSaved.get(imageName) === trimmed) {
+                return;
+            }
+            if (captionAutoSaveState.lastAttempted.get(imageName) === trimmed) {
+                return;
+            }
             saveCaptionImmediate(imageName, trimmed, { datasetId }).catch((error) => {
                 console.warn("Caption autosave flush failed", error);
             });

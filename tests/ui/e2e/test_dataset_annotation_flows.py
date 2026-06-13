@@ -396,6 +396,9 @@ def test_close_blocks_when_snapshot_save_fails_then_recovers(playwright_page):
             "document.querySelector('#annotationSourceSummary')?.textContent?.toLowerCase().includes('close blocked')",
             timeout=20000,
         )
+        blocked_failure_count = failed["count"]
+        page.wait_for_timeout(1800)
+        assert failed["count"] == blocked_failure_count
         mode_text = page.text_content("#annotationSourceMode") or ""
         assert "transient" in mode_text.lower()
         assert failed["count"] >= 1

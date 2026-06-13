@@ -854,6 +854,42 @@ def test_accepted_export_preview_and_download_tiles_kept_items(tmp_path, monkeyp
     assert not zip_path.parent.exists()
 
 
+def test_accepted_export_preview_cleans_partial_artifacts_on_render_failure(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_accept_preview_failure"
+    media_dir = job_dir / "media" / "candidates"
+    media_dir.mkdir(parents=True)
+    image_path = media_dir / "candidate_a.jpg"
+    Image.new("RGB", (16, 10), (20, 100, 180)).save(image_path)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_accept_preview_failure", job_dir, image_path)
+
+    calls = {"count": 0}
+    real_render = api._data_ingestion_render_output_image
+
+    def flaky_render(output, config):
+        calls["count"] += 1
+        if calls["count"] > 1:
+            raise RuntimeError("preview render failed")
+        return real_render(output, config)
+
+    monkeypatch.setattr(api, "_data_ingestion_render_output_image", flaky_render)
+
+    with pytest.raises(RuntimeError, match="preview render failed"):
+        api.preview_data_ingestion_accepted_export(
+            "di_accept_preview_failure",
+            {
+                "item_ids": ["item_keep", "item_skip"],
+                "transform_mode": "original",
+                "limit": 10,
+            },
+        )
+
+    export_root = job_dir / "accepted_exports"
+    assert not export_root.exists() or list(export_root.iterdir()) == []
+
+
 def test_accepted_export_rejects_source_outside_job_dir(tmp_path, monkeypatch):
     ingestion_root = tmp_path / "ingestion"
     job_dir = ingestion_root / "di_accept_escape"

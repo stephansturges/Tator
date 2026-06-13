@@ -38126,40 +38126,53 @@ def preview_data_ingestion_accepted_export(job_id: str, payload: Dict[str, Any])
     preview_id = f"preview_{uuid.uuid4().hex[:12]}"
     preview_dir = job_dir / "accepted_exports" / preview_id
     thumb_dir = preview_dir / "thumbnails"
-    prepared_thumb_dir = _class_analysis_prepare_dir(thumb_dir, job_dir)
-    if prepared_thumb_dir is None:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_preview_path_invalid")
-    preview_payload = {
-        "preview_id": preview_id,
-        "job_id": job_id,
-        "created_at": time.time(),
-        "config": config,
-        "offset": offset,
-        "limit": limit,
-        "total_outputs": len(outputs),
-    }
-    _class_analysis_write_json(preview_dir / "preview.json", job_dir, preview_payload)
-    returned: List[Dict[str, Any]] = []
-    for output in page_outputs:
-        thumb_path = prepared_thumb_dir / f"{output['output_id']}.jpg"
-        image = _data_ingestion_render_output_image(output, config)
+    try:
+        prepared_thumb_dir = _class_analysis_prepare_dir(thumb_dir, job_dir)
+        if prepared_thumb_dir is None:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="accepted_export_preview_path_invalid")
+        preview_payload = {
+            "preview_id": preview_id,
+            "job_id": job_id,
+            "created_at": time.time(),
+            "config": config,
+            "offset": offset,
+            "limit": limit,
+            "total_outputs": len(outputs),
+        }
+        _class_analysis_write_json(preview_dir / "preview.json", job_dir, preview_payload)
+        returned: List[Dict[str, Any]] = []
+        for output in page_outputs:
+            thumb_path = prepared_thumb_dir / f"{output['output_id']}.jpg"
+            image = _data_ingestion_render_output_image(output, config)
+            try:
+                image.thumbnail((ACCEPTED_EXPORT_THUMB_SIZE, ACCEPTED_EXPORT_THUMB_SIZE))
+                _class_analysis_write_jpeg(thumb_path, job_dir, image, quality=82)
+            finally:
+                image.close()
+            public = _data_ingestion_public_output(output)
+            public["thumbnail_url"] = f"/data_ingestion/jobs/{job_id}/accepted_export/{preview_id}/thumbnail/{output['output_id']}"
+            returned.append(public)
+        return {
+            "preview_id": preview_id,
+            "total_outputs": len(outputs),
+            "offset": offset,
+            "limit": limit,
+            "outputs": returned,
+            "config": json_sanitize(config),
+            "warnings": _data_ingestion_accepted_export_warnings(config),
+        }
+    except Exception:
         try:
-            image.thumbnail((ACCEPTED_EXPORT_THUMB_SIZE, ACCEPTED_EXPORT_THUMB_SIZE))
-            _class_analysis_write_jpeg(thumb_path, job_dir, image, quality=82)
-        finally:
-            image.close()
-        public = _data_ingestion_public_output(output)
-        public["thumbnail_url"] = f"/data_ingestion/jobs/{job_id}/accepted_export/{preview_id}/thumbnail/{output['output_id']}"
-        returned.append(public)
-    return {
-        "preview_id": preview_id,
-        "total_outputs": len(outputs),
-        "offset": offset,
-        "limit": limit,
-        "outputs": returned,
-        "config": json_sanitize(config),
-        "warnings": _data_ingestion_accepted_export_warnings(config),
-    }
+            preview_resolved = preview_dir.resolve(strict=False)
+            if (
+                _path_is_within_root_impl(preview_resolved, job_dir)
+                and preview_dir.exists()
+                and not preview_dir.is_symlink()
+            ):
+                shutil.rmtree(preview_dir, ignore_errors=True)
+        except Exception:
+            pass
+        raise
 
 
 def get_data_ingestion_accepted_export_thumbnail(job_id: str, preview_id: str, output_id: str):

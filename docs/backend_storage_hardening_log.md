@@ -2968,3 +2968,20 @@ preserving the exact validation story for storage and artifact-write fixes.
   (`tests/test_dataset_linked_annotation_flows.py -k segmentation`, `6
   passed`), segmentation thread-start rollback regression (`1 passed`),
   `py_compile localinferenceapi.py` and touched tests, and `git diff --check`.
+
+## 2026-06-13: Data Ingestion Accepted Preview Atomicity
+
+- Continued the Data Ingestion output-lifecycle audit from the accepted-candidate
+  export surface. A preview generation failure after the first thumbnail write
+  could leave a partial `accepted_exports/preview_*` directory behind, making a
+  failed preview look like durable review state.
+- Made accepted-output preview creation fail closed: if manifest or thumbnail
+  rendering raises before the preview response is returned, the backend removes
+  the whole preview directory under the job-owned root and re-raises the original
+  error.
+- Added a regression that forces the second preview thumbnail render to fail and
+  asserts that no partial preview artifacts remain.
+- Validation: accepted-export Data Ingestion regressions
+  (`tests/test_data_ingestion.py -k accepted_export`, `8 passed`), full
+  Data Ingestion test module (`90 passed`), `py_compile localinferenceapi.py`,
+  and `git diff --check`.

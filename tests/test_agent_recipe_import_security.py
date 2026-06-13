@@ -105,6 +105,25 @@ def test_agent_recipe_import_rejects_symlink_entry(tmp_path: Path) -> None:
     assert exc_info.value.detail == "agent_recipe_import_symlink_unsupported"
 
 
+@pytest.mark.parametrize("member_name", ["C:/escape.json", "\\\\server\\share\\escape.json"])
+def test_agent_recipe_import_rejects_windows_absolute_members(
+    tmp_path: Path,
+    member_name: str,
+) -> None:
+    payload = _make_zip(
+        {
+            "recipe.json": json.dumps({"id": "r1", "label": "demo"}).encode("utf-8"),
+            member_name: b"{}",
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _call_import(payload, tmp_path)
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "agent_recipe_import_invalid_path"
+
+
 def test_agent_recipe_import_rejects_duplicate_members(tmp_path: Path) -> None:
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:

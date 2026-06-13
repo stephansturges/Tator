@@ -3326,3 +3326,19 @@ preserving the exact validation story for storage and artifact-write fixes.
   (`tests/test_agent_recipe_import_security.py` and
   `tests/test_agent_cascade_import_security.py`, `20 passed`) and `py_compile
   services/prepass_recipes.py services/agent_cascades.py` plus affected tests.
+
+## 2026-06-13: Portable Import Windows-Absolute Path Guards
+
+- Continued the portable ZIP import review across platforms. Agent Recipe and
+  legacy prepass recipe imports already rejected POSIX absolute paths,
+  traversal, duplicate members, and symlinks, but did not explicitly reject
+  Windows drive or UNC-style absolute member names.
+- Added a shared ZIP member path guard in the prepass recipe service that
+  rejects empty names, POSIX absolute paths, Windows absolute/drive paths,
+  leading backslash paths, and `..` traversal before parsing or extraction.
+- Added regressions for `C:/...` and UNC-style archive members in both Agent
+  Recipe import and legacy prepass recipe import.
+- Validation: affected portable import coverage
+  (`tests/test_agent_recipe_import_security.py` and
+  `tests/test_prepass_recipe_import_security.py`, `18 passed`) and `py_compile
+  services/prepass_recipes.py` plus affected tests.

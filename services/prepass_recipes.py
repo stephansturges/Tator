@@ -15,7 +15,7 @@ import zipfile
 import hashlib
 import tempfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Dict, Optional, Literal, List, Tuple
 
 from fastapi import HTTPException
@@ -220,6 +220,21 @@ def _zip_member_names_or_duplicate_error(zf: zipfile.ZipFile, *, detail: str) ->
     if len(names) != len(set(names)):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=detail)
     return names
+
+
+def _zip_member_path_is_unsafe(name: str) -> bool:
+    member_name = str(name or "")
+    member_win = PureWindowsPath(member_name)
+    member_posix = Path(member_name)
+    return (
+        not member_name
+        or member_name.startswith("/")
+        or member_name.startswith("\\")
+        or member_win.is_absolute()
+        or bool(member_win.drive)
+        or member_posix.is_absolute()
+        or ".." in member_posix.parts
+    )
 
 
 def _write_prepass_recipe_meta(recipe_dir: Path, payload: Dict[str, Any]) -> None:
@@ -1704,6 +1719,9 @@ def _import_agent_recipe_zip_obj_impl(
     crops: Dict[str, bytes] = {}
     clip_head_files: Dict[str, bytes] = {}
     names = _zip_member_names_or_duplicate_error(zf, detail="agent_recipe_import_duplicate_files")
+    for name in names:
+        if _zip_member_path_is_unsafe(name):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_invalid_path")
     json_name = "recipe.json" if "recipe.json" in names else None
     if not json_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_no_json")
@@ -1715,9 +1733,6 @@ def _import_agent_recipe_zip_obj_impl(
         )
     if json_info.file_size > max_json_bytes:
         raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail="agent_recipe_import_json_too_large")
-    json_path = Path(json_name)
-    if json_path.is_absolute() or ".." in json_path.parts:
-        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_invalid_path")
     with zf.open(json_name) as jf:
         data = json.load(jf)
 
@@ -1729,8 +1744,6 @@ def _import_agent_recipe_zip_obj_impl(
         arc_path = Path(name)
         if arc_path.is_dir():
             continue
-        if arc_path.is_absolute() or ".." in arc_path.parts:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_invalid_path")
         mode = (info.external_attr >> 16) & 0xFFFF
         if stat.S_ISLNK(mode):
             raise HTTPException(
@@ -2271,8 +2284,7 @@ def _import_prepass_recipe_from_zip_impl(
             # Reject absolute paths and parent traversal entries before extraction.
             resolved_member = (dest_dir / member_name).resolve()
             if (
-                member_name.startswith("/")
-                or member_name.startswith("\\")
+                _zip_member_path_is_unsafe(member_name)
                 or (
                     resolved_member != root
                     and root not in resolved_member.parents

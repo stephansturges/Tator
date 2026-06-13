@@ -3130,3 +3130,28 @@ preserving the exact validation story for storage and artifact-write fixes.
   (`tests/test_data_ingestion.py -k accepted_export`, `9 passed`), full data
   ingestion suite (`tests/test_data_ingestion.py`, `91 passed`), `py_compile
   localinferenceapi.py tests/test_data_ingestion.py`, and `git diff --check`.
+
+## 2026-06-13: Dataset Download ZIP Completeness
+
+- Continued the dataset-management preservation sweep on managed and linked
+  dataset downloads. The export route had strong source containment and overlay
+  revalidation, but it still trusted the just-written ZIP without re-opening it
+  before handing it to the browser.
+- Generalized the created-ZIP validation helper and applied it to dataset
+  downloads. The exporter now records every dataset or overlay member it intends
+  to archive, verifies the finished ZIP with `testzip()`, and fails closed if
+  any planned member is missing.
+- A broken dataset ZIP export now returns a controlled `dataset_export_zip_*`
+  error and removes the transient export directory instead of serving a partial
+  archive as a valid user dataset backup.
+- Added a regression that simulates the ZIP writer silently omitting an archived
+  dataset file and verifies the endpoint rejects the archive before serving it.
+- Validation: dataset download, linked dataset, and dataset ZIP upload coverage
+  (`tests/test_dataset_download_cleanup.py
+  tests/test_dataset_linked_annotation_flows.py
+  tests/test_dataset_zip_upload_security.py`, `120 passed`), accepted export
+  coverage (`tests/test_data_ingestion.py -k accepted_export`, `9 passed`),
+  full data ingestion suite (`tests/test_data_ingestion.py`, `91 passed`), and
+  `py_compile localinferenceapi.py tests/test_dataset_download_cleanup.py
+  tests/test_dataset_linked_annotation_flows.py tests/test_data_ingestion.py`,
+  plus `git diff --check`.

@@ -18148,6 +18148,7 @@ def download_dataset_entry(dataset_id: str):
     tmp_dir = Path(tempfile.mkdtemp(prefix="dataset_export_"))
     try:
         zip_path = tmp_dir / f"{dataset_id}.zip"
+        written_arcnames: Set[str] = set()
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             override_relpaths = set(override_entries.keys())
             for path in dataset_root.rglob("*"):
@@ -18160,7 +18161,9 @@ def download_dataset_entry(dataset_id: str):
                     continue
                 if rel.as_posix() in override_relpaths:
                     continue
-                zf.write(path, arcname=str(Path(dataset_root.name) / rel))
+                arcname = str(Path(dataset_root.name) / rel)
+                written_arcnames.add(arcname)
+                zf.write(path, arcname=arcname)
             for rel_posix, override_path in sorted(override_entries.items()):
                 safe_override = _safe_existing_regular_file_within_root_impl(
                     override_path,
@@ -18174,7 +18177,14 @@ def download_dataset_entry(dataset_id: str):
                             "path": rel_posix,
                         },
                     )
-                zf.write(safe_override, arcname=str(Path(dataset_root.name) / Path(rel_posix)))
+                arcname = str(Path(dataset_root.name) / Path(rel_posix))
+                written_arcnames.add(arcname)
+                zf.write(safe_override, arcname=arcname)
+        _validate_created_zip(
+            zip_path,
+            required_names=written_arcnames,
+            detail_prefix="dataset_export",
+        )
         return FileResponse(
             path=str(zip_path),
             media_type="application/zip",
@@ -35078,7 +35088,7 @@ def _data_ingestion_validate_zip_infos(
             raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail=f"{detail_prefix}_uncompressed_too_large")
 
 
-def _data_ingestion_validate_created_zip(
+def _validate_created_zip(
     zip_path: Path,
     *,
     required_names: Set[str],
@@ -38296,7 +38306,7 @@ def download_data_ingestion_accepted_export(job_id: str, payload: Dict[str, Any]
                         image.close()
             zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
             zf.writestr("summary.json", json.dumps(summary, ensure_ascii=False, indent=2))
-        _data_ingestion_validate_created_zip(
+        _validate_created_zip(
             zip_path,
             required_names=written_arcnames | {"manifest.json", "summary.json"},
             detail_prefix="accepted_export",

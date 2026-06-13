@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +25,34 @@ def _make_sam3_config_meta(tmp_path: Path) -> dict:
         "coco_train_json": str(train_json),
         "coco_val_json": str(val_json),
     }
+
+
+class _ImmediateTrainingThread:
+    def __init__(self, target=None, args=(), kwargs=None, **_kwargs):
+        self._target = target
+        self._args = tuple(args or ())
+        self._kwargs = dict(kwargs or {})
+
+    def start(self):
+        if self._target:
+            self._target(*self._args, **self._kwargs)
+
+    def join(self, *_args, **_kwargs):
+        return None
+
+
+class _EmptySam3Process:
+    def __init__(self, *_args, **_kwargs):
+        self.stdout = SimpleNamespace(readline=lambda: "")
+
+    def poll(self):
+        return 0
+
+    def wait(self):
+        return 0
+
+    def terminate(self):
+        return None
 
 
 def test_delete_sam3_run_resets_active_checkpoint_when_deleted(tmp_path: Path, monkeypatch) -> None:
@@ -785,6 +814,60 @@ def test_save_sam3_config_rejects_symlinked_config_file_without_target_overwrite
     assert excinfo.value.status_code == 400
     assert excinfo.value.detail == "sam3_config_path_invalid"
     assert outside.read_text(encoding="utf-8") == "external"
+
+
+def test_latest_sam3_checkpoint_prefers_last_ckpt_and_ignores_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    older_pt = checkpoint_dir / "epoch_1.pt"
+    older_pt.write_text("older", encoding="utf-8")
+    last_ckpt = checkpoint_dir / "last.ckpt"
+    last_ckpt.write_text("latest", encoding="utf-8")
+    outside = tmp_path / "outside.pth"
+    outside.write_text("outside", encoding="utf-8")
+    try:
+        (checkpoint_dir / "linked_newer.pth").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    assert api._latest_checkpoint_in_dir(checkpoint_dir) == str(last_ckpt)
+
+
+def test_sam3_training_fails_when_checkpoint_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_id = "missing-sam3-checkpoint"
+    log_dir = tmp_path / "sam3_runs" / job_id
+    checkpoint_dir = log_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    config_path = tmp_path / "generated.yaml"
+    config_path.write_text("paths: {}\n", encoding="utf-8")
+    cfg = api.OmegaConf.create(
+        {
+            "paths": {"experiment_log_dir": str(log_dir)},
+            "trainer": {"max_epochs": 1},
+            "scratch": {"enable_segmentation_head": True, "load_segmentation": True},
+        }
+    )
+    job = api.Sam3TrainingJob(job_id=job_id, config={})
+
+    monkeypatch.setattr(api.threading, "Thread", _ImmediateTrainingThread)
+    monkeypatch.setattr(api.subprocess, "Popen", _EmptySam3Process)
+    monkeypatch.setattr(api, "_prepare_for_training_impl", lambda **_kwargs: None)
+    monkeypatch.setattr(api, "_finalize_training_environment_impl", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        api,
+        "_save_sam3_config",
+        lambda _cfg, _job_id: ("configs/generated/test.yaml", config_path),
+    )
+
+    api._start_sam3_training_worker(job, cfg, 1)
+
+    assert job.status == "failed"
+    assert job.error == "sam3_checkpoint_missing"
+    assert job.result is None
 
 
 def test_sam3_training_job_cleans_split_when_config_build_fails(

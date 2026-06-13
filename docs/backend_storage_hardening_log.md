@@ -2929,3 +2929,23 @@ preserving the exact validation story for storage and artifact-write fixes.
   checks), OpenAPI missing-query sanity (`5` checks), UI negative tests (`18`
   checks), UI data-ops smoke, UI smoke, backend storage health summary,
   `node --check ybat-master/ybat.js`, and `git diff --check`.
+
+## 2026-06-13: SAM3 Training Missing Checkpoint Sweep
+
+- Continued the successful-job artifact sweep on SAM3 training. A completed
+  SAM3 run must expose a safe checkpoint under the run `checkpoints/`
+  directory before the UI can offer it as a trained model.
+- Found that `_start_sam3_training_worker` could report success with
+  `"checkpoint": null` when the training subprocess exited with code `0` but
+  emitted no checkpoint file. The worker now fails closed with
+  `sam3_checkpoint_missing` in that case.
+- Aligned SAM3 latest-checkpoint discovery with the activation path: `.ckpt`,
+  `.pth`, and `.pt` files are accepted, `last.ckpt` is preferred, symlinked
+  files are ignored, and resolved files must stay within the checkpoint
+  directory. This avoids both false missing-checkpoint failures for normal
+  `last.ckpt` outputs and success on symlink escapes.
+- Added regressions for safe latest-checkpoint selection and worker-level
+  missing-checkpoint failure.
+- Validation: focused SAM3 lifecycle tests (`35 passed`), adjacent SAM3/start
+  validation/storage tests (`35 passed`), `py_compile localinferenceapi.py` and
+  touched tests, and `git diff --check`.

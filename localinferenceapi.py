@@ -46838,13 +46838,31 @@ def _start_segmentation_build_job(request: SegmentationBuildRequest) -> Segmenta
 
 
 def _latest_checkpoint_in_dir(checkpoint_dir: Path) -> Optional[str]:
-    if not checkpoint_dir.exists():
+    if checkpoint_dir.is_symlink() or not checkpoint_dir.exists() or not checkpoint_dir.is_dir():
         return None
+    try:
+        checkpoint_root = checkpoint_dir.resolve(strict=True)
+    except Exception:
+        return None
+    candidates = []
+    for path in checkpoint_dir.iterdir():
+        if path.is_symlink() or path.suffix not in {".ckpt", ".pth", ".pt"}:
+            continue
+        try:
+            resolved = path.resolve(strict=True)
+            if not resolved.is_file() or not _path_is_within_root_impl(resolved, checkpoint_root):
+                continue
+            candidates.append(path)
+        except Exception:
+            continue
     candidates = sorted(
-        checkpoint_dir.glob("*.pt"),
+        candidates,
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
+    for path in candidates:
+        if path.name == "last.ckpt":
+            return str(path)
     if candidates:
         return str(candidates[0])
     return None
@@ -47130,6 +47148,8 @@ def _start_sam3_training_worker(
             log_dir = Path(cfg.paths.experiment_log_dir)
             checkpoint_dir = log_dir / "checkpoints"
             latest_ckpt = _latest_checkpoint_in_dir(checkpoint_dir)
+            if not latest_ckpt:
+                raise RuntimeError("sam3_checkpoint_missing")
             seg_head = bool(
                 getattr(
                     cfg.scratch,

@@ -3308,3 +3308,21 @@ preserving the exact validation story for storage and artifact-write fixes.
   `tests/test_edr_packages.py`, `69 passed`), `py_compile
   services/prepass_recipes.py services/agent_cascades.py
   services/edr_packages.py` plus affected tests, and `git diff --check`.
+
+## 2026-06-13: Portable Manifest Selection Hardening
+
+- Continued the archive import review after duplicate-member rejection. Agent
+  Recipe import previously accepted the first JSON member in a portable ZIP,
+  and Agent Cascade import accepted the first member whose basename was
+  `cascade.json`.
+- A malicious or malformed bundle could therefore put auxiliary or nested JSON
+  before the real root manifest and change what the importer parsed.
+- Agent Recipe import now requires the root `recipe.json`; Agent Cascade import
+  validates every member path and then requires the root `cascade.json`.
+- Added regressions where `clip_head/meta.json` or `nested/cascade.json`
+  appears before the root manifest and verified the importer still uses the
+  canonical root manifest.
+- Validation: affected portable import coverage
+  (`tests/test_agent_recipe_import_security.py` and
+  `tests/test_agent_cascade_import_security.py`, `20 passed`) and `py_compile
+  services/prepass_recipes.py services/agent_cascades.py` plus affected tests.

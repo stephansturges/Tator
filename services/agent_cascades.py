@@ -454,13 +454,10 @@ def _import_agent_cascade_zip_obj_impl(
     max_total_uncompressed_bytes: Optional[int] = None,
 ) -> Dict[str, Any]:
     names = _zip_member_names_or_duplicate_error(zf, detail="agent_cascade_import_duplicate_files")
-    cascade_name = None
     for name in names:
         if _zip_member_path_is_unsafe(name):
             raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_invalid_path")
-        if Path(name).name.lower() == "cascade.json":
-            cascade_name = name
-            break
+    cascade_name = "cascade.json" if "cascade.json" in names else None
     if not cascade_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_cascade_import_no_json")
     info = zf.getinfo(cascade_name)

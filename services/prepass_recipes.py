@@ -1704,11 +1704,7 @@ def _import_agent_recipe_zip_obj_impl(
     crops: Dict[str, bytes] = {}
     clip_head_files: Dict[str, bytes] = {}
     names = _zip_member_names_or_duplicate_error(zf, detail="agent_recipe_import_duplicate_files")
-    json_name = None
-    for name in names:
-        if name.lower().endswith(".json"):
-            json_name = name
-            break
+    json_name = "recipe.json" if "recipe.json" in names else None
     if not json_name:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="agent_recipe_import_no_json")
     json_info = zf.getinfo(json_name)

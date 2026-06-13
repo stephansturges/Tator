@@ -77,6 +77,18 @@ def test_agent_recipe_import_basic_success(tmp_path: Path) -> None:
     assert "crops/sample.png" in persisted["crops"]
 
 
+def test_agent_recipe_import_prefers_root_recipe_json(tmp_path: Path) -> None:
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("clip_head/meta.json", json.dumps({"label": "shadow"}))
+        zf.writestr("recipe.json", json.dumps({"id": "r1", "label": "root"}))
+
+    old_id, persisted = _call_import(buf.getvalue(), tmp_path)
+
+    assert old_id == "r1"
+    assert persisted["label"] == "root"
+
+
 def test_agent_recipe_import_rejects_symlink_entry(tmp_path: Path) -> None:
     buf = BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:

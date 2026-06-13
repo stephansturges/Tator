@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """Shared runtime helpers for base XGB + learned policy-layer scoring."""
 
 from __future__ import annotations

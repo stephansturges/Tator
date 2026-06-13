@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """Compact feature builder for the learned second-stage policy layer."""
 
 from __future__ import annotations

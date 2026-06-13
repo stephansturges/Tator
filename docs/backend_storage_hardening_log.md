@@ -2615,3 +2615,18 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: direct purge-helper regression and SAM3 purge checks (`4
   passed`), pycompile for touched files, and the broader data-safety/lifecycle
   focused suite (`657 passed`).
+
+## 2026-06-13: Tool Entrypoint Portability Sweep
+
+- Audited tracked project shell scripts and Python tool entrypoints after the
+  startup-doc cleanup.
+- Normalized remaining `#!/usr/bin/env python` shebangs in maintained Python
+  tools to `#!/usr/bin/env python3`, matching the repository's Python 3-only
+  runtime and avoiding failures on systems without a `python` alias.
+- Confirmed local Swift worker build artifacts under
+  `tools/mlx_dinov3_worker/.build/` are ignored and not part of the tracked
+  project script surface.
+- Validation: `bash -n` over all 12 tracked shell entrypoints, pycompile for
+  tracked `tools/*.py`, strict unused-definition scan (`--max-uses 0`, no
+  output), OpenAPI missing-query and missing-param sanity checks, and argparse
+  `--help` sweep (`80` checked tools, no failures).

@@ -3215,3 +3215,22 @@ preserving the exact validation story for storage and artifact-write fixes.
   "dataset_upload_session_finalize"`, `3 passed`), full dataset ZIP upload
   coverage (`tests/test_dataset_zip_upload_security.py`, `21 passed`), and
   `py_compile localinferenceapi.py tests/test_dataset_zip_upload_security.py`.
+
+## 2026-06-13: Qwen Dataset Upload Orphan Cleanup
+
+- Continued the destructive-operation sweep on Qwen dataset upload staging. The
+  Qwen upload cancel endpoint could clean live in-memory jobs, but after a
+  backend restart the same staged directory became an unmanageable orphan
+  because the missing-job path returned `missing` without checking disk.
+- Qwen upload cancellation now mirrors the managed dataset upload session
+  behavior: when the in-memory job is absent, a sanitized same-id staging
+  directory is cleaned if present and reported as an orphan cancellation.
+- The Qwen upload job-dir helper no longer creates the upload staging root when
+  called with `create=False`, so a no-op cancel for a missing job does not leave
+  new empty storage behind.
+- Added regressions for restart-orphan cleanup and missing-job no-op behavior.
+- Validation: full Qwen dataset upload coverage
+  (`tests/test_qwen_dataset_upload.py`, `19 passed`), adjacent Qwen upload
+  security coverage (`tests/test_qwen_dataset_upload_security.py`,
+  `12 passed`), `py_compile localinferenceapi.py
+  tests/test_qwen_dataset_upload.py`, and `git diff --check`.

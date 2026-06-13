@@ -462,6 +462,43 @@ def test_cancel_qwen_dataset_upload_unlinks_symlinked_staging_job_without_target
         assert job.job_id not in api.QWEN_DATASET_UPLOADS
 
 
+def test_cancel_qwen_dataset_upload_removes_orphaned_staging_job_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upload_parent = tmp_path / "dataset_uploads"
+    orphan_root = upload_parent / "qwen_upload_orphan_job"
+    train_root = orphan_root / "train"
+    train_root.mkdir(parents=True, exist_ok=True)
+    (orphan_root / "val").mkdir()
+    (train_root / "a.jpg").write_bytes(b"image")
+    monkeypatch.setattr(api, "DATASET_UPLOAD_ROOT", upload_parent)
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        api.QWEN_DATASET_UPLOADS.clear()
+
+    out = api.cancel_qwen_dataset_upload("orphan_job")
+
+    assert out == {"status": "cancelled", "job_id": "orphan_job", "orphan": True}
+    assert not orphan_root.exists()
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        assert api.QWEN_DATASET_UPLOADS == {}
+
+
+def test_cancel_qwen_dataset_upload_missing_job_does_not_create_staging_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upload_parent = tmp_path / "dataset_uploads"
+    monkeypatch.setattr(api, "DATASET_UPLOAD_ROOT", upload_parent)
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        api.QWEN_DATASET_UPLOADS.clear()
+
+    out = api.cancel_qwen_dataset_upload("missing_job")
+
+    assert out == {"status": "missing", "job_id": "missing_job"}
+    assert not upload_parent.exists()
+    with api.QWEN_DATASET_UPLOADS_LOCK:
+        assert api.QWEN_DATASET_UPLOADS == {}
+
+
 def test_cancel_qwen_dataset_upload_rejects_symlinked_staging_parent_without_target_delete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

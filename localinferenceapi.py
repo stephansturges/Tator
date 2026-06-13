@@ -15530,7 +15530,7 @@ def _qwen_dataset_upload_job_dir(
 ) -> Path:
     safe_job_id = _sanitize_yolo_run_id_impl(str(job_id or "")) or uuid.uuid4().hex
     try:
-        root = _qwen_dataset_upload_storage_root(create=True, detail=detail)
+        root = _qwen_dataset_upload_storage_root(create=create, detail=detail)
         candidate = root / f"qwen_upload_{safe_job_id}"
         if _storage_path_has_symlink_component(candidate):
             raise ValueError("qwen dataset upload job dir is a symlink")
@@ -38871,6 +38871,16 @@ def cancel_qwen_dataset_upload(job_id: str):
     with QWEN_DATASET_UPLOADS_LOCK:
         job = QWEN_DATASET_UPLOADS.get(job_id)
     if not job:
+        safe_job_id = _sanitize_yolo_run_id_impl(str(job_id or ""))
+        if safe_job_id:
+            root_dir = _qwen_dataset_upload_job_dir(
+                safe_job_id,
+                create=False,
+                detail="qwen_dataset_cancel_path_invalid",
+            )
+            if root_dir.exists() or root_dir.is_symlink():
+                _remove_qwen_dataset_upload_root(root_dir)
+                return {"status": "cancelled", "job_id": safe_job_id, "orphan": True}
         return {"status": "missing", "job_id": job_id}
     with job.lock:
         with QWEN_DATASET_UPLOADS_LOCK:

@@ -55298,7 +55298,15 @@ def export_prepass_recipe(recipe_id: str):
     config = meta.get("config") if isinstance(meta.get("config"), dict) else {}
     package_id = str(config.get("edr_package_id") or "").strip()
     if package_id:
-        zip_path = _export_edr_package_impl(EDR_PACKAGES_ROOT, package_id)
+        try:
+            zip_path = _export_edr_package_impl(EDR_PACKAGES_ROOT, package_id)
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="edr_package_not_found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=HTTP_412_PRECONDITION_FAILED,
+                detail=str(exc) or "edr_package_invalid",
+            ) from exc
         return FileResponse(
             path=str(zip_path),
             media_type="application/zip",

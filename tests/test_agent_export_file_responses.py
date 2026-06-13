@@ -51,3 +51,25 @@ def test_agent_mining_export_cascade_wraps_file_errors(monkeypatch) -> None:
         localinferenceapi.agent_mining_export_cascade("cascade_1")
     assert exc.value.status_code == 500
     assert str(exc.value.detail).startswith("agent_cascade_export_failed:")
+
+
+def test_export_prepass_recipe_edr_wrapper_maps_invalid_package(tmp_path, monkeypatch) -> None:
+    recipe_dir = tmp_path / "recipe"
+    recipe_dir.mkdir()
+    monkeypatch.setattr(localinferenceapi, "_prepass_recipe_dir_impl", lambda *args, **kwargs: recipe_dir)
+    monkeypatch.setattr(
+        localinferenceapi,
+        "_load_prepass_recipe_meta",
+        lambda _recipe_dir: {"config": {"edr_package_id": "pkg1"}},
+    )
+
+    def fail_export(*_args, **_kwargs):
+        raise RuntimeError("edr_package_invalid_zip")
+
+    monkeypatch.setattr(localinferenceapi, "_export_edr_package_impl", fail_export)
+
+    with pytest.raises(HTTPException) as exc:
+        localinferenceapi.export_prepass_recipe("recipe_1")
+
+    assert exc.value.status_code == 412
+    assert exc.value.detail == "edr_package_invalid_zip"

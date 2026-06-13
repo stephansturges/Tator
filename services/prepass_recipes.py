@@ -192,6 +192,22 @@ def _write_png_file(path: Path, image: Image.Image) -> Path:
     return _write_binary_file(path, lambda handle: image.save(handle, format="PNG"))
 
 
+def _zip_directory_guarded(source_dir: Path, zip_path: Path) -> Path:
+    source_root = source_dir.resolve(strict=True)
+    tmp_path = _prepare_atomic_output_file(zip_path)
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for item in sorted(source_root.rglob("*")):
+                if not _safe_regular_file_within_root(item, source_root):
+                    continue
+                zf.write(item.resolve(strict=True), arcname=str(item.relative_to(source_root)))
+        os.replace(tmp_path, zip_path)
+    finally:
+        if tmp_path.exists() or tmp_path.is_symlink():
+            tmp_path.unlink(missing_ok=True)
+    return zip_path
+
+
 def _zip_write_safe_file(zf: zipfile.ZipFile, path: Path, root: Path, arcname: str) -> bool:
     if not _safe_regular_file_within_root(path, root):
         return False
@@ -2647,33 +2663,48 @@ def _export_prepass_recipe_impl(
         sanitize_id_fn=sanitize_run_id_fn,
     )
     meta = load_meta_fn(recipe_dir)
-    temp_dir = Path(
-        tempfile.mkdtemp(prefix=f"prepass_recipe_{recipe_id}_", dir=prepass_recipe_export_root)
+    export_root = _recipe_storage_root(
+        prepass_recipe_export_root,
+        create=True,
+        detail="prepass_recipe_path_invalid",
     )
-    meta_copy = json.loads(json.dumps(meta))
-    config_copy = meta_copy.get("config") or {}
+    temp_dir = Path(
+        tempfile.mkdtemp(prefix=f"prepass_recipe_{recipe_dir.name}_", dir=str(export_root))
+    )
+    temp_dir = temp_dir.resolve(strict=True)
     if (
-        isinstance(config_copy, dict)
-        and "dataset_id" in config_copy
-        and not _is_canonical_prepass_recipe_config(config_copy)
+        _path_has_symlink_component(temp_dir)
+        or temp_dir.parent != export_root
+        or not _path_within_root(temp_dir, export_root)
     ):
-        config_copy = dict(config_copy)
-        config_copy.pop("dataset_id", None)
-        meta_copy["config"] = config_copy
-    meta_path = temp_dir / prepass_recipe_meta
-    _write_json_file(meta_path, meta_copy)
-    assets = collect_assets_fn(meta_copy, temp_dir)
-    manifest = {
-        "schema_version": prepass_schema_version,
-        "recipe_id": meta.get("id") or recipe_id,
-        "generated_at": time.time(),
-        "assets": assets,
-    }
-    manifest_path = temp_dir / "manifest.json"
-    _write_json_file(manifest_path, manifest)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="prepass_recipe_path_invalid")
     zip_path = temp_dir.with_suffix(".zip")
-    shutil.make_archive(zip_path.with_suffix("").as_posix(), "zip", temp_dir.as_posix())
-    return zip_path
+    try:
+        meta_copy = json.loads(json.dumps(meta))
+        config_copy = meta_copy.get("config") or {}
+        if (
+            isinstance(config_copy, dict)
+            and "dataset_id" in config_copy
+            and not _is_canonical_prepass_recipe_config(config_copy)
+        ):
+            config_copy = dict(config_copy)
+            config_copy.pop("dataset_id", None)
+            meta_copy["config"] = config_copy
+        meta_path = temp_dir / prepass_recipe_meta
+        _write_json_file(meta_path, meta_copy)
+        assets = collect_assets_fn(meta_copy, temp_dir)
+        manifest = {
+            "schema_version": prepass_schema_version,
+            "recipe_id": meta.get("id") or recipe_id,
+            "generated_at": time.time(),
+            "assets": assets,
+        }
+        manifest_path = temp_dir / "manifest.json"
+        _write_json_file(manifest_path, manifest)
+        return _zip_directory_guarded(temp_dir, zip_path)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def _save_prepass_recipe_impl(

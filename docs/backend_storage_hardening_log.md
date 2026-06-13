@@ -3085,4 +3085,30 @@ preserving the exact validation story for storage and artifact-write fixes.
   (`tests/test_prepass_recipe_config_validation.py
   tests/test_prepass_recipe_import_security.py`, `47 passed`), and
   `py_compile localinferenceapi.py services/edr_packages.py
-  tests/test_edr_packages.py`, and `git diff --check`.
+  tests/test_edr_packages.py`, plus `git diff --check`.
+
+## 2026-06-13: Prepass Recipe Export Scratch Cleanup
+
+- Continued the portable recipe artifact sweep on saved prepass recipe exports.
+  The export helper created a staging directory under
+  `uploads/prepass_recipe_exports` and left that directory behind after writing
+  the ZIP, so repeated exports could accumulate unmanaged staging trees.
+- Revalidated the prepass recipe export root at export time, created staging
+  directories only as direct children of that guarded root, and cleaned staging
+  trees after the archive is written.
+- Replaced `shutil.make_archive` with a guarded ZIP writer that only includes
+  regular files still contained by the staging tree, so a symlink introduced
+  during staging is skipped instead of being followed into the archive.
+- Mapped invalid EDR package state through the prepass recipe export route as a
+  controlled `412` when the saved recipe is an EDR-package wrapper, matching the
+  direct EDR package export endpoint.
+- Validation: focused prepass/export route coverage
+  (`tests/test_prepass_recipe_config_validation.py
+  tests/test_agent_export_file_responses.py`, `48 passed`), focused EDR package
+  suite (`tests/test_edr_packages.py`, `41 passed`), adjacent prepass
+  import/agent export bundle (`tests/test_prepass_recipe_import_security.py
+  tests/test_agent_recipe_zip_export_robustness.py
+  tests/test_agent_cascade_export_safety.py`, `40 passed`), `py_compile
+  localinferenceapi.py services/prepass_recipes.py
+  tests/test_prepass_recipe_config_validation.py
+  tests/test_agent_export_file_responses.py`, and `git diff --check`.

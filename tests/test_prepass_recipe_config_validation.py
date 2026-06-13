@@ -1195,6 +1195,132 @@ def test_export_keeps_dataset_id_for_canonical_recipe(tmp_path):
     assert exported_meta["config"]["dataset_id"] == "qwen_dataset"
 
 
+def test_export_prepass_recipe_rejects_symlinked_export_root(tmp_path: Path) -> None:
+    recipe_root = tmp_path / "prepass_recipes"
+    recipe_dir = recipe_root / "recipe_a"
+    recipe_dir.mkdir(parents=True, exist_ok=True)
+    _write_prepass_recipe_meta(
+        recipe_dir,
+        {
+            "id": "recipe_a",
+            "schema_version": 1,
+            "name": "Recipe A",
+            "description": "",
+            "config": {},
+            "glossary": "",
+            "created_at": 1.0,
+            "updated_at": 1.0,
+        },
+    )
+    outside_export = tmp_path / "outside_exports"
+    outside_export.mkdir()
+    export_root = tmp_path / "exports_link"
+    try:
+        export_root.symlink_to(outside_export, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unsupported: {exc}")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _export_prepass_recipe_impl(
+            "recipe_a",
+            prepass_recipe_meta="prepass.meta.json",
+            prepass_schema_version=1,
+            prepass_recipe_export_root=export_root,
+            prepass_recipe_root=recipe_root,
+            sanitize_run_id_fn=lambda value: value,
+            load_meta_fn=_load_prepass_recipe_meta,
+            collect_assets_fn=lambda meta, temp_dir: {"copied": [], "missing": []},
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "prepass_recipe_path_invalid"
+    assert list(outside_export.iterdir()) == []
+
+
+def test_export_prepass_recipe_cleans_staging_dir(tmp_path: Path) -> None:
+    recipe_root = tmp_path / "prepass_recipes"
+    export_root = tmp_path / "exports"
+    export_root.mkdir(parents=True, exist_ok=True)
+    recipe_dir = recipe_root / "recipe_a"
+    recipe_dir.mkdir(parents=True, exist_ok=True)
+    _write_prepass_recipe_meta(
+        recipe_dir,
+        {
+            "id": "recipe_a",
+            "schema_version": 1,
+            "name": "Recipe A",
+            "description": "",
+            "config": {},
+            "glossary": "",
+            "created_at": 1.0,
+            "updated_at": 1.0,
+        },
+    )
+
+    zip_path = _export_prepass_recipe_impl(
+        "recipe_a",
+        prepass_recipe_meta="prepass.meta.json",
+        prepass_schema_version=1,
+        prepass_recipe_export_root=export_root,
+        prepass_recipe_root=recipe_root,
+        sanitize_run_id_fn=lambda value: value,
+        load_meta_fn=_load_prepass_recipe_meta,
+        collect_assets_fn=lambda meta, temp_dir: {"copied": [], "missing": []},
+    )
+
+    assert zip_path.exists()
+    assert [entry for entry in export_root.iterdir() if entry.is_dir()] == []
+    with zipfile.ZipFile(zip_path) as zf:
+        names = set(zf.namelist())
+    assert {"prepass.meta.json", "manifest.json"} <= names
+
+
+def test_export_prepass_recipe_skips_staging_symlink_escape(tmp_path: Path) -> None:
+    recipe_root = tmp_path / "prepass_recipes"
+    export_root = tmp_path / "exports"
+    export_root.mkdir(parents=True, exist_ok=True)
+    recipe_dir = recipe_root / "recipe_a"
+    recipe_dir.mkdir(parents=True, exist_ok=True)
+    _write_prepass_recipe_meta(
+        recipe_dir,
+        {
+            "id": "recipe_a",
+            "schema_version": 1,
+            "name": "Recipe A",
+            "description": "",
+            "config": {},
+            "glossary": "",
+            "created_at": 1.0,
+            "updated_at": 1.0,
+        },
+    )
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+
+    def collect_assets(_meta, temp_dir):
+        try:
+            (temp_dir / "escape.txt").symlink_to(outside)
+        except OSError as exc:
+            pytest.skip(f"symlink unsupported: {exc}")
+        return {"copied": [], "missing": []}
+
+    zip_path = _export_prepass_recipe_impl(
+        "recipe_a",
+        prepass_recipe_meta="prepass.meta.json",
+        prepass_schema_version=1,
+        prepass_recipe_export_root=export_root,
+        prepass_recipe_root=recipe_root,
+        sanitize_run_id_fn=lambda value: value,
+        load_meta_fn=_load_prepass_recipe_meta,
+        collect_assets_fn=collect_assets,
+    )
+
+    with zipfile.ZipFile(zip_path) as zf:
+        names = set(zf.namelist())
+    assert "escape.txt" not in names
+    assert outside.read_text(encoding="utf-8") == "secret"
+
+
 def test_collect_recipe_assets_rejects_symlinked_detector_run(tmp_path: Path) -> None:
     yolo_root = tmp_path / "uploads" / "yolo_runs"
     yolo_root.mkdir(parents=True)

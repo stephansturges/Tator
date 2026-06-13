@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
+import types
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -21,6 +24,21 @@ def _load_tool_module(name: str, rel_path: str):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+class _FakeHttpResponse:
+    def __init__(self, status: int, payload: bytes) -> None:
+        self.status = status
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def read(self) -> bytes:
+        return self._payload
 
 
 def test_ui_contract_dataset_cleanup_removes_only_generated_trash(
@@ -58,6 +76,51 @@ def test_ui_contract_dataset_cleanup_keeps_non_contract_trash(
 
     assert trash_dir.exists()
     assert (trash_dir / "payload.bin").read_bytes() == b"user"
+
+
+def test_ui_e2e_dataset_cleanup_retries_annotation_lock(monkeypatch) -> None:
+    for name, path in [
+        ("tests", REPO_ROOT / "tests"),
+        ("tests.ui", REPO_ROOT / "tests" / "ui"),
+        ("tests.ui.e2e", REPO_ROOT / "tests" / "ui" / "e2e"),
+        ("tests.ui.e2e.helpers", REPO_ROOT / "tests" / "ui" / "e2e" / "helpers"),
+    ]:
+        package = types.ModuleType(name)
+        package.__path__ = [str(path)]  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, name, package)
+    _load_tool_module(
+        "tests.ui.e2e.helpers.env",
+        "tests/ui/e2e/helpers/env.py",
+    )
+    e2e_api = _load_tool_module(
+        "tests.ui.e2e.helpers.api",
+        "tests/ui/e2e/helpers/api.py",
+    )
+
+    calls: list[str] = []
+
+    def fake_urlopen(req, timeout=0):  # noqa: ANN001
+        calls.append(req.full_url)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                409,
+                "Conflict",
+                hdrs=None,
+                fp=io.BytesIO(b'{"detail":"dataset_delete_blocked_annotation_lock"}'),
+            )
+        return _FakeHttpResponse(200, b'{"status":"deleted"}')
+
+    monkeypatch.setattr(e2e_api.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(e2e_api.time, "sleep", lambda _delay: None)
+    monkeypatch.setenv("UI_API_ROOT", "http://example.test")
+
+    e2e_api.delete_dataset_if_exists("pw_linked_unit", attempts=2, delay_s=0.0)
+
+    assert calls == [
+        "http://example.test/datasets/pw_linked_unit",
+        "http://example.test/datasets/pw_linked_unit",
+    ]
 
 
 def test_gpu_validation_cleanup_removes_run_scoped_dataset_trash(tmp_path: Path) -> None:
@@ -406,12 +469,116 @@ def test_auto_mlp_runner_has_no_host_specific_root_or_bare_python_calls() -> Non
     assert "\n          python " not in text
 
 
+def test_fuzz_tier1_timeout_requests_qwen_cancel(monkeypatch) -> None:
+    tool = _load_tool_module("fuzz_tier1_timeout_test", "tools/fuzz_tier1.py")
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"cancelled":true}'
+
+    def fake_urlopen(req, timeout):
+        calls.append((req.full_url, timeout))
+        if req.full_url.endswith("/qwen/cancel?force=false"):
+            return Response()
+        raise TimeoutError("simulated slow qwen request")
+
+    monkeypatch.setattr(tool.urllib.request, "urlopen", fake_urlopen)
+
+    try:
+        tool._post(
+            "http://127.0.0.1:8000/qwen/prepass",
+            {"prepass_only": True},
+            timeout=0.01,
+            cancel_url="http://127.0.0.1:8000/qwen/cancel?force=false",
+        )
+    except RuntimeError as exc:
+        assert str(exc).startswith("timeout_after_0.01s:")
+    else:
+        raise AssertionError("timed out Qwen fuzz request should fail")
+
+    assert calls == [
+        ("http://127.0.0.1:8000/qwen/prepass", 0.01),
+        ("http://127.0.0.1:8000/qwen/cancel?force=false", 10),
+    ]
+
+
+def test_fuzz_tier1_wrapped_timeout_is_reported_as_timeout(monkeypatch) -> None:
+    tool = _load_tool_module("fuzz_tier1_wrapped_timeout_test", "tools/fuzz_tier1.py")
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(req, timeout):
+        calls.append(req.full_url)
+        if req.full_url.endswith("/qwen/cancel?force=false"):
+            return Response()
+        raise tool.URLError(tool.socket.timeout("wrapped slow request"))
+
+    monkeypatch.setattr(tool.urllib.request, "urlopen", fake_urlopen)
+
+    try:
+        tool._post(
+            "http://127.0.0.1:8000/qwen/caption",
+            {},
+            timeout=0.02,
+            cancel_url="http://127.0.0.1:8000/qwen/cancel?force=false",
+        )
+    except RuntimeError as exc:
+        assert str(exc).startswith("timeout_after_0.02s:")
+    else:
+        raise AssertionError("wrapped timeout should fail as timeout")
+
+    assert calls == [
+        "http://127.0.0.1:8000/qwen/caption",
+        "http://127.0.0.1:8000/qwen/cancel?force=false",
+    ]
+
+
+def test_fuzz_tier1_failure_writes_structured_summary(tmp_path: Path) -> None:
+    tool = _load_tool_module("fuzz_tier1_summary_test", "tools/fuzz_tier1.py")
+    out = tmp_path / "tier1.json"
+    summary = {"skip_gpu": False, "steps": [{"name": "prepass_base", "result": {"ok": True}}]}
+
+    code = tool._record_failure(summary, str(out), "prepass_windowed", RuntimeError("timeout_after_60s"))
+
+    assert code == 1
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert written["steps"][-1] == {
+        "name": "prepass_windowed",
+        "failed": True,
+        "error": "timeout_after_60s",
+    }
+
+
+def test_run_fuzz_fast_exposes_tier1_request_timeout() -> None:
+    text = (REPO_ROOT / "tools/run_fuzz_fast.sh").read_text(encoding="utf-8")
+
+    assert 'REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-60}"' in text
+    assert '--request-timeout "$REQUEST_TIMEOUT"' in text
+
+
 def test_ui_validation_tools_help_exits_cleanly_without_backend() -> None:
     for rel_path in [
         "tools/check_ui_endpoints.py",
         "tools/derive_context_feature_variants.py",
         "tools/detect_missclassifications.py",
         "tools/fuzz_tier0.py",
+        "tools/fuzz_tier1.py",
         "tools/label_candidates_iou90.py",
         "tools/run_class_split_qwen_review_benchmark.py",
         "tools/run_context_feature_ablation.py",

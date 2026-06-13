@@ -2728,3 +2728,33 @@ preserving the exact validation story for storage and artifact-write fixes.
   UI data-ops smoke, OpenAPI missing-query sanity (`5` checks), and OpenAPI
   missing-param sanity (`76` checks), full pytest (`1561 passed, 40 skipped`),
   and full UI E2E (`42 passed`).
+
+## 2026-06-13: Tier-1 Qwen Fuzz Timeout Cleanup Sweep
+
+- Ran the broader validation/fuzz layer after the linked-dataset delete sweep.
+  Tier-0 fuzz, UI smoke, UI contract checks, Playwright control coverage,
+  parameter sweep, and concurrency smoke were clean, but live Tier-1 fuzz timed
+  out while `/qwen/prepass` was in RF-DETR SAHI detector phase.
+- The server cancellation endpoint worked, but the harness exited with a
+  traceback and could leave the backend with an active Qwen prepass after the
+  client-side timeout. That made validation itself a source of stale backend
+  state.
+- Hardened `tools/fuzz_tier1.py` so timed-out Qwen prepass/caption requests
+  request `/qwen/cancel?force=false`, record the failed step in the JSON
+  summary, and exit nonzero without hiding the failure. `tools/run_fuzz_fast.sh`
+  now exposes `REQUEST_TIMEOUT` for intentional long GPU fuzz runs.
+- Fixed the Playwright dataset cleanup helper so generated E2E datasets retry
+  transient annotation-lock and active-job delete conflicts. This prevents
+  failed/fast-following browser tests from silently leaving `pw_*` cards in the
+  Dataset Manager while still keeping production dataset deletes fail-closed.
+- Updated the tools README to document the timeout knob and cleanup behavior.
+- Validation: focused validation-tool tests (`20 passed`), `py_compile
+  tools/fuzz_tier1.py` and the E2E helper, `tools/fuzz_tier1.py --help`,
+  skip-GPU fuzz wrapper smoke, live timeout smoke proving the tool exits with a
+  structured `timeout_after_*` summary while backend Qwen progress becomes
+  inactive and cancelled, full pytest (`1566 passed, 40 skipped`), full UI E2E
+  (`42 passed`), UI contract runner (`82` checks), UI endpoint method check
+  (`277` fetches), UI OpenAPI sanity (`167` tested), OpenAPI missing-param
+  sanity (`76` checks), OpenAPI missing-query sanity (`5` checks), and `git
+  diff --check`. A post-E2E dataset list confirmed no generated `pw_*` datasets
+  remained.

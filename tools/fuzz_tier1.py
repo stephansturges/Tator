@@ -2,6 +2,7 @@
 import argparse
 import base64
 import json
+import socket
 from pathlib import Path
 import urllib.request
 from urllib.error import URLError, HTTPError
@@ -20,19 +21,49 @@ def _get(url: str) -> dict:
     return json.loads(data)
 
 
-def _post(url: str, payload: dict) -> dict:
+def _cancel_active_qwen(cancel_url: str) -> None:
+    data = b"{}"
+    req = urllib.request.Request(
+        cancel_url,
+        data=data,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+    except Exception:
+        pass
+
+
+def _post(url: str, payload: dict, *, timeout: float = 60.0, cancel_url: str = "") -> dict:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, headers={"Content-Type": "application/json", "Accept": "application/json"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except (TimeoutError, socket.timeout) as exc:
+        if cancel_url:
+            _cancel_active_qwen(cancel_url)
+        raise RuntimeError(f"timeout_after_{timeout:g}s:{url}") from exc
     except HTTPError as exc:
         body = exc.read().decode("utf-8") if exc.fp else ""
         raise RuntimeError(f"HTTP {exc.code} for {url}: {body}") from exc
     except URLError as exc:
+        if isinstance(getattr(exc, "reason", None), socket.timeout):
+            if cancel_url:
+                _cancel_active_qwen(cancel_url)
+            raise RuntimeError(f"timeout_after_{timeout:g}s:{url}") from exc
         raise RuntimeError(f"URL error for {url}: {exc}") from exc
+
+
+def _record_failure(summary: dict, out_path: str, name: str, exc: Exception) -> int:
+    summary["steps"].append({"name": name, "failed": True, "error": str(exc)})
+    Path(out_path).write_text(json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2))
+    return 1
 
 
 def _load_manifest(root: Path) -> dict:
@@ -60,6 +91,7 @@ def main() -> int:
     parser.add_argument("--fuzz-pack", default="tests/fixtures/fuzz_pack")
     parser.add_argument("--skip-gpu", action="store_true")
     parser.add_argument("--out", default="fuzz_tier1_summary.json")
+    parser.add_argument("--request-timeout", type=float, default=60.0)
     args = parser.parse_args()
 
     root = Path(args.fuzz_pack)
@@ -118,8 +150,35 @@ def main() -> int:
     prepass_win["sam3_text_window_extension"] = True
     prepass_win["similarity_window_extension"] = True
 
-    summary["steps"].append({"name": "prepass_base", "result": _post(args.base_url + "/qwen/prepass", prepass_base)})
-    summary["steps"].append({"name": "prepass_windowed", "result": _post(args.base_url + "/qwen/prepass", prepass_win)})
+    qwen_cancel_url = args.base_url + "/qwen/cancel?force=false"
+    try:
+        summary["steps"].append(
+            {
+                "name": "prepass_base",
+                "result": _post(
+                    args.base_url + "/qwen/prepass",
+                    prepass_base,
+                    timeout=args.request_timeout,
+                    cancel_url=qwen_cancel_url,
+                ),
+            }
+        )
+    except Exception as exc:
+        return _record_failure(summary, args.out, "prepass_base", exc)
+    try:
+        summary["steps"].append(
+            {
+                "name": "prepass_windowed",
+                "result": _post(
+                    args.base_url + "/qwen/prepass",
+                    prepass_win,
+                    timeout=args.request_timeout,
+                    cancel_url=qwen_cancel_url,
+                ),
+            }
+        )
+    except Exception as exc:
+        return _record_failure(summary, args.out, "prepass_windowed", exc)
 
     # Caption: full + windowed
     caption_full = {
@@ -131,8 +190,34 @@ def main() -> int:
     caption_win = dict(caption_full)
     caption_win["caption_mode"] = "windowed"
 
-    summary["steps"].append({"name": "caption_full", "result": _post(args.base_url + "/qwen/caption", caption_full)})
-    summary["steps"].append({"name": "caption_windowed", "result": _post(args.base_url + "/qwen/caption", caption_win)})
+    try:
+        summary["steps"].append(
+            {
+                "name": "caption_full",
+                "result": _post(
+                    args.base_url + "/qwen/caption",
+                    caption_full,
+                    timeout=args.request_timeout,
+                    cancel_url=qwen_cancel_url,
+                ),
+            }
+        )
+    except Exception as exc:
+        return _record_failure(summary, args.out, "caption_full", exc)
+    try:
+        summary["steps"].append(
+            {
+                "name": "caption_windowed",
+                "result": _post(
+                    args.base_url + "/qwen/caption",
+                    caption_win,
+                    timeout=args.request_timeout,
+                    cancel_url=qwen_cancel_url,
+                ),
+            }
+        )
+    except Exception as exc:
+        return _record_failure(summary, args.out, "caption_windowed", exc)
 
     # Calibration: tiny job with max_images=1 (uses cached prepass)
     classifier_id = None
@@ -183,7 +268,14 @@ def main() -> int:
     }
     try:
         summary["steps"].append(
-            {"name": "calibration", "result": _post(args.base_url + "/calibration/jobs", cal_payload)}
+            {
+                "name": "calibration",
+                "result": _post(
+                    args.base_url + "/calibration/jobs",
+                    cal_payload,
+                    timeout=args.request_timeout,
+                ),
+            }
         )
     except Exception as exc:
         summary["steps"].append(

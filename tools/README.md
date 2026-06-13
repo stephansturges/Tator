@@ -25,6 +25,10 @@ Tools
 
 - Fuzz smoke + lite (Tier-0/Tier-1)
   - Run: `BASE_URL=http://127.0.0.1:8000 SKIP_GPU=1 tools/run_fuzz_fast.sh`
+  - GPU-enabled Tier-1 Qwen prepass/caption checks can run longer than the
+    default request guard; set `REQUEST_TIMEOUT=300` for intentional long
+    runs. If a Qwen request times out, the harness requests `/qwen/cancel` and
+    writes the partial summary before exiting nonzero.
 
 - UI endpoint and contract checks
   - Endpoint method map: `python tools/run_ui_endpoint_method_check.py http://127.0.0.1:8000`

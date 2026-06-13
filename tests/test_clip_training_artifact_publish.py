@@ -1,4 +1,6 @@
 import os
+from dataclasses import fields
+from pathlib import Path
 from types import SimpleNamespace
 
 import joblib
@@ -19,6 +21,105 @@ from services.canonical_edr_completion import _copy2_if_different as _canonical_
 from services.detectors import _copy2_if_different as _detector_copy2_if_different
 from services.edr_packages import _copy2_if_different as _edr_copy2_if_different
 from services.prepass_recipes import _copy2_if_different as _prepass_copy2_if_different
+
+
+def _make_training_artifacts(model_path, labelmap_path, meta_path):
+    values = {field.name: None for field in fields(api.TrainingArtifacts)}
+    values.update(
+        {
+            "model_path": str(model_path),
+            "labelmap_path": str(labelmap_path),
+            "meta_path": str(meta_path),
+            "accuracy": 0.0,
+            "classes_seen": 0,
+            "classes_encountered": 0,
+            "samples_train": 0,
+            "samples_test": 0,
+            "clip_model": "ViT-B/32",
+            "encoder_type": "clip",
+            "encoder_model": "ViT-B/32",
+            "embedding_dim": 512,
+            "device": "cpu",
+            "classification_report": "",
+            "confusion_matrix": [],
+            "label_order": [],
+            "iterations_run": 0,
+            "converged": False,
+            "convergence_trace": [],
+            "solver": "lbfgs",
+            "hard_example_mining": False,
+            "class_weight": "balanced",
+            "effective_beta": 0.999,
+            "per_class_metrics": [],
+            "hard_mining_misclassified_weight": 1.0,
+            "hard_mining_low_conf_weight": 1.0,
+            "hard_mining_low_conf_threshold": 0.5,
+            "hard_mining_margin_threshold": 0.2,
+            "convergence_tol": 1e-4,
+            "background_class_count": 0,
+            "background_classes": [],
+            "negative_crop_policy": {},
+            "augmentation_policy": {},
+            "oversample_policy": {},
+            "classifier_type": "logreg",
+            "mlp_hidden_sizes": [],
+            "mlp_dropout": 0.0,
+            "mlp_epochs": 0,
+            "mlp_lr": 0.0,
+            "mlp_weight_decay": 0.0,
+            "mlp_label_smoothing": 0.0,
+            "mlp_loss_type": "ce",
+            "mlp_focal_gamma": 0.0,
+            "mlp_focal_alpha": None,
+            "mlp_sampler": "none",
+            "mlp_mixup_alpha": 0.0,
+            "mlp_normalize_embeddings": True,
+            "mlp_patience": 0,
+            "mlp_activation": "relu",
+            "mlp_layer_norm": False,
+            "mlp_hard_mining_epochs": 0,
+            "logit_adjustment_mode": "none",
+            "logit_adjustment_inference": False,
+            "logit_adjustment": None,
+            "arcface_enabled": False,
+            "arcface_margin": 0.0,
+            "arcface_scale": 0.0,
+            "supcon_weight": 0.0,
+            "supcon_temperature": 0.0,
+            "supcon_projection_dim": 0,
+            "supcon_projection_hidden": 0,
+            "embedding_center": False,
+            "embedding_standardize": False,
+            "preprocess_mode": "default",
+            "canonical_size": 224,
+            "embedding_crop_mode": "bbox",
+            "embedding_crop_padding_ratio": 0.0,
+            "background_mode": "none",
+            "embedding_view_mode": "single",
+            "embedding_adjustment": "none",
+            "dinov3_pooling": "cls",
+            "dinov3_backend": None,
+            "cradio_pooling": "summary",
+            "embedding_aggregation": "mean",
+            "embedding_salad_head_id": "",
+            "calibration_mode": "none",
+            "calibration_temperature": None,
+            "phase_timings": {},
+        }
+    )
+    return api.TrainingArtifacts(**values)
+
+
+def _write_clip_publish_sources(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    model_src = run_dir / "head.pkl"
+    meta_src = run_dir / "head.meta.pkl"
+    labelmap_src = run_dir / "labels.pkl"
+    model_src.write_bytes(b"new-model")
+    meta_src.write_bytes(b"new-meta")
+    labelmap_src.write_bytes(b"new-labelmap")
+    return model_src, meta_src, labelmap_src
 
 
 def test_link_or_copy_file_noops_when_source_is_destination(tmp_path):
@@ -488,6 +589,91 @@ def test_calibration_safe_link_replaces_self_referential_destination(tmp_path):
 
     assert dest.exists()
     assert dest.resolve() == source.resolve()
+
+
+def test_publish_clip_training_artifacts_requires_all_sources(tmp_path, monkeypatch):
+    model_src, meta_src, labelmap_src = _write_clip_publish_sources(tmp_path)
+    meta_src.unlink()
+    monkeypatch.setattr(api, "UPLOAD_ROOT", tmp_path / "uploads")
+
+    with pytest.raises(api.TrainingError, match="clip_artifact_publish_missing:metadata:"):
+        api._publish_clip_training_artifacts(
+            _make_training_artifacts(model_src, labelmap_src, meta_src)
+        )
+
+    assert not (tmp_path / "uploads" / "classifiers" / model_src.name).exists()
+    assert not (tmp_path / "uploads" / "labelmaps" / labelmap_src.name).exists()
+
+
+def test_publish_clip_training_artifacts_fails_closed_on_stage_failure(
+    tmp_path, monkeypatch
+):
+    model_src, meta_src, labelmap_src = _write_clip_publish_sources(tmp_path)
+    upload_root = tmp_path / "uploads"
+    monkeypatch.setattr(api, "UPLOAD_ROOT", upload_root)
+    original_link = api._link_or_copy_file
+
+    def fail_meta_stage(src, dest, *, overwrite=False):
+        if src == meta_src.resolve():
+            raise OSError("forced metadata stage failure")
+        return original_link(src, dest, overwrite=overwrite)
+
+    monkeypatch.setattr(api, "_link_or_copy_file", fail_meta_stage)
+
+    with pytest.raises(api.TrainingError, match="forced metadata stage failure"):
+        api._publish_clip_training_artifacts(
+            _make_training_artifacts(model_src, labelmap_src, meta_src)
+        )
+
+    classifiers_root = upload_root / "classifiers"
+    labelmaps_root = upload_root / "labelmaps"
+    assert not (classifiers_root / model_src.name).exists()
+    assert not (classifiers_root / meta_src.name).exists()
+    assert not (labelmaps_root / labelmap_src.name).exists()
+    assert list(classifiers_root.glob("*.tmp")) == []
+    assert list(labelmaps_root.glob("*.tmp")) == []
+
+
+def test_publish_clip_training_artifacts_rolls_back_visible_files_on_commit_failure(
+    tmp_path, monkeypatch
+):
+    model_src, meta_src, labelmap_src = _write_clip_publish_sources(tmp_path)
+    upload_root = tmp_path / "uploads"
+    classifiers_root = upload_root / "classifiers"
+    labelmaps_root = upload_root / "labelmaps"
+    classifiers_root.mkdir(parents=True)
+    labelmaps_root.mkdir(parents=True)
+    model_dst = classifiers_root / model_src.name
+    meta_dst = classifiers_root / meta_src.name
+    labelmap_dst = labelmaps_root / labelmap_src.name
+    model_dst.write_bytes(b"old-model")
+    meta_dst.write_bytes(b"old-meta")
+    labelmap_dst.write_bytes(b"old-labelmap")
+    monkeypatch.setattr(api, "UPLOAD_ROOT", upload_root)
+    original_replace = api.os.replace
+
+    def fail_meta_commit(src, dst):
+        src_name = Path(os.fspath(src)).name
+        if (
+            os.fspath(dst) == os.fspath(meta_dst)
+            and ".publish." in src_name
+            and src_name.endswith(".tmp")
+        ):
+            raise OSError("forced metadata commit failure")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(api.os, "replace", fail_meta_commit)
+
+    with pytest.raises(api.TrainingError, match="forced metadata commit failure"):
+        api._publish_clip_training_artifacts(
+            _make_training_artifacts(model_src, labelmap_src, meta_src)
+        )
+
+    assert model_dst.read_bytes() == b"old-model"
+    assert meta_dst.read_bytes() == b"old-meta"
+    assert labelmap_dst.read_bytes() == b"old-labelmap"
+    assert list(classifiers_root.glob("*.publish.*")) == []
+    assert list(labelmaps_root.glob("*.publish.*")) == []
 
 
 def test_clip_auto_predict_loads_legacy_active_classifier_head(tmp_path, monkeypatch):

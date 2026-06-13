@@ -48592,24 +48592,93 @@ def _publish_clip_training_artifacts(artifacts: TrainingArtifacts) -> TrainingAr
     labelmap_dst = labelmaps_root / labelmap_src.name
     meta_dst = classifiers_root / meta_src.name
 
+    publish_id = uuid.uuid4().hex
+    publish_entries = [
+        ("classifier", model_src, model_dst),
+        ("metadata", meta_src, meta_dst),
+        ("labelmap", labelmap_src, labelmap_dst),
+    ]
+    staged_entries: List[Tuple[str, Path, Path]] = []
+    backup_paths: Dict[Path, Path] = {}
+    committed_paths: Set[Path] = set()
+
+    def _cleanup_staged_artifacts() -> None:
+        for _kind, staged_path, _dst in staged_entries:
+            try:
+                if staged_path.exists() or staged_path.is_symlink():
+                    if staged_path.is_dir() and not staged_path.is_symlink():
+                        shutil.rmtree(staged_path, ignore_errors=True)
+                    else:
+                        staged_path.unlink(missing_ok=True)
+            except Exception:
+                logger.warning("Failed to remove staged CLIP artifact %s", staged_path)
+
+    def _rollback_published_artifacts() -> None:
+        for dst, backup in reversed(list(backup_paths.items())):
+            try:
+                if dst.exists() or dst.is_symlink():
+                    if dst.is_dir() and not dst.is_symlink():
+                        shutil.rmtree(dst, ignore_errors=True)
+                    else:
+                        dst.unlink(missing_ok=True)
+                if backup.exists() or backup.is_symlink():
+                    os.replace(backup, dst)
+            except Exception:
+                logger.warning("Failed to roll back CLIP artifact publish target %s", dst)
+        for dst in list(committed_paths):
+            if dst in backup_paths:
+                continue
+            try:
+                if dst.exists() or dst.is_symlink():
+                    if dst.is_dir() and not dst.is_symlink():
+                        shutil.rmtree(dst, ignore_errors=True)
+                    else:
+                        dst.unlink(missing_ok=True)
+            except Exception:
+                logger.warning("Failed to remove newly published CLIP artifact %s", dst)
+        _cleanup_staged_artifacts()
+
     try:
-        if model_src.exists():
-            _link_or_copy_file(model_src, model_dst, overwrite=True)
-            artifacts.model_path = str(model_dst)
+        for kind, src, dst in publish_entries:
+            if not src.exists() or not src.is_file():
+                raise TrainingError(f"clip_artifact_publish_missing:{kind}:{src}")
+            staged_path = dst.with_name(f".{dst.name}.publish.{publish_id}.tmp")
+            _link_or_copy_file(src, staged_path, overwrite=True)
+            staged_entries.append((kind, staged_path, dst))
+
+        for kind, staged_path, dst in staged_entries:
+            backup_path = dst.with_name(f".{dst.name}.publish.{publish_id}.bak")
+            if backup_path.exists() or backup_path.is_symlink():
+                if backup_path.is_dir() and not backup_path.is_symlink():
+                    raise TrainingError(f"clip_artifact_publish_failed:{kind}:backup_path_is_dir")
+                backup_path.unlink(missing_ok=True)
+            if dst.exists() or dst.is_symlink():
+                if dst.is_dir() and not dst.is_symlink():
+                    raise TrainingError(f"clip_artifact_publish_failed:{kind}:target_is_dir")
+                os.replace(dst, backup_path)
+                backup_paths[dst] = backup_path
+            os.replace(staged_path, dst)
+            committed_paths.add(dst)
+    except TrainingError:
+        _rollback_published_artifacts()
+        raise
     except Exception as exc:
-        logger.warning("Failed to publish CLIP classifier %s: %s", model_src, exc)
-    try:
-        if meta_src.exists():
-            _link_or_copy_file(meta_src, meta_dst, overwrite=True)
-            artifacts.meta_path = str(meta_dst)
-    except Exception as exc:
-        logger.warning("Failed to publish CLIP meta %s: %s", meta_src, exc)
-    try:
-        if labelmap_src.exists():
-            _link_or_copy_file(labelmap_src, labelmap_dst, overwrite=True)
-            artifacts.labelmap_path = str(labelmap_dst)
-    except Exception as exc:
-        logger.warning("Failed to publish CLIP labelmap %s: %s", labelmap_src, exc)
+        _rollback_published_artifacts()
+        raise TrainingError(f"clip_artifact_publish_failed:{exc}") from exc
+
+    for backup_path in backup_paths.values():
+        try:
+            if backup_path.exists() or backup_path.is_symlink():
+                if backup_path.is_dir() and not backup_path.is_symlink():
+                    shutil.rmtree(backup_path, ignore_errors=True)
+                else:
+                    backup_path.unlink(missing_ok=True)
+        except Exception:
+            logger.warning("Failed to remove CLIP artifact publish backup %s", backup_path)
+
+    artifacts.model_path = str(model_dst)
+    artifacts.meta_path = str(meta_dst)
+    artifacts.labelmap_path = str(labelmap_dst)
 
     return artifacts
 

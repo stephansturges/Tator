@@ -2842,3 +2842,34 @@ preserving the exact validation story for storage and artifact-write fixes.
   data-ops smoke, UI smoke, Tier-0 fuzz, skip-GPU fast fuzz wrapper, backend
   health summary, `node --check ybat-master/ybat.js`, and `git diff --check`.
   A post-E2E dataset list confirmed no generated `pw_*` datasets remained.
+
+## 2026-06-13: CLIP Training Artifact Publish Sweep
+
+- Continued the CLIP registry hardening pass into the training completion path.
+  A successful Train Class Predictor run must publish the classifier, metadata,
+  and labelmap together before the UI is told that the job succeeded.
+- Found that `_publish_clip_training_artifacts` swallowed publish failures with
+  warning logs. If copying/linking the classifier, `.meta.pkl`, or labelmap
+  failed, the training worker could still mark the job as succeeded and return
+  temp artifact paths that were not actually in the registry.
+- Hardened publish into a staged transaction. All three artifacts are first
+  copied or hardlinked to hidden staging files; only after staging succeeds are
+  visible registry files replaced. If a visible replace fails, previous visible
+  files are restored from backups and the job fails with
+  `clip_artifact_publish_failed:*` instead of reporting success.
+- Missing generated artifacts now fail the training job with
+  `clip_artifact_publish_missing:<kind>:*`. Artifact paths in the success payload
+  are only rewritten to registry paths after the commit succeeds.
+- Added regressions for missing metadata, staging failure before registry
+  mutation, and commit failure after an earlier file has been replaced.
+- Validation: `py_compile localinferenceapi.py` and touched tests, focused CLIP
+  artifact/registry/job lifecycle tests (`115 passed`), full pytest (`1577
+  passed, 40 skipped`), full UI E2E (`42 passed`), UI contract runner (`82`
+  checks), UI endpoint method check (`277` fetches), endpoint map (`184`
+  endpoints), Playwright control coverage (`83` controls), UI OpenAPI sanity
+  (`167` tested), OpenAPI missing-param sanity (`76` checks), OpenAPI
+  missing-query sanity (`5` checks), UI negative tests (`18` checks), UI
+  data-ops smoke, UI smoke, Tier-0 fuzz, skip-GPU fast fuzz wrapper, backend
+  storage health summary, `node --check ybat-master/ybat.js`, and `git diff
+  --check`. A post-E2E dataset list confirmed no generated `pw_*` datasets
+  remained.

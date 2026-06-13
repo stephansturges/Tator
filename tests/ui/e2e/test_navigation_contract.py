@@ -39,3 +39,17 @@ def test_all_tab_buttons_open_expected_panels(playwright_page):
 
     # Return to labeling as default resting state.
     go_to_tab(page, "#tabLabelingButton", "#tabLabeling")
+
+
+def test_enter_in_labeling_search_does_not_submit_or_reload_app(playwright_page):
+    page, _ = playwright_page
+    go_to_tab(page, "#tabLabelingButton", "#tabLabeling")
+    page.wait_for_selector("#imageSearch", timeout=15000)
+
+    page.evaluate("() => { window.__tatorNoSubmitMarker = 'still-here'; }")
+    page.fill("#imageSearch", "img")
+    page.press("#imageSearch", "Enter")
+    page.wait_for_timeout(250)
+
+    assert page.evaluate("() => window.__tatorNoSubmitMarker") == "still-here"
+    assert page.eval_on_selector("#tabLabeling", "el => !!el && getComputedStyle(el).display !== 'none'") is True

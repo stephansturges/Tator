@@ -2684,3 +2684,25 @@ preserving the exact validation story for storage and artifact-write fixes.
   OpenAPI sanity (`167` tested), UI negative tests (`18` checks), UI data-ops
   smoke, OpenAPI missing-query sanity (`5` checks), OpenAPI missing-param
   sanity (`76` checks), and `git diff --check`.
+
+## 2026-06-13: Annotation Form Submit Guard Sweep
+
+- Audited the shipped annotation HTML for controls that can accidentally submit
+  the UI-only form and reload the app.
+- Fixed the SAM3 split-cache purge control, which was the only shipped
+  `<button>` without an explicit `type`. Inside the annotation form, that
+  defaulted to browser submit behavior instead of a pure action button.
+- Added a startup guard that prevents submit navigation from UI-only forms, so
+  pressing Enter in annotation controls such as image search cannot reload the
+  app and lose transient UI state.
+- Added static coverage requiring every shipped button to declare `type`, plus
+  a browser E2E regression that presses Enter in the Label Images search field
+  and proves the app did not reload.
+- Validation: `node --check ybat-master/ybat.js`, `git diff --check`, focused
+  static form-submit tests (`2 passed`), focused browser Enter-key regression
+  (`1 passed`), full pytest (`1560 passed, 40 skipped`), full UI E2E (`42
+  passed`), UI endpoint method check (`277` fetches), UI contract runner (`82`
+  checks), endpoint map (`170` paths), UI OpenAPI sanity (`167` tested), UI
+  negative tests (`18` checks), UI data-ops smoke, OpenAPI missing-query sanity
+  (`5` checks), OpenAPI missing-param sanity (`76` checks), UI smoke, and
+  legacy UI endpoint check (`184` endpoints).

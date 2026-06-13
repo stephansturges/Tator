@@ -1354,6 +1354,14 @@
         uiTooltipMutationObserver.observe(document.body, { childList: true, subtree: true });
     }
 
+    function preventUiOnlyFormSubmits() {
+        document.querySelectorAll("form").forEach((form) => {
+            form.addEventListener("submit", (event) => {
+                event.preventDefault();
+            });
+        });
+    }
+
     function loadStoredApiRoot() {
         try {
             const saved = localStorage.getItem(API_STORAGE_KEY);
@@ -44530,6 +44538,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     document.addEventListener("DOMContentLoaded", () => {
+        preventUiOnlyFormSubmits();
         refreshUiTooltips();
         initializeUiTooltipObserver();
         initializeThemeToggle();

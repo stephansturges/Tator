@@ -274,6 +274,26 @@ def test_static_get_element_by_id_bindings_exist_in_tator_html():
     assert missing == []
 
 
+def test_all_tator_buttons_declare_type_to_avoid_form_submit_fallbacks():
+    root = _parse_static_html()
+    missing = [
+        _describe_control(button)
+        for button in _nodes_by_tag(root, "button")
+        if not str(button.attrs.get("type") or "").strip()
+    ]
+
+    assert missing == []
+
+
+def test_ui_only_forms_prevent_browser_submit_navigation():
+    js = _js()
+
+    assert "function preventUiOnlyFormSubmits()" in js
+    assert 'form.addEventListener("submit", (event) => {' in js
+    assert "event.preventDefault();" in js
+    assert "preventUiOnlyFormSubmits();" in js
+
+
 def test_yolo_import_and_export_controls_live_in_annotation_source_panel():
     html = _html()
     source_start = html.index('id="annotationSourcePanel"')

@@ -51013,11 +51013,23 @@ def download_rfdetr_run(run_id: str):
     meta = _rfdetr_load_run_meta_impl(run_dir, meta_name=RFDETR_RUN_META_NAME)
     run_name = meta.get("config", {}).get("run_name") or meta.get("job_id") or run_id
     safe_name = _sanitize_yolo_run_id_impl(run_name)
+    selected_best_path = Path(best_path_str).resolve(strict=False)
+    selected_best_name = selected_best_path.name
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for filename in sorted(RFDETR_KEEP_FILES):
             path = run_dir / filename
-            _zip_write_safe_file(zf, path, run_dir, filename)
+            if filename in RFDETR_DOWNLOAD_REQUIRED_FILES or path.resolve(strict=False) == selected_best_path:
+                _zip_write_required_safe_file(
+                    zf,
+                    path,
+                    run_dir,
+                    filename,
+                    error="rfdetr_run_download_incomplete",
+                    missing_name=filename if filename in RFDETR_DOWNLOAD_REQUIRED_FILES else selected_best_name,
+                )
+            else:
+                _zip_write_safe_file(zf, path, run_dir, filename)
     buffer.seek(0)
     headers = {"Content-Disposition": f'attachment; filename="{safe_name}.zip"'}
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
@@ -51097,6 +51109,23 @@ def _zip_write_safe_file(zf: zipfile.ZipFile, path: Path, root: Path, arcname: s
         return False
     zf.write(path.resolve(strict=True), arcname=arcname)
     return True
+
+
+def _zip_write_required_safe_file(
+    zf: zipfile.ZipFile,
+    path: Path,
+    root: Path,
+    arcname: str,
+    *,
+    error: str,
+    missing_name: Optional[str] = None,
+) -> None:
+    if _zip_write_safe_file(zf, path, root, arcname):
+        return
+    raise HTTPException(
+        status_code=HTTP_412_PRECONDITION_FAILED,
+        detail={"error": error, "missing": [missing_name or arcname]},
+    )
 
 
 def delete_rfdetr_run(run_id: str):
@@ -51753,7 +51782,16 @@ def download_yolo_run(run_id: str):
                 keep_files.add(yaml_path.name)
         for filename in sorted(keep_files):
             path = run_dir / filename
-            _zip_write_safe_file(zf, path, run_dir, filename)
+            if filename in YOLO_DOWNLOAD_REQUIRED_FILES:
+                _zip_write_required_safe_file(
+                    zf,
+                    path,
+                    run_dir,
+                    filename,
+                    error="yolo_run_download_incomplete",
+                )
+            else:
+                _zip_write_safe_file(zf, path, run_dir, filename)
     buffer.seek(0)
     headers = {"Content-Disposition": f'attachment; filename="{safe_name}.zip"'}
     return StreamingResponse(buffer, media_type="application/zip", headers=headers)
@@ -51789,7 +51827,13 @@ def download_yolo_head_graft_bundle(job_id: str):
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for filename in sorted(required):
             path = run_dir / filename
-            _zip_write_safe_file(zf, path, run_dir, filename)
+            _zip_write_required_safe_file(
+                zf,
+                path,
+                run_dir,
+                filename,
+                error="yolo_head_graft_bundle_incomplete",
+            )
         for yaml_path in sorted(run_dir.glob("*.yaml")):
             _zip_write_safe_file(zf, yaml_path, run_dir, yaml_path.name)
     buffer.seek(0)

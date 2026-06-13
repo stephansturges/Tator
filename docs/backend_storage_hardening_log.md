@@ -3155,3 +3155,25 @@ preserving the exact validation story for storage and artifact-write fixes.
   `py_compile localinferenceapi.py tests/test_dataset_download_cleanup.py
   tests/test_dataset_linked_annotation_flows.py tests/test_data_ingestion.py`,
   plus `git diff --check`.
+
+## 2026-06-13: Detector Run Bundle Required-Write Guards
+
+- Continued the generated artifact sweep on YOLO, RF-DETR, and YOLO head-graft
+  bundle downloads. These routes preflighted required files before building the
+  in-memory ZIP, but the actual `_zip_write_safe_file` return value was ignored
+  in the write loop.
+- Required detector artifacts now fail closed at write time if they disappear,
+  become unsafe, or otherwise cannot be added after preflight. Optional files
+  still skip cleanly when absent.
+- RF-DETR downloads now treat the concrete selected best checkpoint as required
+  during ZIP construction, in addition to required metadata and labelmap files.
+- Added regressions for required YOLO, RF-DETR, and YOLO head-graft files that
+  pass preflight but fail during ZIP writing.
+- Validation: focused detector bundle coverage
+  (`tests/test_detector_active_lifecycle.py -k "download_yolo_run or
+  download_rfdetr_run"`, `6 passed`;
+  `tests/test_yolo_head_graft_flow.py -k head_graft_bundle`, `3 passed`) and
+  full affected detector coverage (`tests/test_detector_active_lifecycle.py
+  tests/test_yolo_head_graft_flow.py`, `57 passed`),
+  `py_compile localinferenceapi.py tests/test_detector_active_lifecycle.py
+  tests/test_yolo_head_graft_flow.py`, plus `git diff --check`.

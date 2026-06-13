@@ -318,6 +318,35 @@ def test_download_yolo_run_requires_core_artifacts_but_allows_missing_optional_f
     assert "results.csv" not in names
 
 
+def test_download_yolo_run_fails_if_required_file_disappears_during_zip_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_root = tmp_path / "yolo_runs"
+    run_dir = job_root / "run1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "best.pt").write_text("weights", encoding="utf-8")
+    (run_dir / "labelmap.txt").write_text("target\n", encoding="utf-8")
+    (run_dir / api.YOLO_RUN_META_NAME).write_text('{"job_id":"run1"}', encoding="utf-8")
+    monkeypatch.setattr(api, "YOLO_JOB_ROOT", job_root)
+    real_zip_write = api._zip_write_safe_file
+
+    def flaky_zip_write(zf, path, root, arcname):
+        if arcname == "best.pt":
+            return False
+        return real_zip_write(zf, path, root, arcname)
+
+    monkeypatch.setattr(api, "_zip_write_safe_file", flaky_zip_write)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.download_yolo_run("run1")
+
+    assert exc.value.status_code == 412
+    assert exc.value.detail == {
+        "error": "yolo_run_download_incomplete",
+        "missing": ["best.pt"],
+    }
+
+
 def test_yolo_detector_runtime_rejects_best_symlink_escape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -426,6 +455,35 @@ def test_download_rfdetr_run_requires_core_artifacts_but_allows_missing_optional
 
     assert {"checkpoint_best_total.pth", "labelmap.txt", api.RFDETR_RUN_META_NAME}.issubset(names)
     assert "results.json" not in names
+
+
+def test_download_rfdetr_run_fails_if_selected_checkpoint_disappears_during_zip_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_root = tmp_path / "rfdetr_runs"
+    run_dir = job_root / "run1"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "checkpoint_best_total.pth").write_text("weights", encoding="utf-8")
+    (run_dir / "labelmap.txt").write_text("target\n", encoding="utf-8")
+    (run_dir / api.RFDETR_RUN_META_NAME).write_text('{"job_id":"run1"}', encoding="utf-8")
+    monkeypatch.setattr(api, "RFDETR_JOB_ROOT", job_root)
+    real_zip_write = api._zip_write_safe_file
+
+    def flaky_zip_write(zf, path, root, arcname):
+        if arcname == "checkpoint_best_total.pth":
+            return False
+        return real_zip_write(zf, path, root, arcname)
+
+    monkeypatch.setattr(api, "_zip_write_safe_file", flaky_zip_write)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.download_rfdetr_run("run1")
+
+    assert exc.value.status_code == 412
+    assert exc.value.detail == {
+        "error": "rfdetr_run_download_incomplete",
+        "missing": ["checkpoint_best_total.pth"],
+    }
 
 
 def test_rfdetr_prepare_dataset_copy_fallback_skips_symlink_escape(

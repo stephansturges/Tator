@@ -213,6 +213,44 @@ def test_yolo_head_graft_bundle_rejects_symlink_required_file_escape(
     assert "best.pt" in (exc.value.detail.get("missing") or [])
 
 
+def test_yolo_head_graft_bundle_fails_if_required_file_disappears_during_zip_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "head_graft_run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "best.pt").write_text("weights", encoding="utf-8")
+    (run_dir / "labelmap.txt").write_text("target\n", encoding="utf-8")
+    (run_dir / "head_graft_audit.jsonl").write_text("ok\n", encoding="utf-8")
+    (run_dir / api.YOLO_RUN_META_NAME).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(api, "_yolo_run_dir_impl", lambda *_args, **_kwargs: run_dir)
+    monkeypatch.setattr(
+        api,
+        "_yolo_load_run_meta_impl",
+        lambda *_args, **_kwargs: {
+            "head_graft": {"base_run_id": "base_run"},
+            "config": {"run_name": "head_graft_demo"},
+            "job_id": "job_1",
+        },
+    )
+    real_zip_write = api._zip_write_safe_file
+
+    def flaky_zip_write(zf, path, root, arcname):
+        if arcname == "head_graft_audit.jsonl":
+            return False
+        return real_zip_write(zf, path, root, arcname)
+
+    monkeypatch.setattr(api, "_zip_write_safe_file", flaky_zip_write)
+
+    with pytest.raises(api.HTTPException) as exc:
+        api.download_yolo_head_graft_bundle("job_1")
+
+    assert exc.value.status_code == 412
+    assert exc.value.detail == {
+        "error": "yolo_head_graft_bundle_incomplete",
+        "missing": ["head_graft_audit.jsonl"],
+    }
+
+
 def test_cancel_yolo_head_graft_job_sets_cancelling_state(monkeypatch: pytest.MonkeyPatch) -> None:
     jobs = {}
     monkeypatch.setattr(api, "YOLO_HEAD_GRAFT_JOBS", jobs)

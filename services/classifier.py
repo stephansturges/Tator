@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -678,7 +678,13 @@ def _resolve_clip_labelmap_path_impl(
         roots = [root for root in [labelmaps_root, classifiers_root] if root is not None]
     for root in roots:
         try:
-            raw_path = Path(raw)
+            win_path = PureWindowsPath(raw)
+            if win_path.is_absolute() or win_path.drive:
+                raw_path = Path(win_path.name)
+            else:
+                raw_path = Path(raw.replace("\\", "/"))
+            if not str(raw_path):
+                continue
             raw_candidate = raw_path if raw_path.is_absolute() else root / raw_path
             if _path_has_alias_component(raw_candidate, root) or _path_has_symlink_component(raw_candidate, root):
                 continue

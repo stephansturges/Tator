@@ -861,6 +861,42 @@ def test_resolve_clip_labelmap_allows_plain_nested_relative_path(tmp_path) -> No
     assert resolved == target.resolve()
 
 
+def test_resolve_clip_labelmap_supports_windows_path_hints(tmp_path) -> None:
+    upload_root = tmp_path / "uploads"
+    labelmaps_root = upload_root / "labelmaps"
+    nested = labelmaps_root / "nested"
+    nested.mkdir(parents=True)
+    basename_target = labelmaps_root / "target.pkl"
+    basename_target.write_bytes(b"labels")
+    nested_target = nested / "target.txt"
+    nested_target.write_text("car\n", encoding="utf-8")
+
+    for raw_path in (
+        "C:/export/target.pkl",
+        r"C:\export\target.pkl",
+        r"\\server\share\target.pkl",
+    ):
+        resolved = localinferenceapi._resolve_clip_labelmap_path_impl(
+            raw_path,
+            root_hint="labelmaps",
+            upload_root=upload_root,
+            labelmap_exts=localinferenceapi.LABELMAP_ALLOWED_EXTS,
+            path_is_within_root_fn=localinferenceapi._path_is_within_root_impl,
+        )
+
+        assert resolved == basename_target.resolve()
+
+    resolved_nested = localinferenceapi._resolve_clip_labelmap_path_impl(
+        r"nested\target.txt",
+        root_hint="labelmaps",
+        upload_root=upload_root,
+        labelmap_exts=localinferenceapi.LABELMAP_ALLOWED_EXTS,
+        path_is_within_root_fn=localinferenceapi._path_is_within_root_impl,
+    )
+
+    assert resolved_nested == nested_target.resolve()
+
+
 def test_delete_active_clip_labelmap_clears_active_label_state(tmp_path, monkeypatch) -> None:
     labelmap_path = tmp_path / "labelmap.pkl"
     labelmap_path.write_bytes(b"labels")

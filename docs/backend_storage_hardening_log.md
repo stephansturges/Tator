@@ -3,6 +3,17 @@
 This log keeps implementation checkpoints out of the README front page while
 preserving the exact validation story for storage and artifact-write fixes.
 
+## 2026-06-13: CLIP Labelmap Windows Metadata Hints
+
+- Resolved Windows absolute, Windows-drive, UNC-style, and backslash-relative
+  CLIP labelmap metadata hints into registry-contained labelmap paths.
+- Kept existing alias, symlink, extension, and root-containment checks before
+  returning any labelmap file.
+- Added regressions for Windows path hints and nested backslash-relative
+  labelmap metadata.
+- Validation: `113 passed, 8 warnings` for CLIP registry download, CLIP
+  artifact publication, and backend path-containment coverage.
+
 ## 2026-06-13: COCO Windows Path Import Fallback
 
 - Treated Windows absolute, Windows-drive, and UNC-style COCO image names like

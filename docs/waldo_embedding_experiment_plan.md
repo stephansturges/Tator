@@ -8,17 +8,20 @@ Find the best Class Split Explorer embedding setup for the active WALDO v4 datas
 
 ## Dataset Lock
 
-The requested path `~/Pictures/WALDO/WALDO_new_date_for_v4` was not present locally. The matching available dataset is:
+Set `WALDO_V4_ROOT` to the local WALDO v4 dataset root before running the
+commands below:
 
-`/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4`
+```bash
+export WALDO_V4_ROOT=/path/to/WALDO_new_data_for_v4
+```
 
 Use this dataset snapshot unless the user supplies a different path.
 
 Inputs:
 
-- Images: `/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/cropped images`
-- Labelmap: `/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/code/labelmap.txt`
-- Labels: `/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/labels/bboxes_yolo (207).zip`
+- Images: `$WALDO_V4_ROOT/cropped images`
+- Labelmap: `$WALDO_V4_ROOT/code/labelmap.txt`
+- Labels: `$WALDO_V4_ROOT/labels/bboxes_yolo (207).zip`
 
 Latest label zip evidence:
 
@@ -138,10 +141,10 @@ Initial command shape:
 
 ```bash
 ./.venv-macos/bin/python tools/run_class_split_experiments.py \
-  --dataset-root "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4" \
-  --label-zip "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/labels/bboxes_yolo (207).zip" \
-  --labelmap "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/code/labelmap.txt" \
-  --image-dir "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/cropped images" \
+  --dataset-root "$WALDO_V4_ROOT" \
+  --label-zip "$WALDO_V4_ROOT/labels/bboxes_yolo (207).zip" \
+  --labelmap "$WALDO_V4_ROOT/code/labelmap.txt" \
+  --image-dir "$WALDO_V4_ROOT/cropped images" \
   --output-root uploads/class_analysis/experiments/waldo_v4
 ```
 
@@ -439,10 +442,10 @@ Executed on 2026-05-20 with:
 
 ```bash
 NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python tools/run_class_split_experiments.py \
-  --dataset-root "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4" \
-  --label-zip "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/labels/bboxes_yolo (207).zip" \
-  --labelmap "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/code/labelmap.txt" \
-  --image-dir "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/cropped images" \
+  --dataset-root "$WALDO_V4_ROOT" \
+  --label-zip "$WALDO_V4_ROOT/labels/bboxes_yolo (207).zip" \
+  --labelmap "$WALDO_V4_ROOT/code/labelmap.txt" \
+  --image-dir "$WALDO_V4_ROOT/cropped images" \
   --output-root uploads/class_analysis/experiments/waldo_v4
 ```
 
@@ -509,10 +512,10 @@ Executed on 2026-05-20 with:
 
 ```bash
 NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python tools/run_class_split_experiments.py \
-  --dataset-root "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4" \
-  --label-zip "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/labels/bboxes_yolo (207).zip" \
-  --labelmap "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/code/labelmap.txt" \
-  --image-dir "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/cropped images" \
+  --dataset-root "$WALDO_V4_ROOT" \
+  --label-zip "$WALDO_V4_ROOT/labels/bboxes_yolo (207).zip" \
+  --labelmap "$WALDO_V4_ROOT/code/labelmap.txt" \
+  --image-dir "$WALDO_V4_ROOT/cropped images" \
   --output-root uploads/class_analysis/experiments/waldo_v4_remaining_smoke \
   --matrix remaining --sample-cap 50 --force
 ```
@@ -554,10 +557,10 @@ Executed on 2026-05-20 with:
 
 ```bash
 NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python tools/run_class_split_experiments.py \
-  --dataset-root "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4" \
-  --label-zip "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/labels/bboxes_yolo (207).zip" \
-  --labelmap "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/code/labelmap.txt" \
-  --image-dir "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/cropped images" \
+  --dataset-root "$WALDO_V4_ROOT" \
+  --label-zip "$WALDO_V4_ROOT/labels/bboxes_yolo (207).zip" \
+  --labelmap "$WALDO_V4_ROOT/code/labelmap.txt" \
+  --image-dir "$WALDO_V4_ROOT/cropped images" \
   --output-root uploads/class_analysis/experiments/waldo_v4_finalists \
   --matrix finalists --sample-cap 200 --force
 ```
@@ -616,10 +619,10 @@ Executed on 2026-05-20 with no sample cap:
 
 ```bash
 NO_ALBUMENTATIONS_UPDATE=1 .venv-macos/bin/python tools/run_class_split_experiments.py \
-  --dataset-root "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4" \
-  --label-zip "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/labels/bboxes_yolo (207).zip" \
-  --labelmap "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/code/labelmap.txt" \
-  --image-dir "/Users/stephansturges/Pictures/WALDO/WALDO_new_data_for_v4/cropped images" \
+  --dataset-root "$WALDO_V4_ROOT" \
+  --label-zip "$WALDO_V4_ROOT/labels/bboxes_yolo (207).zip" \
+  --labelmap "$WALDO_V4_ROOT/code/labelmap.txt" \
+  --image-dir "$WALDO_V4_ROOT/cropped images" \
   --output-root uploads/class_analysis/experiments/waldo_v4_finalists_rerun_20260520 \
   --matrix finalists --sample-cap 0 --force
 ```

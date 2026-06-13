@@ -39795,7 +39795,7 @@ def _ensure_yolo_inference_runtime_for_detector(
         sanitize_fn=_sanitize_yolo_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    if not run_dir.exists():
+    if not run_dir.exists() or not run_dir.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
     best_path = run_dir / "best.pt"
     try:
@@ -39838,7 +39838,7 @@ def _ensure_rfdetr_inference_runtime_for_detector(
         sanitize_fn=_sanitize_rfdetr_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    if not run_dir.exists():
+    if not run_dir.exists() or not run_dir.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
     best_path = _rfdetr_best_checkpoint_impl(run_dir)
     if not best_path:
@@ -50979,7 +50979,7 @@ def set_rfdetr_active(payload: RfDetrActiveRequest):
         sanitize_fn=_sanitize_rfdetr_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    if not run_dir.exists():
+    if not run_dir.exists() or not run_dir.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
     best_path = _rfdetr_best_checkpoint_impl(run_dir)
     if not best_path:
@@ -51023,7 +51023,7 @@ def download_rfdetr_run(run_id: str):
         sanitize_fn=_sanitize_rfdetr_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    if not run_dir.exists():
+    if not run_dir.exists() or not run_dir.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
     best_path_str = _rfdetr_best_checkpoint_impl(run_dir)
     missing = [
@@ -51071,7 +51071,7 @@ def yolo_run_summary(run_id: str):
         sanitize_fn=_sanitize_yolo_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    if not run_dir.exists():
+    if not run_dir.exists() or not run_dir.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
     meta = _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
     config = meta.get("config") or {}
@@ -51101,7 +51101,7 @@ def rfdetr_run_summary(run_id: str):
         sanitize_fn=_sanitize_rfdetr_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    if not run_dir.exists():
+    if not run_dir.exists() or not run_dir.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
     meta = _rfdetr_load_run_meta_impl(run_dir, meta_name=RFDETR_RUN_META_NAME)
     config = meta.get("config") or {}
@@ -51164,7 +51164,7 @@ def delete_rfdetr_run(run_id: str):
         sanitize_fn=_sanitize_rfdetr_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    if not run_dir.exists():
+    if not run_dir.exists() or not run_dir.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="rfdetr_run_not_found")
     blocking_registry = _active_job_registry_blocking_run_delete(
         run_id,
@@ -51215,7 +51215,7 @@ def set_yolo_active(payload: YoloActiveRequest):
         sanitize_fn=_sanitize_yolo_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    if not run_dir.exists():
+    if not run_dir.exists() or not run_dir.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
     best_path = run_dir / "best.pt"
     if not _safe_regular_file_within_root(best_path, run_dir):
@@ -51787,7 +51787,7 @@ def download_yolo_run(run_id: str):
         sanitize_fn=_sanitize_yolo_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    if not run_dir.exists():
+    if not run_dir.exists() or not run_dir.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
     missing = [
         name
@@ -51833,7 +51833,7 @@ def download_yolo_head_graft_bundle(job_id: str):
         sanitize_fn=_sanitize_yolo_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    if not run_dir.exists():
+    if not run_dir.exists() or not run_dir.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
     meta = _yolo_load_run_meta_impl(run_dir, meta_name=YOLO_RUN_META_NAME)
     if not meta.get("head_graft"):
@@ -51877,7 +51877,7 @@ def delete_yolo_run(run_id: str):
         sanitize_fn=_sanitize_yolo_run_id_impl,
         http_exception_cls=HTTPException,
     )
-    if not run_dir.exists():
+    if not run_dir.exists() or not run_dir.is_dir():
         raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="yolo_run_not_found")
     blocking_registry = _active_job_registry_blocking_run_delete(
         run_id,

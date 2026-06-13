@@ -3234,3 +3234,20 @@ preserving the exact validation story for storage and artifact-write fixes.
   security coverage (`tests/test_qwen_dataset_upload_security.py`,
   `12 passed`), `py_compile localinferenceapi.py
   tests/test_qwen_dataset_upload.py`, and `git diff --check`.
+
+## 2026-06-13: Detector Run Non-Directory Guards
+
+- Continued the run-management sweep on YOLO and RF-DETR trained-run
+  endpoints. A malformed file at a run-id path was contained, but several
+  endpoints treated it like an existing partial run and could return
+  precondition failures or deletion-time 500s instead of a controlled
+  run-not-found response.
+- YOLO and RF-DETR active selection, summary, download, deletion, and direct
+  detector-runtime selection now require the run path to be a directory before
+  proceeding.
+- Added endpoint-level regressions that create a file at the requested run id
+  and verify every affected YOLO/RF-DETR run surface returns the expected 404
+  without modifying the file.
+- Validation: detector lifecycle coverage
+  (`tests/test_detector_active_lifecycle.py`, `48 passed`) and `py_compile
+  localinferenceapi.py tests/test_detector_active_lifecycle.py`.

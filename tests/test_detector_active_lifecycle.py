@@ -412,6 +412,61 @@ def test_set_yolo_active_omits_symlinked_labelmap_escape(
     assert json.loads(active_path.read_text(encoding="utf-8"))["labelmap_path"] is None
 
 
+def test_yolo_run_endpoints_reject_file_at_run_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_root = tmp_path / "yolo_runs"
+    job_root.mkdir()
+    run_path = job_root / "not_a_dir"
+    run_path.write_text("not a run directory", encoding="utf-8")
+    monkeypatch.setattr(api, "YOLO_JOB_ROOT", job_root)
+    monkeypatch.setattr(api, "YOLO_ACTIVE_PATH", tmp_path / "models" / "yolo" / "active.json")
+
+    calls = [
+        lambda: api.set_yolo_active(api.YoloActiveRequest(run_id="not_a_dir")),
+        lambda: api.download_yolo_run("not_a_dir"),
+        lambda: api.download_yolo_head_graft_bundle("not_a_dir"),
+        lambda: api.yolo_run_summary("not_a_dir"),
+        lambda: api.delete_yolo_run("not_a_dir"),
+        lambda: api._ensure_yolo_inference_runtime_for_detector("not_a_dir"),
+    ]
+
+    for call in calls:
+        with pytest.raises(api.HTTPException) as exc:
+            call()
+        assert exc.value.status_code == 404
+        assert exc.value.detail == "yolo_run_not_found"
+        assert run_path.read_text(encoding="utf-8") == "not a run directory"
+
+
+def test_rfdetr_run_endpoints_reject_file_at_run_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_root = tmp_path / "rfdetr_runs"
+    job_root.mkdir()
+    run_path = job_root / "not_a_dir"
+    run_path.write_text("not a run directory", encoding="utf-8")
+    monkeypatch.setattr(api, "RFDETR_JOB_ROOT", job_root)
+    monkeypatch.setattr(
+        api, "RFDETR_ACTIVE_PATH", tmp_path / "models" / "rfdetr" / "active.json"
+    )
+
+    calls = [
+        lambda: api.set_rfdetr_active(api.RfDetrActiveRequest(run_id="not_a_dir")),
+        lambda: api.download_rfdetr_run("not_a_dir"),
+        lambda: api.rfdetr_run_summary("not_a_dir"),
+        lambda: api.delete_rfdetr_run("not_a_dir"),
+        lambda: api._ensure_rfdetr_inference_runtime_for_detector("not_a_dir"),
+    ]
+
+    for call in calls:
+        with pytest.raises(api.HTTPException) as exc:
+            call()
+        assert exc.value.status_code == 404
+        assert exc.value.detail == "rfdetr_run_not_found"
+        assert run_path.read_text(encoding="utf-8") == "not a run directory"
+
+
 def test_download_rfdetr_run_rejects_symlinked_required_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

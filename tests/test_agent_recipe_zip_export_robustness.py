@@ -34,6 +34,24 @@ def test_ensure_recipe_zip_rebuilds_corrupt_existing_zip(tmp_path: Path) -> None
     assert payload["id"] == "r1"
 
 
+def test_ensure_recipe_zip_rebuilds_existing_zip_missing_recipe_manifest(tmp_path: Path) -> None:
+    recipes_root = tmp_path / "recipes"
+    recipes_root.mkdir(parents=True, exist_ok=True)
+    stale_zip = recipes_root / "r_manifest.zip"
+    with zipfile.ZipFile(stale_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("not_recipe.json", "{}")
+
+    recipe: Dict[str, Any] = {"id": "r_manifest", "label": "demo", "config": {"x": 1}}
+    zip_path = _ensure_recipe_zip_impl(recipe, recipes_root=recipes_root)
+
+    assert zip_path == stale_zip
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        names = set(zf.namelist())
+        payload = json.loads(zf.read("recipe.json").decode("utf-8"))
+    assert "not_recipe.json" not in names
+    assert payload["id"] == "r_manifest"
+
+
 def test_ensure_recipe_zip_skips_symlink_artifact_escape(tmp_path: Path) -> None:
     recipes_root = tmp_path / "recipes"
     recipe_dir = recipes_root / "r2"

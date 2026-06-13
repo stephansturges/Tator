@@ -358,6 +358,38 @@ def test_ensure_cascade_zip_rebuilds_corrupt_existing_zip(tmp_path: Path) -> Non
         assert "cascade.json" in zf.namelist()
 
 
+def test_ensure_cascade_zip_rebuilds_existing_zip_missing_cascade_manifest(tmp_path: Path) -> None:
+    cascades_root = tmp_path / "cascades"
+    recipes_root = tmp_path / "recipes"
+    classifiers_root = tmp_path / "classifiers"
+    cascades_root.mkdir(parents=True, exist_ok=True)
+    recipes_root.mkdir(parents=True, exist_ok=True)
+    classifiers_root.mkdir(parents=True, exist_ok=True)
+
+    stale_zip = cascades_root / "ac_manifest.zip"
+    with zipfile.ZipFile(stale_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("not_cascade.json", "{}")
+
+    cascade: Dict[str, Any] = {"id": "ac_manifest", "label": "demo", "steps": [], "dedupe": {}}
+    zip_path = _ensure_cascade_zip_impl(
+        cascade,
+        cascades_root=cascades_root,
+        recipes_root=recipes_root,
+        classifiers_root=classifiers_root,
+        path_is_within_root_fn=_within_root,
+        ensure_recipe_zip_fn=lambda _recipe: recipes_root / "noop.zip",
+        load_recipe_fn=lambda _rid: {"id": _rid},
+        resolve_classifier_fn=lambda _rel: None,
+    )
+
+    assert zip_path == stale_zip
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        names = set(zf.namelist())
+        payload = json.loads(zf.read("cascade.json").decode("utf-8"))
+    assert "not_cascade.json" not in names
+    assert payload["id"] == "ac_manifest"
+
+
 def test_delete_agent_cascade_unlinks_symlinked_zip_without_touching_target(
     tmp_path: Path,
 ) -> None:

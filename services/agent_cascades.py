@@ -304,7 +304,7 @@ def _ensure_cascade_zip_impl(
     if zip_raw.exists():
         try:
             with zipfile.ZipFile(zip_raw, "r") as zf:
-                if zf.testzip() is None:
+                if zf.testzip() is None and "cascade.json" in set(zf.namelist()):
                     return zip_raw
         except Exception:
             try:

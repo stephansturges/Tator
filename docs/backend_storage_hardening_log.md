@@ -3045,3 +3045,20 @@ preserving the exact validation story for storage and artifact-write fixes.
   tests/test_dataset_download_cleanup.py`, `100 passed`), `py_compile
   localinferenceapi.py tests/test_dataset_linked_annotation_flows.py`, and
   `git diff --check`.
+
+## 2026-06-13: Agent Recipe/Cascade Cached ZIP Manifests
+
+- Continued the user-facing export sweep on saved SAM3 recipe and cascade
+  bundles. Existing cached ZIPs were rebuilt when corrupt, but any valid ZIP was
+  reused even if it lacked the required top-level manifest (`recipe.json` or
+  `cascade.json`), allowing a stale or wrong archive to be served as the saved
+  object export.
+- Recipe ZIP cache reuse now requires both a clean ZIP test and `recipe.json`.
+  Cascade ZIP cache reuse now requires both a clean ZIP test and `cascade.json`.
+  Valid-but-wrong cached archives are rebuilt atomically before being returned.
+- Added regressions for valid cached recipe/cascade ZIPs missing their required
+  manifest entries.
+- Validation: recipe/cascade ZIP export robustness suites
+  (`tests/test_agent_recipe_zip_export_robustness.py
+  tests/test_agent_cascade_export_safety.py`, `33 passed`), `py_compile`
+  on touched service/test modules, and `git diff --check`.

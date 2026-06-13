@@ -1533,7 +1533,7 @@ def _ensure_recipe_zip_impl(
     if zip_raw.exists():
         try:
             with zipfile.ZipFile(zip_raw, "r") as zf:
-                if zf.testzip() is None:
+                if zf.testzip() is None and "recipe.json" in set(zf.namelist()):
                     return zip_raw
         except Exception:
             try:

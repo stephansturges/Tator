@@ -641,7 +641,7 @@ class ActiveModelResponse(BaseModel):
     clip_warnings: List[str] = Field(default_factory=list)
     encoder_ready: Optional[bool] = None
     encoder_error: Optional[str] = None
-    labelmap_entries: List[str] = []
+    labelmap_entries: List[str] = Field(default_factory=list)
     logit_adjustment_inference: Optional[bool] = None
 
 
@@ -1052,8 +1052,8 @@ class PredictorSettingsUpdate(BaseModel):
 class MultiPointPrompt(BaseModel):
     image_base64: Optional[str] = None
     image_token: Optional[str] = None
-    positive_points: List[List[float]] = []
-    negative_points: List[List[float]] = []
+    positive_points: List[List[float]] = Field(default_factory=list)
+    negative_points: List[List[float]] = Field(default_factory=list)
     uuid: Optional[str] = None
     sam_variant: Optional[str] = None
     image_name: Optional[str] = None

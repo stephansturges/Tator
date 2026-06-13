@@ -2630,3 +2630,19 @@ preserving the exact validation story for storage and artifact-write fixes.
   tracked `tools/*.py`, strict unused-definition scan (`--max-uses 0`, no
   output), OpenAPI missing-query and missing-param sanity checks, and argparse
   `--help` sweep (`80` checked tools, no failures).
+
+## 2026-06-13: Schema Default And OpenAPI Integrity Sweep
+
+- Audited route/schema/model-selection surfaces after the tool-entrypoint
+  cleanup. Live OpenAPI had no duplicate operation IDs, malformed operations,
+  missing operation IDs, or duplicate method/path route registrations.
+- Replaced remaining mutable literal defaults on Pydantic models with
+  `Field(default_factory=list)` for active model labelmap entries and SAM
+  multi-point prompts.
+- Added an AST regression that scans `localinferenceapi.py`, `models/*.py`, and
+  `api/*.py` for mutable literal defaults on Pydantic `BaseModel` classes.
+- Validation: focused API/schema/config/model-selection tests (`318 passed`),
+  focused schema regression slice (`48 passed`), pycompile for touched files,
+  local mutable-default scan (`0` findings), live UI/OpenAPI endpoint sanity
+  checks, OpenAPI missing-query and missing-param sanity checks, live OpenAPI
+  operation-id/route-table audit, and backend health (`HTTP 200`, `ok: true`).

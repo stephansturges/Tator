@@ -110,6 +110,46 @@ def test_ensure_cascade_zip_skips_unsafe_recipe_archive_path(tmp_path: Path) -> 
     assert all(".." not in Path(name).parts for name in names)
 
 
+def test_ensure_cascade_zip_exports_standard_classifier_meta_sidecar(tmp_path: Path) -> None:
+    cascades_root = tmp_path / "cascades"
+    recipes_root = tmp_path / "recipes"
+    classifiers_root = tmp_path / "classifiers"
+    cascades_root.mkdir(parents=True, exist_ok=True)
+    recipes_root.mkdir(parents=True, exist_ok=True)
+    classifiers_root.mkdir(parents=True, exist_ok=True)
+
+    recipe_zip = recipes_root / "r1.zip"
+    _write_recipe_zip(recipe_zip)
+    classifier_path = classifiers_root / "nested" / "safe.pkl"
+    classifier_path.parent.mkdir(parents=True, exist_ok=True)
+    classifier_path.write_bytes(b"classifier")
+    standard_meta_path = classifier_path.with_name("safe.meta.pkl")
+    standard_meta_path.write_bytes(b"standard-meta")
+
+    cascade: Dict[str, Any] = {
+        "id": "ac_classifier_meta",
+        "label": "demo",
+        "steps": [{"recipe_id": "r1", "extra_clip_classifier_path": "nested/safe.pkl"}],
+        "dedupe": {},
+    }
+    zip_path = _ensure_cascade_zip_impl(
+        cascade,
+        cascades_root=cascades_root,
+        recipes_root=recipes_root,
+        classifiers_root=classifiers_root,
+        path_is_within_root_fn=_within_root,
+        ensure_recipe_zip_fn=lambda _recipe: recipe_zip,
+        load_recipe_fn=lambda _rid: {"id": "r1"},
+        resolve_classifier_fn=lambda _rel: str(classifier_path),
+    )
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        assert "classifiers/nested/safe.pkl" in zf.namelist()
+        assert "classifiers/nested/safe.meta.pkl" in zf.namelist()
+        assert "classifiers/nested/safe.pkl.meta.pkl" not in zf.namelist()
+        assert zf.read("classifiers/nested/safe.meta.pkl") == b"standard-meta"
+
+
 def test_ensure_cascade_zip_rejects_symlinked_cascade_root_without_write(
     tmp_path: Path,
 ) -> None:

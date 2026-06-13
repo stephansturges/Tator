@@ -395,21 +395,32 @@ def _ensure_cascade_zip_impl(
                         zf.write(resolved_path, arcname=arcname)
                     except Exception:
                         pass
-                meta_path = resolved_path.with_suffix(resolved_path.suffix + ".meta.pkl")
-                try:
-                    meta_path_resolved = meta_path.resolve(strict=True)
-                except Exception:
-                    meta_path_resolved = None
-                if (
-                    meta_path_resolved is not None
-                    and path_is_within_root_fn(meta_path_resolved, classifiers_base)
-                    and meta_path_resolved.is_file()
-                ):
+                meta_archive_rel = _safe_archive_relpath(f"{os.path.splitext(safe_classifier_rel)[0]}.meta.pkl")
+                if not meta_archive_rel:
+                    continue
+                meta_candidates = [
+                    Path(os.path.splitext(str(resolved_path))[0] + ".meta.pkl"),
+                    resolved_path.with_suffix(resolved_path.suffix + ".meta.pkl"),
+                ]
+                seen_meta_paths: set[Path] = set()
+                for meta_path in meta_candidates:
                     try:
-                        meta_rel = f"classifiers/{safe_classifier_rel}.meta.pkl"
-                        zf.write(meta_path_resolved, arcname=meta_rel)
+                        meta_path_resolved = meta_path.resolve(strict=True)
+                    except Exception:
+                        continue
+                    if meta_path_resolved in seen_meta_paths:
+                        continue
+                    seen_meta_paths.add(meta_path_resolved)
+                    if not (
+                        path_is_within_root_fn(meta_path_resolved, classifiers_base)
+                        and meta_path_resolved.is_file()
+                    ):
+                        continue
+                    try:
+                        zf.write(meta_path_resolved, arcname=f"classifiers/{meta_archive_rel}")
                     except Exception:
                         pass
+                    break
         os.replace(temp_zip_path, zip_raw)
     except Exception as exc:  # noqa: BLE001
         try:

@@ -3267,3 +3267,23 @@ preserving the exact validation story for storage and artifact-write fixes.
 - Validation: CLIP registry download coverage
   (`tests/test_clip_registry_downloads.py`, `36 passed`) and `py_compile
   localinferenceapi.py tests/test_clip_registry_downloads.py`.
+
+## 2026-06-13: Agent Cascade CLIP Metadata Sidecars
+
+- Continued the archive/export sweep on Agent Cascade bundles. Cascade export
+  looked for CLIP classifier metadata as `<classifier>.pkl.meta.pkl`, while the
+  classifier registry stores metadata as `<classifier>.meta.pkl`.
+- This could silently export a cascade with the classifier weights but without
+  the encoder/head metadata needed after re-import.
+- Cascade export now prefers the canonical registry sidecar, tolerates the old
+  `<classifier>.pkl.meta.pkl` sidecar as a legacy fallback, and always writes
+  the metadata archive member back under the canonical `<classifier>.meta.pkl`
+  name.
+- Added a nested-path regression that verifies `classifiers/nested/safe.pkl`
+  exports with `classifiers/nested/safe.meta.pkl` and never with the stale
+  `safe.pkl.meta.pkl` member.
+- Validation: Agent Cascade export safety coverage
+  (`tests/test_agent_cascade_export_safety.py`, `22 passed`), adjacent import
+  security coverage (`tests/test_agent_cascade_import_security.py`,
+  `12 passed`), `py_compile services/agent_cascades.py
+  tests/test_agent_cascade_export_safety.py`, and `git diff --check`.

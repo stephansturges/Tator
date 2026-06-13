@@ -3112,3 +3112,21 @@ preserving the exact validation story for storage and artifact-write fixes.
   localinferenceapi.py services/prepass_recipes.py
   tests/test_prepass_recipe_config_validation.py
   tests/test_agent_export_file_responses.py`, and `git diff --check`.
+
+## 2026-06-13: Data Ingestion Accepted Export ZIP Completeness
+
+- Continued the data-ingestion accepted-output export sweep. The download route
+  already guarded source containment, duplicate output paths, render failures,
+  and cleanup, but it did not re-open the finished ZIP before serving it.
+- Added a final accepted-export ZIP validation step that runs `testzip()` and
+  verifies every selected output member plus `manifest.json` and `summary.json`
+  is present before returning the `FileResponse`.
+- A corrupt or incomplete accepted-data archive now fails closed with an
+  `accepted_export_zip_*` detail and removes the transient ZIP staging directory
+  instead of serving a broken dataset download.
+- Added a regression that simulates a ZIP writer silently dropping `summary.json`
+  and verifies the endpoint rejects the archive and cleans temporary staging.
+- Validation: focused accepted export coverage
+  (`tests/test_data_ingestion.py -k accepted_export`, `9 passed`), full data
+  ingestion suite (`tests/test_data_ingestion.py`, `91 passed`), `py_compile
+  localinferenceapi.py tests/test_data_ingestion.py`, and `git diff --check`.

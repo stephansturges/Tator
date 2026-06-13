@@ -35078,6 +35078,34 @@ def _data_ingestion_validate_zip_infos(
             raise HTTPException(status_code=HTTP_413_CONTENT_TOO_LARGE, detail=f"{detail_prefix}_uncompressed_too_large")
 
 
+def _data_ingestion_validate_created_zip(
+    zip_path: Path,
+    *,
+    required_names: Set[str],
+    detail_prefix: str,
+) -> None:
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            bad_member = zf.testzip()
+            if bad_member is not None:
+                raise HTTPException(
+                    status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"{detail_prefix}_zip_corrupt:{bad_member}",
+                )
+            names = set(zf.namelist())
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"{detail_prefix}_zip_invalid",
+        ) from exc
+    missing = sorted(required_names - names)
+    if missing:
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"{detail_prefix}_zip_missing:{missing[0]}",
+        )
+
+
 def _data_ingestion_reference_fingerprint(
     prepared_rows: Sequence[Dict[str, Any]],
     *,
@@ -38268,6 +38296,11 @@ def download_data_ingestion_accepted_export(job_id: str, payload: Dict[str, Any]
                         image.close()
             zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
             zf.writestr("summary.json", json.dumps(summary, ensure_ascii=False, indent=2))
+        _data_ingestion_validate_created_zip(
+            zip_path,
+            required_names=written_arcnames | {"manifest.json", "summary.json"},
+            detail_prefix="accepted_export",
+        )
         return FileResponse(
             path=str(zip_path),
             media_type="application/zip",

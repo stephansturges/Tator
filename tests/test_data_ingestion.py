@@ -854,6 +854,65 @@ def test_accepted_export_preview_and_download_tiles_kept_items(tmp_path, monkeyp
     assert not zip_path.parent.exists()
 
 
+def test_accepted_export_download_rejects_incomplete_zip_before_serving(tmp_path, monkeypatch):
+    ingestion_root = tmp_path / "ingestion"
+    job_dir = ingestion_root / "di_accept_incomplete_zip"
+    media_dir = job_dir / "media" / "candidates"
+    media_dir.mkdir(parents=True)
+    image_path = media_dir / "candidate_a.jpg"
+    Image.new("RGB", (16, 10), (20, 100, 180)).save(image_path)
+    monkeypatch.setattr(api, "DATA_INGESTION_ROOT", ingestion_root)
+    api.DATA_INGESTION_JOBS.clear()
+    _register_completed_ingestion_job(api, "di_accept_incomplete_zip", job_dir, image_path)
+
+    real_zipfile = zipfile.ZipFile
+
+    class DroppingZipFile:
+        def __init__(self, *args, **kwargs):
+            self._mode = str(args[1] if len(args) > 1 else kwargs.get("mode", "r"))
+            self._inner = real_zipfile(*args, **kwargs)
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return self._inner.__exit__(exc_type, exc, tb)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def write(self, *args, **kwargs):
+            return self._inner.write(*args, **kwargs)
+
+        def writestr(self, zinfo_or_arcname, data, *args, **kwargs):
+            arcname = getattr(zinfo_or_arcname, "filename", zinfo_or_arcname)
+            if "w" in self._mode and str(arcname) == "summary.json":
+                return None
+            return self._inner.writestr(zinfo_or_arcname, data, *args, **kwargs)
+
+    export_tmp_root = tmp_path / "export_tmp"
+    export_tmp_root.mkdir()
+
+    def fixed_mkdtemp(*, prefix):
+        tmp_dir = export_tmp_root / f"{prefix}unit"
+        tmp_dir.mkdir()
+        return str(tmp_dir)
+
+    monkeypatch.setattr(api.zipfile, "ZipFile", DroppingZipFile)
+    monkeypatch.setattr(api.tempfile, "mkdtemp", fixed_mkdtemp)
+
+    with pytest.raises(api.HTTPException) as exc_info:
+        api.download_data_ingestion_accepted_export(
+            "di_accept_incomplete_zip",
+            {"transform_mode": "tile", "target_width": 8, "target_height": 8},
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "accepted_export_zip_missing:summary.json"
+    assert list(export_tmp_root.iterdir()) == []
+
+
 def test_accepted_export_preview_cleans_partial_artifacts_on_render_failure(tmp_path, monkeypatch):
     ingestion_root = tmp_path / "ingestion"
     job_dir = ingestion_root / "di_accept_preview_failure"

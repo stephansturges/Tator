@@ -425,6 +425,42 @@ def test_dataset_upload_session_cancel_removes_disk_session_after_restart(
     assert not ((tmp_path / "upload_sessions") / session_id).exists()
 
 
+def test_dataset_upload_session_cancel_keeps_session_when_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api, "DATASET_REGISTRY_ROOT", tmp_path / "registry")
+    monkeypatch.setattr(api, "YOLO_DATASET_UPLOAD_SESSION_ROOT", tmp_path / "upload_sessions")
+    api.DATASET_UPLOAD_SESSIONS.clear()
+    session_id = api.init_dataset_upload_session(
+        {"dataset_id": "cleanup_fail", "classes": ["building"], "total_images": 1}
+    )["session_id"]
+    api.upload_dataset_session_batch(
+        session_id,
+        json.dumps({"rows": [{"filename": "a.jpg", "split": "train", "label_text": ""}]}),
+        [UploadFile(filename="a.jpg", file=BytesIO(b"img"))],
+    )
+    original_rmtree = api.shutil.rmtree
+
+    def fail_rmtree(*_args, **_kwargs):
+        raise OSError("forced cleanup failure")
+
+    monkeypatch.setattr(api.shutil, "rmtree", fail_rmtree)
+
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            api.cancel_dataset_upload_session(session_id)
+
+        assert exc_info.value.status_code == 500
+        assert str(exc_info.value.detail).startswith("dataset_upload_cancel_failed:")
+        with api.DATASET_UPLOAD_SESSIONS_LOCK:
+            assert session_id in api.DATASET_UPLOAD_SESSIONS
+        assert ((tmp_path / "upload_sessions") / session_id).exists()
+    finally:
+        monkeypatch.setattr(api.shutil, "rmtree", original_rmtree)
+        api.cancel_dataset_upload_session(session_id)
+        api.DATASET_UPLOAD_SESSIONS.clear()
+
+
 def test_import_prepass_recipe_closes_upload_handle(monkeypatch: pytest.MonkeyPatch) -> None:
     upload = UploadFile(filename="recipe.zip", file=BytesIO(b"zip-bytes"))
     monkeypatch.setattr(api, "_import_prepass_recipe_from_zip", lambda _path: {"status": "ok"})

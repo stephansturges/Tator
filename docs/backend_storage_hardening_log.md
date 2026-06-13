@@ -2758,3 +2758,31 @@ preserving the exact validation story for storage and artifact-write fixes.
   sanity (`76` checks), OpenAPI missing-query sanity (`5` checks), and `git
   diff --check`. A post-E2E dataset list confirmed no generated `pw_*` datasets
   remained.
+
+## 2026-06-13: Dataset Upload Cancel Cleanup Sweep
+
+- Audited user-visible upload cancellation paths after the Tier-1 fuzz cleanup
+  sweep, focusing on endpoints that can return success after deleting staged
+  upload state.
+- Found that both Dataset Management chunked dataset uploads and Qwen dataset
+  uploads could remove the upload job from the in-memory registry and return
+  `"cancelled"` even when staging-root cleanup was only best-effort. That could
+  leave temporary chunks on disk without a visible upload-session handle.
+- Changed both cancel flows to fail closed: staging cleanup is validated and
+  completed before the upload job/session is removed from the registry. If
+  cleanup fails or the staging path is invalid, the API now raises an explicit
+  error and keeps the job/session visible for retry or inspection.
+- Preserved the existing symlink safety invariant: a symlinked staging child can
+  be unlinked without following it, while a symlinked staging parent is treated
+  as an invalid path and never causes target deletion.
+- Validation: `py_compile localinferenceapi.py` and touched tests, focused
+  upload/UI contract tests (`78 passed`) covering Dataset Management chunked
+  upload, Qwen upload, upload security, and layout contracts, full pytest
+  (`1568 passed, 40 skipped`), full UI E2E (`42 passed`), UI contract runner
+  (`82` checks), endpoint map (`184` endpoints), Playwright control coverage
+  (`83` controls), UI endpoint method check (`277` fetches), UI OpenAPI sanity
+  (`167` tested), OpenAPI missing-param sanity (`76` checks), OpenAPI
+  missing-query sanity (`5` checks), UI negative tests (`18` checks), UI
+  data-ops smoke, UI smoke, Tier-0 fuzz, skip-GPU fast fuzz wrapper, backend
+  health summary, `node --check ybat-master/ybat.js`, and `git diff --check`.
+  A post-E2E dataset list confirmed no generated `pw_*` datasets remained.

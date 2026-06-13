@@ -17897,45 +17897,62 @@ def finalize_dataset_upload_session(session_id: str) -> Dict[str, Any]:
         return meta
 
 
+def _remove_dataset_upload_session_root(
+    root_dir: Path,
+    *,
+    path_detail: str = "dataset_upload_session_path_invalid",
+    cleanup_detail: str = "dataset_upload_cancel_failed",
+) -> None:
+    try:
+        upload_root = _dataset_upload_session_storage_root(create=False)
+        raw_root = Path(root_dir)
+        if _storage_path_has_symlink_component(raw_root.parent):
+            raise ValueError("dataset upload session parent has a symlink component")
+        parent = raw_root.parent.resolve(strict=False)
+        if parent != upload_root or not _path_is_within_root_impl(parent, upload_root):
+            raise ValueError("dataset upload session root escapes staging root")
+        if raw_root.is_symlink():
+            raw_root.unlink()
+        else:
+            resolved = raw_root.resolve(strict=False)
+            if not _path_is_within_root_impl(resolved, upload_root) or resolved.parent != upload_root:
+                raise ValueError("dataset upload session root escapes staging root")
+            if not resolved.exists():
+                return
+            if not resolved.is_dir():
+                raise ValueError("dataset upload session root is not a directory")
+            shutil.rmtree(resolved)
+        if raw_root.exists() or raw_root.is_symlink():
+            raise OSError("dataset upload session root still exists after cleanup")
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=path_detail) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"{cleanup_detail}:{exc}",
+        ) from exc
+
+
 def cancel_dataset_upload_session(session_id: str) -> Dict[str, Any]:
     job = _load_dataset_upload_session_job(session_id, required=False)
     if not job:
         safe_session_id = _sanitize_yolo_run_id_impl(str(session_id or ""))
         if safe_session_id:
-            try:
-                upload_root = _dataset_upload_session_storage_root(create=False)
-                root_dir = _dataset_upload_session_job_dir(safe_session_id, create=False)
-                root_resolved = root_dir.resolve(strict=False)
-                if (
-                    root_resolved.exists()
-                    and root_resolved.is_dir()
-                    and not root_resolved.is_symlink()
-                    and _path_is_within_root_impl(root_resolved, upload_root)
-                    and root_resolved.parent == upload_root
-                ):
-                    shutil.rmtree(root_resolved, ignore_errors=True)
-                    return {"status": "cancelled", "session_id": safe_session_id, "orphan": True}
-            except Exception:
-                pass
+            root_dir = _dataset_upload_session_job_dir(safe_session_id, create=False)
+            if root_dir.exists() or root_dir.is_symlink():
+                _remove_dataset_upload_session_root(root_dir)
+                return {"status": "cancelled", "session_id": safe_session_id, "orphan": True}
         return {"status": "missing", "session_id": session_id}
     with job.lock:
         with DATASET_UPLOAD_SESSIONS_LOCK:
             if DATASET_UPLOAD_SESSIONS.get(str(session_id or "")) is not job:
                 return {"status": "missing", "session_id": session_id}
-            DATASET_UPLOAD_SESSIONS.pop(str(session_id or ""), None)
-        try:
-            upload_root = _dataset_upload_session_storage_root(create=False)
-            root_resolved = job.root_dir.resolve(strict=False)
-            if (
-                root_resolved.exists()
-                and root_resolved.is_dir()
-                and not root_resolved.is_symlink()
-                and _path_is_within_root_impl(root_resolved, upload_root)
-                and root_resolved.parent == upload_root
-            ):
-                shutil.rmtree(root_resolved, ignore_errors=True)
-        except Exception:
-            pass
+        _remove_dataset_upload_session_root(job.root_dir)
+        with DATASET_UPLOAD_SESSIONS_LOCK:
+            if DATASET_UPLOAD_SESSIONS.get(str(session_id or "")) is job:
+                DATASET_UPLOAD_SESSIONS.pop(str(session_id or ""), None)
         return {"status": "cancelled", "session_id": session_id}
 
 
@@ -38699,27 +38716,44 @@ def finalize_qwen_dataset_upload(job_id: str, metadata: Dict[str, Any], run_name
         return meta
 
 
-def _cleanup_qwen_dataset_upload_root(root_dir: Path) -> None:
+def _remove_qwen_dataset_upload_root(
+    root_dir: Path,
+    *,
+    path_detail: str = "qwen_dataset_cancel_path_invalid",
+    cleanup_detail: str = "qwen_dataset_cancel_failed",
+) -> None:
     try:
         raw_root = Path(root_dir)
-        if raw_root.is_symlink():
-            raw_root.unlink(missing_ok=True)
-            return
-        if _storage_path_has_symlink_component(raw_root.parent):
-            return
         upload_root = _qwen_dataset_upload_storage_root(
-            create=False, detail="qwen_dataset_upload_path_invalid"
+            create=False, detail=path_detail
         )
-        resolved = raw_root.resolve(strict=True)
-    except Exception:
-        return
-    if (
-        not resolved.is_dir()
-        or not _path_is_within_root_impl(resolved, upload_root)
-        or resolved.parent != upload_root
-    ):
-        return
-    shutil.rmtree(resolved, ignore_errors=True)
+        if _storage_path_has_symlink_component(raw_root.parent):
+            raise ValueError("qwen dataset upload parent has a symlink component")
+        parent = raw_root.parent.resolve(strict=False)
+        if parent != upload_root or not _path_is_within_root_impl(parent, upload_root):
+            raise ValueError("qwen dataset upload root escapes staging root")
+        if raw_root.is_symlink():
+            raw_root.unlink()
+        else:
+            resolved = raw_root.resolve(strict=False)
+            if not _path_is_within_root_impl(resolved, upload_root) or resolved.parent != upload_root:
+                raise ValueError("qwen dataset upload root escapes staging root")
+            if not resolved.exists():
+                return
+            if not resolved.is_dir():
+                raise ValueError("qwen dataset upload root is not a directory")
+            shutil.rmtree(resolved)
+        if raw_root.exists() or raw_root.is_symlink():
+            raise OSError("qwen dataset upload root still exists after cleanup")
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail=path_detail) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"{cleanup_detail}:{exc}",
+        ) from exc
 
 
 def cancel_qwen_dataset_upload(job_id: str):
@@ -38731,8 +38765,10 @@ def cancel_qwen_dataset_upload(job_id: str):
         with QWEN_DATASET_UPLOADS_LOCK:
             if QWEN_DATASET_UPLOADS.get(job_id) is not job:
                 return {"status": "missing", "job_id": job_id}
-            QWEN_DATASET_UPLOADS.pop(job_id, None)
-        _cleanup_qwen_dataset_upload_root(job.root_dir)
+        _remove_qwen_dataset_upload_root(job.root_dir)
+        with QWEN_DATASET_UPLOADS_LOCK:
+            if QWEN_DATASET_UPLOADS.get(job_id) is job:
+                QWEN_DATASET_UPLOADS.pop(job_id, None)
         return {"status": "cancelled", "job_id": job_id}
 
 

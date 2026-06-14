@@ -210,11 +210,13 @@ The setup script installs `mlx`, the direct MLX-VLM runtime dependencies, and
 then `mlx-lm==0.31.3` and `mlx-vlm==0.6.1` from
 `requirements-macos-vlm.txt` with `--no-deps`. This keeps the main macOS
 environment on Transformers 4.57 and the SAHI-compatible OpenCV line while
-adding Qwen3.5/3.6 MoE MLX modules. The backend applies a narrow compatibility
-shim for Qwen3.5/3.6 MLX checkpoints whose MoE expert weights are already split
-into `switch_mlp` tensors. The backend exposes MLX model options through
-`/qwen/settings` and the browser UI under **Backend Config -> Qwen Runtime
-(advanced)**.
+adding Qwen3.5/3.6 MoE MLX modules. Transformers 5.x can resolve the official
+Qwen3.6 `qwen3_5_moe` architecture, but it currently breaks the shared RF-DETR
+import path, so Qwen3.6 / SwiReasoning experiments use a separate environment
+profile for now. The backend applies a narrow compatibility shim for Qwen3.5/3.6
+MLX checkpoints whose MoE expert weights are already split into `switch_mlp`
+tensors. The backend exposes MLX model options through `/qwen/settings` and the
+browser UI under **Backend Config -> Qwen Runtime (advanced)**.
 
 Useful environment settings:
 
@@ -223,6 +225,21 @@ QWEN_INFERENCE_PLATFORM=auto
 QWEN_MLX_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
 QWEN_MLX_DEFAULT_QUANTIZATION=4bit
 ```
+
+Experimental Qwen3.6 / SwiReasoning smoke:
+
+```bash
+tools/setup_qwen36_swir_env.sh
+.venv-qwen36-swir/bin/python tools/qwen36_swir_smoke.py
+```
+
+The helper prefers `.venv-macos/bin/python` or Python 3.11; avoid Python 3.14
+for this environment because native wheels such as `safetensors` may not be
+available yet. The smoke intentionally does not download the full 35B weights.
+It checks the first runtime gate: the isolated Transformers 5.x environment must
+resolve the official `Qwen/Qwen3.6-35B-A3B` config and processor. Full inference
+and SwiReasoning decoding should be benchmarked from this environment before
+the main backend pins move to Transformers 5.x.
 
 Runtime selection rules:
 

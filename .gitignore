@@ -163,6 +163,7 @@ celerybeat.pid
 !.env.*.example
 .venv
 .venv-macos/
+.venv-qwen36-swir/
 env/
 venv/
 ENV/
@@ -286,6 +287,7 @@ scrn.png
 
 # Root-level scratch artifacts (do not track)
 /*.txt
+!/requirements-qwen36-swir.txt
 !requirements.txt
 !requirements-dev.txt
 !requirements-macos-inference.txt

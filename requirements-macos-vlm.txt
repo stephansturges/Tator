@@ -2,8 +2,9 @@
 #
 # In the full .venv-macos environment, install this file with --no-deps after
 # requirements-macos-inference.txt. mlx-vlm 0.6.1 adds Qwen3.5/3.6 MoE support.
-# The backend keeps Transformers 4.57 for the rest of the stack and applies a
-# narrow processor fallback for Qwen3.6 MLX smoke-tested models.
+# The backend keeps Transformers 4.57 for the rest of the stack. Use
+# requirements-qwen36-swir.txt for the isolated Transformers 5.x Qwen3.6
+# / SwiReasoning research runtime.
 
 mlx>=0.31,<1.0
 mlx-lm==0.31.3

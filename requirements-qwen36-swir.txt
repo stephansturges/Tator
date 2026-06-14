@@ -1,0 +1,14 @@
+# Experimental Qwen3.6 / SwiReasoning runtime.
+#
+# Keep this separate from requirements-macos-inference.txt for now:
+# Transformers 5.x is required for Qwen3.6 `qwen3_5_moe`, but it currently
+# breaks the shared backend RF-DETR import path that depends on Transformers 4.x.
+
+torch>=2.3,<3.0
+torchvision>=0.18,<1.0
+transformers==5.7.0
+accelerate>=1.0,<2.0
+huggingface-hub>=1.5,<2.0
+qwen-vl-utils>=0.0.8
+safetensors>=0.4,<0.5
+sentencepiece>=0.1.99,<0.2

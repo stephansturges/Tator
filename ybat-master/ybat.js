@@ -1110,7 +1110,7 @@
         classSplitWrongShuffle: "Show a different random page of likely-wrong vignettes.",
         classSplitMobilePush: "Create or refresh a mobile review session for the current likely-wrong queue.",
         classSplitMobileSync: "Sync mobile review decisions back into the current browser workspace.",
-        classSplitQwenReviewRefresh: "Refresh the list of local Qwen reviewer models.",
+        classSplitQwenReviewRefresh: "Refresh the list of local VLM reviewer models.",
         classSplitDatasetAnalysisRun: "Run dataset-level value scoring after all-class class-split analysis is available.",
         qwenAgentRecipeImportFile: "Choose a Detection Recipe ZIP archive to import.",
         datasetUploadCurrentBtn: "Upload the currently open Label Images workspace as a backend-managed dataset.",
@@ -20831,24 +20831,30 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenSettingsElements.status.className = variant ? `settings-status ${variant}` : "settings-status";
     }
 
-    function normalizeQwenMlxModelOptions(models) {
+    function normalizeQwenRuntimeModelOptions(models) {
         const items = Array.isArray(models) ? models : [];
         const seen = new Set();
         const normalized = [];
         items.forEach((entry) => {
-            const modelId = String(entry?.id || entry?.model_id || "").trim();
+            const metadata = entry?.metadata || entry || {};
+            const modelId = String(metadata.model_id || entry?.model_id || entry?.id || "").trim();
             if (!modelId || seen.has(modelId)) {
                 return;
             }
-            if (entry?.vision_inference_supported === false || entry?.inference_supported === false) {
+            if (modelId === "default" || entry?.type === "finetune") {
+                return;
+            }
+            if (metadata.vision_inference_supported === false || metadata.inference_supported === false) {
                 return;
             }
             seen.add(modelId);
             normalized.push({
-                ...entry,
+                ...metadata,
+                availability: entry?.availability || metadata.availability || entry?.availability,
                 id: modelId,
                 model_id: modelId,
-                label: entry?.label || modelId,
+                label: metadata.label || entry?.label || modelId,
+                type: entry?.type || metadata.type || "",
             });
         });
         return normalized;
@@ -20872,7 +20878,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function qwenModelOptionLabel(entry) {
-        const label = entry?.label || entry?.id || entry?.model_id || "Qwen model";
+        const label = entry?.label || entry?.id || entry?.model_id || "VLM model";
         return `${label} [${qwenModelAvailabilityLabel(entry)}]`;
     }
 
@@ -20893,10 +20899,10 @@ async function cancelRfDetrTrainingJobRequest() {
         if (!select) {
             return;
         }
-        Array.from(select.querySelectorAll('optgroup[data-runtime-platform="mlx_vlm"]')).forEach((group) => {
+        Array.from(select.querySelectorAll('optgroup[data-agent-runtime-models="true"]')).forEach((group) => {
             group.remove();
         });
-        Array.from(select.querySelectorAll('option[data-runtime-platform="mlx_vlm"]')).forEach((option) => {
+        Array.from(select.querySelectorAll('option[data-agent-runtime-model="true"]')).forEach((option) => {
             option.remove();
         });
     }
@@ -20909,8 +20915,8 @@ async function cancelRfDetrTrainingJobRequest() {
         removeGeneratedQwenMlxOptions(select);
         const existingValues = new Set(Array.from(select.options).map((option) => option.value));
         const group = document.createElement("optgroup");
-        group.label = "MLX quantized Qwen3-VL";
-        group.dataset.runtimePlatform = "mlx_vlm";
+        group.label = "Available VLM / agent models";
+        group.dataset.agentRuntimeModels = "true";
         (Array.isArray(models) ? models : []).forEach((entry) => {
             const modelId = String(entry?.id || entry?.model_id || "").trim();
             if (!modelId || existingValues.has(modelId)) {
@@ -20920,7 +20926,8 @@ async function cancelRfDetrTrainingJobRequest() {
             option.value = modelId;
             option.textContent = qwenModelOptionLabel(entry);
             option.title = qwenModelOptionTitle(entry);
-            option.dataset.runtimePlatform = "mlx_vlm";
+            option.dataset.agentRuntimeModel = "true";
+            option.dataset.runtimePlatform = entry?.runtime_platform || inferQwenRuntimePlatform(modelId);
             option.dataset.cacheState = qwenModelAvailabilityLabel(entry);
             group.appendChild(option);
             existingValues.add(modelId);
@@ -20972,7 +20979,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function populateQwenRuntimeModelSelects(models) {
-        const items = normalizeQwenMlxModelOptions(models);
+        const items = normalizeQwenRuntimeModelOptions(models);
         [
             qwenElements.captionModel,
             qwenElements.captionRefinementModel,
@@ -20985,7 +20992,7 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function populateQwenMlxModelSelect(models, selectedId) {
         const select = qwenSettingsElements.mlxModel;
-        const items = normalizeQwenMlxModelOptions(models);
+        const items = normalizeQwenRuntimeModelOptions(models);
         qwenMlxModelOptions = items;
         populateQwenRuntimeModelSelects(items);
         if (!select) {
@@ -26518,7 +26525,8 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const modelFamily = metadata.model_family || "qwen3";
-        const familyLabel = modelFamily !== "qwen3" ? "Legacy (read-only)" : "Qwen3";
+        const isAgentModel = Boolean(metadata.agent_model || metadata.agent_supported);
+        const familyLabel = modelFamily !== "qwen3" && !isAgentModel ? "Legacy (read-only)" : modelFamily === "qwen3" ? "Qwen3" : "Agent VLM";
         const classes = Array.isArray(metadata.classes) ? metadata.classes.join(", ") : "(not specified)";
         const context = metadata.dataset_context || "(not specified)";
         const runtimePlatform = metadata.runtime_platform || "transformers";
@@ -26572,7 +26580,8 @@ async function cancelRfDetrTrainingJobRequest() {
             const modelFamily = entry.metadata?.model_family || "qwen3";
             const runtimePlatform = entry.metadata?.runtime_platform || "";
             const quantization = entry.metadata?.quantization || "";
-            const legacyTag = modelFamily !== "qwen3" ? "Legacy (read-only)" : "";
+            const isAgentModel = Boolean(entry.metadata?.agent_model || entry.metadata?.agent_supported);
+            const legacyTag = modelFamily !== "qwen3" && !isAgentModel ? "Legacy (read-only)" : isAgentModel ? "Agent VLM" : "";
             const runtimeTag = runtimePlatform === "mlx_vlm"
                 ? `MLX ${quantization || ""}`.trim()
                 : runtimePlatform;
@@ -26608,7 +26617,7 @@ async function cancelRfDetrTrainingJobRequest() {
             const button = document.createElement("button");
             button.type = "button";
             button.className = "training-button";
-            const isLegacy = modelFamily !== "qwen3";
+            const isLegacy = modelFamily !== "qwen3" && !isAgentModel;
             if (isLegacy) {
                 card.classList.add("legacy");
             }
@@ -26655,6 +26664,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
             qwenModelState.models = data.models || [];
             qwenModelState.activeId = data.active || "default";
+            populateQwenRuntimeModelSelects(qwenModelState.models);
             if (data.progress && (data.progress.active || data.progress.run_id)) {
                 renderQwenProgressState(data.progress);
             } else if (data.memory) {
@@ -42797,7 +42807,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         classSplitState.qwenReviewModelRefreshInFlight = true;
         setButtonDisabled(classSplitElements.qwenReviewRefresh, true);
-        setClassSplitQwenReviewStatus("Loading Qwen models ...", "info");
+        setClassSplitQwenReviewStatus("Loading reviewer models ...", "info");
         try {
             const resp = await fetch(`${API_ROOT}/qwen/models`);
             if (!resp.ok) {
@@ -42808,10 +42818,10 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitState.qwenReviewModels = Array.isArray(data.models) ? data.models : [];
             classSplitState.qwenReviewActiveModelId = String(data.active || "");
             renderClassSplitQwenReviewModelOptions();
-            setClassSplitQwenReviewStatus("Qwen reviewer models loaded.", "success");
+            setClassSplitQwenReviewStatus("Reviewer models loaded.", "success");
         } catch (error) {
-            console.error("Failed to load Class Split Qwen reviewer models", error);
-            setClassSplitQwenReviewStatus(`Qwen models failed: ${error.message || error}`, "error");
+            console.error("Failed to load Class Split reviewer models", error);
+            setClassSplitQwenReviewStatus(`Reviewer models failed: ${error.message || error}`, "error");
         } finally {
             classSplitState.qwenReviewModelRefreshInFlight = false;
             setButtonDisabled(classSplitElements.qwenReviewRefresh, false);
@@ -44367,8 +44377,8 @@ async function cancelRfDetrTrainingJobRequest() {
             classSplitElements.qwenReviewModel.addEventListener("change", () => {
                 setClassSplitQwenReviewStatus(
                     classSplitElements.qwenReviewModel.value
-                        ? `Qwen reviewer set to ${classSplitElements.qwenReviewModel.value}.`
-                        : "Qwen reviewer will use the active model.",
+                        ? `Reviewer model set to ${classSplitElements.qwenReviewModel.value}.`
+                        : "Reviewer will use the active model.",
                     "info"
                 );
             });

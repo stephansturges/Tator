@@ -382,6 +382,14 @@ from services.qwen_model_catalog import (
     qwen_transformers_metadata_for_model,
     resolve_qwen_training_model_id,
 )
+from services.agent_model_catalog import (
+    AGENT_MLX_MODEL_OPTIONS,
+    AGENT_MODEL_OPTIONS,
+    AGENT_TRANSFORMERS_MODEL_IDS,
+    agent_model_block_detail,
+    agent_model_metadata_for_model,
+    is_agent_mlx_model_id,
+)
 from services.qwen_generation import (
     _BASE_LOGITS_PROCESSOR,
     ThinkingEffortProcessor,
@@ -909,6 +917,10 @@ try:
         Qwen3VLForConditionalGeneration,
         Qwen3VLMoeForConditionalGeneration,
     )
+    try:
+        from transformers import AutoModelForImageTextToText
+    except Exception:  # noqa: BLE001
+        AutoModelForImageTextToText = None  # type: ignore[assignment]
     from qwen_vl_utils import process_vision_info
 except Exception as exc:  # noqa: BLE001
     QWEN_IMPORT_ERROR = exc
@@ -916,6 +928,7 @@ except Exception as exc:  # noqa: BLE001
     Qwen3VLMoeForConditionalGeneration = None  # type: ignore[assignment]
     AutoConfig = None  # type: ignore[assignment]
     AutoModelForCausalLM = None  # type: ignore[assignment]
+    AutoModelForImageTextToText = None  # type: ignore[assignment]
     AutoProcessor = None  # type: ignore[assignment]
     process_vision_info = None  # type: ignore[assignment]
 else:
@@ -5640,6 +5653,10 @@ def _resolve_qwen_runtime_platform(
     if meta_platform == QWEN_PLATFORM_TRANSFORMERS and meta_id and meta_id != "default":
         return QWEN_PLATFORM_TRANSFORMERS
     raw_model_id = str(model_id or "").strip()
+    if raw_model_id in AGENT_TRANSFORMERS_MODEL_IDS:
+        return QWEN_PLATFORM_TRANSFORMERS
+    if is_agent_mlx_model_id(raw_model_id):
+        return QWEN_PLATFORM_MLX
     if raw_model_id in QWEN_TRANSFORMERS_MODEL_IDS and not raw_model_id.startswith("Qwen/Qwen3-VL-"):
         return QWEN_PLATFORM_TRANSFORMERS
     return select_qwen_platform(
@@ -5661,6 +5678,9 @@ def _qwen_mlx_dependency_error() -> Optional[str]:
 
 
 def _qwen_mlx_incompatible_model_detail(model_id: str) -> Optional[str]:
+    agent_detail = agent_model_block_detail(str(model_id or ""))
+    if agent_detail:
+        return agent_detail
     metadata = qwen_mlx_metadata_for_model(str(model_id or ""))
     if (
         metadata.get("vision_inference_supported") is False
@@ -5803,6 +5823,9 @@ def _qwen_mlx_remote_checkpoint_incompatibility_detail(model_id: str) -> Optiona
 
 
 def _qwen_mlx_catalog_incompatibility_detail(model_id: str) -> Optional[str]:
+    agent_detail = agent_model_block_detail(str(model_id))
+    if agent_detail:
+        return agent_detail
     metadata = qwen_mlx_metadata_for_model(str(model_id))
     if (
         metadata.get("vision_inference_supported") is False
@@ -5986,7 +6009,7 @@ def _qwen_mlx_entry_with_runtime_state(entry: Mapping[str, Any]) -> Dict[str, An
 
 def _qwen_mlx_runtime_model_options() -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
-    for entry in QWEN_MLX_MODEL_OPTIONS:
+    for entry in [*QWEN_MLX_MODEL_OPTIONS, *AGENT_MLX_MODEL_OPTIONS]:
         enriched = _qwen_mlx_entry_with_runtime_state(entry)
         if (
             enriched.get("vision_inference_supported") is False
@@ -8259,6 +8282,28 @@ def _load_qwen_vl_model(
         return Qwen3VLForConditionalGeneration.from_pretrained(
             str(model_id), local_files_only=local_files_only, **load_kwargs
         )
+    generic_image_text_model_types = {
+        "qwen3_5",
+        "qwen3_5_moe",
+        "gemma4",
+        "gemma4_unified",
+    }
+
+    def _load_generic_image_text_model(*, trust_remote_code: bool) -> Any:
+        if AutoModelForImageTextToText is not None:
+            return AutoModelForImageTextToText.from_pretrained(
+                str(model_id),
+                trust_remote_code=trust_remote_code,
+                local_files_only=local_files_only,
+                **load_kwargs,
+            )
+        return AutoModelForCausalLM.from_pretrained(
+            str(model_id),
+            trust_remote_code=trust_remote_code,
+            local_files_only=local_files_only,
+            **load_kwargs,
+        )
+
     if not QWEN_TRUST_REMOTE_CODE:
         if _is_qwen_moe_model_id(str(model_id)) and Qwen3VLMoeForConditionalGeneration is not None:
             return Qwen3VLMoeForConditionalGeneration.from_pretrained(
@@ -8273,6 +8318,8 @@ def _load_qwen_vl_model(
                 return Qwen3VLMoeForConditionalGeneration.from_pretrained(
                     str(model_id), local_files_only=local_files_only, **load_kwargs
                 )
+            if model_type in generic_image_text_model_types:
+                return _load_generic_image_text_model(trust_remote_code=False)
             if model_type not in (None, "qwen3_vl", "qwen3_vl_moe"):
                 logging.warning(
                     "Qwen model_type=%s may require trust_remote_code; set QWEN_TRUST_REMOTE_CODE=1 to enable.",
@@ -8298,6 +8345,8 @@ def _load_qwen_vl_model(
             return Qwen3VLMoeForConditionalGeneration.from_pretrained(
                 str(model_id), local_files_only=local_files_only, **load_kwargs
             )
+        if model_type in generic_image_text_model_types:
+            return _load_generic_image_text_model(trust_remote_code=True)
         if model_type not in (None, "qwen3_vl", "qwen3_vl_moe"):
             return AutoModelForCausalLM.from_pretrained(
                 str(model_id),
@@ -52357,7 +52406,53 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
                 "created_at": None,
             }
         )
-    return [default_entry, *transformers_entries, *mlx_entries]
+    agent_entries: List[Dict[str, Any]] = []
+    for entry in AGENT_MODEL_OPTIONS:
+        model_id = str(entry.get("id") or entry.get("model_id") or "")
+        if not model_id:
+            continue
+        runtime_platform = str(entry.get("runtime_platform") or QWEN_PLATFORM_TRANSFORMERS)
+        vision_supported = entry.get("vision_inference_supported", True) is not False
+        metadata = {
+            "id": model_id,
+            "label": str(entry.get("label") or model_id),
+            "system_prompt": DEFAULT_SYSTEM_PROMPT,
+            "dataset_context": str(entry.get("dataset_context") or "Inference-only VLM agent model."),
+            "classes": [],
+            "model_id": model_id,
+            "model_family": str(entry.get("model_family") or "agent_vlm"),
+            "source": str(entry.get("source") or "huggingface"),
+            "runtime_platform": runtime_platform,
+            "quantization": entry.get("quantization"),
+            "quantized": bool(entry.get("quantized")),
+            "abliterated": bool(entry.get("abliterated")),
+            "variant": entry.get("variant"),
+            "size": entry.get("size"),
+            "agent_model": True,
+            "agent_supported": bool(entry.get("agent_supported", vision_supported)),
+            "vision_inference_supported": vision_supported,
+            "inference_supported": vision_supported,
+            "backend_status": entry.get("backend_status"),
+            "smoke_status": entry.get("smoke_status"),
+            "compatibility_note": entry.get("compatibility_note"),
+            "training_supported": False,
+            "training_modes": [],
+            "training_model_id": None,
+            "training_note": entry.get("training_note") or entry.get("compatibility_note"),
+            "min_pixels": QWEN_MIN_PIXELS,
+            "max_pixels": QWEN_MAX_PIXELS,
+        }
+        agent_entries.append(
+            {
+                "id": model_id,
+                "label": str(entry.get("label") or model_id),
+                "type": "builtin_agent_mlx" if runtime_platform == QWEN_PLATFORM_MLX else "builtin_agent_transformers",
+                "metadata": metadata,
+                "path": None,
+                "created_at": None,
+            }
+        )
+    return [default_entry, *transformers_entries, *mlx_entries, *agent_entries]
 
 
 def _get_builtin_qwen_model_entry(model_id: str) -> Optional[Dict[str, Any]]:
@@ -52389,7 +52484,7 @@ def list_qwen_models():
             platform_name,
             entry_path=entry.get("path"),
         )
-        if entry.get("type") == "builtin_mlx" and isinstance(metadata, dict):
+        if entry.get("type") in {"builtin_mlx", "builtin_agent_mlx"} and isinstance(metadata, dict):
             cached_incompatible = _qwen_mlx_cached_checkpoint_incompatibility_detail(
                 str(metadata.get("model_id") or entry.get("id")),
                 availability,
@@ -52438,14 +52533,19 @@ def activate_qwen_model(payload: QwenModelActivateRequest):
         _set_active_qwen_model_default()
     else:
         builtin = _get_builtin_qwen_model_entry(model_id)
-        if builtin and builtin.get("type") in {"builtin_mlx", "builtin_transformers"}:
+        if builtin and builtin.get("type") in {
+            "builtin_mlx",
+            "builtin_transformers",
+            "builtin_agent_mlx",
+            "builtin_agent_transformers",
+        }:
             fallback_metadata = (
-                qwen_mlx_metadata_for_model(model_id)
-                if builtin.get("type") == "builtin_mlx"
+                (agent_model_metadata_for_model(model_id) or qwen_mlx_metadata_for_model(model_id))
+                if builtin.get("type") in {"builtin_mlx", "builtin_agent_mlx"}
                 else qwen_transformers_metadata_for_model(model_id)
             )
             metadata = builtin.get("metadata") or fallback_metadata
-            if builtin.get("type") == "builtin_mlx" and (
+            if builtin.get("type") in {"builtin_mlx", "builtin_agent_mlx"} and (
                 metadata.get("vision_inference_supported") is False
                 or metadata.get("inference_supported") is False
             ):
@@ -53258,8 +53358,15 @@ def qwen_status():
         "memory": memory,
         "vram": memory,
         "progress": qwen_progress(),
-        "transformers_models": QWEN_TRANSFORMERS_MODEL_OPTIONS,
-        "mlx_models": QWEN_MLX_VISION_MODEL_OPTIONS,
+        "transformers_models": [*QWEN_TRANSFORMERS_MODEL_OPTIONS, *AGENT_MODEL_OPTIONS],
+        "mlx_models": [
+            *QWEN_MLX_VISION_MODEL_OPTIONS,
+            *[
+                entry
+                for entry in AGENT_MLX_MODEL_OPTIONS
+                if entry.get("vision_inference_supported", True) is not False
+            ],
+        ],
     }
 
 

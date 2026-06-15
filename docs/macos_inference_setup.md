@@ -231,6 +231,7 @@ Experimental Qwen3.6 / SwiReasoning smoke:
 ```bash
 tools/setup_qwen36_swir_env.sh
 .venv-qwen36-swir/bin/python tools/qwen36_swir_smoke.py
+.venv-qwen36-swir/bin/python tools/agent_model_smoke.py --json
 ```
 
 The helper prefers `.venv-macos/bin/python` or Python 3.11; avoid Python 3.14
@@ -240,6 +241,25 @@ It checks the first runtime gate: the isolated Transformers 5.x environment must
 resolve the official `Qwen/Qwen3.6-35B-A3B` config and processor. Full inference
 and SwiReasoning decoding should be benchmarked from this environment before
 the main backend pins move to Transformers 5.x.
+
+The backend also exposes an inference-only agent model catalog through the
+existing `/qwen/models` compatibility endpoint. These entries are available to
+captioning, Qwen/agent prepass, and Class Split reviewer selectors, but every
+non-Qwen training-family entry carries `training_supported=false` so it cannot
+silently appear in the Qwen training picker. The first cataloged families are:
+
+- Qwopus3.6 via `Jackrong/Qwopus3.6-27B-v2` on the Transformers/CUDA path.
+- Qwen3.6 abliterated MAX via
+  `prithivMLmods/Qwen3.6-35B-A3B-abliterated-MAX` on the Transformers/CUDA path.
+- Nex-N2 Mini via `nex-agi/Nex-N2-mini` on the Transformers/CUDA path, plus a
+  metadata-only MLX candidate.
+- Gemma 4 via Huihui/MLX community candidates on the Transformers and MLX paths.
+
+The `tools/agent_model_smoke.py` check verifies config and processor loading for
+the Transformers candidates in the isolated Transformers-5 environment and keeps
+MLX entries metadata-only unless a future benchmark explicitly downloads full
+weights. GGUF and llama.cpp/mmproj inference are intentionally not wired in this
+path yet.
 
 Runtime selection rules:
 
@@ -260,6 +280,11 @@ tracked in the backend catalog as a candidate, but is blocked from UI selection
 because local smoke tests did not produce valid Qwen review output. Choose a
 model that fits local RAM/VRAM; the list is capability surface, not a guarantee
 that every model is practical on every Mac.
+
+Additional MLX agent candidates, including Qwen3.6, Nex-N2, and Gemma 4
+repackages, appear in the same runtime selectors when the catalog marks them
+image-capable. Candidates with failed local smoke evidence remain visible in
+the model registry but blocked from activation.
 
 CUDA machines should use the Transformers model registry in **Qwen Models**.
 That registry exposes the official full and FP8 Qwen3-VL checkpoints, curated

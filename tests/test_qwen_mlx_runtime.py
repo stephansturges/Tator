@@ -179,6 +179,29 @@ def test_qwen_model_registry_exposes_abliterated_mlx_models():
         assert by_id[model_id]["metadata"]["training_modes"] == []
 
 
+def test_qwen_model_registry_exposes_inference_only_agent_models():
+    models = api.list_qwen_models()["models"]
+    by_id = {entry["id"]: entry for entry in models}
+
+    expected = {
+        "Jackrong/Qwopus3.6-27B-v2": "builtin_agent_transformers",
+        "prithivMLmods/Qwen3.6-35B-A3B-abliterated-MAX": "builtin_agent_transformers",
+        "nex-agi/Nex-N2-mini": "builtin_agent_transformers",
+        "huihui-ai/Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated": "builtin_agent_transformers",
+        "mlx-community/Qwen3.6-35B-A3B-4bit": "builtin_agent_mlx",
+        "mlx-community/gemma-4-31B-it-qat-4bit": "builtin_agent_mlx",
+        "vanch007/Huihui-gemma-4-26B-A4B-it-abliterated-mlx-4bit": "builtin_agent_mlx",
+    }
+
+    for model_id, entry_type in expected.items():
+        entry = by_id[model_id]
+        assert entry["type"] == entry_type
+        assert entry["metadata"]["agent_model"] is True
+        assert entry["metadata"]["training_supported"] is False
+        assert entry["metadata"]["training_modes"] == []
+        assert entry["metadata"]["vision_inference_supported"] is True
+
+
 def test_qwen_training_config_accepts_moe_transformers_model(tmp_path, monkeypatch):
     if api.QwenTrainingConfig is None:
         pytest.skip("Qwen training dependencies are not importable in this environment")

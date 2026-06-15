@@ -1213,7 +1213,7 @@
                             <details id="classSplitWrongPanel" class="class-split-review-section class-split-wrong-panel class-split-wrong-panel--wide" open>
                                 <summary>Likely wrong class</summary>
                                 <details class="class-split-qwen-context" open>
-                                    <summary>Qwen review context<span class="help-icon" title="Class meaning and session-specific policy sent to Qwen before it reviews a likely-wrong vignette. Qwen recommendations do not apply edits automatically.">?</span></summary>
+                                    <summary>VLM review context<span class="help-icon" title="Class meaning and session-specific policy sent to the selected local reviewer model before it reviews a likely-wrong vignette. Model recommendations do not apply edits automatically.">?</span></summary>
                                     <div class="class-split-qwen-context__grid">
                                         <div>
                                             <label for="classSplitQwenReviewGlossary">Class glossary<span class="help-icon" title="Semantic class meanings for this dataset. Loaded from the current backend dataset when available. Save only if you want this glossary persisted for the dataset.">?</span></label>
@@ -1240,8 +1240,8 @@
                                     <button type="button" id="classSplitWrongShuffle" class="training-button secondary">Shuffle vignettes</button>
                                     <button type="button" id="classSplitMobilePush" class="training-button secondary">Push to mobile</button>
                                     <button type="button" id="classSplitMobileSync" class="training-button secondary" disabled>Sync mobile edits</button>
-                                    <div class="class-split-wrong-toolbar__qwen" title="Run a bounded local Qwen review on one vignette. Qwen only recommends; it does not change labels.">
-                                        <label for="classSplitQwenReviewModel">Qwen reviewer</label>
+                                    <div class="class-split-wrong-toolbar__qwen" title="Run a bounded local VLM review on one vignette. The model only recommends; it does not change labels.">
+                                        <label for="classSplitQwenReviewModel">Reviewer model</label>
                                         <select id="classSplitQwenReviewModel">
                                             <option value="">Active model</option>
                                         </select>
@@ -1398,7 +1398,7 @@
                                     <div class="training-help">Dataset mode uses the dataset’s canonical glossary. Named/custom modes override the dataset glossary for this run.</div>
                                     <div class="qwen-caption-grid">
                                         <div>
-                                            <label for="qwenAgentModel">Qwen model</label>
+                                            <label for="qwenAgentModel">Agent VLM model</label>
                                             <select id="qwenAgentModel">
                                                 <option value="active">Use active model</option>
                                                 <option value="2B">Qwen3-VL 2B</option>

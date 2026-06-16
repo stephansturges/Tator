@@ -21,11 +21,11 @@ poetry install --only-root
 poetry run tator-setup macos
 ```
 the second piece of the poetry setup contains a harcoded ref to python3.11:
-python3.11 -m venv /Users/stephan.sturges-ext/Tator/.venv-macos
+python3.11 -m venv .../xxx/Tator/.venv-macos
 if your Poetry setup picked a different version of python then run the venv
 init with the correct version before the tator-setup step, ie:
 
-python3.1xx -m venv /xxx/Tator/.venv-macos
+python3.1xx -m venv .../xxx/Tator/.venv-macos
 
 
 Then start the backend from the repository root with this single command:

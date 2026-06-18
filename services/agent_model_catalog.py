@@ -11,13 +11,13 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from services.qwen_mlx import QWEN_PLATFORM_MLX, QWEN_PLATFORM_TRANSFORMERS
 
-AGENT_TRANSFORMERS5_NOTE = (
-    "Inference-only agent model. Requires a Transformers 5.x-compatible runtime "
-    "for this architecture; keep Qwen training on the Qwen3-VL catalog."
-)
 AGENT_MLX_NOTE = (
     "Inference-only MLX-VLM agent model candidate. Use for captioning, prepass, "
     "and Class Split review after local smoke validation; training is not wired."
+)
+AGENT_TRANSFORMERS_NOTE = (
+    "Inference-only Transformers agent model candidate. Keep hidden until a model "
+    "has a completed Class Split/VLM smoke on the target runtime."
 )
 
 
@@ -38,7 +38,7 @@ def _entry(
     smoke_status: str = "metadata",
 ) -> Dict[str, Any]:
     note = compatibility_note or (
-        AGENT_MLX_NOTE if runtime_platform == QWEN_PLATFORM_MLX else AGENT_TRANSFORMERS5_NOTE
+        AGENT_MLX_NOTE if runtime_platform == QWEN_PLATFORM_MLX else AGENT_TRANSFORMERS_NOTE
     )
     return {
         "id": model_id,
@@ -72,27 +72,6 @@ def _entry(
 def _build_agent_model_options() -> List[Dict[str, Any]]:
     entries = [
         _entry(
-            "Jackrong/Qwopus3.6-27B-v2",
-            "CUDA Qwopus3.6 27B v2",
-            family="qwopus3_6",
-            runtime_platform=QWEN_PLATFORM_TRANSFORMERS,
-            source="Jackrong",
-            size="27B",
-            variant="v2",
-            smoke_status="config_processor",
-        ),
-        _entry(
-            "prithivMLmods/Qwen3.6-35B-A3B-abliterated-MAX",
-            "CUDA Qwen3.6 35B-A3B abliterated MAX",
-            family="qwen3_6",
-            runtime_platform=QWEN_PLATFORM_TRANSFORMERS,
-            source="prithivMLmods",
-            size="35B-A3B",
-            variant="Abliterated MAX",
-            abliterated=True,
-            smoke_status="config_processor",
-        ),
-        _entry(
             "mlx-community/Qwen3.6-35B-A3B-4bit",
             "MLX Qwen3.6 35B-A3B 4bit",
             family="qwen3_6",
@@ -100,7 +79,11 @@ def _build_agent_model_options() -> List[Dict[str, Any]]:
             source="mlx-community",
             size="35B-A3B",
             quantization="4bit",
-            smoke_status="metadata",
+            compatibility_note=(
+                "Inference-only MLX-VLM agent model. Local Class Split vignette smoke tests passed; "
+                "training is not wired."
+            ),
+            smoke_status="class_split_benchmark_passed",
         ),
         _entry(
             "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit",

@@ -9,12 +9,12 @@ from services.qwen_mlx import QWEN_PLATFORM_MLX, QWEN_PLATFORM_TRANSFORMERS
 
 def test_agent_catalog_includes_qwen_inference_family():
     expected = {
-        "Jackrong/Qwopus3.6-27B-v2",
-        "prithivMLmods/Qwen3.6-35B-A3B-abliterated-MAX",
         "mlx-community/Qwen3.6-35B-A3B-4bit",
         "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit",
     }
-    removed_non_qwen = {
+    removed_unusable = {
+        "Jackrong/Qwopus3.6-27B-v2",
+        "prithivMLmods/Qwen3.6-35B-A3B-abliterated-MAX",
         "nex-agi/Nex-N2-mini",
         "huihui-ai/Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated",
         "mlx-community/gemma-4-31B-it-qat-4bit",
@@ -22,9 +22,9 @@ def test_agent_catalog_includes_qwen_inference_family():
     }
 
     assert expected <= AGENT_MODEL_IDS
-    assert not (removed_non_qwen & AGENT_MODEL_IDS)
-    assert "Jackrong/Qwopus3.6-27B-v2" in AGENT_TRANSFORMERS_MODEL_IDS
+    assert not (removed_unusable & AGENT_MODEL_IDS)
     assert "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit" in AGENT_MLX_MODEL_IDS
+    assert AGENT_TRANSFORMERS_MODEL_IDS == set()
 
 
 def test_agent_catalog_is_inference_only_not_training():
@@ -33,6 +33,7 @@ def test_agent_catalog_is_inference_only_not_training():
         assert entry["training_modes"] == []
         assert entry["agent_model"] is True
         assert entry["runtime_platform"] in {QWEN_PLATFORM_MLX, QWEN_PLATFORM_TRANSFORMERS}
+        assert entry["smoke_status"] == "class_split_benchmark_passed"
 
 
 def test_agent_catalog_omits_known_bad_visual_candidates():

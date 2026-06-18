@@ -137,10 +137,11 @@ def main() -> int:
     parser.add_argument("--fail-fast", action="store_true")
     args = parser.parse_args()
 
-    source_run = Path(args.source_run)
+    source_run = Path(args.source_run).expanduser()
     if not source_run.is_file():
         raise SystemExit(f"Missing source run: {source_run}")
-    root = Path("uploads/class_analysis") / str(args.job_id) / "qwen_reviews"
+    source_run = source_run.resolve()
+    root = ROOT / "uploads" / "class_analysis" / str(args.job_id) / "qwen_reviews"
     root.mkdir(parents=True, exist_ok=True)
 
     matrix_id = f"{_slug(args.run_prefix)}_{int(args.count)}_{int(time.time())}"

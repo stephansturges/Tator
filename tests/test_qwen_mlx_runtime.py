@@ -166,12 +166,12 @@ def test_qwen_model_registry_exposes_inference_only_agent_models():
     by_id = {entry["id"]: entry for entry in models}
 
     expected = {
-        "Jackrong/Qwopus3.6-27B-v2": "builtin_agent_transformers",
-        "prithivMLmods/Qwen3.6-35B-A3B-abliterated-MAX": "builtin_agent_transformers",
         "mlx-community/Qwen3.6-35B-A3B-4bit": "builtin_agent_mlx",
         "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit": "builtin_agent_mlx",
     }
-    removed_non_qwen = {
+    removed_unusable = {
+        "Jackrong/Qwopus3.6-27B-v2",
+        "prithivMLmods/Qwen3.6-35B-A3B-abliterated-MAX",
         "nex-agi/Nex-N2-mini",
         "huihui-ai/Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated",
         "mlx-community/gemma-4-31B-it-qat-4bit",
@@ -185,7 +185,7 @@ def test_qwen_model_registry_exposes_inference_only_agent_models():
         assert entry["metadata"]["training_supported"] is False
         assert entry["metadata"]["training_modes"] == []
         assert entry["metadata"]["vision_inference_supported"] is True
-    assert not (removed_non_qwen & set(by_id))
+    assert not (removed_unusable & set(by_id))
 
 
 def test_qwen_training_config_accepts_moe_transformers_model(tmp_path, monkeypatch):

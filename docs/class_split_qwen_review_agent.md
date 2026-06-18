@@ -2264,6 +2264,10 @@ The 2026-06-18 model matrix benchmark used the fixed reviewable source set
 - Qwen-family candidates that failed the smoke (`unsloth/...UD-MLX-4bit` and
   `froggeric/...Heretic-MLX-4bit`) were removed from the active presets and
   UI-facing agent model catalog.
+- Transformers/CUDA Qwen3.6-style candidates that only passed metadata/config
+  checks are also hidden from the agent catalog until they complete the same
+  vignette-review smoke path. Active agent choices are limited to the two
+  completed MLX Qwen3.6 reviewers above.
 
 The same benchmark showed that enabling thinking directly on schema-producing
 calls is counterproductive: both viable Qwen3.6 models completed structurally

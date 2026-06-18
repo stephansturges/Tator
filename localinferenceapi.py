@@ -370,6 +370,7 @@ from services.qwen_mlx import (
     QWEN_PLATFORM_MLX,
     QWEN_PLATFORM_TRANSFORMERS,
     normalize_qwen_platform,
+    qwen_known_incompatible_mlx_detail,
     qwen_mlx_metadata_for_model,
     resolve_mlx_model_id,
     select_qwen_platform,
@@ -5678,6 +5679,9 @@ def _qwen_mlx_dependency_error() -> Optional[str]:
 
 
 def _qwen_mlx_incompatible_model_detail(model_id: str) -> Optional[str]:
+    known_detail = qwen_known_incompatible_mlx_detail(str(model_id or ""))
+    if known_detail:
+        return known_detail
     agent_detail = agent_model_block_detail(str(model_id or ""))
     if agent_detail:
         return agent_detail
@@ -30024,6 +30028,134 @@ def _class_analysis_qwen_review_specificity_probe_message(probe: Dict[str, Any])
     return {"role": "user", "content": [{"type": "text", "text": text}]}
 
 
+def _class_analysis_qwen_review_thinking_scratchpad_instruction(
+    *,
+    point: Dict[str, Any],
+    evidence_ledger: Dict[str, Any],
+    visual_quality: Dict[str, Any],
+) -> Dict[str, Any]:
+    clean_ids = [
+        str(item or "").strip()
+        for item in (evidence_ledger.get("clean_target_source_evidence_ids") or [])
+        if str(item or "").strip()
+    ]
+    overlay_ids = [
+        str(item or "").strip()
+        for item in (evidence_ledger.get("geometry_overlay_evidence_ids") or [])
+        if str(item or "").strip()
+    ]
+    context_ids = [
+        str(item or "").strip()
+        for item in (evidence_ledger.get("local_consensus_evidence_ids") or [])
+        if str(item or "").strip()
+    ]
+    current_class = str(point.get("class_name") or "").strip()
+    suggested_class = str(point.get("suggested_neighbor_class") or "").strip()
+    lines = [
+        "Two-phase visual reasoning notes.",
+        "This is a freeform evidence-reading pass. Do not return JSON, XML, markdown tables, or a tool call.",
+        "The controller will run a separate schema-only finalization pass after this. Your job here is to write concise visual audit notes that help that pass.",
+        f"Current class: {current_class or '(none)'}",
+        f"Suggested class: {suggested_class or '(none)'}",
+        _class_analysis_qwen_review_quality_summary(visual_quality),
+        f"Clean target/source evidence ids to prioritize: {', '.join(clean_ids) or '(none)'}",
+        f"Geometry/overlay ids are only for bbox/overlap reasoning: {', '.join(overlay_ids) or '(none)'}",
+        f"Local consensus ids are only distribution context: {', '.join(context_ids) or '(none)'}",
+        "Write at most 10 short bullet points.",
+        "Cover these points:",
+        "- What the reviewed target pixels themselves appear to show.",
+        "- Which cues support the current class, if any.",
+        "- Which cues support the suggested class, if any.",
+        "- Which cues are likely background, overlap, neighboring objects, or annotation-density artifacts.",
+        "- Whether the whole target extent is explained by one class or only by a subpart/overlap.",
+        "- A provisional decision: confirm_current, accept_suggested, change_to_other, or skip_uncertain.",
+        "Keep the notes grounded in visible evidence ids and avoid dataset-specific assumptions not present in the label glossary or rendered evidence.",
+    ]
+    return {"role": "user", "content": [{"type": "text", "text": "\n".join(lines)}]}
+
+
+def _class_analysis_qwen_review_thinking_scratchpad_message(packet: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(packet, dict) or packet.get("status") != "completed":
+        text = "Two-phase reasoning notes: unavailable. Continue with rendered evidence and strict schema instructions."
+    else:
+        text = "\n".join(
+            [
+                "Two-phase reasoning notes from the thinking-enabled evidence pass.",
+                "Use these notes as advisory visual self-critique only; final schema fields must still cite rendered evidence.",
+                str(packet.get("text") or "")[:5000],
+            ]
+        )
+    return {"role": "user", "content": [{"type": "text", "text": text}]}
+
+
+def _class_analysis_qwen_review_run_thinking_scratchpad(
+    job: ClassAnalysisQwenReviewJob,
+    *,
+    final_base_messages: Sequence[Dict[str, Any]],
+    point: Dict[str, Any],
+    visual_quality: Dict[str, Any],
+    evidence_ledger: Dict[str, Any],
+    model_id: Optional[str],
+) -> Dict[str, Any]:
+    messages = copy.deepcopy(list(final_base_messages))
+    messages.append(
+        _class_analysis_qwen_review_thinking_scratchpad_instruction(
+            point=point,
+            evidence_ledger=evidence_ledger,
+            visual_quality=visual_quality,
+        )
+    )
+    try:
+        raw_text = _class_analysis_qwen_review_model_call(
+            job,
+            messages,
+            phase="thinking_scratchpad",
+            model_id=model_id,
+            tool_specs=[],
+            max_new_tokens=1200,
+            progress=0.255,
+            event_extra={
+                "reasoning_protocol": "two_phase_thinking_scratchpad_v1",
+                "reasoning_visual_policy": "compact_scratchpad_core",
+                "schema_phase": False,
+            },
+            assistant_prefix=None,
+            image_max_side=CLASS_ANALYSIS_QWEN_REVIEW_REASONING_IMAGE_MAX_SIDE,
+            image_limit=CLASS_ANALYSIS_QWEN_REVIEW_FINAL_MAX_IMAGES,
+            enable_thinking=True,
+        )
+        text = str(raw_text or "").strip()
+        if not text:
+            raise ValueError("empty_thinking_scratchpad")
+        if _class_analysis_qwen_review_text_is_degenerate(text):
+            raise ValueError("degenerate_thinking_scratchpad")
+        packet = {
+            "enabled": True,
+            "status": "completed",
+            "version": "two_phase_thinking_scratchpad_v1",
+            "text": text[:6000],
+        }
+    except Exception as exc:
+        packet = {
+            "enabled": True,
+            "status": "failed",
+            "version": "two_phase_thinking_scratchpad_v1",
+            "error": str(exc),
+        }
+    _class_analysis_qwen_review_write_json(job, "thinking_scratchpad.json", packet)
+    _class_analysis_qwen_review_append_event(
+        job,
+        {
+            "type": "thinking_scratchpad_result",
+            "status": packet.get("status"),
+            "version": packet.get("version"),
+            "text_preview": str(packet.get("text") or "")[:600],
+            "error": packet.get("error"),
+        },
+    )
+    return packet
+
+
 def _class_analysis_qwen_review_run_specificity_probe(
     job: ClassAnalysisQwenReviewJob,
     *,
@@ -33926,14 +34058,22 @@ def _class_analysis_qwen_review_model_call(
     assistant_prefix: Optional[str] = "<tool_call>",
     image_max_side: Optional[int] = None,
     image_limit: Optional[int] = None,
+    enable_thinking: bool = False,
 ) -> str:
+    chat_template_kwargs: Dict[str, Any] = {"enable_thinking": bool(enable_thinking)}
     qwen_kwargs = {
         "max_new_tokens": int(max_new_tokens),
         "model_id_override": model_id,
         "decode_override": {"do_sample": False, "temperature": 0.0},
-        "chat_template_kwargs": {"enable_thinking": False},
+        "chat_template_kwargs": chat_template_kwargs,
         "assistant_prefix": assistant_prefix,
     }
+    thinking_effort = (job.request or {}).get("thinking_effort")
+    thinking_scale_factor = (job.request or {}).get("thinking_scale_factor")
+    if enable_thinking and thinking_effort is not None:
+        qwen_kwargs["thinking_effort"] = thinking_effort
+    if enable_thinking and thinking_scale_factor is not None:
+        qwen_kwargs["thinking_scale_factor"] = thinking_scale_factor
     effective_messages, image_policy = _class_analysis_qwen_review_cap_message_images(
         messages,
         max_images=image_limit,
@@ -34027,6 +34167,7 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
             if isinstance(raw_specificity_probe, bool)
             else _parse_bool(str(raw_specificity_probe)) if raw_specificity_probe is not None else True
         )
+        thinking_scratchpad_enabled = _class_analysis_qwen_review_request_bool(job, "enable_thinking", False)
         mlx_reset_every = _class_analysis_qwen_review_mlx_reset_every(job)
         reset_after_review = _class_analysis_qwen_review_request_bool(job, "reset_qwen_runtime_after_review", False)
         backend_quality_tier = str(visual_quality.get("tier") or "unknown").strip().lower()
@@ -34046,6 +34187,9 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                 "allow_poor_final_review": poor_final_review_enabled,
                 "enable_cue_verifier": cue_verifier_enabled,
                 "enable_specificity_probe": specificity_probe_enabled,
+                "enable_thinking_scratchpad": thinking_scratchpad_enabled,
+                "thinking_effort": job.request.get("thinking_effort"),
+                "thinking_scale_factor": job.request.get("thinking_scale_factor"),
                 "mlx_reset_every": mlx_reset_every,
                 "reset_qwen_runtime_after_review": reset_after_review,
                 "point_id": point.get("point_id"),
@@ -34402,6 +34546,26 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                 **copy.deepcopy(final_context_policy),
             },
         )
+        thinking_scratchpad: Dict[str, Any] = {
+            "enabled": bool(thinking_scratchpad_enabled),
+            "status": "not_run",
+            "version": "two_phase_thinking_scratchpad_v1",
+            "reason": "disabled" if not thinking_scratchpad_enabled else "final_review_not_available",
+        }
+        if final_result is None and thinking_scratchpad_enabled:
+            thinking_scratchpad = _class_analysis_qwen_review_run_thinking_scratchpad(
+                job,
+                final_base_messages=final_base_messages,
+                point=point,
+                visual_quality=visual_quality,
+                evidence_ledger=evidence_ledger,
+                model_id=model_id,
+            )
+            evidence_ledger["thinking_scratchpad"] = copy.deepcopy(thinking_scratchpad)
+            _class_analysis_qwen_review_write_json(job, "evidence_ledger.json", evidence_ledger)
+            final_base_messages.append(_class_analysis_qwen_review_thinking_scratchpad_message(thinking_scratchpad))
+        elif thinking_scratchpad_enabled:
+            _class_analysis_qwen_review_write_json(job, "thinking_scratchpad.json", thinking_scratchpad)
         specificity_probe: Dict[str, Any] = {
             "enabled": bool(specificity_probe_enabled),
             "status": "not_run",
@@ -34605,6 +34769,13 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
             else None,
             "dual_bbox_resolution": str(final_result.get("dual_bbox_resolution") or "not_applicable"),
             "deterministic_context": deterministic_context,
+            "thinking_scratchpad": {
+                "enabled": bool(thinking_scratchpad.get("enabled")),
+                "status": str(thinking_scratchpad.get("status") or "not_run"),
+                "version": str(thinking_scratchpad.get("version") or "two_phase_thinking_scratchpad_v1"),
+                "text_preview": str(thinking_scratchpad.get("text") or "")[:800],
+                "error": thinking_scratchpad.get("error"),
+            },
             "specificity_probe": copy.deepcopy(specificity_probe),
             "class_concept_briefs": {
                 "enabled": bool(concept_briefs_packet.get("enabled")),
@@ -34649,6 +34820,9 @@ def _run_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> None
                 "local_consensus_evidence_ids": list(evidence_ledger.get("local_consensus_evidence_ids") or []),
                 "clean_visual_reference_evidence_ids": list(evidence_ledger.get("clean_visual_reference_evidence_ids") or []),
                 "deterministic_context_evidence_ids": list(evidence_ledger.get("deterministic_context_evidence_ids") or []),
+                "thinking_scratchpad": copy.deepcopy(evidence_ledger.get("thinking_scratchpad"))
+                if isinstance(evidence_ledger.get("thinking_scratchpad"), dict)
+                else None,
                 "specificity_probe": copy.deepcopy(evidence_ledger.get("specificity_probe"))
                 if isinstance(evidence_ledger.get("specificity_probe"), dict)
                 else None,
@@ -52529,6 +52703,12 @@ def activate_qwen_model(payload: QwenModelActivateRequest):
     model_id = (payload.model_id or "").strip()
     if not model_id:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="model_id_required")
+    incompatible_detail = _qwen_mlx_incompatible_model_detail(model_id)
+    if incompatible_detail:
+        raise HTTPException(
+            status_code=HTTP_400_BAD_REQUEST,
+            detail=f"qwen_mlx_incompatible_checkpoint:{incompatible_detail}",
+        )
     if model_id == "default":
         _set_active_qwen_model_default()
     else:

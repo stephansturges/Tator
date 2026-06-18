@@ -217,6 +217,7 @@ def _record_from_review(
     scale_context = deterministic_context.get("scale") if isinstance(deterministic_context.get("scale"), dict) else {}
     embedding_context = deterministic_context.get("embedding") if isinstance(deterministic_context.get("embedding"), dict) else {}
     cue_verifier = final.get("cue_verifier") if isinstance(final.get("cue_verifier"), dict) else {}
+    thinking_scratchpad = final.get("thinking_scratchpad") if isinstance(final.get("thinking_scratchpad"), dict) else {}
     specificity_probe = final.get("specificity_probe") if isinstance(final.get("specificity_probe"), dict) else {}
     final_current_plausible = _coerce_bool(final.get("current_class_plausible"))
     cue_current_plausible = _coerce_bool(cue_verifier.get("current_class_plausible"))
@@ -258,6 +259,8 @@ def _record_from_review(
         "target_identity_summary": final.get("target_identity_summary") or "",
         "target_identity_uncertainty": final.get("target_identity_uncertainty") or "",
         "target_identity_evidence_ids": final.get("target_identity_evidence_ids") or [],
+        "thinking_scratchpad": thinking_scratchpad,
+        "thinking_scratchpad_status": thinking_scratchpad.get("status") if thinking_scratchpad else "missing",
         "specificity_probe": specificity_probe,
         "specificity_probe_status": specificity_probe.get("status") if specificity_probe else "missing",
         "specificity_probe_alignment": specificity_probe.get("specificity_alignment") if specificity_probe else "missing",
@@ -333,6 +336,7 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
     specificity_probe_alignment = Counter(str(record.get("specificity_probe_alignment") or "missing") for record in records)
     specificity_probe_contrast = Counter(str(record.get("specificity_probe_contrast") or "missing") for record in records)
     specificity_probe_margin = Counter(str(record.get("specificity_probe_margin") or "missing") for record in records)
+    thinking_scratchpad_status = Counter(str(record.get("thinking_scratchpad_status") or "missing") for record in records)
     specificity_probe_subdescription_rows = sum(
         1 for record in records if int(record.get("specificity_probe_subdescription_count") or 0) > 0
     )
@@ -415,6 +419,7 @@ def _summarize(records: Sequence[Dict[str, Any]], *, run_id: str, job_id: str, m
         "same_image_embedding_report_signal_counts": dict(same_image_embedding_report),
         "specificity_alignment_counts": dict(specificity_alignment),
         "target_background_contrast_counts": dict(target_background_contrast),
+        "thinking_scratchpad_status_counts": dict(thinking_scratchpad_status),
         "specificity_probe_status_counts": dict(specificity_probe_status),
         "specificity_probe_alignment_counts": dict(specificity_probe_alignment),
         "specificity_probe_contrast_counts": dict(specificity_probe_contrast),
@@ -697,6 +702,12 @@ def _run_subprocess_review(
         cmd.extend(["--mlx-reset-every", str(max(0, int(args.mlx_reset_every)))])
     if args.reset_qwen_after_review:
         cmd.append("--reset-qwen-after-review")
+    if args.enable_thinking:
+        cmd.append("--enable-thinking")
+    if args.thinking_effort is not None:
+        cmd.extend(["--thinking-effort", str(args.thinking_effort)])
+    if args.thinking_scale_factor is not None:
+        cmd.extend(["--thinking-scale-factor", str(args.thinking_scale_factor)])
     for value in args.source_backend_tier or []:
         cmd.extend(["--source-backend-tier", str(value)])
     for value in args.source_decision or []:
@@ -848,6 +859,16 @@ def main() -> int:
         help="Unload the Qwen runtime after every vignette review for long-run MLX stability testing.",
     )
     parser.add_argument(
+        "--enable-thinking",
+        action="store_true",
+        help=(
+            "Experimental: add a thinking-enabled scratchpad pass while keeping "
+            "schema-producing review calls thinking-disabled."
+        ),
+    )
+    parser.add_argument("--thinking-effort", type=float, default=None)
+    parser.add_argument("--thinking-scale-factor", type=float, default=None)
+    parser.add_argument(
         "--per-review-subprocess",
         action="store_true",
         help="Run each selected vignette in its own Python process so a Metal fault cannot kill the whole benchmark.",
@@ -942,6 +963,9 @@ def main() -> int:
                 "enable_cue_verifier": not bool(args.skip_cue_verifier),
                 "enable_specificity_probe": not bool(args.skip_specificity_probe),
                 "reset_qwen_runtime_after_review": bool(args.reset_qwen_after_review),
+                "enable_thinking": bool(args.enable_thinking),
+                "thinking_effort": args.thinking_effort,
+                "thinking_scale_factor": args.thinking_scale_factor,
                 "benchmark_run_id": run_id,
             },
         )

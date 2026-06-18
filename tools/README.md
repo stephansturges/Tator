@@ -18,6 +18,8 @@ Tools
   - Run: `python tools/run_class_split_qwen_review_benchmark.py --job-id ... --source-run ... --count 100 --run-label ... --audit`
   - Use `--source-backend-tier`, `--source-decision`, `--source-disposition`, `--source-disposition-signal`, `--source-guarded-only`, and `--source-reviewable-only` to filter a prior source run before `--start/--count` slicing.
   - Analyze saved runs with `python tools/analyze_class_split_qwen_review_benchmark.py <run.json> --fail-on-unsafe`.
+  - Compare reviewer models on the same vignette set with `python tools/run_class_split_vlm_model_matrix.py --job-id ... --source-run ... --preset smoke-mlx --count 10`.
+  - Add `--enable-thinking` plus optional `--thinking-effort` / `--thinking-scale-factor` when explicitly benchmarking the two-phase thinking protocol. This adds a thinking scratchpad pass; schema-producing review calls stay thinking-disabled.
 
 - Refactor validation (py_compile + Tier-0/Tier-1 fuzz)
   - Run: `BASE_URL=http://127.0.0.1:8000 SKIP_GPU=1 tools/run_refactor_validation.sh`

@@ -2247,6 +2247,38 @@ briefs. Regression tests cover:
 A larger labeled real-model benchmark should be run before treating v2
 recommendations as more than advisory.
 
+## Qwen3.6 Model Matrix And Thinking Protocol
+
+The 2026-06-18 model matrix benchmark used the fixed reviewable source set
+`compact_verifier_reviewable70_v1_70_1780978425.json` from Class Split job
+`ca_c5c4a7d6ea`.
+
+- `vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit` completed the
+  10-vignette baseline run with 10/10 completed reviews and 3/10 non-skip
+  decisions.
+- `mlx-community/Qwen3.6-35B-A3B-4bit` also completed the 10-vignette baseline
+  run with 10/10 completed reviews and 3/10 non-skip decisions.
+- Non-Qwen candidates tested in the same Qwen-shaped schema harness
+  (Nex/Gemma-family MLX checkpoints) did not produce completed schema-valid
+  reviews and are no longer exposed as active agent-model choices.
+- Qwen-family candidates that failed the smoke (`unsloth/...UD-MLX-4bit` and
+  `froggeric/...Heretic-MLX-4bit`) were removed from the active presets and
+  UI-facing agent model catalog.
+
+The same benchmark showed that enabling thinking directly on schema-producing
+calls is counterproductive: both viable Qwen3.6 models completed structurally
+but produced 0/10 non-skip decisions because the raw model outputs were long
+freeform reasoning notes that never reached valid JSON before repetition/token
+guards. The review flow therefore treats thinking as a two-phase protocol:
+
+1. A bounded `thinking_scratchpad` pass may run with thinking enabled and
+   produce concise visual audit notes.
+2. `probe_specificity`, `finalize_review`, and verifier schema calls remain
+   thinking-disabled and receive the scratchpad only as advisory evidence.
+
+This preserves the VLM-centered reasoning product goal without allowing a
+thinking model to bypass strict JSON schema validation.
+
 ## Provenance References
 
 The local code intentionally keeps only the parts that are useful for label

@@ -8097,6 +8097,55 @@ def test_class_analysis_qwen_review_mlx_reset_cadence_is_generic_and_logged(tmp_
     assert reset_events[0]["completed_calls_before_reset"] == 2
 
 
+def test_class_analysis_qwen_review_model_call_keeps_schema_calls_thinking_disabled(tmp_path, monkeypatch):
+    class_root = tmp_path / "class_analysis"
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    monkeypatch.setattr(api, "qwen_runtime_platform", None)
+    calls = []
+
+    def fake_qwen_chat(_messages, **kwargs):
+        calls.append(dict(kwargs))
+        return "ok"
+
+    monkeypatch.setattr(api, "_run_qwen_chat", fake_qwen_chat)
+    review = api.ClassAnalysisQwenReviewJob(
+        review_id="cqr_thinking_policy",
+        parent_job_id="ca_thinking_policy",
+        point_id="p0",
+        request={"enable_thinking": True, "thinking_effort": "high", "thinking_scale_factor": 0.75},
+    )
+    messages = [{"role": "user", "content": [{"type": "text", "text": "test"}]}]
+
+    api._class_analysis_qwen_review_model_call(
+        review,
+        messages,
+        phase="schema_finalization",
+        model_id="test-model",
+        tool_specs=[],
+        max_new_tokens=16,
+        progress=0.1,
+        assistant_prefix=None,
+    )
+    api._class_analysis_qwen_review_model_call(
+        review,
+        messages,
+        phase="thinking_scratchpad",
+        model_id="test-model",
+        tool_specs=[],
+        max_new_tokens=16,
+        progress=0.2,
+        assistant_prefix=None,
+        enable_thinking=True,
+    )
+
+    assert calls[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "thinking_effort" not in calls[0]
+    assert "thinking_scale_factor" not in calls[0]
+    assert calls[1]["chat_template_kwargs"] == {"enable_thinking": True}
+    assert calls[1]["thinking_effort"] == "high"
+    assert calls[1]["thinking_scale_factor"] == 0.75
+
+
 def test_class_analysis_qwen_review_controller_skips_poor_target_without_qwen(tmp_path, monkeypatch):
     class_root = tmp_path / "class_analysis"
     monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)

@@ -139,26 +139,13 @@ def test_qwen_model_registry_exposes_abliterated_mlx_models():
         assert by_id[model_id]["metadata"]["abliterated"] is True
         assert by_id[model_id]["metadata"]["training_supported"] is True
         assert by_id[model_id]["metadata"]["training_modes"] == ["official_lora", "trl_qlora"]
-    heretic_id = "Youssofal/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit"
-    assert heretic_id in by_id
-    heretic_entry = by_id[heretic_id]
-    assert heretic_entry["type"] == "builtin_mlx"
-    assert heretic_entry["metadata"]["runtime_platform"] == "mlx_vlm"
-    assert heretic_entry["metadata"]["abliterated"] is True
-    assert heretic_entry["metadata"]["source"] == "Youssofal"
-    assert heretic_entry["metadata"]["size"] == "35B-A3B"
-    assert heretic_entry["metadata"]["variant"] == "Heretic"
-    assert heretic_entry["metadata"]["vision_inference_supported"] is False
-    assert heretic_entry["metadata"]["training_supported"] is False
-    assert heretic_entry["metadata"]["training_modes"] == []
-    assert "generated invalid text" in heretic_entry["metadata"]["compatibility_note"]
-    assert "vignette benchmark" in heretic_entry["metadata"]["compatibility_note"]
-    assert "Heretic" in heretic_entry["label"]
+    assert "Youssofal/Qwen3.6-35B-A3B-Abliterated-Heretic-MLX-4bit" not in by_id
     qwen36_id = "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit"
     assert qwen36_id in by_id
     qwen36_entry = by_id[qwen36_id]
-    assert qwen36_entry["type"] == "builtin_mlx"
+    assert qwen36_entry["type"] == "builtin_agent_mlx"
     assert qwen36_entry["metadata"]["runtime_platform"] == "mlx_vlm"
+    assert qwen36_entry["metadata"]["agent_model"] is True
     assert qwen36_entry["metadata"]["abliterated"] is True
     assert qwen36_entry["metadata"]["source"] == "vanch007"
     assert qwen36_entry["metadata"]["size"] == "35B-A3B"
@@ -171,12 +158,7 @@ def test_qwen_model_registry_exposes_abliterated_mlx_models():
         "introvoyz041/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx-mlx-4Bit",
         "introvoyz041/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx-mlx-4Bit",
     ):
-        assert model_id in by_id
-        assert by_id[model_id]["type"] == "builtin_mlx"
-        assert by_id[model_id]["metadata"]["abliterated"] is True
-        assert by_id[model_id]["metadata"]["vision_inference_supported"] is False
-        assert by_id[model_id]["metadata"]["training_supported"] is False
-        assert by_id[model_id]["metadata"]["training_modes"] == []
+        assert model_id not in by_id
 
 
 def test_qwen_model_registry_exposes_inference_only_agent_models():
@@ -186,11 +168,14 @@ def test_qwen_model_registry_exposes_inference_only_agent_models():
     expected = {
         "Jackrong/Qwopus3.6-27B-v2": "builtin_agent_transformers",
         "prithivMLmods/Qwen3.6-35B-A3B-abliterated-MAX": "builtin_agent_transformers",
-        "nex-agi/Nex-N2-mini": "builtin_agent_transformers",
-        "huihui-ai/Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated": "builtin_agent_transformers",
         "mlx-community/Qwen3.6-35B-A3B-4bit": "builtin_agent_mlx",
-        "mlx-community/gemma-4-31B-it-qat-4bit": "builtin_agent_mlx",
-        "vanch007/Huihui-gemma-4-26B-A4B-it-abliterated-mlx-4bit": "builtin_agent_mlx",
+        "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit": "builtin_agent_mlx",
+    }
+    removed_non_qwen = {
+        "nex-agi/Nex-N2-mini",
+        "huihui-ai/Huihui-gemma-4-31B-it-qat-q4_0-unquantized-abliterated",
+        "mlx-community/gemma-4-31B-it-qat-4bit",
+        "vanch007/Huihui-gemma-4-26B-A4B-it-abliterated-mlx-4bit",
     }
 
     for model_id, entry_type in expected.items():
@@ -200,6 +185,7 @@ def test_qwen_model_registry_exposes_inference_only_agent_models():
         assert entry["metadata"]["training_supported"] is False
         assert entry["metadata"]["training_modes"] == []
         assert entry["metadata"]["vision_inference_supported"] is True
+    assert not (removed_non_qwen & set(by_id))
 
 
 def test_qwen_training_config_accepts_moe_transformers_model(tmp_path, monkeypatch):

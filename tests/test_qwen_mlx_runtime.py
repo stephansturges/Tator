@@ -143,7 +143,7 @@ def test_qwen_model_registry_exposes_abliterated_mlx_models():
     qwen36_id = "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit"
     assert qwen36_id in by_id
     qwen36_entry = by_id[qwen36_id]
-    assert qwen36_entry["type"] == "builtin_agent_mlx"
+    assert qwen36_entry["type"] == "builtin_mlx"
     assert qwen36_entry["metadata"]["runtime_platform"] == "mlx_vlm"
     assert qwen36_entry["metadata"]["agent_model"] is True
     assert qwen36_entry["metadata"]["abliterated"] is True
@@ -166,8 +166,17 @@ def test_qwen_model_registry_exposes_inference_only_agent_models():
     by_id = {entry["id"]: entry for entry in models}
 
     expected = {
+        "mlx-community/Qwen3-VL-2B-Instruct-4bit": "builtin_mlx",
+        "mlx-community/Qwen3-VL-4B-Instruct-4bit": "builtin_mlx",
+        "mlx-community/Qwen3-VL-8B-Instruct-4bit": "builtin_mlx",
+        "mlx-community/Qwen3-VL-4B-Thinking-4bit": "builtin_mlx",
+        "mlx-community/Qwen3-VL-8B-Thinking-4bit": "builtin_mlx",
+        "EZCon/Huihui-Qwen3-VL-2B-Instruct-abliterated-4bit-mlx": "builtin_mlx",
+        "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx": "builtin_mlx",
+        "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx": "builtin_mlx",
+        "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx": "builtin_mlx",
         "mlx-community/Qwen3.6-35B-A3B-4bit": "builtin_agent_mlx",
-        "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit": "builtin_agent_mlx",
+        "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit": "builtin_mlx",
     }
     removed_unusable = {
         "Jackrong/Qwopus3.6-27B-v2",
@@ -182,9 +191,13 @@ def test_qwen_model_registry_exposes_inference_only_agent_models():
         entry = by_id[model_id]
         assert entry["type"] == entry_type
         assert entry["metadata"]["agent_model"] is True
-        assert entry["metadata"]["training_supported"] is False
-        assert entry["metadata"]["training_modes"] == []
         assert entry["metadata"]["vision_inference_supported"] is True
+        if entry_type == "builtin_agent_mlx" or "Qwen3.6" in model_id:
+            assert entry["metadata"]["training_supported"] is False
+            assert entry["metadata"]["training_modes"] == []
+        else:
+            assert entry["metadata"]["training_supported"] is True
+            assert entry["metadata"]["training_modes"] == ["official_lora", "trl_qlora"]
     assert not (removed_unusable & set(by_id))
 
 

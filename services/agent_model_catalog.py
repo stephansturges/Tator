@@ -9,7 +9,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional
 
-from services.qwen_mlx import QWEN_PLATFORM_MLX, QWEN_PLATFORM_TRANSFORMERS
+from services.qwen_mlx import (
+    QWEN_MLX_MODEL_OPTIONS,
+    QWEN_PLATFORM_MLX,
+    QWEN_PLATFORM_TRANSFORMERS,
+)
 
 AGENT_MLX_NOTE = (
     "Inference-only MLX-VLM agent model candidate. Use for captioning, prepass, "
@@ -18,6 +22,23 @@ AGENT_MLX_NOTE = (
 AGENT_TRANSFORMERS_NOTE = (
     "Inference-only Transformers agent model candidate. Keep hidden until a model "
     "has a completed Class Split/VLM smoke on the target runtime."
+)
+QWEN_MLX_RUNTIME_SUPPORTED_NOTE = (
+    "Inference-only MLX Qwen3-VL model from the stable runtime catalog. Enabled for "
+    "agent-assisted review because the underlying MLX-VLM path supports image "
+    "inference; not part of the Qwen3.6 vignette matrix winners."
+)
+
+_AGENT_ENABLED_QWEN3_VL_MLX_IDS = (
+    "mlx-community/Qwen3-VL-4B-Instruct-4bit",
+    "mlx-community/Qwen3-VL-2B-Instruct-4bit",
+    "mlx-community/Qwen3-VL-8B-Instruct-4bit",
+    "mlx-community/Qwen3-VL-4B-Thinking-4bit",
+    "mlx-community/Qwen3-VL-8B-Thinking-4bit",
+    "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx",
+    "EZCon/Huihui-Qwen3-VL-2B-Instruct-abliterated-4bit-mlx",
+    "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx",
+    "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx",
 )
 
 
@@ -69,8 +90,31 @@ def _entry(
     }
 
 
+def _entry_from_mlx_runtime(model_id: str) -> Dict[str, Any]:
+    for entry in QWEN_MLX_MODEL_OPTIONS:
+        if str(entry.get("id") or entry.get("model_id") or "") != model_id:
+            continue
+        return _entry(
+            model_id,
+            str(entry.get("label") or model_id),
+            family="qwen3_vl",
+            runtime_platform=QWEN_PLATFORM_MLX,
+            source=str(entry.get("source") or "mlx-community"),
+            size=str(entry.get("size") or ""),
+            variant=str(entry.get("variant") or "Instruct"),
+            quantization=entry.get("quantization"),
+            abliterated=bool(entry.get("abliterated")),
+            vision_inference_supported=entry.get("vision_inference_supported", True) is not False,
+            compatibility_note=QWEN_MLX_RUNTIME_SUPPORTED_NOTE,
+            backend_status="validated_runtime",
+            smoke_status="qwen_mlx_runtime_supported",
+        )
+    raise ValueError(f"Agent Qwen3-VL MLX model is not in the runtime catalog: {model_id}")
+
+
 def _build_agent_model_options() -> List[Dict[str, Any]]:
     entries = [
+        *(_entry_from_mlx_runtime(model_id) for model_id in _AGENT_ENABLED_QWEN3_VL_MLX_IDS),
         _entry(
             "mlx-community/Qwen3.6-35B-A3B-4bit",
             "MLX Qwen3.6 35B-A3B 4bit",

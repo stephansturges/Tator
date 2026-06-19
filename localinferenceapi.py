@@ -363,6 +363,7 @@ from services.qwen_runtime import (
 )
 from services.qwen_mlx import (
     QWEN_MLX_DEFAULT_MODEL,
+    QWEN_MLX_MODEL_IDS,
     QWEN_MLX_MODEL_OPTIONS,
     QWEN_MLX_VISION_MODEL_OPTIONS,
     QWEN_PLATFORM_ALIASES,
@@ -52542,6 +52543,7 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
         model_id = str(entry.get("id") or entry.get("model_id") or "")
         vision_supported = entry.get("vision_inference_supported", True) is not False
         training_supported = bool(entry.get("training_supported", True)) and vision_supported
+        agent_metadata = agent_model_metadata_for_model(model_id)
         default_training_note = (
             "MLX-VLM trains LoRA adapters directly on Apple Silicon. Quantized MLX checkpoints use "
             "the same adapter path as QLoRA-style training."
@@ -52562,7 +52564,12 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
             "size": entry.get("size"),
             "vision_inference_supported": vision_supported,
             "inference_supported": vision_supported,
-            "compatibility_note": entry.get("compatibility_note"),
+            "compatibility_note": entry.get("compatibility_note") or agent_metadata.get("compatibility_note"),
+            "agent_model": bool(agent_metadata),
+            "agent_supported": bool(agent_metadata) and vision_supported,
+            "agent_backend_status": agent_metadata.get("backend_status"),
+            "agent_smoke_status": agent_metadata.get("smoke_status"),
+            "agent_compatibility_note": agent_metadata.get("compatibility_note"),
             "training_supported": training_supported,
             "training_modes": ["official_lora", "trl_qlora"] if training_supported else [],
             "training_model_id": model_id,
@@ -52584,6 +52591,8 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
     for entry in AGENT_MODEL_OPTIONS:
         model_id = str(entry.get("id") or entry.get("model_id") or "")
         if not model_id:
+            continue
+        if model_id in QWEN_MLX_MODEL_IDS:
             continue
         runtime_platform = str(entry.get("runtime_platform") or QWEN_PLATFORM_TRANSFORMERS)
         vision_supported = entry.get("vision_inference_supported", True) is not False

@@ -2266,8 +2266,13 @@ The 2026-06-18 model matrix benchmark used the fixed reviewable source set
   UI-facing agent model catalog.
 - Transformers/CUDA Qwen3.6-style candidates that only passed metadata/config
   checks are also hidden from the agent catalog until they complete the same
-  vignette-review smoke path. Active agent choices are limited to the two
-  completed MLX Qwen3.6 reviewers above.
+  vignette-review smoke path.
+- The agent selector also keeps a small curated Qwen3-VL MLX set from the
+  stable runtime catalog (`mlx-community` 2B/4B/8B Instruct, 4B/8B Thinking,
+  and the previously working Huihui/abliterated MLX variants). These are marked
+  as `qwen_mlx_runtime_supported`, not as Qwen3.6 matrix winners. They preserve
+  the older, working Qwen3-VL behavior for users who prefer it in vignette
+  review while keeping the Qwen3.6 benchmark result explicit.
 
 The same benchmark showed that enabling thinking directly on schema-producing
 calls is counterproductive: both viable Qwen3.6 models completed structurally

@@ -207,16 +207,25 @@ On a working Apple Silicon MLX setup, `/qwen/status` should report
 ## Qwen MLX-VLM
 
 The setup script installs `mlx`, the direct MLX-VLM runtime dependencies, and
-then `mlx-lm==0.31.3` and `mlx-vlm==0.6.1` from
-`requirements-macos-vlm.txt` with `--no-deps`. This keeps the main macOS
-environment on Transformers 4.57 and the SAHI-compatible OpenCV line while
-adding Qwen3.5/3.6 MoE MLX modules. Transformers 5.x can resolve the official
-Qwen3.6 `qwen3_5_moe` architecture, but it currently breaks the shared RF-DETR
-import path, so Qwen3.6 / SwiReasoning experiments use a separate environment
-profile for now. The backend applies a narrow compatibility shim for Qwen3.5/3.6
-MLX checkpoints whose MoE expert weights are already split into `switch_mlp`
-tensors. The backend exposes MLX model options through `/qwen/settings` and the
-browser UI under **Backend Config -> Qwen Runtime (advanced)**.
+then `mlx-lm==0.31.3`, `mlx-audio>=0.4.3`, and `mlx-vlm==0.6.1` from
+`requirements-macos-vlm.txt` with `--no-deps`. The main macOS backend now uses a
+single Transformers 5.x environment so Qwen3.5/3.6 configs (`qwen3_5` and
+`qwen3_5_moe`) resolve in the normal runtime. RF-DETR must be `>=1.8.1`; older
+RF-DETR releases import Transformers helpers that were removed in 5.x.
+
+Keep the SAHI/SAM3-compatible OpenCV/NumPy line from
+`requirements-macos-inference.txt`. `mlx-vlm==0.6.1` declares
+`opencv-python>=4.12`, but SAHI 0.11.x caps OpenCV at 4.11 and SAM3 requires
+NumPy <2. The local runtime is validated with `opencv-python==4.11.0.86` and
+`numpy==1.26.4`, so install the MLX-VLM package layer with `--no-deps`. A
+macOS `pip check` may report the `mlx-vlm` OpenCV requirement; that single
+warning is expected. Do not resolve it by letting `mlx-vlm` upgrade OpenCV or
+NumPy unless SAHI and SAM3 have also moved to compatible pins.
+
+The backend applies a narrow compatibility shim for Qwen3.5/3.6 MLX checkpoints
+whose MoE expert weights are already split into `switch_mlp` tensors. The
+backend exposes MLX model options through `/qwen/settings` and the browser UI
+under **Backend Config -> Qwen Runtime (advanced)**.
 
 Useful environment settings:
 
@@ -226,40 +235,45 @@ QWEN_MLX_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
 QWEN_MLX_DEFAULT_QUANTIZATION=4bit
 ```
 
-Experimental Qwen3.6 / SwiReasoning smoke:
+Qwen3.6 / SwiReasoning smoke:
 
 ```bash
-tools/setup_qwen36_swir_env.sh
-.venv-qwen36-swir/bin/python tools/qwen36_swir_smoke.py
-.venv-qwen36-swir/bin/python tools/agent_model_smoke.py --json
+.venv-macos/bin/python tools/qwen36_swir_smoke.py
+.venv-macos/bin/python tools/agent_model_smoke.py --json
 ```
 
-The helper prefers `.venv-macos/bin/python` or Python 3.11; avoid Python 3.14
-for this environment because native wheels such as `safetensors` may not be
-available yet. The smoke intentionally does not download the full 35B weights.
-It checks the first runtime gate: the isolated Transformers 5.x environment must
-resolve the official `Qwen/Qwen3.6-35B-A3B` config and processor. Full inference
-and SwiReasoning decoding should be benchmarked from this environment before
-the main backend pins move to Transformers 5.x.
+Avoid Python 3.14 for this environment because native wheels such as
+`safetensors` may not be available yet. The smoke intentionally does not
+download the full 35B weights. It checks the first runtime gate: the unified
+Transformers 5.x backend environment must resolve the official
+`Qwen/Qwen3.6-35B-A3B` config and processor.
 
 The backend also exposes an inference-only agent model catalog through the
 existing `/qwen/models` compatibility endpoint. These entries are available to
 captioning, Qwen/agent prepass, and Class Split reviewer selectors, but every
-non-Qwen training-family entry carries `training_supported=false` so it cannot
-silently appear in the Qwen training picker. The first cataloged families are:
+agent-only entry carries `training_supported=false` so it cannot silently appear
+in the Qwen training picker. The active agent catalog is deliberately narrow:
 
-- Qwopus3.6 via `Jackrong/Qwopus3.6-27B-v2` on the Transformers/CUDA path.
-- Qwen3.6 abliterated MAX via
-  `prithivMLmods/Qwen3.6-35B-A3B-abliterated-MAX` on the Transformers/CUDA path.
-- Nex-N2 Mini via `nex-agi/Nex-N2-mini` on the Transformers/CUDA path, plus a
-  metadata-only MLX candidate.
-- Gemma 4 via Huihui/MLX community candidates on the Transformers and MLX paths.
+- Qwen3-VL MLX 2B/4B/8B Instruct and 4B/8B Thinking entries from the stable
+  MLX runtime catalog.
+- Previously working Huihui/abliterated MLX Qwen3-VL variants.
+- Qwen3.6 MLX review candidates that completed local vignette smoke.
+- `empero-ai/Qwable-9B-Claude-Fable-5` on the Transformers 5 path. Metadata
+  smoke confirms it resolves as `qwen3_5` and exposes `Qwen3VLProcessor` with
+  an image processor.
 
-The `tools/agent_model_smoke.py` check verifies config and processor loading for
-the Transformers candidates in the isolated Transformers-5 environment and keeps
-MLX entries metadata-only unless a future benchmark explicitly downloads full
-weights. GGUF and llama.cpp/mmproj inference are intentionally not wired in this
-path yet.
+`empero-ai/Qwythos-9B-Claude-Mythos-5-1M` is not enabled for visual review: its
+config advertises `qwen3_5`, but the repository is missing the image-processor
+files required for `AutoProcessor` image inference.
+
+The `tools/agent_model_smoke.py` check verifies config and processor loading
+for Transformers candidates and keeps MLX entries metadata-only unless a future
+benchmark explicitly downloads full weights. GGUF and llama.cpp/mmproj inference
+are intentionally not wired in this path yet.
+
+There is no separate Qwen3.6/SwiReasoning virtual environment. If a future
+candidate requires a newer Transformers runtime, upgrade the main backend
+environment and keep RF-DETR compatible there instead of adding a second env.
 
 Runtime selection rules:
 
@@ -281,22 +295,34 @@ because local smoke tests did not produce valid Qwen review output. Choose a
 model that fits local RAM/VRAM; the list is capability surface, not a guarantee
 that every model is practical on every Mac.
 
-Additional MLX agent candidates, including Qwen3.6, Nex-N2, and Gemma 4
-repackages, appear in the same runtime selectors when the catalog marks them
-image-capable. Candidates with failed local smoke evidence remain visible in
-the model registry but blocked from activation.
+Additional agent candidates should appear in runtime selectors only after the
+catalog marks them image-capable and at least processor-smoked. Candidates with
+failed local smoke evidence remain blocked from activation or hidden from review
+selectors.
 
 CUDA machines should use the Transformers model registry in **Qwen Models**.
 That registry exposes the official full and FP8 Qwen3-VL checkpoints, curated
 compressed-tensors/AWQ-style and GPTQ 4-bit checkpoints, and compatible
 abliterated Transformer checkpoints from Huihui, Prithiv, and quantized
-community conversions. Quantized activation uses the selected checkpoint for
-inference when the CUDA dependency stack supports it. Dense and MoE
-Transformers entries can be used for LoRA/QLoRA training; quantized CUDA
-selections resolve to the matching full checkpoint before training and apply
-bitsandbytes QLoRA there. MLX entries train through MLX-VLM on Apple Silicon,
-including quantized checkpoints for QLoRA-style adapter training. FP8 requires
-compatible NVIDIA hardware.
+community conversions. It also exposes curated CUDA/Transformers Qwen3.5 and
+Qwen3.6 visual checkpoints for inference and agent-assisted flows:
+
+- Official Qwen3.5/Qwen3.6 visual checkpoints from `Qwen`.
+- Qwen3.5/Qwen3.6 AWQ checkpoints from `cyankiwi`.
+- Selected Qwen3.6 GPTQ checkpoints from `btbtyler09` and `palmfuture`.
+- Huihui/prithiv-style abliterated Qwen3.5/Qwen3.6 checkpoints, plus selected
+  quantized abliterated Qwen3.6 variants that advertise image-text Transformers
+  support.
+
+Quantized activation uses the selected checkpoint for inference when the CUDA
+dependency stack supports it. Dense and MoE Qwen3-VL Transformers entries can be
+used for LoRA/QLoRA training; quantized Qwen3-VL CUDA selections resolve to the
+matching full checkpoint before training and apply bitsandbytes QLoRA there.
+Qwen3.5/Qwen3.6 entries are currently inference-only in this repo and carry
+`training_supported=false` until their training path is explicitly implemented.
+MLX entries train through MLX-VLM on Apple Silicon, including quantized
+checkpoints for QLoRA-style adapter training. FP8 requires compatible NVIDIA
+hardware.
 
 ## MLX-DINOv3
 

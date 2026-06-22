@@ -1163,7 +1163,7 @@ CLIP_TRAIN_UPLOAD_MAX_BYTES = _env_int("CLIP_TRAIN_UPLOAD_MAX_BYTES", 10 * 1024 
 CLIP_TRAIN_UPLOAD_QUOTA_BYTES = _env_int("CLIP_TRAIN_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
 
 QWEN_MODEL_NAME = os.environ.get("QWEN_MODEL_NAME", "Qwen/Qwen3-VL-4B-Instruct")
-QWEN_MIN_TRANSFORMERS = "4.57.0"
+QWEN_MIN_TRANSFORMERS = "5.7.0"
 QWEN_MIN_PIXELS = _env_int("QWEN_MIN_PIXELS", 256 * 28 * 28)
 QWEN_MAX_PIXELS = _env_int("QWEN_MAX_PIXELS", 1280 * 28 * 28)
 QWEN_MAX_NEW_TOKENS = _env_int("QWEN_MAX_NEW_TOKENS", 2000)
@@ -5683,9 +5683,10 @@ def _qwen_mlx_incompatible_model_detail(model_id: str) -> Optional[str]:
     known_detail = qwen_known_incompatible_mlx_detail(str(model_id or ""))
     if known_detail:
         return known_detail
-    agent_detail = agent_model_block_detail(str(model_id or ""))
-    if agent_detail:
-        return agent_detail
+    if is_agent_mlx_model_id(str(model_id or "")):
+        agent_detail = agent_model_block_detail(str(model_id or ""))
+        if agent_detail:
+            return agent_detail
     metadata = qwen_mlx_metadata_for_model(str(model_id or ""))
     if (
         metadata.get("vision_inference_supported") is False
@@ -5828,9 +5829,10 @@ def _qwen_mlx_remote_checkpoint_incompatibility_detail(model_id: str) -> Optiona
 
 
 def _qwen_mlx_catalog_incompatibility_detail(model_id: str) -> Optional[str]:
-    agent_detail = agent_model_block_detail(str(model_id))
-    if agent_detail:
-        return agent_detail
+    if is_agent_mlx_model_id(str(model_id)):
+        agent_detail = agent_model_block_detail(str(model_id))
+        if agent_detail:
+            return agent_detail
     metadata = qwen_mlx_metadata_for_model(str(model_id))
     if (
         metadata.get("vision_inference_supported") is False
@@ -52510,6 +52512,7 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
             "classes": [],
             "model_id": model_id,
             "model_family": "qwen3",
+            "model_line": str(entry.get("model_line") or "Qwen3-VL"),
             "source": str(entry.get("source") or "huggingface"),
             "runtime_platform": QWEN_PLATFORM_TRANSFORMERS,
             "quantization": entry.get("quantization"),
@@ -52523,6 +52526,8 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
                 entry.get("training_modes")
                 or (["official_lora", "trl_qlora"] if training_supported else [])
             ),
+            "vision_inference_supported": entry.get("vision_inference_supported", True) is not False,
+            "inference_supported": entry.get("inference_supported", True) is not False,
             "training_model_id": entry.get("training_model_id") or model_id,
             "training_note": entry.get("training_note"),
             "min_pixels": QWEN_MIN_PIXELS,
@@ -52617,6 +52622,7 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
             "inference_supported": vision_supported,
             "backend_status": entry.get("backend_status"),
             "smoke_status": entry.get("smoke_status"),
+            "min_transformers": entry.get("min_transformers"),
             "compatibility_note": entry.get("compatibility_note"),
             "training_supported": False,
             "training_modes": [],
@@ -52730,10 +52736,17 @@ def activate_qwen_model(payload: QwenModelActivateRequest):
         }:
             fallback_metadata = (
                 (agent_model_metadata_for_model(model_id) or qwen_mlx_metadata_for_model(model_id))
-                if builtin.get("type") in {"builtin_mlx", "builtin_agent_mlx"}
+                if builtin.get("type") in {"builtin_mlx", "builtin_agent_mlx", "builtin_agent_transformers"}
                 else qwen_transformers_metadata_for_model(model_id)
             )
             metadata = builtin.get("metadata") or fallback_metadata
+            if builtin.get("type") in {"builtin_agent_mlx", "builtin_agent_transformers"}:
+                agent_block = agent_model_block_detail(model_id)
+                if agent_block:
+                    raise HTTPException(
+                        status_code=HTTP_400_BAD_REQUEST,
+                        detail=f"qwen_agent_model_unavailable:{agent_block}",
+                    )
             if builtin.get("type") in {"builtin_mlx", "builtin_agent_mlx"} and (
                 metadata.get("vision_inference_supported") is False
                 or metadata.get("inference_supported") is False

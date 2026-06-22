@@ -38,20 +38,23 @@ git+https://github.com/facebookresearch/segment-anything.git
 git+https://github.com/facebookresearch/sam3.git
 einops>=0.7,<1.0
 ultralytics>=8.2,<9.0
-rfdetr>=1.0,<2.0
+rfdetr>=1.8.1,<2.0
 sahi>=0.11,<0.12
 xgboost>=2.0,<3.0
 
-# Qwen VLM paths. Transformers remains the portable fallback; MLX-VLM is the
-# first-class Apple Silicon inference backend for quantized mlx-community models.
+# Qwen VLM paths. Transformers 5.x is required for Qwen3.5/3.6 configs such as
+# qwen3_5 and qwen3_5_moe. RF-DETR must be >=1.8.1 on this line because older
+# RF-DETR releases import Transformers helpers removed in 5.x.
+#
 # The setup script installs mlx-vlm from requirements-macos-vlm.txt with
-# --no-deps. Qwen3-capable mlx-vlm 0.3.x declares opencv-python>=4.12, while
-# SAHI 0.11.x requires opencv-python<=4.11; the runtime works with the
-# SAHI-compatible OpenCV already installed here.
+# --no-deps. mlx-vlm 0.6.1 declares opencv-python>=4.12, while SAHI 0.11.x caps
+# opencv-python<=4.11 and SAM3 keeps numpy<2. The runtime works with this
+# SAHI/SAM3-compatible OpenCV/NumPy line, so do not let mlx-vlm pull OpenCV deps.
 mlx>=0.31,<1.0
-mlx-lm>=0.23,<0.30
-transformers>=4.57,<5.0
+mlx-lm>=0.31.3,<0.32
+transformers>=5.7,<6.0
 accelerate>=1.0,<2.0
+huggingface-hub>=1.5,<2.0
 qwen-vl-utils>=0.0.8
 safetensors>=0.4,<0.5
 sentencepiece>=0.1.99,<0.2

@@ -18,6 +18,8 @@ def test_agent_catalog_includes_qwen_inference_family():
         "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx",
         "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx",
         "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx",
+        "empero-ai/Qwable-9B-Claude-Fable-5",
+        "empero-ai/Qwythos-9B-Claude-Mythos-5-1M",
         "mlx-community/Qwen3.6-35B-A3B-4bit",
         "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit",
     }
@@ -32,9 +34,12 @@ def test_agent_catalog_includes_qwen_inference_family():
 
     assert expected <= AGENT_MODEL_IDS
     assert not (removed_unusable & AGENT_MODEL_IDS)
-    assert expected <= AGENT_MLX_MODEL_IDS
+    assert (expected - AGENT_TRANSFORMERS_MODEL_IDS) <= AGENT_MLX_MODEL_IDS
     assert "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit" in AGENT_MLX_MODEL_IDS
-    assert AGENT_TRANSFORMERS_MODEL_IDS == set()
+    assert {
+        "empero-ai/Qwable-9B-Claude-Fable-5",
+        "empero-ai/Qwythos-9B-Claude-Mythos-5-1M",
+    } <= AGENT_TRANSFORMERS_MODEL_IDS
 
 
 def test_agent_catalog_is_inference_only_not_training():
@@ -45,6 +50,8 @@ def test_agent_catalog_is_inference_only_not_training():
         assert entry["runtime_platform"] in {QWEN_PLATFORM_MLX, QWEN_PLATFORM_TRANSFORMERS}
         assert entry["smoke_status"] in {
             "class_split_benchmark_passed",
+            "missing_image_processor",
+            "transformers5_processor_passed",
             "qwen_mlx_runtime_supported",
         }
 
@@ -59,6 +66,21 @@ def test_agent_catalog_marks_qwen36_matrix_winners_separately():
     )
     assert by_id["mlx-community/Qwen3-VL-4B-Instruct-4bit"]["smoke_status"] == "qwen_mlx_runtime_supported"
     assert by_id["mlx-community/Qwen3-VL-4B-Instruct-4bit"]["backend_status"] == "validated_runtime"
+
+
+def test_agent_catalog_marks_empero_visual_capability():
+    by_id = {entry["id"]: entry for entry in AGENT_MODEL_OPTIONS}
+    qwable = by_id["empero-ai/Qwable-9B-Claude-Fable-5"]
+    qwythos = by_id["empero-ai/Qwythos-9B-Claude-Mythos-5-1M"]
+
+    assert qwable["runtime_platform"] == QWEN_PLATFORM_TRANSFORMERS
+    assert qwable["vision_inference_supported"] is True
+    assert qwable["smoke_status"] == "transformers5_processor_passed"
+    assert qwable["min_transformers"] == "5.7.0"
+    assert qwythos["runtime_platform"] == QWEN_PLATFORM_TRANSFORMERS
+    assert qwythos["vision_inference_supported"] is False
+    assert qwythos["smoke_status"] == "missing_image_processor"
+    assert "missing" in qwythos["compatibility_note"].lower()
 
 
 def test_agent_catalog_omits_known_bad_visual_candidates():

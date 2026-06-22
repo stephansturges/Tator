@@ -2264,9 +2264,23 @@ The 2026-06-18 model matrix benchmark used the fixed reviewable source set
 - Qwen-family candidates that failed the smoke (`unsloth/...UD-MLX-4bit` and
   `froggeric/...Heretic-MLX-4bit`) were removed from the active presets and
   UI-facing agent model catalog.
-- Transformers/CUDA Qwen3.6-style candidates that only passed metadata/config
-  checks are also hidden from the agent catalog until they complete the same
-  vignette-review smoke path.
+- CUDA/Transformers Qwen3.5 and Qwen3.6 checkpoints are exposed in the general
+  Qwen model registry for captioning, prepass, and experimental agent-assisted
+  review. They are inference-only until their training path is wired. The
+  Class Split benchmark-winner label remains reserved for models that complete
+  the vignette-review benchmark.
+- The main macOS backend now uses one Transformers 5.x environment instead of a
+  separate Qwen3.6/SwiReasoning environment. RF-DETR is pinned to `>=1.8.1`
+  because older RF-DETR releases import Transformers helpers removed in 5.x.
+- `empero-ai/Qwable-9B-Claude-Fable-5` is available as an inference-only
+  Transformers 5 agent candidate after metadata smoke: it resolves as
+  `qwen3_5` and `AutoProcessor` returns `Qwen3VLProcessor` with an image
+  processor. A one-vignette real review smoke completed schema-valid, but it is
+  not a benchmark winner yet.
+- `empero-ai/Qwythos-9B-Claude-Mythos-5-1M` remains blocked for visual review:
+  its config resolves as `qwen3_5`, but the model repo is missing the processor
+  assets required for image input. The catalog keeps this as an explicit
+  blocked row so the failure mode is documented rather than rediscovered.
 - The agent selector also keeps a small curated Qwen3-VL MLX set from the
   stable runtime catalog (`mlx-community` 2B/4B/8B Instruct, 4B/8B Thinking,
   and the previously working Huihui/abliterated MLX variants). These are marked
@@ -2287,6 +2301,31 @@ guards. The review flow therefore treats thinking as a two-phase protocol:
 
 This preserves the VLM-centered reasoning product goal without allowing a
 thinking model to bypass strict JSON schema validation.
+
+Empero/Qwen3.5-family smoke against the fixed reviewable set uses the same
+runner:
+
+```bash
+.venv-macos/bin/python tools/run_class_split_vlm_model_matrix.py \
+  --job-id ca_c5c4a7d6ea \
+  --source-run uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/compact_verifier_reviewable70_v1_70_1780978425.json \
+  --preset empero \
+  --count 3 \
+  --review-timeout-seconds 900
+```
+
+- `empero-ai/Qwable-9B-Claude-Fable-5` one-vignette smoke:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/empero_qwable_smoke_1_1782117536/summary.json`.
+  It completed 1/1 schema-valid reviews in 362.211s with 0/1 non-skip
+  decisions. The review produced a guarded human-triage signal, not an
+  actionable class decision.
+- Same-vignette Qwen3.6 abliterated MLX baseline:
+  `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/qwen36_baseline_smoke_for_qwable_1_1782117942/summary.json`.
+  It completed 1/1 schema-valid reviews in 41.919s with 1/1 non-skip decisions.
+
+This is enough to keep Qwable selectable for experimental agent review, but not
+enough to promote it over the validated Qwen3.6 MLX default. Run a wider matrix
+before changing defaults.
 
 ## Provenance References
 

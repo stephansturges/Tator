@@ -118,6 +118,37 @@ def test_qwen_model_registry_exposes_cuda_quantized_and_abliterated_models():
     assert moe_entry["metadata"]["training_modes"] == ["official_lora", "trl_qlora"]
 
 
+def test_qwen_model_registry_exposes_qwen35_36_cuda_inference_models():
+    models = api.list_qwen_models()["models"]
+    by_id = {entry["id"]: entry for entry in models}
+    expected = {
+        "Qwen/Qwen3.5-9B": ("Qwen3.5", False, "none"),
+        "cyankiwi/Qwen3.5-9B-AWQ-4bit": ("Qwen3.5", False, "awq"),
+        "huihui-ai/Huihui-Qwen3.5-9B-abliterated": ("Qwen3.5", True, "none"),
+        "Qwen/Qwen3.6-27B": ("Qwen3.6", False, "none"),
+        "cyankiwi/Qwen3.6-27B-AWQ-INT4": ("Qwen3.6", False, "awq"),
+        "btbtyler09/Qwen3.6-27B-GPTQ-4bit": ("Qwen3.6", False, "gptq"),
+        "Qwen/Qwen3.6-35B-A3B-FP8": ("Qwen3.6", False, "fp8"),
+        "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit": ("Qwen3.6", False, "awq"),
+        "palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4": ("Qwen3.6", False, "gptq"),
+        "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated": ("Qwen3.6", True, "none"),
+        "shawnw3i/Huihui-Qwen3.6-27B-abliterated-AWQ-MTP": ("Qwen3.6", True, "awq"),
+    }
+
+    for model_id, (model_line, abliterated, quantization_backend) in expected.items():
+        entry = by_id[model_id]
+        metadata = entry["metadata"]
+        assert entry["type"] == "builtin_transformers"
+        assert metadata["runtime_platform"] == api.QWEN_PLATFORM_TRANSFORMERS
+        assert metadata["model_line"] == model_line
+        assert metadata["vision_inference_supported"] is not False
+        assert metadata["inference_supported"] is not False
+        assert metadata["training_supported"] is False
+        assert metadata["training_modes"] == []
+        assert metadata["abliterated"] is abliterated
+        assert metadata["quantization_backend"] == quantization_backend
+
+
 def test_qwen_model_registry_exposes_abliterated_mlx_models():
     models = api.list_qwen_models()["models"]
     by_id = {entry["id"]: entry for entry in models}
@@ -177,6 +208,8 @@ def test_qwen_model_registry_exposes_inference_only_agent_models():
         "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx": "builtin_mlx",
         "mlx-community/Qwen3.6-35B-A3B-4bit": "builtin_agent_mlx",
         "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit": "builtin_mlx",
+        "empero-ai/Qwable-9B-Claude-Fable-5": "builtin_agent_transformers",
+        "empero-ai/Qwythos-9B-Claude-Mythos-5-1M": "builtin_agent_transformers",
     }
     removed_unusable = {
         "Jackrong/Qwopus3.6-27B-v2",
@@ -191,8 +224,16 @@ def test_qwen_model_registry_exposes_inference_only_agent_models():
         entry = by_id[model_id]
         assert entry["type"] == entry_type
         assert entry["metadata"]["agent_model"] is True
-        assert entry["metadata"]["vision_inference_supported"] is True
-        if entry_type == "builtin_agent_mlx" or "Qwen3.6" in model_id:
+        if model_id == "empero-ai/Qwythos-9B-Claude-Mythos-5-1M":
+            assert entry["metadata"]["vision_inference_supported"] is False
+            assert entry["metadata"]["inference_supported"] is False
+            assert "missing" in entry["metadata"]["compatibility_note"].lower()
+        else:
+            assert entry["metadata"]["vision_inference_supported"] is True
+        if (
+            entry_type in {"builtin_agent_mlx", "builtin_agent_transformers"}
+            or "Qwen3.6" in model_id
+        ):
             assert entry["metadata"]["training_supported"] is False
             assert entry["metadata"]["training_modes"] == []
         else:
@@ -1165,6 +1206,18 @@ def test_qwen_activation_rejects_language_only_mlx_repack():
 
     assert excinfo.value.status_code == 400
     assert "qwen_mlx_incompatible_checkpoint" in str(excinfo.value.detail)
+
+
+def test_qwen_activation_rejects_blocked_transformers_agent_candidate():
+    with pytest.raises(api.HTTPException) as excinfo:
+        api.activate_qwen_model(
+            api.QwenModelActivateRequest(model_id="empero-ai/Qwythos-9B-Claude-Mythos-5-1M")
+        )
+
+    assert excinfo.value.status_code == 400
+    detail = str(excinfo.value.detail)
+    assert "qwen_agent_model_unavailable" in detail
+    assert "missing preprocessor_config.json" in detail
 
 
 def test_qwen_mlx_runtime_rejects_blocked_heretic_candidate(monkeypatch):

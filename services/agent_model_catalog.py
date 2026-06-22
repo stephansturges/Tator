@@ -7,7 +7,11 @@ handled by services.qwen_model_catalog and tools.qwen_training.
 
 from __future__ import annotations
 
+import importlib.metadata
+
 from typing import Any, Dict, Iterable, List, Optional
+
+from packaging import version as packaging_version
 
 from services.qwen_mlx import (
     QWEN_MLX_MODEL_OPTIONS,
@@ -22,6 +26,10 @@ AGENT_MLX_NOTE = (
 AGENT_TRANSFORMERS_NOTE = (
     "Inference-only Transformers agent model candidate. Keep hidden until a model "
     "has a completed Class Split/VLM smoke on the target runtime."
+)
+AGENT_TRANSFORMERS5_NOTE = (
+    "Inference-only Transformers 5.x VLM agent model candidate. Requires the "
+    "unified Transformers 5.x backend profile used for Qwen3.5/3.6 models."
 )
 QWEN_MLX_RUNTIME_SUPPORTED_NOTE = (
     "Inference-only MLX Qwen3-VL model from the stable runtime catalog. Enabled for "
@@ -57,6 +65,7 @@ def _entry(
     compatibility_note: Optional[str] = None,
     backend_status: str = "candidate",
     smoke_status: str = "metadata",
+    min_transformers: Optional[str] = None,
 ) -> Dict[str, Any]:
     note = compatibility_note or (
         AGENT_MLX_NOTE if runtime_platform == QWEN_PLATFORM_MLX else AGENT_TRANSFORMERS_NOTE
@@ -83,6 +92,7 @@ def _entry(
         "abliterated": abliterated,
         "backend_status": backend_status,
         "smoke_status": smoke_status,
+        "min_transformers": min_transformers,
         "dataset_context": (
             "Inference-only visual-language agent model for captioning, prepass, "
             "and Class Split review. It does not participate in Qwen adapter training."
@@ -115,6 +125,42 @@ def _entry_from_mlx_runtime(model_id: str) -> Dict[str, Any]:
 def _build_agent_model_options() -> List[Dict[str, Any]]:
     entries = [
         *(_entry_from_mlx_runtime(model_id) for model_id in _AGENT_ENABLED_QWEN3_VL_MLX_IDS),
+        _entry(
+            "empero-ai/Qwable-9B-Claude-Fable-5",
+            "Transformers5 Qwable 9B Claude Fable 5",
+            family="qwen3_5",
+            runtime_platform=QWEN_PLATFORM_TRANSFORMERS,
+            source="empero-ai",
+            size="9B",
+            variant="Claude Fable 5",
+            compatibility_note=(
+                f"{AGENT_TRANSFORMERS5_NOTE} Metadata smoke passed under "
+                "Transformers 5.7: config resolves as qwen3_5 and AutoProcessor "
+                "returns Qwen3VLProcessor with an image processor."
+            ),
+            backend_status="transformers5_runtime_supported",
+            smoke_status="transformers5_processor_passed",
+            min_transformers="5.7.0",
+        ),
+        _entry(
+            "empero-ai/Qwythos-9B-Claude-Mythos-5-1M",
+            "Qwythos 9B Claude Mythos 5 1M (blocked visual)",
+            family="qwen3_5",
+            runtime_platform=QWEN_PLATFORM_TRANSFORMERS,
+            source="empero-ai",
+            size="9B",
+            variant="Claude Mythos 5 1M",
+            vision_inference_supported=False,
+            compatibility_note=(
+                "Blocked for image-assisted vignette review: the repo config resolves "
+                "as qwen3_5 and advertises a vision config under Transformers 5.7, "
+                "but the model repo is missing preprocessor_config.json / image "
+                "processor files, so AutoProcessor cannot load an image processor."
+            ),
+            backend_status="blocked",
+            smoke_status="missing_image_processor",
+            min_transformers="5.7.0",
+        ),
         _entry(
             "mlx-community/Qwen3.6-35B-A3B-4bit",
             "MLX Qwen3.6 35B-A3B 4bit",
@@ -206,6 +252,17 @@ def agent_model_block_detail(model_id: str) -> Optional[str]:
     metadata = agent_model_metadata_for_model(model_id)
     if not metadata:
         return None
+    min_transformers = str(metadata.get("min_transformers") or "").strip()
+    if min_transformers and metadata.get("runtime_platform") == QWEN_PLATFORM_TRANSFORMERS:
+        try:
+            installed = importlib.metadata.version("transformers")
+        except Exception:
+            installed = ""
+        if not installed or packaging_version.parse(installed) < packaging_version.parse(min_transformers):
+            return (
+                f"{model_id}: requires transformers>={min_transformers}; "
+                f"installed={installed or 'missing'}."
+            )
     if (
         metadata.get("vision_inference_supported") is False
         or metadata.get("inference_supported") is False

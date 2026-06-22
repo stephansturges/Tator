@@ -1,8 +1,7 @@
-"""Small Qwen3.6 runtime smoke for the experimental SwiReasoning environment.
+"""Small Qwen3.6 runtime smoke for the unified Transformers 5 environment.
 
 This intentionally avoids downloading 35B weights. It verifies that the active
-Transformers runtime can resolve the Qwen3.6 architecture and processor, which
-is the first gate that fails on the shared macOS backend environment.
+Transformers runtime can resolve the Qwen3.6 architecture and processor.
 """
 
 from __future__ import annotations

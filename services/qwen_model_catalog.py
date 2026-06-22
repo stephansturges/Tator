@@ -10,6 +10,10 @@ QWEN_PLATFORM_TRANSFORMERS = "transformers"
 _QWEN_VARIANTS = ("Instruct", "Thinking")
 _QWEN_DENSE_SIZES = ("2B", "4B", "8B", "32B")
 _QWEN_MOE_SIZES = ("30B-A3B", "235B-A22B")
+_QWEN3_5_6_INFERENCE_NOTE = (
+    "Qwen3.5/3.6 visual checkpoints are exposed for CUDA/CPU inference and agent-assisted "
+    "review only. Adapter training for this generation is not wired yet."
+)
 _QWEN_TRAINING_MODES = ["official_lora", "trl_qlora"]
 _QWEN_MOE_TRAINING_NOTE = (
     "Qwen3-VL MoE adapter training uses the Transformers Qwen3VLMoe trainer path. "
@@ -35,9 +39,12 @@ def _model_sort_key(entry: Dict[str, Any]) -> tuple:
         "2B": 0,
         "4B": 1,
         "8B": 2,
-        "32B": 3,
-        "30B-A3B": 4,
-        "235B-A22B": 5,
+        "9B": 3,
+        "27B": 4,
+        "32B": 5,
+        "30B-A3B": 6,
+        "35B-A3B": 7,
+        "235B-A22B": 8,
     }
     return (
         1 if entry.get("abliterated") else 0,
@@ -61,6 +68,7 @@ def _entry(
     training_model_id: Optional[str] = None,
     training_note: Optional[str] = None,
     training_supported: bool = True,
+    model_line: str = "Qwen3-VL",
 ) -> Dict[str, Any]:
     train_base = str(training_model_id or model_id)
     quantized = quantization_backend != "none"
@@ -78,15 +86,15 @@ def _entry(
                 "QLoRA applies bitsandbytes 4-bit at load time."
             )
     dataset_context = (
-        "Abliterated Qwen3-VL Transformer checkpoint for CUDA/CPU inference and adapter training."
+        f"Abliterated {model_line} Transformer checkpoint for CUDA/CPU inference and adapter training."
         if abliterated
-        else "Qwen3-VL Transformer checkpoint for CUDA/CPU inference and adapter training."
+        else f"{model_line} Transformer checkpoint for CUDA/CPU inference and adapter training."
     )
     if not training_supported:
         dataset_context = (
-            "Abliterated Qwen3-VL Transformer checkpoint for CUDA/CPU inference. Adapter training is not wired for this model."
+            f"Abliterated {model_line} Transformer checkpoint for CUDA/CPU inference. Adapter training is not wired for this model."
             if abliterated
-            else "Qwen3-VL Transformer checkpoint for CUDA/CPU inference. Adapter training is not wired for this model."
+            else f"{model_line} Transformer checkpoint for CUDA/CPU inference. Adapter training is not wired for this model."
         )
     return {
         "id": model_id,
@@ -105,6 +113,7 @@ def _entry(
         "training_model_id": train_base,
         "training_note": training_note,
         "dataset_context": dataset_context,
+        "model_line": model_line,
     }
 
 
@@ -327,6 +336,57 @@ def _build_transformers_model_options() -> List[Dict[str, Any]]:
             )
         )
 
+    qwen35_36_specs = [
+        ("Qwen/Qwen3.5-4B", "Qwen3.5", "4B", "Vision", "Qwen", None, "none", False, None),
+        ("Qwen/Qwen3.5-9B", "Qwen3.5", "9B", "Vision", "Qwen", None, "none", False, None),
+        ("Qwen/Qwen3.5-27B", "Qwen3.5", "27B", "Vision", "Qwen", None, "none", False, None),
+        ("Qwen/Qwen3.5-35B-A3B", "Qwen3.5", "35B-A3B", "Vision", "Qwen", None, "none", False, None),
+        ("cyankiwi/Qwen3.5-9B-AWQ-4bit", "Qwen3.5", "9B", "Vision", "cyankiwi", "AWQ 4-bit", "awq", False, "Qwen/Qwen3.5-9B"),
+        ("cyankiwi/Qwen3.5-27B-AWQ-4bit", "Qwen3.5", "27B", "Vision", "cyankiwi", "AWQ 4-bit", "awq", False, "Qwen/Qwen3.5-27B"),
+        ("huihui-ai/Huihui-Qwen3.5-9B-abliterated", "Qwen3.5", "9B", "Vision", "huihui-ai", None, "none", True, None),
+        ("huihui-ai/Huihui-Qwen3.5-35B-A3B-abliterated", "Qwen3.5", "35B-A3B", "Vision", "huihui-ai", None, "none", True, None),
+        ("prithivMLmods/Gliese-Qwen3.5-9B-Abliterated-Caption", "Qwen3.5", "9B", "Vision", "prithivMLmods", None, "none", True, "Qwen/Qwen3.5-9B"),
+        ("Qwen/Qwen3.6-27B", "Qwen3.6", "27B", "Vision", "Qwen", None, "none", False, None),
+        ("Qwen/Qwen3.6-35B-A3B", "Qwen3.6", "35B-A3B", "Vision", "Qwen", None, "none", False, None),
+        ("Qwen/Qwen3.6-35B-A3B-FP8", "Qwen3.6", "35B-A3B", "Vision", "Qwen", "FP8", "fp8", False, "Qwen/Qwen3.6-35B-A3B"),
+        ("cyankiwi/Qwen3.6-27B-AWQ-INT4", "Qwen3.6", "27B", "Vision", "cyankiwi", "AWQ 4-bit", "awq", False, "Qwen/Qwen3.6-27B"),
+        ("btbtyler09/Qwen3.6-27B-GPTQ-4bit", "Qwen3.6", "27B", "Vision", "btbtyler09", "GPTQ 4-bit", "gptq", False, "Qwen/Qwen3.6-27B"),
+        ("cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit", "Qwen3.6", "35B-A3B", "Vision", "cyankiwi", "AWQ 4-bit", "awq", False, "Qwen/Qwen3.6-35B-A3B"),
+        ("palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4", "Qwen3.6", "35B-A3B", "Vision", "palmfuture", "GPTQ 4-bit", "gptq", False, "Qwen/Qwen3.6-35B-A3B"),
+        ("huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated", "Qwen3.6", "35B-A3B", "Vision", "huihui-ai", None, "none", True, None),
+        ("shawnw3i/Huihui-Qwen3.6-27B-abliterated-AWQ-MTP", "Qwen3.6", "27B", "Vision", "shawnw3i", "AWQ 4-bit", "awq", True, "Qwen/Qwen3.6-27B"),
+        ("batsclamp/Huihui-Qwen3.6-35B-A3B-Claude-4.7-Opus-abliterated-FP8", "Qwen3.6", "35B-A3B", "Vision", "batsclamp", "FP8", "fp8", True, "Qwen/Qwen3.6-35B-A3B"),
+    ]
+    for (
+        model_id,
+        model_line,
+        size,
+        variant,
+        source,
+        quantization,
+        quantization_backend,
+        abliterated,
+        training_model_id,
+    ) in qwen35_36_specs:
+        quant_label = f" {quantization}" if quantization else ""
+        ablit_label = " abliterated" if abliterated else ""
+        entries.append(
+            _entry(
+                model_id,
+                f"CUDA {source} {model_line} {size}{ablit_label}{quant_label}",
+                size=size,
+                variant=variant,
+                source=source,
+                quantization=quantization,
+                quantization_backend=quantization_backend,
+                abliterated=abliterated,
+                training_model_id=training_model_id or model_id,
+                training_supported=False,
+                training_note=_QWEN3_5_6_INFERENCE_NOTE,
+                model_line=model_line,
+            )
+        )
+
     entries.sort(key=_model_sort_key)
     return entries
 
@@ -346,7 +406,13 @@ def _infer_qwen_size_variant(model_id: str) -> tuple[Optional[str], Optional[str
         basename,
     )
     if not match:
-        return None, None
+        match = re.search(
+            r"Qwen3\.[56]-(?P<size>4B|9B|27B|35B-A3B)",
+            basename,
+        )
+        if not match:
+            return None, None
+        return match.group("size"), "Vision"
     return match.group("size"), match.group("variant")
 
 
@@ -378,10 +444,15 @@ def qwen_transformers_metadata_for_model(model_id: str) -> Dict[str, Any]:
     quantized = quant_backend != "none"
     abliterated = "abliterated" in raw.lower()
     training_model_id = resolve_qwen_training_model_id(raw)
+    model_line = "Qwen3-VL"
+    if "qwen3.6" in raw.lower():
+        model_line = "Qwen3.6"
+    elif "qwen3.5" in raw.lower():
+        model_line = "Qwen3.5"
     label_parts = ["CUDA"]
     if owner and owner not in {"huggingface", "Qwen"}:
         label_parts.append(owner)
-    label_parts.append("Qwen3-VL")
+    label_parts.append(model_line)
     if size:
         label_parts.append(size)
     if variant:
@@ -418,10 +489,11 @@ def qwen_transformers_metadata_for_model(model_id: str) -> Dict[str, Any]:
         "training_model_id": training_model_id,
         "training_note": training_note,
         "dataset_context": (
-            "Abliterated Qwen3-VL Transformer checkpoint for CUDA/CPU inference and adapter training."
+            f"Abliterated {model_line} Transformer checkpoint for CUDA/CPU inference and adapter training."
             if abliterated
-            else "Qwen3-VL Transformer checkpoint for CUDA/CPU inference and adapter training."
+            else f"{model_line} Transformer checkpoint for CUDA/CPU inference and adapter training."
         ),
+        "model_line": model_line,
     }
 
 
@@ -487,6 +559,10 @@ def _infer_official_base_from_quantized_name(model_id: str) -> Optional[str]:
     size, variant = _infer_qwen_size_variant(model_id)
     if not size or not variant:
         return None
+    basename = str(model_id or "").rsplit("/", 1)[-1]
+    generation_match = re.search(r"Qwen3\.(?P<version>[56])-", basename)
+    if generation_match:
+        return f"Qwen/Qwen3.{generation_match.group('version')}-{size}"
     return _official_model_id(size, variant)
 
 

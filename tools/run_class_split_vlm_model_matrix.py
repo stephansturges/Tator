@@ -28,6 +28,10 @@ MODEL_PRESETS = {
         "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit",
         "mlx-community/Qwen3.6-35B-A3B-4bit",
     ],
+    "empero": [
+        "empero-ai/Qwable-9B-Claude-Fable-5",
+        "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit",
+    ],
     "all-mlx": [
         "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit",
         "mlx-community/Qwen3.6-35B-A3B-4bit",

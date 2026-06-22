@@ -2,10 +2,11 @@
 #
 # In the full .venv-macos environment, install this file with --no-deps after
 # requirements-macos-inference.txt. mlx-vlm 0.6.1 adds Qwen3.5/3.6 MoE support.
-# The backend keeps Transformers 4.57 for the rest of the stack. Use
-# requirements-qwen36-swir.txt for the isolated Transformers 5.x Qwen3.6
-# / SwiReasoning research runtime.
+# Keep this as a package layer, not a separate Python environment. The main
+# macOS backend now uses Transformers 5.x; install mlx-vlm with --no-deps so it
+# does not replace the SAHI/SAM3-compatible OpenCV/NumPy line.
 
 mlx>=0.31,<1.0
 mlx-lm==0.31.3
+mlx-audio>=0.4.3,<0.5
 mlx-vlm==0.6.1

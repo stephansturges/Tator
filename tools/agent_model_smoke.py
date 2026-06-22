@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Metadata smoke for inference-only agent model candidates.
 
-This intentionally avoids downloading full weights by default. Use the isolated
-`.venv-qwen36-swir` environment for Transformers 5.x model types.
+This intentionally avoids downloading full weights by default. The macOS backend
+environment is expected to run Transformers 5.x so Qwen3.5/3.6 configs resolve
+without a separate smoke environment.
 """
 
 from __future__ import annotations

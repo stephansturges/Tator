@@ -17,7 +17,7 @@ json5>=0.9,<1.0
 omegaconf>=2.3,<3.0
 tiktoken>=0.6,<1.0
 ultralytics>=8.2,<9.0
-rfdetr>=1.0,<2.0
+rfdetr>=1.8.1,<2.0
 xgboost>=2.0,<3.0
 
 # Torch (select the build matching your CUDA/CPU environment)
@@ -47,8 +47,9 @@ iopath>=0.1.10,<0.1.11
 tensorboard>=2.14,<3.0
 
 # Qwen 3 visual-language (optional but enabled by default)
-transformers>=4.57,<5.0
+transformers>=5.7,<6.0
 accelerate>=1.0,<2.0
+huggingface-hub>=1.5,<2.0
 qwen-vl-utils>=0.0.8
 safetensors>=0.4,<0.5
 qwen-agent>=0.0.31,<1.0

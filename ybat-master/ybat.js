@@ -6991,6 +6991,7 @@ const sam3TrainState = {
         if (typeof options.onSessionStart === "function") {
             options.onSessionStart({ sessionId, abortController });
         }
+        const statusPrefix = String(options.statusPrefix || "active dataset").trim() || "active dataset";
         const batchSizeRaw = Number(options.chunkSize || options.batchSize || 48);
         const batchSize = Math.max(1, Math.min(96, Number.isFinite(batchSizeRaw) ? Math.round(batchSizeRaw) : 48));
         let completed = 0;
@@ -7014,7 +7015,7 @@ const sam3TrainState = {
                 batch.forEach((row) => {
                     formData.append("files", row.imageRecord.meta, row.safeName);
                 });
-                reportProgress(`Uploading active dataset ${completed}/${total} images ...`);
+                reportProgress(`Uploading ${statusPrefix} ${completed}/${total} images ...`);
                 const resp = await fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(sessionId)}/batch`, {
                     method: "POST",
                     body: formData,
@@ -7025,7 +7026,7 @@ const sam3TrainState = {
                     throw new Error(parseApiError(detail, `HTTP ${resp.status}`));
                 }
                 completed += batch.length;
-                reportProgress(`Uploaded active dataset ${completed}/${total} images ...`);
+                reportProgress(`Uploaded ${statusPrefix} ${completed}/${total} images ...`);
             }
             const finalizeResp = await fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(sessionId)}/finalize`, {
                 method: "POST",
@@ -38960,7 +38961,19 @@ async function cancelRfDetrTrainingJobRequest() {
         refreshDataIngestionControls();
     }
 
-    async function buildClassSplitActiveWorkspaceForm(request) {
+    function publicClassSplitActiveWorkspaceRows(rows) {
+        return (Array.isArray(rows) ? rows : []).map((row) => ({
+            split: row.split,
+            upload_name: row.upload_name,
+            image_relpath: row.image_relpath,
+            image_name: row.image_name,
+            frontend_image_key: row.frontend_image_key,
+            label_lines: row.label_lines,
+            text_label: row.text_label,
+        }));
+    }
+
+    function buildClassSplitActiveWorkspaceSnapshot(request, { onProgress = null } = {}) {
         captureCurrentAnnotationDirtyState();
         const labelmap = getClassSplitLabelmapEntries();
         if (!labelmap.length) {
@@ -38968,24 +38981,43 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const scope = String(request.analysis_scope || "selected_class");
         const className = String(request.class_name || "").trim();
-        const formData = new FormData();
         const rows = [];
         const usedNames = new Set();
         let objectCount = 0;
-        for (const imageKey of getClassSplitImageKeys()) {
+        const imageKeys = getClassSplitImageKeys();
+        const totalImages = imageKeys.length;
+        const reportSnapshotProgress = (processed, message = "") => {
+            if (typeof onProgress !== "function") {
+                return;
+            }
+            const progress = totalImages > 0 ? Math.max(0, Math.min(1, processed / totalImages)) : 0;
+            onProgress({
+                progress,
+                processed,
+                total: totalImages,
+                imageCount: rows.length,
+                objectCount,
+                message: message || `Snapshot-packaging ${processed}/${totalImages} active images (${objectCount} objects matched) ...`,
+            });
+        };
+        reportSnapshotProgress(0, `Snapshot-packaging 0/${totalImages} active images ...`);
+        let processedImages = 0;
+        for (const imageKey of imageKeys) {
+            processedImages += 1;
             const imageRecord = images?.[imageKey];
             if (!imageRecord) {
+                reportSnapshotProgress(processedImages);
                 continue;
             }
             const labelLines = getClassSplitActiveLabelLines(imageKey)
                 .filter((line) => classSplitLineMatchesScope(line, scope, className, labelmap));
             if (!labelLines.length) {
+                reportSnapshotProgress(processedImages);
                 continue;
             }
             const uploadName = makeClassSplitUploadName(imageKey, usedNames);
-            const blob = await getClassSplitImageBlob(imageKey, imageRecord);
-            formData.append("files", blob, uploadName);
             rows.push({
+                _image_key: imageKey,
                 split: "train",
                 upload_name: uploadName,
                 image_relpath: uploadName,
@@ -38995,6 +39027,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 text_label: String(textLabels?.[imageKey] || ""),
             });
             objectCount += labelLines.length;
+            reportSnapshotProgress(processedImages);
         }
         if (!rows.length || objectCount <= 0) {
             throw new Error("No labeled objects in the active Label Images workspace match the selected scope.");
@@ -39006,8 +39039,198 @@ async function cancelRfDetrTrainingJobRequest() {
             request,
             yolo_layout: "flat",
         };
-        formData.append("manifest", JSON.stringify(manifest));
-        return { formData, imageCount: rows.length, objectCount };
+        reportSnapshotProgress(totalImages, `Snapshot packaged ${rows.length}/${totalImages} images and ${objectCount} objects.`);
+        return { manifest, rows, imageCount: rows.length, objectCount };
+    }
+
+    async function buildClassSplitActiveWorkspaceFormFromSnapshot(snapshot) {
+        const formData = new FormData();
+        for (const row of snapshot.rows) {
+            const imageKey = row._image_key || row.frontend_image_key;
+            const imageRecord = images?.[imageKey];
+            if (!imageRecord) {
+                throw new Error(`Image is not loaded in this session: ${imageKey}`);
+            }
+            const blob = await getClassSplitImageBlob(imageKey, imageRecord);
+            formData.append("files", blob, row.upload_name);
+        }
+        formData.append("manifest", JSON.stringify({
+            ...snapshot.manifest,
+            images: publicClassSplitActiveWorkspaceRows(snapshot.rows),
+        }));
+        return { formData, imageCount: snapshot.imageCount, objectCount: snapshot.objectCount };
+    }
+
+    async function buildClassSplitActiveWorkspaceForm(request, { onProgress = null } = {}) {
+        const snapshot = buildClassSplitActiveWorkspaceSnapshot(request, { onProgress });
+        return buildClassSplitActiveWorkspaceFormFromSnapshot(snapshot);
+    }
+
+    function postClassSplitActiveWorkspaceForm(formData, { signal = null, onProgress = null } = {}) {
+        return new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            let settled = false;
+            const cleanup = () => {
+                if (signal) {
+                    signal.removeEventListener("abort", handleAbort);
+                }
+            };
+            const settleReject = (error) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                cleanup();
+                reject(error);
+            };
+            const handleAbort = () => {
+                try {
+                    xhr.abort();
+                } catch (_) {
+                    // Ignore abort races; the rejection below carries the useful state.
+                }
+                settleReject(new DOMException("Class Split upload cancelled.", "AbortError"));
+            };
+            if (signal?.aborted) {
+                handleAbort();
+                return;
+            }
+            if (signal) {
+                signal.addEventListener("abort", handleAbort, { once: true });
+            }
+            xhr.open("POST", `${API_ROOT}/class_analysis/jobs/active_workspace`);
+            xhr.upload.onprogress = (event) => {
+                if (typeof onProgress !== "function") {
+                    return;
+                }
+                if (event.lengthComputable && event.total > 0) {
+                    onProgress({
+                        progress: Math.max(0, Math.min(1, event.loaded / event.total)),
+                        loaded: event.loaded,
+                        total: event.total,
+                        message: `Snapshot-uploading ${Math.round((event.loaded / event.total) * 100)}% ...`,
+                    });
+                } else {
+                    onProgress({
+                        progress: null,
+                        loaded: event.loaded || 0,
+                        total: 0,
+                        message: "Snapshot-uploading active workspace ...",
+                    });
+                }
+            };
+            xhr.onload = () => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                cleanup();
+                const text = String(xhr.responseText || "");
+                resolve({
+                    ok: xhr.status >= 200 && xhr.status < 300,
+                    status: xhr.status,
+                    text: async () => text,
+                });
+            };
+            xhr.onerror = () => settleReject(new Error("Class Split active workspace upload failed."));
+            xhr.onabort = () => settleReject(new DOMException("Class Split upload cancelled.", "AbortError"));
+            xhr.send(formData);
+        });
+    }
+
+    async function postClassSplitActiveWorkspaceChunked(snapshot, { signal = null, onProgress = null } = {}) {
+        const total = Math.max(0, Array.isArray(snapshot?.rows) ? snapshot.rows.length : 0);
+        if (!total) {
+            throw new Error("No active workspace images to upload.");
+        }
+        const report = (completed, message) => {
+            if (typeof onProgress !== "function") {
+                return;
+            }
+            const progress = total > 0 ? Math.max(0, Math.min(1, completed / total)) : 0;
+            onProgress({
+                progress,
+                completed,
+                total,
+                message: message || `Snapshot-uploading ${Math.round(progress * 100)}% (${completed}/${total} images) ...`,
+            });
+        };
+        const startResp = await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace/upload_session/start`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                ...snapshot.manifest,
+                images: [],
+                total_images: total,
+            }),
+            signal,
+        });
+        const startDetail = await startResp.text();
+        if (!startResp.ok) {
+            throw new Error(parseApiError(startDetail, `HTTP ${startResp.status}`));
+        }
+        const startData = parseJsonObjectSafe(startDetail, {});
+        const sessionId = String(startData.session_id || startData.job_id || "").trim();
+        if (!sessionId) {
+            throw new Error("Class Split active workspace upload session did not return an id.");
+        }
+        classSplitState.activeUploadSessionId = sessionId;
+        refreshClassSplitControls();
+        let completed = 0;
+        try {
+            const batchSize = 32;
+            for (let start = 0; start < snapshot.rows.length; start += batchSize) {
+                const rows = snapshot.rows.slice(start, start + batchSize);
+                const formData = new FormData();
+                formData.append("manifest", JSON.stringify({ images: publicClassSplitActiveWorkspaceRows(rows) }));
+                for (const row of rows) {
+                    const imageKey = row._image_key || row.frontend_image_key;
+                    const imageRecord = images?.[imageKey];
+                    if (!imageRecord) {
+                        throw new Error(`Image is not loaded in this session: ${imageKey}`);
+                    }
+                    const blob = await getClassSplitImageBlob(imageKey, imageRecord);
+                    formData.append("files", blob, row.upload_name);
+                }
+                report(completed, `Snapshot-uploading ${Math.round((completed / total) * 100)}% (${completed}/${total} images) ...`);
+                const batchResp = await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(sessionId)}/batch`, {
+                    method: "POST",
+                    body: formData,
+                    signal,
+                });
+                const batchDetail = await batchResp.text();
+                if (!batchResp.ok) {
+                    throw new Error(parseApiError(batchDetail, `HTTP ${batchResp.status}`));
+                }
+                completed += rows.length;
+                report(completed);
+            }
+            const finalizeResp = await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(sessionId)}/finalize`, {
+                method: "POST",
+                signal,
+            });
+            const finalizeDetail = await finalizeResp.text();
+            if (!finalizeResp.ok) {
+                throw new Error(parseApiError(finalizeDetail, `HTTP ${finalizeResp.status}`));
+            }
+            return {
+                ok: true,
+                status: finalizeResp.status,
+                text: async () => finalizeDetail,
+            };
+        } catch (error) {
+            try {
+                await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" });
+            } catch (cancelError) {
+                console.warn("Class Split active workspace upload cleanup failed", cancelError);
+            }
+            throw error;
+        } finally {
+            if (classSplitState.activeUploadSessionId === sessionId) {
+                classSplitState.activeUploadSessionId = "";
+                refreshClassSplitControls();
+            }
+        }
     }
 
     function getClassSplitServerSourceHandle() {
@@ -39605,43 +39828,43 @@ async function cancelRfDetrTrainingJobRequest() {
         if (classSplitElements.projectionMinDist) {
             classSplitElements.projectionMinDist.disabled = !available || classSplitState.active || projectionChoice !== "umap";
         }
-	        refreshClassSplitProjectionHint();
-            setButtonDisabled(classSplitElements.qwenReviewGlossaryReset, classSplitState.qwenReviewGlossaryLoadInFlight);
-            setButtonDisabled(
-                classSplitElements.qwenReviewGlossarySave,
-                classSplitState.qwenReviewGlossarySaveInFlight || !getClassSplitQwenReviewDatasetId()
-            );
-            if (classSplitElements.qwenReviewGlossary && !classSplitState.qwenReviewGlossaryDirty) {
-                const reviewContextKey = getClassSplitQwenReviewDatasetId()
-                    || `workspace:${classSplitHashValues(loadedClassList || [])}`;
-                if (
-                    reviewContextKey
-                    && classSplitState.qwenReviewGlossaryLoadedFor !== reviewContextKey
-                    && !classSplitState.qwenReviewGlossaryLoadInFlight
-                ) {
-                    loadClassSplitQwenReviewGlossary().catch((error) => {
-                        console.warn("Class Split review glossary refresh failed", error);
-                    });
-                }
+        refreshClassSplitProjectionHint();
+        setButtonDisabled(classSplitElements.qwenReviewGlossaryReset, classSplitState.qwenReviewGlossaryLoadInFlight);
+        setButtonDisabled(
+            classSplitElements.qwenReviewGlossarySave,
+            classSplitState.qwenReviewGlossarySaveInFlight || !getClassSplitQwenReviewDatasetId()
+        );
+        if (classSplitElements.qwenReviewGlossary && !classSplitState.qwenReviewGlossaryDirty) {
+            const reviewContextKey = getClassSplitQwenReviewDatasetId()
+                || `workspace:${classSplitHashValues(loadedClassList || [])}`;
+            if (
+                reviewContextKey
+                && classSplitState.qwenReviewGlossaryLoadedFor !== reviewContextKey
+                && !classSplitState.qwenReviewGlossaryLoadInFlight
+            ) {
+                loadClassSplitQwenReviewGlossary().catch((error) => {
+                    console.warn("Class Split review glossary refresh failed", error);
+                });
             }
-		        setButtonDisabled(classSplitElements.runButton, !canRun);
-	        setButtonDisabled(
-	            classSplitElements.cancelButton,
-	            !classSplitState.active
-	                || (!classSplitState.currentJobId && !classSplitState.activeUploadSessionId && !classSplitState.activeUploadAbortController)
-	        );
-	        setButtonDisabled(classSplitElements.rerunButton, classSplitState.active || !classSplitState.lastRequest);
-            setButtonDisabled(classSplitElements.mobilePush, classSplitState.active || !classSplitState.result);
-            setButtonDisabled(
-                classSplitElements.mobileSync,
-                classSplitState.active
-                    || !classSplitState.result
-                    || !classSplitState.mobileReviewSessionId
-                    || classSplitState.mobileReviewTargetMode !== "desktop_workspace"
-            );
-	        refreshClassSplitClusterControls();
-	        refreshClassSplitDatasetAnalysisControls();
-	    }
+        }
+        setButtonDisabled(classSplitElements.runButton, !canRun);
+        setButtonDisabled(
+            classSplitElements.cancelButton,
+            !classSplitState.active
+                || (!classSplitState.currentJobId && !classSplitState.activeUploadSessionId && !classSplitState.activeUploadAbortController)
+        );
+        setButtonDisabled(classSplitElements.rerunButton, classSplitState.active || !classSplitState.lastRequest);
+        setButtonDisabled(classSplitElements.mobilePush, classSplitState.active || !classSplitState.result);
+        setButtonDisabled(
+            classSplitElements.mobileSync,
+            classSplitState.active
+                || !classSplitState.result
+                || !classSplitState.mobileReviewSessionId
+                || classSplitState.mobileReviewTargetMode !== "desktop_workspace"
+        );
+        refreshClassSplitClusterControls();
+        refreshClassSplitDatasetAnalysisControls();
+    }
 
     function buildClassSplitRequest() {
         const stats = getClassSplitActiveWorkspaceStats();
@@ -39789,6 +40012,7 @@ async function cancelRfDetrTrainingJobRequest() {
             await ensureClassSplitSnapshotClean("Class Split analysis");
             previousReviewState = snapshotClassSplitReviewState();
             stopClassSplitClusterPoll();
+            classSplitState.pollRequestId += 1;
             classSplitState.clusterSearchRequestId += 1;
             classSplitState.active = true;
             classSplitState.currentJobId = "";
@@ -39816,7 +40040,15 @@ async function cancelRfDetrTrainingJobRequest() {
             renderClassSplitProgress({ progress: 0, message: "Preparing Class Split analysis ..." });
             refreshClassSplitControls();
             classSplitState.lastRequest = { ...request };
-            const sourceHandle = await getClassSplitServerAnalysisSourceHandle();
+            const sourceHandle = await getClassSplitServerAnalysisSourceHandle(request, {
+                onProgress: ({ progress = 0, message = "" } = {}) => {
+                    const pct = Math.max(0, Math.min(1, Number(progress) || 0));
+                    renderClassSplitProgress({
+                        progress: 0.01 + (0.94 * pct),
+                        message: message || "Uploading active workspace for Class Split analysis ...",
+                    });
+                },
+            });
             classSplitState.currentSourceHandle = sourceHandle ? { ...sourceHandle } : null;
             let resp;
             if (sourceHandle) {
@@ -39831,7 +40063,7 @@ async function cancelRfDetrTrainingJobRequest() {
                     payload.session_id = sourceHandle.sessionId;
                 }
                 renderClassSplitProgress({
-                    progress: Math.max(0.01, sourceHandle.uploadedActiveWorkspace ? 0.2 : 0.01),
+                    progress: Math.max(0.01, sourceHandle.uploadedActiveWorkspace ? 0.96 : 0.01),
                     message: `Starting backend ${sourceHandle.sourceMode} analysis for ${sourceHandle.objectCount} objects from ${sourceHandle.imageCount} images ...`,
                 });
                 resp = await fetch(`${API_ROOT}/class_analysis/jobs`, {
@@ -39841,20 +40073,51 @@ async function cancelRfDetrTrainingJobRequest() {
                 });
             } else {
                 renderClassSplitProgress({ progress: 0, message: "Packaging active labels and images ..." });
-                const workspace = await buildClassSplitActiveWorkspaceForm(request);
+                const workspace = buildClassSplitActiveWorkspaceSnapshot(request, {
+                    onProgress: ({ progress = 0, message = "" } = {}) => {
+                        const snapshotProgress = Math.max(0, Math.min(1, Number(progress) || 0));
+                        renderClassSplitProgress({
+                            progress: 0.01 + (0.24 * snapshotProgress),
+                            message: message || "Snapshot-packaging active workspace ...",
+                        });
+                    },
+                });
                 renderClassSplitProgress({
-                    progress: 0.01,
+                    progress: 0.25,
                     message: `Snapshot-uploading ${workspace.objectCount} objects from ${workspace.imageCount} active images ...`,
                 });
                 const uploadAbortController = new AbortController();
                 classSplitState.activeUploadAbortController = uploadAbortController;
                 refreshClassSplitControls();
                 try {
-                    resp = await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace`, {
-                        method: "POST",
-                        body: workspace.formData,
-                        signal: uploadAbortController.signal,
-                    });
+                    const renderUploadProgress = ({ progress = null, message = "" } = {}) => {
+                        const uploadProgress = Number.isFinite(Number(progress))
+                            ? Math.max(0, Math.min(1, Number(progress)))
+                            : 0;
+                        renderClassSplitProgress({
+                            progress: Number.isFinite(Number(progress))
+                                ? 0.25 + (0.70 * uploadProgress)
+                                : 0.25,
+                            message: message || `Snapshot-uploading ${workspace.objectCount} objects from ${workspace.imageCount} active images ...`,
+                        });
+                    };
+                    try {
+                        resp = await postClassSplitActiveWorkspaceChunked(workspace, {
+                            signal: uploadAbortController.signal,
+                            onProgress: renderUploadProgress,
+                        });
+                    } catch (chunkError) {
+                        const message = String(chunkError?.message || chunkError || "");
+                        if (chunkError?.name === "AbortError" || !/(HTTP 404|not found)/i.test(message)) {
+                            throw chunkError;
+                        }
+                        console.warn("Class Split chunked active workspace upload unavailable; falling back to one-shot upload.", chunkError);
+                        const fallback = await buildClassSplitActiveWorkspaceFormFromSnapshot(workspace);
+                        resp = await postClassSplitActiveWorkspaceForm(fallback.formData, {
+                            signal: uploadAbortController.signal,
+                            onProgress: renderUploadProgress,
+                        });
+                    }
                 } finally {
                     if (classSplitState.activeUploadAbortController === uploadAbortController) {
                         classSplitState.activeUploadAbortController = null;
@@ -39953,9 +40216,11 @@ async function cancelRfDetrTrainingJobRequest() {
                     uploadAbortController.abort();
                 }
                 if (uploadSessionId) {
-                    await fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(uploadSessionId)}/cancel`, {
+                    await fetch(`${API_ROOT}/class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(uploadSessionId)}/cancel`, {
                         method: "POST",
-                    });
+                    }).catch(() => fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(uploadSessionId)}/cancel`, {
+                        method: "POST",
+                    }));
                 }
                 setClassSplitJobStatus("Cancelling active workspace upload ...", "warn");
             } catch (error) {

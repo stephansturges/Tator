@@ -1447,16 +1447,31 @@ def test_class_split_explorer_panel_contract():
     assert "classSplitElements.uploadDatasetName" not in js
     assert "CLASS_SPLIT_ACTIVE_WORKSPACE_UPLOADS_STORAGE_KEY" not in js
     assert "Active workspace upload did not return a backend dataset." not in js
+    assert "function uploadClassSplitActiveWorkspaceSource" not in js
+    assert "function buildClassSplitActiveWorkspaceUploadPlan" not in js
     assert 'return getClassSplitServerSourceHandle();' in js
+    assert "function buildClassSplitActiveWorkspaceSnapshot" in js
+    assert "function postClassSplitActiveWorkspaceChunked" in js
+    assert "class_analysis/jobs/active_workspace/upload_session/start" in js
+    assert "class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(sessionId)}/batch" in js
+    assert "class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(sessionId)}/finalize" in js
+    assert "class_analysis/jobs/active_workspace/upload_session/${encodeURIComponent(sessionId)}/cancel" in js
+    assert "publicClassSplitActiveWorkspaceRows" in js
+    assert "frontend_image_key" in js
+    assert 'transport: "chunked"' not in js[js.index("function buildClassSplitActiveWorkspaceSnapshot"):js.index("function getClassSplitServerSourceHandle")]
     assert "const uploadAbortController = new AbortController();" in js
     assert "signal: uploadAbortController.signal" in js
+    assert "function postClassSplitActiveWorkspaceForm" in js
+    assert "xhr.upload.onprogress" in js
+    assert "Snapshot-uploading ${Math.round((event.loaded / event.total) * 100)}%" in js
+    assert "Snapshot-packaging ${processed}/${totalImages} active images" in js
     assert "activeUploadSessionId" in js
     assert 'fetch(`${API_ROOT}/datasets/upload_session/${encodeURIComponent(uploadSessionId)}/cancel`' in js
     assert 'source_mode: sourceHandle.sourceMode' in js
     assert "payload.dataset_id = sourceHandle.datasetId" in js
     assert 'fetch(`${API_ROOT}/class_analysis/jobs`, {' in js
     assert 'headers: { "Content-Type": "application/json" }' in js
-    assert 'fetch(`${API_ROOT}/class_analysis/jobs/active_workspace`' in js
+    assert 'xhr.open("POST", `${API_ROOT}/class_analysis/jobs/active_workspace`)' in js
     assert "window.Plotly.react" in js
     assert "function jumpToClassSplitPoint" in js
     assert "setActiveTab(TAB_LABELING)" in js
@@ -1472,6 +1487,7 @@ def test_class_split_explorer_panel_contract():
     assert 'await ensureClassSplitSnapshotClean("Class Split analysis")' in js
     assert "Class Split analysis is running. The graph will appear when the backend finishes embedding and projection." in js
     assert "startClassSplitAnalysis({ reuseLast: true })" in js
+    assert "classSplitState.pollRequestId += 1;" in js[js.index("async function startClassSplitAnalysis"):js.index("function stopClassSplitPoll")]
     assert "initClassSplitExplorer();" in js
     assert "function renderClassSplitQwenReviewModelOptions" in js
     assert "metadata.inference_supported === false || metadata.vision_inference_supported === false" in js

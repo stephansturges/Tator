@@ -14623,6 +14623,21 @@ class ClassAnalysisJob:
 
 
 @dataclass
+class ClassAnalysisActiveWorkspaceUploadSession:
+    session_id: str
+    root_dir: Path
+    workspace_dir: Path
+    images_dir: Path
+    manifest_payload: Dict[str, Any] = field(default_factory=dict)
+    saved_uploads: Dict[str, str] = field(default_factory=dict)
+    rows: List[Dict[str, Any]] = field(default_factory=list)
+    bytes_written: int = 0
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+
+@dataclass
 class ClassAnalysisClusterJob:
     job_id: str
     parent_job_id: str
@@ -14718,6 +14733,8 @@ AUTO_LABEL_JOBS: Dict[str, AutoLabelJob] = {}
 AUTO_LABEL_JOBS_LOCK = threading.Lock()
 CLASS_ANALYSIS_JOBS: Dict[str, ClassAnalysisJob] = {}
 CLASS_ANALYSIS_JOBS_LOCK = threading.Lock()
+CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS: Dict[str, ClassAnalysisActiveWorkspaceUploadSession] = {}
+CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS_LOCK = threading.Lock()
 CLASS_ANALYSIS_CLUSTER_JOBS: Dict[str, ClassAnalysisClusterJob] = {}
 CLASS_ANALYSIS_CLUSTER_JOBS_LOCK = threading.Lock()
 CLASS_ANALYSIS_QWEN_REVIEW_JOBS: Dict[str, ClassAnalysisQwenReviewJob] = {}
@@ -19897,7 +19914,122 @@ def _class_analysis_public_result(result: Dict[str, Any]) -> Dict[str, Any]:
             [mode for mode in CLASS_ANALYSIS_PCA_PROJECTION_MODES if mode in coordinates],
         )
     public["projection_options"] = projection_options
+    points = public.get("points")
+    if isinstance(points, list):
+        public["points"] = [
+            _class_analysis_public_point(point)
+            for point in points
+            if isinstance(point, dict)
+        ]
     return public
+
+
+_CLASS_ANALYSIS_PUBLIC_POINT_FIELDS = {
+    "point_id",
+    "split",
+    "image_relpath",
+    "frontend_image_key",
+    "class_id",
+    "class_name",
+    "bbox_xyxy",
+    "width",
+    "height",
+    "projection",
+    "cluster_id",
+    "class_cluster_id",
+    "_subclass_cluster_id",
+    "outlier_score",
+    "same_class_neighbor_ratio",
+    "top_other_neighbor_ratio",
+    "suggested_neighbor_class",
+    "embedding_wrong_class_suspicion",
+    "wrong_class_suspicion",
+    "wrong_class_review_reason",
+    "is_wrong_class_candidate",
+    "is_close_overlap_candidate",
+    "is_dual_bbox_conflict",
+    "dual_bbox_conflict",
+    "review_signals",
+    "dataset_image_value_score",
+    "dataset_image_value_rank",
+}
+
+_CLASS_ANALYSIS_PUBLIC_EMPTY_DEFAULT_POINT_FIELDS = {
+    "suggested_neighbor_class",
+    "embedding_wrong_class_suspicion",
+    "wrong_class_suspicion",
+    "top_other_neighbor_ratio",
+    "wrong_class_review_reason",
+    "is_wrong_class_candidate",
+    "is_close_overlap_candidate",
+    "is_dual_bbox_conflict",
+    "dual_bbox_conflict",
+    "review_signals",
+    "dataset_image_value_score",
+    "dataset_image_value_rank",
+}
+
+_CLASS_ANALYSIS_PUBLIC_REVIEW_POINT_FIELDS = {
+    "neighbor_ids",
+    "neighbor_distances",
+    "neighbor_class_counts",
+    "close_overlap_matches",
+    "dual_bbox_conflicts",
+}
+
+
+def _class_analysis_public_point(point: Dict[str, Any]) -> Dict[str, Any]:
+    public = {}
+    for key, value in point.items():
+        if key not in _CLASS_ANALYSIS_PUBLIC_POINT_FIELDS:
+            continue
+        if key in _CLASS_ANALYSIS_PUBLIC_EMPTY_DEFAULT_POINT_FIELDS and _class_analysis_public_point_empty_default(value):
+            continue
+        public[key] = _class_analysis_public_point_value(key, value)
+    review_signals = public.get("review_signals")
+    is_review_point = bool(public.get("is_wrong_class_candidate")) or (
+        isinstance(review_signals, list) and bool(review_signals)
+    )
+    if is_review_point:
+        for key in _CLASS_ANALYSIS_PUBLIC_REVIEW_POINT_FIELDS:
+            if key in point:
+                public[key] = point[key]
+    return public
+
+
+def _class_analysis_public_point_empty_default(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value) == 0.0
+    if isinstance(value, (list, tuple, dict, set)):
+        return len(value) == 0
+    return False
+
+
+def _class_analysis_public_point_number(value: Any, *, ndigits: int = 6) -> Any:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    if not math.isfinite(number):
+        return value
+    rounded = round(number, ndigits)
+    return int(rounded) if float(rounded).is_integer() else rounded
+
+
+def _class_analysis_public_point_value(key: str, value: Any) -> Any:
+    if key == "projection" and isinstance(value, (list, tuple)):
+        return [_class_analysis_public_point_number(item, ndigits=6) for item in value[:2]]
+    if key == "bbox_xyxy" and isinstance(value, (list, tuple)):
+        return [_class_analysis_public_point_number(item, ndigits=3) for item in value[:4]]
+    if isinstance(value, (float, np.floating)):
+        return _class_analysis_public_point_number(value, ndigits=6)
+    return value
 
 
 def _class_analysis_write_jpeg(
@@ -21703,6 +21835,166 @@ def create_class_analysis_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     return _enqueue_class_analysis_job(request_payload)
 
 
+def _class_analysis_active_workspace_labelmap(manifest_payload: Dict[str, Any]) -> List[str]:
+    return [
+        str(name or "").strip()
+        for name in (manifest_payload.get("labelmap") or [])
+        if str(name or "").strip()
+    ]
+
+
+async def _class_analysis_store_active_workspace_uploads(
+    files: List[UploadFile],
+    *,
+    workspace_dir: Path,
+    images_dir: Path,
+    saved_uploads: Dict[str, str],
+    total_written: int,
+) -> int:
+    for upload in files or []:
+        original_name = str(upload.filename or "").strip()
+        if not original_name:
+            continue
+        safe_rel = _class_analysis_safe_relpath(original_name)
+        safe_name = safe_rel.as_posix()
+        if safe_name in saved_uploads:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_duplicate_upload")
+        target = images_dir / safe_rel
+        target_path = _class_analysis_prepare_write_path(target, workspace_dir)
+        if target_path is None:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_path_invalid")
+        tmp_target_path = _class_analysis_prepare_write_path(
+            target_path.with_suffix(f"{target_path.suffix}.{uuid.uuid4().hex}.tmp"),
+            workspace_dir,
+        )
+        if tmp_target_path is None:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_path_invalid")
+        size = 0
+        fd: Optional[int] = None
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(tmp_target_path, flags, 0o644)
+            with os.fdopen(fd, "wb") as handle:
+                fd = None
+                while True:
+                    chunk = await upload.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    total_written += len(chunk)
+                    if CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES and size > CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES:
+                        raise HTTPException(
+                            status_code=HTTP_413_CONTENT_TOO_LARGE,
+                            detail="active_workspace_upload_too_large",
+                        )
+                    if (
+                        CLASS_ANALYSIS_ACTIVE_UPLOAD_QUOTA_BYTES
+                        and total_written > CLASS_ANALYSIS_ACTIVE_UPLOAD_QUOTA_BYTES
+                    ):
+                        raise HTTPException(
+                            status_code=HTTP_413_CONTENT_TOO_LARGE,
+                            detail="active_workspace_upload_quota_exceeded",
+                        )
+                    handle.write(chunk)
+            if size <= 0:
+                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_empty_upload")
+            os.replace(tmp_target_path, target_path)
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if tmp_target_path.exists() or tmp_target_path.is_symlink():
+                tmp_target_path.unlink(missing_ok=True)
+            close_fn = getattr(upload, "close", None)
+            if callable(close_fn):
+                close_result = close_fn()
+                if hasattr(close_result, "__await__"):
+                    await close_result
+        saved_uploads[original_name] = safe_name
+        saved_uploads[safe_name] = safe_name
+    return total_written
+
+
+def _class_analysis_active_workspace_rows(
+    manifest_payload: Dict[str, Any],
+    saved_uploads: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    uploaded_names = set(saved_uploads.values())
+    for row in list(manifest_payload.get("images") or manifest_payload.get("rows") or []):
+        if not isinstance(row, dict):
+            continue
+        source_rel = str(row.get("upload_name") or row.get("image_relpath") or row.get("image_name") or "").strip()
+        if not source_rel:
+            continue
+        safe_rel = _class_analysis_safe_relpath(saved_uploads.get(source_rel) or source_rel)
+        safe_name = safe_rel.as_posix()
+        if safe_name not in uploaded_names:
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_image_upload_missing")
+        label_lines = [
+            str(line or "").strip()
+            for line in (row.get("label_lines") or [])
+            if str(line or "").strip()
+        ]
+        if not label_lines:
+            continue
+        rows.append(
+            {
+                "split": _annotation_normalise_split(row.get("split") or "train"),
+                "image_relpath": safe_name,
+                "image_name": str(row.get("image_name") or row.get("frontend_image_key") or safe_name),
+                "frontend_image_key": str(row.get("frontend_image_key") or row.get("image_key") or row.get("image_name") or ""),
+                "label_lines": label_lines,
+                "text_label": str(row.get("text_label") or ""),
+            }
+        )
+    return rows
+
+
+def _class_analysis_enqueue_active_workspace(
+    *,
+    job_id: str,
+    workspace_dir: Path,
+    manifest_payload: Dict[str, Any],
+    rows: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    if not rows:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_no_labeled_rows")
+    labelmap = _class_analysis_active_workspace_labelmap(manifest_payload)
+    if not labelmap:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_labelmap_required")
+    manifest_out = {
+        "dataset_label": str(manifest_payload.get("dataset_label") or "Active Label Images workspace"),
+        "labelmap": labelmap,
+        "images": rows,
+        "yolo_layout": "flat",
+        "source_mode": "active_workspace",
+    }
+    manifest_path = workspace_dir / "manifest.json"
+    _class_analysis_write_json(manifest_path, workspace_dir, manifest_out)
+    request_options = manifest_payload.get("request") if isinstance(manifest_payload.get("request"), dict) else {}
+    request_payload = _normalize_class_analysis_request(
+        {
+            **request_options,
+            "source_mode": "active_workspace",
+            "workspace_id": job_id,
+            "workspace_dir": str(workspace_dir),
+            "workspace_manifest_path": str(manifest_path),
+            "yolo_layout": "flat",
+            "labelmap": labelmap,
+        }
+    )
+    result = _enqueue_class_analysis_job(request_payload, job_id=job_id)
+    job = CLASS_ANALYSIS_JOBS.get(job_id)
+    if job:
+        _class_analysis_log(job, f"Active workspace snapshot queued with {len(rows)} images.")
+    return result
+
+
 async def create_class_analysis_active_workspace_job(manifest_json: str, files: List[UploadFile]) -> Dict[str, Any]:
     try:
         manifest_payload = json.loads(str(manifest_json or "{}"))
@@ -21711,11 +22003,7 @@ async def create_class_analysis_active_workspace_job(manifest_json: str, files: 
     if not isinstance(manifest_payload, dict):
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_manifest_invalid")
 
-    labelmap = [
-        str(name or "").strip()
-        for name in (manifest_payload.get("labelmap") or [])
-        if str(name or "").strip()
-    ]
+    labelmap = _class_analysis_active_workspace_labelmap(manifest_payload)
     input_rows = list(manifest_payload.get("images") or [])
     if not labelmap:
         raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_labelmap_required")
@@ -21731,137 +22019,131 @@ async def create_class_analysis_active_workspace_job(manifest_json: str, files: 
         images_dir = workspace_dir / "images"
 
         saved_uploads: Dict[str, str] = {}
-        total_written = 0
-        for upload in files or []:
-            original_name = str(upload.filename or "").strip()
-            if not original_name:
-                continue
-            safe_rel = _class_analysis_safe_relpath(original_name)
-            safe_name = safe_rel.as_posix()
-            if safe_name in saved_uploads:
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_duplicate_upload")
-            target = images_dir / safe_rel
-            target_path = _class_analysis_prepare_write_path(target, workspace_dir)
-            if target_path is None:
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_path_invalid")
-            tmp_target_path = _class_analysis_prepare_write_path(
-                target_path.with_suffix(f"{target_path.suffix}.{uuid.uuid4().hex}.tmp"),
-                workspace_dir,
-            )
-            if tmp_target_path is None:
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_path_invalid")
-            size = 0
-            fd: Optional[int] = None
-            try:
-                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                if hasattr(os, "O_NOFOLLOW"):
-                    flags |= os.O_NOFOLLOW
-                fd = os.open(tmp_target_path, flags, 0o644)
-                with os.fdopen(fd, "wb") as handle:
-                    fd = None
-                    while True:
-                        chunk = await upload.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        size += len(chunk)
-                        total_written += len(chunk)
-                        if CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES and size > CLASS_ANALYSIS_ACTIVE_UPLOAD_MAX_BYTES:
-                            raise HTTPException(
-                                status_code=HTTP_413_CONTENT_TOO_LARGE,
-                                detail="active_workspace_upload_too_large",
-                            )
-                        if (
-                            CLASS_ANALYSIS_ACTIVE_UPLOAD_QUOTA_BYTES
-                            and total_written > CLASS_ANALYSIS_ACTIVE_UPLOAD_QUOTA_BYTES
-                        ):
-                            raise HTTPException(
-                                status_code=HTTP_413_CONTENT_TOO_LARGE,
-                                detail="active_workspace_upload_quota_exceeded",
-                            )
-                        handle.write(chunk)
-                if size <= 0:
-                    raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_empty_upload")
-                os.replace(tmp_target_path, target_path)
-            finally:
-                if fd is not None:
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
-                if tmp_target_path.exists() or tmp_target_path.is_symlink():
-                    tmp_target_path.unlink(missing_ok=True)
-                close_fn = getattr(upload, "close", None)
-                if callable(close_fn):
-                    close_result = close_fn()
-                    if hasattr(close_result, "__await__"):
-                        await close_result
-            saved_uploads[original_name] = safe_name
-            saved_uploads[safe_name] = safe_name
-
-        rows: List[Dict[str, Any]] = []
-        uploaded_names = set(saved_uploads.values())
-        for row in input_rows:
-            if not isinstance(row, dict):
-                continue
-            source_rel = str(row.get("upload_name") or row.get("image_relpath") or row.get("image_name") or "").strip()
-            if not source_rel:
-                continue
-            safe_rel = _class_analysis_safe_relpath(saved_uploads.get(source_rel) or source_rel)
-            safe_name = safe_rel.as_posix()
-            if safe_name not in uploaded_names:
-                raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_image_upload_missing")
-            label_lines = [
-                str(line or "").strip()
-                for line in (row.get("label_lines") or [])
-                if str(line or "").strip()
-            ]
-            if not label_lines:
-                continue
-            rows.append(
-                {
-                    "split": _annotation_normalise_split(row.get("split") or "train"),
-                    "image_relpath": safe_name,
-                    "image_name": str(row.get("image_name") or row.get("frontend_image_key") or safe_name),
-                    "frontend_image_key": str(row.get("frontend_image_key") or row.get("image_key") or row.get("image_name") or ""),
-                    "label_lines": label_lines,
-                    "text_label": str(row.get("text_label") or ""),
-                }
-            )
-        if not rows:
-            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_no_labeled_rows")
-
-        manifest_out = {
-            "dataset_label": str(manifest_payload.get("dataset_label") or "Active Label Images workspace"),
-            "labelmap": labelmap,
-            "images": rows,
-            "yolo_layout": "flat",
-            "source_mode": "active_workspace",
-        }
-        manifest_path = workspace_dir / "manifest.json"
-        _class_analysis_write_json(manifest_path, workspace_dir, manifest_out)
-
-        request_options = manifest_payload.get("request") if isinstance(manifest_payload.get("request"), dict) else {}
-        request_payload = _normalize_class_analysis_request(
-            {
-                **request_options,
-                "source_mode": "active_workspace",
-                "workspace_id": job_id,
-                "workspace_dir": str(workspace_dir),
-                "workspace_manifest_path": str(manifest_path),
-                "yolo_layout": "flat",
-                "labelmap": labelmap,
-            }
+        await _class_analysis_store_active_workspace_uploads(
+            files,
+            workspace_dir=workspace_dir,
+            images_dir=images_dir,
+            saved_uploads=saved_uploads,
+            total_written=0,
         )
-        result = _enqueue_class_analysis_job(request_payload, job_id=job_id)
+        rows = _class_analysis_active_workspace_rows(manifest_payload, saved_uploads)
+        result = _class_analysis_enqueue_active_workspace(
+            job_id=job_id,
+            workspace_dir=workspace_dir,
+            manifest_payload=manifest_payload,
+            rows=rows,
+        )
         queued = True
-        job = CLASS_ANALYSIS_JOBS.get(job_id)
-        if job:
-            _class_analysis_log(job, f"Active workspace snapshot queued with {len(rows)} images.")
         return result
     except Exception:
         if not queued and out_dir is not None:
             shutil.rmtree(out_dir, ignore_errors=True)
         raise
+
+
+def start_class_analysis_active_workspace_upload_session(payload: Dict[str, Any]) -> Dict[str, Any]:
+    manifest_payload = dict(payload or {})
+    labelmap = _class_analysis_active_workspace_labelmap(manifest_payload)
+    if not labelmap:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_labelmap_required")
+    job_id = f"ca_{uuid.uuid4().hex[:10]}"
+    out_dir = _class_analysis_job_dir(job_id, create=True)
+    workspace_dir = out_dir / "active_workspace"
+    images_dir = workspace_dir / "images"
+    session = ClassAnalysisActiveWorkspaceUploadSession(
+        session_id=job_id,
+        root_dir=out_dir,
+        workspace_dir=workspace_dir,
+        images_dir=images_dir,
+        manifest_payload=manifest_payload,
+    )
+    with CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS_LOCK:
+        CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS[job_id] = session
+    return {"session_id": job_id, "job_id": job_id}
+
+
+def _get_class_analysis_active_upload_session(session_id: str) -> ClassAnalysisActiveWorkspaceUploadSession:
+    with CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS_LOCK:
+        session = CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS.get(str(session_id or ""))
+    if session is None:
+        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="active_workspace_upload_session_not_found")
+    return session
+
+
+def _acquire_class_analysis_active_upload_session(session: ClassAnalysisActiveWorkspaceUploadSession) -> None:
+    if not session.lock.acquire(blocking=False):
+        raise HTTPException(status_code=HTTP_409_CONFLICT, detail="active_workspace_upload_session_busy")
+
+
+async def batch_class_analysis_active_workspace_upload_session(
+    session_id: str,
+    manifest_json: str,
+    files: List[UploadFile],
+) -> Dict[str, Any]:
+    try:
+        batch_manifest = json.loads(str(manifest_json or "{}"))
+    except Exception as exc:
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_manifest_json_invalid") from exc
+    if not isinstance(batch_manifest, dict) or not isinstance(batch_manifest.get("images"), list):
+        raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_manifest_invalid")
+    session = _get_class_analysis_active_upload_session(session_id)
+    _acquire_class_analysis_active_upload_session(session)
+    try:
+        rows = list(batch_manifest.get("images") or [])
+        if len(rows) != len(files or []):
+            raise HTTPException(status_code=HTTP_400_BAD_REQUEST, detail="active_workspace_batch_mismatch")
+        before = len(session.rows)
+        session.bytes_written = await _class_analysis_store_active_workspace_uploads(
+            files,
+            workspace_dir=session.workspace_dir,
+            images_dir=session.images_dir,
+            saved_uploads=session.saved_uploads,
+            total_written=session.bytes_written,
+        )
+        session.rows.extend(_class_analysis_active_workspace_rows(batch_manifest, session.saved_uploads))
+        session.updated_at = time.time()
+        return {
+            "status": "ok",
+            "session_id": session.session_id,
+            "added": max(0, len(session.rows) - before),
+            "image_count": len(session.rows),
+            "bytes_written": session.bytes_written,
+        }
+    finally:
+        session.lock.release()
+
+
+def finalize_class_analysis_active_workspace_upload_session(session_id: str) -> Dict[str, Any]:
+    session = _get_class_analysis_active_upload_session(session_id)
+    queued = False
+    try:
+        with session.lock:
+            result = _class_analysis_enqueue_active_workspace(
+                job_id=session.session_id,
+                workspace_dir=session.workspace_dir,
+                manifest_payload=session.manifest_payload,
+                rows=session.rows,
+            )
+            queued = True
+        with CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS_LOCK:
+            CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS.pop(session.session_id, None)
+        return result
+    except Exception:
+        if not queued:
+            shutil.rmtree(session.root_dir, ignore_errors=True)
+            with CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS_LOCK:
+                CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS.pop(session.session_id, None)
+        raise
+
+
+def cancel_class_analysis_active_workspace_upload_session(session_id: str) -> Dict[str, Any]:
+    with CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS_LOCK:
+        session = CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS.pop(str(session_id or ""), None)
+    if session is None:
+        return {"status": "missing", "session_id": str(session_id or "")}
+    with session.lock:
+        shutil.rmtree(session.root_dir, ignore_errors=True)
+    return {"status": "cancelled", "session_id": session.session_id}
 
 
 def _get_class_analysis_job(job_id: str) -> ClassAnalysisJob:
@@ -22708,6 +22990,20 @@ def _class_analysis_mobile_review_result(session: ClassAnalysisMobileReviewSessi
     return get_class_analysis_result(session.job_id)
 
 
+def _class_analysis_mobile_review_mutable_result(session: ClassAnalysisMobileReviewSession) -> Dict[str, Any]:
+    job = _get_class_analysis_job(session.job_id)
+    if isinstance(job.result, dict):
+        return job.result
+    result_path = _safe_job_result_json_path(job.result_path, CLASS_ANALYSIS_ROOT)
+    if result_path is not None:
+        result = _load_json_metadata(result_path) or {}
+        if isinstance(result, dict):
+            with CLASS_ANALYSIS_JOBS_LOCK:
+                job.result = result
+            return result
+    raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="result_not_found")
+
+
 def _class_analysis_mobile_points_by_id(result: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     points = result.get("points") if isinstance(result, dict) else []
     return {
@@ -22941,7 +23237,7 @@ def _class_analysis_mobile_record_action(
 
 def class_analysis_mobile_review_action(session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     session = _get_class_analysis_mobile_review_session(session_id)
-    result = _class_analysis_mobile_review_result(session)
+    result = _class_analysis_mobile_review_mutable_result(session)
     points_by_id = _class_analysis_mobile_points_by_id(result)
     action = str(payload.get("action") or "").strip().lower()
     point_id = str(payload.get("point_id") or "").strip()
@@ -56201,6 +56497,10 @@ app.include_router(
         capabilities_fn=_class_analysis_capabilities,
         create_job_fn=create_class_analysis_job,
         create_active_workspace_job_fn=create_class_analysis_active_workspace_job,
+        start_active_workspace_upload_fn=start_class_analysis_active_workspace_upload_session,
+        batch_active_workspace_upload_fn=batch_class_analysis_active_workspace_upload_session,
+        finalize_active_workspace_upload_fn=finalize_class_analysis_active_workspace_upload_session,
+        cancel_active_workspace_upload_fn=cancel_class_analysis_active_workspace_upload_session,
         get_job_fn=get_class_analysis_job,
         get_result_fn=get_class_analysis_result,
         get_projection_fn=get_class_analysis_projection,

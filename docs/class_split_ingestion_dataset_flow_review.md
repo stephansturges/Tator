@@ -193,8 +193,10 @@ Flow checks:
    dataset, UI submits a JSON `/class_analysis/jobs` request that references
    that dataset/session directly. If it is browser-only, UI packages the current
    images and raw label lines into a transient Class Split job workspace through
-   `/class_analysis/jobs/active_workspace`. That workspace exists only under the
-   Class Split job directory and is not registered in Dataset Management.
+   `/class_analysis/jobs/active_workspace/upload_session/*`. That workspace
+   exists only under the Class Split job directory and is not registered in
+   Dataset Management. Older backends can still receive the legacy one-shot
+   `/class_analysis/jobs/active_workspace` post.
 7. Backend embeds object crops, writes thumbnails, points, cluster summary,
    wrong-class candidates, and compact projection metadata.
 8. UI renders the graph, selected crop inspector, likely-wrong panel, report,
@@ -211,7 +213,9 @@ Flow checks:
   Management.
 - The active-workspace upload has its own browser `AbortController`, so the
   Class Split Cancel button remains useful while the browser is still posting
-  the transient multipart snapshot and before a backend job id exists.
+  the transient snapshot and before a backend job id exists. Chunked batches are
+  serialized per upload session; overlapping batches are rejected instead of
+  blocking the event loop.
 - Crop inspector stays at the top of the right stack.
 - Crop previews fit the available inspector and support scroll zoom.
 - Plot lasso supports bulk class reassignment.
@@ -219,9 +223,10 @@ Flow checks:
   colors, selected points, and suspicious marker outlines stay stable after
   clicks, filter changes, and tab switches.
 - Switchable PCA graph coordinates are persisted separately from the public
-  result payload. The public result advertises available coordinate modes; the
-  browser fetches large coordinate arrays from
-  `/class_analysis/jobs/{job_id}/projection/{mode}` only when needed.
+  result payload. The public result advertises available coordinate modes and
+  returns compact point records for plotting and review; the browser fetches
+  large coordinate arrays from `/class_analysis/jobs/{job_id}/projection/{mode}`
+  only when needed.
 - Within-filter PCA requires a selected class or class filter. If the user
   clears the filter in an all-class run, the graph explains why the mode cannot
   overlay all classes instead of rendering an empty or misleading plot.

@@ -14,6 +14,10 @@ def build_class_analysis_router(
     capabilities_fn: Callable[[], Any],
     create_job_fn: Callable[[dict], Any],
     create_active_workspace_job_fn: Callable[[str, list[UploadFile]], Any],
+    start_active_workspace_upload_fn: Callable[[dict], Any],
+    batch_active_workspace_upload_fn: Callable[[str, str, list[UploadFile]], Any],
+    finalize_active_workspace_upload_fn: Callable[[str], Any],
+    cancel_active_workspace_upload_fn: Callable[[str], Any],
     get_job_fn: Callable[[str], Any],
     get_result_fn: Callable[[str], Any],
     get_projection_fn: Callable[[str, str], Any],
@@ -60,6 +64,38 @@ def build_class_analysis_router(
         if inspect.isawaitable(result):
             return await result
         return result
+
+    @router.post("/class_analysis/jobs/active_workspace/upload_session/start")
+    def start_active_workspace_upload_session(payload: dict = Body(default_factory=dict)):  # noqa: B008
+        return start_active_workspace_upload_fn(payload or {})
+
+    @router.post("/class_analysis/jobs/active_workspace/upload_session/{session_id}/batch")
+    async def batch_active_workspace_upload_session(session_id: str, request: Request):
+        form = await request.form(
+            max_files=float("inf"),
+            max_fields=10_000,
+            max_part_size=512 * 1024 * 1024,
+        )
+        manifest = form.get("manifest")
+        if manifest is None or hasattr(manifest, "filename"):
+            raise HTTPException(status_code=400, detail="active_workspace_manifest_required")
+        files = [
+            item
+            for item in form.getlist("files")
+            if hasattr(item, "filename") and hasattr(item, "read")
+        ]
+        result = batch_active_workspace_upload_fn(session_id, str(manifest), files)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    @router.post("/class_analysis/jobs/active_workspace/upload_session/{session_id}/finalize")
+    def finalize_active_workspace_upload_session(session_id: str):
+        return finalize_active_workspace_upload_fn(session_id)
+
+    @router.post("/class_analysis/jobs/active_workspace/upload_session/{session_id}/cancel")
+    def cancel_active_workspace_upload_session(session_id: str):
+        return cancel_active_workspace_upload_fn(session_id)
 
     @router.get("/class_analysis/jobs/{job_id}")
     def get_class_analysis_job(job_id: str):

@@ -9920,7 +9920,75 @@ def test_class_analysis_result_carries_switchable_pca_coordinates():
     public = api._class_analysis_public_result(result)
     assert "coordinates" not in public["projection_options"]
     assert public["projection_options"]["coordinates_available"] == api.CLASS_ANALYSIS_PCA_PROJECTION_MODES
-    assert public["points"][0]["projection"] == pytest.approx(first_point["projection"])
+    assert public["points"][0]["projection"] == pytest.approx(first_point["projection"], abs=1e-6)
+
+
+def test_class_analysis_public_result_strips_non_ui_point_bulk():
+    result = {
+        "summary": {"projection": "pca", "projection_mode": "class_balanced_pca"},
+        "projection_options": {
+            "selected": "class_balanced_pca",
+            "coordinates": {
+                "class_balanced_pca": np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
+            },
+        },
+        "points": [
+            {
+                "point_id": "p0",
+                "class_name": "car",
+                "bbox_xyxy": [0, 0, 10, 10],
+                "projection": [0.0, 1.0],
+                "thumbnail_url": "/thumb/p0",
+                "neighbor_ids": ["p1"],
+                "neighbor_distances": [0.12],
+                "neighbor_class_counts": {"boat": 1},
+                "embedding_views": [{"path": "internal"}],
+                "crop_cache_key": "cache-key",
+                "crop_cache_reused": True,
+                "label_line": "0 0.5 0.5 0.1 0.1",
+                "crop_xyxy": [0, 0, 12, 12],
+                "is_wrong_class_candidate": False,
+                "review_signals": [],
+            },
+            {
+                "point_id": "p1",
+                "class_name": "boat",
+                "bbox_xyxy": [2, 2, 12, 12],
+                "projection": [1.0, 0.0],
+                "thumbnail_url": "/thumb/p1",
+                "neighbor_ids": ["p0"],
+                "neighbor_distances": [0.12],
+                "neighbor_class_counts": {"car": 1},
+                "embedding_views": [{"path": "internal"}],
+                "crop_cache_key": "cache-key-2",
+                "is_wrong_class_candidate": True,
+                "review_signals": ["wrong_class"],
+            },
+        ],
+    }
+
+    public = api._class_analysis_public_result(result)
+
+    assert "coordinates" not in public["projection_options"]
+    assert public["projection_options"]["coordinates_available"] == ["class_balanced_pca"]
+    graph_point = public["points"][0]
+    assert graph_point["point_id"] == "p0"
+    assert graph_point["projection"] == [0.0, 1.0]
+    assert "neighbor_ids" not in graph_point
+    assert "neighbor_distances" not in graph_point
+    assert "neighbor_class_counts" not in graph_point
+    assert "embedding_views" not in graph_point
+    assert "crop_cache_key" not in graph_point
+    assert "crop_cache_reused" not in graph_point
+    assert "label_line" not in graph_point
+    assert "crop_xyxy" not in graph_point
+
+    review_point = public["points"][1]
+    assert review_point["neighbor_ids"] == ["p0"]
+    assert review_point["neighbor_distances"] == [0.12]
+    assert review_point["neighbor_class_counts"] == {"car": 1}
+    assert "embedding_views" not in review_point
+    assert "crop_cache_key" not in review_point
 
 
 def test_class_analysis_umap_fallback_is_labeled_as_global_pca(monkeypatch):
@@ -10399,6 +10467,92 @@ def test_class_analysis_source_reads_active_workspace_manifest(tmp_path, monkeyp
     assert source["dataset_root"] == workspace.resolve()
     assert source["labelmap"] == ["car", "boat"]
     assert source["manifest"]["images"][0]["frontend_image_key"] == "train/original/example.jpg"
+
+
+def test_class_analysis_chunked_active_workspace_preserves_frontend_keys(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", tmp_path)
+    captured = {}
+
+    def fake_enqueue(payload, *, job_id=None):
+        captured["payload"] = payload
+        return {"job_id": job_id}
+
+    monkeypatch.setattr(api, "_enqueue_class_analysis_job", fake_enqueue)
+    start = api.start_class_analysis_active_workspace_upload_session(
+        {
+            "dataset_label": "browser snapshot",
+            "labelmap": ["car"],
+            "request": {"analysis_scope": "all_classes"},
+        }
+    )
+    session_id = start["session_id"]
+    upload = UploadFile(filename="present.jpg", file=BytesIO(b"image-bytes"))
+    batch_manifest = {
+        "images": [
+            {
+                "upload_name": "present.jpg",
+                "image_name": "Display Name.jpg",
+                "frontend_image_key": "train/source/present.jpg",
+                "label_lines": ["0 0.5 0.5 0.2 0.2"],
+            }
+        ]
+    }
+
+    try:
+        batch = asyncio.run(
+            api.batch_class_analysis_active_workspace_upload_session(
+                session_id,
+                json.dumps(batch_manifest),
+                [upload],
+            )
+        )
+        result = api.finalize_class_analysis_active_workspace_upload_session(session_id)
+    finally:
+        api.cancel_class_analysis_active_workspace_upload_session(session_id)
+
+    assert batch["image_count"] == 1
+    assert result == {"job_id": session_id}
+    manifest_path = Path(captured["payload"]["workspace_manifest_path"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["source_mode"] == "active_workspace"
+    assert manifest["images"][0]["frontend_image_key"] == "train/source/present.jpg"
+    assert manifest["images"][0]["image_relpath"] == "present.jpg"
+    assert "dataset_id" not in captured["payload"]
+
+
+def test_class_analysis_chunked_active_workspace_rejects_overlapping_batch(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", tmp_path)
+    start = api.start_class_analysis_active_workspace_upload_session(
+        {
+            "dataset_label": "browser snapshot",
+            "labelmap": ["car"],
+            "request": {"analysis_scope": "all_classes"},
+        }
+    )
+    session_id = start["session_id"]
+    session = api.CLASS_ANALYSIS_ACTIVE_UPLOAD_SESSIONS[session_id]
+    assert session.lock.acquire(blocking=False)
+
+    try:
+        with pytest.raises(api.HTTPException) as exc_info:
+            asyncio.run(
+                api.batch_class_analysis_active_workspace_upload_session(
+                    session_id,
+                    json.dumps({"images": []}),
+                    [],
+                )
+            )
+    finally:
+        session.lock.release()
+        api.cancel_class_analysis_active_workspace_upload_session(session_id)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "active_workspace_upload_session_busy"
 
 
 def test_class_analysis_source_rejects_active_workspace_outside_class_root(

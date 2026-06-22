@@ -2950,6 +2950,91 @@ body.annotation-focus-mode .class-scroll-indicator {
     max-width: 280px;
 }
 
+.class-split-qwen-mechanism {
+    margin-top: 8px;
+    border: 1px solid rgba(14, 165, 233, 0.22);
+    border-radius: 8px;
+    background: rgba(240, 249, 255, 0.48);
+}
+
+.class-split-qwen-mechanism > summary {
+    cursor: pointer;
+    padding: 8px 10px;
+    font-weight: 800;
+}
+
+.class-split-qwen-mechanism__body {
+    display: grid;
+    gap: 8px;
+    padding: 0 10px 10px;
+}
+
+.class-split-qwen-mechanism__steps {
+    margin: 0;
+    padding-left: 20px;
+    color: #0f172a;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.class-split-qwen-mechanism__steps li + li {
+    margin-top: 5px;
+}
+
+.class-split-qwen-trace-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    width: fit-content;
+    color: #0f172a;
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.class-split-qwen-trace-toast {
+    position: fixed;
+    right: 18px;
+    bottom: 18px;
+    z-index: 95;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: min(560px, calc(100vw - 36px));
+    max-height: min(46vh, 460px);
+    padding: 12px;
+    border: 1px solid rgba(14, 165, 233, 0.45);
+    border-radius: 10px;
+    background: rgba(248, 250, 252, 0.97);
+    color: #0f172a;
+    box-shadow: 0 18px 42px rgba(15, 23, 42, 0.28);
+}
+
+.class-split-qwen-trace-toast[hidden] {
+    display: none;
+}
+
+.class-split-qwen-trace-toast__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.class-split-qwen-trace-toast__body {
+    margin: 0;
+    max-height: min(36vh, 350px);
+    overflow: auto;
+    overscroll-behavior: contain;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-radius: 8px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    background: #ffffff;
+    padding: 10px;
+    color: #0f172a;
+    font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
 .class-split-qwen-review {
     margin-top: 8px;
     border: 1px solid rgba(14, 165, 233, 0.35);
@@ -5420,6 +5505,7 @@ html.theme-dark .data-ingestion-field label,
 html.theme-dark .class-split-toolbar label,
 html.theme-dark .class-split-graph-status,
 html.theme-dark .class-split-advanced summary,
+html.theme-dark .class-split-qwen-mechanism > summary,
 html.theme-dark .class-split-dataset-analysis > summary,
 html.theme-dark .class-split-review-section > strong,
 html.theme-dark .class-split-wrong-panel > summary,
@@ -5428,6 +5514,16 @@ html.theme-dark .class-split-report__note,
 html.theme-dark .class-split-bulk-panel strong,
 html.theme-dark .class-split-inspector__meta {
     color: #b9c5c0;
+}
+
+html.theme-dark .class-split-qwen-mechanism {
+    background: rgba(15, 23, 42, 0.52);
+    border-color: rgba(148, 163, 184, 0.28);
+}
+
+html.theme-dark .class-split-qwen-mechanism__steps,
+html.theme-dark .class-split-qwen-trace-toggle {
+    color: #dce5df;
 }
 
 html.theme-dark .class-split-report__item,
@@ -5626,7 +5722,8 @@ html.theme-dark .qwen-caption-progress.is-complete {
 }
 
 html.theme-dark .qwen-caption-live-toast,
-html.theme-dark .sam3-text-live-toast {
+html.theme-dark .sam3-text-live-toast,
+html.theme-dark .class-split-qwen-trace-toast {
     background: rgba(21, 26, 30, 0.97);
     border-color: #3a444b;
     color: #f5f7f5;
@@ -5638,7 +5735,8 @@ html.theme-dark .sam3-text-live-toast__meta {
 }
 
 html.theme-dark .qwen-caption-live-toast__body,
-html.theme-dark .sam3-text-live-toast__body {
+html.theme-dark .sam3-text-live-toast__body,
+html.theme-dark .class-split-qwen-trace-toast__body {
     background: #0f1418;
     border-color: #3a444b;
     color: #dce5df;
@@ -6242,6 +6340,7 @@ html.theme-pipboy .data-ingestion-field label,
 html.theme-pipboy .class-split-toolbar label,
 html.theme-pipboy .class-split-graph-status,
 html.theme-pipboy .class-split-advanced summary,
+html.theme-pipboy .class-split-qwen-mechanism > summary,
 html.theme-pipboy .class-split-dataset-analysis > summary,
 html.theme-pipboy .class-split-review-section > strong,
 html.theme-pipboy .class-split-wrong-panel > summary,
@@ -6253,6 +6352,16 @@ html.theme-pipboy .shortcut-settings-group__title,
 html.theme-pipboy .shortcut-settings-row__label strong,
 html.theme-pipboy .class-split-inspector__meta {
     color: var(--pip-green-muted);
+}
+
+html.theme-pipboy .class-split-qwen-mechanism {
+    background: color-mix(in srgb, var(--pip-panel) 80%, transparent);
+    border-color: color-mix(in srgb, var(--pip-green) 35%, transparent);
+}
+
+html.theme-pipboy .class-split-qwen-mechanism__steps,
+html.theme-pipboy .class-split-qwen-trace-toggle {
+    color: var(--pip-green);
 }
 
 html.theme-pipboy .class-split-report__item,
@@ -6399,7 +6508,8 @@ html.theme-pipboy .qwen-caption-step-chip.is-ellipsis {
 }
 
 html.theme-pipboy .qwen-caption-live-toast,
-html.theme-pipboy .sam3-text-live-toast {
+html.theme-pipboy .sam3-text-live-toast,
+html.theme-pipboy .class-split-qwen-trace-toast {
     background: var(--pip-subsurface-bg);
     border-color: color-mix(in srgb, var(--pip-green) 44%, transparent);
     color: var(--pip-green);
@@ -6417,7 +6527,8 @@ html.theme-pipboy .sam3-text-live-toast__meta {
 }
 
 html.theme-pipboy .qwen-caption-live-toast__body,
-html.theme-pipboy .sam3-text-live-toast__body {
+html.theme-pipboy .sam3-text-live-toast__body,
+html.theme-pipboy .class-split-qwen-trace-toast__body {
     background: color-mix(in srgb, var(--pip-green) 7%, transparent);
     border-color: color-mix(in srgb, var(--pip-green) 34%, transparent);
     color: var(--pip-green);

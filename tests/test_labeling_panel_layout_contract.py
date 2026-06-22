@@ -1149,6 +1149,12 @@ def test_class_split_explorer_panel_contract():
     assert 'id="classSplitWrongDiscardCount" min="1" max="1000" step="1" value="20"' in html
     assert 'id="classSplitWrongDiscardFirst"' in html
     assert 'id="classSplitWrongShuffle"' in html
+    assert 'id="classSplitQwenReviewMechanism"' in html
+    assert "How VLM vignette review works" in html
+    assert 'id="classSplitQwenReviewTraceToggle"' in html
+    assert 'id="classSplitQwenReviewTraceToast"' in html
+    assert 'id="classSplitQwenReviewTraceBody"' in html
+    assert 'id="classSplitQwenReviewTraceClose"' in html
     assert 'id="classSplitWrongList"' in html
     assert 'id="classSplitInspector"' in html
     assert '<option value="image_value">Image value</option>' in html
@@ -1175,6 +1181,9 @@ def test_class_split_explorer_panel_contract():
     assert ".class-split-cluster-item" in css
     assert ".class-split-wrong-panel--wide" in css
     assert ".class-split-wrong-toolbar__discard" in css
+    assert ".class-split-qwen-mechanism" in css
+    assert ".class-split-qwen-trace-toast" in css
+    assert ".class-split-qwen-trace-toast__body" in css
     assert ".class-split-wrong-item__preview" in css
     assert ".class-split-wrong-item__badge--dual" in css
     assert "grid-template-columns: 232px minmax(0, 1fr);" in css
@@ -1242,6 +1251,10 @@ def test_class_split_explorer_panel_contract():
     assert "classSplitEnterRunningState" in js
     assert "classSplitElements.graphProjection" in js
     assert "classSplitElements.graphStatus" in js
+    assert "classSplitElements.qwenReviewTraceToggle" in js
+    assert "function renderClassSplitQwenReviewTraceToast" in js
+    assert "function buildClassSplitQwenReviewTraceText" in js
+    assert "setClassSplitQwenReviewTraceEnabled" in js
     assert "plotRenderToken" in js
     assert "projection_mode: projectionParts.projectionMode" in js
     assert "projection_neighbor_k: projectionNeighborK" in js

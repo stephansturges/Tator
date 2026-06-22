@@ -35,6 +35,32 @@ that contract and update this document in the same patch.
 6. The human still uses `Confirm current class`, `Switch class to ...`, `Skip`,
    or `See instance` to apply the decision.
 
+### UI Mechanism Panel And Live Trace
+
+The `Likely wrong class` section includes a collapsible
+`How VLM vignette review works` panel. It is intentionally colocated with the
+vignette queue instead of living in a separate top-level tab: the explanation is
+most useful at the moment a user is deciding whether to run `Review with Qwen`.
+
+The panel describes five product-level stages:
+
+1. Class Split flags likely-wrong vignettes from embedding-neighborhood evidence.
+2. The backend packages target, source-context, dual-bbox, same-class,
+   suggested-class, scale, embedding, glossary, and guidance evidence.
+3. The selected local Qwen/VLM reviewer reasons over the evidence and emits the
+   structured review schema.
+4. Deterministic rails may hold weak class-change recommendations for human
+   triage, but they must not replace the VLM final judgment by default.
+5. The human applies, confirms, skips, or jumps to the source instance.
+
+The same panel also exposes `Show live Qwen review trace while reviews run`.
+When enabled, the browser shows a fixed corner toast that mirrors the current
+`GET /class_analysis/qwen_review/{review_id}` payload: review id, status,
+progress, target point, latest backend log lines, final decision summary,
+rationale, and guarded-review reason if present. This is a UI view over existing
+job state; it does not introduce a new backend artifact and does not change label
+mutation behavior.
+
 ## Backend Contract
 
 Endpoint surface:

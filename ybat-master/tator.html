@@ -1230,6 +1230,23 @@
                                         <span id="classSplitQwenReviewContextStatus" class="training-help"></span>
                                     </div>
                                 </details>
+                                <details id="classSplitQwenReviewMechanism" class="class-split-qwen-mechanism">
+                                    <summary>How VLM vignette review works<span class="help-icon" title="Explains the evidence pack, Qwen reasoning pass, deterministic guardrails, and optional live trace for likely-wrong vignette review.">?</span></summary>
+                                    <div class="class-split-qwen-mechanism__body">
+                                        <ol class="class-split-qwen-mechanism__steps">
+                                            <li><strong>Flag:</strong> Class Split compares object embeddings and queues likely-wrong vignettes when an object is closer to another class than to its current class neighborhood.</li>
+                                            <li><strong>Package evidence:</strong> the backend renders the target crop, source-image context, clean same-class examples, suggested-class examples, dual-bbox overlap context, scale checks, embedding checks, and class glossary text.</li>
+                                            <li><strong>Reason with Qwen:</strong> the selected local VLM reviews the evidence in a bounded agent loop and emits a structured decision: confirm current, switch to a class, resolve a dual-bbox conflict, or skip as uncertain.</li>
+                                            <li><strong>Guard and audit:</strong> deterministic checks can hold weak class-change recommendations for human triage, but they do not replace the VLM final judgment. Raw recommendations, guard reasons, evidence thumbnails, and logs remain visible.</li>
+                                            <li><strong>Human applies:</strong> labels change only when you click the vignette action buttons. Qwen review is advisory unless you explicitly apply its recommendation.</li>
+                                        </ol>
+                                        <label class="class-split-qwen-trace-toggle" for="classSplitQwenReviewTraceToggle">
+                                            <input type="checkbox" id="classSplitQwenReviewTraceToggle" />
+                                            Show live Qwen review trace while reviews run
+                                        </label>
+                                        <div class="training-help">The trace toast mirrors the current review job status and recent backend log lines. It is useful for debugging model loading, evidence rendering, tool phases, and final schema parsing.</div>
+                                    </div>
+                                </details>
                                 <div class="class-split-wrong-toolbar">
                                     <span id="classSplitWrongQueueStatus" class="training-help">Run all-class analysis to review likely wrong objects.</span>
                                     <div class="class-split-wrong-toolbar__discard">
@@ -1251,6 +1268,13 @@
                                     <span id="classSplitMobileStatus" class="training-help"></span>
                                 </div>
                                 <div id="classSplitWrongList" class="class-split-wrong-list"></div>
+                                <div id="classSplitQwenReviewTraceToast" class="class-split-qwen-trace-toast" hidden aria-live="polite">
+                                    <div class="class-split-qwen-trace-toast__header">
+                                        <strong>Qwen review trace</strong>
+                                        <button type="button" id="classSplitQwenReviewTraceClose" class="training-button secondary">Hide</button>
+                                    </div>
+                                    <pre id="classSplitQwenReviewTraceBody" class="class-split-qwen-trace-toast__body">Waiting for the next Qwen review.</pre>
+                                </div>
                             </details>
                         </div>
                     </section>

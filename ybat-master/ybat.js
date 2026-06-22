@@ -1111,6 +1111,8 @@
         classSplitMobilePush: "Create or refresh a mobile review session for the current likely-wrong queue.",
         classSplitMobileSync: "Sync mobile review decisions back into the current browser workspace.",
         classSplitQwenReviewRefresh: "Refresh the list of local VLM reviewer models.",
+        classSplitQwenReviewTraceToggle: "Show a live toast with the current Qwen vignette review job status and recent backend logs.",
+        classSplitQwenReviewTraceClose: "Hide the live Qwen review trace toast.",
         classSplitDatasetAnalysisRun: "Run dataset-level value scoring after all-class class-split analysis is available.",
         qwenAgentRecipeImportFile: "Choose a Detection Recipe ZIP archive to import.",
         datasetUploadCurrentBtn: "Upload the currently open Label Images workspace as a backend-managed dataset.",
@@ -2657,6 +2659,11 @@ const AUTOMATION_LOCKED_TABS = new Set([
         qwenReviewGlossaryReset: null,
         qwenReviewGlossarySave: null,
         qwenReviewContextStatus: null,
+        qwenReviewMechanism: null,
+        qwenReviewTraceToggle: null,
+        qwenReviewTraceToast: null,
+        qwenReviewTraceBody: null,
+        qwenReviewTraceClose: null,
         wrongList: null,
         inspector: null,
         datasetAnalysisPanel: null,
@@ -2921,6 +2928,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         qwenReviewGlossarySaveInFlight: false,
         qwenReviewGlossaryLoadedFor: "",
         qwenReviewGlossaryDirty: false,
+        qwenReviewTraceEnabled: false,
         relabelInFlight: false,
         datasetAnalysis: null,
         flashPointId: "",
@@ -42772,6 +42780,115 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.qwenReviewStatus.classList.toggle("success", variant === "success");
     }
 
+    function formatClassSplitQwenTraceTimestamp(rawTimestamp) {
+        const timestamp = Number(rawTimestamp);
+        if (!Number.isFinite(timestamp) || timestamp <= 0) {
+            return "";
+        }
+        try {
+            return new Date(timestamp * 1000).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+                hour12: false,
+            });
+        } catch (_) {
+            return "";
+        }
+    }
+
+    function getLatestClassSplitQwenReviewJob() {
+        let latest = null;
+        classSplitState.qwenReviewJobs.forEach((review) => {
+            if (!review) {
+                return;
+            }
+            if (!latest || Number(review.updated_at || 0) >= Number(latest.updated_at || 0)) {
+                latest = review;
+            }
+        });
+        return latest;
+    }
+
+    function buildClassSplitQwenReviewTraceText(review) {
+        if (!review) {
+            return "Waiting for the next Qwen review.";
+        }
+        const pointId = String(review.point_id || "").trim();
+        const point = pointId ? getClassSplitPointById(pointId) : null;
+        const status = String(review.status || "queued").toLowerCase();
+        const progress = Math.max(0, Math.min(1, Number(review.progress) || 0));
+        const lines = [
+            `review: ${String(review.review_id || review.job_id || "pending")}`,
+            `status: ${status} (${Math.round(progress * 100)}%)`,
+        ];
+        if (point?.class_name || point?.image_relpath) {
+            lines.push(`target: ${String(point.class_name || "object")} • ${String(point.image_relpath || point.image_name || pointId)}`);
+        } else if (pointId) {
+            lines.push(`target: ${pointId}`);
+        }
+        if (review.message) {
+            lines.push(`message: ${String(review.message)}`);
+        }
+        if (review.error) {
+            lines.push(`error: ${String(review.error)}`);
+        }
+        const logs = Array.isArray(review.logs) ? review.logs : [];
+        if (logs.length) {
+            lines.push("", "recent backend log:");
+            logs.slice(-14).forEach((entry) => {
+                const timestamp = formatClassSplitQwenTraceTimestamp(entry?.timestamp ?? entry?.ts);
+                const message = String(entry?.message ?? entry?.msg ?? entry?.summary ?? entry ?? "").trim();
+                if (message) {
+                    lines.push(`${timestamp ? `${timestamp} ` : ""}${message}`);
+                }
+            });
+        }
+        const result = review.result && typeof review.result === "object" ? review.result : null;
+        if (result) {
+            lines.push("", "decision:");
+            lines.push(formatClassSplitQwenDecision(result));
+            if (Number.isFinite(Number(result.confidence))) {
+                lines.push(`confidence: ${Math.round(Number(result.confidence) * 100)}%`);
+            }
+            if (result.rationale_short) {
+                lines.push(`rationale: ${String(result.rationale_short)}`);
+            }
+            const guarded = result.guarded_recommendation && typeof result.guarded_recommendation === "object"
+                ? result.guarded_recommendation
+                : null;
+            if (guarded?.blocked) {
+                const reasons = Array.isArray(guarded.guardrail_reasons)
+                    ? guarded.guardrail_reasons.map((item) => String(item || "").trim()).filter(Boolean)
+                    : [];
+                lines.push(`guarded: held for human review${reasons.length ? ` • ${reasons[0]}` : ""}`);
+            }
+        }
+        return lines.join("\n");
+    }
+
+    function renderClassSplitQwenReviewTraceToast(review = null) {
+        if (!classSplitElements.qwenReviewTraceToast || !classSplitElements.qwenReviewTraceBody) {
+            return;
+        }
+        if (!classSplitState.qwenReviewTraceEnabled) {
+            classSplitElements.qwenReviewTraceToast.hidden = true;
+            return;
+        }
+        const activeReview = review || getLatestClassSplitQwenReviewJob();
+        classSplitElements.qwenReviewTraceToast.hidden = false;
+        classSplitElements.qwenReviewTraceBody.textContent = buildClassSplitQwenReviewTraceText(activeReview);
+        classSplitElements.qwenReviewTraceBody.scrollTop = classSplitElements.qwenReviewTraceBody.scrollHeight;
+    }
+
+    function setClassSplitQwenReviewTraceEnabled(enabled) {
+        classSplitState.qwenReviewTraceEnabled = Boolean(enabled);
+        if (classSplitElements.qwenReviewTraceToggle) {
+            classSplitElements.qwenReviewTraceToggle.checked = classSplitState.qwenReviewTraceEnabled;
+        }
+        renderClassSplitQwenReviewTraceToast();
+    }
+
     function renderClassSplitQwenReviewModelOptions() {
         const select = classSplitElements.qwenReviewModel;
         if (!select) {
@@ -42833,6 +42950,7 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitState.qwenReviewPollTimers.clear();
         if (clearJobs) {
             classSplitState.qwenReviewJobs.clear();
+            renderClassSplitQwenReviewTraceToast();
         }
     }
 
@@ -42850,6 +42968,7 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         classSplitState.qwenReviewJobs.set(pointId, review);
+        renderClassSplitQwenReviewTraceToast(review);
     }
 
     function scheduleClassSplitQwenReviewPoll(pointId, reviewId) {
@@ -44214,6 +44333,11 @@ async function cancelRfDetrTrainingJobRequest() {
         classSplitElements.qwenReviewGlossaryReset = document.getElementById("classSplitQwenReviewGlossaryReset");
         classSplitElements.qwenReviewGlossarySave = document.getElementById("classSplitQwenReviewGlossarySave");
         classSplitElements.qwenReviewContextStatus = document.getElementById("classSplitQwenReviewContextStatus");
+        classSplitElements.qwenReviewMechanism = document.getElementById("classSplitQwenReviewMechanism");
+        classSplitElements.qwenReviewTraceToggle = document.getElementById("classSplitQwenReviewTraceToggle");
+        classSplitElements.qwenReviewTraceToast = document.getElementById("classSplitQwenReviewTraceToast");
+        classSplitElements.qwenReviewTraceBody = document.getElementById("classSplitQwenReviewTraceBody");
+        classSplitElements.qwenReviewTraceClose = document.getElementById("classSplitQwenReviewTraceClose");
         classSplitElements.wrongList = document.getElementById("classSplitWrongList");
         classSplitElements.inspector = document.getElementById("classSplitInspector");
         classSplitElements.datasetAnalysisPanel = document.getElementById("classSplitDatasetAnalysisPanel");
@@ -44381,6 +44505,16 @@ async function cancelRfDetrTrainingJobRequest() {
                         : "Reviewer will use the active model.",
                     "info"
                 );
+            });
+        }
+        if (classSplitElements.qwenReviewTraceToggle) {
+            classSplitElements.qwenReviewTraceToggle.addEventListener("change", () => {
+                setClassSplitQwenReviewTraceEnabled(classSplitElements.qwenReviewTraceToggle.checked);
+            });
+        }
+        if (classSplitElements.qwenReviewTraceClose) {
+            classSplitElements.qwenReviewTraceClose.addEventListener("click", () => {
+                setClassSplitQwenReviewTraceEnabled(false);
             });
         }
         if (classSplitElements.qwenReviewGlossary) {

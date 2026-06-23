@@ -20,6 +20,8 @@ def test_agent_catalog_includes_qwen_inference_family():
         "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx",
         "empero-ai/Qwable-9B-Claude-Fable-5",
         "empero-ai/Qwythos-9B-Claude-Mythos-5-1M",
+        "AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4",
+        "AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS",
         "mlx-community/Qwen3.6-35B-A3B-4bit",
         "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit",
     }
@@ -39,6 +41,7 @@ def test_agent_catalog_includes_qwen_inference_family():
     assert {
         "empero-ai/Qwable-9B-Claude-Fable-5",
         "empero-ai/Qwythos-9B-Claude-Mythos-5-1M",
+        "AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS",
     } <= AGENT_TRANSFORMERS_MODEL_IDS
 
 
@@ -51,6 +54,7 @@ def test_agent_catalog_is_inference_only_not_training():
         assert entry["smoke_status"] in {
             "class_split_benchmark_passed",
             "missing_image_processor",
+            "metadata_verified",
             "transformers5_processor_passed",
             "qwen_mlx_runtime_supported",
         }
@@ -66,6 +70,12 @@ def test_agent_catalog_marks_qwen36_matrix_winners_separately():
     )
     assert by_id["mlx-community/Qwen3-VL-4B-Instruct-4bit"]["smoke_status"] == "qwen_mlx_runtime_supported"
     assert by_id["mlx-community/Qwen3-VL-4B-Instruct-4bit"]["backend_status"] == "validated_runtime"
+    aeon_mlx = by_id["AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4"]
+    aeon_cuda = by_id["AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS"]
+    assert aeon_mlx["runtime_platform"] == QWEN_PLATFORM_MLX
+    assert aeon_mlx["smoke_status"] == "metadata_verified"
+    assert aeon_cuda["runtime_platform"] == QWEN_PLATFORM_TRANSFORMERS
+    assert aeon_cuda["smoke_status"] == "metadata_verified"
 
 
 def test_agent_catalog_marks_empero_visual_capability():

@@ -362,6 +362,7 @@ from services.qwen_runtime import (
     _resolve_qwen_device_impl as _resolve_qwen_device_impl,
 )
 from services.qwen_mlx import (
+    QWEN_MLX_CAPTION_DEFAULT_MODEL,
     QWEN_MLX_DEFAULT_MODEL,
     QWEN_MLX_MODEL_IDS,
     QWEN_MLX_MODEL_OPTIONS,
@@ -377,6 +378,7 @@ from services.qwen_mlx import (
     select_qwen_platform,
 )
 from services.qwen_model_catalog import (
+    QWEN_CUDA_DEFAULT_MODEL,
     QWEN_TRANSFORMERS_MODEL_OPTIONS,
     QWEN_TRANSFORMERS_MODEL_IDS,
     is_qwen_mlx_model_id,
@@ -1162,7 +1164,10 @@ PREPASS_RECIPE_UPLOAD_MAX_BYTES = _env_int(
 CLIP_TRAIN_UPLOAD_MAX_BYTES = _env_int("CLIP_TRAIN_UPLOAD_MAX_BYTES", 10 * 1024 * 1024 * 1024)
 CLIP_TRAIN_UPLOAD_QUOTA_BYTES = _env_int("CLIP_TRAIN_UPLOAD_QUOTA_BYTES", 100 * 1024 * 1024 * 1024)
 
-QWEN_MODEL_NAME = os.environ.get("QWEN_MODEL_NAME", "Qwen/Qwen3-VL-4B-Instruct")
+QWEN_MODEL_NAME = os.environ.get("QWEN_MODEL_NAME", QWEN_CUDA_DEFAULT_MODEL)
+QWEN_TRAINING_DEFAULT_MODEL = os.environ.get(
+    "QWEN_TRAINING_DEFAULT_MODEL", "Qwen/Qwen3-VL-4B-Instruct"
+).strip() or "Qwen/Qwen3-VL-4B-Instruct"
 QWEN_MIN_TRANSFORMERS = "5.7.0"
 QWEN_MIN_PIXELS = _env_int("QWEN_MIN_PIXELS", 256 * 28 * 28)
 QWEN_MAX_PIXELS = _env_int("QWEN_MAX_PIXELS", 1280 * 28 * 28)
@@ -1174,6 +1179,10 @@ QWEN_DEVICE_PREF = os.environ.get("QWEN_DEVICE", "auto").strip().lower()
 QWEN_TRUST_REMOTE_CODE = _env_bool("QWEN_TRUST_REMOTE_CODE", False)
 QWEN_INFERENCE_PLATFORM = normalize_qwen_platform(os.environ.get("QWEN_INFERENCE_PLATFORM", "auto"))
 QWEN_MLX_MODEL_NAME = os.environ.get("QWEN_MLX_MODEL_NAME", QWEN_MLX_DEFAULT_MODEL).strip() or QWEN_MLX_DEFAULT_MODEL
+QWEN_MLX_CAPTION_MODEL_NAME = os.environ.get(
+    "QWEN_MLX_CAPTION_MODEL_NAME",
+    QWEN_MLX_CAPTION_DEFAULT_MODEL,
+).strip() or QWEN_MLX_CAPTION_DEFAULT_MODEL
 QWEN_MLX_DEFAULT_QUANTIZATION = os.environ.get("QWEN_MLX_DEFAULT_QUANTIZATION", "4bit").strip() or "4bit"
 QWEN_CAPTION_CACHE_LIMIT = _env_int("QWEN_CAPTION_CACHE_LIMIT", 0)
 QWEN_WINDOW_DEFAULT_SIZE = _env_int("QWEN_WINDOW_SIZE", 672)
@@ -1186,12 +1195,14 @@ QWEN_VRAM_ESTIMATE_GB = {
         "2B": 12.0,
         "4B": 20.0,
         "8B": 96.0,
+        "27B": 160.0,
         "32B": 192.0,
     },
     "trl_qlora": {
         "2B": 8.0,
         "4B": 10.0,
         "8B": 16.0,
+        "27B": 40.0,
         "32B": 48.0,
     },
 }
@@ -6972,9 +6983,33 @@ def _apply_qwen_chat_template(
     template_kwargs = {
         key: value for key, value in (chat_template_kwargs or {}).items() if value is not None
     }
+    template_call_kwargs: Dict[str, Any] = {}
+    processor_call_kwargs: Dict[str, Any] = {}
+    if template_kwargs:
+        try:
+            from transformers.processing_utils import _get_template_variables
+
+            chat_template = getattr(processor, "chat_template", None)
+            if isinstance(chat_template, Mapping):
+                chat_template = chat_template.get("default")
+            template_vars = set(_get_template_variables(chat_template)) if chat_template else set()
+            template_call_kwargs = {
+                key: value for key, value in template_kwargs.items() if key in template_vars
+            }
+            processor_call_kwargs = {
+                key: value for key, value in template_kwargs.items() if key not in template_vars
+            }
+        except Exception:
+            template_call_kwargs = dict(template_kwargs)
+            processor_call_kwargs = {}
     attempts: List[Dict[str, Any]] = []
     if template_kwargs:
-        attempts.append({**base_kwargs, **template_kwargs})
+        first_attempt = {**base_kwargs, **template_call_kwargs}
+        if processor_call_kwargs:
+            first_attempt["processor_kwargs"] = processor_call_kwargs
+        attempts.append(first_attempt)
+        if template_call_kwargs != template_kwargs:
+            attempts.append({**base_kwargs, **template_kwargs})
         attempts.append({**base_kwargs, "chat_template_kwargs": template_kwargs})
     attempts.append(dict(base_kwargs))
     if tools is not None:
@@ -7314,15 +7349,18 @@ def _run_qwen_inference(
         runtime = _ensure_qwen_ready()
     _raise_if_qwen_cancelled()
     if isinstance(runtime, QwenRuntime) and runtime.platform == QWEN_PLATFORM_MLX:
-        return _run_qwen_inference_mlx(
-            runtime,
-            prompt,
-            pil_img,
-            max_new_tokens=max_new_tokens,
-            system_prompt_override=system_prompt_override,
-            decode_override=decode_override,
-            chat_template_kwargs=chat_template_kwargs,
-        )
+        try:
+            return _run_qwen_inference_mlx(
+                runtime,
+                prompt,
+                pil_img,
+                max_new_tokens=max_new_tokens,
+                system_prompt_override=system_prompt_override,
+                decode_override=decode_override,
+                chat_template_kwargs=chat_template_kwargs,
+            )
+        finally:
+            _qwen_mlx_post_generation_cleanup()
     model, processor = runtime
     resolved_model_id = (
         model_id_override
@@ -14664,6 +14702,7 @@ class ClassAnalysisQwenReviewJob:
     message: str = "Queued"
     request: Dict[str, Any] = field(default_factory=dict)
     logs: List[Dict[str, Any]] = field(default_factory=list)
+    trace_events: List[Dict[str, Any]] = field(default_factory=list)
     evidence: List[Dict[str, Any]] = field(default_factory=list)
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
@@ -14747,6 +14786,7 @@ CLASS_ANALYSIS_QWEN_REVIEW_MAX_JOBS = max(
     1,
     _env_int("CLASS_ANALYSIS_QWEN_REVIEW_MAX_JOBS", 128),
 )
+CLASS_ANALYSIS_QWEN_REVIEW_TRACE_EVENT_LIMIT = 80
 CLASS_ANALYSIS_QWEN_REVIEW_MAX_TURNS = max(
     2,
     min(16, _env_int("CLASS_ANALYSIS_QWEN_REVIEW_MAX_TURNS", 10)),
@@ -20056,6 +20096,21 @@ def _class_analysis_copy_file_within_roots(
     src_path = _safe_existing_regular_file_within_root_impl(src, source_root)
     if src_path is None:
         return False
+    try:
+        dest_path = _class_analysis_prepare_write_path(dest, dest_root)
+        if dest_path is not None:
+            try:
+                src_resolved = src_path.resolve(strict=True)
+                if dest_path.exists() and dest_path.resolve(strict=True) == src_resolved:
+                    return True
+                if dest_path.exists() or dest_path.is_symlink():
+                    dest_path.unlink(missing_ok=True)
+                os.link(src_resolved, dest_path)
+                return True
+            except OSError:
+                pass
+    except Exception:
+        pass
 
     def copy_source(handle: Any) -> None:
         with src_path.open("rb") as source_handle:
@@ -22147,10 +22202,30 @@ def cancel_class_analysis_active_workspace_upload_session(session_id: str) -> Di
 
 
 def _get_class_analysis_job(job_id: str) -> ClassAnalysisJob:
+    raw_job_id = str(job_id or "")
     with CLASS_ANALYSIS_JOBS_LOCK:
-        job = CLASS_ANALYSIS_JOBS.get(str(job_id or ""))
+        job = CLASS_ANALYSIS_JOBS.get(raw_job_id)
     if not job:
-        raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="job_not_found")
+        safe_job_id = _class_analysis_safe_slug(raw_job_id, "")
+        if not safe_job_id:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="job_not_found")
+        job_dir = _class_analysis_job_dir(safe_job_id, create=False)
+        result_path = _safe_existing_regular_file_within_root_impl(job_dir / "result.json", job_dir)
+        if result_path is None:
+            raise HTTPException(status_code=HTTP_404_NOT_FOUND, detail="job_not_found")
+        request_payload = _load_json_metadata(job_dir / "config.json") or {}
+        thumb_dir = job_dir / "thumbnails"
+        job = ClassAnalysisJob(
+            job_id=safe_job_id,
+            status="completed",
+            progress=1.0,
+            message="Restored completed class analysis job from disk.",
+            request=request_payload if isinstance(request_payload, dict) else {},
+            result_path=str(result_path),
+            thumbnail_dir=str(thumb_dir) if thumb_dir.is_dir() else None,
+        )
+        with CLASS_ANALYSIS_JOBS_LOCK:
+            job = CLASS_ANALYSIS_JOBS.setdefault(safe_job_id, job)
     return job
 
 
@@ -23444,6 +23519,14 @@ def _class_analysis_qwen_review_append_event(
             handle.write(line)
     except Exception as exc:
         logger.debug("Failed to append class analysis Qwen review event: %s", exc)
+    event_type = str(event.get("type") or "")
+    if event_type != "model_input":
+        try:
+            job.trace_events.append(json_sanitize(event))
+            if len(job.trace_events) > CLASS_ANALYSIS_QWEN_REVIEW_TRACE_EVENT_LIMIT:
+                job.trace_events[:] = job.trace_events[-CLASS_ANALYSIS_QWEN_REVIEW_TRACE_EVENT_LIMIT:]
+        except Exception:
+            pass
 
 
 def _serialize_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -> Dict[str, Any]:
@@ -23458,6 +23541,7 @@ def _serialize_class_analysis_qwen_review_job(job: ClassAnalysisQwenReviewJob) -
             "message": job.message,
             "request": job.request,
             "logs": job.logs[-MAX_JOB_LOGS:],
+            "trace_events": job.trace_events[-CLASS_ANALYSIS_QWEN_REVIEW_TRACE_EVENT_LIMIT:],
             "evidence": job.evidence,
             "result": job.result,
             "error": job.error,
@@ -43207,12 +43291,7 @@ def _build_qwen_config(
     requested_model_id = payload.model_id
     if requested_model_id and str(requested_model_id).strip().lower() in {"default", "base"}:
         requested_model_id = None
-    requested_model_id = (
-        requested_model_id
-        or (active_qwen_metadata or {}).get("model_id")
-        or QWEN_MODEL_NAME
-    )
-    requested_model_id = str(requested_model_id or "").strip() or QWEN_MODEL_NAME
+    requested_model_id = str(requested_model_id or "").strip() or QWEN_TRAINING_DEFAULT_MODEL
     requested_runtime_platform = (
         QWEN_PLATFORM_MLX if is_qwen_mlx_model_id(requested_model_id) else QWEN_PLATFORM_TRANSFORMERS
     )
@@ -52800,6 +52879,7 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
     for entry in QWEN_TRANSFORMERS_MODEL_OPTIONS:
         model_id = str(entry.get("id") or entry.get("model_id") or "")
         training_supported = bool(entry.get("training_supported", True))
+        agent_metadata = agent_model_metadata_for_model(model_id)
         metadata = {
             "id": model_id,
             "label": str(entry.get("label") or model_id),
@@ -52824,6 +52904,14 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
             ),
             "vision_inference_supported": entry.get("vision_inference_supported", True) is not False,
             "inference_supported": entry.get("inference_supported", True) is not False,
+            "agent_model": bool(agent_metadata),
+            "agent_supported": bool(agent_metadata)
+            and entry.get("vision_inference_supported", True) is not False,
+            "agent_backend_status": agent_metadata.get("backend_status"),
+            "agent_smoke_status": agent_metadata.get("smoke_status"),
+            "agent_compatibility_note": agent_metadata.get("compatibility_note"),
+            "compatibility_note": entry.get("compatibility_note")
+            or agent_metadata.get("compatibility_note"),
             "training_model_id": entry.get("training_model_id") or model_id,
             "training_note": entry.get("training_note"),
             "min_pixels": QWEN_MIN_PIXELS,
@@ -52893,7 +52981,7 @@ def _builtin_qwen_model_entries() -> List[Dict[str, Any]]:
         model_id = str(entry.get("id") or entry.get("model_id") or "")
         if not model_id:
             continue
-        if model_id in QWEN_MLX_MODEL_IDS:
+        if model_id in QWEN_MLX_MODEL_IDS or model_id in QWEN_TRANSFORMERS_MODEL_IDS:
             continue
         runtime_platform = str(entry.get("runtime_platform") or QWEN_PLATFORM_TRANSFORMERS)
         vision_supported = entry.get("vision_inference_supported", True) is not False
@@ -54142,7 +54230,11 @@ def _qwen_caption_default_refinement_model_id(desired_model_id: Optional[str]) -
         if availability.get("local") and not availability.get("partial"):
             return exact_instruct
     if is_qwen_mlx_model_id(desired):
-        return QWEN_MLX_DEFAULT_MODEL
+        caption_instruct = _resolve_qwen_variant_model_id_impl(
+            QWEN_MLX_CAPTION_MODEL_NAME,
+            "Instruct",
+        )
+        return _effective_qwen_model_id_for_platform(caption_instruct, QWEN_PLATFORM_MLX)
     small_instruct = "Qwen/Qwen3-VL-4B-Instruct"
     small_availability = _qwen_model_local_state(small_instruct, QWEN_PLATFORM_TRANSFORMERS)
     if small_availability.get("local") and not small_availability.get("partial"):
@@ -54150,6 +54242,34 @@ def _qwen_caption_default_refinement_model_id(desired_model_id: Optional[str]) -
     if exact_instruct in known_ids:
         return exact_instruct
     return small_instruct
+
+
+def _resolve_qwen_caption_default_model_id(
+    base_model_id: Optional[str],
+    variant: Optional[str],
+) -> str:
+    """Resolve the implicit caption model for "Use active model" requests.
+
+    The general Apple Silicon Qwen default is intentionally allowed to be a
+    large experimental MLX checkpoint for single-call inference and agent
+    review. Captioning is different: one click may run many window, cleanup,
+    and merge generations. Use a smaller MLX vision model unless the caller
+    explicitly selects a large model.
+    """
+
+    base = str(base_model_id or QWEN_MODEL_NAME).strip() or QWEN_MODEL_NAME
+    platform_name = _resolve_qwen_runtime_platform(
+        base,
+        adapter_path=active_qwen_model_path,
+        metadata=active_qwen_metadata,
+    )
+    if platform_name != QWEN_PLATFORM_MLX:
+        return _resolve_qwen_variant_model_id_impl(base, variant)
+    caption_base = _resolve_qwen_variant_model_id_impl(
+        QWEN_MLX_CAPTION_MODEL_NAME,
+        variant,
+    )
+    return _effective_qwen_model_id_for_platform(caption_base, QWEN_PLATFORM_MLX)
 
 
 def qwen_caption(payload: QwenCaptionRequest):
@@ -54165,10 +54285,14 @@ def qwen_caption(payload: QwenCaptionRequest):
     active_runtime: Optional[Tuple[Any, Any]] = None
     request_model_cache: Dict[str, Tuple[Any, Any]] = {}
     default_caption_model_id: Optional[str] = None
+    base_model_hint = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
+    requested_model_hint = str(payload.model_id or "").strip()
+    if requested_model_hint.lower() == "active":
+        requested_model_hint = ""
+    requested_variant_hint = payload.model_variant or "auto"
     caption_model_hint = (
-        payload.model_id
-        or (active_qwen_metadata or {}).get("model_id")
-        or QWEN_MODEL_NAME
+        requested_model_hint
+        or _resolve_qwen_caption_default_model_id(base_model_hint, requested_variant_hint)
     )
     caption_platform_hint = _resolve_qwen_runtime_platform(str(caption_model_hint), metadata=active_qwen_metadata)
     _qwen_progress_start(
@@ -54305,20 +54429,23 @@ def qwen_caption(payload: QwenCaptionRequest):
             )
             prompt_text = f"{prompt_text}\n{glossary_line}"
         base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
-        default_caption_model_id = base_model_id
         variant = payload.model_variant or "auto"
-        model_id_override = payload.model_id or ""
+        model_id_override = str(payload.model_id or "").strip()
+        if model_id_override.lower() == "active":
+            model_id_override = ""
         if model_id_override:
             desired_model_id = model_id_override
+            default_caption_model_id = base_model_id
         else:
-            desired_model_id = _resolve_qwen_variant_model_id_impl(base_model_id, variant)
+            desired_model_id = _resolve_qwen_caption_default_model_id(base_model_id, variant)
+            default_caption_model_id = desired_model_id
         if active_qwen_model_path and desired_model_id != base_model_id:
             logger.info(
                 "[qwen-caption] using base model override (%s) while adapter %s is active",
                 desired_model_id,
                 active_qwen_model_id,
             )
-        caption_base_model_id = desired_model_id if model_id_override else base_model_id
+        caption_base_model_id = desired_model_id
         caption_refinement_model_id = _resolve_qwen_caption_refinement_model_id(
             payload.refinement_model_id,
             desired_model_id=desired_model_id,

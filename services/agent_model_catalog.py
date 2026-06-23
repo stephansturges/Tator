@@ -14,10 +14,12 @@ from typing import Any, Dict, Iterable, List, Optional
 from packaging import version as packaging_version
 
 from services.qwen_mlx import (
+    QWEN_AEON_QWEN36_27B_MLX_MODEL,
     QWEN_MLX_MODEL_OPTIONS,
     QWEN_PLATFORM_MLX,
     QWEN_PLATFORM_TRANSFORMERS,
 )
+from services.qwen_model_catalog import QWEN_CUDA_DEFAULT_MODEL
 
 AGENT_MLX_NOTE = (
     "Inference-only MLX-VLM agent model candidate. Use for captioning, prepass, "
@@ -125,6 +127,43 @@ def _entry_from_mlx_runtime(model_id: str) -> Dict[str, Any]:
 def _build_agent_model_options() -> List[Dict[str, Any]]:
     entries = [
         *(_entry_from_mlx_runtime(model_id) for model_id in _AGENT_ENABLED_QWEN3_VL_MLX_IDS),
+        _entry(
+            QWEN_AEON_QWEN36_27B_MLX_MODEL,
+            "MLX AEON Qwen3.6 27B Ultimate Uncensored FP4",
+            family="qwen3_6",
+            runtime_platform=QWEN_PLATFORM_MLX,
+            source="AEON-7",
+            size="27B",
+            variant="AEON Ultimate Uncensored",
+            quantization="FP4",
+            abliterated=True,
+            compatibility_note=(
+                "Inference-only AEON Qwen3.6 27B multimodal MLX FP4 model. "
+                "The upstream metadata advertises MLX-VLM image-text inference; "
+                "training is not wired."
+            ),
+            backend_status="metadata_verified",
+            smoke_status="metadata_verified",
+        ),
+        _entry(
+            QWEN_CUDA_DEFAULT_MODEL,
+            "CUDA AEON Qwen3.6 27B Ultimate Uncensored NVFP4 MTP",
+            family="qwen3_6",
+            runtime_platform=QWEN_PLATFORM_TRANSFORMERS,
+            source="AEON-7",
+            size="27B",
+            variant="AEON Ultimate Uncensored",
+            quantization="NVFP4",
+            abliterated=True,
+            compatibility_note=(
+                "Inference-only AEON Qwen3.6 27B multimodal NVFP4/MTP model. "
+                "The upstream metadata advertises Transformers/vLLM image-text support; "
+                "training is not wired."
+            ),
+            backend_status="metadata_verified",
+            smoke_status="metadata_verified",
+            min_transformers="5.7.0",
+        ),
         _entry(
             "empero-ai/Qwable-9B-Claude-Fable-5",
             "Transformers5 Qwable 9B Claude Fable 5",

@@ -333,6 +333,35 @@ def test_class_analysis_qwen_review_detects_degenerate_final_text():
     )
 
 
+def test_class_analysis_qwen_review_serializes_recent_model_output_trace(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", tmp_path)
+    job = api.ClassAnalysisQwenReviewJob(
+        review_id="review_trace",
+        parent_job_id="parent_trace",
+        point_id="point_1",
+    )
+
+    api._class_analysis_qwen_review_append_event(
+        job,
+        {"type": "model_input", "phase": "final", "messages": [{"image": "large"}]},
+    )
+    api._class_analysis_qwen_review_append_event(
+        job,
+        {"type": "model_output", "phase": "final", "text": "complete model reasoning\nfinal json"},
+    )
+
+    payload = api._serialize_class_analysis_qwen_review_job(job)
+
+    assert payload["trace_events"] == [
+        {
+            "timestamp": payload["trace_events"][0]["timestamp"],
+            "type": "model_output",
+            "phase": "final",
+            "text": "complete model reasoning\nfinal json",
+        }
+    ]
+
+
 def test_class_analysis_qwen_review_final_context_keeps_decision_images_scoped():
     messages = [
         {"role": "system", "content": [{"type": "text", "text": "system"}]},
@@ -10934,6 +10963,45 @@ def test_class_analysis_projection_endpoint_returns_json_lists(tmp_path, monkeyp
             api.CLASS_ANALYSIS_JOBS.clear()
 
 
+def test_class_analysis_get_job_restores_completed_disk_result(tmp_path, monkeypatch):
+    class_root = tmp_path / "class_analysis"
+    monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
+    job_dir = api._class_analysis_job_dir("job_restored", create=True)
+    result_path = job_dir / "result.json"
+    api._class_analysis_write_json(
+        result_path,
+        class_root,
+        {
+            "summary": {"analysis_scope": "all_classes"},
+            "points": [],
+        },
+    )
+    api._class_analysis_write_json(
+        job_dir / "config.json",
+        class_root,
+        {"analysis_scope": "all_classes", "encoder_type": "dinov3"},
+    )
+    thumb_dir = job_dir / "thumbnails"
+    thumb_dir.mkdir()
+    with api.CLASS_ANALYSIS_JOBS_LOCK:
+        api.CLASS_ANALYSIS_JOBS.clear()
+
+    try:
+        job = api._get_class_analysis_job("job_restored")
+
+        assert job.status == "completed"
+        assert job.result_path == str(result_path)
+        assert job.thumbnail_dir == str(thumb_dir)
+        assert job.request["encoder_type"] == "dinov3"
+        assert job.message == "Restored completed class analysis job from disk."
+        assert api.get_class_analysis_result(job.job_id)["summary"]["analysis_scope"] == "all_classes"
+        with api.CLASS_ANALYSIS_JOBS_LOCK:
+            assert api.CLASS_ANALYSIS_JOBS[job.job_id] is job
+    finally:
+        with api.CLASS_ANALYSIS_JOBS_LOCK:
+            api.CLASS_ANALYSIS_JOBS.clear()
+
+
 def test_class_analysis_projection_endpoint_maps_legacy_pca_points_to_global(tmp_path, monkeypatch):
     class_root = tmp_path / "class_analysis"
     monkeypatch.setattr(api, "CLASS_ANALYSIS_ROOT", class_root)
@@ -11110,6 +11178,30 @@ def test_class_analysis_thumbnail_rejects_symlinked_thumbnail_dir_escape(
     finally:
         with api.CLASS_ANALYSIS_JOBS_LOCK:
             api.CLASS_ANALYSIS_JOBS.clear()
+
+
+def test_class_analysis_copy_file_hardlinks_when_possible(tmp_path):
+    source_root = tmp_path / "source"
+    dest_root = tmp_path / "dest"
+    source_root.mkdir()
+    dest_root.mkdir()
+    source = source_root / "thumb.jpg"
+    dest = dest_root / "thumb.jpg"
+    source.write_bytes(b"cached thumbnail")
+
+    try:
+        assert api._class_analysis_copy_file_within_roots(
+            source,
+            dest,
+            source_root=source_root,
+            dest_root=dest_root,
+        )
+    except OSError as exc:
+        pytest.skip(f"hardlinks unsupported: {exc}")
+
+    assert dest.read_bytes() == b"cached thumbnail"
+    if hasattr(source.stat(), "st_ino"):
+        assert source.stat().st_ino == dest.stat().st_ino
 
 
 def test_class_analysis_encode_crops_reports_batch_progress(monkeypatch):

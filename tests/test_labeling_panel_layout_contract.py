@@ -691,6 +691,8 @@ def test_qwen_training_fallback_catalog_covers_mlx_and_abliterated_paths():
     assert 'runtime_platform: "mlx_vlm"' in fallback_block
     assert "abliterated: true" in fallback_block
     assert 'training_model_id: "huihui-ai/Huihui-Qwen3-VL-8B-Thinking-abliterated"' in fallback_block
+    assert '"27B": 24.0' in js
+    assert '["235B", "35B", "30B", "32B", "27B", "8B", "4B", "2B"]' in js
 
 
 def test_qwen_injected_runtime_options_use_shared_mlx_resolver():
@@ -712,7 +714,7 @@ def test_qwen_caption_model_defaults_to_active_runtime():
 
     assert select_match
     options = select_match.group(1)
-    assert '<option value="active" selected>Use active model</option>' in options
+    assert '<option value="active" selected>Auto caption default</option>' in options
     assert 'value="Qwen/Qwen3-VL-30B-A3B-Thinking" selected' not in options
     assert options.count(" selected") == 1
 
@@ -1184,6 +1186,9 @@ def test_class_split_explorer_panel_contract():
     assert ".class-split-qwen-mechanism" in css
     assert ".class-split-qwen-trace-toast" in css
     assert ".class-split-qwen-trace-toast__body" in css
+    assert "width: min(780px, calc(100vw - 36px));" in css
+    assert "--class-split-qwen-review-bg" in css
+    assert "html.theme-pipboy .class-split-qwen-review" in css
     assert ".class-split-wrong-item__preview" in css
     assert ".class-split-wrong-item__badge--dual" in css
     assert "grid-template-columns: 232px minmax(0, 1fr);" in css
@@ -1206,6 +1211,8 @@ def test_class_split_explorer_panel_contract():
     assert "html.theme-pipboy .class-split-dataset-analysis" in css
     assert "height: calc(100vh - 330px);" in css
     assert "html.theme-dark .class-split-panel" in css
+    assert "raw VLM / controller output" in js
+    assert "review.trace_events" in js
     assert "html.theme-dark .class-split-workspace__header" in css
     assert "html.theme-pipboy .class-split-panel" in css
     assert '"bulk bulk"\n        "graph review"\n        "footer footer"\n        "wrong wrong"' in css
@@ -1253,7 +1260,9 @@ def test_class_split_explorer_panel_contract():
     assert "classSplitElements.graphStatus" in js
     assert "classSplitElements.qwenReviewTraceToggle" in js
     assert "function renderClassSplitQwenReviewTraceToast" in js
+    assert "function buildClassSplitQwenReviewTraceHtml" in js
     assert "function buildClassSplitQwenReviewTraceText" in js
+    assert "Audit trail intermediate outputs" in js
     assert "setClassSplitQwenReviewTraceEnabled" in js
     assert "plotRenderToken" in js
     assert "projection_mode: projectionParts.projectionMode" in js

@@ -2,6 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from services.qwen_model_catalog import (
+    QWEN_CUDA_DEFAULT_MODEL,
     QWEN_TRANSFORMERS_MODEL_IDS,
     QWEN_TRANSFORMERS_MODEL_OPTIONS,
     qwen_transformers_metadata_for_model,
@@ -161,6 +162,26 @@ def test_fp8_runtime_uses_device_map_for_explicit_cuda_device():
         torch_module=_Torch,
     )
 
+    assert kwargs["torch_dtype"] == "auto"
+    assert kwargs["device_map"] == {"": "cuda:1"}
+
+
+def test_aeon_nvfp4_cuda_default_is_inference_only_and_uses_device_map():
+    entry = next(
+        item for item in QWEN_TRANSFORMERS_MODEL_OPTIONS if item["id"] == QWEN_CUDA_DEFAULT_MODEL
+    )
+    kwargs = qwen_transformers_load_kwargs(
+        QWEN_CUDA_DEFAULT_MODEL,
+        device="cuda:1",
+        device_pref="cuda:1",
+        torch_module=_Torch,
+    )
+
+    assert QWEN_CUDA_DEFAULT_MODEL in QWEN_TRANSFORMERS_MODEL_IDS
+    assert entry["training_supported"] is False
+    assert entry["training_modes"] == []
+    assert entry["quantization_backend"] == "nvfp4"
+    assert entry["abliterated"] is True
     assert kwargs["torch_dtype"] == "auto"
     assert kwargs["device_map"] == {"": "cuda:1"}
 

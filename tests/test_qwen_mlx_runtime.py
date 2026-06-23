@@ -7,6 +7,9 @@ from PIL import Image
 
 import localinferenceapi as api
 
+AEON_MLX_ID = "AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4"
+AEON_CUDA_ID = "AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS"
+
 
 class _ImmediateThread:
     def __init__(self, target=None, args=(), kwargs=None, **_kwargs):
@@ -82,11 +85,17 @@ def test_qwen_model_registry_exposes_mlx_quantized_models():
     ids = {entry["id"] for entry in models}
 
     assert "mlx-community/Qwen3-VL-4B-Instruct-4bit" in ids
+    assert AEON_MLX_ID in ids
     assert "mlx-community/Qwen3-VL-32B-Thinking-4bit" in ids
     assert "mlx-community/Qwen3-VL-235B-A22B-Thinking-3bit" in ids
     mlx_entry = next(entry for entry in models if entry["id"] == "mlx-community/Qwen3-VL-4B-Instruct-4bit")
     assert mlx_entry["type"] == "builtin_mlx"
     assert mlx_entry["metadata"]["runtime_platform"] == "mlx_vlm"
+    aeon_entry = next(entry for entry in models if entry["id"] == AEON_MLX_ID)
+    assert aeon_entry["type"] == "builtin_mlx"
+    assert aeon_entry["metadata"]["runtime_platform"] == "mlx_vlm"
+    assert aeon_entry["metadata"]["agent_model"] is True
+    assert aeon_entry["metadata"]["training_supported"] is False
 
 
 def test_qwen_model_registry_exposes_cuda_quantized_and_abliterated_models():
@@ -128,6 +137,7 @@ def test_qwen_model_registry_exposes_qwen35_36_cuda_inference_models():
         "Qwen/Qwen3.6-27B": ("Qwen3.6", False, "none"),
         "cyankiwi/Qwen3.6-27B-AWQ-INT4": ("Qwen3.6", False, "awq"),
         "btbtyler09/Qwen3.6-27B-GPTQ-4bit": ("Qwen3.6", False, "gptq"),
+        AEON_CUDA_ID: ("Qwen3.6", True, "nvfp4"),
         "Qwen/Qwen3.6-35B-A3B-FP8": ("Qwen3.6", False, "fp8"),
         "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit": ("Qwen3.6", False, "awq"),
         "palmfuture/Qwen3.6-35B-A3B-GPTQ-Int4": ("Qwen3.6", False, "gptq"),
@@ -147,6 +157,10 @@ def test_qwen_model_registry_exposes_qwen35_36_cuda_inference_models():
         assert metadata["training_modes"] == []
         assert metadata["abliterated"] is abliterated
         assert metadata["quantization_backend"] == quantization_backend
+    ids = [entry["id"] for entry in models]
+    assert ids.count(AEON_CUDA_ID) == 1
+    assert by_id[AEON_CUDA_ID]["metadata"]["agent_model"] is True
+    assert by_id[AEON_CUDA_ID]["metadata"]["agent_supported"] is True
 
 
 def test_qwen_model_registry_exposes_abliterated_mlx_models():
@@ -206,6 +220,8 @@ def test_qwen_model_registry_exposes_inference_only_agent_models():
         "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx": "builtin_mlx",
         "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx": "builtin_mlx",
         "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx": "builtin_mlx",
+        AEON_MLX_ID: "builtin_mlx",
+        AEON_CUDA_ID: "builtin_transformers",
         "mlx-community/Qwen3.6-35B-A3B-4bit": "builtin_agent_mlx",
         "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit": "builtin_mlx",
         "empero-ai/Qwable-9B-Claude-Fable-5": "builtin_agent_transformers",
@@ -1317,8 +1333,91 @@ def test_qwen_inference_uses_mlx_runtime(monkeypatch):
     assert calls["image"] == [img]
     assert calls["kwargs"]["max_tokens"] == 64
     assert calls["kwargs"]["temperature"] == 0.0
-    assert calls["template_kwargs"]["enable_thinking"] is False
-    assert calls["messages"][-1]["content"][0] == {"type": "image"}
+
+
+def test_qwen_inference_mlx_cleans_transient_buffers(monkeypatch):
+    cleanup_calls = []
+
+    class DummyProcessor:
+        def apply_chat_template(self, *_args, **_kwargs):
+            return "formatted prompt"
+
+    monkeypatch.setattr(api, "MLX_VLM_GENERATE", lambda *_args, **_kwargs: "done")
+    monkeypatch.setattr(api, "_qwen_mlx_post_generation_cleanup", lambda: cleanup_calls.append(True))
+    runtime = api.QwenRuntime(
+        model=object(),
+        processor=DummyProcessor(),
+        platform=api.QWEN_PLATFORM_MLX,
+        model_id="mlx-community/Qwen3-VL-4B-Instruct-4bit",
+        config={"model_type": "qwen2_5_vl"},
+    )
+
+    text, _width, _height = api._run_qwen_inference(
+        "Caption this",
+        Image.new("RGB", (16, 16), (0, 0, 0)),
+        max_new_tokens=16,
+        runtime_override=runtime,
+    )
+
+    assert text == "done"
+    assert cleanup_calls == [True]
+
+
+def test_qwen_caption_active_mlx_default_uses_stable_caption_model(monkeypatch):
+    monkeypatch.setattr(api, "QWEN_MLX_CAPTION_MODEL_NAME", "mlx-community/Qwen3-VL-4B-Instruct-4bit")
+    monkeypatch.setattr(api, "active_qwen_metadata", {"model_id": AEON_MLX_ID, "runtime_platform": api.QWEN_PLATFORM_MLX})
+    monkeypatch.setattr(api, "active_qwen_model_path", None)
+
+    assert (
+        api._resolve_qwen_caption_default_model_id(AEON_MLX_ID, "auto")
+        == "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+    )
+    assert (
+        api._resolve_qwen_caption_default_model_id(AEON_MLX_ID, "Thinking")
+        == "mlx-community/Qwen3-VL-4B-Thinking-4bit"
+    )
+
+
+def test_qwen_caption_default_keeps_transformers_active_model(monkeypatch):
+    active_id = "Qwen/Qwen3-VL-8B-Instruct"
+    monkeypatch.setattr(
+        api,
+        "active_qwen_metadata",
+        {"id": active_id, "model_id": active_id, "runtime_platform": api.QWEN_PLATFORM_TRANSFORMERS},
+    )
+    monkeypatch.setattr(api, "active_qwen_model_path", None)
+
+    assert api._resolve_qwen_caption_default_model_id(active_id, "auto") == active_id
+    assert (
+        api._resolve_qwen_caption_default_model_id(active_id, "Thinking")
+        == "Qwen/Qwen3-VL-8B-Thinking"
+    )
+
+
+def test_qwen_chat_template_kwargs_use_processor_kwargs_for_non_template_vars():
+    calls = {}
+
+    class DummyProcessor:
+        chat_template = "{{ messages[0]['content'][0]['text'] }}"
+
+        def apply_chat_template(self, messages, **kwargs):
+            calls["messages"] = messages
+            calls["kwargs"] = kwargs
+            return "rendered"
+
+    messages = [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+
+    rendered = api._apply_qwen_chat_template(
+        DummyProcessor(),
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    assert rendered == "rendered"
+    assert "enable_thinking" not in calls["kwargs"]
+    assert calls["kwargs"]["processor_kwargs"] == {"enable_thinking": False}
 
 
 def test_qwen_mlx_message_normalization_keeps_falsey_image_objects():

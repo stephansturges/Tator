@@ -2999,8 +2999,8 @@ body.annotation-focus-mode .class-scroll-indicator {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    width: min(560px, calc(100vw - 36px));
-    max-height: min(46vh, 460px);
+    width: min(780px, calc(100vw - 36px));
+    max-height: min(66vh, 720px);
     padding: 12px;
     border: 1px solid rgba(14, 165, 233, 0.45);
     border-radius: 10px;
@@ -3022,10 +3022,9 @@ body.annotation-focus-mode .class-scroll-indicator {
 
 .class-split-qwen-trace-toast__body {
     margin: 0;
-    max-height: min(36vh, 350px);
+    max-height: min(56vh, 620px);
     overflow: auto;
     overscroll-behavior: contain;
-    white-space: pre-wrap;
     word-break: break-word;
     border-radius: 8px;
     border: 1px solid rgba(148, 163, 184, 0.35);
@@ -3035,17 +3034,79 @@ body.annotation-focus-mode .class-scroll-indicator {
     font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
-.class-split-qwen-review {
-    margin-top: 8px;
-    border: 1px solid rgba(14, 165, 233, 0.35);
+.class-split-qwen-trace-summary {
+    display: grid;
+    gap: 3px;
+    margin-bottom: 10px;
+}
+
+.class-split-qwen-trace-timeline {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.class-split-qwen-trace-step,
+.class-split-qwen-trace-raw,
+.class-split-qwen-trace-decision {
+    border: 1px solid rgba(148, 163, 184, 0.35);
     border-radius: 7px;
-    background: rgba(240, 249, 255, 0.9);
+    padding: 8px;
+    background: rgba(248, 250, 252, 0.85);
+}
+
+.class-split-qwen-trace-step__head {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 5px;
+}
+
+.class-split-qwen-trace-step p,
+.class-split-qwen-trace-decision p {
+    margin: 4px 0 0;
+}
+
+.class-split-qwen-trace-step pre,
+.class-split-qwen-trace-raw pre {
+    max-height: 260px;
+    overflow: auto;
+    margin: 6px 0 0;
+    padding: 7px;
+    border-radius: 6px;
+    background: rgba(15, 23, 42, 0.06);
+    white-space: pre-wrap;
+}
+
+.class-split-qwen-trace-raw {
+    margin-top: 10px;
+}
+
+.class-split-qwen-trace-raw h4 {
+    margin: 8px 0 0;
+    font-size: 12px;
+}
+
+.class-split-qwen-review {
+    --class-split-qwen-review-bg: rgba(240, 249, 255, 0.94);
+    --class-split-qwen-review-border: rgba(14, 165, 233, 0.42);
+    --class-split-qwen-review-text: #0f172a;
+    --class-split-qwen-review-strong: #075985;
+    --class-split-qwen-review-muted: #334155;
+    margin-top: 8px;
+    border: 1px solid var(--class-split-qwen-review-border);
+    border-radius: 7px;
+    background: var(--class-split-qwen-review-bg);
+    color: var(--class-split-qwen-review-text);
     overflow: hidden;
 }
 
 .class-split-qwen-review--failed {
-    border-color: rgba(239, 68, 68, 0.45);
-    background: rgba(254, 242, 242, 0.92);
+    --class-split-qwen-review-bg: rgba(254, 242, 242, 0.94);
+    --class-split-qwen-review-border: rgba(239, 68, 68, 0.5);
+    --class-split-qwen-review-strong: #991b1b;
 }
 
 .class-split-qwen-review__bar {
@@ -3070,9 +3131,17 @@ body.annotation-focus-mode .class-scroll-indicator {
     overflow-wrap: anywhere;
 }
 
+.class-split-qwen-review__body strong {
+    color: var(--class-split-qwen-review-strong);
+}
+
+.class-split-qwen-review__body span {
+    color: var(--class-split-qwen-review-muted);
+}
+
 .class-split-qwen-review__body p {
     margin: 4px 0 0;
-    color: #0f172a;
+    color: var(--class-split-qwen-review-text);
     font-size: 12px;
     line-height: 1.35;
 }
@@ -3093,19 +3162,67 @@ body.annotation-focus-mode .class-scroll-indicator {
 
 .class-split-qwen-review__evidence {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 6px;
     padding: 0 8px 8px;
 }
 
-.class-split-qwen-review__evidence img {
+.class-split-qwen-review__evidence-item {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+    color: var(--class-split-qwen-review-text);
+    text-decoration: none;
+}
+
+.class-split-qwen-review__evidence-item img {
     display: block;
     width: 100%;
-    height: 86px;
+    height: 112px;
     border-radius: 5px;
     border: 1px solid rgba(14, 165, 233, 0.28);
     background: #000;
     object-fit: contain;
+}
+
+.class-split-qwen-review__evidence-item.is-cited img {
+    border-color: rgba(34, 197, 94, 0.72);
+}
+
+.class-split-qwen-review__evidence-item span,
+.class-split-qwen-review__evidence-item small {
+    overflow-wrap: anywhere;
+}
+
+.class-split-qwen-review__evidence-item span {
+    font-size: 11px;
+    font-weight: 800;
+}
+
+.class-split-qwen-review__evidence-item small {
+    color: var(--class-split-qwen-review-muted);
+    font-size: 10px;
+    line-height: 1.25;
+}
+
+.class-split-qwen-review__audit {
+    margin: 0 8px 8px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 6px;
+    padding: 6px;
+}
+
+.class-split-qwen-review__audit summary {
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.class-split-qwen-review__audit-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 7px;
 }
 
 .class-split-qwen-review__actions {
@@ -5638,6 +5755,20 @@ html.theme-dark .class-split-wrong-item__body span {
     color: #fed7aa;
 }
 
+html.theme-dark .class-split-qwen-review {
+    --class-split-qwen-review-bg: rgba(15, 23, 42, 0.92);
+    --class-split-qwen-review-border: rgba(96, 165, 250, 0.52);
+    --class-split-qwen-review-text: #e2e8f0;
+    --class-split-qwen-review-strong: #bfdbfe;
+    --class-split-qwen-review-muted: #cbd5e1;
+}
+
+html.theme-dark .class-split-qwen-review--failed {
+    --class-split-qwen-review-bg: rgba(69, 10, 10, 0.58);
+    --class-split-qwen-review-border: rgba(248, 113, 113, 0.58);
+    --class-split-qwen-review-strong: #fecaca;
+}
+
 html.theme-dark .shortcut-key {
     background: rgba(96, 165, 250, 0.14);
     border-color: rgba(96, 165, 250, 0.45);
@@ -5740,6 +5871,18 @@ html.theme-dark .class-split-qwen-trace-toast__body {
     background: #0f1418;
     border-color: #3a444b;
     color: #dce5df;
+}
+
+html.theme-dark .class-split-qwen-trace-step,
+html.theme-dark .class-split-qwen-trace-raw,
+html.theme-dark .class-split-qwen-trace-decision {
+    background: #151a1e;
+    border-color: #3a444b;
+}
+
+html.theme-dark .class-split-qwen-trace-step pre,
+html.theme-dark .class-split-qwen-trace-raw pre {
+    background: #0b0f12;
 }
 
 html.theme-dark .qwen-caption-live-toast.is-error,
@@ -6470,6 +6613,31 @@ html.theme-pipboy .class-split-wrong-item__body span {
     color: var(--pip-green);
 }
 
+html.theme-pipboy .class-split-qwen-review {
+    --class-split-qwen-review-bg: color-mix(in srgb, var(--pip-green) 8%, var(--pip-panel));
+    --class-split-qwen-review-border: color-mix(in srgb, var(--pip-green) 52%, var(--pip-border));
+    --class-split-qwen-review-text: var(--pip-green);
+    --class-split-qwen-review-strong: var(--pip-green-strong);
+    --class-split-qwen-review-muted: color-mix(in srgb, var(--pip-green) 78%, transparent);
+}
+
+html.theme-pipboy .class-split-qwen-review--failed {
+    --class-split-qwen-review-bg: color-mix(in srgb, var(--pip-red) 14%, var(--pip-panel));
+    --class-split-qwen-review-border: color-mix(in srgb, var(--pip-red) 58%, var(--pip-border));
+    --class-split-qwen-review-strong: color-mix(in srgb, var(--pip-red) 65%, var(--pip-green-strong));
+}
+
+html.theme-pipboy .class-split-qwen-review__guarded {
+    background: color-mix(in srgb, var(--pip-amber) 10%, var(--pip-panel));
+    border-color: color-mix(in srgb, var(--pip-amber) 58%, var(--pip-border));
+}
+
+html.theme-pipboy .class-split-qwen-review__guarded strong,
+html.theme-pipboy .class-split-qwen-review__guarded span,
+html.theme-pipboy .class-split-qwen-review__guarded p {
+    color: var(--pip-amber);
+}
+
 html.theme-pipboy .qwen-caption-workflow__title,
 html.theme-pipboy .qwen-caption-workflow__path-item strong,
 html.theme-pipboy .qwen-caption-workflow__setting strong {
@@ -6532,6 +6700,18 @@ html.theme-pipboy .class-split-qwen-trace-toast__body {
     background: color-mix(in srgb, var(--pip-green) 7%, transparent);
     border-color: color-mix(in srgb, var(--pip-green) 34%, transparent);
     color: var(--pip-green);
+}
+
+html.theme-pipboy .class-split-qwen-trace-step,
+html.theme-pipboy .class-split-qwen-trace-raw,
+html.theme-pipboy .class-split-qwen-trace-decision {
+    background: color-mix(in srgb, var(--pip-green) 5%, transparent);
+    border-color: color-mix(in srgb, var(--pip-green) 28%, transparent);
+}
+
+html.theme-pipboy .class-split-qwen-trace-step pre,
+html.theme-pipboy .class-split-qwen-trace-raw pre {
+    background: color-mix(in srgb, black 65%, transparent);
 }
 
 html.theme-pipboy .sam3-text-workflow .qwen-caption-workflow__path-item.is-active,

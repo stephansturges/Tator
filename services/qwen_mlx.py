@@ -18,7 +18,16 @@ QWEN_PLATFORM_ALIASES = {
     "mlx-vlm": QWEN_PLATFORM_MLX,
     "mlx_vlm": QWEN_PLATFORM_MLX,
 }
-QWEN_MLX_DEFAULT_MODEL = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+QWEN_AEON_QWEN36_27B_MLX_MODEL = (
+    "AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4"
+)
+QWEN_MLX_DEFAULT_MODEL = QWEN_AEON_QWEN36_27B_MLX_MODEL
+QWEN_MLX_CAPTION_DEFAULT_MODEL = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+QWEN_AEON_QWEN36_27B_MLX_NOTE = (
+    "Inference-only AEON Qwen3.6 27B multimodal MLX FP4 checkpoint. "
+    "The upstream AEON MLX repo advertises it as an Apple Silicon MLX-VLM "
+    "image-text model; adapter training is not wired for this architecture."
+)
 QWEN_VANCH007_QWEN36_35B_MLX_MODEL = "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit"
 QWEN_VANCH007_QWEN36_35B_MLX_NOTE = (
     "Experimental Qwen3.6 35B-A3B abliterated MLX-VLM checkpoint. "
@@ -236,6 +245,13 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
             )
     for model_id, size, variant, quantization, source in (
         (
+            QWEN_AEON_QWEN36_27B_MLX_MODEL,
+            "27B",
+            "AEON Ultimate Uncensored",
+            "FP4",
+            "AEON-7",
+        ),
+        (
             QWEN_VANCH007_QWEN36_35B_MLX_MODEL,
             "35B-A3B",
             "Abliterated",
@@ -271,12 +287,15 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
             "Goekdeniz-Guelmez",
         ),
     ):
-        if source == "Goekdeniz-Guelmez":
+        if source == "AEON-7":
+            label = f"MLX AEON Qwen3.6 {size} {variant} {quantization}"
+        elif source == "Goekdeniz-Guelmez":
             label = f"MLX Josiefied Qwen3-VL {size} {variant} abliterated {quantization}"
         elif source == "vanch007":
             label = f"MLX Qwen3.6 {size} abliterated {quantization}"
         else:
             label = f"MLX Huihui Qwen3-VL {size} {variant} abliterated {quantization}"
+        is_aeon_qwen36 = model_id == QWEN_AEON_QWEN36_27B_MLX_MODEL
         is_vanch007_qwen36 = model_id == QWEN_VANCH007_QWEN36_35B_MLX_MODEL
         entries.append(
             _external_mlx_entry(
@@ -287,13 +306,19 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
                 quantization=quantization,
                 source=source,
                 abliterated=True,
-                training_supported=not is_vanch007_qwen36,
+                training_supported=not (is_aeon_qwen36 or is_vanch007_qwen36),
                 compatibility_note=(
+                    QWEN_AEON_QWEN36_27B_MLX_NOTE
+                    if is_aeon_qwen36
+                    else
                     QWEN_VANCH007_QWEN36_35B_MLX_NOTE
                     if is_vanch007_qwen36
                     else None
                 ),
                 training_note=(
+                    QWEN_AEON_QWEN36_27B_MLX_NOTE
+                    if is_aeon_qwen36
+                    else
                     QWEN_VANCH007_QWEN36_35B_MLX_NOTE
                     if is_vanch007_qwen36
                     else None
@@ -301,16 +326,17 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
             )
         )
     preferred = {
-        "mlx-community/Qwen3-VL-4B-Instruct-4bit": 0,
-        "mlx-community/Qwen3-VL-2B-Instruct-4bit": 1,
-        "mlx-community/Qwen3-VL-8B-Instruct-4bit": 2,
-        "mlx-community/Qwen3-VL-4B-Thinking-4bit": 3,
-        "mlx-community/Qwen3-VL-8B-Thinking-4bit": 4,
-        "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx": 5,
-        "EZCon/Huihui-Qwen3-VL-2B-Instruct-abliterated-4bit-mlx": 6,
-        "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx": 7,
-        "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx": 8,
-        QWEN_VANCH007_QWEN36_35B_MLX_MODEL: 9,
+        QWEN_AEON_QWEN36_27B_MLX_MODEL: 0,
+        "mlx-community/Qwen3-VL-4B-Instruct-4bit": 1,
+        "mlx-community/Qwen3-VL-2B-Instruct-4bit": 2,
+        "mlx-community/Qwen3-VL-8B-Instruct-4bit": 3,
+        "mlx-community/Qwen3-VL-4B-Thinking-4bit": 4,
+        "mlx-community/Qwen3-VL-8B-Thinking-4bit": 5,
+        "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx": 6,
+        "EZCon/Huihui-Qwen3-VL-2B-Instruct-abliterated-4bit-mlx": 7,
+        "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx": 8,
+        "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx": 9,
+        QWEN_VANCH007_QWEN36_35B_MLX_MODEL: 10,
     }
     entries.sort(
         key=lambda entry: (

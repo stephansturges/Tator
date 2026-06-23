@@ -3457,3 +3457,19 @@ preserving the exact validation story for storage and artifact-write fixes.
   (`tests/test_agent_recipe_import_security.py` and
   `tests/test_prepass_recipe_import_security.py`, `18 passed`) and `py_compile
   services/prepass_recipes.py` plus affected tests.
+
+## 2026-06-23: Qwen Caption and Class Split Review Hardening
+
+- Split the implicit macOS captioning default away from the larger general
+  Qwen MLX default. Caption passes now use a caption-safe MLX model by default,
+  while interactive review can still use the larger configured reviewer model.
+- Added post-generation MLX cleanup around Qwen inference to release transient
+  buffers after each generation path.
+- Routed non-template processor options through `processor_kwargs` for current
+  Transformers chat-template compatibility.
+- Restored completed Class Split analysis jobs from disk so refreshed clients
+  can recover graph payloads instead of showing an empty completed analysis.
+- Added richer Class Split Qwen review traces with an expandable intermediate
+  evidence audit trail.
+- Validation: Qwen caption/runtime coverage, class-analysis restore coverage,
+  layout contract checks, `py_compile`, and `node --check ybat-master/ybat.js`.

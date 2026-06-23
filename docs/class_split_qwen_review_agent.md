@@ -910,10 +910,12 @@ selected Qwen reviewer, and parses one compact `finalize_review` JSON object.
 The deterministic scale, embedding, overlap, and anchor reports are rails and
 audit context, not replacements for the VLM.
 
-The current preferred local test model is
-`vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit`. The Heretic MLX variant
-was not exposed as a default reviewer after local smoke tests produced invalid
-text in this harness. If future MLX command-buffer failures recur, use
+The current MLX default for Qwen inference is
+`AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4`. The matching
+CUDA/Transformers default is
+`AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS`.
+Previously validated Qwen3.6 MLX reviewers remain selectable, but they are no
+longer the default. If future MLX command-buffer failures recur, use
 `CLASS_ANALYSIS_QWEN_REVIEW_ENABLE_MLX_FINAL=false` only as an explicit fallback
 debug mode; do not treat controller preflights as the main product behavior.
 
@@ -2284,6 +2286,12 @@ The 2026-06-18 model matrix benchmark used the fixed reviewable source set
   decisions.
 - `mlx-community/Qwen3.6-35B-A3B-4bit` also completed the 10-vignette baseline
   run with 10/10 completed reviews and 3/10 non-skip decisions.
+- `AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4` is now the
+  MLX inference default, and
+  `AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS` is the
+  CUDA/Transformers inference default. They are metadata-verified and exposed
+  for agent-assisted flows, but should get a fresh vignette benchmark before
+  being called benchmark winners.
 - Non-Qwen candidates tested in the same Qwen-shaped schema harness
   (Nex/Gemma-family MLX checkpoints) did not produce completed schema-valid
   reviews and are no longer exposed as active agent-model choices.

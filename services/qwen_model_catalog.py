@@ -6,6 +6,9 @@ import re
 from typing import Any, Dict, List, Optional
 
 QWEN_PLATFORM_TRANSFORMERS = "transformers"
+QWEN_CUDA_DEFAULT_MODEL = (
+    "AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS"
+)
 
 _QWEN_VARIANTS = ("Instruct", "Thinking")
 _QWEN_DENSE_SIZES = ("2B", "4B", "8B", "32B")
@@ -346,6 +349,17 @@ def _build_transformers_model_options() -> List[Dict[str, Any]]:
         ("huihui-ai/Huihui-Qwen3.5-9B-abliterated", "Qwen3.5", "9B", "Vision", "huihui-ai", None, "none", True, None),
         ("huihui-ai/Huihui-Qwen3.5-35B-A3B-abliterated", "Qwen3.5", "35B-A3B", "Vision", "huihui-ai", None, "none", True, None),
         ("prithivMLmods/Gliese-Qwen3.5-9B-Abliterated-Caption", "Qwen3.5", "9B", "Vision", "prithivMLmods", None, "none", True, "Qwen/Qwen3.5-9B"),
+        (
+            QWEN_CUDA_DEFAULT_MODEL,
+            "Qwen3.6",
+            "27B",
+            "AEON Ultimate Uncensored",
+            "AEON-7",
+            "NVFP4 modelopt MTP",
+            "nvfp4",
+            True,
+            "AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-BF16",
+        ),
         ("Qwen/Qwen3.6-27B", "Qwen3.6", "27B", "Vision", "Qwen", None, "none", False, None),
         ("Qwen/Qwen3.6-35B-A3B", "Qwen3.6", "35B-A3B", "Vision", "Qwen", None, "none", False, None),
         ("Qwen/Qwen3.6-35B-A3B-FP8", "Qwen3.6", "35B-A3B", "Vision", "Qwen", "FP8", "fp8", False, "Qwen/Qwen3.6-35B-A3B"),
@@ -425,6 +439,8 @@ def _quantization_label(quantization_backend: str, model_id: str) -> Optional[st
         return "GPTQ 4-bit"
     if backend == "fp8":
         return "FP8"
+    if backend == "nvfp4":
+        return "NVFP4"
     if backend == "4bit":
         return "4-bit"
     if backend == "8bit":
@@ -505,6 +521,8 @@ def infer_qwen_quantization_backend(model_id: Optional[str]) -> str:
         return "gptq"
     if "fp8" in lowered:
         return "fp8"
+    if "nvfp4" in lowered or "modelopt" in lowered:
+        return "nvfp4"
     if re.search(r"(^|[-_])(4bit|4-bit|int4)([-_]|$)", lowered):
         return "4bit"
     if re.search(r"(^|[-_])(8bit|8-bit|int8)([-_]|$)", lowered):
@@ -593,7 +611,7 @@ def resolve_qwen_training_model_id(model_id: Optional[str]) -> str:
         return stripped
     if stripped and stripped.startswith("Qwen/Qwen3-VL-"):
         return stripped
-    if infer_qwen_quantization_backend(raw) in {"awq", "gptq", "fp8", "4bit", "8bit"}:
+    if infer_qwen_quantization_backend(raw) in {"awq", "gptq", "fp8", "nvfp4", "4bit", "8bit"}:
         if is_abliterated:
             inferred_abliterated = _infer_abliterated_base_from_quantized_name(raw)
             if inferred_abliterated:
@@ -616,7 +634,7 @@ def qwen_transformers_load_kwargs(
     quant_backend = infer_qwen_quantization_backend(model_id)
     cuda_available = bool(torch_module.cuda.is_available())
     on_cuda = device_text.startswith("cuda") and cuda_available
-    if on_cuda and quant_backend in {"awq", "gptq", "fp8", "4bit", "8bit"}:
+    if on_cuda and quant_backend in {"awq", "gptq", "fp8", "nvfp4", "4bit", "8bit"}:
         if pref == "auto" or device_text == "cuda":
             return {"torch_dtype": "auto", "device_map": "auto"}
         return {"torch_dtype": "auto", "device_map": {"": device_text}}
@@ -627,6 +645,7 @@ def qwen_transformers_load_kwargs(
 
 
 __all__ = [
+    "QWEN_CUDA_DEFAULT_MODEL",
     "QWEN_TRANSFORMERS_MODEL_OPTIONS",
     "QWEN_TRANSFORMERS_MODEL_IDS",
     "infer_qwen_quantization_backend",

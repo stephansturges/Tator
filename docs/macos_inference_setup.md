@@ -63,7 +63,10 @@ SAM_MLX_ROOT=                 # mlx-examples/segment_anything checkout
 DINOV3_BACKEND=auto           # auto|torch|mlx
 QWEN_DEVICE=auto
 QWEN_INFERENCE_PLATFORM=auto # auto|mlx_vlm|transformers
-QWEN_MLX_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
+QWEN_MLX_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4
+QWEN_MLX_CAPTION_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
+QWEN_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS
+QWEN_TRAINING_DEFAULT_MODEL=Qwen/Qwen3-VL-4B-Instruct
 QWEN_MLX_DEFAULT_QUANTIZATION=4bit
 ```
 
@@ -231,9 +234,21 @@ Useful environment settings:
 
 ```bash
 QWEN_INFERENCE_PLATFORM=auto
-QWEN_MLX_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
+QWEN_MLX_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4
+QWEN_MLX_CAPTION_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
+QWEN_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS
+QWEN_TRAINING_DEFAULT_MODEL=Qwen/Qwen3-VL-4B-Instruct
 QWEN_MLX_DEFAULT_QUANTIZATION=4bit
 ```
+
+`QWEN_MODEL_NAME` and `QWEN_MLX_MODEL_NAME` are general inference defaults.
+`QWEN_MLX_CAPTION_MODEL_NAME` is separate because a single captioning action can
+run many window, cleanup, and merge generations; implicit "Use active model"
+caption requests use the smaller caption default on MLX unless the UI/API
+request explicitly selects a different model. Qwen adapter-training defaults are
+intentionally separate through
+`QWEN_TRAINING_DEFAULT_MODEL`, because the AEON Qwen3.6 checkpoints are exposed
+as inference-only until their training path is wired and tested.
 
 Qwen3.6 / SwiReasoning smoke:
 
@@ -257,6 +272,8 @@ in the Qwen training picker. The active agent catalog is deliberately narrow:
 - Qwen3-VL MLX 2B/4B/8B Instruct and 4B/8B Thinking entries from the stable
   MLX runtime catalog.
 - Previously working Huihui/abliterated MLX Qwen3-VL variants.
+- AEON Qwen3.6 27B Ultimate Uncensored MLX FP4 is the Apple Silicon default
+  inference checkpoint.
 - Qwen3.6 MLX review candidates that completed local vignette smoke.
 - `empero-ai/Qwable-9B-Claude-Fable-5` on the Transformers 5 path. Metadata
   smoke confirms it resolves as `qwen3_5` and exposes `Qwen3VLProcessor` with
@@ -313,6 +330,8 @@ Qwen3.6 visual checkpoints for inference and agent-assisted flows:
 - Huihui/prithiv-style abliterated Qwen3.5/Qwen3.6 checkpoints, plus selected
   quantized abliterated Qwen3.6 variants that advertise image-text Transformers
   support.
+- AEON Qwen3.6 27B Ultimate Uncensored NVFP4/MTP is the default
+  CUDA/Transformers inference checkpoint.
 
 Quantized activation uses the selected checkpoint for inference when the CUDA
 dependency stack supports it. Dense and MoE Qwen3-VL Transformers entries can be

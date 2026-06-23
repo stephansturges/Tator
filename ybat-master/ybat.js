@@ -11619,14 +11619,14 @@ function getSelectedQwenTrainMode() {
 }
 
 const QWEN_VRAM_ESTIMATE_GB = {
-    official_lora: { "2B": 12.0, "4B": 20.0, "8B": 96.0, "32B": 192.0, "35B": 192.0, "30B": 180.0, "235B": 800.0 },
-    trl_qlora: { "2B": 8.0, "4B": 10.0, "8B": 16.0, "32B": 48.0, "35B": 56.0, "30B": 64.0, "235B": 260.0 },
+    official_lora: { "2B": 12.0, "4B": 20.0, "8B": 96.0, "27B": 160.0, "32B": 192.0, "35B": 192.0, "30B": 180.0, "235B": 800.0 },
+    trl_qlora: { "2B": 8.0, "4B": 10.0, "8B": 16.0, "27B": 40.0, "32B": 48.0, "35B": 56.0, "30B": 64.0, "235B": 260.0 },
 };
 const QWEN_VRAM_THINKING_SCALE = 1.08;
 const QWEN_VRAM_PIXEL_BASE = 451584;
 const QWEN_VRAM_PIXEL_SCALE_MIN = 0.6;
 const QWEN_VRAM_PIXEL_SCALE_MAX = 1.6;
-const QWEN_MLX_MEMORY_ESTIMATE_GB = { "2B": 5.5, "4B": 8.0, "8B": 14.0, "30B": 42.0, "32B": 46.0, "35B": 32.0, "235B": 180.0 };
+const QWEN_MLX_MEMORY_ESTIMATE_GB = { "2B": 5.5, "4B": 8.0, "8B": 14.0, "27B": 24.0, "30B": 42.0, "32B": 46.0, "35B": 32.0, "235B": 180.0 };
 function qwenTrainingFallback(id, label, metadata = {}) {
     return {
         id,
@@ -11699,7 +11699,7 @@ const QWEN_TRAINING_MODEL_FALLBACKS = [
 ];
 
 function inferQwenModelSize(modelId) {
-    const sizes = ["235B", "35B", "30B", "32B", "8B", "4B", "2B"];
+    const sizes = ["235B", "35B", "30B", "32B", "27B", "8B", "4B", "2B"];
     for (const size of sizes) {
         if (modelId.includes(size)) return size;
     }
@@ -43075,6 +43075,171 @@ async function cancelRfDetrTrainingJobRequest() {
         return latest;
     }
 
+    function classSplitQwenReviewEvidenceRole(item, citedIds = null) {
+        const kind = String(item?.kind || "").trim();
+        const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+        const cited = citedIds instanceof Set && citedIds.has(String(item?.evidence_id || ""));
+        let role = "audit artifact";
+        if (["target_detail", "source_clean", "zoom_region", "specificity_region_contrast"].includes(kind)) {
+            role = "final VLM visual core";
+        } else if (["class_context_pack", "local_consensus_context", "overlap_decomposition", "same_image_scale_report", "same_image_embedding_report"].includes(kind)) {
+            role = "text/ledger context";
+        } else if (kind === "source_overlay") {
+            role = "geometry overlay context";
+        } else if (kind === "target_context") {
+            role = "target setup context";
+        }
+        if (metadata.bbox_overlay === true && role === "final VLM visual core") {
+            role = "overlay context";
+        }
+        return cited ? `${role} • cited by final` : role;
+    }
+
+    function renderClassSplitQwenEvidenceThumb(item, citedIds = null) {
+        const url = String(item?.artifact_url || "");
+        if (!url) {
+            return "";
+        }
+        const evidenceId = String(item?.evidence_id || "").trim();
+        const title = String(item?.title || item?.kind || "Qwen evidence").trim();
+        const role = classSplitQwenReviewEvidenceRole(item, citedIds);
+        const citedClass = citedIds instanceof Set && citedIds.has(evidenceId) ? " is-cited" : "";
+        return [
+            `<a class="class-split-qwen-review__evidence-item${citedClass}" href="${escapeHtml(url)}" target="_blank" rel="noopener">`,
+            `<img src="${escapeHtml(url)}" alt="${escapeHtml(title)}" loading="lazy">`,
+            `<span>${escapeHtml(title)}</span>`,
+            `<small>${escapeHtml(evidenceId)}${evidenceId ? " • " : ""}${escapeHtml(role)}</small>`,
+            `</a>`,
+        ].join("");
+    }
+
+    function formatClassSplitQwenTraceEventTitle(event) {
+        const type = String(event?.type || "event");
+        const phase = String(event?.phase || "").trim();
+        const tool = String(event?.tool || "").trim();
+        if (type === "controller_tool_call") {
+            return `Tool call: ${tool || "evidence tool"}`;
+        }
+        if (type === "tool_result") {
+            return `Tool output: ${tool || "evidence tool"}`;
+        }
+        if (type === "router_decision") {
+            return `Route: ${String(event?.router?.action || "controller decision")}`;
+        }
+        if (type === "model_output") {
+            return `VLM output${phase ? `: ${phase}` : ""}`;
+        }
+        if (type === "final_context_compacted") {
+            return "Final VLM context selected";
+        }
+        if (type === "compact_final_expanded") {
+            return "Final JSON expanded";
+        }
+        return phase ? `${type}: ${phase}` : type;
+    }
+
+    function renderClassSplitQwenTraceEvent(event) {
+        const timestamp = formatClassSplitQwenTraceTimestamp(event?.timestamp ?? event?.ts);
+        const type = String(event?.type || "event");
+        const summary = String(event?.summary || event?.message || event?.reason || "").trim();
+        const evidenceIds = Array.isArray(event?.evidence_ids) ? event.evidence_ids.map((id) => String(id || "").trim()).filter(Boolean) : [];
+        const details = [];
+        if (summary) {
+            details.push(`<p>${escapeHtml(summary)}</p>`);
+        }
+        if (evidenceIds.length) {
+            details.push(`<p><strong>Evidence:</strong> ${escapeHtml(evidenceIds.join(", "))}</p>`);
+        }
+        if (type === "final_context_compacted") {
+            const imageTools = Array.isArray(event.image_observations) ? event.image_observations.join(", ") : "";
+            const textTools = Array.isArray(event.text_only_observations) ? event.text_only_observations.join(", ") : "";
+            details.push(`<p><strong>Images sent:</strong> ${escapeHtml(imageTools || "none")}</p>`);
+            details.push(`<p><strong>Text/ledger only:</strong> ${escapeHtml(textTools || "none")}</p>`);
+        }
+        if (type === "router_decision" && event.router) {
+            details.push(`<pre>${escapeHtml(JSON.stringify(event.router, null, 2))}</pre>`);
+        }
+        if (type === "model_output" && typeof event.text === "string") {
+            details.push(`<details open><summary>Complete VLM text</summary><pre>${escapeHtml(event.text)}</pre></details>`);
+        } else if (["final_validation_error", "final_degenerate_output", "compact_final_expanded", "thinking_scratchpad_result", "specificity_probe_result"].includes(type)) {
+            details.push(`<details><summary>Raw event</summary><pre>${escapeHtml(JSON.stringify(event, null, 2))}</pre></details>`);
+        }
+        return [
+            `<li class="class-split-qwen-trace-step class-split-qwen-trace-step--${escapeHtml(type.replace(/[^a-z0-9_-]/gi, "_"))}">`,
+            `<div class="class-split-qwen-trace-step__head">`,
+            `<strong>${escapeHtml(formatClassSplitQwenTraceEventTitle(event))}</strong>`,
+            timestamp ? `<span>${escapeHtml(timestamp)}</span>` : "",
+            `</div>`,
+            details.join("") || `<p>${escapeHtml(type)}</p>`,
+            `</li>`,
+        ].join("");
+    }
+
+    function buildClassSplitQwenReviewTraceHtml(review) {
+        if (!review) {
+            return "Waiting for the next Qwen review.";
+        }
+        const pointId = String(review.point_id || "").trim();
+        const point = pointId ? getClassSplitPointById(pointId) : null;
+        const status = String(review.status || "queued").toLowerCase();
+        const progress = Math.max(0, Math.min(1, Number(review.progress) || 0));
+        const lines = [
+            `<strong>review:</strong> ${escapeHtml(String(review.review_id || review.job_id || "pending"))}`,
+            `<strong>status:</strong> ${escapeHtml(status)} (${Math.round(progress * 100)}%)`,
+        ];
+        if (point?.class_name || point?.image_relpath) {
+            lines.push(`<strong>target:</strong> ${escapeHtml(String(point.class_name || "object"))} • ${escapeHtml(String(point.image_relpath || point.image_name || pointId))}`);
+        } else if (pointId) {
+            lines.push(`<strong>target:</strong> ${escapeHtml(pointId)}`);
+        }
+        if (review.message) {
+            lines.push(`<strong>message:</strong> ${escapeHtml(String(review.message))}`);
+        }
+        if (review.error) {
+            lines.push(`<strong>error:</strong> ${escapeHtml(String(review.error))}`);
+        }
+        const logs = Array.isArray(review.logs) ? review.logs : [];
+        const logHtml = logs.length
+            ? `<details class="class-split-qwen-trace-raw"><summary>Recent backend log</summary><pre>${escapeHtml(logs.slice(-14).map((entry) => {
+                const timestamp = formatClassSplitQwenTraceTimestamp(entry?.timestamp ?? entry?.ts);
+                const message = String(entry?.message ?? entry?.msg ?? entry?.summary ?? entry ?? "").trim();
+                return message ? `${timestamp ? `${timestamp} ` : ""}${message}` : "";
+            }).filter(Boolean).join("\n"))}</pre></details>`
+            : "";
+        const traceEvents = Array.isArray(review.trace_events) ? review.trace_events : [];
+        const timelineEvents = traceEvents.filter((event) => {
+            const type = String(event?.type || "");
+            return type !== "model_input";
+        });
+        const timelineHtml = timelineEvents.length
+            ? `<ol class="class-split-qwen-trace-timeline">${timelineEvents.map(renderClassSplitQwenTraceEvent).join("")}</ol>`
+            : `<div class="training-help">Waiting for backend trace events. Current status is shown above.</div>`;
+        const rawOutputEvents = traceEvents.filter((event) => String(event?.type || "") === "model_output");
+        const rawOutputHtml = rawOutputEvents.length
+            ? `<details class="class-split-qwen-trace-raw" open><summary>Complete raw VLM outputs</summary>${rawOutputEvents.map((event) => {
+                const phase = String(event?.phase || "model_output");
+                return `<h4>${escapeHtml(phase)}</h4><pre>${escapeHtml(String(event?.text || ""))}</pre>`;
+            }).join("")}</details>`
+            : "";
+        const result = review.result && typeof review.result === "object" ? review.result : null;
+        const resultHtml = result
+            ? [
+                `<div class="class-split-qwen-trace-decision">`,
+                `<strong>${escapeHtml(formatClassSplitQwenDecision(result))}</strong>`,
+                Number.isFinite(Number(result.confidence)) ? `<span>confidence ${Math.round(Number(result.confidence) * 100)}%</span>` : "",
+                result.rationale_short ? `<p>${escapeHtml(String(result.rationale_short))}</p>` : "",
+                `</div>`,
+            ].join("")
+            : "";
+        return [
+            `<div class="class-split-qwen-trace-summary">${lines.map((line) => `<div>${line}</div>`).join("")}</div>`,
+            timelineHtml,
+            resultHtml,
+            rawOutputHtml,
+            logHtml,
+        ].join("");
+    }
+
     function buildClassSplitQwenReviewTraceText(review) {
         if (!review) {
             return "Waiting for the next Qwen review.";
@@ -43106,6 +43271,29 @@ async function cancelRfDetrTrainingJobRequest() {
                 const message = String(entry?.message ?? entry?.msg ?? entry?.summary ?? entry ?? "").trim();
                 if (message) {
                     lines.push(`${timestamp ? `${timestamp} ` : ""}${message}`);
+                }
+            });
+        }
+        const traceEvents = Array.isArray(review.trace_events) ? review.trace_events : [];
+        const visibleEvents = traceEvents.filter((event) => {
+            const type = String(event?.type || "");
+            return type === "model_output"
+                || type === "final_validation_error"
+                || type === "final_degenerate_output"
+                || type === "compact_final_expanded"
+                || type === "thinking_scratchpad_result"
+                || type === "specificity_probe_result";
+        }).slice(-12);
+        if (visibleEvents.length) {
+            lines.push("", "raw VLM / controller output:");
+            visibleEvents.forEach((event) => {
+                const type = String(event?.type || "event");
+                const phase = String(event?.phase || "").trim();
+                const label = phase ? `${type} (${phase})` : type;
+                if (typeof event?.text === "string") {
+                    lines.push("", `${label}:`, event.text);
+                } else {
+                    lines.push("", `${label}:`, JSON.stringify(event, null, 2));
                 }
             });
         }
@@ -43142,7 +43330,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         const activeReview = review || getLatestClassSplitQwenReviewJob();
         classSplitElements.qwenReviewTraceToast.hidden = false;
-        classSplitElements.qwenReviewTraceBody.textContent = buildClassSplitQwenReviewTraceText(activeReview);
+        classSplitElements.qwenReviewTraceBody.innerHTML = buildClassSplitQwenReviewTraceHtml(activeReview);
         classSplitElements.qwenReviewTraceBody.scrollTop = classSplitElements.qwenReviewTraceBody.scrollHeight;
     }
 
@@ -43446,10 +43634,6 @@ async function cancelRfDetrTrainingJobRequest() {
         const result = review.result || null;
         const evidence = Array.isArray(review.evidence) ? review.evidence : [];
         const resultEvidenceIds = new Set((Array.isArray(result?.evidence_ids) ? result.evidence_ids : []).map((id) => String(id || "")));
-        const visibleEvidence = evidence.filter((item) => {
-            const id = String(item?.evidence_id || "");
-            return !resultEvidenceIds.size || resultEvidenceIds.has(id);
-        }).slice(-6);
         const guarded = result && typeof result.guarded_recommendation === "object"
             ? result.guarded_recommendation
             : null;
@@ -43495,13 +43679,21 @@ async function cancelRfDetrTrainingJobRequest() {
         const dualHtml = dualConflict
             ? `<span>dual-bbox ${escapeHtml(dualResolution.replace(/_/g, " "))}${dualConflictLabel ? ` • ${escapeHtml(dualConflictLabel)}` : ""}</span>`
             : "";
-        const evidenceHtml = visibleEvidence.length
-            ? `<div class="class-split-qwen-review__evidence">${visibleEvidence.map((item) => {
-                const url = String(item?.artifact_url || "");
-                return url
-                    ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener"><img src="${escapeHtml(url)}" alt="${escapeHtml(item?.title || "Qwen evidence")}" loading="lazy"></a>`
-                    : "";
-            }).join("")}</div>`
+        const citedEvidence = resultEvidenceIds.size
+            ? evidence.filter((item) => resultEvidenceIds.has(String(item?.evidence_id || "")))
+            : [];
+        const evidenceHtml = citedEvidence.length
+            ? `<div class="class-split-qwen-review__evidence">${citedEvidence.slice(-6).map((item) => renderClassSplitQwenEvidenceThumb(item, resultEvidenceIds)).join("")}</div>`
+            : "";
+        const auditEvidenceHtml = evidence.length
+            ? [
+                `<details class="class-split-qwen-review__audit">`,
+                `<summary>Audit trail intermediate outputs (${evidence.length})</summary>`,
+                `<div class="class-split-qwen-review__audit-grid">`,
+                evidence.map((item) => renderClassSplitQwenEvidenceThumb(item, resultEvidenceIds)).join(""),
+                `</div>`,
+                `</details>`,
+            ].join("")
             : "";
         const resultHtml = result
             ? [
@@ -43523,6 +43715,7 @@ async function cancelRfDetrTrainingJobRequest() {
             `<div class="class-split-qwen-review__bar"><span style="width:${Math.round(progress * 100)}%"></span></div>`,
             `<div class="class-split-qwen-review__body">${resultHtml}</div>`,
             evidenceHtml,
+            auditEvidenceHtml,
             cancelHtml ? `<div class="class-split-qwen-review__actions">${cancelHtml}</div>` : "",
             `</div>`,
         ].join("");

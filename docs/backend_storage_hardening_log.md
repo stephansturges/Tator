@@ -3473,3 +3473,13 @@ preserving the exact validation story for storage and artifact-write fixes.
   evidence audit trail.
 - Validation: Qwen caption/runtime coverage, class-analysis restore coverage,
   layout contract checks, `py_compile`, and `node --check ybat-master/ybat.js`.
+
+## 2026-06-24: Generic UI Copy Cleanup
+
+- Removed WALDO/qwen-dataset-specific benchmark wording from visible UI copy in
+  Class Split Explorer, Class Predictor settings, Qwen recipe placeholders, and
+  glossary placeholders.
+- Replaced hard-coded historical benchmark rows with generic encoder guidance
+  so the UI applies cleanly to any annotation dataset.
+- Validation: targeted layout contract tests, UI string grep, and
+  `node --check ybat-master/ybat.js`.

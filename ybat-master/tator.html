@@ -924,23 +924,23 @@
                     <header class="class-split-workspace__header">
                         <div>
                             <h2>Class Split Explorer</h2>
-                            <div id="classSplitDatasetStatus" class="training-help">Open a dataset in Label Images to run analysis. Full WALDO tests keep DINOv3 Precise as the stable default; C-RADIOv4 improves NN purity only in a very slow opt-in audit path.</div>
-                            <div class="training-help warn">C-RADIOv4 on Mac now uses the local MLX backend by default when <code>~/cradio_mlx</code> and its checkpoints are present; otherwise it falls back to Torch CUDA/MPS/CPU. The old WALDO C-RADIO timings were Torch/MPS-era numbers.</div>
+                            <div id="classSplitDatasetStatus" class="training-help">Open a dataset in Label Images to run analysis. DINOv3 Precise is the stable default; C-RADIOv4 is a slower opt-in comparison path.</div>
+                            <div class="training-help warn">C-RADIOv4 on Mac uses the local MLX backend by default when <code>~/cradio_mlx</code> and its checkpoints are present; otherwise it falls back to Torch CUDA/MPS/CPU.</div>
                             <details class="embedding-benchmark-note">
-                                <summary>WALDO encoder benchmark comparison</summary>
-                                <div class="embedding-benchmark-note__intro">All-class object-crop audit, uncapped. NN purity means: for each embedded object crop, what fraction of its nearest neighbors have the same class. The first NN number is object-weighted; the second balances classes. This is a clustering score, not classifier accuracy. Lower size leakage and fewer wrong-class candidates are better. The C-RADIO card is the slow tight+context audit row; the visible C-RADIO preset starts from summary mode.</div>
+                                <summary>Encoder guide</summary>
+                                <div class="embedding-benchmark-note__intro">All-class object-crop audits compare each embedded object with nearby objects in the same embedding space. Neighbor agreement is a clustering signal, not classifier accuracy. Lower size leakage and fewer wrong-class candidates are better, but the right encoder can vary by dataset.</div>
                                 <div class="embedding-benchmark-note__grid">
                                     <div class="embedding-benchmark-note__item">
                                         <strong>DINOv3 Precise</strong>
-                                        <span>NN 0.8969 / 0.6917, size 0.0273, wrong 804, runtime 45.3s.</span>
+                                        <span>Stable image-only default for crop similarity and likely-wrong-class review.</span>
                                     </div>
                                     <div class="embedding-benchmark-note__item">
-                                        <strong>C-RADIOv4 tight+context audit</strong>
-                                        <span>NN 0.9078 / 0.7264, size 0.0591, wrong 851, runtime 9046.9s.</span>
+                                        <strong>C-RADIOv4</strong>
+                                        <span>Slower image-only comparison path. Useful when you want to audit whether another visual backbone separates your dataset better.</span>
                                     </div>
                                     <div class="embedding-benchmark-note__item">
                                         <strong>CLIP</strong>
-                                        <span>Available for comparison, but no full uncapped WALDO promotion row is recorded here.</span>
+                                        <span>Semantic image-text backbone. Useful for prompt-aware workflows, usually less targeted for fine crop-neighborhood audits.</span>
                                     </div>
                                 </div>
                             </details>
@@ -974,7 +974,7 @@
                                 <div id="classSplitProjectionHint" class="class-split-projection-hint">Selected-class subclass search works best with UMAP when available; all-class review defaults to class-balanced PCA.</div>
                             </div>
                             <div class="class-split-field">
-                                <label for="classSplitRecipePreset">Quality preset<span class="help-icon" title="Fast is a quick coarse audit. Balanced is the faster single-view DINOv3 baseline. Precise is the measured WALDO default for all-class wrong-label discovery. C-RADIOv4 is opt-in: its slowest recipe improved NN purity in full WALDO tests but leaked more size signal and produced more wrong-class candidates than DINOv3 Precise. On Mac it now uses local MLX when available.">?</span></label>
+                                <label for="classSplitRecipePreset">Quality preset<span class="help-icon" title="Fast is a quick coarse audit. Balanced is the faster single-view DINOv3 baseline. Precise is the conservative default for all-class wrong-label discovery. C-RADIOv4 is an opt-in comparison path; on Mac it uses local MLX when available.">?</span></label>
                                 <select id="classSplitRecipePreset">
                                     <option value="balanced">Balanced faster</option>
                                     <option value="fast">Fast coarse</option>
@@ -992,7 +992,7 @@
                                 <select id="classSplitClassSelect"></select>
                             </div>
                             <div class="class-split-field">
-                                <label for="classSplitEncoderType">Encoder<span class="help-icon" title="Backbone family used to embed object crops. DINOv3 is the current WALDO default. CLIP is available for comparison, but no full uncapped WALDO promotion row is recorded here. C-RADIOv4 is a candidate; on Mac it uses the local MLX runtime by default when ~/cradio_mlx is available and is benchmarked separately before promotion.">?</span></label>
+                                <label for="classSplitEncoderType">Encoder<span class="help-icon" title="Backbone family used to embed object crops. DINOv3 is the stable image-only default. CLIP is available for semantic comparison. C-RADIOv4 is a slower image-only candidate; on Mac it uses the local MLX runtime by default when ~/cradio_mlx is available.">?</span></label>
                                 <select id="classSplitEncoderType">
                                     <option value="dinov3" selected>DINOv3</option>
                                     <option value="clip">CLIP</option>
@@ -1314,7 +1314,7 @@
                                     <div class="qwen-caption-grid">
                                         <div>
                                             <label for="qwenAgentRecipeName">Recipe name</label>
-                                            <input type="text" id="qwenAgentRecipeName" placeholder="e.g., qwen_dataset_edr_v1" />
+                                            <input type="text" id="qwenAgentRecipeName" placeholder="e.g., project_edr_v1" />
                                         </div>
                                         <div>
                                             <label for="qwenAgentRecipeSelect">Saved recipes</label>
@@ -1584,7 +1584,7 @@
                                             <input type="number" id="qwenAgentSam3TextScoreThr" min="0" max="1" step="0.05" value="0.2" />
                                         </div>
                                         <div>
-                                            <label for="qwenAgentSam3TextWindowExtension">Windowed SAM3 text<span class="help-icon" title="Runs an extra windowed SAM3 text pass in addition to full-frame inference. Enabled by default because the current calibrated windowed recipe outperforms the non-windowed path on qwen_dataset, at higher runtime cost.">?</span></label>
+                                            <label for="qwenAgentSam3TextWindowExtension">Windowed SAM3 text<span class="help-icon" title="Runs an extra windowed SAM3 text pass in addition to full-frame inference. Enabled by default because calibrated windowed recipes can outperform non-windowed text prompts on small or crowded objects, at higher runtime cost.">?</span></label>
                                             <input type="checkbox" id="qwenAgentSam3TextWindowExtension" checked />
                                         </div>
                                         <div>
@@ -1814,11 +1814,11 @@
                     <section class="training-form-section">
                         <h2>Class Predictor Settings</h2>
                         <div class="training-help" style="margin: 8px 0 14px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc;">
-                            <div style="font-weight: 600; color: #0f172a;">Backbone guide (recent comparison on qwen_dataset)</div>
+                            <div style="font-weight: 600; color: #0f172a;">Backbone guide</div>
                             <div style="margin-top: 6px;">
-                                <strong>DINOv3 LVD (ViT-L/16)</strong> ranked highest in our test, followed by LVD ViT-B/16, then LVD ViT-S/16.
-                                <strong>CLIP</strong> trailed but enables text prompts and prompt prefiltering.
-                                <strong>SAT backbones</strong> were slower and did not beat LVD in that test.
+                                <strong>DINOv3 LVD</strong> is the image-only default family for crop embeddings.
+                                <strong>CLIP</strong> enables text prompts and prompt prefiltering.
+                                <strong>SAT backbones</strong> are available for expert comparison when domain fit matters.
                             </div>
                             <div style="margin-top: 6px;">
                                 <strong>Compute / VRAM / latency (rough bands)</strong><br />
@@ -1826,13 +1826,13 @@
                                 DINOv3 LVD ViT-S/B: Medium (12-16&nbsp;GB) • Slow · DINOv3 LVD ViT-L/H+: High (16-24&nbsp;GB+) • Slower · DINOv3 7B/SAT: Very high (48&nbsp;GB+) • Very slow
                             </div>
                             <div style="margin-top: 6px;">
-                                <strong>WALDO Class Split all-class reference</strong><br />
-                                NN purity is nearest-neighbor same-class agreement, reported as object-weighted / class-balanced. DINOv3 Precise: NN 0.8969 / 0.6917, size 0.0273, wrong 804, runtime 45.3s. C-RADIOv4 tight+context audit: NN 0.9078 / 0.7264, size 0.0591, wrong 851, runtime 9046.9s. CLIP has no full uncapped WALDO promotion row recorded here.
+                                <strong>Class Split reference</strong><br />
+                                NN purity is nearest-neighbor same-class agreement. It is a clustering diagnostic, not classifier accuracy. Use it to compare encoders on your dataset before changing defaults.
                             </div>
                             <div style="margin-top: 6px; color: #475569;">Choose the largest model your GPU can handle if accuracy matters; use smaller models for faster iteration. Results vary by dataset.</div>
                         </div>
                         <div class="training-field">
-                            <label for="trainEncoderType">Encoder type<span class="help-icon" title="Embedding family for the auto-class predictor. CLIP supports text prompt prefiltering. DINOv3 is the current image-only default from WALDO tests. C-RADIOv4 is an image-only candidate; on Mac it uses local MLX by default when ~/cradio_mlx is available and should still be benchmarked against DINOv3 before becoming the default.">?</span></label>
+                            <label for="trainEncoderType">Encoder type<span class="help-icon" title="Embedding family for the auto-class predictor. CLIP supports text prompt prefiltering. DINOv3 is the stable image-only default. C-RADIOv4 is an image-only candidate; on Mac it uses local MLX by default when ~/cradio_mlx is available and should be benchmarked against DINOv3 on your dataset before becoming the default.">?</span></label>
                             <select id="trainEncoderType">
                                 <option value="clip" selected>CLIP (image + text)</option>
                                 <option value="dinov3">DINOv3 (image-only)</option>
@@ -1841,12 +1841,12 @@
                             <div class="training-help">CLIP is the default and enables prompt prefiltering; DINOv3 and C-RADIOv4 are image-only and skip text-based prompt filters.</div>
                         </div>
                         <div class="training-field" id="clipBackboneRow">
-                            <label for="clipBackboneSelect">CLIP Backbone<span class="help-icon" title="CLIP checkpoint for image embeddings and text prompt prefiltering. Larger CLIP models can improve semantic grouping but were weaker than DINOv3 on recent WALDO crop-separation tests.">?</span></label>
+                            <label for="clipBackboneSelect">CLIP Backbone<span class="help-icon" title="CLIP checkpoint for image embeddings and text prompt prefiltering. Larger CLIP models can improve semantic grouping but may be less targeted than DINOv3 for crop-neighborhood separation.">?</span></label>
                             <select id="clipBackboneSelect"></select>
                             <div class="training-help">Default is the largest backbone (ViT-L/14) for best accuracy. Choose a smaller model for faster training or lower VRAM.</div>
                         </div>
                         <div class="training-field" id="dinov3BackboneRow" hidden>
-                            <label for="dinov3BackboneSelect">DINOv3 Backbone<span class="help-icon" title="DINOv3 checkpoint for image-only crop embeddings. The WALDO recipe currently favors the LVD family with pooler output and size-bias residualization.">?</span></label>
+                            <label for="dinov3BackboneSelect">DINOv3 Backbone<span class="help-icon" title="DINOv3 checkpoint for image-only crop embeddings. The default recipe favors LVD-family checkpoints with pooler output and size-bias residualization.">?</span></label>
                             <select id="dinov3BackboneSelect"></select>
                             <div class="training-help">Frozen image encoder only (no text). Larger models are more accurate but need more VRAM.</div>
                         </div>
@@ -1949,7 +1949,7 @@
                                 <div class="training-help">Canonical is the selected recipe because it makes crop scale and aspect handling consistent between training and inference.</div>
                             </div>
                             <div>
-                                <label for="trainCanonicalSize">Canonical size<span class="help-icon" title="Fixed square crop size sent to the embedding encoder. Larger values preserve small visual details but increase encoding time and memory. Balanced uses 336px from the WALDO recipe.">?</span></label>
+                                <label for="trainCanonicalSize">Canonical size<span class="help-icon" title="Fixed square crop size sent to the embedding encoder. Larger values preserve small visual details but increase encoding time and memory. Balanced uses 336px.">?</span></label>
                                 <input type="number" id="trainCanonicalSize" min="64" max="1024" step="16" value="336" />
                                 <div class="training-help">Input square size used when canonical crop normalization is enabled.</div>
                             </div>
@@ -4205,7 +4205,7 @@
                                     </div>
                                     <div>
                                         <label for="datasetGlossarySaveName">Save as named glossary</label>
-                                        <input type="text" id="datasetGlossarySaveName" placeholder="e.g. qwen_dataset_v1" />
+                                        <input type="text" id="datasetGlossarySaveName" placeholder="e.g. project_glossary_v1" />
                                     </div>
                                 </div>
                                 <label for="datasetGlossaryEditor">Glossary (JSON or label: synonyms)</label>

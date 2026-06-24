@@ -777,7 +777,7 @@ def test_data_ingestion_panel_contract():
     assert 'id="dataIngestionDownloadAcceptedButton"' in html
     assert "Split later by original source to avoid train/val leakage" in html
     assert "Use 0 for the backend safety cap" in html
-    assert "WALDO encoder benchmark comparison" in html
+    assert "Encoder guide" in html
     assert "Data Ingestion" in html
     assert 'id="dataIngestionCradioModel"' not in html
     assert 'id="dataIngestionCradioPooling"' not in html
@@ -1099,13 +1099,12 @@ def test_class_split_explorer_panel_contract():
     assert 'Class<span class="help-icon"' in html
     assert 'Encoder<span class="help-icon"' in html
     assert 'Backbone<span class="help-icon"' in html
-    assert "Full WALDO tests keep DINOv3 Precise as the stable default" in html
-    assert "C-RADIOv4 improves NN purity only in a very slow opt-in audit path" in html
+    assert "DINOv3 Precise is the stable default" in html
+    assert "C-RADIOv4 is a slower opt-in comparison path" in html
     assert 'class="embedding-benchmark-note" open' not in html
-    assert "its slowest recipe improved NN purity in full WALDO tests" in html
-    assert "The first NN number is object-weighted; the second balances classes" in html
-    assert "the visible C-RADIO preset starts from summary mode" in html
-    assert "On Mac it now uses local MLX when available" in html
+    assert "Neighbor agreement is a clustering signal, not classifier accuracy" in html
+    assert "Useful when you want to audit whether another visual backbone separates your dataset better" in html
+    assert "on Mac it uses local MLX when available" in html
     assert 'UMAP neighbors<span class="help-icon"' in html
     assert 'UMAP min distance<span class="help-icon"' in html
     assert 'id="classSplitProjectionMinDist" min="0" max="0.99" step="0.01" value="0.08"' in html

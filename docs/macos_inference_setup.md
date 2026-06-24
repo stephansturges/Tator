@@ -63,7 +63,7 @@ SAM_MLX_ROOT=                 # mlx-examples/segment_anything checkout
 DINOV3_BACKEND=auto           # auto|torch|mlx
 QWEN_DEVICE=auto
 QWEN_INFERENCE_PLATFORM=auto # auto|mlx_vlm|transformers
-QWEN_MLX_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4
+QWEN_MLX_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
 QWEN_MLX_CAPTION_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
 QWEN_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS
 QWEN_TRAINING_DEFAULT_MODEL=Qwen/Qwen3-VL-4B-Instruct
@@ -234,7 +234,7 @@ Useful environment settings:
 
 ```bash
 QWEN_INFERENCE_PLATFORM=auto
-QWEN_MLX_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4
+QWEN_MLX_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
 QWEN_MLX_CAPTION_MODEL_NAME=mlx-community/Qwen3-VL-4B-Instruct-4bit
 QWEN_MODEL_NAME=AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS
 QWEN_TRAINING_DEFAULT_MODEL=Qwen/Qwen3-VL-4B-Instruct
@@ -249,6 +249,36 @@ request explicitly selects a different model. Qwen adapter-training defaults are
 intentionally separate through
 `QWEN_TRAINING_DEFAULT_MODEL`, because the AEON Qwen3.6 checkpoints are exposed
 as inference-only until their training path is wired and tested.
+
+### Qwen Caption Controls
+
+The annotation caption panel is split into three groups:
+
+- **Caption scope** controls what image context is sent: full image, windowed
+  crops, overlap, box metadata, class counts, and output length.
+- **Models** selects the caption model and the editor model. The caption model
+  performs the first visual pass. The editor model is used only for later text
+  or reconciliation passes: draft refinement, window merge, cleanup, coverage
+  guard, and English rewrite.
+- **Generation and guards** controls sampling, reasoning suppression, optional
+  draft/refine mode, fast model retention, and auto-save.
+
+Editor model semantics are explicit:
+
+- **Same as captioning** is literal. The backend sends `same`, resolves it to
+  the selected caption model, and keeps the same runtime path unless a later
+  explicit model switch is requested.
+- **Auto editor model (compact/Instruct)** preserves the older behavior: use a
+  stable compact/Instruct editor model for cleanup speed and lower risk of
+  reasoning loops.
+- An explicit model id forces that model for editor passes and logs the switch
+  in the trace.
+
+Caption traces log the effective prompt inputs, model outputs, runtime platform,
+loop flags, and `degenerate_reason` where available. Degenerate editor or guard
+outputs, including punctuation loops and repeated chunks, are rejected in favor
+of the previous usable caption instead of replacing good text with broken guard
+output.
 
 Qwen3.6 / SwiReasoning smoke:
 
@@ -272,8 +302,11 @@ in the Qwen training picker. The active agent catalog is deliberately narrow:
 - Qwen3-VL MLX 2B/4B/8B Instruct and 4B/8B Thinking entries from the stable
   MLX runtime catalog.
 - Previously working Huihui/abliterated MLX Qwen3-VL variants.
-- AEON Qwen3.6 27B Ultimate Uncensored MLX FP4 is the Apple Silicon default
-  inference checkpoint.
+- `mlx-community/Qwen3-VL-4B-Instruct-4bit` is the Apple Silicon default
+  inference checkpoint because it is the validated stable MLX-VLM path.
+- AEON Qwen3.6 27B Ultimate Uncensored MLX FP4 remains cataloged but blocked
+  for local vision inference because mlx-vlm currently rejects its
+  `qwen3_5_vision` tower.
 - Qwen3.6 MLX review candidates that completed local vignette smoke.
 - `empero-ai/Qwable-9B-Claude-Fable-5` on the Transformers 5 path. Metadata
   smoke confirms it resolves as `qwen3_5` and exposes `Qwen3VLProcessor` with
@@ -422,5 +455,6 @@ Upstream SAM3 currently imports a few CUDA/Triton helper modules even when the r
 - `pip check` will report intentional no-deps MLX metadata mismatches in
   `.venv-macos`: MLX-VLM 0.6.1 declares newer Transformers, MLX-Audio,
   Starlette, and OpenCV requirements than this app uses. The setup helper filters
-  those known warnings because the tested Qwen3.6 path works with Transformers
-  4.57 and the SAHI-compatible OpenCV installed by the setup script.
+  those known warnings so the single backend environment can keep the validated
+  Transformers 5.x Qwen path together with the SAHI/SAM3-compatible OpenCV and
+  NumPy pins installed by the setup script.

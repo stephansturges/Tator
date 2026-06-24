@@ -53,6 +53,7 @@ def test_agent_catalog_is_inference_only_not_training():
         assert entry["runtime_platform"] in {QWEN_PLATFORM_MLX, QWEN_PLATFORM_TRANSFORMERS}
         assert entry["smoke_status"] in {
             "class_split_benchmark_passed",
+            "mlx_vlm_unsupported_vision_tower",
             "missing_image_processor",
             "metadata_verified",
             "transformers5_processor_passed",
@@ -73,7 +74,9 @@ def test_agent_catalog_marks_qwen36_matrix_winners_separately():
     aeon_mlx = by_id["AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4"]
     aeon_cuda = by_id["AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS"]
     assert aeon_mlx["runtime_platform"] == QWEN_PLATFORM_MLX
-    assert aeon_mlx["smoke_status"] == "metadata_verified"
+    assert aeon_mlx["vision_inference_supported"] is False
+    assert aeon_mlx["smoke_status"] == "mlx_vlm_unsupported_vision_tower"
+    assert "qwen3_5_vision" in aeon_mlx["compatibility_note"]
     assert aeon_cuda["runtime_platform"] == QWEN_PLATFORM_TRANSFORMERS
     assert aeon_cuda["smoke_status"] == "metadata_verified"
 

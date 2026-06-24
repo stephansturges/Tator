@@ -45,6 +45,7 @@ def _reset_qwen_progress() -> None:
                 "step_region": None,
                 "step_plan": [],
                 "live_output": "",
+                "io_events": [],
                 "log_lines": [],
             }
         )
@@ -363,6 +364,40 @@ def test_qwen_caption_io_input_does_not_fail_on_bad_token_count(monkeypatch, tmp
     records = [json.loads(line) for line in latest_jsonl.read_text(encoding="utf-8").splitlines()]
     assert records[-1]["event"] == "input"
     assert records[-1]["max_new_tokens"] is None
+
+
+def test_qwen_caption_io_events_are_exposed_in_progress(monkeypatch, tmp_path):
+    _reset_qwen_progress()
+    monkeypatch.setattr(api, "LOG_ROOT", tmp_path)
+    api._qwen_progress_start(
+        kind="caption",
+        model_id="Qwen/Qwen3-VL-4B-Instruct",
+        platform=api.QWEN_PLATFORM_TRANSFORMERS,
+        message="test",
+        max_new_tokens=10,
+    )
+
+    api._qwen_caption_io_input(
+        call_id="call-1",
+        source="test",
+        model_id="model",
+        prompt_text="prompt with hints",
+        rendered_prompt="rendered prompt",
+    )
+    api._qwen_caption_io_output(
+        call_id="call-1",
+        source="test",
+        model_id="model",
+        output_text="model output",
+        loop_detected=True,
+        degenerate_reason="punctuation_loop",
+    )
+
+    events = api.qwen_progress()["io_events"]
+    assert [event["kind"] for event in events[-2:]] == ["prompt", "output"]
+    assert "rendered prompt" in events[-2]["text"]
+    assert "model output" in events[-1]["text"]
+    assert "degenerate_reason: punctuation_loop" in events[-1]["text"]
 
 
 def test_qwen_caption_io_readable_failure_does_not_break_request(monkeypatch, tmp_path):

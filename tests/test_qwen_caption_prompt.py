@@ -1,6 +1,14 @@
+import base64
+import io
+
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from PIL import Image
 from pydantic import ValidationError
 
+import localinferenceapi as api
+from api.qwen_caption import build_qwen_caption_router
 from localinferenceapi import (
     QwenCaptionHint,
     _build_caption_overlap_guidance,
@@ -10,11 +18,19 @@ from localinferenceapi import (
     _qwen_messages_with_no_think,
     _qwen_neutralize_thinking_prefill,
     _resolve_qwen_caption_refinement_model_id,
+    qwen_caption_prompt_preview,
 )
-from models.schemas import AutoLabelRequest, QwenCaptionRequest, QwenPrepassRequest
+from models.schemas import (
+    AutoLabelRequest,
+    QwenCaptionPromptPreviewResponse,
+    QwenCaptionRequest,
+    QwenCaptionResponse,
+    QwenPrepassRequest,
+)
 from services.qwen import (
     _caption_count_conflicts,
     _caption_demote_unstable_glossary_subtypes,
+    _caption_degenerate_reason,
     _caption_is_degenerate_impl,
     _caption_has_meta,
     _caption_missing_labels,
@@ -50,6 +66,14 @@ class _DecodePayload:
     top_p = None
     top_k = None
     presence_penalty = None
+
+
+def _caption_test_image_data_url(width: int = 96, height: int = 96) -> str:
+    img = Image.new("RGB", (width, height), (72, 92, 108))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 def test_build_qwen_caption_prompt_counts_and_truncation():
@@ -502,6 +526,15 @@ def test_caption_loop_detection_catches_numeric_character_run():
     assert _caption_is_degenerate_impl(repeated) is True
 
 
+def test_caption_loop_detection_catches_punctuation_run():
+    repeated = "!" * 160
+
+    assert _caption_repetition_loop_detected(repeated) is True
+    assert _caption_degenerate_reason(repeated, allow_short_caption=True) == "punctuation_loop"
+    assert _caption_is_degenerate_impl(repeated) is True
+    assert _truncate_repeated_caption_loop(repeated) == "!"
+
+
 def test_truncate_repeated_caption_loop_keeps_first_cycle_only():
     repeated = (
         "A street is lined with buildings. Windows face the road. "
@@ -818,6 +851,104 @@ def test_caption_request_accepts_custom_system_prompt():
     assert payload.caption_cleanup_prompt == "Cleanup policy."
 
 
+def test_qwen_caption_prompt_preview_uses_caption_stack_without_loading_model(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "_ensure_qwen_ready_for_caption",
+        lambda *_args, **_kwargs: pytest.fail("prompt preview must not load a Qwen runtime"),
+    )
+    payload = QwenCaptionRequest(
+        image_base64=_caption_test_image_data_url(),
+        image_name="preview_image.png",
+        image_width=96,
+        image_height=96,
+        user_prompt="Use the opening phrase: A top-down view shows",
+        label_hints=[
+            QwenCaptionHint(label="Boat", bbox=[8, 8, 44, 44], confidence=0.98),
+            QwenCaptionHint(label="Person", bbox=[52, 52, 80, 86], confidence=0.91),
+        ],
+        include_counts=True,
+        include_coords=True,
+        max_boxes=10,
+        model_id="Qwen/Qwen3-VL-4B-Thinking",
+        model_variant="Thinking",
+        two_stage_refine=True,
+        final_answer_only=True,
+        final_caption_max_sentences=2,
+        caption_mode="windowed",
+        window_size=64,
+        caption_system_prompt="CUSTOM SYSTEM PROMPT",
+        caption_detection_context_prompt="CUSTOM DETECTION CONTEXT PROMPT",
+        caption_window_prompt="CUSTOM WINDOW PROMPT",
+        caption_draft_refine_prompt="CUSTOM DRAFT REFINE PROMPT",
+        caption_merge_prompt="CUSTOM MERGE PROMPT",
+        caption_cleanup_prompt="CUSTOM CLEANUP PROMPT",
+        labelmap_glossary="Boat: watercraft and vessels\nPerson: visible humans",
+    )
+
+    preview = qwen_caption_prompt_preview(payload)
+
+    assert preview.used_counts == {"Boat": 1, "Person": 1}
+    assert preview.used_boxes == 2
+    assert preview.meta["planned_windows"] >= 1
+    assert "Complete Qwen caption prompt flow preview" in preview.full_text
+    assert "CUSTOM SYSTEM PROMPT" in preview.full_text
+    assert "CUSTOM DETECTION CONTEXT PROMPT" in preview.full_text
+    assert "CUSTOM WINDOW PROMPT" in preview.full_text
+    assert "CUSTOM DRAFT REFINE PROMPT" in preview.full_text
+    assert "CUSTOM MERGE PROMPT" in preview.full_text
+    assert "CUSTOM CLEANUP PROMPT" in preview.full_text
+    assert "Two-stage draft prompt" in preview.full_text
+    assert "Two-stage refinement prompt template" in preview.full_text
+    assert "Window merge prompt template" in preview.full_text
+    assert "Conditional cleanup / guard prompt template" in preview.full_text
+    assert "Only mention these classes if they appear:" in preview.full_text
+    assert "watercraft and vessels" in preview.full_text
+    assert "visible humans" in preview.full_text
+    assert "Edit the draft with minimal changes. Do not introduce new objects or actions." in preview.full_text
+    assert "First-stage model output context:" in preview.full_text
+    assert "<generated caption from window" in preview.full_text
+    assert "<generated draft caption>" in preview.full_text
+    assert any(section.chat_messages for section in preview.sections)
+    assert any(section.kind == "template" for section in preview.sections)
+
+
+def test_qwen_caption_router_exposes_prompt_preview_endpoint():
+    seen = {}
+
+    def caption_fn(_payload):
+        return QwenCaptionResponse(caption="caption", used_boxes=0, truncated=False)
+
+    def preview_fn(payload):
+        seen["payload"] = payload
+        return QwenCaptionPromptPreviewResponse(full_text="preview text")
+
+    app = FastAPI()
+    app.include_router(
+        build_qwen_caption_router(
+            caption_fn=caption_fn,
+            preview_fn=preview_fn,
+            request_cls=QwenCaptionRequest,
+            response_cls=QwenCaptionResponse,
+            preview_response_cls=QwenCaptionPromptPreviewResponse,
+        )
+    )
+    response = TestClient(app).post(
+        "/qwen/caption/preview_prompt",
+        json={
+            "image_base64": _caption_test_image_data_url(),
+            "image_name": "route_preview.png",
+            "user_prompt": "Keep it concise.",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["full_text"] == "preview text"
+    assert isinstance(seen["payload"], QwenCaptionRequest)
+    assert seen["payload"].image_name == "route_preview.png"
+    assert seen["payload"].user_prompt == "Keep it concise."
+
+
 def test_caption_request_normalizes_legacy_caption_mode_and_variant_values():
     hybrid_payload = QwenCaptionRequest(
         image_base64="data:image/png;base64,AA==",
@@ -882,12 +1013,17 @@ def test_caption_request_normalizes_refinement_model_id():
         image_base64="data:image/png;base64,AA==",
         refinement_model_id=" same ",
     )
+    auto_payload = QwenCaptionRequest(
+        image_base64="data:image/png;base64,AA==",
+        refinement_model_id=" auto ",
+    )
     explicit_payload = QwenCaptionRequest(
         image_base64="data:image/png;base64,AA==",
         refinement_model_id=" mlx-community/Qwen3-VL-4B-Instruct-4bit ",
     )
 
-    assert same_payload.refinement_model_id is None
+    assert same_payload.refinement_model_id == "same"
+    assert auto_payload.refinement_model_id == "auto"
     assert explicit_payload.refinement_model_id == "mlx-community/Qwen3-VL-4B-Instruct-4bit"
 
 
@@ -919,6 +1055,22 @@ def test_resolve_qwen_caption_refinement_model_id_defaults_to_instruct_for_think
             active_model_id="Qwen/Qwen3-VL-4B-Instruct",
         )
         == "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+    )
+    assert (
+        _resolve_qwen_caption_refinement_model_id(
+            "auto",
+            desired_model_id="nightmedia/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx",
+            active_model_id="Qwen/Qwen3-VL-4B-Instruct",
+        )
+        == "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+    )
+    assert (
+        _resolve_qwen_caption_refinement_model_id(
+            "same",
+            desired_model_id="nightmedia/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx",
+            active_model_id="Qwen/Qwen3-VL-4B-Instruct",
+        )
+        == "nightmedia/Huihui-Qwen3-VL-30B-A3B-Thinking-abliterated-qx86-hi-mlx"
     )
     assert (
         _resolve_qwen_caption_refinement_model_id(
@@ -1027,6 +1179,26 @@ def test_caption_merge_uses_refinement_model_override():
     assert "do not replace broad class terms with narrower subtypes" in calls["prompt"]
 
 
+def test_caption_merge_rejects_degenerate_editor_output():
+    def run_qwen_inference_fn(*_args, **_kwargs):
+        return "!" * 160, None, None
+
+    merged = _run_qwen_caption_merge(
+        "Draft caption with useful details.",
+        [(0, 0, 128, "Window detail in the bottom-right of the crop.")],
+        pil_img=type("ImageStub", (), {"width": 512, "height": 512})(),
+        base_model_id="Qwen/Qwen3-VL-4B-Instruct",
+        runtime_resolver=lambda _model_id: ("runtime", None),
+        max_new_tokens=64,
+        run_qwen_inference_fn=run_qwen_inference_fn,
+        resolve_variant_fn=lambda _base, _variant: "Qwen/Qwen3-VL-4B-Instruct",
+        extract_caption_fn=lambda text, marker=None: (text, False),
+        sanitize_caption_fn=lambda text: text.strip(),
+    )
+
+    assert merged == "Draft caption with useful details."
+
+
 def test_caption_cleanup_forwards_no_thinking_template_kwargs():
     calls = {}
 
@@ -1057,6 +1229,25 @@ def test_caption_cleanup_forwards_no_thinking_template_kwargs():
     assert calls["chat_template_kwargs"] == {"enable_thinking": False}
     assert "person: 2" in calls["prompt"]
     assert "Frontend cleanup policy: remove loops and keep counts." in calls["prompt"]
+
+
+def test_caption_cleanup_rejects_degenerate_editor_output():
+    def run_qwen_inference_fn(*_args, **_kwargs):
+        return "!" * 160, None, None
+
+    caption = _run_qwen_caption_cleanup(
+        "A useful existing caption remains available.",
+        pil_img=object(),
+        max_new_tokens=64,
+        base_model_id="Qwen/Qwen3-VL-4B-Instruct",
+        use_caption_cache=True,
+        run_qwen_inference_fn=run_qwen_inference_fn,
+        resolve_variant_fn=lambda _base, _variant: "Qwen/Qwen3-VL-4B-Instruct",
+        extract_caption_fn=lambda text, marker=None: (text, False),
+        sanitize_caption_fn=lambda text: text.strip(),
+    )
+
+    assert caption == "A useful existing caption remains available."
 
 
 def test_caption_cleanup_respects_long_final_caption_sentence_budget():

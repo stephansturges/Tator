@@ -516,6 +516,8 @@ def _caption_sentence_units(text: str) -> List[str]:
 def _caption_repetition_loop_detected(text: str) -> bool:
     if not text:
         return False
+    if _caption_surface_loop_reason(text):
+        return True
     compact = re.sub(r"\s+", "", text)
     if re.search(r"([A-Za-z0-9])\1{30,}", compact):
         return True
@@ -545,12 +547,46 @@ def _caption_repetition_loop_detected(text: str) -> bool:
     return False
 
 
+def _caption_surface_loop_reason(text: str) -> Optional[str]:
+    if not text:
+        return None
+    compact = re.sub(r"\s+", "", str(text))
+    if not compact:
+        return None
+    if re.search(r"([A-Za-z0-9])\1{30,}", compact):
+        return "alnum_char_loop"
+    if re.search(r"([^A-Za-z0-9\s])\1{20,}", str(text)):
+        return "punctuation_loop"
+    if len(compact) > 10 and re.fullmatch(r"[^A-Za-z0-9]+", compact):
+        return "punctuation_only"
+    alnum = re.findall(r"[A-Za-z0-9]", compact)
+    if len(compact) >= 20 and len(alnum) / max(1, len(compact)) < 0.2:
+        return "low_alnum"
+    if len(compact) >= 80:
+        most_common_ratio = max((compact.count(ch) for ch in set(compact)), default=0) / max(1, len(compact))
+        if most_common_ratio >= 0.80:
+            return "char_dominance"
+        for width in range(2, 17):
+            if len(compact) < width * 12:
+                continue
+            chunk = compact[:width]
+            repeated = chunk * (len(compact) // width)
+            if chunk and repeated == compact[: len(repeated)]:
+                return "repeated_chunk"
+        if re.search(r"(.{2,16})\1{12,}", compact):
+            return "repeated_chunk"
+    return None
+
+
 def _truncate_repeated_caption_loop(text: str) -> str:
     if not text:
         return text
     char_loop = re.search(r"([A-Za-z0-9])\1{30,}", text)
     if char_loop:
         return text[: max(0, char_loop.start() + 1)].strip()
+    punctuation_loop = re.search(r"([^A-Za-z0-9\s])\1{20,}", text)
+    if punctuation_loop:
+        return text[: max(0, punctuation_loop.start() + 1)].strip()
     units = _caption_sentence_units(text)
     if len(units) < 3:
         return text
@@ -1147,50 +1183,42 @@ def _allowed_caption_labels_impl(label_hints: Sequence[Any]) -> List[str]:
     return sorted(set(labels))
 
 
-def _caption_is_degenerate_impl(caption: str) -> bool:
+def _caption_degenerate_reason(caption: str, *, allow_short_caption: bool = False) -> Optional[str]:
     if not caption:
-        return True
+        return "empty"
     trimmed = caption.strip()
     if not trimmed:
-        return True
-    if _caption_repetition_loop_detected(trimmed):
-        return True
+        return "empty"
+    surface_reason = _caption_surface_loop_reason(trimmed)
+    if surface_reason:
+        return surface_reason
     if _QWEN_THINKING_REASONING_RE.search(trimmed):
-        return True
-    compact = re.sub(r"\\s+", "", trimmed)
-    if compact:
-        alnum = re.findall(r"[A-Za-z0-9]", compact)
-        if not alnum and len(compact) > 10:
-            return True
-        if len(compact) >= 20:
-            ratio = len(alnum) / max(1, len(compact))
-            if ratio < 0.2:
-                return True
-        if re.fullmatch(r"[^A-Za-z0-9]+", compact):
-            return True
-        if re.search(r"([A-Za-z0-9])\1{24,}", compact):
-            return True
-        if re.search(r"([!?.<>\\-_=])\\1{20,}", compact):
-            return True
+        return "thinking_reasoning"
+    if _caption_repetition_loop_detected(trimmed):
+        return "repetition_loop"
     words = caption.split()
-    if len(words) < 8:
-        return True
+    if not allow_short_caption and len(words) < 8:
+        return "too_short"
     sentences = [s.strip().lower() for s in re.split(r"[.!?]+", caption) if s.strip()]
     if sentences:
         counts = Counter(sentences)
         most_common = counts.most_common(1)[0][1]
         if most_common >= 3:
-            return True
+            return "repeated_sentence"
         if len(sentences) >= 3 and most_common >= 2 and most_common / len(sentences) > 0.45:
-            return True
+            return "repeated_sentence"
     if len(words) > 40:
         tokens = [w.lower() for w in words]
         bigrams = list(zip(tokens, tokens[1:], strict=False))
         if bigrams:
             unique_ratio = len(set(bigrams)) / len(bigrams)
             if unique_ratio < 0.55:
-                return True
-    return False
+                return "low_bigram_diversity"
+    return None
+
+
+def _caption_is_degenerate_impl(caption: str) -> bool:
+    return _caption_degenerate_reason(caption) is not None
 
 
 def _resolve_qwen_caption_decode(payload: Any, is_thinking: bool) -> Dict[str, Any]:
@@ -1486,7 +1514,10 @@ def _run_qwen_caption_cleanup(
         chat_template_kwargs=chat_template_kwargs,
     )
     caption_text, _ = extract_caption_fn(qwen_text, marker=None)
-    return sanitize_caption_fn(caption_text)
+    cleaned = sanitize_caption_fn(caption_text)
+    if _caption_degenerate_reason(cleaned, allow_short_caption=True):
+        return sanitize_caption_fn(prompt)
+    return cleaned
 
 
 def _run_qwen_caption_merge(
@@ -1590,6 +1621,8 @@ def _run_qwen_caption_merge(
     )
     merged, _ = extract_caption_fn(qwen_text, marker=None)
     merged = sanitize_caption_fn(merged)
+    if _caption_degenerate_reason(merged, allow_short_caption=True):
+        return draft_caption
     return merged or draft_caption
 
 

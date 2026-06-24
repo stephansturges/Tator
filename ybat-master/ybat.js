@@ -1071,7 +1071,8 @@
         qwenCaptionBatchCancel: "Cancel the active caption batch job.",
         qwenCaptionDownloadJsonl: "Download generated captions as Qwen-ready JSONL.",
         qwenCaptionGlossary: "Edit the caption glossary that maps label names to broad visual meanings.",
-        qwenCaptionPromptUser: "Edit the user request layer used by the active caption recipe.",
+        qwenCaptionStyleText: "Edit the caption style text loaded from the selected preset.",
+        qwenCaptionPromptUser: "Edit the combined user request layer used by the active caption recipe.",
         qwenCaptionSystemPrompt: "Edit the system prompt layer for captioning calls.",
         qwenCaptionPromptContext: "Edit the context prompt layer that describes dataset and label semantics.",
         qwenCaptionPromptWindow: "Edit the prompt layer used for local crop/window captioning.",
@@ -2368,8 +2369,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
         captionPromptCleanup: null,
         captionPreset: null,
         captionPresetRandom: null,
-        captionStyleList: null,
-        captionStyleInspiration: null,
+        captionStyleText: null,
         captionVaryOpening: null,
         captionOpeningList: null,
         captionDatasetSelect: null,
@@ -2828,6 +2828,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
     let qwenCaptionLiveToastManualScrollUntil = 0;
     let qwenCaptionLiveToastPendingTerminalSignature = "";
     let qwenCaptionLiveToastHiddenTerminalSignature = "";
+    let qwenCaptionLiveToastHovered = false;
+    let qwenCaptionPromptPreviewToastEl = null;
     let qwenCaptionRegionOverlay = null;
     let qwenAgentActive = false;
     let qwenAgentAbortController = null;
@@ -3018,16 +3020,8 @@ const AUTOMATION_LOCKED_TABS = new Set([
         { id: "concise", label: "Concise scene caption", text: "Write a short caption (1-2 sentences) describing the scene and main objects." },
         { id: "context", label: "Context + setting", text: "Describe the scene, setting, and activity in one concise paragraph." },
         { id: "objects", label: "Objects only", text: "List the key objects and their relationships in one sentence." },
-        { id: "aerial", label: "Aerial / drone view", text: "Caption the image as aerial/drone footage, noting roads, vehicles, and structures." },
         { id: "safety", label: "Safety / inspection", text: "Write a safety/inspection style caption focusing on equipment and hazards." },
-        { id: "custom", label: "Custom (hint only)", text: "" },
-    ];
-    const DEFAULT_CAPTION_STYLE_LINES = [
-        "A close-up photograph",
-        "A wide establishing shot",
-        "An overhead view",
-        "A street-level documentary shot",
-        "A candid scene",
+        { id: "custom", label: "Custom", text: "" },
     ];
     const DEFAULT_CAPTION_OPENERS = [
         "The scene shows",
@@ -3051,7 +3045,7 @@ const AUTOMATION_LOCKED_TABS = new Set([
     const DEFAULT_CAPTION_DETECTION_CONTEXT_PROMPT = [
         "Treat the user caption request as required guidance. If it asks a question or asks for an inference such as likely location, scene type, event, or time, answer it when the image supports a grounded answer; otherwise state uncertainty briefly.",
         "Do not mention that a request or hint was provided.",
-        "Use style and opening inspirations for tone only; rephrase them instead of copying exact wording.",
+        "Follow the combined user request assembled from the editable caption style text and optional opening guidance; rephrase opening wording instead of copying exact phrases.",
         "When authoritative counts are present, state those counts as ordinary image facts in the final caption using digits and without qualifiers such as visible, roughly, or approximately.",
         "Use relative positions such as top-left, center, or lower-right when box layout matters, but never mention coordinates.",
         "Write a detailed caption. Use the image as truth and incorporate label hints; if hints conflict with the image, mention the uncertainty briefly.",
@@ -21003,7 +20997,6 @@ async function cancelRfDetrTrainingJobRequest() {
         const select = qwenSettingsElements.mlxModel;
         const items = normalizeQwenRuntimeModelOptions(models);
         qwenMlxModelOptions = items;
-        populateQwenRuntimeModelSelects(items);
         if (!select) {
             return;
         }
@@ -21572,8 +21565,7 @@ async function cancelRfDetrTrainingJobRequest() {
         qwenElements.captionPromptCleanup = document.getElementById("qwenCaptionPromptCleanup");
         qwenElements.captionPreset = document.getElementById("qwenCaptionPreset");
         qwenElements.captionPresetRandom = document.getElementById("qwenCaptionPresetRandom");
-        qwenElements.captionStyleList = document.getElementById("qwenCaptionStyleList");
-        qwenElements.captionStyleInspiration = document.getElementById("qwenCaptionStyleInspiration");
+        qwenElements.captionStyleText = document.getElementById("qwenCaptionStyleText");
         qwenElements.captionVaryOpening = document.getElementById("qwenCaptionVaryOpening");
         qwenElements.captionOpeningList = document.getElementById("qwenCaptionOpeningList");
         qwenElements.captionDatasetSelect = document.getElementById("qwenCaptionDataset");
@@ -21904,9 +21896,7 @@ async function cancelRfDetrTrainingJobRequest() {
             });
             qwenElements.captionPreset.value = CAPTION_PRESETS[0].id;
         }
-        if (qwenElements.captionStyleList && !qwenElements.captionStyleList.value.trim()) {
-            qwenElements.captionStyleList.value = DEFAULT_CAPTION_STYLE_LINES.join("\n");
-        }
+        syncCaptionStyleTextFromPreset({ force: !qwenElements.captionStyleText?.value.trim() });
         if (qwenElements.captionOpeningList) {
             const currentOpeningText = qwenElements.captionOpeningList.value.trim();
             if (!currentOpeningText) {
@@ -21935,7 +21925,7 @@ async function cancelRfDetrTrainingJobRequest() {
             }
         });
         const captionPromptStackInputs = [
-            qwenElements.captionStyleList,
+            qwenElements.captionStyleText,
             qwenElements.captionOpeningList,
             qwenElements.captionWindowSize,
             qwenElements.captionWindowOverlap,
@@ -21954,8 +21944,6 @@ async function cancelRfDetrTrainingJobRequest() {
             }
         });
         [
-            qwenElements.captionPreset,
-            qwenElements.captionStyleInspiration,
             qwenElements.captionVaryOpening,
             qwenElements.captionMode,
             qwenElements.captionModel,
@@ -21971,6 +21959,11 @@ async function cancelRfDetrTrainingJobRequest() {
                 el.addEventListener("change", updateQwenCaptionWorkflow);
             }
         });
+        if (qwenElements.captionPreset) {
+            qwenElements.captionPreset.addEventListener("change", () => {
+                applyCaptionPreset({ forceStyleText: true });
+            });
+        }
         if (qwenElements.captionWindowSize && !qwenElements.captionWindowSize.value.trim()) {
             qwenElements.captionWindowSize.value = DEFAULT_CAPTION_WINDOW_SIZE;
         }
@@ -22054,7 +22047,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
         if (qwenElements.captionCancelButton) {
             qwenElements.captionCancelButton.addEventListener("click", () => {
-                requestQwenCaptionCancel({ force: true }).catch((error) => {
+                requestQwenCaptionCancel({ force: false }).catch((error) => {
                     console.warn("Caption cancel request failed", error);
                 });
             });
@@ -22157,7 +22150,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 }
                 qwenCaptionBatchCancel = true;
                 updateQwenCaptionButton();
-                requestQwenCaptionCancel({ force: true }).catch((error) => {
+                requestQwenCaptionCancel({ force: false }).catch((error) => {
                     console.warn("Caption batch cancel request failed", error);
                 });
                 setQwenCaptionStatus("Batch cancel requested");
@@ -24069,13 +24062,13 @@ async function cancelRfDetrTrainingJobRequest() {
 
     function getAnnotationDiversityTitle(metric) {
         if (!metric || metric.status === "empty") {
-            return "Class-coverage image value. Add or load bboxes to score this image.";
+            return "Annotation class-balance score. Add or load bboxes to score this image. This does not use pixels, embeddings, Class Split, Data Ingestion, or a reference profile.";
         }
         const detail = (metric.classDetails || [])
             .slice(0, 6)
             .map((entry) => `${entry.className}: ${entry.currentCount} here, ${entry.existingCount} elsewhere`)
             .join(" | ");
-        return `Class-coverage image value. Higher means the current bboxes improve rare or missing class coverage. ${detail}`;
+        return `Annotation class-balance score. Higher means this image contains classes that are rare or missing elsewhere in the currently loaded labels. It is not visual diversity and does not use a reference profile. ${detail}`;
     }
 
     function renderAnnotationDiversityMetric(metric, message) {
@@ -24477,7 +24470,21 @@ async function cancelRfDetrTrainingJobRequest() {
         return preset.text || "";
     }
 
-    function applyCaptionPreset({ randomize = false } = {}) {
+    function syncCaptionStyleTextFromPreset({ force = false } = {}) {
+        if (!qwenElements.captionStyleText) {
+            return;
+        }
+        const text = getCaptionPresetText();
+        const previousPresetText = qwenElements.captionStyleText.dataset.presetText || "";
+        const currentText = String(qwenElements.captionStyleText.value || "").trim();
+        const isPristine = !currentText || currentText === previousPresetText;
+        if (force || isPristine) {
+            qwenElements.captionStyleText.value = text;
+        }
+        qwenElements.captionStyleText.dataset.presetText = text;
+    }
+
+    function applyCaptionPreset({ randomize = false, forceStyleText = true } = {}) {
         if (!qwenElements.captionPreset) {
             return;
         }
@@ -24486,28 +24493,12 @@ async function cancelRfDetrTrainingJobRequest() {
             const pick = selectable[Math.floor(Math.random() * selectable.length)] || CAPTION_PRESETS[0];
             qwenElements.captionPreset.value = pick.id;
         }
+        syncCaptionStyleTextFromPreset({ force: forceStyleText });
         updateQwenCaptionWorkflow();
     }
 
-    function buildCaptionStylePrompt() {
-        const raw = (qwenElements.captionStyleList?.value || "").trim();
-        if (!raw) {
-            return "";
-        }
-        const lines = raw
-            .split("\n")
-            .map((line) => line.trim())
-            .filter(Boolean);
-        if (!lines.length) {
-            return "";
-        }
-        const joined = lines.join(" / ");
-        const inspirationOnly = qwenElements.captionStyleInspiration?.checked;
-        if (inspirationOnly) {
-            return "Style inspirations (for tone/angle only; rephrase, do not quote verbatim): "
-                + `${joined}.`;
-        }
-        return `Use one of these styles as a starting point: ${joined}.`;
+    function getCaptionStyleText() {
+        return String(qwenElements.captionStyleText?.value || "").trim();
     }
 
     function parseCaptionLineList(raw) {
@@ -24535,13 +24526,9 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function buildCaptionCombinedUserPrompt() {
-        const basePreset = getCaptionPresetText();
-        const stylePrompt = buildCaptionStylePrompt();
+        const stylePrompt = getCaptionStyleText();
         const openingPrompt = buildCaptionOpeningPrompt();
-        let combinedPrompt = basePreset;
-        if (stylePrompt) {
-            combinedPrompt = combinedPrompt ? `${combinedPrompt} ${stylePrompt}` : stylePrompt;
-        }
+        let combinedPrompt = stylePrompt;
         if (openingPrompt) {
             combinedPrompt = combinedPrompt ? `${combinedPrompt} ${openingPrompt}` : openingPrompt;
         }
@@ -24791,7 +24778,7 @@ async function cancelRfDetrTrainingJobRequest() {
             pathItems.push({
                 title: "Window observations",
                 body: "Caption selected overlapping crops first; these are source notes, not the final caption.",
-                prompts: "System prompt; User request; generated crop context; Detection context prompt; Window prompt as Crop task",
+                prompts: "System prompt; Combined user request; generated crop context; Detection context prompt; Window prompt as Crop task",
                 uses: "Crop image, crop-local boxes/counts/classes, active glossary, max-box policy, final length policy",
                 previous: "No prior model output; Draft + refine does not run per crop",
                 output: "Sanitized crop captions plus raw window outputs for merge and guards",
@@ -24802,7 +24789,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 {
                     title: "Full-image draft",
                     body: "One Thinking draft pass over the full image after any crop notes exist.",
-                    prompts: "System prompt with DRAFT marker; Draft + refine prompt; generated full-image context; User request; Detection context prompt",
+                    prompts: "System prompt with DRAFT marker; Draft + refine prompt; generated full-image context; Combined user request; Detection context prompt",
                     uses: "Full image, full-image boxes/counts/classes, active glossary, max-box policy, final length policy",
                     previous: mode.isWindowed
                         ? "Window observations are already appended into the full prompt"
@@ -24812,7 +24799,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 {
                     title: "Refine draft",
                     body: `One editor pass over the full-image draft with ${mode.editorText}.`,
-                    prompts: "Fixed editor system; generated full-image context; User request; Detection context prompt; Draft + refine prompt",
+                    prompts: "Fixed editor system; generated full-image context; Combined user request; Detection context prompt; Draft + refine prompt",
                     uses: "Full image, draft caption, raw first-stage outputs, allowed classes, final length policy",
                     previous: mode.isWindowed
                         ? "Window observations plus full-image draft"
@@ -24826,7 +24813,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 body: mode.isWindowed
                     ? "Compose the full image using the crop observations."
                     : "Compose from the whole image in one caption pass.",
-                prompts: "System prompt; User request; generated full-image context; Detection context prompt",
+                prompts: "System prompt; Combined user request; generated full-image context; Detection context prompt",
                 uses: "Full image, full-image boxes/counts/classes, active glossary, max-box policy, final length policy",
                 previous: mode.isWindowed
                     ? "Window observations are appended into this prompt"
@@ -24838,7 +24825,7 @@ async function cancelRfDetrTrainingJobRequest() {
             pathItems.push({
                 title: "Merge window observations",
                 body: "Windowed-only editor pass that runs when crop captions exist.",
-                prompts: "System prompt; Window merge prompt; user request note; authoritative count note when counts are enabled",
+                prompts: "System prompt; Window merge prompt; combined user request note; authoritative count note when counts are enabled",
                 uses: "Full image, current full-image caption, crop observations with global layout bounds, overlap/dedupe guidance, glossary policy, raw source outputs",
                 previous: mode.twoStage && mode.isThinking
                     ? "Refined full-image caption plus window observations"
@@ -24957,6 +24944,17 @@ async function cancelRfDetrTrainingJobRequest() {
         });
         settingsSection.append(settingsTitle, settingsList);
         qwenElements.captionWorkflow.appendChild(settingsSection);
+
+        const actions = document.createElement("div");
+        actions.className = "qwen-caption-workflow__actions";
+        const previewButton = document.createElement("button");
+        previewButton.type = "button";
+        previewButton.className = "training-button secondary qwen-caption-workflow__preview-button";
+        previewButton.textContent = "preview complete prompt flow on image";
+        previewButton.title = "Show the exact caption prompt flow for the current image and current caption settings without running the model.";
+        previewButton.addEventListener("click", handleQwenCaptionPromptPreview);
+        actions.appendChild(previewButton);
+        qwenElements.captionWorkflow.appendChild(actions);
     }
 
     if (qwenElements.captionSamplingPreset) {
@@ -25151,10 +25149,14 @@ async function cancelRfDetrTrainingJobRequest() {
         el.innerHTML = `
             <div class="qwen-caption-live-toast__title"></div>
             <div class="qwen-caption-live-toast__meta"></div>
-            <pre class="qwen-caption-live-toast__body"></pre>
+            <div class="qwen-caption-live-toast__body"></div>
         `;
         el.addEventListener("wheel", handleQwenCaptionLiveToastWheel, { passive: false });
+        el.addEventListener("mouseenter", () => {
+            qwenCaptionLiveToastHovered = true;
+        });
         el.addEventListener("mouseleave", () => {
+            qwenCaptionLiveToastHovered = false;
             qwenCaptionLiveToastManualScrollUntil = 0;
             scrollQwenCaptionOutputToBottom(el.querySelector(".qwen-caption-live-toast__body"), {
                 respectManualScroll: false,
@@ -25163,6 +25165,66 @@ async function cancelRfDetrTrainingJobRequest() {
         document.body.appendChild(el);
         qwenCaptionLiveToastEl = el;
         return el;
+    }
+
+    function ensureQwenCaptionPromptPreviewToast() {
+        if (qwenCaptionPromptPreviewToastEl) {
+            return qwenCaptionPromptPreviewToastEl;
+        }
+        const el = document.createElement("div");
+        el.className = "qwen-caption-prompt-preview-toast";
+        el.setAttribute("role", "dialog");
+        el.setAttribute("aria-modal", "true");
+        el.setAttribute("aria-labelledby", "qwenCaptionPromptPreviewTitle");
+        el.innerHTML = `
+            <div class="qwen-caption-prompt-preview-toast__panel">
+                <div class="qwen-caption-prompt-preview-toast__header">
+                    <div>
+                        <strong id="qwenCaptionPromptPreviewTitle">Complete caption prompt flow</strong>
+                        <span class="qwen-caption-prompt-preview-toast__meta"></span>
+                    </div>
+                    <button type="button" class="training-button secondary qwen-caption-prompt-preview-toast__close">Close</button>
+                </div>
+                <pre class="qwen-caption-prompt-preview-toast__body"></pre>
+            </div>
+        `;
+        const closeButton = el.querySelector(".qwen-caption-prompt-preview-toast__close");
+        if (closeButton) {
+            closeButton.addEventListener("click", hideQwenCaptionPromptPreviewToast);
+        }
+        el.addEventListener("click", (event) => {
+            if (event.target === el) {
+                hideQwenCaptionPromptPreviewToast();
+            }
+        });
+        document.body.appendChild(el);
+        qwenCaptionPromptPreviewToastEl = el;
+        return el;
+    }
+
+    function hideQwenCaptionPromptPreviewToast() {
+        if (qwenCaptionPromptPreviewToastEl) {
+            qwenCaptionPromptPreviewToastEl.classList.remove("visible", "is-error");
+        }
+    }
+
+    function showQwenCaptionPromptPreviewToast({ title = "Complete caption prompt flow", meta = "", body = "", error = false } = {}) {
+        const el = ensureQwenCaptionPromptPreviewToast();
+        const titleEl = el.querySelector("#qwenCaptionPromptPreviewTitle");
+        const metaEl = el.querySelector(".qwen-caption-prompt-preview-toast__meta");
+        const bodyEl = el.querySelector(".qwen-caption-prompt-preview-toast__body");
+        if (titleEl) {
+            titleEl.textContent = title;
+        }
+        if (metaEl) {
+            metaEl.textContent = meta;
+        }
+        if (bodyEl) {
+            bodyEl.textContent = body || "";
+            bodyEl.scrollTop = 0;
+        }
+        el.classList.toggle("is-error", !!error);
+        el.classList.add("visible");
     }
 
     function normalizeWheelDeltaY(event, fallbackEl) {
@@ -25229,6 +25291,56 @@ async function cancelRfDetrTrainingJobRequest() {
         ].join("|");
     }
 
+    function qwenCaptionTraceKind(entry) {
+        const kind = String(entry?.kind || "").toLowerCase();
+        if (["prompt", "output", "meta", "live"].includes(kind)) {
+            return kind;
+        }
+        const event = String(entry?.event || "").toLowerCase();
+        if (event.includes("output") || event.includes("trim")) {
+            return "output";
+        }
+        if (event.includes("prompt") || event === "input") {
+            return "prompt";
+        }
+        return "meta";
+    }
+
+    function appendQwenCaptionTraceBlock(bodyEl, entry) {
+        const kind = qwenCaptionTraceKind(entry);
+        const block = document.createElement("div");
+        block.className = `qwen-caption-live-toast__trace qwen-caption-live-toast__trace--${kind}`;
+
+        const title = document.createElement("div");
+        title.className = "qwen-caption-live-toast__trace-title";
+        title.textContent = String(entry?.title || entry?.event || kind || "trace");
+        block.appendChild(title);
+
+        const text = document.createElement("pre");
+        text.className = "qwen-caption-live-toast__trace-text";
+        text.textContent = String(entry?.text || "");
+        block.appendChild(text);
+        bodyEl.appendChild(block);
+    }
+
+    function renderQwenCaptionLiveToastBody(bodyEl, progress, liveText) {
+        const events = Array.isArray(progress?.io_events) ? progress.io_events : [];
+        bodyEl.innerHTML = "";
+        if (events.length) {
+            events.forEach((entry) => appendQwenCaptionTraceBlock(bodyEl, entry));
+        }
+        if (liveText) {
+            appendQwenCaptionTraceBlock(bodyEl, {
+                kind: "live",
+                title: progress?.active ? "live model output" : "final caption",
+                text: liveText,
+            });
+        }
+        if (!events.length && !liveText) {
+            bodyEl.textContent = "Waiting for model output...";
+        }
+    }
+
     function hideQwenCaptionLiveToast(delayMs = 0, { terminalSignature = "" } = {}) {
         if (qwenCaptionLiveToastHideTimer) {
             clearTimeout(qwenCaptionLiveToastHideTimer);
@@ -25246,7 +25358,16 @@ async function cancelRfDetrTrainingJobRequest() {
         };
         if (delayMs > 0) {
             qwenCaptionLiveToastPendingTerminalSignature = terminalSignature;
-            qwenCaptionLiveToastHideTimer = setTimeout(hideNow, delayMs);
+            const scheduleHide = (nextDelayMs) => {
+                qwenCaptionLiveToastHideTimer = setTimeout(() => {
+                    if (qwenCaptionLiveToastHovered) {
+                        scheduleHide(1000);
+                        return;
+                    }
+                    hideNow();
+                }, nextDelayMs);
+            };
+            scheduleHide(delayMs);
         } else {
             hideNow();
         }
@@ -25281,7 +25402,8 @@ async function cancelRfDetrTrainingJobRequest() {
             return;
         }
         const liveText = String(progress.live_output || progress.token_preview || "").trim();
-        const shouldShow = progress.active || liveText;
+        const traceEvents = Array.isArray(progress.io_events) ? progress.io_events : [];
+        const shouldShow = progress.active || liveText || traceEvents.length;
         if (!shouldShow) {
             hideQwenCaptionLiveToast(isDone ? 1200 : 0, { terminalSignature });
             return;
@@ -25312,7 +25434,7 @@ async function cancelRfDetrTrainingJobRequest() {
                 .join(" • ");
         }
         if (bodyEl) {
-            bodyEl.textContent = liveText || "Waiting for model output...";
+            renderQwenCaptionLiveToastBody(bodyEl, progress, liveText);
             scrollQwenCaptionOutputToBottom(bodyEl);
         }
         el.classList.toggle("is-error", progress.phase === "error" || (!!progress.error && progress.error !== "cancelled"));
@@ -25484,7 +25606,7 @@ async function cancelRfDetrTrainingJobRequest() {
         }
     }
 
-    async function requestQwenCaptionCancel({ force = true } = {}) {
+    async function requestQwenCaptionCancel({ force = false } = {}) {
         if (!qwenCaptionActive && !qwenCaptionBatchActive) {
             return;
         }
@@ -25521,6 +25643,28 @@ async function cancelRfDetrTrainingJobRequest() {
                 console.warn("Failed to abort caption batch request", error);
             }
         }
+        const cancelledSnapshot = {
+            active: false,
+            kind: "caption",
+            phase: "cancelled",
+            phase_label: "Cancelled",
+            progress: 1,
+            message: "Caption cancellation requested",
+            error: "cancelled",
+            token_preview: "",
+            live_output: "",
+        };
+        qwenCaptionActive = false;
+        if (!qwenCaptionBatchCancel) {
+            qwenCaptionBatchActive = false;
+        }
+        qwenProgressActiveContext = null;
+        renderQwenCaptionProgressState(cancelledSnapshot, { force: true });
+        hideQwenCaptionLiveToast(0, {
+            terminalSignature: getQwenCaptionLiveToastTerminalSignature(cancelledSnapshot),
+        });
+        stopQwenProgressPolling(0);
+        updateQwenCaptionButton();
     }
 
     function formatQwenMemory(memory) {
@@ -26984,6 +27128,62 @@ async function cancelRfDetrTrainingJobRequest() {
         return resp.json();
     }
 
+    async function invokeQwenCaptionPromptPreview(requestFields, options = {}) {
+        if (!currentImage) {
+            throw new Error("No active image");
+        }
+        const imageNameForRequest = currentImage.name;
+        const variantForRequest = samVariant;
+        const preloadToken = await waitForSamPreloadIfActive(imageNameForRequest, variantForRequest);
+        let payload = await buildSamImagePayload({
+            variantOverride: variantForRequest,
+            preferredToken: preloadToken,
+            imageNameOverride: imageNameForRequest,
+        });
+        if (imageNameForRequest && !payload.image_name) {
+            payload.image_name = imageNameForRequest;
+        }
+        payload.sam_variant = variantForRequest;
+        if (options.signal?.aborted) {
+            throw makeCaptionAbortError();
+        }
+        let resp = await fetch(`${API_ROOT}/qwen/caption/preview_prompt`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...requestFields, ...payload }),
+            signal: options.signal,
+        });
+        if (resp.status === 428 || resp.status === 404) {
+            if (options.signal?.aborted) {
+                throw makeCaptionAbortError();
+            }
+            if (resp.status === 404 && imageNameForRequest) {
+                forgetSamToken(imageNameForRequest, variantForRequest);
+            }
+            payload = await buildSamImagePayload({
+                forceBase64: true,
+                variantOverride: variantForRequest,
+                preferredToken: null,
+                imageNameOverride: imageNameForRequest,
+            });
+            if (imageNameForRequest && !payload.image_name) {
+                payload.image_name = imageNameForRequest;
+            }
+            payload.sam_variant = variantForRequest;
+            resp = await fetch(`${API_ROOT}/qwen/caption/preview_prompt`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ...requestFields, ...payload }),
+                signal: options.signal,
+            });
+        }
+        if (!resp.ok) {
+            const detail = await resp.text();
+            throw new Error(parseApiError(detail, resp.statusText || `HTTP ${resp.status}`));
+        }
+        return resp.json();
+    }
+
     function naturalizeCaptionGlossaryLabel(label) {
         return String(label || "")
             .trim()
@@ -27242,12 +27442,10 @@ async function cancelRfDetrTrainingJobRequest() {
         if (modelOverride) {
             warnIfFp8Unsupported(modelOverride);
         }
-        let refinementModelOverride = null;
-        if (refinementPick && refinementPick !== "same") {
-            refinementModelOverride = refinementPick === "active"
-                ? "active"
-                : resolveQwenCaptionModelSelection(refinementPick, requestVariant);
-            if (refinementModelOverride && refinementModelOverride !== "active") {
+        let refinementModelOverride = refinementPick || "same";
+        if (refinementModelOverride && !["same", "auto", "active"].includes(refinementModelOverride)) {
+            refinementModelOverride = resolveQwenCaptionModelSelection(refinementModelOverride, requestVariant);
+            if (refinementModelOverride) {
                 warnIfFp8Unsupported(refinementModelOverride);
             }
         }
@@ -28330,6 +28528,57 @@ async function cancelRfDetrTrainingJobRequest() {
             textLabelRecords = [];
         }
         textLabelRecords.push(record);
+    }
+
+    async function handleQwenCaptionPromptPreview() {
+        if (!ensureAutomationAvailable("Qwen caption prompt preview")) {
+            return;
+        }
+        if (!currentImage || !currentImage.name) {
+            setSamStatus("Load an image before previewing the caption prompt flow", { variant: "warn", duration: 3000 });
+            return;
+        }
+        const requestImageName = currentImage.name;
+        const requestImageWidth = currentImage.width;
+        const requestImageHeight = currentImage.height;
+        showQwenCaptionPromptPreviewToast({
+            title: "Complete caption prompt flow",
+            meta: `Assembling prompt flow for ${requestImageName}`,
+            body: "Preparing current image payload and caption settings...",
+        });
+        try {
+            const { requestFields, meta, hints } = buildQwenCaptionRequestFields(requestImageName);
+            const result = await invokeQwenCaptionPromptPreview({
+                ...requestFields,
+                image_width: requestImageWidth,
+                image_height: requestImageHeight,
+            });
+            const counts = result?.used_counts && typeof result.used_counts === "object"
+                ? Object.entries(result.used_counts).map(([label, count]) => `${label}: ${count}`).join(" • ")
+                : "";
+            const previewMeta = [
+                `${result?.sections?.length || 0} prompt section${(result?.sections?.length || 0) === 1 ? "" : "s"}`,
+                `${hints.length} hint${hints.length === 1 ? "" : "s"}`,
+                `${result?.used_boxes ?? 0} used box${(result?.used_boxes ?? 0) === 1 ? "" : "es"}`,
+                meta.captionMode,
+                counts,
+            ].filter(Boolean).join(" • ");
+            showQwenCaptionPromptPreviewToast({
+                title: "Complete caption prompt flow",
+                meta: previewMeta,
+                body: result?.full_text || "No prompt preview returned.",
+            });
+        } catch (error) {
+            const message = error?.message || error;
+            showQwenCaptionPromptPreviewToast({
+                title: "Prompt preview failed",
+                meta: String(requestImageName || ""),
+                body: String(message || "Unable to preview caption prompts."),
+                error: true,
+            });
+            setSamStatus(`Caption prompt preview failed: ${message}`, { variant: "error", duration: 4500 });
+            console.error("Caption prompt preview failed", error);
+        }
     }
 
     async function handleQwenCaption() {

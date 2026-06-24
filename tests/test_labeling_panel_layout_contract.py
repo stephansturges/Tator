@@ -373,15 +373,18 @@ def test_annotation_diversity_metric_control_contract():
     assert "annotation_diversity.js" in html
     assert html.index('src="annotation_diversity.js') < html.index('src="ybat.js')
     assert 'id="showAnnotationDiversityMetric"' in html
-    assert "Show diversity metric / image value" in html
+    assert "Show annotation class-balance score" in html
+    assert "does not use pixels, embeddings, Class Split analysis, Data Ingestion, or a reference profile" in html
     assert 'id="annotationDiversityMetric"' in html
     assert 'data-testid="status.annotation.diversity_metric"' in html
     assert ".annotation-diversity-metric" in css
     assert "ANNOTATION_DIVERSITY_METRIC_STORAGE_KEY" in js
     assert "initAnnotationDiversityControls();" in js
     assert "scheduleAnnotationDiversityMetricRefresh();" in js
+    assert "It is not visual diversity and does not use a reference profile" in js
     assert "computeImageDiversityMetric" in helper
     assert "countBoxesByClassFromYoloLines" in helper
+    assert "Class-balance score" in helper
 
 
 def test_caption_output_label_precedes_large_textarea():
@@ -401,16 +404,28 @@ def test_caption_prompt_controls_have_tooltips_and_roomy_textareas():
     html = _html()
     css = _css()
 
-    assert "Caption style<span class=\"help-icon\"" in html
-    assert "Style prompts (one per line)<span class=\"help-icon\"" in html
-    assert "Opening phrases (one per line)<span class=\"help-icon\"" in html
+    assert "Caption style preset<span class=\"help-icon\"" in html
+    assert "Caption style text<span class=\"help-icon\"" in html
+    assert "Opening phrase options (one per line)<span class=\"help-icon\"" in html
+    assert "Final user request = Caption style text + optional opening phrase guidance." in html
+    assert "Combined user request prompt<span class=\"help-icon\"" in html
     assert "Caption prompt stack<span class=\"help-icon\"" in html
+    assert "qwen-caption-settings__section" in html
+    assert "Caption scope" in html
+    assert "Generation and guards" in html
+    assert "Auto editor model (compact/Instruct)" in html
+    assert "Same is literal: it uses the selected caption model." in html
     assert 'id="qwenCaptionPresetRandom" class="training-button secondary" title=' in html
-    assert 'id="qwenCaptionStyleList" rows="4"' in html
+    assert 'id="qwenCaptionStyleText" rows="5"' in html
     assert 'id="qwenCaptionOpeningList" rows="6"' in html
     assert 'id="qwenCaptionSystemPrompt" rows="12"' in html
+    assert "Style prompts (one per line)" not in html
+    assert "qwenCaptionStyleInspiration" not in html
 
-    assert "#qwenCaptionStyleList,\n#qwenCaptionOpeningList" in css
+    js = _js()
+    assert "Aerial / drone view" not in js
+    assert "aerial/drone footage" not in js
+    assert "#qwenCaptionStyleText,\n#qwenCaptionOpeningList" in css
     assert "min-height: 240px;" in css
     assert "max-height: 520px;" in css
 
@@ -706,6 +721,91 @@ def test_qwen_injected_runtime_options_use_shared_mlx_resolver():
     assert 'lowered.includes("-mlx-")' in js
     assert 'lowered.endsWith("-mlx")' in js
     assert "goekdeniz-guelmez/josiefied-qwen3-vl-" in js
+
+
+def test_qwen_runtime_selects_keep_full_model_refresh_authoritative():
+    js = _js()
+    start = js.index("function populateQwenMlxModelSelect")
+    end = js.index("async function refreshQwenSettings", start)
+    settings_block = js[start:end]
+
+    assert "populateQwenRuntimeModelSelects(items);" not in settings_block
+    assert "populateQwenRuntimeModelSelects(qwenModelState.models);" in js
+
+
+def test_qwen_caption_and_agent_selects_share_workable_vlm_catalog():
+    js = _js()
+    start = js.index("function appendQwenMlxOptionsToSelect")
+    end = js.index("function populateQwenMlxModelSelect", start)
+    block = js[start:end]
+
+    assert "caption_supported" not in block
+    assert "qwenElements.captionModel" in block
+    assert "qwenElements.captionRefinementModel" in block
+    assert "qwenElements.agentModel" in block
+    assert "qwenElements.agentCaptionModel" in block
+    assert "appendQwenMlxOptionsToSelect(select, items);" in block
+
+
+def test_class_split_qwen_review_selector_keeps_broad_workable_vlm_catalog():
+    js = _js()
+    start = js.index("function renderClassSplitQwenReviewModelOptions")
+    end = js.index("async function refreshClassSplitQwenReviewModels", start)
+    block = js[start:end]
+
+    assert "metadata.inference_supported === false" in block
+    assert "metadata.vision_inference_supported === false" in block
+    assert "caption_supported" not in block
+
+
+def test_qwen_caption_cancel_does_not_force_backend_restart():
+    js = _js()
+
+    assert "requestQwenCaptionCancel({ force: true })" not in js
+    assert "requestQwenCaptionCancel({ force: false })" in js
+    assert 'const url = `${API_ROOT}/qwen/caption/cancel?force=${force ? "1" : "0"}`;' in js
+    assert "hideQwenCaptionLiveToast(0" in js
+    assert 'phase: "cancelled"' in js
+
+
+def test_qwen_caption_toast_shows_prompt_output_trace_blocks():
+    js = _js()
+    css = _css()
+
+    assert "function renderQwenCaptionLiveToastBody" in js
+    assert "progress?.io_events" in js
+    start = js.index("function renderQwenCaptionLiveToastBody")
+    end = js.index("function hideQwenCaptionLiveToast", start)
+    assert "progress?.io_events.slice" not in js[start:end]
+    assert "qwen-caption-live-toast__trace--${kind}" in js
+    assert ".qwen-caption-live-toast__trace--prompt" in css
+    assert ".qwen-caption-live-toast__trace--output" in css
+    assert "let qwenCaptionLiveToastHovered = false;" in js
+    assert 'el.addEventListener("mouseenter", () => {' in js
+    assert "if (qwenCaptionLiveToastHovered)" in js
+    assert "max-height: min(88vh, 960px);" in css
+    assert "max-height: min(76vh, 820px);" in css
+    assert ".qwen-caption-live-toast__trace-text" in css
+    trace_text_start = css.index(".qwen-caption-live-toast__trace-text")
+    trace_text_end = css.index(".qwen-caption-live-toast__trace--prompt", trace_text_start)
+    assert "max-height:" not in css[trace_text_start:trace_text_end]
+    assert ".left textarea," in css
+    assert ".qwen-caption-output textarea" in css
+    assert "box-sizing: border-box;" in css
+
+
+def test_qwen_caption_workflow_can_preview_complete_prompt_flow():
+    js = _js()
+    css = _css()
+
+    assert "preview complete prompt flow on image" in js
+    assert "handleQwenCaptionPromptPreview" in js
+    assert "/qwen/caption/preview_prompt" in js
+    assert "invokeQwenCaptionPromptPreview" in js
+    assert "buildQwenCaptionRequestFields(requestImageName)" in js
+    assert ".qwen-caption-prompt-preview-toast" in css
+    assert ".qwen-caption-prompt-preview-toast__body" in css
+    assert "max-height: calc(86vh - 118px);" in css
 
 
 def test_qwen_caption_model_defaults_to_active_runtime():

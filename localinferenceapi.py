@@ -115,6 +115,8 @@ from models.schemas import (
     QwenInferenceResponse,
     QwenCaptionHint,
     QwenCaptionRequest,
+    QwenCaptionPromptPreviewResponse,
+    QwenCaptionPromptPreviewSection,
     QwenCaptionResponse,
     QwenPrepassRequest,
     QwenPrepassResponse,
@@ -658,6 +660,10 @@ from services.canonical_edr_completion import (
     list_canonical_deployment_jobs as _list_canonical_deployment_jobs_impl,
     rewrite_canonical_deployment_bundle_metadata as _rewrite_canonical_deployment_bundle_metadata_impl,
 )
+from services.calibration_recipe_registry import (
+    CANONICAL_EDR_ORIGIN_IMPORTED_PORTABLE,
+    register_promoted_recipe,
+)
 from services.edr_packages import (
     export_edr_package as _export_edr_package_impl,
     get_edr_package as _get_edr_package_impl,
@@ -730,6 +736,7 @@ from services.qwen import (
     _format_caption_source_output_context as _format_caption_source_output_context_impl,
     _format_caption_window_observation_lines as _format_caption_window_observation_lines_impl,
     _allowed_caption_labels_impl as _allowed_caption_labels_impl,
+    _caption_degenerate_reason as _caption_degenerate_reason_impl,
     _caption_is_degenerate_impl as _caption_is_degenerate_impl,
     _resolve_qwen_caption_decode as _resolve_qwen_caption_decode_impl,
     _window_positions_impl as _window_positions_impl,
@@ -1273,9 +1280,12 @@ qwen_progress_state: Dict[str, Any] = {
     "step_region": None,
     "step_plan": [],
     "live_output": "",
+    "io_events": [],
     "log_lines": [],
 }
 qwen_caption_cache: Dict[str, Any] = {}
+QWEN_CAPTION_PROGRESS_IO_EVENT_LIMIT = 64
+QWEN_CAPTION_PROGRESS_IO_TEXT_LIMIT = 120_000
 qwen_caption_order: deque[str] = deque()
 _HF_OFFLINE_AUTO_ENABLED = False
 _CAPTION_WINDOW_HOOK: ContextVar[Optional[Callable[[int, int, int, str], None]]] = ContextVar(
@@ -2088,6 +2098,7 @@ def _qwen_progress_start(
                 "step_region": None,
                 "step_plan": [],
                 "live_output": "",
+                "io_events": [],
                 "log_lines": [
                     f"{time.strftime('%H:%M:%S')} queued {kind} for {availability.get('effective_model_id') or model_id or 'Qwen'}",
                 ],
@@ -2781,6 +2792,7 @@ def _qwen_caption_io_record(record: Mapping[str, Any]) -> None:
     except Exception as exc:
         logger.debug("[qwen-caption-io] failed to format readable log: %s", exc)
         readable = ""
+    _qwen_caption_io_progress_append(payload, readable)
     if readable:
         for path in (text_path, latest_text_path):
             try:
@@ -2809,6 +2821,7 @@ def _qwen_caption_io_readable(record: Mapping[str, Any]) -> str:
         "image_width",
         "image_height",
         "loop_detected",
+        "degenerate_reason",
     ):
         if key in record and record.get(key) is not None:
             lines.append(f"{key}: {record.get(key)}")
@@ -2830,6 +2843,51 @@ def _qwen_caption_io_readable(record: Mapping[str, Any]) -> str:
             lines.extend(["", f"--- {heading} ---", str(value)])
     lines.append("")
     return "\n".join(lines) + "\n"
+
+
+def _qwen_caption_io_progress_event(record: Mapping[str, Any], readable: str) -> Dict[str, Any]:
+    event = str(record.get("event") or "event")
+    has_output = any(record.get(key) for key in ("output_text", "raw_output", "trimmed_output"))
+    has_prompt = any(
+        record.get(key) for key in ("messages", "system_prompt", "user_prompt", "rendered_prompt", "prompt_text")
+    )
+    kind = "output" if has_output else "prompt" if has_prompt else "meta"
+    source = str(record.get("source") or "").strip()
+    step = str(record.get("step_label") or record.get("step_id") or "").strip()
+    title_bits = [event]
+    if source:
+        title_bits.append(source)
+    if step:
+        title_bits.append(step)
+    text = str(readable or "").strip()
+    max_chars = QWEN_CAPTION_PROGRESS_IO_TEXT_LIMIT
+    if len(text) > max_chars:
+        text = f"... truncated to latest {max_chars} chars ...\n{text[-max_chars:]}"
+    return {
+        "event": event,
+        "kind": kind,
+        "title": " • ".join(title_bits),
+        "time": str(record.get("time") or ""),
+        "call_id": str(record.get("call_id") or ""),
+        "text": text,
+    }
+
+
+def _qwen_caption_io_progress_append(record: Mapping[str, Any], readable: str) -> None:
+    if not readable:
+        return
+    run_id = record.get("run_id")
+    with qwen_progress_lock:
+        if qwen_progress_state.get("kind") != "caption":
+            return
+        if run_id and qwen_progress_state.get("run_id") != run_id:
+            return
+        events = qwen_progress_state.get("io_events")
+        if not isinstance(events, list):
+            events = []
+        events.append(_qwen_caption_io_progress_event(record, readable))
+        qwen_progress_state["io_events"] = events[-QWEN_CAPTION_PROGRESS_IO_EVENT_LIMIT:]
+        qwen_progress_state["updated_at"] = time.time()
 
 
 def _qwen_caption_io_input(
@@ -2878,6 +2936,7 @@ def _qwen_caption_io_output(
     runtime_platform: Optional[str] = None,
     output_text: str,
     loop_detected: bool = False,
+    degenerate_reason: Optional[str] = None,
 ) -> None:
     _qwen_caption_io_record(
         {
@@ -2888,6 +2947,7 @@ def _qwen_caption_io_output(
             "model_id": model_id,
             "output_text": output_text,
             "loop_detected": bool(loop_detected),
+            "degenerate_reason": degenerate_reason,
         }
     )
 
@@ -5659,13 +5719,30 @@ def _resolve_qwen_runtime_platform(
     adapter_path: Optional[Path] = None,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
+    raw_model_id = str(model_id or "").strip()
     meta_platform = normalize_qwen_platform((metadata or {}).get("runtime_platform"))
     meta_id = str((metadata or {}).get("id") or "")
-    if meta_platform == QWEN_PLATFORM_MLX and meta_id and meta_id != "default":
+    meta_model_id = str((metadata or {}).get("model_id") or meta_id)
+    metadata_matches_request = (
+        not raw_model_id
+        or raw_model_id == "default"
+        or raw_model_id == meta_id
+        or raw_model_id == meta_model_id
+    )
+    if (
+        metadata_matches_request
+        and meta_platform == QWEN_PLATFORM_MLX
+        and meta_id
+        and meta_id != "default"
+    ):
         return QWEN_PLATFORM_MLX
-    if meta_platform == QWEN_PLATFORM_TRANSFORMERS and meta_id and meta_id != "default":
+    if (
+        metadata_matches_request
+        and meta_platform == QWEN_PLATFORM_TRANSFORMERS
+        and meta_id
+        and meta_id != "default"
+    ):
         return QWEN_PLATFORM_TRANSFORMERS
-    raw_model_id = str(model_id or "").strip()
     if raw_model_id in AGENT_TRANSFORMERS_MODEL_IDS:
         return QWEN_PLATFORM_TRANSFORMERS
     if is_agent_mlx_model_id(raw_model_id):
@@ -7323,6 +7400,7 @@ def _run_qwen_inference_mlx(
         model_id=runtime.model_id,
         output_text=output_text,
         loop_detected=_caption_repetition_loop_detected_impl(output_text),
+        degenerate_reason=_caption_degenerate_reason_impl(output_text, allow_short_caption=True),
     )
     # mlx-vlm does not expose the processed vision grid that Transformers returns here.
     # Qwen prompts in this app use the standard 0-1000 coordinate space.
@@ -7795,6 +7873,7 @@ def _run_qwen_inference(
         model_id=resolved_model_id,
         output_text=output_text,
         loop_detected=_caption_repetition_loop_detected_impl(output_text),
+        degenerate_reason=_caption_degenerate_reason_impl(output_text, allow_short_caption=True),
     )
     grid = inputs.get("image_grid_thw")
     patch_size = 14
@@ -20103,6 +20182,11 @@ def _class_analysis_copy_file_within_roots(
                 src_resolved = src_path.resolve(strict=True)
                 if dest_path.exists() and dest_path.resolve(strict=True) == src_resolved:
                     return True
+                tmp_leaf = dest_path.with_suffix(f"{dest_path.suffix}.{uuid.uuid4().hex}.tmp")
+                if tmp_leaf.is_symlink() or tmp_leaf.exists():
+                    if tmp_leaf.is_dir() and not tmp_leaf.is_symlink():
+                        return False
+                    tmp_leaf.unlink(missing_ok=True)
                 if dest_path.exists() or dest_path.is_symlink():
                     dest_path.unlink(missing_ok=True)
                 os.link(src_resolved, dest_path)
@@ -54205,8 +54289,10 @@ def _resolve_qwen_caption_refinement_model_id(
     active_model_id: Optional[str],
 ) -> str:
     raw = str(refinement_model_id or "").strip()
-    if not raw or raw.lower() == "same":
+    if not raw or raw.lower() == "auto":
         return _qwen_caption_default_refinement_model_id(desired_model_id)
+    if raw.lower() == "same":
+        return desired_model_id
     if raw.lower() == "active":
         return str(active_model_id or "").strip() or QWEN_MODEL_NAME
     return raw
@@ -54270,6 +54356,648 @@ def _resolve_qwen_caption_default_model_id(
         variant,
     )
     return _effective_qwen_model_id_for_platform(caption_base, QWEN_PLATFORM_MLX)
+
+
+def _qwen_caption_prompt_preview_section(
+    *,
+    title: str,
+    user_prompt: str,
+    kind: str = "prompt",
+    model_id: Optional[str] = None,
+    system_prompt: Optional[str] = None,
+    note: Optional[str] = None,
+    image_region: Optional[Dict[str, Any]] = None,
+) -> QwenCaptionPromptPreviewSection:
+    messages: List[Dict[str, Any]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": str(system_prompt)})
+    if user_prompt:
+        messages.append({"role": "user", "content": str(user_prompt)})
+    return QwenCaptionPromptPreviewSection(
+        title=title,
+        kind=kind,
+        model_id=model_id,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        note=note,
+        image_region=image_region,
+        chat_messages=messages,
+    )
+
+
+def _format_qwen_caption_prompt_preview_text(
+    sections: Sequence[QwenCaptionPromptPreviewSection],
+    *,
+    warnings: Sequence[str],
+    meta: Mapping[str, Any],
+) -> str:
+    lines: List[str] = [
+        "Complete Qwen caption prompt flow preview",
+        f"Image: {meta.get('image_name') or '(current image)'}",
+        f"Mode: {meta.get('caption_mode') or 'full'}",
+        f"Caption model: {meta.get('model_id') or '(active/default)'}",
+        f"Refinement model: {meta.get('refinement_model_id') or '(same/default)'}",
+    ]
+    if warnings:
+        lines.extend(["", "Warnings / generated-dependent stages:"])
+        lines.extend([f"- {warning}" for warning in warnings if str(warning or "").strip()])
+    for section in sections:
+        lines.extend(["", "=" * 88, section.title, "=" * 88])
+        if section.note:
+            lines.append(f"Note: {section.note}")
+        if section.model_id:
+            lines.append(f"Model: {section.model_id}")
+        if section.image_region:
+            region_bits = ", ".join(
+                f"{key}={value}" for key, value in section.image_region.items()
+                if value is not None
+            )
+            if region_bits:
+                lines.append(f"Image region: {region_bits}")
+        if section.system_prompt:
+            lines.extend(["", "--- system ---", section.system_prompt])
+        if section.user_prompt:
+            lines.extend(["", "--- user ---", section.user_prompt])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def qwen_caption_prompt_preview(payload: QwenCaptionRequest) -> QwenCaptionPromptPreviewResponse:
+    pil_img, _, _ = resolve_image_payload(payload.image_base64, payload.image_token, None)
+    request_image_name = str(getattr(payload, "image_name", "") or "").strip()
+    user_prompt = (payload.user_prompt or "").strip()
+    include_counts = bool(payload.include_counts)
+    include_coords = bool(payload.include_coords)
+    max_boxes = payload.max_boxes if payload.max_boxes is not None else 0
+    source_image_width = payload.image_width
+    source_image_height = payload.image_height
+    image_width = pil_img.width
+    image_height = pil_img.height
+    label_hints = _normalize_caption_hints_for_decoded_image(
+        payload.label_hints or [],
+        source_image_width,
+        source_image_height,
+        image_width,
+        image_height,
+    )
+    allowed_labels = _allowed_caption_labels_impl(label_hints)
+    caption_mode = payload.caption_mode or "full"
+    restrict_to_labels = (
+        payload.restrict_to_labels if payload.restrict_to_labels is not None else True
+    )
+    final_caption_max_sentences = payload.final_caption_max_sentences
+    caption_all_windows = _resolve_caption_all_windows_impl(
+        caption_mode,
+        payload.caption_all_windows,
+        has_label_hints=bool(label_hints),
+        restrict_to_labels=bool(restrict_to_labels),
+    )
+    detailed_mode = caption_mode == "windowed"
+    glossary_map = _caption_glossary_map_impl(
+        payload.labelmap_glossary,
+        [hint.label for hint in label_hints if hint.label],
+    )
+    allowed_labels_prompt = (
+        [_caption_preferred_label_impl(label, glossary_map) for label in allowed_labels]
+        if allowed_labels
+        else []
+    )
+    prompt_text, counts, used_boxes, truncated = _build_qwen_caption_prompt_impl(
+        user_prompt,
+        label_hints,
+        image_width,
+        image_height,
+        include_counts,
+        include_coords,
+        max_boxes,
+        detailed_mode,
+        restrict_to_labels=restrict_to_labels,
+        labelmap_glossary=payload.labelmap_glossary,
+        max_sentences=final_caption_max_sentences,
+        context_prompt=payload.caption_detection_context_prompt,
+    )
+    glossary_line = ""
+    if payload.labelmap_glossary:
+        glossary_line = (
+            "Use the class meaning glossary above to interpret label hints semantically. "
+            "Glossary terms describe what each class can mean; they are not exact words to force. "
+            "Never output labelmap class names, especially tokens with underscores."
+        )
+        prompt_text = f"{prompt_text}\n{glossary_line}"
+    base_model_id = (active_qwen_metadata or {}).get("model_id") or QWEN_MODEL_NAME
+    variant = payload.model_variant or "auto"
+    model_id_override = str(payload.model_id or "").strip()
+    if model_id_override.lower() == "active":
+        model_id_override = ""
+    desired_model_id = (
+        model_id_override
+        if model_id_override
+        else _resolve_qwen_caption_default_model_id(base_model_id, variant)
+    )
+    caption_refinement_model_id = _resolve_qwen_caption_refinement_model_id(
+        payload.refinement_model_id,
+        desired_model_id=desired_model_id,
+        active_model_id=base_model_id,
+    )
+    final_only = bool(payload.final_answer_only)
+    final_caption_length_instruction = _caption_length_instruction_impl(final_caption_max_sentences)
+    caption_user_request_note = _caption_user_request_instruction_impl(user_prompt)
+    broad_term_editor_note = _caption_editor_preserve_broad_terms_instruction_impl()
+    short_caption_requested = _caption_user_requested_short_impl(
+        user_prompt,
+        final_caption_max_sentences,
+    )
+    requested_sentence_limit = _caption_requested_sentence_limit_impl(
+        user_prompt,
+        final_caption_max_sentences,
+    )
+    two_stage = bool(payload.two_stage_refine)
+    is_thinking = "Thinking" in desired_model_id or variant == "Thinking"
+    if is_thinking:
+        prompt_text = _adjust_prompt_for_thinking_impl(prompt_text)
+    if final_caption_length_instruction:
+        prompt_text = f"{prompt_text}\nFinal caption length: {final_caption_length_instruction}"
+    default_system_prompt = (
+        (
+            "You are a concise captioning assistant. Use the image as truth. "
+            "Prioritize the user's requested length over exhaustive detail. "
+        )
+        if short_caption_requested
+        else (
+            "You are a detailed captioning assistant. Use the image as truth. "
+            "Provide a rich, multi-sentence caption when there is a lot to see. "
+        )
+    ) + (
+        "Do not mention labels, hints, bounding boxes, coordinates, glossary text, or that counts were provided. "
+        "Do not output internal dataset class names or any token with underscores. "
+        "Use natural-language class terms from the provided context when available. "
+        "Use narrower subtypes only when the image clearly supports them. "
+        "If the hints conflict with the image, mention the uncertainty briefly. "
+        "Stop when the caption is complete; never repeat a sentence or keep writing to fill the token budget."
+    )
+    custom_system_prompt = bool((payload.caption_system_prompt or "").strip())
+    system_prompt = (payload.caption_system_prompt or "").strip() or default_system_prompt
+    if not custom_system_prompt:
+        system_prompt = f"{system_prompt} Respond in English only."
+        if final_only:
+            system_prompt = f"{system_prompt} Return only the final caption. Do not include reasoning or preamble."
+        if final_only and is_thinking and not two_stage:
+            system_prompt = f"{system_prompt} Respond with exactly <final>...</final> and nothing else."
+    overlap: Optional[float] = None
+    window_size: Optional[int] = None
+    x_positions: List[int] = []
+    y_positions: List[int] = []
+    grouped_hints: Dict[Tuple[int, int], List[QwenCaptionHint]] = {}
+    overlap_guidance = ""
+    total_windows = 0
+    if caption_mode == "windowed":
+        overlap = _resolve_qwen_window_overlap_impl(
+            payload.window_overlap, default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP
+        )
+        window_size = _resolve_qwen_window_size_impl(
+            payload.window_size,
+            image_width,
+            image_height,
+            overlap=overlap,
+            default_size=QWEN_WINDOW_DEFAULT_SIZE,
+            default_overlap=QWEN_WINDOW_DEFAULT_OVERLAP,
+        )
+        x_positions = _window_positions_impl(image_width, window_size, overlap)
+        y_positions = _window_positions_impl(image_height, window_size, overlap)
+        grouped_hints = _group_hints_by_window(label_hints, x_positions, y_positions, window_size)
+        overlap_guidance = _build_caption_overlap_guidance(
+            label_hints,
+            grouped_hints,
+            image_width,
+            image_height,
+            labelmap_glossary=payload.labelmap_glossary,
+        )
+        total_windows = max(1, len(x_positions) * len(y_positions))
+    caption_step_plan = _build_qwen_caption_step_plan(
+        caption_mode=caption_mode,
+        total_windows=total_windows,
+        two_stage=two_stage,
+        is_thinking=is_thinking,
+        force_unload=False,
+        caption_model_id=desired_model_id,
+        refinement_model_id=caption_refinement_model_id,
+    )
+
+    def _format_authoritative_counts_note(
+        counts_map: Dict[str, int],
+        glossary: Optional[Dict[str, List[str]]],
+    ) -> str:
+        if not include_counts or not restrict_to_labels or not counts_map:
+            return ""
+        pieces: List[str] = []
+        for label, count in counts_map.items():
+            try:
+                count_int = int(count)
+            except (TypeError, ValueError):
+                continue
+            if count_int <= 0:
+                continue
+            preferred = _caption_preferred_label_impl(label, glossary).strip()
+            if preferred:
+                pieces.append(f"{preferred}: {count_int}")
+        if not pieces:
+            return ""
+        return (
+            "Authoritative object counts that must appear in the caption as natural scene facts: "
+            + ", ".join(pieces)
+            + ". State counts with digits; do not say counts were provided."
+        )
+
+    authoritative_counts_note = _format_authoritative_counts_note(counts, glossary_map)
+    full_region = {
+        "x": 0,
+        "y": 0,
+        "width": image_width,
+        "height": image_height,
+        "image_width": image_width,
+        "image_height": image_height,
+        "image_name": request_image_name,
+        "kind": "full_image",
+    }
+    sections: List[QwenCaptionPromptPreviewSection] = []
+    warnings: List[str] = []
+    planned_windows: List[Tuple[int, int, int, str]] = []
+    pending_window_merge_section: Optional[QwenCaptionPromptPreviewSection] = None
+    skipped_windows = 0
+    if caption_mode == "windowed" and window_size is not None:
+        window_index = 0
+        window_is_thinking = "Thinking" in desired_model_id
+        for y0 in y_positions:
+            for x0 in x_positions:
+                window_index += 1
+                window_hints = grouped_hints.get((x0, y0), [])
+                if not window_hints and not caption_all_windows:
+                    skipped_windows += 1
+                    continue
+                window_allowed = _allowed_caption_labels_impl(window_hints)
+                window_glossary_map = _caption_glossary_map_impl(
+                    payload.labelmap_glossary,
+                    [hint.label for hint in window_hints if hint.label],
+                )
+                window_allowed_prompt = (
+                    [
+                        _caption_preferred_label_impl(label, window_glossary_map)
+                        for label in window_allowed
+                    ]
+                    if window_allowed
+                    else []
+                )
+                window_prompt, _window_counts, _, _ = _build_qwen_caption_prompt_impl(
+                    user_prompt,
+                    window_hints,
+                    window_size,
+                    window_size,
+                    include_counts,
+                    include_coords,
+                    max_boxes,
+                    detailed_mode=True,
+                    restrict_to_labels=restrict_to_labels,
+                    labelmap_glossary=payload.labelmap_glossary,
+                    max_sentences=final_caption_max_sentences,
+                    context_prompt=payload.caption_detection_context_prompt,
+                )
+                if payload.caption_window_prompt:
+                    window_task_prompt = payload.caption_window_prompt.strip()
+                else:
+                    if short_caption_requested:
+                        if requested_sentence_limit == 1:
+                            window_caption_instruction = "Write one concise sentence about this region only. "
+                        else:
+                            window_caption_instruction = "Write 1-2 concise sentences about this region only. "
+                    else:
+                        window_caption_instruction = "Write 1-3 concrete sentences about this region only. "
+                    window_task_prompt = (
+                        "This crop is a subregion of the full image.\n"
+                        "Apply the crop caption context above to this crop only.\n"
+                        "Use the crop image as truth and treat the provided object context as priors, not as text to mention.\n"
+                        "Describe crop-local objects of interest with natural-language class meanings, visible attributes, counts, "
+                        "and spatial relations when available. Mention surrounding scene details only when they clarify those objects or the crop. "
+                        "Do not add unsupported object categories or treat background context as extra counted inventory.\n"
+                        f"{window_caption_instruction}No reasoning or preamble. "
+                        "Do not mention labels, hints, bounding boxes, coordinates, glossary text, or that counts were provided. "
+                        "Do not output internal dataset class names or any token with underscores. "
+                        "Use narrower subtypes only when the crop clearly supports them."
+                    )
+                if glossary_line:
+                    window_prompt = f"{window_prompt}\n{glossary_line}"
+                if restrict_to_labels and window_allowed_prompt:
+                    window_prompt = (
+                        f"{window_prompt}\nAllowed classes: {', '.join(window_allowed_prompt)}. "
+                        "This window has labeled support boxes. Use the crop detection context to describe those labeled objects, "
+                        "their visible attributes, and surrounding crop details that clarify them. "
+                        "Do not promote unrelated background objects into extra counted categories, and do not introduce unsupported entity types."
+                    )
+                elif restrict_to_labels and label_hints and caption_all_windows:
+                    window_prompt = (
+                        f"{window_prompt}\nThis window has no labeled support boxes. "
+                        "Use it only for broad scene context; do not enumerate object categories, counts, or new object lists."
+                    )
+                window_prompt = f"{window_prompt}\n\nCrop task:\n{window_task_prompt}"
+                if window_is_thinking:
+                    window_prompt = _adjust_prompt_for_thinking_impl(window_prompt)
+                window_region = {
+                    "x": x0,
+                    "y": y0,
+                    "width": min(window_size, max(1, image_width - x0)),
+                    "height": min(window_size, max(1, image_height - y0)),
+                    "image_width": image_width,
+                    "image_height": image_height,
+                    "image_name": request_image_name,
+                    "kind": "window",
+                    "label": f"Window {window_index}/{total_windows}",
+                }
+                sections.append(
+                    _qwen_caption_prompt_preview_section(
+                        title=f"Window {window_index}/{total_windows} caption prompt",
+                        model_id=desired_model_id,
+                        system_prompt=system_prompt,
+                        user_prompt=window_prompt,
+                        note="Exact prompt for this crop/window model call.",
+                        image_region=window_region,
+                    )
+                )
+                planned_windows.append((x0, y0, window_size, f"<generated caption from window {window_index}/{total_windows}>"))
+        if skipped_windows:
+            warnings.append(
+                f"{skipped_windows} empty window(s) would be skipped because caption_all_windows is disabled."
+            )
+        if planned_windows:
+            warnings.append(
+                "Window merge and final composition prompts contain placeholders in this preview because their exact text depends on generated window captions."
+            )
+            window_lines = _format_caption_window_observation_lines_impl(
+                planned_windows,
+                image_width=image_width,
+                image_height=image_height,
+            )
+            window_lines.append(
+                "Treat these observations as close-up source notes, not a separate object inventory."
+            )
+            if overlap_guidance:
+                window_lines.append(overlap_guidance)
+            if short_caption_requested:
+                if include_counts and restrict_to_labels:
+                    window_lines.append(
+                        "Now write the full-image caption at the requested length. Use the close-up observations only for the most important visible details. "
+                        "Mention only central labeled object types, and summarize repetitive objects instead of listing them. "
+                        "Do not mention labels, hints, coordinates, or that counts were provided."
+                    )
+                    window_lines.append(
+                        "If window observations conflict, trust the full image and the authoritative counts. Avoid self-contradictions."
+                    )
+                else:
+                    window_lines.append(
+                        "Now write the full-image caption at the requested length. Use the close-up observations only for the most important visible details. "
+                        "Do not mention labels, hints, or coordinates."
+                    )
+                    window_lines.append(
+                        "If window observations conflict, trust the full image. Avoid self-contradictions."
+                    )
+                window_lines.append(
+                    "Do not expand beyond the requested caption length just because window observations are available."
+                )
+            elif include_counts and restrict_to_labels:
+                window_lines.append(
+                    "Now describe the full image in detail. Use all labeled object counts and the close-up observations. "
+                    "Mention every class that appears in the hints, and summarize repetitive objects (e.g., many cars as a parking lot) "
+                    "unless only a few are present or a specific action stands out. "
+                    "Do not mention labels, hints, coordinates, or that counts were provided."
+                )
+                window_lines.append(
+                    "If window observations conflict, trust the full image and the authoritative counts. Avoid self-contradictions."
+                )
+            else:
+                window_lines.append(
+                    "Now describe the full image in detail using the close-up observations. "
+                    "Use detector hints as suggestions, and mention other visible objects. "
+                    "Do not mention labels, hints, or coordinates."
+                )
+                window_lines.append(
+                    "If window observations conflict, trust the full image. Avoid self-contradictions."
+                )
+            window_lines.append(
+                (
+                    "In the final caption, include only the most important window details that fit the requested length."
+                    if short_caption_requested
+                    else (
+                        "In the final caption, preserve specific details about labeled or clearly central objects from the windows "
+                        "(e.g., counts, actions, and notable attributes). "
+                        "Do not promote unlabeled background observations into extra counted objects; longer captions are acceptable when needed."
+                    )
+                )
+            )
+            if broad_term_editor_note:
+                window_lines.append(broad_term_editor_note)
+            prompt_text = f"{prompt_text}\n" + "\n".join(window_lines)
+            merge_detail_policy = (
+                "Keep the revised caption concise. Fold in only the most important missing visible details from the windows. "
+                if short_caption_requested
+                else (
+                    "Use multiple sentences if needed. Preserve specific counts, actions, and notable attributes from the windows; "
+                    "treat window text as supporting evidence, not a complete object inventory. Ignore extra object lists "
+                    "or quantities that conflict with the full image or authoritative counts. "
+                )
+            )
+            merge_policy = (
+                _collapse_whitespace_impl(payload.caption_merge_prompt or "")
+                or (
+                    "Revise the draft caption so it includes all distinct object details "
+                    "from the window observations that are missing in the draft. "
+                    "Do not invent new objects, and do not turn background window descriptions into extra counted object categories. "
+                    f"{broad_term_editor_note} "
+                    f"{merge_detail_policy}"
+                    f"{final_caption_length_instruction}"
+                    "Do not mention labels, hints, or coordinates."
+                )
+            )
+            merge_prompt = (
+                f"{caption_user_request_note}"
+                f"{_collapse_whitespace_impl(authoritative_counts_note or '') + ' ' if authoritative_counts_note else ''}"
+                f"{merge_policy}\n"
+                "Draft caption: <generated full-image caption before window merge>\n"
+                + "\n".join(window_lines)
+            )
+            if overlap_guidance:
+                merge_prompt = f"{merge_prompt}\n\n{overlap_guidance}"
+            if glossary_line:
+                merge_prompt = f"{merge_prompt}\n{glossary_line}"
+            merge_system = (
+                _collapse_whitespace_impl(system_prompt or "")
+                or "You are a caption editor. Return only the revised caption in English."
+            )
+            pending_window_merge_section = _qwen_caption_prompt_preview_section(
+                title="Window merge prompt template",
+                kind="template",
+                model_id=caption_refinement_model_id,
+                system_prompt=merge_system,
+                user_prompt=merge_prompt,
+                note="Runs only after window captions and a full-image caption exist; placeholders stand in for generated text.",
+                image_region=full_region,
+            )
+    if two_stage and is_thinking:
+        if payload.caption_draft_refine_prompt:
+            draft_prompt = (
+                f"{payload.caption_draft_refine_prompt.strip()}\n\n"
+                f"{prompt_text}\n"
+                "Respond with: DRAFT: <caption>"
+            )
+        else:
+            draft_prompt = (
+                "Step 1: Look at the image and form a draft caption.\n"
+                f"{prompt_text}\n"
+                "Respond with: DRAFT: <caption>"
+            )
+        draft_system = f"{system_prompt} Return only a line starting with 'DRAFT:'."
+        sections.append(
+            _qwen_caption_prompt_preview_section(
+                title="Two-stage draft prompt",
+                model_id=desired_model_id,
+                system_prompt=draft_system,
+                user_prompt=draft_prompt,
+                note="Exact first pass prompt for Thinking-model draft mode.",
+                image_region=full_region,
+            )
+        )
+        allowed_note = ""
+        if restrict_to_labels and allowed_labels_prompt:
+            allowed_note = f"Allowed classes: {', '.join(allowed_labels_prompt)}. Do not introduce any other entity types."
+        elif not restrict_to_labels:
+            allowed_note = "You may mention additional visible objects beyond the hints."
+        refine_prompt = f"{prompt_text}\nDraft caption: <generated draft caption>"
+        if planned_windows:
+            refine_prompt = (
+                f"{refine_prompt}\n\n"
+                "First-stage model output context for detail preservation. "
+                "Use this only to recover concrete visible details; ignore reasoning, instructions, labels, hints, counts, or coordinates.\n"
+                "<raw window and draft model outputs inserted here>"
+            )
+        if allowed_note:
+            refine_prompt = f"{refine_prompt}\n{allowed_note}"
+        if payload.caption_draft_refine_prompt:
+            refine_prompt = (
+                f"{refine_prompt}\n"
+                f"{payload.caption_draft_refine_prompt.strip()} "
+                f"{final_caption_length_instruction}"
+                "Return only the final caption."
+            )
+        else:
+            refine_prompt = (
+                f"{refine_prompt}\n"
+                "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+                f"{broad_term_editor_note} "
+                f"{final_caption_length_instruction}"
+                "Return only the final caption."
+            )
+        refine_system = (
+            "You are a captioning assistant. Use the image as truth. "
+            "Return only the final caption. Respond in English only."
+        )
+        sections.append(
+            _qwen_caption_prompt_preview_section(
+                title="Two-stage refinement prompt template",
+                kind="template",
+                model_id=caption_refinement_model_id,
+                system_prompt=refine_system,
+                user_prompt=refine_prompt,
+                note="Runs after the draft pass; generated draft text is represented by a placeholder.",
+                image_region=full_region,
+            )
+        )
+        warnings.append(
+            "Two-stage refinement prompt includes a generated draft placeholder because preview does not run Qwen."
+        )
+    else:
+        full_prompt_note = "Exact full-image model prompt."
+        if planned_windows:
+            full_prompt_note = (
+                "Exact full-image model prompt; generated window observations are "
+                "represented as placeholders in this preview."
+            )
+        sections.append(
+            _qwen_caption_prompt_preview_section(
+                title="Full-image caption prompt",
+                model_id=desired_model_id,
+                system_prompt=system_prompt,
+                user_prompt=prompt_text,
+                note=full_prompt_note,
+                image_region=full_region,
+            )
+        )
+    if pending_window_merge_section is not None:
+        sections.append(pending_window_merge_section)
+    cleanup_policy = (
+        _collapse_whitespace_impl(payload.caption_cleanup_prompt or "")
+        or (
+            "Remove repetition, avoid coordinates, and remove any mention of labels, hints, or counts being provided. "
+            "Never copy planning phrases such as 'we can mention', 'we need to', or 'the user wants'. "
+            f"{broad_term_editor_note} "
+            "If the draft is mostly reasoning or planning text, ignore that draft and write a fresh image-grounded caption. "
+            "Keep the caption grounded in the image."
+        )
+    )
+    cleanup_allowed_note = ""
+    if restrict_to_labels and allowed_labels_prompt:
+        cleanup_allowed_note = (
+            f"Only mention these classes if they appear: {', '.join(sorted(set(allowed_labels_prompt)))}. "
+            "Do not introduce any other entity types. "
+        )
+    cleanup_minimal_note = "Edit the draft with minimal changes. Do not introduce new objects or actions. "
+    cleanup_prompt = (
+        f"{final_caption_length_instruction}"
+        f"{cleanup_allowed_note}"
+        f"{cleanup_minimal_note}"
+        f"{caption_user_request_note}"
+        f"{_collapse_whitespace_impl(authoritative_counts_note or '') + ' ' if authoritative_counts_note else ''}"
+        f"{cleanup_policy}\n"
+        "Draft caption: <caption that triggered cleanup, coverage, count, repetition, or language guards>\n\n"
+        "First-stage model output context:\n"
+        "<raw first-stage model output inserted here when available>"
+    )
+    sections.append(
+        _qwen_caption_prompt_preview_section(
+            title="Conditional cleanup / guard prompt template",
+            kind="template",
+            model_id=caption_refinement_model_id,
+            system_prompt=system_prompt,
+            user_prompt=cleanup_prompt,
+            note="Runs only if caption quality guards fire; generated caption text is represented by a placeholder.",
+            image_region=full_region,
+        )
+    )
+    warnings.append(
+        "Cleanup, coverage, count, repetition, and language guard prompts run only if their checks fire after generation."
+    )
+    meta = {
+        "image_name": request_image_name,
+        "image_width": image_width,
+        "image_height": image_height,
+        "caption_mode": caption_mode,
+        "model_id": desired_model_id,
+        "refinement_model_id": caption_refinement_model_id,
+        "two_stage_refine": two_stage,
+        "is_thinking": is_thinking,
+        "planned_windows": len(planned_windows),
+        "skipped_windows": skipped_windows,
+        "caption_all_windows": caption_all_windows,
+        "include_counts": include_counts,
+        "include_coords": include_coords,
+        "max_boxes": max_boxes,
+    }
+    full_text = _format_qwen_caption_prompt_preview_text(sections, warnings=warnings, meta=meta)
+    return QwenCaptionPromptPreviewResponse(
+        sections=sections,
+        full_text=full_text,
+        used_counts=counts,
+        used_boxes=used_boxes,
+        truncated=truncated,
+        step_plan=caption_step_plan,
+        warnings=warnings,
+        meta=meta,
+    )
 
 
 def qwen_caption(payload: QwenCaptionRequest):
@@ -54451,7 +55179,6 @@ def qwen_caption(payload: QwenCaptionRequest):
             desired_model_id=desired_model_id,
             active_model_id=base_model_id,
         )
-        has_refinement_model_override = bool(payload.refinement_model_id)
         final_only = bool(payload.final_answer_only)
         final_caption_length_instruction = _caption_length_instruction_impl(final_caption_max_sentences)
         caption_user_request_note = _caption_user_request_instruction_impl(user_prompt)
@@ -54696,6 +55423,29 @@ def qwen_caption(payload: QwenCaptionRequest):
                 sanitize_caption_fn=_sanitize_qwen_caption_impl,
             )
 
+        def _accept_guard_caption(candidate: str, fallback: str, *, stage: str) -> str:
+            cleaned = _sanitize_qwen_caption_impl(candidate)
+            reason = _caption_degenerate_reason_impl(cleaned, allow_short_caption=True)
+            if not reason:
+                return cleaned
+            preserved = _sanitize_qwen_caption_impl(fallback)
+            _qwen_caption_io_record(
+                {
+                    "event": "guard_output_rejected",
+                    "stage": stage,
+                    "reason": reason,
+                    "rejected_output": cleaned,
+                    "preserved_caption": preserved,
+                }
+            )
+            _qwen_progress_update(
+                phase="cleanup",
+                phase_label="Postprocessing",
+                message=f"Rejected degenerate {stage} output; preserving previous caption",
+                token_preview=preserved,
+            )
+            return preserved
+
         def resolve_main_runtime() -> Tuple[Any, Any]:
             if model_id_override:
                 return get_runtime(desired_model_id)
@@ -54704,10 +55454,7 @@ def qwen_caption(payload: QwenCaptionRequest):
             return get_runtime(None)
 
         def resolve_refinement_runtime() -> Tuple[Any, Any]:
-            if (
-                has_refinement_model_override
-                or str(caption_refinement_model_id or "") != str(desired_model_id or "")
-            ):
+            if str(caption_refinement_model_id or "") != str(desired_model_id or ""):
                 return get_runtime(caption_refinement_model_id)
             return resolve_main_runtime()
 
@@ -55174,10 +55921,15 @@ def qwen_caption(payload: QwenCaptionRequest):
                             chat_template_kwargs=postprocess_chat_template_kwargs,
                         )
                         _raise_if_qwen_cancelled()
+                        previous_window_caption = window_caption
                         window_caption, _ = _extract_caption_from_text_impl(
                             refine_text, marker=None
                         )
-                        window_caption = _sanitize_qwen_caption_impl(window_caption)
+                        window_caption = _accept_guard_caption(
+                            window_caption,
+                            previous_window_caption,
+                            stage=f"window {window_index}/{total_windows} refine",
+                        )
                         refine_count += 1
                     if window_caption:
                         window_caption_for_merge = _clean_caption_source_context_text_impl(window_caption)
@@ -55345,8 +56097,13 @@ def qwen_caption(payload: QwenCaptionRequest):
                 chat_template_kwargs=postprocess_chat_template_kwargs,
             )
             _raise_if_qwen_cancelled()
+            previous_caption_text = draft_caption
             caption_text, _ = _extract_caption_from_text_impl(qwen_text, marker=None)
-            caption_text = _sanitize_qwen_caption_impl(caption_text)
+            caption_text = _accept_guard_caption(
+                caption_text,
+                previous_caption_text,
+                stage="draft refinement",
+            )
         else:
             _raise_if_qwen_cancelled()
             _qwen_progress_update(
@@ -55657,8 +56414,13 @@ def qwen_caption(payload: QwenCaptionRequest):
                 chat_template_kwargs=postprocess_chat_template_kwargs,
             )
             _raise_if_qwen_cancelled()
+            previous_caption_text = caption_text
             caption_text, _ = _extract_caption_from_text_impl(refine_text, marker=None)
-            caption_text = _sanitize_qwen_caption_impl(caption_text)
+            caption_text = _accept_guard_caption(
+                caption_text,
+                previous_caption_text,
+                stage="coverage refinement",
+            )
             refine_count += 1
         if caption_text and _caption_needs_english_rewrite_impl(caption_text):
             rewrite_model = caption_refinement_model_id
@@ -55696,8 +56458,13 @@ def qwen_caption(payload: QwenCaptionRequest):
                 chat_template_kwargs=postprocess_chat_template_kwargs,
             )
             _raise_if_qwen_cancelled()
+            previous_caption_text = caption_text
             caption_text, _ = _extract_caption_from_text_impl(rewrite_text, marker=None)
-            caption_text = _sanitize_qwen_caption_impl(caption_text)
+            caption_text = _accept_guard_caption(
+                caption_text,
+                previous_caption_text,
+                stage="English rewrite",
+            )
         caption_text = _sanitize_qwen_caption_impl(caption_text)
         if _caption_needs_completion_impl(caption_text):
             repair_model = caption_refinement_model_id
@@ -55853,9 +56620,11 @@ app.include_router(
 app.include_router(
     build_qwen_caption_router(
         caption_fn=qwen_caption,
+        preview_fn=qwen_caption_prompt_preview,
         cancel_fn=cancel_qwen_caption,
         request_cls=QwenCaptionRequest,
         response_cls=QwenCaptionResponse,
+        preview_response_cls=QwenCaptionPromptPreviewResponse,
     )
 )
 

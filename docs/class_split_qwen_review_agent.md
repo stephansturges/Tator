@@ -2286,12 +2286,15 @@ The 2026-06-18 model matrix benchmark used the fixed reviewable source set
   decisions.
 - `mlx-community/Qwen3.6-35B-A3B-4bit` also completed the 10-vignette baseline
   run with 10/10 completed reviews and 3/10 non-skip decisions.
-- `AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4` is now the
-  MLX inference default, and
-  `AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS` is the
-  CUDA/Transformers inference default. They are metadata-verified and exposed
-  for agent-assisted flows, but should get a fresh vignette benchmark before
-  being called benchmark winners.
+- `mlx-community/Qwen3-VL-4B-Instruct-4bit` remains the MLX inference default
+  because it is the validated stable Apple Silicon vision path.
+- `AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4` remains
+  cataloged but blocked for local MLX vision inference: local caption smoke
+  failed with mlx-vlm rejecting its `qwen3_5_vision` tower.
+- `AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-NVFP4-MTP-XS` is the
+  CUDA/Transformers inference default. It is metadata-verified and exposed for
+  agent-assisted flows, but should get a fresh vignette benchmark before being
+  called a benchmark winner.
 - Non-Qwen candidates tested in the same Qwen-shaped schema harness
   (Nex/Gemma-family MLX checkpoints) did not produce completed schema-valid
   reviews and are no longer exposed as active agent-model choices.

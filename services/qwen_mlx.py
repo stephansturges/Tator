@@ -21,12 +21,13 @@ QWEN_PLATFORM_ALIASES = {
 QWEN_AEON_QWEN36_27B_MLX_MODEL = (
     "AEON-7/Qwen3.6-27B-AEON-Ultimate-Uncensored-Multimodal-MLX-FP4"
 )
-QWEN_MLX_DEFAULT_MODEL = QWEN_AEON_QWEN36_27B_MLX_MODEL
+QWEN_MLX_DEFAULT_MODEL = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
 QWEN_MLX_CAPTION_DEFAULT_MODEL = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
 QWEN_AEON_QWEN36_27B_MLX_NOTE = (
     "Inference-only AEON Qwen3.6 27B multimodal MLX FP4 checkpoint. "
-    "The upstream AEON MLX repo advertises it as an Apple Silicon MLX-VLM "
-    "image-text model; adapter training is not wired for this architecture."
+    "Local caption smoke failed with mlx-vlm rejecting qwen3_5_vision, so this "
+    "checkpoint is blocked on the current Apple Silicon runtime until mlx-vlm "
+    "supports that vision tower."
 )
 QWEN_VANCH007_QWEN36_35B_MLX_MODEL = "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit"
 QWEN_VANCH007_QWEN36_35B_MLX_NOTE = (
@@ -306,6 +307,7 @@ def qwen_mlx_model_options() -> List[Dict[str, Any]]:
                 quantization=quantization,
                 source=source,
                 abliterated=True,
+                vision_inference_supported=not is_aeon_qwen36,
                 training_supported=not (is_aeon_qwen36 or is_vanch007_qwen36),
                 compatibility_note=(
                     QWEN_AEON_QWEN36_27B_MLX_NOTE

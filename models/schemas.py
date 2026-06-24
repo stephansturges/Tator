@@ -543,11 +543,7 @@ class QwenCaptionRequest(BaseModel):
         model_id = (values.get("model_id") or "").strip()
         values["model_id"] = model_id or None
         refinement_model_id = (values.get("refinement_model_id") or "").strip()
-        values["refinement_model_id"] = (
-            None
-            if not refinement_model_id or refinement_model_id.lower() == "same"
-            else refinement_model_id
-        )
+        values["refinement_model_id"] = refinement_model_id or None
         glossary = values.get("labelmap_glossary")
         if glossary is not None:
             values["labelmap_glossary"] = str(glossary).strip() or None
@@ -561,6 +557,28 @@ class QwenCaptionResponse(BaseModel):
     used_counts: Dict[str, int] = Field(default_factory=dict)
     used_boxes: int
     truncated: bool
+
+
+class QwenCaptionPromptPreviewSection(BaseModel):
+    title: str
+    kind: str = "prompt"
+    model_id: Optional[str] = None
+    system_prompt: Optional[str] = None
+    user_prompt: str = ""
+    note: Optional[str] = None
+    image_region: Optional[Dict[str, Any]] = None
+    chat_messages: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class QwenCaptionPromptPreviewResponse(BaseModel):
+    sections: List[QwenCaptionPromptPreviewSection] = Field(default_factory=list)
+    full_text: str
+    used_counts: Dict[str, int] = Field(default_factory=dict)
+    used_boxes: int = 0
+    truncated: bool = False
+    step_plan: List[Dict[str, str]] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    meta: Dict[str, Any] = Field(default_factory=dict)
 
 
 def _normalize_qwen_variant_value(value: Any, *, default: Optional[str] = "auto") -> Optional[str]:

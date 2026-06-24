@@ -433,13 +433,13 @@
 
     function formatImageDiversityMetric(metric) {
         if (!metric || metric.status === "empty") {
-            return "Image value 0/100 - no bboxes on this image.";
+            return "Class-balance score 0/100 - no bboxes on this image.";
         }
         const strongest = (metric.rareClasses && metric.rareClasses.length ? metric.rareClasses : [])
             .slice(0, 3)
             .join(", ");
         const rareText = strongest ? ` - coverage: ${strongest}` : "";
-        return `Image value ${metric.score}/100 - ${pluralize(metric.boxes, "box", "boxes")} across ${pluralize(metric.classes, "class", "classes")}${rareText}.`;
+        return `Class-balance score ${metric.score}/100 - ${pluralize(metric.boxes, "box", "boxes")} across ${pluralize(metric.classes, "class", "classes")}${rareText}.`;
     }
 
     const api = Object.freeze({

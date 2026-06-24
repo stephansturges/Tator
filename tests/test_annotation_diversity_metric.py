@@ -43,7 +43,7 @@ def test_annotation_diversity_metric_scores_rare_current_classes_higher():
         assert(rare.score > common.score, `${rare.score} should beat ${common.score}`);
         assert(multi.score > common.score, `${multi.score} should beat ${common.score}`);
         assert(rare.newClasses.includes("rare"));
-        assert(api.formatImageDiversityMetric(rare).startsWith("Image value "));
+        assert(api.formatImageDiversityMetric(rare).startsWith("Class-balance score "));
         """
     )
     _run_node(script)

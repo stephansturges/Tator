@@ -95,7 +95,10 @@ def test_qwen_model_registry_exposes_mlx_quantized_models():
     assert aeon_entry["type"] == "builtin_mlx"
     assert aeon_entry["metadata"]["runtime_platform"] == "mlx_vlm"
     assert aeon_entry["metadata"]["agent_model"] is True
+    assert aeon_entry["metadata"]["vision_inference_supported"] is False
+    assert aeon_entry["metadata"]["inference_supported"] is False
     assert aeon_entry["metadata"]["training_supported"] is False
+    assert "qwen3_5_vision" in aeon_entry["metadata"]["compatibility_note"]
 
 
 def test_qwen_model_registry_exposes_cuda_quantized_and_abliterated_models():
@@ -220,7 +223,6 @@ def test_qwen_model_registry_exposes_inference_only_agent_models():
         "EZCon/Huihui-Qwen3-VL-4B-Instruct-abliterated-4bit-mlx": "builtin_mlx",
         "alexgusevski/Huihui-Qwen3-VL-8B-Instruct-abliterated-q4-mlx": "builtin_mlx",
         "nightmedia/Huihui-Qwen3-VL-32B-Thinking-abliterated-qx65-hi-mlx": "builtin_mlx",
-        AEON_MLX_ID: "builtin_mlx",
         AEON_CUDA_ID: "builtin_transformers",
         "mlx-community/Qwen3.6-35B-A3B-4bit": "builtin_agent_mlx",
         "vanch007/Huihui-Qwen3.6-35B-A3B-abliterated-mlx-4bit": "builtin_mlx",
@@ -256,6 +258,8 @@ def test_qwen_model_registry_exposes_inference_only_agent_models():
             assert entry["metadata"]["training_supported"] is True
             assert entry["metadata"]["training_modes"] == ["official_lora", "trl_qlora"]
     assert not (removed_unusable & set(by_id))
+    assert by_id[AEON_MLX_ID]["metadata"]["vision_inference_supported"] is False
+    assert by_id[AEON_MLX_ID]["metadata"]["inference_supported"] is False
 
 
 def test_qwen_training_config_accepts_moe_transformers_model(tmp_path, monkeypatch):
@@ -1375,6 +1379,37 @@ def test_qwen_caption_active_mlx_default_uses_stable_caption_model(monkeypatch):
     assert (
         api._resolve_qwen_caption_default_model_id(AEON_MLX_ID, "Thinking")
         == "mlx-community/Qwen3-VL-4B-Thinking-4bit"
+    )
+
+
+def test_explicit_qwen_runtime_platform_ignores_stale_active_metadata(monkeypatch):
+    monkeypatch.setattr(
+        api,
+        "active_qwen_metadata",
+        {
+            "id": AEON_MLX_ID,
+            "model_id": AEON_MLX_ID,
+            "runtime_platform": api.QWEN_PLATFORM_MLX,
+        },
+    )
+
+    assert (
+        api._resolve_qwen_runtime_platform(
+            "empero-ai/Qwable-9B-Claude-Fable-5",
+            metadata=api.active_qwen_metadata,
+        )
+        == api.QWEN_PLATFORM_TRANSFORMERS
+    )
+    assert (
+        api._resolve_qwen_runtime_platform(
+            AEON_MLX_ID,
+            metadata={
+                "id": "empero-ai/Qwable-9B-Claude-Fable-5",
+                "model_id": "empero-ai/Qwable-9B-Claude-Fable-5",
+                "runtime_platform": api.QWEN_PLATFORM_TRANSFORMERS,
+            },
+        )
+        == api.QWEN_PLATFORM_MLX
     )
 
 

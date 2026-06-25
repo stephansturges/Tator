@@ -198,28 +198,28 @@ def test_resolve_caption_all_windows_defaults_to_labeled_windows_only():
 
 
 def test_caption_count_conflicts_catch_pluralized_singletons_with_glossary_terms():
-    glossary = {"UPole": ["utility pole"]}
+    glossary = {"PoleFixture": ["utility pole"]}
     caption = (
         "A tall utility pole stands near the center-left. "
         "A few utility poles are visible throughout the neighborhood."
     )
 
-    conflicts = _caption_count_conflicts(caption, {"UPole": 1}, glossary)
+    conflicts = _caption_count_conflicts(caption, {"PoleFixture": 1}, glossary)
     needs_refine, missing = _caption_needs_refine(
         caption,
-        {"UPole": 1},
+        {"PoleFixture": 1},
         detailed_mode=True,
         include_counts=True,
         glossary_map=glossary,
     )
 
-    assert conflicts == ["UPole"]
+    assert conflicts == ["PoleFixture"]
     assert needs_refine is True
-    assert missing == ["UPole"]
+    assert missing == ["PoleFixture"]
     assert (
         _caption_count_conflicts(
             "A utility pole stands near the road, with another pole farther back.",
-            {"UPole": 2},
+            {"PoleFixture": 2},
             glossary,
         )
         == []
@@ -227,27 +227,27 @@ def test_caption_count_conflicts_catch_pluralized_singletons_with_glossary_terms
 
 
 def test_caption_missing_exact_counts_requires_numeric_count_for_multiple_objects():
-    glossary = {"LightVehicle": ["small vehicle", "car", "van", "SUV"]}
+    glossary = {"SmallVehicle": ["small vehicle", "car", "van", "SUV"]}
 
     assert _caption_missing_exact_counts(
         "Several small vehicles are parked along the street.",
-        {"LightVehicle": 251},
+        {"SmallVehicle": 251},
         glossary,
-    ) == ["LightVehicle"]
+    ) == ["SmallVehicle"]
     assert _caption_missing_exact_counts(
         "There are 251 small vehicles parked along the street.",
-        {"LightVehicle": 251},
+        {"SmallVehicle": 251},
         glossary,
     ) == []
     needs_refine, missing = _caption_needs_refine(
         "Several small vehicles are parked along the street.",
-        {"LightVehicle": 251},
+        {"SmallVehicle": 251},
         detailed_mode=False,
         include_counts=True,
         glossary_map=glossary,
     )
     assert needs_refine is True
-    assert missing == ["LightVehicle"]
+    assert missing == ["SmallVehicle"]
 
 
 def test_caption_english_rewrite_ignores_ascii_equivalent_punctuation():
@@ -258,7 +258,7 @@ def test_caption_english_rewrite_ignores_ascii_equivalent_punctuation():
 
 def test_caption_demotes_disputed_glossary_subtype_to_broad_term():
     glossary = {
-        "LightVehicle": [
+        "SmallVehicle": [
             "small vehicle",
             "light vehicle",
             "car",
@@ -272,7 +272,7 @@ def test_caption_demotes_disputed_glossary_subtype_to_broad_term():
 
     cleaned = _caption_demote_unstable_glossary_subtypes(
         caption,
-        {"LightVehicle": 1},
+        {"SmallVehicle": 1},
         glossary,
         source_outputs=[
             ("Window 1", "A small vehicle is parked near the buildings."),
@@ -287,7 +287,7 @@ def test_caption_demotes_disputed_glossary_subtype_to_broad_term():
 
 def test_caption_keeps_consistently_supported_glossary_subtype():
     glossary = {
-        "LightVehicle": [
+        "SmallVehicle": [
             "small vehicle",
             "light vehicle",
             "car",
@@ -299,7 +299,7 @@ def test_caption_keeps_consistently_supported_glossary_subtype():
 
     cleaned = _caption_demote_unstable_glossary_subtypes(
         caption,
-        {"LightVehicle": 1},
+        {"SmallVehicle": 1},
         glossary,
         source_outputs=[
             ("Window 1", "A red pickup truck sits on the path."),
@@ -431,12 +431,11 @@ def test_caption_prompt_uses_glossary_as_semantic_class_meaning():
 
 
 def test_default_caption_glossary_matches_camelcase_labelmap_names():
-    glossary = _default_agent_glossary_for_labelmap(["LightVehicle", "UPole", "GasTank"])
+    glossary = _default_agent_glossary_for_labelmap(["SmallVehicle", "PoleFixture", "StorageTank"])
 
-    assert '"LightVehicle": [\n    "Light Vehicle"' in glossary
-    assert '"UPole": [\n    "UPole"' in glossary
-    assert '"GasTank": [\n    "Gas Tank"' in glossary
-    assert '"storage tank"' in glossary
+    assert '"SmallVehicle": [\n    "Small Vehicle"' in glossary
+    assert '"PoleFixture": [\n    "Pole Fixture"' in glossary
+    assert '"StorageTank": [\n    "Storage Tank"' in glossary
 
 
 def test_window_caption_prompt_applies_max_boxes_after_window_clipping():
@@ -487,7 +486,7 @@ def test_short_caption_request_removes_conflicting_detail_instructions():
 
 def test_sanitize_qwen_caption_removes_repeated_sentence_tail():
     repeated = (
-        "A drone view shows a dry site with a white path and several buildings. "
+        "An overhead view shows a dry site with a white path and several buildings. "
         "There are no visible signs of vegetation or large trees in the area, and the ground appears mostly bare and dry. "
         "There are no visible signs of vegetation or large trees in the area, and the ground appears mostly bare and dry. "
         "There are no visible signs of vegetation or large trees in the area, and the ground appears"
@@ -590,7 +589,7 @@ def test_caption_final_guard_removes_incomplete_trailing_sentence():
     raw = (
         "The image shows a domed landmark surrounded by dense city blocks. "
         "A waterfront and several roads frame the scene. "
-        "An aerial view of"
+        "An overhead view of"
     )
 
     cleaned, changed = _caption_trim_to_complete_sentences(raw, max_sentences=10)

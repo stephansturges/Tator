@@ -515,7 +515,7 @@ def test_class_analysis_qwen_review_system_prompt_preserves_limited_advisory_cha
 
 
 def test_class_analysis_qwen_review_router_policy_allows_limited_local_consensus():
-    point = {"class_name": "UPole", "suggested_neighbor_class": "LightVehicle"}
+    point = {"class_name": "PoleFixture", "suggested_neighbor_class": "SmallVehicle"}
     limited_quality = {"tier": "limited"}
     payload = {
         "name": "route_review",
@@ -542,7 +542,7 @@ def test_class_analysis_qwen_review_router_policy_allows_limited_local_consensus
 
 
 def test_class_analysis_qwen_review_router_policy_masks_poor_local_consensus():
-    point = {"class_name": "UPole", "suggested_neighbor_class": "LightVehicle"}
+    point = {"class_name": "PoleFixture", "suggested_neighbor_class": "SmallVehicle"}
     poor_quality = {"tier": "poor"}
     payload = {
         "name": "route_review",
@@ -569,11 +569,11 @@ def test_class_analysis_qwen_review_router_policy_masks_poor_local_consensus():
 
 
 def test_class_analysis_qwen_review_compact_final_schema_expands_to_full_audit_payload():
-    result = {"summary": {"labelmap": ["Truck", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["Truck", "SmallVehicle"]}}
     point = {
         "point_id": "p0",
         "class_name": "Truck",
-        "suggested_neighbor_class": "LightVehicle",
+        "suggested_neighbor_class": "SmallVehicle",
     }
     clear_quality = {
         "tier": "clear",
@@ -587,7 +587,7 @@ def test_class_analysis_qwen_review_compact_final_schema_expands_to_full_audit_p
         "edge_clipped": False,
         "reasons": ["usable"],
     }
-    spec = api._class_analysis_qwen_review_final_tool_spec(["Truck", "LightVehicle"])
+    spec = api._class_analysis_qwen_review_final_tool_spec(["Truck", "SmallVehicle"])
     required = set(spec["parameters"]["required"])
 
     assert "anchor_evidence_current" not in required
@@ -609,7 +609,7 @@ def test_class_analysis_qwen_review_compact_final_schema_expands_to_full_audit_p
     expanded = api._class_analysis_qwen_review_expand_compact_final(
         {
             "decision": "accept_suggested",
-            "final_class": "LightVehicle",
+            "final_class": "SmallVehicle",
             "confidence": 0.88,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -652,7 +652,7 @@ def test_class_analysis_qwen_review_compact_final_schema_expands_to_full_audit_p
     assert expanded["local_consensus_evidence"] == "not_applicable"
     assert expanded["glossary_or_guidance_used"] is True
     assert final["decision"] == "accept_suggested"
-    assert final["target_class"] == "LightVehicle"
+    assert final["target_class"] == "SmallVehicle"
     assert final["evidence_ids"] == ["target_context_1", "zoom_region_6"]
 
 
@@ -770,11 +770,11 @@ def test_class_analysis_qwen_review_blocks_class_change_without_whole_extent_sup
 
 
 def test_class_analysis_qwen_review_reconciles_self_contradictory_accept_to_confirm_current():
-    result = {"summary": {"labelmap": ["Boat", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["Boat", "SmallVehicle"]}}
     point = {
         "point_id": "p0",
         "class_name": "Boat",
-        "suggested_neighbor_class": "LightVehicle",
+        "suggested_neighbor_class": "SmallVehicle",
     }
     clear_quality = {
         "tier": "clear",
@@ -833,8 +833,8 @@ def test_class_analysis_qwen_review_reconciles_self_contradictory_accept_to_conf
 def test_class_analysis_qwen_review_does_not_confirm_when_self_contradictory_accept_rejects_current():
     point = {
         "point_id": "p0",
-        "class_name": "UPole",
-        "suggested_neighbor_class": "LightVehicle",
+        "class_name": "PoleFixture",
+        "suggested_neighbor_class": "SmallVehicle",
     }
     clear_quality = {
         "tier": "clear",
@@ -852,7 +852,7 @@ def test_class_analysis_qwen_review_does_not_confirm_when_self_contradictory_acc
     expanded = api._class_analysis_qwen_review_expand_compact_final(
         {
             "decision": "accept_suggested",
-            "target_class": "UPole",
+            "target_class": "PoleFixture",
             "confidence": 0.85,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -862,8 +862,8 @@ def test_class_analysis_qwen_review_does_not_confirm_when_self_contradictory_acc
             "overlap_assessment": "partial_contamination",
             "overlap_explains_candidate_similarity": False,
             "rationale_short": (
-                "Target crop clearly shows a car fitting LightVehicle. "
-                "The current UPole label is likely a misclassification."
+                "Target crop clearly shows a car fitting SmallVehicle. "
+                "The current PoleFixture label is likely a misclassification."
             ),
         },
         point=point,
@@ -874,15 +874,15 @@ def test_class_analysis_qwen_review_does_not_confirm_when_self_contradictory_acc
 
     assert expanded["_controller_reconciliation"]["applied"] is False
     assert expanded["decision"] == "accept_suggested"
-    assert expanded["target_class"] == "LightVehicle"
+    assert expanded["target_class"] == "SmallVehicle"
 
 
 def test_class_analysis_qwen_review_does_not_reconcile_non_adjacent_skip():
-    result = {"summary": {"labelmap": ["Solarpanels", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["SolarArray", "SmallVehicle"]}}
     point = {
         "point_id": "p0",
-        "class_name": "Solarpanels",
-        "suggested_neighbor_class": "LightVehicle",
+        "class_name": "SolarArray",
+        "suggested_neighbor_class": "SmallVehicle",
     }
     clear_quality = {
         "tier": "clear",
@@ -928,11 +928,11 @@ def test_class_analysis_qwen_review_does_not_reconcile_non_adjacent_skip():
 
 
 def test_class_analysis_qwen_review_compact_uncertain_class_alias_maps_to_suggested():
-    result = {"summary": {"labelmap": ["UPole", "Solarpanels"]}}
+    result = {"summary": {"labelmap": ["PoleFixture", "SolarArray"]}}
     point = {
         "point_id": "p0",
-        "class_name": "UPole",
-        "suggested_neighbor_class": "Solarpanels",
+        "class_name": "PoleFixture",
+        "suggested_neighbor_class": "SolarArray",
     }
     clear_quality = {
         "tier": "clear",
@@ -949,7 +949,7 @@ def test_class_analysis_qwen_review_compact_uncertain_class_alias_maps_to_sugges
     expanded = api._class_analysis_qwen_review_expand_compact_final(
         {
             "decision": "change_to_other",
-            "uncertain_class": "Solarpanels",
+            "uncertain_class": "SolarArray",
             "confidence": 0.86,
             "visual_quality": "clear",
             "visual_visibility": "visible",
@@ -988,7 +988,7 @@ def test_class_analysis_qwen_review_compact_uncertain_class_alias_maps_to_sugges
     assert expanded["decision"] == "accept_suggested"
     assert expanded["overlap_assessment"] == "none"
     assert final["decision"] == "accept_suggested"
-    assert final["target_class"] == "Solarpanels"
+    assert final["target_class"] == "SolarArray"
 
 
 def test_class_analysis_qwen_review_final_validation_is_non_mutating_and_labelmap_guarded():
@@ -1183,11 +1183,11 @@ def test_class_analysis_qwen_review_quality_gate_caps_direct_high_confidence_ski
 
 
 def test_class_analysis_qwen_review_blocks_class_change_on_material_overlap():
-    result = {"summary": {"labelmap": ["Truck", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["Truck", "SmallVehicle"]}}
     point = {
         "point_id": "p0",
         "class_name": "Truck",
-        "suggested_neighbor_class": "LightVehicle",
+        "suggested_neighbor_class": "SmallVehicle",
     }
     clear_quality = {
         "tier": "clear",
@@ -1205,7 +1205,7 @@ def test_class_analysis_qwen_review_blocks_class_change_on_material_overlap():
     final = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.9,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -1221,7 +1221,7 @@ def test_class_analysis_qwen_review_blocks_class_change_on_material_overlap():
             "global_context_evidence": "strong",
             "glossary_or_guidance_used": True,
             "evidence_ids": ["ctx_1"],
-            "rationale_short": "Class comparison indicates LightVehicle is a better fit.",
+            "rationale_short": "Class comparison indicates SmallVehicle is a better fit.",
             "counter_evidence": "",
             "human_review_needed": False,
         },
@@ -1750,11 +1750,11 @@ def test_class_analysis_qwen_review_cue_verifier_rejects_shared_target_current_c
 
 
 def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class_switch():
-    result = {"summary": {"labelmap": ["Truck", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["Truck", "SmallVehicle"]}}
     point = {
         "point_id": "p0",
         "class_name": "Truck",
-        "suggested_neighbor_class": "LightVehicle",
+        "suggested_neighbor_class": "SmallVehicle",
         "dual_bbox_conflict": {
             "enabled": True,
             "kind": "near_identical_cross_class_bbox",
@@ -1762,9 +1762,9 @@ def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class
             "point_id": "p0",
             "current_class": "Truck",
             "other_point_id": "p1",
-            "other_class_name": "LightVehicle",
-            "class_name": "LightVehicle",
-            "classes": ["Truck", "LightVehicle"],
+            "other_class_name": "SmallVehicle",
+            "class_name": "SmallVehicle",
+            "classes": ["Truck", "SmallVehicle"],
             "iou": 0.96,
             "corner_similarity": 0.97,
             "target_area_covered": 0.98,
@@ -1796,7 +1796,7 @@ def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class
             "overlaps": [
                 {
                     "point_id": "p1",
-                    "class_name": "LightVehicle",
+                    "class_name": "SmallVehicle",
                     "relation": "duplicate_like",
                     "target_area_covered": 0.98,
                     "other_area_covered": 0.97,
@@ -1819,7 +1819,7 @@ def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class
     expanded = api._class_analysis_qwen_review_expand_compact_final(
         {
             "decision": "accept_suggested",
-            "final_class": "LightVehicle",
+            "final_class": "SmallVehicle",
             "confidence": 0.9,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -1844,7 +1844,7 @@ def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class
             "whole_target_extent_reason": "The overlapping class explains the full target extent.",
             "visible_target_cues": ["compact vehicle body", "visible windshield"],
             "supporting_clean_evidence_ids": ["target_detail_2", "zoom_region_8"],
-            "rationale_short": "target pixels match the overlapping LightVehicle box",
+            "rationale_short": "target pixels match the overlapping SmallVehicle box",
             "counter_evidence": "Truck label is only from the duplicate box metadata.",
             "human_review_needed": False,
         },
@@ -1864,7 +1864,7 @@ def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class
 
     assert expanded["dual_bbox_resolution"] == "overlap_box_class"
     assert final["decision"] == "accept_suggested"
-    assert final["target_class"] == "LightVehicle"
+    assert final["target_class"] == "SmallVehicle"
     assert final["dual_bbox_resolution"] == "overlap_box_class"
     assert final["guardrail_reasons"] == []
     disposition = api._class_analysis_qwen_review_disposition(
@@ -1906,7 +1906,7 @@ def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class
     inconsistent_compact = api._class_analysis_qwen_review_expand_compact_final(
         {
             "decision": "accept_suggested",
-            "final_class": "LightVehicle",
+            "final_class": "SmallVehicle",
             "confidence": 0.92,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -1931,7 +1931,7 @@ def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class
             "whole_target_extent_reason": "The overlapping class explains the full target extent.",
             "visible_target_cues": ["compact vehicle body", "visible windshield"],
             "supporting_clean_evidence_ids": ["target_detail_2", "zoom_region_8"],
-            "rationale_short": "target pixels match the near-identical LightVehicle box, not Truck.",
+            "rationale_short": "target pixels match the near-identical SmallVehicle box, not Truck.",
             "counter_evidence": "Truck label is only from the duplicate box metadata.",
             "human_review_needed": False,
         },
@@ -1953,7 +1953,7 @@ def test_class_analysis_qwen_review_dual_bbox_mode_allows_resolved_overlap_class
     assert inconsistent_compact["overlap_assessment"] == "duplicate_like"
     assert inconsistent_compact["dual_bbox_resolution"] == "overlap_box_class"
     assert inconsistent_final["decision"] == "accept_suggested"
-    assert inconsistent_final["target_class"] == "LightVehicle"
+    assert inconsistent_final["target_class"] == "SmallVehicle"
     assert inconsistent_final["dual_bbox_resolution"] == "overlap_box_class"
     assert "accept_suggested has only moderate suggested-anchor agreement" in inconsistent_final["advisory_reasons"]
 
@@ -5492,7 +5492,7 @@ def test_class_analysis_qwen_review_ignores_negative_and_color_only_visible_cues
             "global_context_evidence": "strong",
             "glossary_or_guidance_used": True,
             "visible_target_cues": [
-                "aerial view of parked candidate class",
+                "overhead view of parked candidate class",
                 "multiple object colors",
                 "flat ground surface",
                 "no current-class features",
@@ -5646,11 +5646,11 @@ def test_class_analysis_qwen_review_allows_class_change_with_clean_supporting_ev
 
 
 def test_class_analysis_qwen_review_blocks_accept_when_text_rejects_suggested_alias():
-    result = {"summary": {"labelmap": ["Building", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["Building", "SmallVehicle"]}}
     point = {
         "point_id": "p0",
         "class_name": "Building",
-        "suggested_neighbor_class": "LightVehicle",
+        "suggested_neighbor_class": "SmallVehicle",
     }
     clear_quality = {
         "tier": "clear",
@@ -5676,7 +5676,7 @@ def test_class_analysis_qwen_review_blocks_accept_when_text_rejects_suggested_al
     final = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.95,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -5713,9 +5713,9 @@ def test_class_analysis_qwen_review_blocks_accept_when_text_rejects_suggested_al
 def test_class_analysis_qwen_review_semantic_rejection_stops_at_semicolon_positive_cue():
     payload = {
         "decision": "accept_suggested",
-        "target_class": "LightVehicle",
+        "target_class": "SmallVehicle",
         "rationale_short": (
-            "Target is small, compact, no cargo; matches LightVehicle visual cues; "
+            "Target is small, compact, no cargo; matches SmallVehicle visual cues; "
             "no overlap contamination"
         ),
         "counter_evidence": "No explicit counterevidence provided.",
@@ -5724,9 +5724,9 @@ def test_class_analysis_qwen_review_semantic_rejection_stops_at_semicolon_positi
 
     conflict = api._class_analysis_qwen_review_text_conflicts_with_accept_suggested(
         current_class="Truck",
-        suggested_class="LightVehicle",
+        suggested_class="SmallVehicle",
         payload=payload,
-        labelmap=["Truck", "LightVehicle"],
+        labelmap=["Truck", "SmallVehicle"],
     )
 
     assert conflict is None
@@ -5790,10 +5790,10 @@ def test_class_analysis_qwen_review_allows_partial_overlap_accept_with_strong_in
 
 
 def test_class_analysis_qwen_review_blocks_class_change_on_limited_quality():
-    result = {"summary": {"labelmap": ["UPole", "Person"]}}
+    result = {"summary": {"labelmap": ["PoleFixture", "Person"]}}
     point = {
         "point_id": "p0",
-        "class_name": "UPole",
+        "class_name": "PoleFixture",
         "suggested_neighbor_class": "Person",
     }
     limited_quality = {
@@ -5847,7 +5847,7 @@ def test_class_analysis_qwen_review_blocks_class_change_on_limited_quality():
         "accept_suggested requires clear backend visual-quality tier" in reason
         for reason in final["guardrail_reasons"]
     )
-    assert final["target_class"] == "UPole"
+    assert final["target_class"] == "PoleFixture"
     assert final["guarded_recommendation"]["blocked"] is True
     assert final["guarded_recommendation"]["decision"] == "accept_suggested"
     assert final["guarded_recommendation"]["target_class"] == "Person"
@@ -5856,11 +5856,11 @@ def test_class_analysis_qwen_review_blocks_class_change_on_limited_quality():
 
 
 def test_class_analysis_qwen_review_allows_limited_confirm_current_with_specificity_rebuttal():
-    result = {"summary": {"labelmap": ["UPole", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["PoleFixture", "SmallVehicle"]}}
     point = {
         "point_id": "p0",
-        "class_name": "UPole",
-        "suggested_neighbor_class": "LightVehicle",
+        "class_name": "PoleFixture",
+        "suggested_neighbor_class": "SmallVehicle",
     }
     limited_quality = {
         "tier": "limited",
@@ -5878,7 +5878,7 @@ def test_class_analysis_qwen_review_allows_limited_confirm_current_with_specific
     final = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "confirm_current",
-            "target_class": "UPole",
+            "target_class": "PoleFixture",
             "confidence": 0.88,
             "visual_quality": "limited",
             "object_visibility": "partial",
@@ -5920,13 +5920,13 @@ def test_class_analysis_qwen_review_allows_limited_confirm_current_with_specific
                 "specificity_alignment": "supports_current",
                 "target_background_contrast": "target_specific",
                 "specificity_margin": "current_target_favored",
-                "best_supported_class": "UPole",
+                "best_supported_class": "PoleFixture",
             },
         },
     )
 
     assert final["decision"] == "confirm_current"
-    assert final["target_class"] == "UPole"
+    assert final["target_class"] == "PoleFixture"
     assert final["guardrail_reasons"] == []
     assert final["guarded_recommendation"] is None
     assert final["confidence"] <= 0.65
@@ -6124,7 +6124,7 @@ def test_class_analysis_qwen_review_blocks_limited_partial_change_when_multiple_
 
 
 def test_class_analysis_qwen_review_blocks_self_conflicting_class_recommendations():
-    result = {"summary": {"labelmap": ["Truck", "LightVehicle", "Container"]}}
+    result = {"summary": {"labelmap": ["Truck", "SmallVehicle", "Container"]}}
     clear_quality = {
         "tier": "clear",
         "bbox_width": 90.0,
@@ -6141,7 +6141,7 @@ def test_class_analysis_qwen_review_blocks_self_conflicting_class_recommendation
     accepted = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.9,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -6161,7 +6161,7 @@ def test_class_analysis_qwen_review_blocks_self_conflicting_class_recommendation
             "human_review_needed": False,
         },
         result,
-        {"point_id": "p0", "class_name": "Truck", "suggested_neighbor_class": "LightVehicle"},
+        {"point_id": "p0", "class_name": "Truck", "suggested_neighbor_class": "SmallVehicle"},
         {"ctx_1"},
         clear_quality,
     )
@@ -6205,7 +6205,7 @@ def test_class_analysis_qwen_review_blocks_self_conflicting_class_recommendation
 
 
 def test_class_analysis_qwen_review_blocks_accept_when_model_text_rejects_suggested_class():
-    result = {"summary": {"labelmap": ["Boat", "Building", "LightVehicle", "Truck"]}}
+    result = {"summary": {"labelmap": ["Boat", "Building", "SmallVehicle", "Truck"]}}
     clear_quality = {
         "tier": "clear",
         "bbox_width": 90.0,
@@ -6222,7 +6222,7 @@ def test_class_analysis_qwen_review_blocks_accept_when_model_text_rejects_sugges
     contradictory = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.85,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -6238,12 +6238,12 @@ def test_class_analysis_qwen_review_blocks_accept_when_model_text_rejects_sugges
             "global_context_evidence": "strong",
             "glossary_or_guidance_used": True,
             "evidence_ids": ["ctx_1"],
-            "rationale_short": "The target crop clearly shows a small boat, contradicting the LightVehicle suggestion.",
+            "rationale_short": "The target crop clearly shows a small boat, contradicting the SmallVehicle suggestion.",
             "counter_evidence": "The object is clearly a small boat, not a car or light vehicle.",
             "human_review_needed": False,
         },
         result,
-        {"point_id": "p0", "class_name": "Boat", "suggested_neighbor_class": "LightVehicle"},
+        {"point_id": "p0", "class_name": "Boat", "suggested_neighbor_class": "SmallVehicle"},
         {"ctx_1"},
         clear_quality,
     )
@@ -6266,12 +6266,12 @@ def test_class_analysis_qwen_review_blocks_accept_when_model_text_rejects_sugges
             "global_context_evidence": "strong",
             "glossary_or_guidance_used": True,
             "evidence_ids": ["ctx_1"],
-            "rationale_short": "The target is a small red shed with a roof, clearly a Building. The current LightVehicle label is incorrect.",
+            "rationale_short": "The target is a small red shed with a roof, clearly a Building. The current SmallVehicle label is incorrect.",
             "counter_evidence": "No vehicle features are visible.",
             "human_review_needed": False,
         },
         result,
-        {"point_id": "p1", "class_name": "LightVehicle", "suggested_neighbor_class": "Building"},
+        {"point_id": "p1", "class_name": "SmallVehicle", "suggested_neighbor_class": "Building"},
         {"ctx_1"},
         clear_quality,
     )
@@ -6314,7 +6314,7 @@ def test_class_analysis_qwen_review_blocks_accept_when_model_text_rejects_sugges
 
 
 def test_class_analysis_qwen_review_sentence_bounds_model_text_fields():
-    result = {"summary": {"labelmap": ["Building", "LightVehicle", "Truck"]}}
+    result = {"summary": {"labelmap": ["Building", "SmallVehicle", "Truck"]}}
     clear_quality = {
         "tier": "clear",
         "bbox_width": 90.0,
@@ -6377,7 +6377,7 @@ def test_class_analysis_qwen_review_sentence_bounds_model_text_fields():
 
 
 def test_class_analysis_qwen_review_blocks_dominant_current_overlap():
-    result = {"summary": {"labelmap": ["Building", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["Building", "SmallVehicle"]}}
     clear_quality = {
         "tier": "clear",
         "bbox_width": 183.0,
@@ -6412,7 +6412,7 @@ def test_class_analysis_qwen_review_blocks_dominant_current_overlap():
                 },
                 {
                     "point_id": "neighbor_vehicle",
-                    "class_name": "LightVehicle",
+                    "class_name": "SmallVehicle",
                     "relation": "partial_contamination",
                     "target_area_covered": 0.15,
                     "other_area_covered": 0.31,
@@ -6425,7 +6425,7 @@ def test_class_analysis_qwen_review_blocks_dominant_current_overlap():
     accepted = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.95,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -6443,12 +6443,12 @@ def test_class_analysis_qwen_review_blocks_dominant_current_overlap():
             "visible_target_cues": ["parked object shape", "bright vehicle roof"],
             "supporting_clean_evidence_ids": ["target_context_1", "zoom_region_8"],
             "evidence_ids": ["target_context_1", "zoom_region_8", "overlap_decomposition_4"],
-            "rationale_short": "Target matches LightVehicle traits; overlap does not explain vehicle features.",
+            "rationale_short": "Target matches SmallVehicle traits; overlap does not explain vehicle features.",
             "counter_evidence": "",
             "human_review_needed": False,
         },
         result,
-        {"point_id": "p0", "class_name": "Building", "suggested_neighbor_class": "LightVehicle"},
+        {"point_id": "p0", "class_name": "Building", "suggested_neighbor_class": "SmallVehicle"},
         {"target_context_1", "zoom_region_8", "overlap_decomposition_4"},
         clear_quality,
         ledger,
@@ -6721,7 +6721,7 @@ def test_class_analysis_qwen_review_blocks_confirm_current_when_probe_favors_bac
 
 def test_class_analysis_qwen_review_controller_preflight_confirms_current_overlap_false_alarm():
     result = api._class_analysis_qwen_review_current_overlap_false_alarm_result(
-        {"point_id": "p0", "class_name": "Building", "suggested_neighbor_class": "LightVehicle"},
+        {"point_id": "p0", "class_name": "Building", "suggested_neighbor_class": "SmallVehicle"},
         {"tier": "clear"},
         {
             "clean_visual_evidence_ids": ["target_detail_2", "zoom_region_9"],
@@ -6736,7 +6736,7 @@ def test_class_analysis_qwen_review_controller_preflight_confirms_current_overla
                         "iou": 0.18,
                     },
                     {
-                        "class_name": "LightVehicle",
+                        "class_name": "SmallVehicle",
                         "relation": "partial_contamination",
                         "target_area_covered": 0.15,
                         "other_area_covered": 0.31,
@@ -6756,13 +6756,13 @@ def test_class_analysis_qwen_review_controller_preflight_confirms_current_overla
 
 def test_class_analysis_qwen_review_controller_preflight_ignores_balanced_overlap():
     result = api._class_analysis_qwen_review_current_overlap_false_alarm_result(
-        {"point_id": "p0", "class_name": "Building", "suggested_neighbor_class": "LightVehicle"},
+        {"point_id": "p0", "class_name": "Building", "suggested_neighbor_class": "SmallVehicle"},
         {"tier": "clear"},
         {
             "overlap_decomposition": {
                 "overlaps": [
                     {"class_name": "Building", "relation": "partial_contamination", "target_area_covered": 0.52},
-                    {"class_name": "LightVehicle", "relation": "partial_contamination", "target_area_covered": 0.35},
+                    {"class_name": "SmallVehicle", "relation": "partial_contamination", "target_area_covered": 0.35},
                 ]
             },
         },
@@ -6935,7 +6935,7 @@ def test_class_analysis_qwen_review_allows_accept_with_decisive_suggested_cues()
 
 
 def test_class_analysis_qwen_review_blocks_accept_when_counter_evidence_supports_current_class():
-    result = {"summary": {"labelmap": ["UPole", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["PoleFixture", "SmallVehicle"]}}
     clear_quality = {
         "tier": "clear",
         "bbox_width": 90.0,
@@ -6952,7 +6952,7 @@ def test_class_analysis_qwen_review_blocks_accept_when_counter_evidence_supports
     accepted = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.85,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -6968,23 +6968,23 @@ def test_class_analysis_qwen_review_blocks_accept_when_counter_evidence_supports
             "global_context_evidence": "strong",
             "glossary_or_guidance_used": True,
             "evidence_ids": ["ctx_1"],
-            "rationale_short": "Target crop clearly shows a car, so LightVehicle is plausible.",
-            "counter_evidence": "A thin pole-like structure is visible, which could justify the UPole label.",
+            "rationale_short": "Target crop clearly shows a car, so SmallVehicle is plausible.",
+            "counter_evidence": "A thin pole-like structure is visible, which could justify the PoleFixture label.",
             "human_review_needed": False,
         },
         result,
-        {"point_id": "p0", "class_name": "UPole", "suggested_neighbor_class": "LightVehicle"},
+        {"point_id": "p0", "class_name": "PoleFixture", "suggested_neighbor_class": "SmallVehicle"},
         {"ctx_1"},
         clear_quality,
     )
 
     assert accepted["decision"] == "skip_uncertain"
-    assert any("model text supporting current class UPole" in reason for reason in accepted["guardrail_reasons"])
+    assert any("model text supporting current class PoleFixture" in reason for reason in accepted["guardrail_reasons"])
 
     plausible_current = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.85,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -7005,8 +7005,8 @@ def test_class_analysis_qwen_review_blocks_accept_when_counter_evidence_supports
             "counter_evidence": "Current class Truck is plausible from visible target structure.",
             "human_review_needed": False,
         },
-        {"summary": {"labelmap": ["Truck", "LightVehicle"]}},
-        {"point_id": "p1", "class_name": "Truck", "suggested_neighbor_class": "LightVehicle"},
+        {"summary": {"labelmap": ["Truck", "SmallVehicle"]}},
+        {"point_id": "p1", "class_name": "Truck", "suggested_neighbor_class": "SmallVehicle"},
         {"ctx_1"},
         clear_quality,
     )
@@ -7017,7 +7017,7 @@ def test_class_analysis_qwen_review_blocks_accept_when_counter_evidence_supports
     mixed_reject_and_support = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.85,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -7038,8 +7038,8 @@ def test_class_analysis_qwen_review_blocks_accept_when_counter_evidence_supports
             "counter_evidence": "Current class Truck is plausible due to visible target structure.",
             "human_review_needed": False,
         },
-        {"summary": {"labelmap": ["Truck", "LightVehicle"]}},
-        {"point_id": "p2", "class_name": "Truck", "suggested_neighbor_class": "LightVehicle"},
+        {"summary": {"labelmap": ["Truck", "SmallVehicle"]}},
+        {"point_id": "p2", "class_name": "Truck", "suggested_neighbor_class": "SmallVehicle"},
         {"ctx_1"},
         clear_quality,
     )
@@ -7053,16 +7053,16 @@ def test_class_analysis_qwen_review_blocks_accept_when_counter_evidence_supports
     [
         (
             "Boat",
-            "LightVehicle",
-            "The target is a small white boat on a trailer, visually matching LightVehicle.",
+            "SmallVehicle",
+            "The target is a small white boat on a trailer, visually matching SmallVehicle.",
         ),
         (
             "Truck",
-            "LightVehicle",
+            "SmallVehicle",
             "Target crop shows a clear truck with a cab and open bed, distinct from the nearby car.",
         ),
         (
-            "Gastank",
+            "StorageTank",
             "Building",
             "Target is a small residential tank, visually matching Building anchors.",
         ),
@@ -7125,7 +7125,7 @@ def test_class_analysis_qwen_review_blocks_accept_when_visible_text_identifies_c
 
 
 def test_class_analysis_qwen_review_allows_adjacent_accept_when_text_downgrades_current_label():
-    result = {"summary": {"labelmap": ["Truck", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["Truck", "SmallVehicle"]}}
     clear_quality = {
         "tier": "clear",
         "bbox_width": 120.0,
@@ -7142,7 +7142,7 @@ def test_class_analysis_qwen_review_allows_adjacent_accept_when_text_downgrades_
     accepted = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.85,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -7159,20 +7159,20 @@ def test_class_analysis_qwen_review_allows_adjacent_accept_when_text_downgrades_
             "glossary_or_guidance_used": True,
             "evidence_ids": ["ctx_1"],
             "rationale_short": (
-                "Target crop clearly shows a pickup truck with an open bed, fitting LightVehicle. "
+                "Target crop clearly shows a pickup truck with an open bed, fitting SmallVehicle. "
                 "Current Truck label is broad and weak."
             ),
             "counter_evidence": "No explicit counterevidence provided.",
             "human_review_needed": False,
         },
         result,
-        {"point_id": "p0", "class_name": "Truck", "suggested_neighbor_class": "LightVehicle"},
+        {"point_id": "p0", "class_name": "Truck", "suggested_neighbor_class": "SmallVehicle"},
         {"ctx_1"},
         clear_quality,
     )
 
     assert accepted["decision"] == "accept_suggested"
-    assert accepted["target_class"] == "LightVehicle"
+    assert accepted["target_class"] == "SmallVehicle"
     assert not accepted["guardrail_reasons"]
 
 
@@ -7180,10 +7180,10 @@ def test_class_analysis_qwen_review_allows_adjacent_accept_when_text_downgrades_
     ("current_class", "suggested_class", "rationale", "counter_evidence"),
     [
         (
-            "UPole",
-            "Gastank",
-            "Target is a clear horizontal tank (Gastank). Current UPole label is weak as it lacks vertical pole features.",
-            "Current UPole anchors show vertical poles, while the target is a horizontal tank.",
+            "PoleFixture",
+            "StorageTank",
+            "Target is a clear horizontal tank (StorageTank). Current PoleFixture label is weak as it lacks vertical pole features.",
+            "Current PoleFixture anchors show vertical poles, while the target is a horizontal tank.",
         ),
         (
             "Container",
@@ -7193,9 +7193,9 @@ def test_class_analysis_qwen_review_allows_adjacent_accept_when_text_downgrades_
         ),
         (
             "Building",
-            "Solarpanels",
+            "SolarArray",
             "Target crop clearly shows a solar panel array with grid structure, distinct from the large building roofs labeled as Building.",
-            "Local consensus shows 12 Building anchors, but the target crop matches Solarpanels anchors.",
+            "Local consensus shows 12 Building anchors, but the target crop matches SolarArray anchors.",
         ),
     ],
 )
@@ -7308,7 +7308,7 @@ def test_class_analysis_qwen_review_allows_rebutted_partial_overlap_for_clear_ta
 
 
 def test_class_analysis_qwen_review_allows_background_element_partial_overlap_rebuttal():
-    result = {"summary": {"labelmap": ["UPole", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["PoleFixture", "SmallVehicle"]}}
     clear_quality = {
         "tier": "clear",
         "bbox_width": 90.0,
@@ -7325,7 +7325,7 @@ def test_class_analysis_qwen_review_allows_background_element_partial_overlap_re
     accepted = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.85,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -7342,25 +7342,25 @@ def test_class_analysis_qwen_review_allows_background_element_partial_overlap_re
             "glossary_or_guidance_used": True,
             "evidence_ids": ["ctx_1"],
             "rationale_short": (
-                "Target crop clearly shows a light vehicle. Current UPole label is weak; "
+                "Target crop clearly shows a light vehicle. Current PoleFixture label is weak; "
                 "the vertical pole is a minor background element and overlap does not explain target features."
             ),
             "counter_evidence": "No explicit counterevidence provided.",
             "human_review_needed": False,
         },
         result,
-        {"point_id": "p0", "class_name": "UPole", "suggested_neighbor_class": "LightVehicle"},
+        {"point_id": "p0", "class_name": "PoleFixture", "suggested_neighbor_class": "SmallVehicle"},
         {"ctx_1"},
         clear_quality,
     )
 
     assert accepted["decision"] == "accept_suggested"
-    assert accepted["target_class"] == "LightVehicle"
+    assert accepted["target_class"] == "SmallVehicle"
     assert any("partial overlap present" in reason for reason in accepted["advisory_reasons"])
 
 
 def test_class_analysis_qwen_review_allows_background_overlap_not_vehicle_rebuttal():
-    result = {"summary": {"labelmap": ["UPole", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["PoleFixture", "SmallVehicle"]}}
     clear_quality = {
         "tier": "clear",
         "bbox_width": 90.0,
@@ -7377,7 +7377,7 @@ def test_class_analysis_qwen_review_allows_background_overlap_not_vehicle_rebutt
     accepted = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.85,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -7401,13 +7401,13 @@ def test_class_analysis_qwen_review_allows_background_overlap_not_vehicle_rebutt
             "human_review_needed": False,
         },
         result,
-        {"point_id": "p0", "class_name": "UPole", "suggested_neighbor_class": "LightVehicle"},
+        {"point_id": "p0", "class_name": "PoleFixture", "suggested_neighbor_class": "SmallVehicle"},
         {"ctx_1"},
         clear_quality,
     )
 
     assert accepted["decision"] == "accept_suggested"
-    assert accepted["target_class"] == "LightVehicle"
+    assert accepted["target_class"] == "SmallVehicle"
 
 
 def test_class_analysis_qwen_review_allows_minor_partial_overlap_wording():
@@ -7510,7 +7510,7 @@ def test_class_analysis_qwen_review_allows_adjacent_not_target_overlap_wording()
 
 
 def test_class_analysis_qwen_review_blocks_partial_overlap_when_model_says_overlap_explains():
-    result = {"summary": {"labelmap": ["UPole", "Gastank"]}}
+    result = {"summary": {"labelmap": ["PoleFixture", "StorageTank"]}}
     clear_quality = {
         "tier": "clear",
         "bbox_width": 90.0,
@@ -7527,7 +7527,7 @@ def test_class_analysis_qwen_review_blocks_partial_overlap_when_model_says_overl
     final = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "Gastank",
+            "target_class": "StorageTank",
             "confidence": 0.85,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -7548,7 +7548,7 @@ def test_class_analysis_qwen_review_blocks_partial_overlap_when_model_says_overl
             "human_review_needed": False,
         },
         result,
-        {"point_id": "p0", "class_name": "UPole", "suggested_neighbor_class": "Gastank"},
+        {"point_id": "p0", "class_name": "PoleFixture", "suggested_neighbor_class": "StorageTank"},
         {"ctx_1"},
         clear_quality,
     )
@@ -7558,7 +7558,7 @@ def test_class_analysis_qwen_review_blocks_partial_overlap_when_model_says_overl
 
 
 def test_class_analysis_qwen_review_blocks_partial_overlap_without_explicit_rebuttal():
-    result = {"summary": {"labelmap": ["Boat", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["Boat", "SmallVehicle"]}}
     clear_quality = {
         "tier": "clear",
         "bbox_width": 120.0,
@@ -7575,7 +7575,7 @@ def test_class_analysis_qwen_review_blocks_partial_overlap_without_explicit_rebu
     accepted = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.84,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -7596,7 +7596,7 @@ def test_class_analysis_qwen_review_blocks_partial_overlap_without_explicit_rebu
             "human_review_needed": False,
         },
         result,
-        {"point_id": "p0", "class_name": "Boat", "suggested_neighbor_class": "LightVehicle"},
+        {"point_id": "p0", "class_name": "Boat", "suggested_neighbor_class": "SmallVehicle"},
         {"ctx_1"},
         clear_quality,
     )
@@ -7606,11 +7606,11 @@ def test_class_analysis_qwen_review_blocks_partial_overlap_without_explicit_rebu
 
 
 def test_class_analysis_qwen_review_local_consensus_guardrails():
-    result = {"summary": {"labelmap": ["UPole", "LightVehicle"]}}
+    result = {"summary": {"labelmap": ["PoleFixture", "SmallVehicle"]}}
     point = {
         "point_id": "p0",
-        "class_name": "UPole",
-        "suggested_neighbor_class": "LightVehicle",
+        "class_name": "PoleFixture",
+        "suggested_neighbor_class": "SmallVehicle",
     }
     clear_quality = {
         "tier": "clear",
@@ -7628,7 +7628,7 @@ def test_class_analysis_qwen_review_local_consensus_guardrails():
     accepted = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.84,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -7655,7 +7655,7 @@ def test_class_analysis_qwen_review_local_consensus_guardrails():
     confirmed = api._class_analysis_qwen_review_validate_final(
         {
             "decision": "confirm_current",
-            "target_class": "UPole",
+            "target_class": "PoleFixture",
             "confidence": 0.84,
             "visual_quality": "clear",
             "object_visibility": "clear",
@@ -8775,7 +8775,7 @@ def test_class_analysis_qwen_review_pair_must_skip_drops_obvious_class_examples(
     brief = api._class_analysis_qwen_review_normalize_pair_contrast(
         {
             "class_a": "Boat",
-            "class_b": "LightVehicle",
+            "class_b": "SmallVehicle",
             "summary": "separate boats and cars",
             "choose_class_a_when": ["visible hull"],
             "choose_class_b_when": ["visible wheels"],
@@ -8787,7 +8787,7 @@ def test_class_analysis_qwen_review_pair_must_skip_drops_obvious_class_examples(
             ],
         },
         class_a="Boat",
-        class_b="LightVehicle",
+        class_b="SmallVehicle",
         glossary_a="",
         glossary_b="",
         review_guidance="",
@@ -8832,7 +8832,7 @@ def test_class_analysis_qwen_review_context_image_can_render_clean_crop(tmp_path
         workspace_dir / "manifest.json",
         workspace_dir,
         {
-            "labelmap": ["UPole"],
+            "labelmap": ["PoleFixture"],
             "images": [{"split": "train", "image_relpath": "scene.jpg", "label_lines": []}],
             "yolo_layout": "flat",
             "source_mode": "active_workspace",
@@ -8840,13 +8840,13 @@ def test_class_analysis_qwen_review_context_image_can_render_clean_crop(tmp_path
     )
     point = {
         "point_id": "p0",
-        "class_name": "UPole",
+        "class_name": "PoleFixture",
         "image_relpath": "scene.jpg",
         "split": "train",
         "bbox_xyxy": [20, 20, 60, 60],
     }
     result = {
-        "summary": {"source_mode": "active_workspace", "source_id": parent_id, "labelmap": ["UPole"]},
+        "summary": {"source_mode": "active_workspace", "source_id": parent_id, "labelmap": ["PoleFixture"]},
         "points": [point],
     }
     job = api.ClassAnalysisQwenReviewJob(
@@ -8892,7 +8892,7 @@ def test_class_analysis_qwen_review_local_consensus_context_filters_and_renders(
         workspace_dir / "manifest.json",
         workspace_dir,
         {
-            "labelmap": ["UPole", "LightVehicle", "Boat"],
+            "labelmap": ["PoleFixture", "SmallVehicle", "Boat"],
             "images": [{"split": "train", "image_relpath": "scene.jpg", "label_lines": []}],
             "yolo_layout": "flat",
             "source_mode": "active_workspace",
@@ -8900,8 +8900,8 @@ def test_class_analysis_qwen_review_local_consensus_context_filters_and_renders(
     )
     target = {
         "point_id": "target",
-        "class_name": "UPole",
-        "suggested_neighbor_class": "LightVehicle",
+        "class_name": "PoleFixture",
+        "suggested_neighbor_class": "SmallVehicle",
         "image_relpath": "scene.jpg",
         "split": "train",
         "bbox_xyxy": [90, 70, 130, 155],
@@ -8910,27 +8910,27 @@ def test_class_analysis_qwen_review_local_consensus_context_filters_and_renders(
         "summary": {
             "source_mode": "active_workspace",
             "source_id": parent_id,
-            "labelmap": ["UPole", "LightVehicle", "Boat"],
+            "labelmap": ["PoleFixture", "SmallVehicle", "Boat"],
         },
         "points": [
             target,
             {
                 "point_id": "current_near",
-                "class_name": "UPole",
+                "class_name": "PoleFixture",
                 "image_relpath": "scene.jpg",
                 "split": "train",
                 "bbox_xyxy": [42, 72, 62, 158],
             },
             {
                 "point_id": "current_far",
-                "class_name": "UPole",
+                "class_name": "PoleFixture",
                 "image_relpath": "scene.jpg",
                 "split": "train",
                 "bbox_xyxy": [220, 60, 242, 150],
             },
             {
                 "point_id": "suggested_near",
-                "class_name": "LightVehicle",
+                "class_name": "SmallVehicle",
                 "image_relpath": "scene.jpg",
                 "split": "train",
                 "bbox_xyxy": [145, 140, 260, 188],
@@ -8959,7 +8959,7 @@ def test_class_analysis_qwen_review_local_consensus_context_filters_and_renders(
     assert metadata["same_image_suggested_count"] == 1
     assert metadata["included_current_count"] == 2
     assert metadata["included_suggested_count"] == 1
-    assert all(item["class_name"] in {"UPole", "LightVehicle"} for item in metadata["included_points"])
+    assert all(item["class_name"] in {"PoleFixture", "SmallVehicle"} for item in metadata["included_points"])
     assert len(observation["evidence"]) == 1
     assert observation["evidence"][0]["kind"] == "local_consensus_context"
     assert all(Path(path).is_file() for path in observation["image_paths"])
@@ -8972,7 +8972,7 @@ def test_class_analysis_qwen_review_local_consensus_context_filters_and_renders(
 def test_class_analysis_qwen_review_overlap_decomposition_marks_partial_contamination():
     point = {
         "point_id": "pole",
-        "class_name": "UPole",
+        "class_name": "PoleFixture",
         "split": "train",
         "image_relpath": "scene.jpg",
         "bbox_xyxy": [50, 20, 80, 170],
@@ -8982,7 +8982,7 @@ def test_class_analysis_qwen_review_overlap_decomposition_marks_partial_contamin
             point,
             {
                 "point_id": "car",
-                "class_name": "LightVehicle",
+                "class_name": "SmallVehicle",
                 "split": "train",
                 "image_relpath": "scene.jpg",
                 "bbox_xyxy": [40, 110, 160, 160],
@@ -9001,7 +9001,7 @@ def test_class_analysis_qwen_review_overlap_decomposition_marks_partial_contamin
 
     assert len(overlaps) == 1
     assert overlaps[0]["point_id"] == "car"
-    assert overlaps[0]["class_name"] == "LightVehicle"
+    assert overlaps[0]["class_name"] == "SmallVehicle"
     assert overlaps[0]["relation"] == "partial_contamination"
     assert overlaps[0]["target_area_covered"] > 0.25
 
@@ -9009,7 +9009,7 @@ def test_class_analysis_qwen_review_overlap_decomposition_marks_partial_contamin
 def test_class_analysis_qwen_review_anchor_selection_prefers_clean_class_anchors():
     point = {
         "point_id": "target",
-        "class_name": "UPole",
+        "class_name": "PoleFixture",
         "split": "train",
         "image_relpath": "scene.jpg",
     }
@@ -9018,7 +9018,7 @@ def test_class_analysis_qwen_review_anchor_selection_prefers_clean_class_anchors
             point,
             {
                 "point_id": "clean",
-                "class_name": "UPole",
+                "class_name": "PoleFixture",
                 "split": "train",
                 "image_relpath": "other.jpg",
                 "bbox_xyxy": [0, 0, 80, 80],
@@ -9028,7 +9028,7 @@ def test_class_analysis_qwen_review_anchor_selection_prefers_clean_class_anchors
             },
             {
                 "point_id": "suspicious",
-                "class_name": "UPole",
+                "class_name": "PoleFixture",
                 "split": "train",
                 "image_relpath": "other2.jpg",
                 "bbox_xyxy": [0, 0, 100, 100],
@@ -9041,7 +9041,7 @@ def test_class_analysis_qwen_review_anchor_selection_prefers_clean_class_anchors
     }
 
     anchors = api._class_analysis_qwen_review_select_anchors(
-        result, point, "UPole", same_image=False, limit=3
+        result, point, "PoleFixture", same_image=False, limit=3
     )
 
     assert [anchor["point_id"] for anchor in anchors] == ["clean"]
@@ -9305,7 +9305,7 @@ def test_class_analysis_qwen_review_deterministic_triage_ignores_consensus_witho
 
     result = api._class_analysis_qwen_review_deterministic_triage_result(
         review,
-        {"point_id": "target", "class_name": "Boat", "suggested_neighbor_class": "LightVehicle"},
+        {"point_id": "target", "class_name": "Boat", "suggested_neighbor_class": "SmallVehicle"},
         {"tier": "clear"},
         {
             "clean_visual_evidence_ids": ["target_detail_2"],
@@ -9366,7 +9366,7 @@ def test_class_analysis_qwen_review_deterministic_triage_does_not_override_curre
     point = {
         "point_id": "target",
         "class_name": "Building",
-        "suggested_neighbor_class": "LightVehicle",
+        "suggested_neighbor_class": "SmallVehicle",
     }
     result = api._class_analysis_qwen_review_deterministic_triage_result(
         review,
@@ -9385,7 +9385,7 @@ def test_class_analysis_qwen_review_deterministic_triage_does_not_override_curre
                         "iou": 0.4,
                     },
                     {
-                        "class_name": "LightVehicle",
+                        "class_name": "SmallVehicle",
                         "relation": "partial_contamination",
                         "target_area_covered": 0.15,
                         "other_area_covered": 0.2,
@@ -9425,21 +9425,21 @@ def test_class_analysis_qwen_review_mlx_final_disabled_returns_completed_skip():
 
 def test_class_analysis_qwen_review_initial_prompt_includes_glossary_and_guidance():
     text = api._class_analysis_qwen_review_initial_user_message(
-        {"summary": {"labelmap": ["UPole", "LightVehicle"]}},
+        {"summary": {"labelmap": ["PoleFixture", "SmallVehicle"]}},
         {
             "point_id": "p0",
-            "class_name": "UPole",
-            "suggested_neighbor_class": "LightVehicle",
+            "class_name": "PoleFixture",
+            "suggested_neighbor_class": "SmallVehicle",
         },
         {"tier": "clear", "bbox_width": 50, "bbox_height": 100},
-        labelmap_glossary='{"UPole":["utility pole","satellite dish"]}',
-        review_guidance="UPole includes drone-obstruction fixtures in this dataset.",
+        labelmap_glossary='{"PoleFixture":["utility pole","mounted sign"]}',
+        review_guidance="PoleFixture includes project-specific obstruction fixtures in this dataset.",
     )
 
     assert "Relevant class meaning glossary" in text
-    assert "satellite dish" in text
+    assert "mounted sign" in text
     assert "Additional review guidance" in text
-    assert "drone-obstruction" in text
+    assert "project-specific obstruction" in text
 
 
 def test_class_analysis_flags_very_close_overlap_candidates():

@@ -289,7 +289,6 @@ def _normalize_visible_cues(
         "candidate",
     )
     context_only_tokens = {
-        "aerial",
         "adjacent",
         "area",
         "background",
@@ -400,12 +399,12 @@ def _normalize_visible_cues(
         if all(token in context_only_tokens for token in tokens):
             return True
         if (
-            re.search(r"\b(?:top[-\s]?down|overhead|aerial)\b", lowered)
+            re.search(r"\b(?:top[-\s]?down|overhead)\b", lowered)
             and len([token for token in tokens if token not in context_only_tokens]) == 0
         ):
             return True
         if re.search(
-            r"\b(?:top[-\s]?down|overhead|aerial|parked|color|colors|colou?r(?:ed)?|multiple)\b",
+            r"\b(?:top[-\s]?down|overhead|parked|color|colors|colou?r(?:ed)?|multiple)\b",
             lowered,
         ) and all(token in context_only_tokens or token in color_or_lighting_tokens for token in tokens):
             return True

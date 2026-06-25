@@ -1047,7 +1047,7 @@ Targeted verifier probe after adding anchor-support adjudication:
   verifier repair turn.
 - Visual audit note and follow-up hardening: the actionable sheet
   `cueverifier_promptfix_clear_guarded14_14_1780888993_visual_non_skip.jpg`
-  showed one visually arguable `Truck -> LightVehicle` case at crop scale. The
+  showed one visually arguable `Truck -> SmallVehicle` case at crop scale. The
   issue was not a dataset-specific label rule; it was a generic visual-reasoning
   failure mode where Qwen accepted a class change while its own text still said
   the current class was plausible, and while the proposed class explanation
@@ -1081,7 +1081,7 @@ Latest Mac probe after restoring VLM finalization and the `final_class` schema:
   call per row, 2 guarded VLM recommendations, and 2 effective human-triage
   signals.
 - Both raw model outputs were coherent `accept_suggested` recommendations with
-  `final_class=LightVehicle` and concrete visible cues. The controller blocked
+  `final_class=SmallVehicle` and concrete visible cues. The controller blocked
   automatic mutation because the crops were limited and/or overlap/scale rails
   made them unsafe for automatic relabeling.
 
@@ -1244,9 +1244,9 @@ contrast briefs, evidence fields, and overlap state.
   back to `skip_uncertain` while preserving the raw Qwen recommendation. Manual
   visual spot-check of
   `qwen_region_contrast_v3_guarded30_30_1780934528_visual_non_skip.jpg` found the
-  two class-change candidates plausible: `#22 Gastank->Building` looked like a
+  two class-change candidates plausible: `#22 StorageTank->Building` looked like a
   rectangular roof/building object rather than a tank, and `#28
-  LightVehicle->UPole` looked like a pole/utility structure rather than a
+  SmallVehicle->PoleFixture` looked like a pole/utility structure rather than a
   vehicle.
 - Qwen SDDF-region-contrast V3 tie-fix reviewable-30 gate:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/qwen_sddf_tiefix_v1_reviewable30_30_1780941008.json`
@@ -1318,7 +1318,7 @@ contrast briefs, evidence fields, and overlap state.
   `accept_suggested` back to actionable `confirm_current`: the target was
   described as a boat, the probe supported the current class with
   `target_background_contrast=target_specific`, and the final rationale said
-  nearby cars explained the LightVehicle neighbor consensus. The audit reported
+  nearby cars explained the SmallVehicle neighbor consensus. The audit reported
   3/3 completed, 0 unsafe issues, one actionable `confirm_current`, two guarded
   visual-quality results, and three effective human signals.
 - Qwen specificity blocker-rule reviewable-30 gate:
@@ -1356,8 +1356,8 @@ contrast briefs, evidence fields, and overlap state.
   `skip_uncertain` because Qwen's supporting cues were shared generic geometry
   without same-image scale, embedding, or local-consensus support. Manual spot
   checks of the four remaining actionables found them plausible human-reviewed
-  class-change suggestions: `#26 Truck->Building`, `#47 LightVehicle->Building`,
-  `#89 Truck->Building`, and `#92 Building->Solarpanels`.
+  class-change suggestions: `#26 Truck->Building`, `#47 SmallVehicle->Building`,
+  `#89 Truck->Building`, and `#92 Building->SolarArray`.
 - SDDF/dual-bbox V3 100-crop gate:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/sddf_dual_v3_wide100_100_1780857344.json`
   reran the V1 100-row benchmark with SDDF-style target/background fields,
@@ -1371,7 +1371,7 @@ contrast briefs, evidence fields, and overlap state.
   `overlap_box_class`; two of the four actionable recommendations were
   `dual_bbox_switch_overlap_class` cases. Compared with the V1 benchmark,
   Qwen now promotes two additional clear dual-bbox/building corrections, while
-  the previously questionable Truck to LightVehicle action is demoted to a
+  the previously questionable Truck to SmallVehicle action is demoted to a
   guarded skip because the clean visible cue verifier found only one concrete
   target-class cue. Manual review of
   `sddf_dual_v3_wide100_100_1780857344_visual_non_skip.jpg` found the four
@@ -1385,7 +1385,7 @@ contrast briefs, evidence fields, and overlap state.
   recommendations, and 70 effective human signals. Manual visual inspection of
   `overlap_verifier_v5_wide100_visual_non_skip.jpg` found that two actions were
   too aggressive (`#41 Truck->Building`, `#83 Truck->Building`) and two
-  `Gastank->Building` actions (`#33`, `#40`) depended on project-specific class
+  `StorageTank->Building` actions (`#33`, `#40`) depended on project-specific class
   semantics. The failure mode was not a missing controller signal; it was that
   Qwen could accept the suggested class while the current class still remained
   visually plausible.
@@ -1401,11 +1401,11 @@ contrast briefs, evidence fields, and overlap state.
   verifier-reported current-class-plausible cases in
   `plausibility_v2_wide100_audit.json`. Compared with
   `overlap_verifier_v5_wide100.json`, exactly four decisions changed:
-  `#33 Gastank->Building`, `#40 Gastank->Building`, `#41 Truck->Building`, and
+  `#33 StorageTank->Building`, `#40 StorageTank->Building`, `#41 Truck->Building`, and
   `#83 Truck->Building` were demoted from `accept_suggested` to guarded
   `skip_uncertain` with VLM-generated current-class plausibility reasons. The
-  remaining actionables stayed `#47 LightVehicle->Building`,
-  `#89 Truck->Building`, and `#92 Building->Solarpanels`; visual inspection of
+  remaining actionables stayed `#47 SmallVehicle->Building`,
+  `#89 Truck->Building`, and `#92 Building->SolarArray`; visual inspection of
   `plausibility_v2_wide100_visual_non_skip.jpg` found those three defensible.
   Individual spot checks of the four demoted rows confirmed the new behavior:
   each target is ambiguous enough that automatic relabeling would be too
@@ -1436,7 +1436,7 @@ contrast briefs, evidence fields, and overlap state.
 - Result: 30/30 completed, 0 backend failures, 0 extra overlap calls, 24
   `skip_uncertain`, 5 `accept_suggested`, 1 `confirm_current`.
 - Manual image audit of that 30-crop run found one accepted
-  `Truck`/`LightVehicle` construction-vehicle case that should remain human
+  `Truck`/`SmallVehicle` construction-vehicle case that should remain human
   review, so the validator was tightened for class-adjacent pairs and
   context-reliant rationales.
 - Replay of the same 30 model outputs through the tightened validator:
@@ -1444,7 +1444,7 @@ contrast briefs, evidence fields, and overlap state.
 - Replayed result: 28 `skip_uncertain`, 1 `accept_suggested`, 1
   `confirm_current`. A 4-crop live probe
   `real30b_qualitygate_probe4_1780641025.json` confirmed the problematic
-  `Truck`/`LightVehicle` case is now forced to `skip_uncertain`, while a clear
+  `Truck`/`SmallVehicle` case is now forced to `skip_uncertain`, while a clear
   `Truck` confirmation still passes.
 - Clean-zoom-required controller run:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/real30b_cleanzoom_controller_validation_30_1780652060.json`
@@ -1479,7 +1479,7 @@ contrast briefs, evidence fields, and overlap state.
   `skip_uncertain`, 0 high-confidence skips, 0 high-confidence guarded skips.
   Visual audit sheet
   `real30b_hardened_validation_30_1780656637_strict_visual_non_skip.jpg`
-  leaves only defensible advisory recommendations: two clear LightVehicle
+  leaves only defensible advisory recommendations: two clear SmallVehicle
   corrections, one Building correction, and one low-risk confirm-current case.
 - Compact-state smoke run:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/state_machine_compact_smoke_5_1780675832.json`
@@ -1524,7 +1524,7 @@ contrast briefs, evidence fields, and overlap state.
   compatibility shim. Result: 5/5 completed, 0 backend failures, 0 final
   validation errors, 1 `accept_suggested`, 4 `skip_uncertain`. Visual audit of
   `vanch007_qwen36_integrated_smoke_5_1780684758_visual_all.jpg` found the
-  accepted Truck to LightVehicle case defensible and the skipped cases tiny,
+  accepted Truck to SmallVehicle case defensible and the skipped cases tiny,
   clipped, or ambiguous.
 - Qwen3.6 35B-A3B 30-crop validation before the strict overlap rail:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/vanch007_qwen36_vehicle_guard_validation_30_30_1780686690.json`
@@ -1539,8 +1539,8 @@ contrast briefs, evidence fields, and overlap state.
   2 `confirm_current`, 28 `skip_uncertain`, and 0 class-changing accepts.
   Visual audit of
   `vanch007_qwen36_strict_overlap_validation_30_30_1780687541_visual_non_skip.jpg`
-  found the two confirmations defensible: one Solarpanels confirmation where
-  nearby cars explained the LightVehicle suggestion, and one Truck confirmation
+  found the two confirmations defensible: one SolarArray confirmation where
+  nearby cars explained the SmallVehicle suggestion, and one Truck confirmation
   where a visible cab/chassis contradicted the Container suggestion.
 - Qwen3.6 35B-A3B no-prefix finalization validation:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/vanch007_qwen36_noprefix_focus_validation_actions_15_1780704776.json`
@@ -1555,15 +1555,15 @@ contrast briefs, evidence fields, and overlap state.
   the same 100 rows dropped from 18 final-validation errors to 0 and from mixed
   retry sequences to one `finalize_review` pass for every row. Manual visual
   audit of `vanch007_qwen36_noprefix_wide100_100_1780705062_visual_non_skip.jpg`
-  found no unsafe accepted class changes; the old UPole to Gastank accept became
+  found no unsafe accepted class changes; the old PoleFixture to StorageTank accept became
   a safer skip because the visible target was a thin pole/bar overlapping a tank
   object.
 - Qwen3.6 35B-A3B adjacent-text-guard focused benchmark:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/vanch007_qwen36_adjacent_text_guard_focus_15_1780707457.json`
   completed 15/15 reviews with 0 backend failures and 0 final validation
   errors, but visual audit exposed two unsafe overlap-driven accepts: a
-  Boat/LightVehicle case where the target was a boat next to a car, and a
-  UPole/Gastank case where the target was too entangled to relabel safely.
+  Boat/SmallVehicle case where the target was a boat next to a car, and a
+  PoleFixture/StorageTank case where the target was too entangled to relabel safely.
   This run motivated the current stricter partial-overlap rule.
 - Qwen3.6 35B-A3B overlap-rebuttal focused benchmark:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/vanch007_qwen36_overlap_text_rebuttal_focus_15_1780707871.json`
@@ -1583,8 +1583,8 @@ contrast briefs, evidence fields, and overlap state.
   of
   `vanch007_qwen36_overlap_text_rebuttal_wide100_100_1780708144_visual_non_skip.jpg`
   found the 14 non-skip recommendations defensible; compared with the no-prefix
-  100-crop run, UPole to LightVehicle and Container to Building overlap-heavy
-  accepts moved to conservative skips, while the clear Truck to LightVehicle
+  100-crop run, PoleFixture to SmallVehicle and Container to Building overlap-heavy
+  accepts moved to conservative skips, while the clear Truck to SmallVehicle
   pickup case moved from skip to accept.
 - Repeatable audit for that run:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/vanch007_qwen36_overlap_text_rebuttal_wide100_100_1780708144_audit.json`
@@ -1619,7 +1619,7 @@ contrast briefs, evidence fields, and overlap state.
   reports 18 actionable recommendations, 0 unsafe issues, and one guarded
   clear-target candidate. Compared with the prior live 100-crop run, exactly
   five rows moved from guarded skips to accepted class changes:
-  Gastank->Building, Truck->LightVehicle, LightVehicle->UPole, and two
+  StorageTank->Building, Truck->SmallVehicle, SmallVehicle->PoleFixture, and two
   Container->Building cases. Manual inspection of
   `vanch007_qwen36_overlap_recall_livewide100_100_1780734902_visual_all.jpg`
   and `vanch007_qwen36_overlap_recall_livewide100_100_1780734902_visual_non_skip.jpg`
@@ -1640,9 +1640,9 @@ contrast briefs, evidence fields, and overlap state.
   as structured advisory data. Result: 15/15 completed, 0 backend failures, 0
   final validation errors, 0 unsafe audit issues, 1 actionable
   `confirm_current`, and 1 `guarded_recommendation`. The guarded case was the
-  known UPole/Gastank partial-overlap row: the final decision stayed
+  known PoleFixture/StorageTank partial-overlap row: the final decision stayed
   `skip_uncertain`, but the benchmark/UI now expose the blocked
-  `accept_suggested -> Gastank` signal and the exact overlap guardrail reason
+  `accept_suggested -> StorageTank` signal and the exact overlap guardrail reason
   for human triage.
 - Guarded-recommendation 100-crop validation:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/vanch007_qwen36_guarded_signal_wide100_100_1780739423.json`
@@ -1653,7 +1653,7 @@ contrast briefs, evidence fields, and overlap state.
   `guarded_recommendation` records. The comparison against
   `vanch007_qwen36_overlap_recall_livewide100_100_1780734902.json` reports 100
   matched rows and 0 decision/target/confidence drift. The guarded rows are
-  UPole->Gastank blocked by material partial overlap, Boat->LightVehicle blocked
+  PoleFixture->StorageTank blocked by material partial overlap, Boat->SmallVehicle blocked
   by limited backend visual quality, and Container->Building blocked by limited
   backend visual quality. The generated
   `vanch007_qwen36_guarded_signal_wide100_100_1780739423_visual_guarded.jpg`
@@ -1667,8 +1667,8 @@ contrast briefs, evidence fields, and overlap state.
   `accept_suggested`, 2 `confirm_current`, 2 `skip_uncertain`, and 0 guarded
   recommendations. The run recovered useful class-changing recommendations that
   had previously been over-blocked by too-narrow text guards, including
-  UPole->LightVehicle where the overlap was background road markings rather
-  than a vehicle, and Truck->LightVehicle where the target was a pickup-like
+  PoleFixture->SmallVehicle where the overlap was background road markings rather
+  than a vehicle, and Truck->SmallVehicle where the target was a pickup-like
   light vehicle.
 - Class-concept-brief 30-crop safety probe:
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/concept_brief_v2_probe30_refixed_30_1780746210.json`
@@ -1687,7 +1687,7 @@ contrast briefs, evidence fields, and overlap state.
   issues, 3 `confirm_current`, 27 `skip_uncertain`, and 0 guarded
   recommendations. The run generated 9 missing pair-contrast briefs, used 21
   pair cache hits, and visually checked the three actionable confirmations:
-  Boat->LightVehicle was a small boat or boat-like object, Building->LightVehicle
+  Boat->SmallVehicle was a small boat or boat-like object, Building->SmallVehicle
   was mostly roof/building pixels with vehicle contamination at the edge, and
   Truck->Building remained a weak but acceptable truck-like edge case rather
   than an automatic class change.
@@ -1769,7 +1769,7 @@ contrast briefs, evidence fields, and overlap state.
   0 final validation errors, 0 unsafe audit issues, 13 `accept_suggested`, 87
   `skip_uncertain`, and 6 guarded model recommendations. The audit path is
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/deterministic_tools_dominant_overlap_guard_deep100_100_1780785210_audit.json`.
-  The previously unsafe Building-to-LightVehicle case is now guarded because
+  The previously unsafe Building-to-SmallVehicle case is now guarded because
   building pixels dominate the target bbox while the candidate vehicle evidence
   comes from overlap/context. Manual contact-sheet inspection found the remaining
   actionable rows plausible but still advisory.
@@ -1851,7 +1851,7 @@ contrast briefs, evidence fields, and overlap state.
   only moderate but whose target, local context, global context, and overlap
   fields otherwise supported the suggested class. It completed 100/100 with 0
   backend failures and 44 guarded recommendations, but visual review found that
-  one Boat-to-LightVehicle accept relied on negative/context cues rather than
+  one Boat-to-SmallVehicle accept relied on negative/context cues rather than
   positive target-object evidence. This experiment was rejected as the final
   gate and motivated stricter cue normalization.
 - Positive-visible-cue 100-crop gate:
@@ -1881,8 +1881,8 @@ contrast briefs, evidence fields, and overlap state.
   deterministic same-image scale/embedding signals that do not support the
   current class. This path is capped at confidence `0.86` and records an
   advisory reason. A follow-up audit also tightened semantic text-conflict
-  parsing so `no cargo; matches LightVehicle visual cues` is not treated as
-  rejecting the LightVehicle target class. Result: 100/100 completed, 0 backend
+  parsing so `no cargo; matches SmallVehicle visual cues` is not treated as
+  rejecting the SmallVehicle target class. Result: 100/100 completed, 0 backend
   failures, 0 unsafe audit issues, 11 `accept_suggested`, 89 `skip_uncertain`,
   and 50 guarded model recommendations. The audit path is
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/semicolon_repair100_100_1780799314_audit.json`.
@@ -1984,7 +1984,7 @@ briefs. Regression tests cover:
   completed 100/100 reviews with 0 failures, 0 final validation errors, and 0
   unsafe audit issues. Compared with
   `genericity_v4_wide100_100_1780875777.json`, the corrected verifier-backed
-  partial-overlap path changed one row: `#39 LightVehicle->UPole` moved from a
+  partial-overlap path changed one row: `#39 SmallVehicle->PoleFixture` moved from a
   guarded skip to `accept_suggested` after the verifier supplied target-specific
   visible cues plus an overlap rebuttal and same-image embedding evidence that
   questioned the current class. The run produced 5 actionable recommendations
@@ -2045,7 +2045,7 @@ briefs. Regression tests cover:
   `finalize_review->verify_visible_cues` for all 8 verifier rows, with no repair
   verifier turn. It produced 6 actionable class-change recommendations, 3
   guarded human-triage signals, and 1 useful negative. The only decision change
-  versus the prior run was one additional `Gastank -> Building` actionable
+  versus the prior run was one additional `StorageTank -> Building` actionable
   recommendation where Qwen supplied target-specific roof/rectangular cues,
   target-specific anchors, clean evidence ids, and whole-target support. Visual
   spot checks of `compact_verifier_clear_guarded10_10_1780911588_visual_non_skip.jpg`
@@ -2056,7 +2056,7 @@ briefs. Regression tests cover:
   reran the same 30 reviewable rows after a manual visual audit found one bad
   promotion in
   `compact_verifier_reviewable30_30_1780912608.json`: row 3
-  `Boat -> LightVehicle` was driven by local-consensus pressure while the clean
+  `Boat -> SmallVehicle` was driven by local-consensus pressure while the clean
   target crop still looked boat-like. The fix is generic and dataset-agnostic:
   for moderate-anchor, overlap-entangled class changes, the verifier can promote
   only when deterministic same-image scale/embedding evidence questions the
@@ -2114,7 +2114,7 @@ briefs. Regression tests cover:
   persisted `backend_edge_clipped` into benchmark records. The focused rerun
   `uploads/class_analysis/ca_c5c4a7d6ea/qwen_reviews/edge_clipped_limited_guard_probe_3_1780962731.json`
   reran the three promoted rows. Result: 3/3 completed, 0 unsafe audit issues,
-  the edge-clipped `Building -> LightVehicle` row became guarded human triage,
+  the edge-clipped `Building -> SmallVehicle` row became guarded human triage,
   and the two clear non-edge rows remained actionable class changes. This keeps
   the workflow VLM-centered while applying an SDDF-style target/background
   constraint: when the target extent is cut by the image edge, the model's
@@ -2228,8 +2228,8 @@ briefs. Regression tests cover:
   source-edge-clipped `Digger -> Boat` case where Qwen explicitly marked the
   edge clipping recoverable. Manual inspection of
   `edge_recoverable_limited70slice_v1_24_1780998638_visual_non_skip.jpg` found
-  the Boat and LightVehicle promotions clearly useful, the Bike confirmation
-  harmless/advisory, and the UPole promotion low-resolution but consistent with
+  the Boat and SmallVehicle promotions clearly useful, the Bike confirmation
+  harmless/advisory, and the PoleFixture promotion low-resolution but consistent with
   the visible pole/crossarm evidence. The guarded contact sheet showed many
   plausible advisory opinions, but most remained too clipped, partial, or
   background-contaminated for automatic actionability.

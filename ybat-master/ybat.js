@@ -19136,7 +19136,7 @@ async function cancelRfDetrTrainingJobRequest() {
         element.innerHTML = [
             `<div class="embedding-recipe-note__summary"><strong>${escapeHtml(embeddingRecipePresetLabel(preset))}</strong> currently uses ${escapeHtml(encoder)} with ${escapeHtml(preprocess)}, ${escapeHtml(crop)} crops, ${escapeHtml(String(values.padding || "0.08"))} padding, ${escapeHtml(String(values.canonicalSize || "336"))}px canonical size, ${escapeHtml(background)} background, ${escapeHtml(view)} views, and ${escapeHtml(pooling)}.</div>`,
             `<ul class="embedding-recipe-note__reasons">`,
-            `<li><strong>Why fixed canonical crops:</strong> object crops from aerial datasets vary wildly in pixel size and aspect ratio. Resizing every crop through the same square recipe makes training, auto-class inference, and Class Split analysis see the same kind of input. Mean-color padding avoids adding artificial black borders that could become a shortcut.</li>`,
+            `<li><strong>Why fixed canonical crops:</strong> object crops from varied datasets vary wildly in pixel size and aspect ratio. Resizing every crop through the same square recipe makes training, auto-class inference, and Class Split analysis see the same kind of input. Mean-color padding avoids adding artificial black borders that could become a shortcut.</li>`,
             `<li><strong>Why padding and views:</strong> a small amount of padding keeps immediate context that often disambiguates classes, while background controls let you suppress context if it becomes a shortcut. Multi-view modes concatenate object-focused and context-focused crops when the precise recipe needs both shape and surroundings.</li>`,
             `<li><strong>Why size/aspect residualization:</strong> raw crop embeddings can cluster by bbox area, crop area, or aspect ratio instead of object identity. Remove size/aspect bias regresses out log bbox area, log crop area, bbox aspect, and crop aspect, then L2-normalizes. This targets a known geometry shortcut without rotating or whitening the whole embedding space.</li>`,
             `<li><strong>Why not full whitening:</strong> full covariance whitening/PCA would rotate every embedding dimension around the current dataset distribution and can make saved classifier heads brittle. For auto-class we optionally use only diagonal center/std scaling, which is simpler to save and replay; for Class Split we keep the audit path to residualization plus L2 normalization.</li>`,
@@ -34316,16 +34316,7 @@ async function cancelRfDetrTrainingJobRequest() {
     }
 
     function normalizeClassAliasForMatch(name) {
-        const normalized = normalizeClassNameForMatch(name);
-        const aliases = {
-            utilitypole: "upole",
-            utilitypoles: "upole",
-            utilitypost: "upole",
-            utilityposts: "upole",
-            utilitylinepole: "upole",
-            utilitylinepoles: "upole",
-        };
-        return aliases[normalized] || normalized;
+        return normalizeClassNameForMatch(name);
     }
 
     function resolveKnownClassName(label) {

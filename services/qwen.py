@@ -651,10 +651,10 @@ def _caption_needs_english_rewrite(text: str) -> bool:
 
 
 _CAPTION_GENERIC_OPENERS = (
-    "an aerial view",
-    "aerial view",
+    "an overhead view",
+    "overhead view",
     "from a high angle",
-    "a drone image",
+    "a high-angle image",
     "a bird's-eye view",
     "overhead view",
 )

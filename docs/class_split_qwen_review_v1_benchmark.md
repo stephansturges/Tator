@@ -136,9 +136,9 @@ false positive.
 
 | Row | Agent result | Manual expectation | Assessment |
 | --- | --- | --- | --- |
-| 66 | `Truck -> LightVehicle`, confidence 0.72 | Keep current `Truck` or at least do not accept as `LightVehicle` | Likely false positive. The target crop shows a white box truck or van-like vehicle. Qwen called it a sedan. |
+| 66 | `Truck -> SmallVehicle`, confidence 0.72 | Keep current `Truck` or at least do not accept as `SmallVehicle` | Likely false positive. The target crop shows a white box truck or van-like vehicle. Qwen called it a sedan. |
 | 83 | `Truck -> Building`, confidence 0.72 | Change to `Building` | Likely correct. The target is a fixed white rectangular roof or structure in a paved area, not a truck. |
-| 92 | `Building -> Solarpanels`, confidence 0.72 | Change to `Solarpanels` | Likely correct. The target shows a panel grid distinct from surrounding roof/building texture. |
+| 92 | `Building -> SolarArray`, confidence 0.72 | Change to `SolarArray` | Likely correct. The target shows a panel grid distinct from surrounding roof/building texture. |
 
 Actionable precision on the manual actionable subset is therefore about 2/3.
 That is not enough for automatic relabeling, but it is useful enough to justify

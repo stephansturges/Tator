@@ -6703,10 +6703,10 @@ def _ensure_qwen_ready_for_caption(model_id_override: str) -> Tuple[Any, Any]:
 
 
 _CAPTION_GENERIC_OPENERS = (
-    "an aerial view",
-    "aerial view",
+    "an overhead view",
+    "overhead view",
     "from a high angle",
-    "a drone image",
+    "a high-angle image",
     "a bird's-eye view",
     "overhead view",
 )
@@ -12288,7 +12288,7 @@ def _agent_tool_think_missed_objects(
     )
     usage_text = _agent_grid_usage_text(usage_rows)
     prompt_lines = [
-        "You are reviewing an annotated aerial image.",
+        "You are reviewing an annotated image.",
         "Return JSON only: {\"missing_labels\": [...], \"missing_tiles\": [...], \"rationale\": \"...\"}.",
         "Use labelmap classes only. Use grid cells like A1, B2.",
         f"Labelmap: {', '.join(labels) if labels else 'none'}",
@@ -28544,7 +28544,6 @@ def _class_analysis_qwen_review_normalize_visible_cues(
         "candidate",
     )
     context_only_tokens = {
-        "aerial",
         "adjacent",
         "area",
         "background",
@@ -28655,12 +28654,12 @@ def _class_analysis_qwen_review_normalize_visible_cues(
         if all(token in context_only_tokens for token in tokens):
             return True
         if (
-            re.search(r"\b(?:top[-\s]?down|overhead|aerial)\b", lowered)
+            re.search(r"\b(?:top[-\s]?down|overhead)\b", lowered)
             and len([token for token in tokens if token not in context_only_tokens]) == 0
         ):
             return True
         if re.search(
-            r"\b(?:top[-\s]?down|overhead|aerial|parked|color|colors|colou?r(?:ed)?|multiple)\b",
+            r"\b(?:top[-\s]?down|overhead|parked|color|colors|colou?r(?:ed)?|multiple)\b",
             lowered,
         ) and all(token in context_only_tokens or token in color_or_lighting_tokens for token in tokens):
             return True

@@ -17,7 +17,7 @@ def _record(**overrides):
         "point_id": "p1",
         "decision": "skip_uncertain",
         "current_class": "Truck",
-        "suggested_neighbor_class": "LightVehicle",
+        "suggested_neighbor_class": "SmallVehicle",
         "target_class": "Truck",
         "confidence": 0.4,
         "backend_tier": "limited",
@@ -58,7 +58,7 @@ def _record(**overrides):
 def test_qwen_review_benchmark_audit_flags_unsafe_low_quality_accept():
     record = _record(
         decision="accept_suggested",
-        target_class="LightVehicle",
+        target_class="SmallVehicle",
         backend_tier="limited",
         visual_quality="clear",
         object_visibility="clear",
@@ -84,12 +84,12 @@ def test_qwen_review_benchmark_visual_sheet_can_select_guarded_recommendations(t
         guarded_recommendation={
             "blocked": True,
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.9,
             "guardrail_reasons": ["limited target"],
         },
     )
-    unguarded = _record(ordinal=2, decision="accept_suggested", target_class="LightVehicle", backend_tier="clear")
+    unguarded = _record(ordinal=2, decision="accept_suggested", target_class="SmallVehicle", backend_tier="clear")
 
     guarded_output = tmp_path / "guarded.jpg"
     _make_visual_sheet(
@@ -387,8 +387,8 @@ def test_qwen_review_benchmark_audit_semicolon_positive_cue_does_not_reject_targ
     record = _record(
         decision="accept_suggested",
         current_class="Truck",
-        suggested_neighbor_class="LightVehicle",
-        target_class="LightVehicle",
+        suggested_neighbor_class="SmallVehicle",
+        target_class="SmallVehicle",
         backend_tier="clear",
         visual_quality="clear",
         object_visibility="clear",
@@ -406,7 +406,7 @@ def test_qwen_review_benchmark_audit_semicolon_positive_cue_does_not_reject_targ
         visible_target_cues=["compact target body"],
         supporting_clean_evidence_ids=["target_context_1", "zoom_region_6"],
         rationale_short=(
-            "Target is small, compact, no cargo; matches LightVehicle visual cues; "
+            "Target is small, compact, no cargo; matches SmallVehicle visual cues; "
             "no overlap contamination"
         ),
         model_compact_arguments={
@@ -562,7 +562,7 @@ def test_qwen_review_benchmark_audit_ignores_negative_and_color_only_visible_cue
         visual_quality="clear",
         object_visibility="clear",
         visible_target_cues=[
-            "aerial view of parked candidate class",
+            "overhead view of parked candidate class",
             "multiple object colors",
             "no current-class features",
         ],
@@ -586,7 +586,7 @@ def test_qwen_review_benchmark_visible_cue_filter_is_domain_agnostic():
             "spiral conduit ridges",
             "triangular bracket lattice",
             "translucent membrane fold",
-            "aerial view of parked candidate",
+            "overhead view of parked candidate",
             "green background region",
             "matches suggested class",
         ],
@@ -619,7 +619,7 @@ def test_qwen_review_benchmark_visible_cue_filter_is_domain_agnostic():
 def test_qwen_review_benchmark_audit_flags_class_change_without_clean_visual_ledger():
     record = _record(
         decision="accept_suggested",
-        target_class="LightVehicle",
+        target_class="SmallVehicle",
         backend_tier="clear",
         visual_quality="clear",
         object_visibility="clear",
@@ -640,7 +640,7 @@ def test_qwen_review_benchmark_audit_flags_class_change_without_clean_visual_led
 def test_qwen_review_benchmark_audit_flags_class_change_without_supporting_clean_evidence():
     record = _record(
         decision="accept_suggested",
-        target_class="LightVehicle",
+        target_class="SmallVehicle",
         backend_tier="clear",
         visual_quality="clear",
         object_visibility="clear",
@@ -661,7 +661,7 @@ def test_qwen_review_benchmark_audit_flags_class_change_without_supporting_clean
 def test_qwen_review_benchmark_audit_flags_overlay_only_supporting_evidence():
     record = _record(
         decision="accept_suggested",
-        target_class="LightVehicle",
+        target_class="SmallVehicle",
         backend_tier="clear",
         visual_quality="clear",
         object_visibility="clear",
@@ -683,7 +683,7 @@ def test_qwen_review_benchmark_audit_flags_overlay_only_supporting_evidence():
 def test_qwen_review_benchmark_audit_flags_reference_only_supporting_evidence():
     record = _record(
         decision="accept_suggested",
-        target_class="LightVehicle",
+        target_class="SmallVehicle",
         backend_tier="clear",
         visual_quality="clear",
         object_visibility="clear",
@@ -706,8 +706,8 @@ def test_qwen_review_benchmark_audit_flags_class_change_text_rejecting_target_al
     record = _record(
         decision="accept_suggested",
         current_class="Building",
-        suggested_neighbor_class="LightVehicle",
-        target_class="LightVehicle",
+        suggested_neighbor_class="SmallVehicle",
+        target_class="SmallVehicle",
         backend_tier="clear",
         visual_quality="clear",
         object_visibility="clear",
@@ -760,8 +760,8 @@ def test_qwen_review_benchmark_audit_flags_dominant_current_overlap():
     record = _record(
         decision="accept_suggested",
         current_class="Building",
-        suggested_neighbor_class="LightVehicle",
-        target_class="LightVehicle",
+        suggested_neighbor_class="SmallVehicle",
+        target_class="SmallVehicle",
         backend_tier="clear",
         visual_quality="clear",
         object_visibility="clear",
@@ -787,7 +787,7 @@ def test_qwen_review_benchmark_audit_flags_dominant_current_overlap():
                             "iou": 0.18,
                         },
                         {
-                            "class_name": "LightVehicle",
+                            "class_name": "SmallVehicle",
                             "relation": "partial_contamination",
                             "target_area_covered": 0.15,
                             "other_area_covered": 0.31,
@@ -809,7 +809,7 @@ def test_qwen_review_benchmark_audit_requires_partial_overlap_rebuttal():
         ordinal=1,
         point_id="unsafe",
         decision="accept_suggested",
-        target_class="LightVehicle",
+        target_class="SmallVehicle",
         backend_tier="clear",
         visual_quality="clear",
         object_visibility="clear",
@@ -827,7 +827,7 @@ def test_qwen_review_benchmark_audit_requires_partial_overlap_rebuttal():
         ordinal=2,
         point_id="safe",
         decision="accept_suggested",
-        target_class="LightVehicle",
+        target_class="SmallVehicle",
         backend_tier="clear",
         visual_quality="clear",
         object_visibility="clear",
@@ -902,7 +902,7 @@ def test_qwen_review_benchmark_audit_accepts_minor_or_adjacent_overlap_rebuttals
 def test_qwen_review_benchmark_audit_accepts_background_not_vehicle_rebuttal():
     record = _record(
         decision="accept_suggested",
-        target_class="LightVehicle",
+        target_class="SmallVehicle",
         backend_tier="clear",
         visual_quality="clear",
         object_visibility="clear",
@@ -1447,7 +1447,7 @@ def test_qwen_review_benchmark_audit_lists_guarded_recommendations():
         guarded_recommendation={
             "blocked": True,
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.82,
             "target_evidence": "strong",
             "current_evidence": "weak",
@@ -1472,7 +1472,7 @@ def test_qwen_review_benchmark_audit_lists_guarded_recommendations():
     assert audit["review_disposition_signal_counts"] == {"guarded_human_triage": 1}
     guarded = audit["guarded_recommendations"][0]
     assert guarded["point_id"] == "p1"
-    assert guarded["guarded_recommendation"]["target_class"] == "LightVehicle"
+    assert guarded["guarded_recommendation"]["target_class"] == "SmallVehicle"
     assert guarded["review_disposition"]["disposition"] == "guarded_visual_quality"
     assert guarded["review_disposition"]["signal_strength"] == "strong"
     assert guarded["review_disposition"]["priority"] == "high"
@@ -1488,7 +1488,7 @@ def test_qwen_review_benchmark_audit_prioritizes_specificity_conflict_dispositio
         guarded_recommendation={
             "blocked": True,
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.86,
             "target_evidence": "strong",
             "current_evidence": "weak",
@@ -1523,7 +1523,7 @@ def test_qwen_review_benchmark_audit_marks_verified_guarded_limited_signal():
         guarded_recommendation={
             "blocked": True,
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.82,
             "target_evidence": "strong",
             "current_evidence": "weak",
@@ -1562,7 +1562,7 @@ def test_qwen_review_benchmark_audit_counts_current_overlap_false_alarm_as_usefu
         guarded_recommendation={
             "blocked": True,
             "decision": "accept_suggested",
-            "target_class": "LightVehicle",
+            "target_class": "SmallVehicle",
             "confidence": 0.95,
             "guardrail_reasons": [
                 "accept_suggested conflicts with overlap decomposition: current class Building dominates the target bbox (partial_contamination, current_cover=0.63, target_class_cover=0.15)"
@@ -1755,7 +1755,7 @@ def test_qwen_review_benchmark_audit_allows_specificity_probe_rebutted_confirm_c
         visual_quality="clear",
         object_visibility="clear",
         current_class="Truck",
-        suggested_neighbor_class="LightVehicle",
+        suggested_neighbor_class="SmallVehicle",
         current_evidence="strong",
         suggested_evidence="strong",
         target_evidence="strong",
@@ -1798,7 +1798,7 @@ def test_qwen_review_benchmark_audit_allows_limited_probe_rebutted_confirm_curre
         visual_quality="limited",
         object_visibility="partial",
         current_class="Truck",
-        suggested_neighbor_class="LightVehicle",
+        suggested_neighbor_class="SmallVehicle",
         current_evidence="strong",
         suggested_evidence="strong",
         target_evidence="strong",
@@ -2079,7 +2079,7 @@ def test_qwen_review_benchmark_audit_blocks_weak_probe_rebutted_confirm_current(
         visual_quality="clear",
         object_visibility="clear",
         current_class="Truck",
-        suggested_neighbor_class="LightVehicle",
+        suggested_neighbor_class="SmallVehicle",
         current_evidence="strong",
         suggested_evidence="strong",
         target_evidence="strong",
@@ -2142,7 +2142,7 @@ def test_qwen_review_benchmark_audit_blocks_unrebutted_strong_suggestion_confirm
 
 
 def test_qwen_review_benchmark_compare_runs_tracks_decision_drift():
-    previous = [_record(point_id="p1", decision="accept_suggested", target_class="LightVehicle", confidence=0.8)]
+    previous = [_record(point_id="p1", decision="accept_suggested", target_class="SmallVehicle", confidence=0.8)]
     current = [_record(point_id="p1", decision="skip_uncertain", target_class="Truck", confidence=0.4)]
 
     comparison = compare_runs(current, previous)

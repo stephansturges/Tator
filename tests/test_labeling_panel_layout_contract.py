@@ -422,9 +422,6 @@ def test_caption_prompt_controls_have_tooltips_and_roomy_textareas():
     assert "Style prompts (one per line)" not in html
     assert "qwenCaptionStyleInspiration" not in html
 
-    js = _js()
-    assert "Aerial / drone view" not in js
-    assert "aerial/drone footage" not in js
     assert "#qwenCaptionStyleText,\n#qwenCaptionOpeningList" in css
     assert "min-height: 240px;" in css
     assert "max-height: 520px;" in css

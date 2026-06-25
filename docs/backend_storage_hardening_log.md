@@ -3476,7 +3476,7 @@ preserving the exact validation story for storage and artifact-write fixes.
 
 ## 2026-06-24: Generic UI Copy Cleanup
 
-- Removed WALDO/qwen-dataset-specific benchmark wording from visible UI copy in
+- Removed project-specific benchmark wording from visible UI copy in
   Class Split Explorer, Class Predictor settings, Qwen recipe placeholders, and
   glossary placeholders.
 - Replaced hard-coded historical benchmark rows with generic encoder guidance

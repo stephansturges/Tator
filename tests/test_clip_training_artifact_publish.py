@@ -679,7 +679,7 @@ def test_publish_clip_training_artifacts_rolls_back_visible_files_on_commit_fail
 def test_clip_auto_predict_loads_legacy_active_classifier_head(tmp_path, monkeypatch):
     classifier_path = tmp_path / "legacy_logreg.pkl"
     classifier = SimpleNamespace(
-        classes_=np.array(["LightVehicle", "Person"], dtype=object),
+        classes_=np.array(["SmallVehicle", "Person"], dtype=object),
         coef_=np.zeros((2, 512), dtype=np.float32),
         intercept_=np.zeros(2, dtype=np.float32),
         solver="lbfgs",
@@ -697,7 +697,7 @@ def test_clip_auto_predict_loads_legacy_active_classifier_head(tmp_path, monkeyp
     details = api._clip_auto_predict_details(features, background_guard=False)
 
     assert details["error"] is None
-    assert details["label"] == "LightVehicle"
+    assert details["label"] == "SmallVehicle"
     assert isinstance(api.active_classifier_head, dict)
 
 
